@@ -152,13 +152,11 @@ the edge: with the name and only the security contact set, both drafts drop the 
 hidden — the gap is still printed inline — but set all three contacts in one go so it never
 shows.
 
-**The site repo's `Dockerfile` does not yet declare these as build ARGs.** As of 2026-09-12 it
-declares only `NEXT_PUBLIC_SITE_URL` and `NEXT_PUBLIC_APP_URL`, and a Railway service variable reaches a
-Dockerfile build only through a declared `ARG` (`ops/deploy.md` §3). Setting the six on Railway
-today builds a site that still says "not yet designated". Before §4 step 2, add six `ARG`/`ENV`
-pairs to that `Dockerfile`, in the build-time configuration block, with **no default values** —
-the whole point is that an absent value renders the gap. That edit was outside the scope of the
-change that created this runbook and is still open.
+**The site repo's `Dockerfile` declares all six as build ARGs** (done 2026-09-13, in the
+build-time configuration block, with **no default values** — the whole point is that an absent
+value renders the gap). A Railway service variable reaches a Dockerfile build only through a
+declared `ARG` (`ops/deploy.md` §3), so until that edit landed, setting the six on Railway would
+have built a site that still says "not yet designated". What remains is §4 from step 3 on.
 
 ---
 
@@ -169,8 +167,8 @@ Do these in order. Step 1 is the long one and it is not ours.
 1. **Decide.** Counsel closes every item in §2 that becomes a variable, and answers items 3, 5
    and 7 in writing so the answer is on record even when it is "the current behaviour stands".
 
-2. **Declare the ARGs.** Add the six `ARG`/`ENV` pairs to the site repo's `Dockerfile` (see §3).
-   Merge.
+2. **Declare the ARGs.** Done 2026-09-13: the site repo's `Dockerfile` declares the six
+   `ARG`/`ENV` pairs (see §3). Nothing left to merge for this step.
 
 3. **Set the variables** on the Railway `site` service. All six, exactly as they should read on
    the page. Then **rebuild** `site` — Railway → service → Deploy → Redeploy, or push a commit. A
