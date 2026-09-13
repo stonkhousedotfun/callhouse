@@ -22,8 +22,8 @@ only) landed before the split, so all three start from the same tree.
 | Contracts | 310 unit+invariant pass, 21 fork tests pass against live chain 4663. Unaudited. Vault 23,426 B (margin 1,150) |
 | Keeper | typecheck clean, 66/66 tests |
 | Keeper dry run | **passed, three cycles**; re-run after the fee change at fork block 62142174, 20.9 s (cycle 3 fee 0.953962 USDG) |
-| Indexer / web / site | green locally. Never run against a live cycle |
-| CI on GitHub | dead. Every run ends in `startup_failure`, an account-level billing problem |
+| Indexer / web / site | green locally. Never run against a live cycle. **Site deployed 2026-09-13**: Railway project `callhouse`, service `site`, healthy at its `*.up.railway.app` host; `callhouse.finance` + `www` attached (TLS validating), waiting on the two CNAMEs in Cloudflare |
+| CI on GitHub | billing fixed 2026-09-13; runs should go green on next push |
 
 ## Done on 2026-09-13
 
@@ -53,16 +53,21 @@ keeper/src/roll.ts  keeper/src/abi.ts  keeper/src/roll.test.ts  keeper/src/roll.
 
 1. ~~**Protocol fee on strike proceeds.**~~ **Decided and implemented 2026-09-13:** 5% of premium
    only, strike proceeds fee-free. See the afternoon session log in `tasks.md`.
-2. **GitHub billing.** Go to leekzor → Settings → Billing and raise the Actions spending limit. Then
-   add the `RH_RPC` repo secret.
-3. **Counsel and operating entity** for `app/terms` and `app/privacy` in `leekzor/callhouse-site`,
-   plus a security.txt contact.
+2. ~~**GitHub billing.**~~ **Done 2026-09-13.** Still open: add the `RH_RPC` repo secret.
+3. ~~**Counsel and operating entity**~~ Partially superseded 2026-09-13: the owner adopted
+   `/terms` and `/privacy` as `v1-2026-09-13` without counsel (boilerplate added, no facts
+   invented), and the three contact mailboxes exist (`legal@` / `privacy@` /
+   `security@callhouse.finance` → owner). Still genuinely open: the operating entity,
+   jurisdiction, governing law and GDPR controller — the legal pages keep rendering those gaps
+   in words until they exist. See `ops/launch-legal.md` §2, items 1, 2, 4, 5.
 
 ## Next, in order
 
 1. ~~Commit this work, then proofread `keeper/DRYRUN.md` against the run report.~~ Done and
    pushed (2026-09-13), followed by the fee change and the repository split.
-2. Fix GitHub billing (L-01) and start legal (L-05). Legal is the longest pole.
+2. ~~Fix GitHub billing (L-01)~~ Done. Legal's code half is done (site deployed, documents
+   adopted, contacts live); what remains is naming the operating entity, governing law and GDPR
+   controller (L-05's residue) — and `app.callhouse.finance` (web) is still not deployed.
 3. ~~Decide the fee question above.~~ Done. Fix W-21 (assigned-week yield labels) before launch.
 4. Audit prep: work through the D-05 housekeeping list in `tasks.md`, tag a commit in
    `leekzor/callhouse-contracts`, point the `contracts/` submodule here at it, send

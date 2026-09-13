@@ -56,9 +56,9 @@ placeholder.
 | Terms of Use | adopted v1-2026-09-13 by owner decision, no counsel; gap sentences still render | `callhouse.finance/terms` |
 | Privacy notice | adopted v1-2026-09-13, same basis | `callhouse.finance/privacy` |
 | Perimeter disclosure | live since before this runbook; now links the terms instead of "the terms you accept here" | `callhouse.finance/legal`, `app.callhouse.finance/legal` |
-| Vulnerability reporting | section exists, address unset | `callhouse.finance/legal#reporting` |
-| `security.txt` | route exists, returns **404** with a one-line explanation until the contact is set | `callhouse.finance/.well-known/security.txt` |
-| Operator constants | six, all `undefined` | `lib/legal.ts` (site repo) |
+| Vulnerability reporting | section exists; address set 2026-09-13 (`security@callhouse.finance`) | `callhouse.finance/legal#reporting` |
+| `security.txt` | returns **200** since 2026-09-13, Contact line present | `callhouse.finance/.well-known/security.txt` |
+| Operator constants | six; the three contacts are set, name / jurisdiction / governing law still `undefined` | `lib/legal.ts` (site repo) |
 | Document version | `v1-2026-09-13` | `LEGAL_DOCS_VERSION` in `lib/legal.ts` (site repo) |
 | Accept flow | none. Use is acceptance; the pages say so | — |
 | Geoblock | none. The US-person perimeter is disclosure-only, on every legal page, in bold | — |
@@ -116,12 +116,13 @@ Each item ends with the variable it becomes, or "no variable" when it is a text 
    technical control is a product change and a runtime dependency, not a variable.
    → no variable; a decision that either closes the item or opens a task
 
-8. **Contacts.** Three mailboxes: legal notices, data-protection requests, vulnerability
-   reports. They may be the same address. Each must be a mailbox somebody reads, because the
-   pages will publish it, `security.txt` will advertise it to scanners, and an unread disclosure
-   mailbox is worse than the current 404.
+8. **Contacts.** Done 2026-09-13: three mailboxes — `legal@`, `privacy@`,
+   `security@callhouse.finance` — created with Cloudflare Email Routing, all forwarding to the
+   owner's verified mailbox, and set on the Railway `site` service (then rebuilt, since the
+   values are compiled in). Still owed: one external test email to each, and reading what
+   arrives.
    → `NEXT_PUBLIC_LEGAL_CONTACT_EMAIL`, `NEXT_PUBLIC_PRIVACY_CONTACT_EMAIL`,
-     `NEXT_PUBLIC_SECURITY_CONTACT_EMAIL`
+     `NEXT_PUBLIC_SECURITY_CONTACT_EMAIL` (all three set)
 
 9. **Adoption.** Done 2026-09-13: `LEGAL_DOCS_VERSION` in `lib/legal.ts` (site repo) is
    `v1-2026-09-13` — no `draft-` prefix, and the copy-lint gate that pinned it was removed in
@@ -174,14 +175,18 @@ Do these in order. Step 1 is the long one and it is not ours.
 
 3. **Set the variables** on the Railway `site` service. All six, exactly as they should read on
    the page. Then **rebuild** `site` — Railway → service → Deploy → Redeploy, or push a commit. A
-   restart does nothing; the values are compiled in.
+   restart does nothing; the values are compiled in. *Partially done 2026-09-13: the three
+   contact variables are set and rebuilt in; the name, jurisdiction and governing-law variables
+   wait on items 1, 2 and 4.*
 
 4. **Rebuild `web` too.** It has no new variable, but it links to `${NEXT_PUBLIC_SITE_URL}/terms`
    and `/privacy`, and the footer links and the `/legal` link only exist in builds after
    2026-09-12. If `web` was last built before that, rebuild it now so both domains carry the
    links in the same window.
 
-5. **Verify the notice is gone.**
+5. **Verify the notice is gone.** *Only meaningful once the name variable is set — the notice is
+   up by design until then (`operatorIsDesignated()` wants a name AND at least one contact). The
+   checks below are for that moment.*
 
    ```bash
    # The operator gap is closed (the draft marker is gone since adoption, §2 item 9):
@@ -194,7 +199,9 @@ Do these in order. Step 1 is the long one and it is not ours.
    A non-zero count means the variable did not reach the build: check the `ARG` from step 2,
    then that the rebuild actually ran (`ops/deploy.md` §9 item 1).
 
-6. **Verify `security.txt` returns 200** and has a real contact line.
+6. **Verify `security.txt` returns 200** and has a real contact line. *Verified 2026-09-13 on
+   the Railway host (pre-DNS): 200 with `Contact: mailto:security@callhouse.finance` and
+   `Expires: 2027-09-13`. Re-run on `callhouse.finance` once DNS resolves.*
 
    ```bash
    curl -s -o /dev/null -w '%{http_code}\n' https://callhouse.finance/.well-known/security.txt   # 200
@@ -211,9 +218,9 @@ Do these in order. Step 1 is the long one and it is not ours.
    expires on its own, which is what RFC 9116 wants.
 
 7. **Update the reporting paragraph in both places** to drop the sentence saying the address is
-   unset: the "Reporting" section of this repository's `SECURITY.md` and `contracts/SECURITY.md`
-   §6 in `leekzor/callhouse-contracts`. Both carry it now, so both must change, in paired commits.
-   Pair them with the version bump in §2 item 9 (site repo) if they land together.
+   unset. *Done 2026-09-13, paired: this repository's `SECURITY.md` "Reporting" and
+   `contracts/SECURITY.md` §6 in leekzor/callhouse-contracts both now name
+   `security@callhouse.finance`.*
 
 8. **Check the mailboxes.** Send one message to each of the three addresses from outside and
    confirm a human reads it. Then close the audit blocker.
