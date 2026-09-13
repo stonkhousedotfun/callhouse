@@ -61,6 +61,7 @@ What is pinned, because each of these is a week of premium when it drifts:
 | `state.test.ts` | the SQLite store on a real file: components JSON round-trip of a 77-digit option id, the column allowlists, `/orders` hiding rows past `endTime`, tx recovery by kind and cycle, and reopening the file after close |
 | `overcallApi.test.ts` | the POST body and query, 200-as-idempotent, 4xx-not-retried, 429/Retry-After with the 60s cap, network errors, `lastFilledUnitPrice6` picking the newest fill by `createdAt`; and that `abi.ts` names **all 89** custom errors of Vault + SeaportOrderLib + ValoremLib (pinned, and re-derived from `contracts/out` when present) and that `describeError` reports them by name |
 | `roll.test.ts` | the chain-outranks-the-book rules without a chain: `seaportVerdict` downgrades a book-latched `filled`/`partial`/`unfillable` only on a chain-valid state, `bookVerdict` believes `filled` only when the row's own Seaport fields agree, and `isPostRetryable` covers a `partial` row the book never accepted |
+| `roll.relist.test.ts` | a Listed tick with `listingHash == 0` retires every still-offered row of the cycle — Seaport-cancelled, counter-invalidated (never `isCancelled`), or filled before the cancel — tells the book, and leaves `/orders` serving none of them (the defect `dryrun-extended.ts` found) |
 | `alerts.test.ts` | the cooldown clock: a failed webhook delivery retries after five minutes, a successful one suppresses for the full `KEEPER_ALERT_COOLDOWN_MS` |
 | `config.test.ts` | the schema's hard edges: bigint fields reject `-1` loudly (it parses, and would silently switch the low-gas alert off) |
 
@@ -101,7 +102,7 @@ What it does, in order — every step is an assertion, and a failure exits 1 nam
    both proven. `tick()` sees the fill.
 8. Warp to `exerciseTimestamp`; `tick()` → `lockBook`. Warp to `expiryTimestamp`; `tick()` →
    `rollClose`. Asserts the harvest (95% leg, 5% protocol fee on the premium, net), that the collateral came back, and
-   that the depositor can claim exactly the net.
+   that the depositor can claim exactly what the index credited (net − `usdgDust`, which is net at 25e18).
 9. **Cycle 2:** five fresh option types are created on the real Clear, the mock registry moves
    to cycle 2, and the vault is `rollOpen`ed by the harness with the keeper's key and **no
    database row** — the "rolled while asleep" case. `reconcile()` must adopt it, `tick()` must
@@ -119,7 +120,10 @@ What it does, in order — every step is an assertion, and a failure exits 1 nam
     **plus** strike proceeds with the 5% fee on the premium only (the strike proceeds are credited
     fee-free: `feeUsdg == floor((grossUsdg − usdgFromAssignment) × 500 / 10000)`), store `contracts_assigned = 9` with the
     alert's `contractsAssignedSource = RollClose` and `contractsAssignedFromClaim = 9` (the value
-    the keeper's pre-read returned inside the tick), and
+    the keeper's pre-read returned inside the tick), record `assets_returned` 14e18 and
+    `usdg_from_assignment` 9 × strike on the row and in `/cycles` (with `premium_gross_usdg6` = the
+    premium leg and `strike_proceeds_usdg6`), word the alert `cycle 3 closed: premium … USDG (fee …),
+    strike proceeds … USDG from 9 contracts assigned; … USDG to depositors.` (K-21), and
     settle the queue (`QueueSettled(1, 10e18, 6.4e18, escrow)`, the escrow's USDG being its
     own share of the index move). The depositor then `completeRedeem`s exactly the preview and
     `claimUsdg`s the rest; every base unit of the gross is accounted for, down to the single
@@ -132,12 +136,55 @@ What it does, in order — every step is an assertion, and a failure exits 1 nam
 
 Options: `DRYRUN_FEED=real` keeps the real Chainlink feed (cycle 1 only — after a one-week warp
 the real feed is stale, which is the vault's `StalePrice` gate working); `DRYRUN_SKIP_CYCLE2=1`
-(cycle 1 only); `DRYRUN_SKIP_CYCLE3=1` (cycles 1 and 2, no assignment); `DRYRUN_DEPOSIT` (the
-closed-form USDG checks in cycle 3 — 6.4 NVDA out, zero dust, floor(2/5) and floor(3/5) of net —
-assume the default 25e18, which divides the 1e27 index precision exactly; any other supply is
-still checked with the same floor formulas), `DRYRUN_RPC`, `DRYRUN_OUT`, `DRYRUN_ARTIFACTS`
-(where the compiled contracts come from; default `../contracts/out`), `DRYRUN_HEALTH_PORT`,
-`DRYRUN_KEEPER_PK`.
+(cycle 1 only); `DRYRUN_SKIP_CYCLE3=1` (cycles 1 and 2, no assignment); `DRYRUN_DEPOSIT` (at
+least 10e18; every cycle-3 amount is derived from chain state, including cycle 1's `usdgDust`
+carried into cycle 3's pot — `DRYRUN_DEPOSIT=33333333333333333333` carries 1 base unit and passes;
+the closed forms — 6.4 NVDA out, zero dust, floor(2/5) and floor(3/5) of net — are additionally
+pinned at the default 25e18, which divides the 1e27 index precision exactly), `DRYRUN_RPC`,
+`DRYRUN_OUT`, `DRYRUN_ARTIFACTS` (where the compiled contracts come from; default
+`../contracts/out`), `DRYRUN_HEALTH_PORT`, `DRYRUN_KEEPER_PK`.
+
+### Extended dry run (K-22)
+
+`src/dryrun-extended.ts` covers what the three-cycle run cannot, on one vault over three fresh
+series, with the same fork, stubs and exact-amount style (shared plumbing in
+`src/dryrun-common.ts`):
+
+```bash
+(cd contracts && forge build)
+anvil --fork-url https://rpc.mainnet.chain.robinhood.com --chain-id 4663 --port 8545
+pnpm --filter @callhouse/keeper dryrun:extended
+# report: keeper/dryrun-out/extended-<utc>/report.md, run.json, keeper.db, keeper-process.log
+```
+
+1. **`index.ts`, the real process.** Runs `tsc` (the `build` script) and spawns `node
+   dist/index.js` — the Dockerfile's CMD — with `POLL_INTERVAL_MS=5000` against the fork. It must
+   boot, send the `boot` alert, tick idle on its interval (every gap ≥ 5 s), then write, approve
+   and POST on the poll tick after a deposit lands. The harness holds that POST open, sends
+   SIGTERM, and asserts the process is still alive two seconds later, logs `shutting down` →
+   `waiting for the in-flight tick` → `listing published to Overcall` → `stopped`, starts no new
+   tick, exits 0, and leaves no `-wal`/`-shm`/`-journal` beside `keeper.db`; the file then passes
+   `PRAGMA integrity_check` and the in-process keeper carries the week on from it.
+2. **Partial fills, cancel, relist budget** (`KEEPER_MAX_RELISTS=2`). Two buyers take 7/28, 6/21
+   and 5/15 through `fulfillAdvancedOrder`; the guardian `cancelListing`s, `invalidateAllListings`,
+   and cancels again. The keeper relists twice (sized by `clear.balanceOf`, at `max(previous ask,
+   live floor)`, at the live counter), retires each dead row, and then relists nothing; a fourth
+   `approveListing` reverts `TooManyListings(3, 3)`.
+3. **Several exercisers across several transactions**: 4, 6 and 3 contracts in three `exercise`
+   transactions by two buyers; one `RollClose(1, 15e18, 13 × strike, 13)`, the harvest (three
+   premium legs + strike proceeds, fee on the legs only) and the redeem exact.
+4. **Guardian `rollClose`**: the keeper does not tick at expiry; a role-less address reverts
+   `GuardianTooEarly(expiry + 3600)` just past expiry and at expiry + 3599, and closes at exactly
+   expiry + 3600. The keeper's next tick reconstructs the week from logs (K-17) with
+   `assets_returned` / `usdg_from_assignment` and the unwitnessed wording.
+5. **Valorem's fee switch**: the Clear's `feeTo` is impersonated to `setFeesEnabled(true)`. The
+   keeper refuses to write (`valorem_fees_enabled` alert), `rollOpen` reverts
+   `ValoremFeeNotAccepted(15)`; after `acceptValoremFee(true)` the write pays 15 bps of collateral
+   in NVDA and the exercise 15 bps of the strike in USDG, and the claim redeems untouched.
+
+Options: `DRYRUN_DEPOSIT` (default 30e18, within [23e18, 50e18]), `DRYRUN_HEALTH_PORT` (default
+18797; the spawned keeper takes the next port), `DRYRUN_RPC`, `DRYRUN_OUT`, `DRYRUN_ARTIFACTS`,
+`DRYRUN_KEEPER_PK`. The same RPC-window trap applies: start anvil, run immediately.
 
 Three traps, each of which cost an afternoon:
 
@@ -260,6 +307,7 @@ have to come out right on the next tick.
 | `Idle` | `isWritingOpen()` and this cycle is not yet handled | pick strike → `rollOpen` → build order → `approveListing` → `POST` → verify visible |
 | `Idle` | writing window closed and we never wrote | record the week as **skipped**, with the reason. This is "unfilled, 0" and it gets published. |
 | `Listed` | every tick | `seaport.getOrderStatus`. Fully filled → stop. Cancelled → clear the vault listing and relist once. |
+| `Listed` | `listingHash == 0` (a guardian `cancelListing` / `invalidateAllListings`) | retire every still-offered row of the cycle (`cancelled`, or `filled` if Seaport says so; `DELETE` to the book) so `/orders` stops serving it, then relist within `KEEPER_MAX_RELISTS` and the vault's 3 |
 | `Listed` | hourly | Overcall's book: status, fill fraction, visibility |
 | `Listed`/`Exercisable` | `now >= cycleExerciseTs` | no new listings; `lockBook()` |
 | `Listed`/`Exercisable` | `now >= cycleExpiryTs` | `rollClose()` — redeem, harvest, settle the queue |
@@ -545,6 +593,8 @@ it picks the listing back up from `seaport.getOrderStatus` and carries on.
 | `alerts.ts` | Webhook alerting with per-kind cooldown. |
 | `index.ts` | Wiring, the poll loop, graceful shutdown. |
 | `dryrun.ts` | The production keeper driven through three cycles against an anvil fork (filled OTM, rolled-while-asleep unfilled, in-the-money with a queued redeem and 9 of 23 assigned), with assertions. `DRYRUN.md` is the recorded run. |
+| `dryrun-extended.ts` | The K-22 scenarios on a fork: the compiled `index.ts` process under SIGTERM mid-tick, partial fills / cancel / invalidate / relist budget, several exercisers across several transactions, a guardian `rollClose` reconciled from logs, and Valorem's fee switch on. `DRYRUN.md` records the run. |
+| `dryrun-common.ts` | What both harnesses share: chain constants, derived actors, anvil RPC, storage-written balances, linked deploys, the Overcall stub and alert capture. |
 | `*.test.ts` | Unit tests, next to the module each one pins (`roll.close.test.ts` pins the rollClose count path with the keeper's client stubbed). `pnpm test`. |
 | `Dockerfile`, `railway.json` | The container, built from the repo root, and the Railway config-as-code. Runbook: `ops/deploy.md`. |
 | `deploy/callhouse-keeper.service` | The systemd alternative. |

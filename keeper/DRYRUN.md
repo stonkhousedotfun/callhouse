@@ -13,6 +13,191 @@ the harness. The "What was stubbed" section is the list of things this run does 
 
 ---
 
+## K-21 re-run and the K-22 extended harness — 2026-09-13T21:09Z to 21:13Z (supersedes the alert wording below)
+
+Three runs, each on its own fresh anvil fork (`anvil/v1.6.0`, port 8546, `--chain-id 4663`),
+all **passed**, on the tree committed with this section on top of `3e8f677` (K-21), contracts
+submodule `634bf55`. Keeper unit tests 85/85 on the same tree (84 + `roll.relist.test.ts`).
+Raw artefacts: `dryrun-out/final-default/`, `dryrun-out/final-deposit-33.3/`,
+`dryrun-out/final-extended/` (report.md, run.json, keeper.db; the extended run also
+keeper-process.log).
+
+| run | command | fork block | wall clock | result |
+|---|---|---|---|---|
+| three cycles, default deposit 25e18 | `pnpm --filter @callhouse/keeper dryrun` | 62264333 | 187.4 s | `DRY RUN PASSED` |
+| three cycles, `DRYRUN_DEPOSIT=33333333333333333333` | same | 62266347 | 21.2 s | `DRY RUN PASSED` |
+| K-22 scenarios, deposit 30e18 | `pnpm --filter @callhouse/keeper dryrun:extended` | 62266701 | 41.9 s | `EXTENDED DRY RUN PASSED` |
+
+The 187.4 s is upstream latency on first-touch storage reads (the slowest steps were the two
+five-rung series creations, 28.6 s and 22.7 s); the same harness ran in 21.2 s minutes later.
+
+### dryrun.ts after K-21 (default deposit)
+
+Every non-K-21 figure matches the 17:42 re-run below: 23 contracts at 226 then 225; cycle 1
+`Harvest` 19.079259 / 0.953962 / 18.125297 and the depositor claimed 18.125297; cycle 2 unfilled
+0; cycle 3 gross 2044.079259, fee 0.953962, net 2043.125297, escrow 817250118, claim 1225875178,
+1 base unit left (dust 0, owed 1); rows `{cycles 3, listings 3, txs 11, alerts 5, meta 4}`.
+rollClose txs `0x1e3398c0…` (c1), `0x74ff8fc0…` (c2), `0x59ee219e…` (c3). Newly asserted:
+
+- the cycle-3 `roll_close` alert is exactly `cycle 3 closed: premium 19.079259 USDG (fee
+  0.953962), strike proceeds 2025 USDG from 9 contracts assigned; 2043.125297 USDG to
+  depositors.`, built from the receipt's `Harvest` and `RollClose` (premium = gross −
+  usdgFromAssignment, asserted equal to the filled premium leg); `data.premiumUsdg` 19.079259,
+  `data.strikeProceedsUsdg` 2025, `data.assetsReturned` 14000000000000000000;
+- cycle 3's row and `GET /cycles`: `assets_returned` 14000000000000000000, `usdg_from_assignment`
+  2025000000, `premium_gross_usdg6` 19079259, `strike_proceeds_usdg6` 2025000000;
+- cycles 1 and 2: row and `/cycles` `usdg_from_assignment` `'0'`, `strike_proceeds_usdg6` `'0'`,
+  premium = gross; `assets_returned` = every written lot (23e18) from each close's `RollClose`;
+  the cycle-1 message `cycle 1 closed: 19.079259 USDG harvested, 18.125297 to depositors.` and
+  the cycle-2 message `cycle 2 closed unfilled: 0 USDG harvested.` exactly (wording unchanged);
+- `PREMIUM_MARGIN_BPS` is deleted from the environment beside `KEEPER_UNIT_PRICE_USDG6`, so the
+  "priced at the policy floor" assertions cannot be broken by a shell variable.
+
+### Non-default `DRYRUN_DEPOSIT` (K-22 f): covered
+
+At 33333333333333333333 (supply does not divide 1e27) cycle 1 left 1 base unit of `usdgDust`
+(net 24429747, depositor claimed 24429746, `usdgOwed` 0), and it was carried into cycle 3's pot.
+The harness now reads it instead of assuming 0: vault USDG and `usdgDust` before cycle 3's write
+(`carriedIn {usdg 1, usdgDust 1}`), index delta = floor((net + carried dust) × 1e27 / supply)
+= **61482892440000000**, `usdgDust` after = pot − credited = **1**, vault USDG at the exercise =
+carried + premium leg, and `escrow + claim + fee + dust + owed = gross + carried`:
+614828924 + 1434600823 + 1285776 + 1 + 0 = 2050715524 = 2050715523 + 1. Cycle 1's claim is
+asserted exactly (claimable = net − `usdgDust`), not within 1000 units. Other figures: 31
+contracts; cycle 3 gross 2050715523 / fee 1285776 / net 2049429747, `RollClose` assetsReturned
+22000000000000000000, queue payout 7299999999999999999 NVDA wei; final `totalSupply`
+23333333333333333333, `idleAssets` 17033333333333333334. The closed forms (6.4 NVDA, zero dust,
+floor(2/5), owed by divisibility) stay pinned at the default only. The previous assertions would
+have failed here on arithmetic: vault USDG at the exercise was premium leg + 1, not the leg.
+
+### dryrun-extended.ts (K-22 a–e)
+
+One vault, deposit 30e18, three fresh series on the real Clear, `KEEPER_MAX_RELISTS=2`,
+`POLL_INTERVAL_MS=5000`. Alerts, exactly and in order: `boot`, `roll_open` (28 at 225),
+`roll_close` c1, `roll_open` (16 at 225), `roll_close` c2 (unwitnessed), `valorem_fees_enabled`,
+`roll_open` (12 at 225), `roll_close` c3. Final rows `{cycles 3, listings 5, txs 13, alerts 8,
+meta 8}`, identical after reopen. Keeper txs, all success: c1 rollOpen `0xf38879fc…` (62266718),
+approveListing ×3 `0x0d6f3b5e…` / `0x02021642…` / `0x06f7ad33…`, lockBook `0xe8ecf9c9…`, rollClose
+`0x9397d2b3…` (62266742); c2 rollOpen, approveListing, lockBook and **no rollClose**; c3
+rollOpen `0x153e9685…`, approveListing, lockBook, rollClose `0x6f121a6d…` (62266783).
+
+**(a) `index.ts`: covered.** The harness ran `tsc -p tsconfig.json` and spawned `node
+dist/index.js` (the Dockerfile CMD) as pid 71216 against the fork. It booted, reconciled, sent
+`boot` (`keeper online for 0x07fF75F9…`), and ticked idle twice (`no-idle-collateral`), 5079 ms
+apart; its own `/health` answered 200 `ok` with phase Idle and registry cycle 1. After the
+deposit landed, its third tick sent rollOpen and approveListing (both confirmed) and POSTed; the
+stub held the POST and the harness sent SIGTERM. The process logged `shutting down`
+(`signal: SIGTERM`) and `waiting for the in-flight tick`, was still alive 2 s later with no
+`stopped`, and after the POST was released logged `listing published to Overcall` then `stopped`
+as its last line (JSON lines 24 < 25 < 27 < 28 of 29), started no further tick, logged no
+error, and exited with code 0 and no signal. Beside `keeper.db` there was no `-wal`, `-shm` or
+`-journal`; a fresh better-sqlite3 connection returned `integrity_check` `ok`, `journal_mode`
+`wal`, and rows `{cycles 1, listings 1, txs 2, alerts 2, meta 2}`: cycle 1 `open`, the listing
+`posted` with `api_status open` (the held POST completed after the signal), txs
+`rollOpen:success,approveListing:success`, alerts `boot:1,roll_open:1`, meta
+`last_heartbeat_ms` and `skip_reason:1 = no-idle-collateral`. The vault's `listingHash` equalled
+the stored hash. The in-process keeper then opened the same file and ran the rest of the week.
+
+**(d) Cancel / partial fill / relist budget: covered, and it found a keeper defect (fixed).**
+Listing 1: 28 contracts at 873192, counter 0. Buyer A filled 7/28 through `fulfillAdvancedOrder`
+(vault +5806731, Overcall +305613; Seaport 7/28); tick → `partial`. The guardian
+`cancelListing` (`0x81dcd71a…`); a role-less caller reverted
+`AccessControlUnauthorizedAccount`. Tick → relist 1: 21 contracts (= `clear.balanceOf(vault)`),
+873192 (= `relistUnitPrice6(previous, live floor, 0)`), vault leg 17420193, `listingsThisCycle`
+2, `relists_used` 1. Buyer B filled 6/21 (+4977198 / +261954). The guardian
+`invalidateAllListings` (`0xc989befe…`): counter 0 → 248131054363107652433663257066137832485,
+and Seaport `isCancelled` stayed **false** on listing 2. Tick → relist 2: 15 contracts at the new
+counter, `listingsThisCycle` 3, `relists_used` 2. Buyer A filled 5/15 (+4147665 / +218295); the
+guardian cancelled listing 3; tick → nothing sent, no POST, three rows, 10 contracts left
+unlisted; a fourth `approveListing` from the keeper key, built by the keeper's own
+`buildOrderComponents` at the live counter, reverted **`TooManyListings(3, 3)`**. After each
+cancel/invalidate the dead row went to `cancelled` (Seaport 7/28 cancelled=1, 6/21 cancelled=0,
+5/15 cancelled=1), one `DELETE` reached the book each time, and `/orders` served only the
+vault-authorised listing (nothing after the last cancel).
+
+> **Defect (K-22 d), found by the first extended run and fixed in `roll.ts`.** After the
+> guardian's `cancelListing`, the keeper relisted correctly but left the dead row `partial`;
+> `openListings()` — what `GET /orders` serves — returned `[seq 2, seq 1]`, i.e. the
+> Seaport-cancelled order beside the relist, until its endTime. Nothing retired it:
+> `pollLiveListing` reads only the vault's live hash, `refreshListings` runs only at boot,
+> `liveListingsForCycle` (lockBook, rollClose) skips `partial`, and an `invalidateAllListings`
+> counter bump never sets `isCancelled`, so even a Seaport poll would not flag it. Fix:
+> `retireUnauthorisedListings` runs at the top of `maybeRelist` (phase Listed, `listingHash == 0`):
+> every row of the cycle still in `approved/posted/visible/post_failed/partial` is read on
+> Seaport and set `filled` if fully filled, else `cancelled` with a best-effort `DELETE` to the
+> book. Unit test `roll.relist.test.ts` drives it through `tick()` (fails without the call,
+> passes with it); the extended run above is the fork evidence.
+
+**(b) Several exercisers across several transactions: covered.** Buyer A held 12, buyer B 6.
+Three `exercise` transactions on the real Clear, fee off: A 4 (`0xd095bebe…`, debit 900000000),
+B 6 (`0xb30376c9…`, 1350000000), A 3 (`0x98d1b7b5…`, 675000000); `vault.contractsAssigned()`
+read 4, 10, 13 after each, and `claim.amountExercised` 4e18, 10e18, 13e18. `position` before the
+close: 15 lots locked, `exerciseAmount` 2925000000. The keeper's pre-read answered 13. The
+keeper's rollClose emitted exactly one `RollClose(1, 15000000000000000000, 2925000000, 13)` (and
+it is the only RollClose for cycle 1 on chain); the Clear's `ClaimRedeemed` carried the same two
+amounts; `Harvest` gross 2939931594 = the three vault legs 14931594 + 2925000000, fee 746579 =
+floor(14931594 × 500 / 10000), net 2939185015, one Harvest for the cycle. Vault NVDA =
+30e18 − 13e18; buyer A holds 7 NVDA, buyer B 6; 10 unsold option tokens still in the vault. Row:
+`contracts_assigned` 13, `assets_returned` 15e18, `usdg_from_assignment` 2925000000,
+`relists_used` 2; alert `cycle 1 closed: premium 14.931594 USDG (fee 0.746579), strike proceeds
+2925 USDG from 13 contracts assigned; 2939.185015 USDG to depositors.` with
+`contractsAssignedSource RollClose` and `contractsAssignedFromClaim 13`; `/cycles`
+`premium_gross_usdg6` 14931594. The depositor claimed 2939185014 (the whole credited pot).
+
+**(c) Guardian / anyone `rollClose`: covered.** Cycle 2: the keeper wrote 16 (on 17e18 idle),
+buyer B filled 16/16 (+13272528), the keeper locked, buyer B exercised 4. The keeper then did not
+tick. Expiry 1789514048: a role-less address's `rollClose` reverted
+**`GuardianTooEarly(1789517648)`** just past expiry and again in a block mined at exactly
+1789517647 (expiry + 3599); the keeper key's simulation passed in that same block. In a block at
+exactly **1789517648** the role-less address closed (`0x4eb140f4…`, block 62266762, 208,604 gas):
+`RollClose(2, 12000000000000000000, 900000000, 4)`, `Harvest` 913272528 / 663626 / 912608902.
+The keeper's row still said `locked` and it had no rollClose tx. Its next tick reconstructed the
+week from logs (K-17): `closed`, `roll_close_tx` = that hash, gross/fee/net from the Harvest log,
+`contracts_assigned` 4, `assets_returned` 12000000000000000000, `usdg_from_assignment` 900000000,
+its own open and lock hashes kept, the filled listing still `filled`, nothing sent. One alert:
+`cycle 2 closed: premium 13.272528 USDG (fee 0.663626), strike proceeds 900 USDG from 4 contracts
+assigned; 912.608902 USDG to depositors. The close ran without this keeper witnessing it;
+reconstructed from chain logs.` with `witnessedLive false`, `tx` the hash, and no
+`contractsAssignedSource`. `/cycles` served the same split. A further `reconcile()` and tick
+raised nothing and left the row byte-identical.
+
+**(e) Valorem's exercise and write fee: covered** — without a storage write: the Clear's `feeTo`
+is `0xdAe7…0782`, an EOA (recon R4), so it was impersonated to call `setFeesEnabled(true)`
+(`0x262586d1…`, `FeeSwitchUpdated(enabled true)`). The keeper's tick sent nothing, left
+`skip_reason:3 = valorem-fees-enabled`, and raised `[warn] valorem_fees_enabled: Valorem turned
+its engine fee on (15 bps). The vault will not write until an admin calls
+acceptValoremFee(true).`; `/state` showed `valoremFeesEnabled true`, `valoremFeeAccepted false`.
+`rollOpen` with the production picker's plan reverted **`ValoremFeeNotAccepted(15)`**. After the
+admin's `acceptValoremFee(true)`, the keeper's rollOpen (`0x153e9685…`) wrote 12 contracts and the
+vault paid 12e18 + **18000000000000000** NVDA wei (15 bps), the Clear's `feeBalance(NVDA)` rose by
+exactly that, and the vault's NVDA allowance to the Clear was back to 0. Buyer A filled 12/12
+and exercised 5 with debit 1125000000 + fee **1687500** (15 bps), `feeBalance(USDG)` +1687500.
+The keeper's rollClose: `RollClose(3, 7000000000000000000, 1125000000, 5)` — neither fee netted
+from the claim — and `feeBalance` unchanged by the redeem; `Harvest` 1134954396 / 497719 /
+1134456677; alert `cycle 3 closed: premium 9.954396 USDG (fee 0.497719), strike proceeds 1125
+USDG from 5 contracts assigned; 1134.456677 USDG to depositors.`
+
+### Still open after these runs
+
+- **Overcall's real validator** (R3 checks 0–12). Needs a mainnet listing (L-04).
+- **`index.ts` edges**: SIGINT (same handler, not sent), a signal during a receipt wait (the held
+  point was the POST after both receipts), the `unhandledRejection` and `keeper_error` paths, and
+  PID 1 inside the container (the process was `node` directly, not `docker run`).
+- **Valorem's bucketed assignment across several writers.** The vault is its option types' only
+  writer, so every exercise lands on its one claim.
+- **The keeper's own `clearVaultListing` → `cancelListing` branch is unreachable with this
+  vault, not merely unexercised**: `pollLiveListing` takes it only when Seaport reports the
+  vault's live hash `isCancelled`, but Seaport lets only the offerer (the vault) or the zone (0x0)
+  cancel, and `Vault.cancelListing` clears `listingHash` in the same transaction.
+- **The vault-cap guards in `maybeRelist` / `createListing`** (`listingsThisCycle >= 3` with
+  keeper budget left, and its `api_reject` alert): with `KEEPER_MAX_RELISTS ≤ 2` the keeper's own
+  budget always binds first; only an `approveListing` sent outside the keeper reaches them.
+- **`ValoremLib.ValoremFeesEnabled`** is shadowed by the vault's own `ValoremFeeNotAccepted`
+  check and cannot be reached through `rollOpen`. `sweepFees` and a fee switch flipped mid-cycle
+  were not exercised.
+- **Carried `usdgOwed` and `usdgUnallocated`** in the non-default run: one holder claims exactly
+  what was credited (owed 0) and the supply is never 0.
+- **`phase_stuck`** is keyed to the wall clock, which a warped fork never reaches; not observed.
+
 ## Re-run after the fee change — 2026-09-13T17:42:14Z (supersedes every fee figure below)
 
 The protocol fee became **5% of premium only** (`Policy.launchDefaults().protocolFeeBps` 500;

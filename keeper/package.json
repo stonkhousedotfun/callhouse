@@ -11,7 +11,8 @@
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "lint": "tsc -p tsconfig.json --noEmit",
     "test": "tsx --test 'src/**/*.test.ts'",
-    "dryrun": "tsx src/dryrun.ts"
+    "dryrun": "tsx src/dryrun.ts",
+    "dryrun:extended": "tsx src/dryrun-extended.ts"
   },
   "dependencies": {
     "viem": "^2.56.3",

@@ -47,8 +47,9 @@
  *   - ALERT_WEBHOOK -> an in-process capture. alerts.ts runs unmodified.
  *   - NVDA and USDG balances are written into storage (anvil_setStorageAt), the fork suite's
  *     `deal` technique, because nobody here holds real Stock Tokens.
- * WHAT IS NOT EXERCISED: index.ts's timer loop and signal handling (the harness calls tick()),
- * and Overcall's real validator. Neither can be, from here.
+ * WHAT IS NOT EXERCISED HERE: index.ts's timer loop and signal handling (this harness calls
+ * tick()), multiple exercisers, relists, a guardian rollClose and the Valorem fee branch — all
+ * five are dryrun-extended.ts — and Overcall's real validator, which cannot be, from a fork.
  *
  * HOW TO RUN IT (keeper/README.md "Dry run" has the long form):
  *   anvil --fork-url https://rpc.mainnet.chain.robinhood.com --chain-id 4663 --port 8545
@@ -59,7 +60,11 @@
  *   DRYRUN_RPC           anvil endpoint. Default http://127.0.0.1:8545
  *   DRYRUN_ARTIFACTS     contracts/out. Default ../contracts/out relative to this package
  *   DRYRUN_OUT           where state.db, report.md and run.json go. Default ./dryrun-out/<utc>
- *   DRYRUN_DEPOSIT       asset base units to deposit. Default 25e18
+ *   DRYRUN_DEPOSIT       asset base units to deposit. Default 25e18. Cycle 3 needs at least
+ *                        10e18 (it queues 10e18 shares and exercises 9 contracts). Every
+ *                        amount is derived, including cycle 1's usdgDust carried into cycle 3's
+ *                        pot; the closed forms (6.4 NVDA, zero dust, floor(2/5) of net) are
+ *                        additionally pinned at the default only.
  *   DRYRUN_FEED          mock (default) | real
  *   DRYRUN_KEEPER_PK     the hot key to run as. Default: a key derived from a label
  *   DRYRUN_HEALTH_PORT   KEEPER_PORT for the health server. Default 18787
@@ -69,87 +74,68 @@
  * Every keeper variable is set by this file before the keeper is imported; a keeper .env is
  * deliberately NOT read (KEEPER_ENV_FILE=/dev/null), so a mainnet key cannot leak into a fork run.
  */
-import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
-import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
+import { mkdirSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { encodeEventTopics, getAddress, keccak256, parseEventLogs, toHex, type Address, type Hex } from 'viem';
 import {
-  BaseError,
-  ContractFunctionRevertedError,
-  createPublicClient,
-  createWalletClient,
-  defineChain,
-  encodeAbiParameters,
-  encodeEventTopics,
-  getAddress,
-  http,
-  keccak256,
-  pad,
-  parseEventLogs,
-  toHex,
-  type Abi,
-  type Address,
-  type Chain,
-  type Hex,
-  type PublicClient,
-  type TransactionReceipt,
-  type WalletClient,
-} from 'viem';
-import { privateKeyToAccount, type PrivateKeyAccount } from 'viem/accounts';
+  ADMIN,
+  BPS,
+  BUYER,
+  CHAIN_ID,
+  CLEAR,
+  DEPOSITOR,
+  FEED,
+  FEE_SAFE,
+  KEEPER,
+  LAUNCH_POLICY,
+  LOT,
+  NVDA,
+  OVERCALL_FEE,
+  REGISTRY_NVDA,
+  RPC,
+  SEAPORT,
+  USDG,
+  ZERO_BYTES32,
+  ONE_HUNDRED_ETH,
+  AlertCapture,
+  OvercallStub,
+  artifact,
+  assert,
+  assertEq,
+  balanceOf,
+  clearDelegation,
+  createFreshSeries,
+  currentStep,
+  deal,
+  deploy,
+  deployLinked,
+  erc20Abi,
+  expectRevert,
+  feedAbi,
+  forkChain,
+  harvestFee,
+  latestTimestamp,
+  mockFeedAbi,
+  mockRegistryAbi,
+  note,
+  pub,
+  rpc,
+  sendTx,
+  setBalance,
+  step,
+  trail,
+  vaultQueueAbi,
+  wallet,
+  warpTo,
+} from './dryrun-common.js';
 // Type-only, erased at runtime: the keeper's state.ts (and config.ts behind it) is still not
 // loaded until the environment below has been set.
 import type { ListingRow } from './state.js';
 
 /*//////////////////////////////////////////////////////////////
-                    CHAIN 4663 CONSTANTS (recon-confirmed)
-//////////////////////////////////////////////////////////////*/
-
-const CLEAR = '0x9a7b40e5c1dB1Af822ef091c990b58b02C78C0C0' as const;
-const SEAPORT = '0x0000000000000068F116a894984e2DB1123eB395' as const;
-const USDG = '0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168' as const;
-const NVDA = '0xd0601CE157Db5bdC3162BbaC2a2C8aF5320D9EEC' as const;
-const REGISTRY_NVDA = '0x8E973cE1A6884E28Ad3E377d5f670Bc0b463f4EA' as const;
-const OVERCALL_FEE = '0xdAe7e82A2E7D566C67E87C164B05a1C560190782' as const;
-const FEED = '0x379EC4f7C378F34a1B47E4F3cbeBCbAC3E8E9F15' as const;
-const CHAIN_ID = 4663;
-
-const ZERO_BYTES32 = '0x0000000000000000000000000000000000000000000000000000000000000000' as const;
-const ONE_HUNDRED_ETH = 100_000_000_000_000_000_000n;
-const LOT = 1_000_000_000_000_000_000n;
-const BPS = 10_000n;
-
-/**
- * Policy.launchDefaults(): what the Vault constructor installs, and so what this run's vault
- * must read back before the keeper sizes its first write. protocolFeeBps is the 2026-09-13
- * decision: 5% of harvested PREMIUM, never of strike proceeds.
- */
-const LAUNCH_POLICY = {
-  minOtmBps: 300n,
-  maxOtmBps: 1200n,
-  minPremiumBps: 40n,
-  maxUtilizationBps: 9500n,
-  protocolFeeBps: 500n,
-  maxContractsCap: 50n,
-} as const;
-
-/**
- * The protocol fee on ONE Harvest event, charged exactly as Vault._accrueHarvest charges it:
- * floor((grossUsdg - feeFree) x protocolFeeBps / 10000), where `feeFree` is
- * `RollClose.usdgFromAssignment` for the terminal harvest inside rollClose (same transaction)
- * and 0 for a deposit/mint checkpoint. `grossUsdg` still includes the strike proceeds; only the
- * premium part is fee-bearing, and `netUsdg = grossUsdg - feeUsdg` either way.
- */
-function harvestFee(grossUsdg: bigint, feeFree: bigint, protocolFeeBps: bigint): bigint {
-  const feeBearing = grossUsdg > feeFree ? grossUsdg - feeFree : 0n;
-  return (feeBearing * protocolFeeBps) / BPS;
-}
-
-/*//////////////////////////////////////////////////////////////
                               SETTINGS
 //////////////////////////////////////////////////////////////*/
 
-const RPC = process.env.DRYRUN_RPC ?? 'http://127.0.0.1:8545';
-const ARTIFACTS = process.env.DRYRUN_ARTIFACTS ?? fileURLToPath(new URL('../../contracts/out/', import.meta.url));
 const OUT = resolve(process.env.DRYRUN_OUT ?? join('dryrun-out', new Date().toISOString().replace(/[:.]/g, '-')));
 const DEPOSIT = BigInt(process.env.DRYRUN_DEPOSIT ?? '25000000000000000000');
 const FEED_MODE = process.env.DRYRUN_FEED === 'real' ? 'real' : 'mock';
@@ -158,54 +144,8 @@ const SKIP_CYCLE2 = process.env.DRYRUN_SKIP_CYCLE2 === '1';
 const SKIP_CYCLE3 = process.env.DRYRUN_SKIP_CYCLE3 === '1';
 
 /*//////////////////////////////////////////////////////////////
-                               ACTORS
-//////////////////////////////////////////////////////////////*/
-
-/**
- * Deterministic throwaway actors, derived from a label rather than taken from anvil's default
- * list. Every one of anvil's well-known accounts carries 23 bytes of code on chain 4663 — an
- * EIP-7702 delegation designator — so the EVM treats them as contracts, Valorem's ERC-1155 calls
- * `onERC1155Received` on them, the delegate reverts, and Seaport reports
- * TokenTransferGenericFailure, which reads like a broken order and is nothing of the kind.
- */
-function derivedActor(label: string): PrivateKeyAccount {
-  return privateKeyToAccount(keccak256(toHex(`callhouse-dryrun:${label}`)));
-}
-
-const KEEPER = process.env.DRYRUN_KEEPER_PK ? privateKeyToAccount(process.env.DRYRUN_KEEPER_PK as Hex) : derivedActor('keeper');
-const ADMIN = derivedActor('admin');
-const FEE_SAFE = derivedActor('fee-safe');
-const DEPOSITOR = derivedActor('depositor');
-const BUYER = derivedActor('buyer');
-
-const forkChain: Chain = defineChain({
-  id: CHAIN_ID,
-  name: 'Robinhood Chain (anvil fork)',
-  nativeCurrency: { name: 'Ether', symbol: 'ETH', decimals: 18 },
-  rpcUrls: { default: { http: [RPC] } },
-});
-
-/** The HARNESS's clients. The keeper builds its own from the environment set below. */
-const pub: PublicClient = createPublicClient({ chain: forkChain, transport: http(RPC) });
-const wallet: WalletClient = createWalletClient({ chain: forkChain, transport: http(RPC) });
-
-/*//////////////////////////////////////////////////////////////
                               THE RECORD
 //////////////////////////////////////////////////////////////*/
-
-interface TxRecord {
-  label: string;
-  by: string;
-  hash: Hex;
-  block: string;
-  gasUsed: string;
-}
-
-interface StepRecord {
-  step: string;
-  ms: number;
-  notes: string[];
-}
 
 const record = {
   startedAt: new Date().toISOString(),
@@ -214,16 +154,17 @@ const record = {
   chainId: 0,
   forkBlock: '',
   feedMode: FEED_MODE,
-  actors: {} as Record<string, string>,
-  addresses: {} as Record<string, string>,
+  deposit: DEPOSIT.toString(),
+  actors: trail.actors,
+  addresses: trail.addresses,
   cycle1: {} as Record<string, unknown>,
   cycle2: {} as Record<string, unknown>,
   cycle3: {} as Record<string, unknown>,
-  harnessTxs: [] as TxRecord[],
-  steps: [] as StepRecord[],
+  harnessTxs: trail.harnessTxs,
+  steps: trail.steps,
   health: {} as Record<string, unknown>,
-  stubRequests: [] as string[],
-  alerts: [] as Array<{ kind: string; severity: string; message: string }>,
+  stubRequests: trail.stubRequests,
+  alerts: trail.alerts,
   db: {} as Record<string, unknown>,
   stoppedAt: null as string | null,
   error: null as string | null,
@@ -231,579 +172,6 @@ const record = {
 };
 
 const startedMs = Date.now();
-let currentStep = 'preflight';
-let currentNotes: string[] = [];
-
-function note(text: string): void {
-  currentNotes.push(text);
-  process.stdout.write(`    ${text}\n`);
-}
-
-async function step<T>(label: string, run: () => Promise<T>): Promise<T> {
-  currentStep = label;
-  currentNotes = [];
-  process.stdout.write(`\n== ${label}\n`);
-  const t0 = Date.now();
-  const result = await run();
-  record.steps.push({ step: label, ms: Date.now() - t0, notes: currentNotes });
-  return result;
-}
-
-function assert(condition: boolean, message: string): asserts condition {
-  if (!condition) throw new Error(`ASSERTION FAILED (${currentStep}): ${message}`);
-}
-
-function assertEq(actual: bigint | number | string | boolean | null, expected: typeof actual, message: string): void {
-  assert(actual === expected, `${message} (expected ${String(expected)}, got ${String(actual)})`);
-}
-
-/**
- * Assert that a call reverts with a NAMED custom error. The catch here is the assertion, not a
- * swallow: a call that succeeds fails the step, and so does a revert with any other name.
- */
-async function expectRevert(label: string, errorName: string, run: () => Promise<unknown>): Promise<void> {
-  let thrown: unknown = null;
-  try {
-    await run();
-  } catch (error) {
-    thrown = error;
-  }
-  assert(thrown !== null, `${label}: expected a ${errorName} revert, but the call succeeded`);
-  const revert = thrown instanceof BaseError ? thrown.walk((e) => e instanceof ContractFunctionRevertedError) : null;
-  const decoded = revert instanceof ContractFunctionRevertedError ? revert.data : undefined;
-  assertEq(decoded?.errorName ?? null, errorName, `${label}: revert reason (${thrown instanceof Error ? thrown.message.split('\n')[0] : String(thrown)})`);
-  note(`${label}: reverted ${errorName}(${(decoded?.args ?? []).map(String).join(', ')})`);
-}
-
-/*//////////////////////////////////////////////////////////////
-                             RAW ANVIL RPC
-//////////////////////////////////////////////////////////////*/
-
-let rpcId = 0;
-
-async function rpc<T = unknown>(method: string, params: unknown[] = []): Promise<T> {
-  const response = await fetch(RPC, {
-    method: 'POST',
-    headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ jsonrpc: '2.0', id: (rpcId += 1), method, params }),
-  });
-  const body = (await response.json()) as { result?: T; error?: { message: string } };
-  if (body.error) throw new Error(`${method} failed: ${body.error.message}`);
-  return body.result as T;
-}
-
-async function setBalance(address: Address, wei: bigint): Promise<void> {
-  await rpc('anvil_setBalance', [address, toHex(wei)]);
-}
-
-/** Scrub any code (an EIP-7702 delegation, see derivedActor) off a throwaway actor. */
-async function clearDelegation(address: Address): Promise<void> {
-  const code = await rpc<Hex>('eth_getCode', [address, 'latest']);
-  if (code === '0x' || code === '0x0') return;
-  await rpc('anvil_setCode', [address, '0x']);
-  note(`cleared ${code.length / 2 - 1} bytes of code on ${address}`);
-}
-
-async function latestTimestamp(): Promise<bigint> {
-  return (await pub.getBlock({ blockTag: 'latest' })).timestamp;
-}
-
-/** Move the fork's clock to `target` plus a minute of slack, and mine a block there. */
-async function warpTo(target: bigint, label: string): Promise<void> {
-  const before = await latestTimestamp();
-  if (before >= target) {
-    note(`${label}: already past ${target}`);
-    return;
-  }
-  const delta = target - before + 60n;
-  await rpc('evm_increaseTime', [Number(delta)]);
-  await rpc('evm_mine', []);
-  const after = await latestTimestamp();
-  note(`warped ${label}: ${before} -> ${after} (+${delta}s)`);
-}
-
-/*//////////////////////////////////////////////////////////////
-                            ERC-20 FUNDING
-//////////////////////////////////////////////////////////////*/
-
-const erc20Abi = [
-  { type: 'function', name: 'balanceOf', inputs: [{ name: 'a', type: 'address' }], outputs: [{ type: 'uint256' }], stateMutability: 'view' },
-  { type: 'function', name: 'approve', inputs: [{ name: 's', type: 'address' }, { name: 'v', type: 'uint256' }], outputs: [{ type: 'bool' }], stateMutability: 'nonpayable' },
-] as const;
-
-/**
- * Write a balance straight into the token's storage. NVDA (OpenZeppelin v5, upgradeable) keeps
- * `_balances` at the ERC-7201 namespaced slot; USDG keeps it at slot 1. Both were confirmed by
- * probing on a fork, and both are probed again here rather than assumed: a wrong guess is put
- * back before the next one is tried.
- */
-const ERC20_STORAGE_BASES: bigint[] = [
-  BigInt('0x52c63247e1f47db19d5ce0460030c497f067ca4cebf71ba98eeadabe20bace00'),
-  ...Array.from({ length: 64 }, (_, i) => BigInt(i)),
-];
-
-async function balanceOf(token: Address, holder: Address): Promise<bigint> {
-  return pub.readContract({ address: token, abi: erc20Abi, functionName: 'balanceOf', args: [holder] });
-}
-
-async function deal(token: Address, holder: Address, amount: bigint): Promise<void> {
-  if ((await balanceOf(token, holder)) >= amount) return;
-  for (const base of ERC20_STORAGE_BASES) {
-    const slot = keccak256(encodeAbiParameters([{ type: 'address' }, { type: 'uint256' }], [holder, base]));
-    const previous = await rpc<Hex>('eth_getStorageAt', [token, slot, 'latest']);
-    await rpc('anvil_setStorageAt', [token, slot, pad(toHex(amount), { size: 32 })]);
-    if ((await balanceOf(token, holder)) === amount) {
-      note(`dealt ${amount} of ${token} to ${holder} (balances base slot ${toHex(base)})`);
-      return;
-    }
-    await rpc('anvil_setStorageAt', [token, slot, previous]);
-  }
-  throw new Error(`could not find the balances slot of ${token}`);
-}
-
-/*//////////////////////////////////////////////////////////////
-                      TRANSACTIONS AND DEPLOYMENTS
-//////////////////////////////////////////////////////////////*/
-
-interface Artifact {
-  abi: Abi;
-  bytecode: { object: Hex; linkReferences: Record<string, Record<string, Array<{ start: number; length: number }>>> };
-  metadata?: { settings?: { libraries?: Record<string, string> } };
-}
-
-function artifact(file: string): Artifact {
-  const path = join(ARTIFACTS, file);
-  try {
-    return JSON.parse(readFileSync(path, 'utf8')) as Artifact;
-  } catch (error) {
-    throw new Error(`cannot read ${path} — run \`forge build\` in contracts/ first (${String(error)})`);
-  }
-}
-
-/**
- * Link a creation bytecode the way `forge script` would: deploy every library the artifact's
- * `linkReferences` name, then splice each address in at the byte offsets the artifact gives.
- * Offsets, not a regex, because two libraries have two different placeholders.
- *
- * REFUSES an artifact compiled with a library pinned to an address (`metadata.settings.libraries`).
- * That happened once: a size-measuring build pinned SeaportOrderLib to 0x1111…1111, forge cached
- * it, `linkReferences` then named only ValoremLib, and the deployed vault DELEGATECALLed an
- * empty address on its first `approveListing` — an empty revert with no error data at all.
- */
-async function deployLinked(label: string, by: PrivateKeyAccount, art: Artifact, args: readonly unknown[]): Promise<Address> {
-  const pinned = Object.entries(art.metadata?.settings?.libraries ?? {});
-  if (pinned.length > 0) {
-    throw new Error(
-      `${label} artifact was compiled with libraries pinned to addresses (${pinned.map(([k, v]) => `${k}=${v}`).join(', ')}). ` +
-        'That is a stale or size-measuring build. Run `forge clean && forge build` in contracts/ and try again.',
-    );
-  }
-  let code = art.bytecode.object.slice(2);
-  for (const [file, byName] of Object.entries(art.bytecode.linkReferences)) {
-    for (const [name, sites] of Object.entries(byName)) {
-      const libArtifact = artifact(`${name}.sol/${name}.json`);
-      if (Object.keys(libArtifact.bytecode.linkReferences).length > 0) throw new Error(`${name} itself needs linking; not supported`);
-      const address = await deploy(name, by, libArtifact.abi, libArtifact.bytecode.object, []);
-      const hex = address.slice(2).toLowerCase();
-      for (const site of sites) {
-        assert(site.length === 20, `${file}:${name} link site of ${site.length} bytes`);
-        const at = site.start * 2;
-        assert(code.slice(at, at + 40).startsWith('__$'), `${name} placeholder expected at byte ${site.start}`);
-        code = code.slice(0, at) + hex + code.slice(at + 40);
-      }
-      note(`linked ${name} at ${sites.length} site(s)`);
-    }
-  }
-  assert(!code.includes('__$'), 'unlinked placeholders remain');
-  return deploy(label, by, art.abi, `0x${code}` as Hex, args);
-}
-
-async function sendTx(label: string, by: PrivateKeyAccount, send: () => Promise<Hex>): Promise<{ hash: Hex; block: bigint; receipt: TransactionReceipt }> {
-  const hash = await send();
-  const receipt = await pub.waitForTransactionReceipt({ hash });
-  assert(receipt.status === 'success', `${label} reverted (tx ${hash})`);
-  record.harnessTxs.push({ label, by: by.address, hash, block: receipt.blockNumber.toString(), gasUsed: receipt.gasUsed.toString() });
-  note(`${label}: tx ${hash} (block ${receipt.blockNumber}, gas ${receipt.gasUsed})`);
-  return { hash, block: receipt.blockNumber, receipt };
-}
-
-async function deploy(label: string, by: PrivateKeyAccount, abi: Abi, bytecode: Hex, args: readonly unknown[]): Promise<Address> {
-  const hash = await wallet.deployContract({ account: by, chain: forkChain, abi, bytecode, args: args as never });
-  const receipt = await pub.waitForTransactionReceipt({ hash });
-  assert(receipt.status === 'success' && !!receipt.contractAddress, `${label} deployment reverted (tx ${hash})`);
-  const address = getAddress(receipt.contractAddress);
-  record.harnessTxs.push({ label: `deploy ${label}`, by: by.address, hash, block: receipt.blockNumber.toString(), gasUsed: receipt.gasUsed.toString() });
-  record.addresses[label] = address;
-  note(`${label} at ${address} (tx ${hash})`);
-  return address;
-}
-
-/*//////////////////////////////////////////////////////////////
-                         THE OVERCALL STUB
-//////////////////////////////////////////////////////////////*/
-
-interface StubListing extends Record<string, unknown> {
-  orderHash: string;
-  status: string;
-  optionId: string;
-  offerer: string;
-}
-
-/**
- * The four endpoints overcallApi.ts speaks, with the response shapes recorded in recon R3. The
- * order hash is derived from the posted components the same way Overcall does it (they hash the
- * components server-side); the derivation is injected after the keeper's seaport.ts is imported.
- */
-class OvercallStub {
-  readonly listings = new Map<string, StubListing>();
-  readonly requests: string[] = [];
-  hashOf: ((components: unknown) => string) | null = null;
-  private server: Server | null = null;
-  url = '';
-
-  async start(): Promise<void> {
-    this.server = createServer((req, res) => void this.handle(req, res));
-    await new Promise<void>((done) => this.server?.listen(0, '127.0.0.1', done));
-    const address = this.server.address();
-    if (!address || typeof address === 'string') throw new Error('stub did not bind');
-    this.url = `http://127.0.0.1:${address.port}`;
-  }
-
-  stop(): void {
-    this.server?.close();
-  }
-
-  markFilled(orderHash: string, realisedPremium6: string): void {
-    const listing = this.listings.get(orderHash);
-    if (!listing) throw new Error(`stub has no listing ${orderHash}`);
-    Object.assign(listing, { status: 'filled', remaining: '0', filledNumerator: '1', filledDenominator: '1', realisedPremium6, checkedAt: new Date().toISOString() });
-  }
-
-  private async handle(req: IncomingMessage, res: ServerResponse): Promise<void> {
-    const chunks: Buffer[] = [];
-    for await (const chunk of req) chunks.push(chunk as Buffer);
-    const raw = Buffer.concat(chunks).toString('utf8');
-    const url = new URL(req.url ?? '/', 'http://stub');
-    const method = req.method ?? 'GET';
-    this.requests.push(`${method} ${url.pathname}${url.search}`);
-    record.stubRequests.push(`${method} ${url.pathname}${url.search}`);
-
-    const reply = (status: number, body: unknown): void => {
-      res.writeHead(status, { 'content-type': 'application/json' });
-      res.end(JSON.stringify(body));
-    };
-
-    const match = /^\/api\/orders(?:\/(0x[0-9a-fA-F]{64}))?$/.exec(url.pathname);
-    if (!match) return reply(404, { error: 'not found' });
-    const hash = match[1]?.toLowerCase();
-
-    if (method === 'POST' && !hash) {
-      let body: { chainId?: number; components?: Record<string, unknown>; signature?: string };
-      try {
-        body = JSON.parse(raw) as typeof body;
-      } catch {
-        return reply(400, { error: 'invalid json' });
-      }
-      if (url.searchParams.get('market') !== 'NVDA') return reply(400, { error: 'unknown market' });
-      if (body.chainId !== CHAIN_ID) return reply(400, { error: 'wrong chainId' });
-      if (!body.signature || !/^0x([0-9a-f]{128}|[0-9a-f]{130})$/.test(body.signature)) return reply(400, { error: 'signature must be 64 or 65 bytes' });
-      const c = body.components;
-      if (!c || !Array.isArray(c.offer) || !Array.isArray(c.consideration) || c.orderType !== 1) return reply(400, { error: 'components: bad shape' });
-      if (!this.hashOf) return reply(500, { error: 'stub not wired' });
-      const orderHash = this.hashOf(c).toLowerCase();
-      const existing = this.listings.get(orderHash);
-      if (existing) return reply(200, { listing: existing });
-      const offer = (c.offer as Array<Record<string, string>>)[0] ?? {};
-      const consideration = c.consideration as Array<Record<string, string>>;
-      const total = consideration.reduce((sum, item) => sum + BigInt(item.startAmount ?? '0'), 0n);
-      const quantity = BigInt(offer.startAmount ?? '0');
-      const listing: StubListing = {
-        orderHash,
-        chainId: CHAIN_ID,
-        offerer: String(c.offerer),
-        optionId: String(offer.identifierOrCriteria),
-        quantity: quantity.toString(),
-        remaining: quantity.toString(),
-        unitPrice6: quantity === 0n ? '0' : (total / quantity).toString(),
-        totalPrice6: total.toString(),
-        realisedPremium6: '0',
-        startTime: String(c.startTime),
-        endTime: String(c.endTime),
-        salt: String(c.salt),
-        counter: String(c.counter),
-        status: 'open',
-        filledNumerator: '0',
-        filledDenominator: '0',
-        signature: body.signature,
-        createdAt: new Date().toISOString(),
-        checkedAt: new Date().toISOString(),
-        components: c,
-      };
-      this.listings.set(orderHash, listing);
-      return reply(201, { listing });
-    }
-
-    if (method === 'GET' && !hash) {
-      const status = url.searchParams.get('status');
-      const offerer = url.searchParams.get('offerer')?.toLowerCase();
-      const optionId = url.searchParams.get('optionId');
-      const limit = Number(url.searchParams.get('limit') ?? '50');
-      const listings = [...this.listings.values()]
-        .filter((l) => (status && status !== 'all' ? l.status === status : true))
-        .filter((l) => (offerer ? l.offerer.toLowerCase() === offerer : true))
-        .filter((l) => (optionId ? l.optionId === optionId : true))
-        .slice(0, limit);
-      return reply(200, { listings });
-    }
-
-    if (method === 'GET' && hash) {
-      const listing = this.listings.get(hash);
-      return listing ? reply(200, { listing }) : reply(404, { error: 'listing not found' });
-    }
-
-    if (method === 'DELETE' && hash) {
-      const listing = this.listings.get(hash);
-      if (!listing) return reply(404, { error: 'listing not found' });
-      listing.status = 'cancelled';
-      return reply(200, { ok: true });
-    }
-
-    return reply(405, { error: 'method not allowed' });
-  }
-}
-
-/** Captures what alerts.ts POSTs to ALERT_WEBHOOK. */
-class AlertCapture {
-  readonly received: Array<{ kind: string; severity: string; message: string; data: unknown }> = [];
-  private server: Server | null = null;
-  url = '';
-
-  async start(): Promise<void> {
-    this.server = createServer((req, res) => {
-      const chunks: Buffer[] = [];
-      req.on('data', (chunk: Buffer) => chunks.push(chunk));
-      req.on('end', () => {
-        const payload = JSON.parse(Buffer.concat(chunks).toString('utf8')) as { kind: string; severity: string; message: string; data: unknown };
-        this.received.push(payload);
-        record.alerts.push({ kind: payload.kind, severity: payload.severity, message: payload.message });
-        process.stdout.write(`    ALERT [${payload.severity}] ${payload.kind}: ${payload.message}\n`);
-        res.writeHead(200, { 'content-type': 'application/json' });
-        res.end('{"ok":true}');
-      });
-    });
-    await new Promise<void>((done) => this.server?.listen(0, '127.0.0.1', done));
-    const address = this.server.address();
-    if (!address || typeof address === 'string') throw new Error('alert capture did not bind');
-    this.url = `http://127.0.0.1:${address.port}/alerts`;
-  }
-
-  stop(): void {
-    this.server?.close();
-  }
-
-  kinds(): string[] {
-    return this.received.map((a) => a.kind);
-  }
-}
-
-/*//////////////////////////////////////////////////////////////
-                          ABI FRAGMENTS (harness)
-//////////////////////////////////////////////////////////////*/
-
-const mockRegistryAbi = [
-  {
-    type: 'function',
-    name: 'setCycleWithStrikes',
-    inputs: [
-      { name: 'ids', type: 'uint256[]' },
-      { name: 'strikes', type: 'uint96[]' },
-      { name: 'exerciseAt', type: 'uint40' },
-      { name: 'expireAt', type: 'uint40' },
-    ],
-    outputs: [],
-    stateMutability: 'nonpayable',
-  },
-] as const;
-
-const mockFeedAbi = [
-  { type: 'function', name: 'setAnswer', inputs: [{ name: 'a', type: 'int256' }], outputs: [], stateMutability: 'nonpayable' },
-] as const;
-
-const feedAbi = [
-  {
-    type: 'function',
-    name: 'latestRoundData',
-    inputs: [],
-    outputs: [
-      { name: 'roundId', type: 'uint80' },
-      { name: 'answer', type: 'int256' },
-      { name: 'startedAt', type: 'uint256' },
-      { name: 'updatedAt', type: 'uint256' },
-      { name: 'answeredInRound', type: 'uint80' },
-    ],
-    stateMutability: 'view',
-  },
-] as const;
-
-/** Valorem's option-type factory, absent from abi.ts because the keeper never creates options. */
-const newOptionTypeAbi = [
-  {
-    type: 'function',
-    name: 'newOptionType',
-    inputs: [
-      { name: 'underlyingAsset', type: 'address' },
-      { name: 'underlyingAmount', type: 'uint96' },
-      { name: 'exerciseAsset', type: 'address' },
-      { name: 'exerciseAmount', type: 'uint96' },
-      { name: 'exerciseTimestamp', type: 'uint40' },
-      { name: 'expiryTimestamp', type: 'uint40' },
-    ],
-    outputs: [{ name: 'optionId', type: 'uint256' }],
-    stateMutability: 'nonpayable',
-  },
-] as const;
-
-/**
- * The vault surface the keeper never touches — the redeem queue and the USDG accounting views —
- * absent from abi.ts on purpose. Cycle 3 checks every fragment here against the compiled
- * artifact before using it, so this cannot drift from Vault.sol unnoticed.
- */
-const vaultQueueAbi = [
-  { type: 'function', name: 'queueRedeem', inputs: [{ name: 'shares', type: 'uint256' }], outputs: [{ name: 'queuedEpoch', type: 'uint256' }], stateMutability: 'nonpayable' },
-  {
-    type: 'function',
-    name: 'completeRedeem',
-    inputs: [{ name: 'receiver', type: 'address' }],
-    outputs: [{ name: 'assets', type: 'uint256' }, { name: 'usdgOut', type: 'uint256' }],
-    stateMutability: 'nonpayable',
-  },
-  {
-    type: 'function',
-    name: 'previewCompleteRedeem',
-    inputs: [{ name: 'owner', type: 'address' }],
-    outputs: [{ name: 'assets', type: 'uint256' }, { name: 'usdgOut', type: 'uint256' }],
-    stateMutability: 'view',
-  },
-  {
-    type: 'function',
-    name: 'epochs',
-    inputs: [{ name: 'id', type: 'uint256' }],
-    outputs: [{ name: 'sharesRemaining', type: 'uint256' }, { name: 'assetsRemaining', type: 'uint256' }, { name: 'usdgRemaining', type: 'uint256' }],
-    stateMutability: 'view',
-  },
-  { type: 'function', name: 'queuedSharesOf', inputs: [{ name: 'a', type: 'address' }], outputs: [{ type: 'uint256' }], stateMutability: 'view' },
-  { type: 'function', name: 'queuedEpochOf', inputs: [{ name: 'a', type: 'address' }], outputs: [{ type: 'uint256' }], stateMutability: 'view' },
-  { type: 'function', name: 'owedAssets', inputs: [{ name: 'a', type: 'address' }], outputs: [{ type: 'uint256' }], stateMutability: 'view' },
-  { type: 'function', name: 'owedQueueUsdg', inputs: [{ name: 'a', type: 'address' }], outputs: [{ type: 'uint256' }], stateMutability: 'view' },
-  { type: 'function', name: 'pendingFeeUsdg', inputs: [], outputs: [{ type: 'uint256' }], stateMutability: 'view' },
-  { type: 'function', name: 'usdgDust', inputs: [], outputs: [{ type: 'uint256' }], stateMutability: 'view' },
-  { type: 'function', name: 'usdgUnallocated', inputs: [], outputs: [{ type: 'uint256' }], stateMutability: 'view' },
-  { type: 'function', name: 'usdgOwed', inputs: [], outputs: [{ type: 'uint256' }], stateMutability: 'view' },
-  { type: 'function', name: 'usdgAccounted', inputs: [], outputs: [{ type: 'uint256' }], stateMutability: 'view' },
-  { type: 'function', name: 'totalUsdgClaimed', inputs: [], outputs: [{ type: 'uint256' }], stateMutability: 'view' },
-  { type: 'function', name: 'previewRedeem', inputs: [{ name: 'shares', type: 'uint256' }], outputs: [{ type: 'uint256' }], stateMutability: 'view' },
-  { type: 'function', name: 'maxDeposit', inputs: [{ name: 'a', type: 'address' }], outputs: [{ type: 'uint256' }], stateMutability: 'view' },
-  {
-    type: 'event',
-    name: 'QueueRedeem',
-    inputs: [
-      { name: 'owner', type: 'address', indexed: true },
-      { name: 'shares', type: 'uint256', indexed: false },
-      { name: 'epochId', type: 'uint256', indexed: false },
-    ],
-  },
-  {
-    type: 'event',
-    name: 'CompleteRedeem',
-    inputs: [
-      { name: 'owner', type: 'address', indexed: true },
-      { name: 'receiver', type: 'address', indexed: true },
-      { name: 'shares', type: 'uint256', indexed: false },
-      { name: 'assets', type: 'uint256', indexed: false },
-      { name: 'usdgOut', type: 'uint256', indexed: false },
-    ],
-  },
-  {
-    type: 'event',
-    name: 'QueueEntrySettled',
-    inputs: [
-      { name: 'owner', type: 'address', indexed: true },
-      { name: 'epochId', type: 'uint256', indexed: true },
-      { name: 'shares', type: 'uint256', indexed: false },
-      { name: 'assets', type: 'uint256', indexed: false },
-      { name: 'usdgOut', type: 'uint256', indexed: false },
-    ],
-  },
-  {
-    type: 'event',
-    name: 'QueueSettled',
-    inputs: [
-      { name: 'epochId', type: 'uint256', indexed: true },
-      { name: 'shares', type: 'uint256', indexed: false },
-      { name: 'assets', type: 'uint256', indexed: false },
-      { name: 'usdgOut', type: 'uint256', indexed: false },
-    ],
-  },
-  {
-    type: 'event',
-    name: 'ClaimUsdg',
-    inputs: [
-      { name: 'account', type: 'address', indexed: true },
-      { name: 'to', type: 'address', indexed: true },
-      { name: 'amount', type: 'uint256', indexed: false },
-    ],
-  },
-  {
-    type: 'event',
-    name: 'FeeSwept',
-    inputs: [
-      { name: 'feeRecipient', type: 'address', indexed: true },
-      { name: 'amount', type: 'uint256', indexed: false },
-    ],
-  },
-  {
-    type: 'event',
-    name: 'UsdgDistributed',
-    inputs: [
-      { name: 'amount', type: 'uint256', indexed: false },
-      { name: 'accUsdgPerShare', type: 'uint256', indexed: false },
-      { name: 'totalSupply', type: 'uint256', indexed: false },
-    ],
-  },
-  /** AdapterValorem's ClaimRedeemed (the balance deltas), not the Clear's event of the same name. */
-  {
-    type: 'event',
-    name: 'ClaimRedeemed',
-    inputs: [
-      { name: 'claimKey', type: 'uint256', indexed: true },
-      { name: 'underlyingReturned', type: 'uint256', indexed: false },
-      { name: 'exerciseReceived', type: 'uint256', indexed: false },
-    ],
-  },
-  {
-    type: 'event',
-    name: 'Harvest',
-    inputs: [
-      { name: 'cycleNumber', type: 'uint32', indexed: true },
-      { name: 'grossUsdg', type: 'uint256', indexed: false },
-      { name: 'feeUsdg', type: 'uint256', indexed: false },
-      { name: 'netUsdg', type: 'uint256', indexed: false },
-    ],
-  },
-  {
-    type: 'event',
-    name: 'RollClose',
-    inputs: [
-      { name: 'cycleNumber', type: 'uint32', indexed: true },
-      { name: 'assetsReturned', type: 'uint256', indexed: false },
-      { name: 'usdgFromAssignment', type: 'uint256', indexed: false },
-      { name: 'contractsAssignedCount', type: 'uint256', indexed: false },
-    ],
-  },
-  { type: 'error', name: 'EpochNotSettled', inputs: [{ name: 'epochId', type: 'uint256' }, { name: 'currentEpoch', type: 'uint256' }] },
-  { type: 'error', name: 'NothingQueued', inputs: [] },
-  { type: 'error', name: 'DepositsClosedForCycle', inputs: [{ name: 'exerciseTs', type: 'uint40' }] },
-] as const;
 
 /*//////////////////////////////////////////////////////////////
                                 MAIN
@@ -963,6 +331,9 @@ async function main(): Promise<void> {
   process.env.OVERCALL_MAX_ATTEMPTS = '2';
   process.env.ALERT_WEBHOOK = alerts.url;
   delete process.env.KEEPER_UNIT_PRICE_USDG6;
+  // Margin 0 is the identity (policy.ts withPremiumMargin), so every "priced at the policy floor"
+  // assertion below holds only if a shell's PREMIUM_MARGIN_BPS cannot leak in.
+  delete process.env.PREMIUM_MARGIN_BPS;
   delete process.env.OVERCALL_API_KEY;
 
   // The production modules. config.ts validates the environment above the moment this runs.
@@ -1039,46 +410,8 @@ async function main(): Promise<void> {
     return { fillTx: fill.hash };
   };
 
-  /**
-   * Five fresh option types on the REAL Valorem Clear, installed on the mock registry as cycle
-   * `n`. Fresh timestamps mean fresh option ids even when the strikes repeat (Valorem hashes the
-   * whole tuple; identical parameters would revert OptionsTypeExists). Shared by cycles 2 and 3.
-   */
-  const createFreshSeries = async (n: number, rec: Record<string, unknown>): Promise<{ ids: bigint[]; strikes: bigint[]; exercise: bigint; expiry: bigint }> => {
-    await sendTx('MockFeed.setAnswer (refresh updatedAt after the warp)', ADMIN, () =>
-      wallet.writeContract({ account: ADMIN, chain: forkChain, address: feed, abi: mockFeedAbi, functionName: 'setAnswer', args: [realAnswer] }),
-    );
-    const spot = await pub.readContract({ address: vault, abi: vaultAbi, functionName: 'spotUsdg' });
-    const now = await latestTimestamp();
-    // The real Clear needs only a minute between now, exercise and expiry; the registry's
-    // MIN_EXERCISE_WINDOW is a day, and the vault caps the tenor at 21 days. An hour before the
-    // write deadline is plenty for a rehearsal.
-    const exercise = now + 3_600n;
-    const expiry = exercise + 86_400n;
-    const strikes = [1035n, 1055n, 1075n, 1095n, 1115n].map((bps) => ((spot * bps) / 1000n / 1_000_000n) * 1_000_000n);
-    const ids: bigint[] = [];
-    for (const strike of strikes) {
-      const { result, request } = await pub.simulateContract({
-        account: ADMIN,
-        address: CLEAR,
-        abi: newOptionTypeAbi,
-        functionName: 'newOptionType',
-        args: [NVDA, LOT, USDG, strike, Number(exercise), Number(expiry)],
-      });
-      await sendTx(`clear.newOptionType(strike ${strike / 1_000_000n})`, ADMIN, () => wallet.writeContract(request));
-      ids.push(result);
-    }
-    await sendTx(`MockRegistry.setCycleWithStrikes(cycle ${n})`, ADMIN, () =>
-      wallet.writeContract({ account: ADMIN, chain: forkChain, address: registry, abi: mockRegistryAbi, functionName: 'setCycleWithStrikes', args: [ids, strikes, Number(exercise), Number(expiry)] }),
-    );
-    note(`spot ${spot} USDG6; strikes ${strikes.map((s) => (s / 1_000_000n).toString()).join('/')}; exercise ${exercise}, expiry ${expiry}`);
-    rec.spotUsdg6 = spot.toString();
-    rec.optionIds = ids.map(String);
-    rec.strikes = strikes.map(String);
-    rec.exerciseTimestamp = Number(exercise);
-    rec.expiryTimestamp = Number(expiry);
-    return { ids, strikes, exercise, expiry };
-  };
+  /** Five fresh option types on the REAL Valorem Clear (dryrun-common.ts). Shared by cycles 2 and 3. */
+  const freshSeries = (n: number, rec: Record<string, unknown>) => createFreshSeries({ vault, feed, registry, answer: realAnswer }, n, rec);
 
   const dumpDb = (): Record<string, unknown> => ({
     counts: store.counts(),
@@ -1123,7 +456,7 @@ async function main(): Promise<void> {
 
     /* ---------- 6. deposit ---------- */
 
-    await step('a depositor puts 25 NVDA in', async () => {
+    await step(`a depositor puts ${DEPOSIT} NVDA wei in`, async () => {
       await deal(NVDA, DEPOSITOR.address, DEPOSIT);
       await sendTx('NVDA.approve(vault)', DEPOSITOR, () =>
         wallet.writeContract({ account: DEPOSITOR, chain: forkChain, address: NVDA, abi: erc20Abi, functionName: 'approve', args: [vault, DEPOSIT] }),
@@ -1245,21 +578,37 @@ async function main(): Promise<void> {
       assertEq(cycle.fee_usdg6, fee1.toString(), 'protocol fee = floor(premium x protocolFeeBps / 10000)');
       assertEq(cycle.net_usdg6, (toVault - fee1).toString(), 'net to depositors = gross - fee');
       assertEq(cycle.contracts_assigned, 0, 'out of the money: nothing assigned');
+      // K-21 columns, from the same RollClose log: every written lot came back, no strike proceeds.
+      assertEq(rollClose1.args.assetsReturned, BigInt(listed.contracts) * LOT, 'RollClose.assetsReturned = every written lot');
+      assertEq(cycle.assets_returned, rollClose1.args.assetsReturned.toString(), 'assets_returned = RollClose.assetsReturned');
+      assertEq(cycle.usdg_from_assignment, '0', 'usdg_from_assignment = 0 on an unassigned week (known zero, not NULL)');
       assertEq(alerts.kinds().join(','), 'roll_open,roll_close', 'alerts');
       const last = alerts.received[alerts.received.length - 1];
-      assert(last !== undefined && /harvested/.test(last.message) && !/unfilled/.test(last.message), 'roll_close alert reports a filled week');
+      assert(last !== undefined, 'roll_close alert');
+      const net = BigInt(cycle.net_usdg6 ?? '0');
+      assertEq(last.message, `cycle 1 closed: ${roll.formatUsdg(toVault)} USDG harvested, ${roll.formatUsdg(net)} to depositors.`, 'the unassigned filled-week wording, unchanged by K-21');
 
       const idle = await pub.readContract({ address: vault, abi: vaultAbi, functionName: 'idleAssets' });
       assertEq(idle, DEPOSIT, 'all collateral came back from Valorem');
       const claimable = await pub.readContract({ address: vault, abi: vaultAbi, functionName: 'claimableUsdg', args: [DEPOSITOR.address] });
-      const net = BigInt(cycle.net_usdg6 ?? '0');
-      assert(claimable <= net && claimable + 1_000n >= net, `claimable ${claimable} within dust of net ${net}`);
+      // One holder: claimable = floor(D x floor(net x 1e27 / D) / 1e27) = what the index credited,
+      // and the rest of net is usdgDust, carried into the next distribution (0 when D divides 1e27).
+      const dust1 = await pub.readContract({ address: vault, abi: vaultQueueAbi, functionName: 'usdgDust' });
+      assertEq(claimable, net - dust1, 'claimable = net - usdgDust: the single holder is credited everything the index represents');
       await sendTx('vault.claimUsdg (depositor)', DEPOSITOR, () =>
         wallet.writeContract({ account: DEPOSITOR, chain: forkChain, address: vault, abi: vaultAbi, functionName: 'claimUsdg' }),
       );
       assertEq(await balanceOf(USDG, DEPOSITOR.address), claimable, 'the depositor received exactly the claimable USDG');
+      const [owed1, accounted1] = await Promise.all([
+        pub.readContract({ address: vault, abi: vaultQueueAbi, functionName: 'usdgOwed' }),
+        pub.readContract({ address: vault, abi: vaultQueueAbi, functionName: 'usdgAccounted' }),
+      ]);
+      const carried1 = await balanceOf(USDG, vault);
+      assertEq(owed1, 0n, 'usdgOwed 0: a single holder claims exactly what was credited');
+      assertEq(carried1, dust1 + owed1, 'what stays in the vault after cycle 1 = usdgDust + usdgOwed');
+      assertEq(accounted1, carried1, 'and it is inside usdgAccounted, so the next harvest cannot re-count it');
       record.cycle1.rollCloseTx = cycle.roll_close_tx;
-      record.cycle1.harvest = { gross: cycle.gross_usdg6, fee: cycle.fee_usdg6, net: cycle.net_usdg6, depositorReceived: claimable.toString() };
+      record.cycle1.harvest = { gross: cycle.gross_usdg6, fee: cycle.fee_usdg6, net: cycle.net_usdg6, depositorReceived: claimable.toString(), usdgDust: dust1.toString(), usdgLeftInVault: carried1.toString() };
       note(`harvest gross ${roll.formatUsdg(BigInt(cycle.gross_usdg6 ?? '0'))} USDG, fee ${roll.formatUsdg(BigInt(cycle.fee_usdg6 ?? '0'))}, net ${roll.formatUsdg(net)}; depositor claimed ${roll.formatUsdg(claimable)}`);
 
       const h = await health('/health');
@@ -1276,7 +625,7 @@ async function main(): Promise<void> {
       record.cycle2.skipped = true;
       record.cycle3.skipped = true;
     } else {
-      const series2 = await step('cycle 2: create a fresh five-rung series on the REAL Valorem Clear', () => createFreshSeries(2, record.cycle2));
+      const series2 = await step('cycle 2: create a fresh five-rung series on the REAL Valorem Clear', () => freshSeries(2, record.cycle2));
 
       await step('cycle 2: the vault is rolled open BEHIND the keeper (same key, no database row)', async () => {
         // The plan is computed with the production picker so the write is exactly what the
@@ -1359,9 +708,16 @@ async function main(): Promise<void> {
         assertEq(cycle.gross_usdg6, '0', 'unfilled: 0');
         assertEq(cycle.fee_usdg6, '0', 'unfilled: 0 fee');
         assertEq(cycle.net_usdg6, '0', 'unfilled: 0 net');
+        const closeReceipt2 = await pub.getTransactionReceipt({ hash: cycle.roll_close_tx as Hex });
+        const rollClose2 = only(parseEventLogs({ abi: vaultAbi, eventName: 'RollClose', logs: closeReceipt2.logs }), vault, 'RollClose');
+        assertEq(rollClose2.args.assetsReturned, BigInt(record.cycle2.contracts as string) * LOT, 'RollClose.assetsReturned = every written lot');
+        assertEq(rollClose2.args.usdgFromAssignment, 0n, 'RollClose.usdgFromAssignment = 0');
+        assertEq(cycle.assets_returned, rollClose2.args.assetsReturned.toString(), 'assets_returned = RollClose.assetsReturned');
+        assertEq(cycle.usdg_from_assignment, '0', 'usdg_from_assignment = 0 on an unfilled week (known zero, not NULL)');
         assertEq(alerts.kinds().join(','), 'roll_open,roll_close,roll_close', 'alerts');
         const last = alerts.received[alerts.received.length - 1];
-        assert(last !== undefined && /unfilled: 0 USDG/.test(last.message), 'the roll_close alert says unfilled, 0');
+        assert(last !== undefined, 'roll_close alert');
+        assertEq(last.message, 'cycle 2 closed unfilled: 0 USDG harvested.', 'the roll_close alert says unfilled, 0');
         assertEq(await pub.readContract({ address: vault, abi: vaultAbi, functionName: 'idleAssets' }), DEPOSIT, 'collateral back again');
         record.cycle2.rollCloseTx = cycle.roll_close_tx;
         record.cycle2.harvest = { gross: cycle.gross_usdg6, fee: cycle.fee_usdg6, net: cycle.net_usdg6 };
@@ -1379,6 +735,9 @@ async function main(): Promise<void> {
         const QUEUED = 10n * LOT;
         /** Distributor.ACC_PRECISION: the USDG-per-share index is scaled by 1e27. */
         const ACC_PRECISION = 10n ** 27n;
+        /** Vault USDG and usdgDust carried into cycle 3 from cycle 1, read before cycle 3's write. */
+        let carriedUsdg = 0n;
+        let carriedDust = 0n;
         const V = { address: vault, abi: vaultAbi } as const;
         const Q = { address: vault, abi: vaultQueueAbi } as const;
         const strikeOfCycle3 = (): bigint => {
@@ -1398,7 +757,7 @@ async function main(): Promise<void> {
               `Vault artifact has no ${fragment.type} named ${fragment.name}`,
             );
           }
-          const series = await createFreshSeries(3, record.cycle3);
+          const series = await freshSeries(3, record.cycle3);
           const cycle = await pub.readContract({ address: registry, abi: registryAbi, functionName: 'cycle' });
           assertEq(cycle.number, 3, 'mock registry cycle number');
           assertEq(await pub.readContract({ address: registry, abi: registryAbi, functionName: 'isWritingOpen' }), true, 'writing open');
@@ -1408,6 +767,14 @@ async function main(): Promise<void> {
         const listed3 = await step('cycle 3, tick #10 (Idle, writing open): the KEEPER writes and lists', async () => {
           const idleBefore = await pub.readContract({ ...V, functionName: 'idleAssets' });
           assertEq(idleBefore, DEPOSIT, 'idle collateral entering cycle 3: both earlier cycles expired out of the money');
+          // What cycle 1 left behind, measured rather than assumed to be 0: its index dust (and any
+          // per-account floor loss) is still in the vault, and the Distributor folds usdgDust into
+          // the next pot. 0 and 0 at the default 25e18, whose supply divides 1e27.
+          [carriedUsdg, carriedDust] = await Promise.all([balanceOf(USDG, vault), pub.readContract({ ...Q, functionName: 'usdgDust' })]);
+          assertEq(carriedUsdg, BigInt((record.cycle1.harvest as { usdgLeftInVault: string }).usdgLeftInVault), 'nothing moved the vault USDG since cycle 1 (cycle 2 earned 0)');
+          assert(carriedDust <= carriedUsdg, 'carried usdgDust is inside the carried balance');
+          record.cycle3.carriedIn = { usdg: carriedUsdg.toString(), usdgDust: carriedDust.toString() };
+          note(`carried into cycle 3: ${carriedUsdg} USDG6 in the vault, of which usdgDust ${carriedDust}`);
           await roll.tick();
           assertEq(await pub.readContract({ ...V, functionName: 'phase' }), roll.Phase.Listed, 'vault phase after the tick');
           assertEq(await pub.readContract({ ...V, functionName: 'cycleNumber' }), 3, 'vault cycle number');
@@ -1585,7 +952,7 @@ async function main(): Promise<void> {
           const clearUsdgBefore = await balanceOf(USDG, CLEAR);
           const clearNvdaBefore = await balanceOf(NVDA, CLEAR);
           const vaultUsdgBefore = await balanceOf(USDG, vault);
-          assertEq(vaultUsdgBefore, BigInt(listed3.to_vault6), 'the vault holds exactly this premium leg: cycle 1 was claimed out, cycle 2 earned nothing');
+          assertEq(vaultUsdgBefore, carriedUsdg + BigInt(listed3.to_vault6), "the vault holds this premium leg plus exactly what cycle 1 left (cycle 1's claim, cycle 2 earned nothing)");
           assertEq(await pub.readContract({ address: CLEAR, abi: clearAbi, functionName: 'balanceOf', args: [BUYER.address, optionId] }), written, 'the buyer holds all 23 option tokens');
           assertEq(await pub.readContract({ ...V, functionName: 'totalAssets' }), DEPOSIT, 'NAV before the exercise');
           assertEq(await pub.readContract({ ...V, functionName: 'contractsAssigned' }), 0n, 'nothing assigned yet');
@@ -1656,6 +1023,12 @@ async function main(): Promise<void> {
           ]);
           assertEq(supplyBefore, DEPOSIT, 'the escrowed shares still count in the supply');
           assertEq(vaultNvdaBefore, DEPOSIT - written * LOT, 'the vault holds what it did not write');
+          const [dustBefore, unallocatedBefore] = await Promise.all([
+            pub.readContract({ ...Q, functionName: 'usdgDust' }),
+            pub.readContract({ ...Q, functionName: 'usdgUnallocated' }),
+          ]);
+          assertEq(dustBefore, carriedDust, 'usdgDust entering the close is what cycle 1 left');
+          assertEq(unallocatedBefore, 0n, 'nothing unallocated: the supply was never zero');
           assertEq(await pub.readContract({ ...V, functionName: 'contractsAssigned' }), EXERCISED, "the harness's own read of vault.contractsAssigned(): 9 before the close");
           assertEq(await pub.readContract({ ...V, functionName: 'claimKey' }), exercised3.claimKey, 'claim still open');
 
@@ -1767,17 +1140,32 @@ async function main(): Promise<void> {
           assertEq(cycle.fee_usdg6, fee.toString(), 'fee_usdg6');
           assertEq(cycle.net_usdg6, net.toString(), 'net_usdg6');
           assertEq(cycle.contracts_assigned, Number(EXERCISED), 'contracts_assigned = 9, from the RollClose event');
+          // K-21: the split rides in the row, straight from this receipt's RollClose.
+          assertEq(cycle.assets_returned, assetsReturned.toString(), 'assets_returned = RollClose.assetsReturned = 14e18');
+          assertEq(cycle.usdg_from_assignment, usdgFromAssignment.toString(), 'usdg_from_assignment = RollClose.usdgFromAssignment = 9 x strike');
           assertEq(alerts.kinds().join(','), 'roll_open,roll_close,roll_close,roll_open,roll_close', 'alerts');
           const last = alerts.received[alerts.received.length - 1];
           assert(last !== undefined, 'alert');
-          assertEq(last.message, `cycle 3 closed: ${roll.formatUsdg(gross)} USDG harvested, ${roll.formatUsdg(net)} to depositors.`, "the roll_close message, in the keeper's own format");
+          // roll.ts rollCloseMessage, assigned branch: premium = gross - strike proceeds, named apart.
+          assertEq(
+            last.message,
+            `cycle 3 closed: premium ${roll.formatUsdg(gross - usdgFromAssignment)} USDG (fee ${roll.formatUsdg(fee)}), strike proceeds ${roll.formatUsdg(usdgFromAssignment)} USDG from ${EXERCISED} contracts assigned; ${roll.formatUsdg(net)} USDG to depositors.`,
+            "the roll_close message, in the keeper's own K-21 format",
+          );
+          assertEq(gross - usdgFromAssignment, toVault, 'the premium the message names is exactly the premium leg that filled');
           const data = last.data as {
             cycleNumber?: number;
             contractsAssigned?: number;
             contractsAssignedSource?: string;
             contractsAssignedFromClaim?: number | null;
+            premiumUsdg?: string | null;
+            strikeProceedsUsdg?: string | null;
+            assetsReturned?: string | null;
           };
           assertEq(data.cycleNumber ?? null, 3, 'roll_close alert cycle');
+          assertEq(data.premiumUsdg ?? null, roll.formatUsdg(toVault), 'roll_close alert data.premiumUsdg = the premium leg');
+          assertEq(data.strikeProceedsUsdg ?? null, roll.formatUsdg(usdgFromAssignment), 'roll_close alert data.strikeProceedsUsdg = RollClose.usdgFromAssignment');
+          assertEq(data.assetsReturned ?? null, assetsReturned.toString(), 'roll_close alert data.assetsReturned = RollClose.assetsReturned (wei)');
           assertEq(data.contractsAssigned ?? null, Number(EXERCISED), 'roll_close alert carries contractsAssigned = 9');
           assertEq(data.contractsAssignedSource ?? null, 'RollClose', 'roll_close alert: the count came from the RollClose event');
           // This binds the value doRollClose's OWN contractsAssignedAt call returned inside the
@@ -1788,7 +1176,7 @@ async function main(): Promise<void> {
             Number(EXERCISED),
             "roll_close alert: the keeper's own pre-close Valorem read inside the tick was 9",
           );
-          note('the roll_close MESSAGE has the same shape as an unassigned filled week; the assignment count travels only in data.contractsAssigned (with contractsAssignedSource and contractsAssignedFromClaim beside it)');
+          note(`the roll_close MESSAGE names premium ${roll.formatUsdg(toVault)} and strike proceeds ${roll.formatUsdg(usdgFromAssignment)} apart (K-21); data carries premiumUsdg, strikeProceedsUsdg, assetsReturned and contractsAssigned (with contractsAssignedSource and contractsAssignedFromClaim beside it)`);
 
           /* ---- fee, distribution, queue settlement ---- */
           const swept = only(parseEventLogs({ abi: vaultQueueAbi, eventName: 'FeeSwept', logs: receipt.logs }), vault, 'FeeSwept');
@@ -1799,13 +1187,16 @@ async function main(): Promise<void> {
 
           const accAfter = await pub.readContract({ ...V, functionName: 'accUsdgPerShare' });
           const indexDelta = accAfter - accBefore;
-          assertEq(indexDelta, (net * ACC_PRECISION) / supplyBefore, 'index delta = floor(net x 1e27 / totalSupply), escrow included in the supply');
+          // Distributor._distributeUsdg: pot = net + carried usdgDust + usdgUnallocated (both read
+          // before the tick; 0 at the default deposit), and the index moves by floor(pot x 1e27 / supply).
+          const pot = net + dustBefore + unallocatedBefore;
+          assertEq(indexDelta, (pot * ACC_PRECISION) / supplyBefore, 'index delta = floor((net + carried usdgDust) x 1e27 / totalSupply), escrow included in the supply');
           const distributed = only(parseEventLogs({ abi: vaultQueueAbi, eventName: 'UsdgDistributed', logs: receipt.logs }), vault, 'UsdgDistributed');
           assertEq(distributed.args.totalSupply, supplyBefore, 'UsdgDistributed.totalSupply: the escrowed shares were still in the supply');
           assertEq(distributed.args.accUsdgPerShare, accAfter, 'UsdgDistributed.accUsdgPerShare');
           assertEq(distributed.args.amount, (indexDelta * supplyBefore) / ACC_PRECISION, 'UsdgDistributed.amount = what the index can represent');
           const dust = await pub.readContract({ ...Q, functionName: 'usdgDust' });
-          assertEq(dust, net - distributed.args.amount, 'usdgDust = net - credited');
+          assertEq(dust, pot - distributed.args.amount, 'usdgDust = (net + carried dust) - credited');
           assertEq((await pub.readContract({ ...V, functionName: 'totalUsdgDistributed' })) - distributedBefore, distributed.args.amount, 'totalUsdgDistributed grew by the credited amount');
 
           const settled = only(parseEventLogs({ abi: vaultQueueAbi, eventName: 'QueueSettled', logs: receipt.logs }), vault, 'QueueSettled');
@@ -1870,6 +1261,18 @@ async function main(): Promise<void> {
           assertEq(servedCycle.cycle_number as number, 3, '/cycles[0] is cycle 3');
           assertEq(servedCycle.contracts_assigned as number, Number(EXERCISED), '/cycles shows contracts_assigned 9');
           assertEq(String(servedCycle.gross_usdg6), gross.toString(), '/cycles shows the gross');
+          assertEq(servedCycle.assets_returned as string, assetsReturned.toString(), '/cycles assets_returned = 14e18');
+          assertEq(servedCycle.usdg_from_assignment as string, usdgFromAssignment.toString(), '/cycles usdg_from_assignment = 9 x strike');
+          assertEq(servedCycle.premium_gross_usdg6 as string, toVault.toString(), '/cycles premium_gross_usdg6 = the premium leg (gross - strike proceeds)');
+          assertEq(servedCycle.strike_proceeds_usdg6 as string, usdgFromAssignment.toString(), '/cycles strike_proceeds_usdg6 = RollClose.usdgFromAssignment');
+          for (const earlier of [1, 2]) {
+            const served = cycles.find((c) => c.cycle_number === earlier);
+            assert(served !== undefined, `/cycles serves cycle ${earlier}`);
+            assertEq(served.usdg_from_assignment as string, '0', `/cycles cycle ${earlier} usdg_from_assignment '0'`);
+            assertEq(served.strike_proceeds_usdg6 as string, '0', `/cycles cycle ${earlier} strike_proceeds_usdg6 '0'`);
+            assertEq(served.premium_gross_usdg6 as string, String(served.gross_usdg6), `/cycles cycle ${earlier} premium = gross`);
+            assertEq(store.getCycle(earlier)?.usdg_from_assignment ?? null, '0', `cycle ${earlier} row usdg_from_assignment '0'`);
+          }
           record.health.afterCycle3 = h.body;
 
           record.cycle3.rollCloseTx = cycle.roll_close_tx;
@@ -1957,7 +1360,9 @@ async function main(): Promise<void> {
             pub.readContract({ ...Q, functionName: 'usdgOwed' }),
             pub.readContract({ ...Q, functionName: 'usdgAccounted' }),
           ]);
-          assertEq(closed3.escrowUsdg + claimable + closed3.fee + dust + owed, closed3.gross, 'gross = escrow + claim + fee + dust + owed');
+          // Carried-in USDG (cycle 1's dust; 0 at the default deposit) is part of the same ledger:
+          // the pot folded it in, so it leaves through the same escrow/claim/dust/owed split.
+          assertEq(closed3.escrowUsdg + claimable + closed3.fee + dust + owed, closed3.gross + carriedUsdg, 'gross + carried-in = escrow + claim + fee + dust + owed');
           assertEq(remainder, dust + owed, 'what stays in the vault is exactly the index dust plus the per-account floor loss');
           assertEq(accounted, remainder, 'and it sits inside usdgAccounted, so it can never be re-harvested as new premium');
           assertEq(unallocated, 0n, 'nothing was received while the supply was zero');
@@ -2026,7 +1431,7 @@ async function main(): Promise<void> {
     writeReport();
     process.stdout.write(`\nDRY RUN PASSED in ${(record.wallClockMs / 1000).toFixed(1)}s. Report: ${join(OUT, 'report.md')}\n`);
   } catch (error) {
-    record.stoppedAt = currentStep;
+    record.stoppedAt = currentStep();
     record.error = error instanceof Error ? error.message : String(error);
     record.wallClockMs = Date.now() - startedMs;
     try {
@@ -2097,7 +1502,7 @@ main()
     process.exit(0);
   })
   .catch((error: unknown) => {
-    process.stderr.write(`\nDRY RUN FAILED at "${currentStep}": ${error instanceof Error ? error.message : String(error)}\n`);
+    process.stderr.write(`\nDRY RUN FAILED at "${currentStep()}": ${error instanceof Error ? error.message : String(error)}\n`);
     process.stderr.write(`Partial report: ${join(OUT, 'report.md')}\n`);
     process.exit(1);
   });

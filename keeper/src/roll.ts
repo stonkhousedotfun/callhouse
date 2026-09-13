@@ -1488,6 +1488,9 @@ async function maybeRelist(snap: ChainSnapshot): Promise<void> {
   const cycleNumber = snap.vaultCycleNumber;
   const row = store.getCycle(cycleNumber);
 
+  // Before anything else, and whether or not a relist follows: nothing this cycle is authorised.
+  await retireUnauthorisedListings(snap);
+
   if (snap.optionInventory === 0n) {
     log.roll.debug({ cycleNumber }, 'nothing left to list');
     return;
@@ -1528,6 +1531,52 @@ async function maybeRelist(snap: ChainSnapshot): Promise<void> {
   // week's allowance and left saleable inventory sitting unlisted until Friday.
   if (listed && !isFirstListing) {
     store.updateCycle(cycleNumber, { relists_used: used + 1 });
+  }
+}
+
+/** Row statuses that still offer an order: /orders serves them (openListings) until endTime. */
+const OFFERED_STATUSES: ReadonlySet<ListingStatus> = new Set(['approved', 'posted', 'visible', 'post_failed', 'partial']);
+
+/**
+ * Retire every row of this cycle that still offers an order, when the vault authorises none.
+ *
+ * Called with the vault Listed and `listingHash` zero. The vault authorises one order at a time
+ * and clears `listingHash` only in `cancelListing` (which sets Seaport's isCancelled) and
+ * `invalidateAllListings` (which bumps the Seaport counter and sets nothing on the order), so
+ * every earlier listing of the cycle is dead. When the guardian — or anyone holding the keeper key
+ * outside this process — does either, no other path notices: pollLiveListing only reads the
+ * vault's live hash, refreshListings runs only at boot, lockBook skips `partial` rows, and a
+ * counter bump never sets isCancelled. The dead row then stays `visible`/`partial` and GET /orders
+ * keeps serving it beside the relist until endTime, so the fallback buy page offers an order
+ * Seaport rejects (dryrun-extended.ts, cycle 1, found it on the fork).
+ *
+ * A row Seaport reports fully filled becomes `filled` (the fill landed before the cancel);
+ * anything else becomes `cancelled` and the book is told, best-effort. A failed status read
+ * leaves the row for the next tick.
+ */
+async function retireUnauthorisedListings(snap: ChainSnapshot): Promise<void> {
+  if (snap.listingHash !== ZERO_HASH) return;
+  for (const listing of store.listingsForCycle(snap.vaultCycleNumber)) {
+    if (!OFFERED_STATUSES.has(listing.status)) continue;
+    let status: SeaportOrderStatus;
+    try {
+      status = await readOrderStatus(listing.order_hash as Hex);
+    } catch (error) {
+      log.roll.warn({ orderHash: listing.order_hash, err: describeError(error) }, 'could not read a dead listing; will retry');
+      continue;
+    }
+    const next: ListingStatus = status.isFullyFilled ? 'filled' : 'cancelled';
+    store.updateListing(listing.order_hash, {
+      status: next,
+      seaport_total_filled: status.totalFilled.toString(),
+      seaport_total_size: status.totalSize.toString(),
+      seaport_cancelled: status.isCancelled ? 1 : 0,
+    });
+    if (next === 'cancelled') await recordCancellation(listing.order_hash);
+    log.roll.warn(
+      { orderHash: listing.order_hash, was: listing.status, now: next, seaportCancelled: status.isCancelled },
+      'the vault no longer authorises this listing; retired it',
+    );
   }
 }
 
