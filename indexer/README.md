@@ -61,7 +61,9 @@ instances from the indexer.
 
 Ponder also requires a **database schema** (a Postgres namespace) so that two deployments can
 share one database without colliding: `DATABASE_SCHEMA=callhouse` or `--schema callhouse`.
-A fresh deploy to a new schema backfills from scratch; redeploying to the same schema resumes.
+A fresh deploy to a new schema backfills from scratch (from Ponder's RPC cache when it is warm). Reusing a
+schema only resumes when neither the code nor the config changed; otherwise Ponder refuses it. On Railway
+leave `DATABASE_SCHEMA` unset so each deployment gets its own schema (see "Deploy (Railway)").
 
 ---
 

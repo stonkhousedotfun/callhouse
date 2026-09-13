@@ -424,7 +424,8 @@ The full reference for every key is `keeper/README.md` → "Environment". Split 
 | `PORT` | `8787` | Railway probes `$PORT`; the keeper listens on `KEEPER_PORT`, whose Dockerfile default is 8787. Set `PORT=8787` so the two agree, or set both to the same other value |
 | `KEEPER_DB_PATH` | leave unset | Dockerfile default `/data/keeper.db`, on the volume |
 | `RH_RPC_2` | `https://robinhood-rpc.publicnode.com` | recommended. Backup for `eth_call`/sends only; it rejects archive `eth_getLogs`, and the keeper never sends a log query there |
-| `ALERT_WEBHOOK` | your JSON webhook relay | recommended. Unset means alerts are logged and stored in SQLite, not delivered |
+| `ALERT_WEBHOOK` | the relay, `http://relay.railway.internal:8080/alert` | recommended. Unset means alerts are logged and stored in SQLite, not delivered |
+| `ALERT_WEBHOOK_TOKEN` | `${{relay.RELAY_TOKEN}}` | required by the relay; sent as `Authorization: Bearer` |
 | `KEEPER_LOG_LEVEL` | `info` | `debug` is per-tick chain reads; not for production |
 | `POLL_INTERVAL_MS` | `60000` | default |
 | `OVERCALL_ORDERS_URL` | leave unset | default `https://overcall.finance/api/orders` |
@@ -744,17 +745,16 @@ configuration and prints which variable is wrong, never its value.
 
 ### 12.3 Wiring the keeper
 
-`keeper/src/alerts.ts` sends `content-type: application/json` and **no other header**, so the
-token rides in the URL. On the `keeper` service (§10.2):
+The keeper sends `Authorization: Bearer <ALERT_WEBHOOK_TOKEN>` when that variable is set. On the
+`keeper` service (§10.2), both as runtime variables:
 
 ```
-ALERT_WEBHOOK=http://relay.railway.internal:8080/alert?token=<RELAY_TOKEN>
+ALERT_WEBHOOK=http://relay.railway.internal:8080/alert
+ALERT_WEBHOOK_TOKEN=${{relay.RELAY_TOKEN}}
 ```
 
-Use a Railway reference so the token is written once:
-`http://relay.railway.internal:8080/alert?token=${{relay.RELAY_TOKEN}}`. Restart the keeper; its
-`boot` alert is the first end-to-end test. When the keeper can send `Authorization: Bearer`, switch
-to that and rotate `RELAY_TOKEN` — a token in a query string can land in proxy logs.
+The Railway reference writes the token once. Restart the keeper; its `boot` alert is the first
+end-to-end test. Do not put the token in the URL (`?token=` works but can land in proxy logs).
 
 ### 12.4 Verify
 

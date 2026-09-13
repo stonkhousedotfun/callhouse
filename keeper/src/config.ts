@@ -47,16 +47,19 @@ const privateKeyField = z.string().transform((raw, ctx): Hex => {
   return withPrefix.toLowerCase() as Hex;
 });
 
+/** URL fields carry secrets in practice: an RPC key in the path or query, the relay token in
+ *  ALERT_WEBHOOK's query string. A validation error is printed at boot, so it names what is wrong
+ *  without echoing the value. */
 const httpUrlField = z.string().transform((raw, ctx): string => {
   let parsed: URL;
   try {
     parsed = new URL(raw);
   } catch {
-    ctx.addIssue({ code: z.ZodIssueCode.custom, message: `not a URL: ${raw}` });
+    ctx.addIssue({ code: z.ZodIssueCode.custom, message: `not a URL (value not shown; ${raw.length} chars)` });
     return z.NEVER;
   }
   if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
-    ctx.addIssue({ code: z.ZodIssueCode.custom, message: `not an http(s) URL: ${raw}` });
+    ctx.addIssue({ code: z.ZodIssueCode.custom, message: `not an http(s) URL (scheme ${parsed.protocol})` });
     return z.NEVER;
   }
   return parsed.toString().replace(/\/$/, '');
@@ -171,6 +174,9 @@ const schema = z.object({
   /** Generic JSON webhook. Unset means alerts are still logged at their own severity and
    *  stored in SQLite — just not delivered anywhere. */
   ALERT_WEBHOOK: httpUrlField.optional(),
+  /** Sent as `authorization: Bearer <token>` with every webhook POST when set. The relay
+   *  (relay/) requires it; prefer this over `?token=` in ALERT_WEBHOOK, which proxies can log. */
+  ALERT_WEBHOOK_TOKEN: z.string().min(16).optional(),
 
   /* ---- loop ---- */
   POLL_INTERVAL_MS: intField(5_000, 3_600_000).default(60_000),

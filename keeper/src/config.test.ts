@@ -63,3 +63,30 @@ test('PREMIUM_MARGIN_BPS: default 0 (price at the floor), an integer 0..1000, an
 test('the boot failure message points at keeper/.env.example, which has the keeper keys', () => {
   assert.throws(() => loadConfig({}), /keeper\/\.env\.example/);
 });
+
+test('a malformed URL field is refused without echoing its value (RPC keys, relay tokens)', () => {
+  const secret = 'not a url with sk_live_SECRET123';
+  assert.throws(
+    () => loadConfig({ ...VALID, ALERT_WEBHOOK: secret }),
+    (err: unknown) => {
+      const text = String(err);
+      assert.match(text, /ALERT_WEBHOOK: not a URL/);
+      assert.ok(!text.includes('SECRET123'), 'the value must not appear in the error');
+      return true;
+    },
+  );
+  assert.throws(
+    () => loadConfig({ ...VALID, RH_RPC: 'ftp://user:SECRET123@rpc.example' }),
+    (err: unknown) => {
+      const text = String(err);
+      assert.match(text, /RH_RPC: not an http\(s\) URL/);
+      assert.ok(!text.includes('SECRET123'));
+      return true;
+    },
+  );
+});
+
+test('ALERT_WEBHOOK_TOKEN must be at least 16 characters when set', () => {
+  assert.throws(() => loadConfig({ ...VALID, ALERT_WEBHOOK_TOKEN: 'short' }), /ALERT_WEBHOOK_TOKEN/);
+  assert.equal(loadConfig({ ...VALID, ALERT_WEBHOOK_TOKEN: 'x'.repeat(32) }).ALERT_WEBHOOK_TOKEN, 'x'.repeat(32));
+});

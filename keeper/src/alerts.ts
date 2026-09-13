@@ -127,9 +127,11 @@ export async function alert(
 
   const id = store.recordAlert(kind, severity, message, data, false);
   try {
+    const headers: Record<string, string> = { 'content-type': 'application/json' };
+    if (config.ALERT_WEBHOOK_TOKEN) headers.authorization = `Bearer ${config.ALERT_WEBHOOK_TOKEN}`;
     const response = await fetch(config.ALERT_WEBHOOK, {
       method: 'POST',
-      headers: { 'content-type': 'application/json' },
+      headers,
       body: JSON.stringify(payload, bigintReplacer),
       signal: AbortSignal.timeout(10_000),
     });

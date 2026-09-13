@@ -34,12 +34,11 @@ prefixed 🔴 ERROR / 🟠 WARN / 🔵 INFO. With `ALERT_WEBHOOK` unset, alerts 
 severity and stored in SQLite (`alerts` table), nowhere else.
 
 - **The token.** The relay requires `RELAY_TOKEN`, as `Authorization: Bearer <token>` or as
-  `?token=<token>`. `keeper/src/alerts.ts` sends only `content-type` today, so the keeper uses the
-  query form:
-  `ALERT_WEBHOOK=http://relay.railway.internal:8080/alert?token=<RELAY_TOKEN>` (private network,
-  same Railway project; the public relay domain works the same way). A token in a query string can
-  land in proxy logs — when the keeper gains a header option (an `ALERT_WEBHOOK_TOKEN` sent as
-  `Authorization: Bearer`), move to it and rotate the token.
+  `?token=<token>`. The keeper sends the header when `ALERT_WEBHOOK_TOKEN` is set (≥ 16 chars), so
+  wire it as `ALERT_WEBHOOK=http://relay.railway.internal:8080/alert` plus
+  `ALERT_WEBHOOK_TOKEN=<RELAY_TOKEN>` (private network, same Railway project). The `?token=` form
+  still works but can land in proxy logs; do not use it. The keeper's config errors never echo a URL
+  value, so a malformed `ALERT_WEBHOOK` does not print a token at boot.
 - **What the keeper hears.** 200 when at least one configured target accepted (a partial failure
   is logged by the relay, not retried — a retry would duplicate the message where it landed); 502
   when every target refused, timed out (`RELAY_TIMEOUT_MS`, default 5 s, under the keeper's 10 s
@@ -122,7 +121,7 @@ them will ever arrive as a webhook with the old SCREAMING_CASE code; that vocabu
 | Role or policy changed | No alert. Every legitimate change is a planned Safe transaction; review the Safe queue | §23 |
 | Deposit cap reached | No alert. Working as intended | §24 |
 | Settled epoch unclaimed 30 days | No alert. Periodic `epochs()` review | §25 |
-| Indexer behind head | No alert — the indexer has no webhook. External monitor on its `/health` — **not yet stood up** | §26 |
+| Indexer behind head | No alert — the indexer has no webhook. External monitor on its `/v1/health` (lag in blocks and seconds; Ponder's own `/health` only says the process is up) — **not yet stood up** | §26 |
 | Keeper gas truly empty (cannot pay for `rollClose`) | No separate kind. `low_gas` at 0.01 is the only gas alert; past expiry + 1h anyone can close | §8 |
 
 ---
@@ -485,7 +484,9 @@ A settled epoch still holds balances a month later.
 nobody else's share price is inflated. Reach out to the depositor.
 
 ### §26 Indexer lag — external monitor (not yet stood up)
-Ponder is behind head. The indexer has no webhook; point an uptime check at its health endpoint.
+Ponder is behind head. The indexer has no webhook; point an uptime check at `/v1/health`, which reports
+`lag.blocks` / `lag.seconds` and turns `degraded` when behind. Railway's own healthcheck uses `/ready`
+(ready only after historical sync), which is right for deploys and wrong for lag monitoring.
 
 1. `cast block-number --rpc-url $RH_RPC` vs the indexer's last processed block
 2. Is the indexer pointed at the primary RPC? The publicnode backup rejects historical `eth_getLogs`

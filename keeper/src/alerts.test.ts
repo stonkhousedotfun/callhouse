@@ -21,10 +21,12 @@ import { join } from 'node:path';
 import { test } from 'node:test';
 
 let posts = 0;
+let lastAuthorization: string | undefined;
 let handler: () => { status: number } = () => ({ status: 200 });
 
-const server = createServer((_req: IncomingMessage, res: ServerResponse) => {
+const server = createServer((req: IncomingMessage, res: ServerResponse) => {
   posts += 1;
+  lastAuthorization = req.headers.authorization;
   const reply = handler();
   res.writeHead(reply.status, { 'content-type': 'application/json' });
   res.end('{}');
@@ -44,6 +46,7 @@ process.env.KEEPER_DB_PATH = join(scratch, 'keeper.db');
 process.env.KEEPER_LOG_LEVEL = 'fatal';
 process.env.KEEPER_ALERT_COOLDOWN_MS = '1200'; // short enough to wait out for real
 process.env.ALERT_WEBHOOK = `http://127.0.0.1:${address.port}/hook`;
+process.env.ALERT_WEBHOOK_TOKEN = 'relay-token-0123456789abcdef';
 
 const { FAILED_DELIVERY_RETRY_MS, alert, failedDeliveryStamp } = await import('./alerts.js');
 const { store } = await import('./state.js');
@@ -85,4 +88,10 @@ test('a successful delivery returns true and consumes the FULL cooldown', async 
   await sleep(1_300); // the suite cooldown is 1.2s
   assert.equal(await alert('rpc_lag', 'still lagging', {}, { dedupeKey: 'ok' }), true, 'allowed once it elapses');
   assert.equal(posts, before + 1);
+});
+
+test('the webhook POST carries ALERT_WEBHOOK_TOKEN as a bearer header', async () => {
+  handler = () => ({ status: 200 });
+  assert.equal(await alert('keeper_error', 'token check', {}, { dedupeKey: 'token-header' }), true);
+  assert.equal(lastAuthorization, 'Bearer relay-token-0123456789abcdef');
 });

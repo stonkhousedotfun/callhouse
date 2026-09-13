@@ -243,7 +243,8 @@ All of these are cross-checked against the deployed vault at boot. A mismatch is
 | `KEEPER_UNIT_PRICE_USDG6` | — | Manual per-contract ask override, USDG base units. For one unusual cycle. Leave unset normally. |
 | `PREMIUM_MARGIN_BPS` | `0` | Basis points added to the policy premium floor when pricing a listing, integer `0`–`1000`: `unit = ceil(floor × (10000 + margin) / 10000)`. `0` prices exactly at the floor, as before. The vault re-reads spot at `approveListing`, so a floor-priced listing reverts `PremiumBelowMinimum` on one upward oracle tick between the keeper's read and the vault's; a margin of `m` absorbs a spot rise of up to `m` bps. **Trade-off:** higher margin → fewer reverts on an uptick, but a slightly higher ask that is slightly less likely to fill. `50` (0.5%) covers a normal tick. Not applied to `KEEPER_UNIT_PRICE_USDG6`. See "Picking the strike". |
 | `KEEPER_FALLBACK_DIR` | — | Mirrors each signed order payload to disk. The payload is always in SQLite and served from `/orders`; this is belt and braces. |
-| `ALERT_WEBHOOK` | — | Generic JSON `POST`. Unset means alerts are still logged and stored, just not delivered. |
+| `ALERT_WEBHOOK` | — | Generic JSON `POST`. Unset means alerts are still logged and stored, just not delivered. In production this is the relay (`relay/`). |
+| `ALERT_WEBHOOK_TOKEN` | — | ≥ 16 chars. Sent as `authorization: Bearer <token>` with every webhook POST; the relay requires it. |
 | `KEEPER_ENV_FILE` | `.env` | Alternative dotenv path. |
 
 ---

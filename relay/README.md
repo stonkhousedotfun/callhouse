@@ -70,13 +70,12 @@ Either of:
 
 ```
 Authorization: Bearer <RELAY_TOKEN>      preferred
-POST /alert?token=<RELAY_TOKEN>          what the keeper can send today
+POST /alert?token=<RELAY_TOKEN>          fallback for clients without headers
 ```
 
 Compared in constant time (SHA-256 digests through `timingSafeEqual`), checked **before** the body
-is read. The query form exists because `keeper/src/alerts.ts` sends only `content-type`, so the
-token has to ride in `ALERT_WEBHOOK` itself. A query string can land in proxy access logs; when
-the keeper gains a header option, switch to it and rotate the token.
+is read. The keeper sends the header when `ALERT_WEBHOOK_TOKEN` is set; use that. The query form remains
+for clients that cannot set headers, but a query string can land in proxy access logs.
 
 ### Status contract
 
