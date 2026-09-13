@@ -13,6 +13,18 @@ State at the start (verified 2026-09-13 ~13:10 PT):
 | `callhouse-contracts` | GitHub `main` at `2a9bb59` (two docs commits by another session); 8 local commits **not pushed**, including both 2026-09-13 contract fixes (lot size, queue fairness) |
 | Docs | `leekzor/callhouse-docs` pushed; GitBook sync in progress; `docs.` CNAME target comes from GitBook |
 
+Status (2026-09-13 ~14:30 PT):
+
+| Part | State |
+|---|---|
+| 1.1–1.3 | **done.** Apex and `www` CNAMEs (DNS only) plus Railway's `_railway-verify` TXT records; both return 200 with valid TLS |
+| 1.4 | **done** (owner connected the repo). Pushes to `callhouse-site` `main` deploy |
+| 1.5 | **waiting on GitBook.** `CNAME docs → 9cbc89af57-hosting.gitbook.io` (DNS only) is in place, and GitBook already redirects `callhouse.gitbook.io/callhouse-docs` to `docs.callhouse.finance`, but that host answers Cloudflare **1014** until GitBook activates the custom hostname. **The docs are unreachable until then.** If it does not clear, remove the custom domain in GitBook to restore the gitbook.io URL |
+| 2 | **done.** `callhouse-site` 39caed5, c721dba, 69fb6b3 (no-buyer weeks pay zero *premium*; queue USDG per entry; an issuer freeze can hold up the close). GitBook docs audited against the code (718 claims): `callhouse-docs` 29823dd, 3cf2b4e |
+| 3 | **done.** Contracts `634bf55` on GitHub; app submodule pinned; `ops/safes.md` §7 updated |
+| 4.1–4.9 | **done.** CI green; W-21, K-21, margin, indexer Dockerfile, X-11 (three indexer defects fixed), relay, K-22 (dead-listing defect fixed), W-13 (status flip-flop fixed in e5392fe). Follow-up 1c3de3d: an unfilled week that Valorem assigned anyway is labelled "unfilled, assigned N" in the web app |
+| Open | keeper `/orders` fallback not wired into the web app (`docs/WIRING.md` §7); GitBook site title shows "callhouse Docs" (rename in GitBook site settings) |
+
 ---
 
 ## 1. Site live on `callhouse.finance`
