@@ -29,8 +29,10 @@ Every field, where it comes from, and how to format it. Source column refers to 
 | Assignment proceeds | `exerciseReceived` from the vault's `ClaimRedeemed` | USDG, `0` if not assigned |
 | Harvest gross | **sum** of `Harvest.grossUsdg` over this cycle's `Harvest` events | USDG = premium received + assignment proceeds |
 | **Protocol fee (5% of premium)** | **sum** of `Harvest.feeUsdg` over the cycle | USDG. `0` on an unfilled week. Never charged on assignment proceeds |
-| Net to depositors | **sum** of `Harvest.netUsdg` over the cycle | USDG |
-| **Net USDG per share** | **sum** over the cycle of `UsdgDistributed.credited / UsdgDistributed.totalSupply`, each event against its own `totalSupply` | 6 dp, e.g. `0.034200 USDG` |
+| **Net premium** | premium received − protocol fee (indexer `premiumNet`) | USDG. **Premium only**: never includes assignment proceeds |
+| **Net premium per share** | indexer `premiumNetPerShare`, summed over the cycle's harvests, each against its own supply | 6 dp, e.g. `0.034200 USDG`. This is the week's yield figure |
+| Credited to depositors | **sum** of `Harvest.netUsdg` over the cycle (indexer `creditedUsdg`) | USDG = net premium + assignment proceeds. Assignment proceeds are returned principal, not yield |
+| USDG credited per share | **sum** over the cycle of `UsdgDistributed.credited / UsdgDistributed.totalSupply`, each event against its own `totalSupply` | 6 dp. Equals net premium per share unless assigned |
 | **Assigned or not** | `contractsAssigned()` (snapshot, taken **before** the close) vs `contractsWritten`, agreeing with `RollClose.contractsAssignedCount` | `not assigned` / `n of m assigned` |
 | NVDA per share | `convertToAssets(1e18)` after close | 18 dp, trimmed to 6 for display |
 | Listing hash | `vault.listingHash()` before close | `0x…`, linked to the explorer |
@@ -94,7 +96,10 @@ Hard rules. CI lints the site copy for these; the post is held to the same stand
 
 ## Template B — unfilled
 
-The one that matters. Use it without apology or hedging.
+The one that matters. Use it without apology or hedging. **Only if nothing was assigned**: Valorem
+assigns exercises across every writer of the option series, so an unfilled week can still be
+assigned. If `RollClose.contractsAssignedCount > 0`, use Template C with "Contracts filled: 0" and
+"Premium received by the vault: 0 USDG".
 
 > **Callhouse cNVDA — week {N}, ending Sat {YYYY-MM-DD} 20:00 UTC**
 >
@@ -126,8 +131,9 @@ The one that matters. Use it without apology or hedging.
 > - Premium received by the vault: **{RECV} USDG**
 > - Assignment proceeds: **{ASSIGN} USDG** ({A} × {S}.00)
 > - Protocol fee (5% of premium; none on assignment proceeds): **{PFEE} USDG**
-> - Net to depositors: **{NET} USDG** (premium after fees, plus the assignment proceeds in full)
-> - **Net USDG per share: {PPS} USDG**
+> - **Net premium per share: {PPPS} USDG** — the week's yield
+> - Credited to depositors: **{CREDIT} USDG** (net premium plus the assignment proceeds, which are
+>   the assigned tokens' sale price, not yield); {PPS} USDG per share
 > - NVDA per share is now **{NPS}**, down from {NPS_PRIOR}
 >
 > The calls were exercised, so {A} NVDA left the vault at the strike and {ASSIGN} USDG came back in
