@@ -1,0 +1,46 @@
+# /etc/systemd/system/callhouse-keeper.service
+#
+#   install -d -o callhouse -g callhouse /var/lib/callhouse
+#   systemctl daemon-reload && systemctl enable --now callhouse-keeper
+#
+# Restarting is safe at any instant. On boot the keeper reconciles its SQLite database
+# against live vault state and never re-does work it has already done.
+[Unit]
+Description=Callhouse keeper (weekly covered-call roll)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=callhouse
+Group=callhouse
+WorkingDirectory=/opt/callhouse/keeper
+EnvironmentFile=/etc/callhouse/keeper.env
+Environment=NODE_ENV=production
+Environment=KEEPER_DB_PATH=/var/lib/callhouse/keeper.db
+ExecStart=/usr/bin/node /opt/callhouse/keeper/dist/index.js
+
+# SIGTERM lets the in-flight tick finish. A half-sent transaction is worse than a slow exit.
+KillSignal=SIGTERM
+TimeoutStopSec=90
+Restart=always
+RestartSec=10
+
+# The hot key lives in EnvironmentFile; keep the blast radius small.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/callhouse
+ProtectKernelTunables=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+MemoryDenyWriteExecute=false
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=callhouse-keeper
+
+[Install]
+WantedBy=multi-user.target

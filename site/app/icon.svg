@@ -1,0 +1,31 @@
+<!--
+  Favicon for callhouse.xyz. Next serves this via the app/icon file convention and emits the
+  <link rel="icon"> itself, so nothing imports it and nothing should.
+
+  THE MARK: a roof over two ledger rows. The roof is the "house" half of the name; the rows are
+  the weekly tape — one full row for a week that filled, one short row for a week that did not.
+  That second row is deliberately stunted. A week with no buyer pays zero and is published as a
+  row like any other, so the mark shows one, at 16px, forever.
+
+  CONSTRAINTS THIS FILE IS BUILT AROUND:
+    - Palette is verbatim from the token block in app/globals.css: #0b0d10 is the bg token and
+      #7ee0a8 is the accent token. (Named rather than quoted as CSS custom properties, because a
+      doubled hyphen is illegal inside an XML comment and this file is parsed as XML.) No third
+      colour, no gradient, no opacity: a favicon is composited against unknown browser chrome and
+      anything translucent goes muddy.
+    - 32x32 viewBox and every coordinate an integer, with the roof edges at exactly 45 degrees.
+      Browsers rasterise this at 16, 32 and 180px; integers on a 32 grid land on pixel boundaries
+      at 16 and 32, which is where it actually has to read.
+    - No text. Type at this size is a smudge, and "ch" in a box is every other protocol's mark.
+    - No rounded corners on the ground. The design system is flat bordered boxes; a squircle here
+      would be the only rounded thing in the product.
+
+  Deliberately absent: a dark/light variant. The product is `color-scheme: dark` only, so the
+  mark carries its own dark ground rather than inheriting the browser's.
+-->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" width="32" height="32">
+  <rect width="32" height="32" fill="#0b0d10" />
+  <path d="M16 4 L27 15 L22 15 L16 9 L10 15 L5 15 Z" fill="#7ee0a8" />
+  <rect x="8" y="18" width="16" height="4" fill="#7ee0a8" />
+  <rect x="8" y="24" width="9" height="4" fill="#7ee0a8" />
+</svg>

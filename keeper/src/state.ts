@@ -1,0 +1,566 @@
+/**
+ * Durable keeper state, in SQLite.
+ *
+ * The keeper is a single process that must survive being killed at any instant — including
+ * between `vault.approveListing()` landing on chain and the POST to Overcall, which is the one
+ * window where the two sides of the world can disagree. Everything it has done is written here
+ * before and after the fact, and `roll.ts` reconciles this table against live vault state on
+ * every boot. Nothing is inferred from "it is Friday, so I probably wrote already".
+ *
+ * All 256-bit values are stored as decimal TEXT. SQLite integers are 64-bit and an optionId is
+ * 256 bits; storing one as INTEGER silently truncates it.
+ */
+import { mkdirSync } from 'node:fs';
+import { dirname, resolve } from 'node:path';
+import Database from 'better-sqlite3';
+import { config } from './config.js';
+import { log } from './logger.js';
+
+/*//////////////////////////////////////////////////////////////
+                              TYPES
+//////////////////////////////////////////////////////////////*/
+
+/** Where a cycle got to. `skipped` is a first-class, expected outcome: no rung inside the
+ *  policy band, or writes halted, is a legitimate week with zero premium. */
+export type CycleStatus = 'skipped' | 'open' | 'locked' | 'closed';
+
+/**
+ * Listing lifecycle.
+ *   approved    — vault.approveListing landed; the order hash is authorised on chain.
+ *   posted      — accepted by Overcall (201, or 200 on an idempotent repost).
+ *   visible     — confirmed present in GET /api/orders?offerer=<vault>.
+ *   post_failed — on chain but not in Overcall's book. The fallback payload is served from
+ *                 /orders so a buyer can still fill it. This is NOT a dead listing.
+ *   partial/filled/cancelled/expired/unfillable — terminal-ish states from Seaport + the book.
+ */
+export type ListingStatus =
+  | 'approved'
+  | 'posted'
+  | 'visible'
+  | 'post_failed'
+  | 'partial'
+  | 'filled'
+  | 'cancelled'
+  | 'expired'
+  | 'unfillable';
+
+export type TxKind =
+  | 'rollOpen'
+  | 'approveListing'
+  | 'cancelListing'
+  | 'invalidateAllListings'
+  | 'lockBook'
+  | 'rollClose';
+
+export type TxStatus = 'pending' | 'success' | 'reverted';
+
+export interface CycleRow {
+  cycle_number: number;
+  option_id: string | null;
+  strike_usdg6: string | null;
+  contracts: number | null;
+  exercise_ts: number | null;
+  expiry_ts: number | null;
+  lot_size: string | null;
+  status: CycleStatus;
+  skip_reason: string | null;
+  roll_open_tx: string | null;
+  lock_tx: string | null;
+  roll_close_tx: string | null;
+  gross_usdg6: string | null;
+  fee_usdg6: string | null;
+  net_usdg6: string | null;
+  contracts_assigned: number | null;
+  relists_used: number;
+  opened_at: number | null;
+  locked_at: number | null;
+  closed_at: number | null;
+  created_at: number;
+  updated_at: number;
+}
+
+export interface ListingRow {
+  order_hash: string;
+  cycle_number: number;
+  seq: number;
+  option_id: string;
+  contracts: string;
+  unit_price6: string;
+  gross_usdg6: string;
+  to_vault6: string;
+  to_overcall6: string;
+  end_time: number;
+  counter: string;
+  salt: string;
+  components_json: string;
+  signature: string;
+  approve_tx: string | null;
+  cancel_tx: string | null;
+  status: ListingStatus;
+  api_status: string | null;
+  api_error: string | null;
+  posted_at: number | null;
+  visible_at: number | null;
+  filled_numerator: string | null;
+  filled_denominator: string | null;
+  seaport_total_filled: string | null;
+  seaport_total_size: string | null;
+  seaport_cancelled: number | null;
+  created_at: number;
+  updated_at: number;
+}
+
+export interface TxRow {
+  hash: string;
+  kind: TxKind;
+  cycle_number: number | null;
+  status: TxStatus;
+  block_number: string | null;
+  gas_used: string | null;
+  error: string | null;
+  created_at: number;
+  updated_at: number;
+}
+
+export interface AlertRow {
+  id: number;
+  kind: string;
+  severity: string;
+  message: string;
+  data_json: string | null;
+  delivered: number;
+  created_at: number;
+}
+
+/*//////////////////////////////////////////////////////////////
+                             SCHEMA
+//////////////////////////////////////////////////////////////*/
+
+const SCHEMA = `
+CREATE TABLE IF NOT EXISTS cycles (
+  cycle_number       INTEGER PRIMARY KEY,
+  option_id          TEXT,
+  strike_usdg6       TEXT,
+  contracts          INTEGER,
+  exercise_ts        INTEGER,
+  expiry_ts          INTEGER,
+  lot_size           TEXT,
+  status             TEXT NOT NULL,
+  skip_reason        TEXT,
+  roll_open_tx       TEXT,
+  lock_tx            TEXT,
+  roll_close_tx      TEXT,
+  gross_usdg6        TEXT,
+  fee_usdg6          TEXT,
+  net_usdg6          TEXT,
+  contracts_assigned INTEGER,
+  relists_used       INTEGER NOT NULL DEFAULT 0,
+  opened_at          INTEGER,
+  locked_at          INTEGER,
+  closed_at          INTEGER,
+  created_at         INTEGER NOT NULL,
+  updated_at         INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS listings (
+  order_hash           TEXT PRIMARY KEY,
+  cycle_number         INTEGER NOT NULL,
+  seq                  INTEGER NOT NULL,
+  option_id            TEXT NOT NULL,
+  contracts            TEXT NOT NULL,
+  unit_price6          TEXT NOT NULL,
+  gross_usdg6          TEXT NOT NULL,
+  to_vault6            TEXT NOT NULL,
+  to_overcall6         TEXT NOT NULL,
+  end_time             INTEGER NOT NULL,
+  counter              TEXT NOT NULL,
+  salt                 TEXT NOT NULL,
+  components_json      TEXT NOT NULL,
+  signature            TEXT NOT NULL,
+  approve_tx           TEXT,
+  cancel_tx            TEXT,
+  status               TEXT NOT NULL,
+  api_status           TEXT,
+  api_error            TEXT,
+  posted_at            INTEGER,
+  visible_at           INTEGER,
+  filled_numerator     TEXT,
+  filled_denominator   TEXT,
+  seaport_total_filled TEXT,
+  seaport_total_size   TEXT,
+  seaport_cancelled    INTEGER,
+  created_at           INTEGER NOT NULL,
+  updated_at           INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS listings_by_cycle ON listings (cycle_number, seq);
+
+CREATE TABLE IF NOT EXISTS txs (
+  hash         TEXT PRIMARY KEY,
+  kind         TEXT NOT NULL,
+  cycle_number INTEGER,
+  status       TEXT NOT NULL,
+  block_number TEXT,
+  gas_used     TEXT,
+  error        TEXT,
+  created_at   INTEGER NOT NULL,
+  updated_at   INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS txs_by_cycle ON txs (cycle_number, created_at);
+
+CREATE TABLE IF NOT EXISTS alerts (
+  id         INTEGER PRIMARY KEY AUTOINCREMENT,
+  kind       TEXT NOT NULL,
+  severity   TEXT NOT NULL,
+  message    TEXT NOT NULL,
+  data_json  TEXT,
+  delivered  INTEGER NOT NULL DEFAULT 0,
+  created_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS alerts_by_kind ON alerts (kind, created_at);
+
+CREATE TABLE IF NOT EXISTS meta (
+  key        TEXT PRIMARY KEY,
+  value      TEXT NOT NULL,
+  updated_at INTEGER NOT NULL
+);
+`;
+
+/** Columns the generic updaters are allowed to touch. Keeps the dynamic SQL honest. */
+const CYCLE_COLUMNS = new Set<keyof CycleRow>([
+  'option_id',
+  'strike_usdg6',
+  'contracts',
+  'exercise_ts',
+  'expiry_ts',
+  'lot_size',
+  'status',
+  'skip_reason',
+  'roll_open_tx',
+  'lock_tx',
+  'roll_close_tx',
+  'gross_usdg6',
+  'fee_usdg6',
+  'net_usdg6',
+  'contracts_assigned',
+  'relists_used',
+  'opened_at',
+  'locked_at',
+  'closed_at',
+]);
+
+const LISTING_COLUMNS = new Set<keyof ListingRow>([
+  'approve_tx',
+  'cancel_tx',
+  'status',
+  'api_status',
+  'api_error',
+  'posted_at',
+  'visible_at',
+  'filled_numerator',
+  'filled_denominator',
+  'seaport_total_filled',
+  'seaport_total_size',
+  'seaport_cancelled',
+]);
+
+type SqlValue = string | number | bigint | null;
+
+/*//////////////////////////////////////////////////////////////
+                             STORE
+//////////////////////////////////////////////////////////////*/
+
+export class KeeperStore {
+  readonly db: Database.Database;
+  readonly path: string;
+
+  constructor(dbPath: string) {
+    this.path = resolve(dbPath);
+    mkdirSync(dirname(this.path), { recursive: true });
+    this.db = new Database(this.path);
+    // WAL keeps the health endpoint's reads from blocking the loop's writes.
+    this.db.pragma('journal_mode = WAL');
+    this.db.pragma('synchronous = FULL'); // durability beats throughput; we write a few rows a week
+    this.db.exec(SCHEMA);
+    log.state.info({ path: this.path }, 'state database opened');
+  }
+
+  close(): void {
+    this.db.close();
+  }
+
+  /*------------------------------- meta -------------------------------*/
+
+  getMeta(key: string): string | null {
+    const row = this.db.prepare('SELECT value FROM meta WHERE key = ?').get(key) as { value: string } | undefined;
+    return row ? row.value : null;
+  }
+
+  setMeta(key: string, value: string): void {
+    this.db
+      .prepare(
+        'INSERT INTO meta (key, value, updated_at) VALUES (?, ?, ?) ' +
+          'ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at',
+      )
+      .run(key, value, Date.now());
+  }
+
+  getMetaNumber(key: string): number | null {
+    const raw = this.getMeta(key);
+    if (raw === null) return null;
+    const n = Number(raw);
+    return Number.isFinite(n) ? n : null;
+  }
+
+  /** The loop's liveness marker. /health reports the age of this. */
+  beat(at: number = Date.now()): void {
+    this.setMeta('last_heartbeat_ms', String(at));
+  }
+
+  lastHeartbeat(): number | null {
+    return this.getMetaNumber('last_heartbeat_ms');
+  }
+
+  /*------------------------------ cycles ------------------------------*/
+
+  getCycle(cycleNumber: number): CycleRow | null {
+    const row = this.db.prepare('SELECT * FROM cycles WHERE cycle_number = ?').get(cycleNumber) as
+      | CycleRow
+      | undefined;
+    return row ?? null;
+  }
+
+  latestCycle(): CycleRow | null {
+    const row = this.db.prepare('SELECT * FROM cycles ORDER BY cycle_number DESC LIMIT 1').get() as
+      | CycleRow
+      | undefined;
+    return row ?? null;
+  }
+
+  /** Create the row if it is new; never clobbers an existing one. */
+  ensureCycle(cycleNumber: number, status: CycleStatus): CycleRow {
+    const existing = this.getCycle(cycleNumber);
+    if (existing) return existing;
+    const now = Date.now();
+    this.db
+      .prepare('INSERT INTO cycles (cycle_number, status, relists_used, created_at, updated_at) VALUES (?, ?, 0, ?, ?)')
+      .run(cycleNumber, status, now, now);
+    const created = this.getCycle(cycleNumber);
+    if (!created) throw new Error(`failed to create cycle row ${cycleNumber}`);
+    return created;
+  }
+
+  updateCycle(cycleNumber: number, patch: Partial<CycleRow>): void {
+    const entries = Object.entries(patch).filter(([k]) => CYCLE_COLUMNS.has(k as keyof CycleRow));
+    if (entries.length === 0) return;
+    const sets = entries.map(([k]) => `${k} = ?`).join(', ');
+    const values = entries.map(([, v]) => normalise(v));
+    this.db
+      .prepare(`UPDATE cycles SET ${sets}, updated_at = ? WHERE cycle_number = ?`)
+      .run(...values, Date.now(), cycleNumber);
+    if (patch.status !== undefined) {
+      log.state.info({ cycleNumber, status: patch.status }, 'cycle status');
+    }
+  }
+
+  /** True when this cycle has already been decided, either way. A row exists only because the
+   *  keeper opened it or deliberately skipped it, and both are decisions we do not revisit. */
+  isCycleHandled(cycleNumber: number): boolean {
+    return this.getCycle(cycleNumber) !== null;
+  }
+
+  recentCycles(limit = 12): CycleRow[] {
+    return this.db.prepare('SELECT * FROM cycles ORDER BY cycle_number DESC LIMIT ?').all(limit) as CycleRow[];
+  }
+
+  /*----------------------------- listings -----------------------------*/
+
+  insertListing(row: Omit<ListingRow, 'created_at' | 'updated_at'>): void {
+    const now = Date.now();
+    this.db
+      .prepare(
+        `INSERT INTO listings (
+           order_hash, cycle_number, seq, option_id, contracts, unit_price6, gross_usdg6,
+           to_vault6, to_overcall6, end_time, counter, salt, components_json, signature,
+           approve_tx, cancel_tx, status, api_status, api_error, posted_at, visible_at,
+           filled_numerator, filled_denominator, seaport_total_filled, seaport_total_size,
+           seaport_cancelled, created_at, updated_at
+         ) VALUES (
+           @order_hash, @cycle_number, @seq, @option_id, @contracts, @unit_price6, @gross_usdg6,
+           @to_vault6, @to_overcall6, @end_time, @counter, @salt, @components_json, @signature,
+           @approve_tx, @cancel_tx, @status, @api_status, @api_error, @posted_at, @visible_at,
+           @filled_numerator, @filled_denominator, @seaport_total_filled, @seaport_total_size,
+           @seaport_cancelled, @created_at, @updated_at
+         )
+         ON CONFLICT(order_hash) DO NOTHING`,
+      )
+      .run({ ...row, created_at: now, updated_at: now });
+  }
+
+  getListing(orderHash: string): ListingRow | null {
+    const row = this.db.prepare('SELECT * FROM listings WHERE order_hash = ?').get(orderHash) as
+      | ListingRow
+      | undefined;
+    return row ?? null;
+  }
+
+  listingsForCycle(cycleNumber: number): ListingRow[] {
+    return this.db
+      .prepare('SELECT * FROM listings WHERE cycle_number = ? ORDER BY seq ASC')
+      .all(cycleNumber) as ListingRow[];
+  }
+
+  latestListingForCycle(cycleNumber: number): ListingRow | null {
+    const row = this.db
+      .prepare('SELECT * FROM listings WHERE cycle_number = ? ORDER BY seq DESC LIMIT 1')
+      .get(cycleNumber) as ListingRow | undefined;
+    return row ?? null;
+  }
+
+  /**
+   * Listings whose signed payload should still be offered to buyers from our own UI.
+   *
+   * `end_time` is the order's Seaport endTime, i.e. the cycle's exerciseTimestamp. Past it
+   * Seaport rejects the fill, so an expired row must never reach /orders: the fallback buy
+   * page would be showing a buyer an order that cannot be filled. It is also the only guard
+   * that holds when the vault went straight from Listed to rollClose without a `lockBook` —
+   * `rollClose` kills listings by bumping the Seaport counter, which does NOT set
+   * `isCancelled`, so polling alone would never retire the row.
+   */
+  openListings(nowSeconds: number = Math.floor(Date.now() / 1000)): ListingRow[] {
+    return this.db
+      .prepare(
+        "SELECT * FROM listings WHERE status IN ('approved','posted','visible','post_failed','partial') " +
+          'AND end_time > ? ORDER BY created_at DESC',
+      )
+      .all(nowSeconds) as ListingRow[];
+  }
+
+  /** Every listing for a cycle that is not yet in a terminal state. */
+  liveListingsForCycle(cycleNumber: number): ListingRow[] {
+    return this.db
+      .prepare(
+        "SELECT * FROM listings WHERE cycle_number = ? AND status IN " +
+          "('approved','posted','visible','post_failed') ORDER BY seq ASC",
+      )
+      .all(cycleNumber) as ListingRow[];
+  }
+
+  updateListing(orderHash: string, patch: Partial<ListingRow>): void {
+    const entries = Object.entries(patch).filter(([k]) => LISTING_COLUMNS.has(k as keyof ListingRow));
+    if (entries.length === 0) return;
+    const sets = entries.map(([k]) => `${k} = ?`).join(', ');
+    const values = entries.map(([, v]) => normalise(v));
+    this.db
+      .prepare(`UPDATE listings SET ${sets}, updated_at = ? WHERE order_hash = ?`)
+      .run(...values, Date.now(), orderHash);
+    if (patch.status !== undefined) {
+      log.state.debug({ orderHash, status: patch.status }, 'listing status');
+    }
+  }
+
+  /*------------------------------- txs --------------------------------*/
+
+  recordTxSubmitted(hash: string, kind: TxKind, cycleNumber: number | null): void {
+    const now = Date.now();
+    this.db
+      .prepare(
+        'INSERT INTO txs (hash, kind, cycle_number, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?) ' +
+          'ON CONFLICT(hash) DO NOTHING',
+      )
+      .run(hash, kind, cycleNumber, 'pending' satisfies TxStatus, now, now);
+  }
+
+  recordTxResult(
+    hash: string,
+    status: TxStatus,
+    blockNumber: bigint | null,
+    gasUsed: bigint | null,
+    error: string | null,
+  ): void {
+    this.db
+      .prepare('UPDATE txs SET status = ?, block_number = ?, gas_used = ?, error = ?, updated_at = ? WHERE hash = ?')
+      .run(
+        status,
+        blockNumber === null ? null : blockNumber.toString(),
+        gasUsed === null ? null : gasUsed.toString(),
+        error,
+        Date.now(),
+        hash,
+      );
+    if (status === 'reverted') {
+      log.state.warn({ hash, error }, 'transaction reverted on chain');
+    }
+  }
+
+  getTx(hash: string): TxRow | null {
+    const row = this.db.prepare('SELECT * FROM txs WHERE hash = ?').get(hash) as TxRow | undefined;
+    return row ?? null;
+  }
+
+  /** The newest transaction the keeper submitted of a kind for a cycle, resolved or not. This
+   *  is how a cycle row written without its tx hash (an adopted cycle, a lost write) recovers
+   *  it: every submission is recorded here BEFORE the receipt wait. */
+  latestTxForCycle(kind: TxKind, cycleNumber: number): TxRow | null {
+    const row = this.db
+      .prepare('SELECT * FROM txs WHERE kind = ? AND cycle_number = ? ORDER BY created_at DESC, rowid DESC LIMIT 1')
+      .get(kind, cycleNumber) as TxRow | undefined;
+    return row ?? null;
+  }
+
+  pendingTxs(): TxRow[] {
+    return this.db.prepare("SELECT * FROM txs WHERE status = 'pending' ORDER BY created_at ASC").all() as TxRow[];
+  }
+
+  recentTxs(limit = 20): TxRow[] {
+    return this.db.prepare('SELECT * FROM txs ORDER BY created_at DESC LIMIT ?').all(limit) as TxRow[];
+  }
+
+  /*------------------------------ alerts ------------------------------*/
+
+  recordAlert(kind: string, severity: string, message: string, data: unknown, delivered: boolean): number {
+    const info = this.db
+      .prepare('INSERT INTO alerts (kind, severity, message, data_json, delivered, created_at) VALUES (?,?,?,?,?,?)')
+      .run(kind, severity, message, data === undefined ? null : JSON.stringify(data, bigintReplacer), delivered ? 1 : 0, Date.now());
+    return Number(info.lastInsertRowid);
+  }
+
+  markAlertDelivered(id: number): void {
+    this.db.prepare('UPDATE alerts SET delivered = 1 WHERE id = ?').run(id);
+  }
+
+  recentAlerts(limit = 20): AlertRow[] {
+    return this.db.prepare('SELECT * FROM alerts ORDER BY created_at DESC LIMIT ?').all(limit) as AlertRow[];
+  }
+
+  /*------------------------------ counts ------------------------------*/
+
+  counts(): Record<string, number> {
+    const out: Record<string, number> = {};
+    for (const table of ['cycles', 'listings', 'txs', 'alerts', 'meta'] as const) {
+      const row = this.db.prepare(`SELECT COUNT(*) AS n FROM ${table}`).get() as { n: number };
+      out[table] = row.n;
+    }
+    return out;
+  }
+}
+
+/*//////////////////////////////////////////////////////////////
+                            HELPERS
+//////////////////////////////////////////////////////////////*/
+
+/** better-sqlite3 binds only string/number/bigint/Buffer/null. Booleans and bigints come
+ *  through the patch objects, so normalise them here rather than at every call site. */
+function normalise(value: unknown): SqlValue {
+  if (value === null || value === undefined) return null;
+  if (typeof value === 'boolean') return value ? 1 : 0;
+  if (typeof value === 'bigint') return value.toString();
+  if (typeof value === 'number' || typeof value === 'string') return value;
+  return JSON.stringify(value, bigintReplacer);
+}
+
+export function bigintReplacer(_key: string, value: unknown): unknown {
+  return typeof value === 'bigint' ? value.toString() : value;
+}
+
+/** The process-wide store. */
+export const store = new KeeperStore(config.KEEPER_DB_PATH);

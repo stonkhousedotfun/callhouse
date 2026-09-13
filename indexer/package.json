@@ -1,0 +1,27 @@
+{
+  "name": "@callhouse/indexer",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "ponder dev",
+    "start": "ponder start",
+    "serve": "ponder serve",
+    "codegen": "ponder codegen",
+    "gen:abis": "node scripts/gen-abis.mjs",
+    "build": "ponder codegen && tsc --noEmit",
+    "typecheck": "tsc --noEmit",
+    "lint": "tsc --noEmit",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "ponder": "^0.17.10",
+    "viem": "^2.56.3",
+    "hono": "^4.13.7"
+  },
+  "devDependencies": {
+    "typescript": "^5.9.3",
+    "@types/node": "^22.20.2",
+    "vitest": "^3.2.7"
+  }
+}

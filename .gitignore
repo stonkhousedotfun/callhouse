@@ -16,4 +16,3 @@ lcov.info
 *.db
 *.db-journal
 *.sqlite
-contracts/lib/

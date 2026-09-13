@@ -1,0 +1,193 @@
+[
+ {
+  "type": "error",
+  "name": "ContractsAboveCap",
+  "inputs": [
+   {
+    "name": "contractsRequested",
+    "type": "uint256",
+    "internalType": "uint256"
+   },
+   {
+    "name": "cap",
+    "type": "uint256",
+    "internalType": "uint256"
+   }
+  ]
+ },
+ {
+  "type": "error",
+  "name": "ContractsAboveUtilization",
+  "inputs": [
+   {
+    "name": "contractsRequested",
+    "type": "uint256",
+    "internalType": "uint256"
+   },
+   {
+    "name": "maxByUtilization",
+    "type": "uint256",
+    "internalType": "uint256"
+   }
+  ]
+ },
+ {
+  "type": "error",
+  "name": "ContractsCapZero",
+  "inputs": []
+ },
+ {
+  "type": "error",
+  "name": "ContractsZero",
+  "inputs": []
+ },
+ {
+  "type": "error",
+  "name": "MaxOtmAboveCeiling",
+  "inputs": [
+   {
+    "name": "got",
+    "type": "uint16",
+    "internalType": "uint16"
+   },
+   {
+    "name": "ceilBps",
+    "type": "uint16",
+    "internalType": "uint16"
+   }
+  ]
+ },
+ {
+  "type": "error",
+  "name": "MinOtmBelowFloor",
+  "inputs": [
+   {
+    "name": "got",
+    "type": "uint16",
+    "internalType": "uint16"
+   },
+   {
+    "name": "floorBps",
+    "type": "uint16",
+    "internalType": "uint16"
+   }
+  ]
+ },
+ {
+  "type": "error",
+  "name": "MinPremiumBelowFloor",
+  "inputs": [
+   {
+    "name": "got",
+    "type": "uint16",
+    "internalType": "uint16"
+   },
+   {
+    "name": "floorBps",
+    "type": "uint16",
+    "internalType": "uint16"
+   }
+  ]
+ },
+ {
+  "type": "error",
+  "name": "OtmBandInverted",
+  "inputs": [
+   {
+    "name": "minOtmBps",
+    "type": "uint16",
+    "internalType": "uint16"
+   },
+   {
+    "name": "maxOtmBps",
+    "type": "uint16",
+    "internalType": "uint16"
+   }
+  ]
+ },
+ {
+  "type": "error",
+  "name": "PremiumBelowMinimum",
+  "inputs": [
+   {
+    "name": "premiumUsdg",
+    "type": "uint256",
+    "internalType": "uint256"
+   },
+   {
+    "name": "minPremiumUsdg",
+    "type": "uint256",
+    "internalType": "uint256"
+   }
+  ]
+ },
+ {
+  "type": "error",
+  "name": "ProtocolFeeAboveCeiling",
+  "inputs": [
+   {
+    "name": "got",
+    "type": "uint16",
+    "internalType": "uint16"
+   },
+   {
+    "name": "ceilBps",
+    "type": "uint16",
+    "internalType": "uint16"
+   }
+  ]
+ },
+ {
+  "type": "error",
+  "name": "SpotZero",
+  "inputs": []
+ },
+ {
+  "type": "error",
+  "name": "StrikeAboveBand",
+  "inputs": [
+   {
+    "name": "strikeUsdg",
+    "type": "uint256",
+    "internalType": "uint256"
+   },
+   {
+    "name": "maxStrikeUsdg",
+    "type": "uint256",
+    "internalType": "uint256"
+   }
+  ]
+ },
+ {
+  "type": "error",
+  "name": "StrikeBelowBand",
+  "inputs": [
+   {
+    "name": "strikeUsdg",
+    "type": "uint256",
+    "internalType": "uint256"
+   },
+   {
+    "name": "minStrikeUsdg",
+    "type": "uint256",
+    "internalType": "uint256"
+   }
+  ]
+ },
+ {
+  "type": "error",
+  "name": "UtilizationAboveCeiling",
+  "inputs": [
+   {
+    "name": "got",
+    "type": "uint16",
+    "internalType": "uint16"
+   },
+   {
+    "name": "ceilBps",
+    "type": "uint16",
+    "internalType": "uint16"
+   }
+  ]
+ }
+]

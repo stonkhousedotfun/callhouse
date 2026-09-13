@@ -1,4 +1,4 @@
-I’ll pull the live Overcall / Valorem / token addresses so the spec matches what is actually on chain.# Covered-Call Vault — Technical Specification
+# Covered-Call Vault — Technical Specification
 
 Product name (working): $NVDAy vault  
 Chain: Robinhood Chain mainnet, chain ID 4663 (testnet 46630)  
@@ -157,18 +157,36 @@ Preview functions must return the queue path, not fake instant amounts.
 
 Keeper proposes (optionId, contracts, listPriceUsdg). Vault checks:
 
-optionId ∈ registry.cycle().optionIds
-registry.collateralToken() == asset
-registry.exerciseToken() == usdg
-block.timestamp = minPremiumBps * spotNotional / 10_000
-feesEnabled == false   // or explicitly accepted
-token.oraclePaused() == false
+```
+// REPAIRED 2026-09-12: the original bullet list lost its `<` and `>=` characters to
+// markdown/HTML escaping, which merged two checks into one nonsense line.
+// Canonical version now lives in plan.md section 4.4.
 
-Recommended v1 bounds (governance, inside contract max):
+phase == Idle && !halted
+optionId is a member of registry.cycle().optionIds
+registry.collateralToken() == asset
+registry.exerciseToken()   == usdg
+block.timestamp < cycle.exerciseTimestamp
+token.oraclePaused() == false
+clear.feesEnabled() == false          // or valoremFeeAccepted == true
+
+strike = clear.option(optionId).exerciseAmount
+spot   = priceFeed.latestRoundData()  // gate + display only, never in the settlement path
+
+strike >= spot * (10_000 + minOtmBps) / 10_000
+strike <= spot * (10_000 + maxOtmBps) / 10_000
+
+listPriceUsdg >= minPremiumBps * spotNotional / 10_000
+contracts * 1e18 <= idleAssetBalance * maxUtilizationBps / 10_000
+0 < contracts <= maxContractsCap
+```
+
+Recommended v1 bounds (governance, inside contract hard caps). Note the minOtmBps row is a FLOOR, not a
+ceiling — section 10 requires that admin cannot set it to 0 and sell at-the-money:
 
 | Param | Launch value | Contract ceiling |
 |---|---|---|
-| minOtmBps | 300 (3%) | 0 |
+| minOtmBps | 300 (3%) | floor 100 (admin may NOT go lower; prevents selling ATM) |
 | maxOtmBps | 1200 | 2500 |
 | minPremiumBps | 40 (0.40% of spot / week) | 10 |
 | maxUtilization | 95% of idle | 100% |
@@ -510,5 +528,3 @@ After Saturday, claim USDG (or see “unfilled, 0”)
 Queue and receive leftover NVDA  
 
 No other feature is required for v1.
-
-If you want this turned into Foundry skeletons (Vault.sol + interface files + keeper state machine types) next, say so and we can write the contract headers and function signatures file-by-file.

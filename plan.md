@@ -439,3 +439,85 @@ Order is chosen so each phase has real inputs from the previous one. Contracts b
 - `ops/` runbooks and addresses explorer-confirmed.
 - Audit engaged with this repo's Vault + adapters as scope.
 - Launch week 0 checklist complete.
+
+---
+
+## 14. Recon results and the spec repairs they forced (2026-09-12)
+
+Phase 0 recon ran against live chain 4663. Nine unknowns, each investigated then adversarially
+re-verified. Everything below is confirmed by an `eth_call` or an `eth_getCode` that was actually
+executed, not inferred. Full evidence in `ops/recon/`.
+
+### 14.1 What was found
+
+| Unknown | Answer |
+|---|---|
+| R1 OvercallRegistry (NVDA) | **`0x8E973cE1A6884E28Ad3E377d5f670Bc0b463f4EA`**, verified source, not a proxy |
+| R2/R9 Seaport order shape | zone `0x0`, zoneHash `0x0`, conduitKey `0x0`, orderType `1` (PARTIAL_OPEN), startTime `0`, endTime = exerciseTimestamp, fee recipient `0xdAe7e82A…0782` |
+| R3 Overcall listings API | `POST https://overcall.finance/api/orders?market=NVDA`. No auth, no allowlist, ERC-1271 offerers explicitly accepted. **Not a launch blocker.** |
+| R4 Valorem Clear | Exact upstream `ValoremOptionsClearinghouse`, valorem-core @`6436c823`, solc 0.8.16. Bytecode-identical outside the metadata trailer. |
+| R5 Spot feed | Chainlink `RHNVDA / USD` at `0x379EC4f7C378F34a1B47E4F3cbeBCbAC3E8E9F15`, 8 decimals |
+| R6 Stock Token | 18 decimals, non-rebasing, live `uiMultiplier()` (observed 1.000775…), `oraclePaused()` present |
+| R7 Testnet 46630 | **Usable after all.** The first pass found no Valorem/Overcall/NVDA and an older Stock build; the adversarial re-check refuted that — Valorem Clear is at `0x0059df7c…acbc` (byte-identical), ten Overcall registries exist (NVDA `0xdFA1cab9…4A56`, with `isWritingOpen`), mock NVDA implements `oraclePaused()`, and mock USDG self-mints. Cycles are hand-set by Overcall's operator and lapse between rehearsals. Full evidence in `ops/recon/R7-R8-testnet-explorer.md` (both passes) |
+| R8 Explorer | Blockscout sits behind a Cloudflare challenge; its API is not reliably scriptable |
+| R10 Address audit | All six README addresses confirmed. `0xdAe7e82A…0782` is an EOA and really is Valorem's `feeTo` |
+| R12 Overcall surface | One contract type, `OvercallRegistry`, deployed once per market. 11 live markets. No zone, no conduit, no periphery, no proxy |
+
+Live NVDA cycle at recon time: cycle 1, lot size 1e18, five rungs at 226 / 231 / 236 / 241 / 246
+USDG, book close Fri 2026-09-18 20:00 UTC, expiry Sat 2026-09-19 20:00 UTC. `MAX_STRIKES` is 5 and
+`MIN_EXERCISE_WINDOW` is 24h, so the observed 24h window is the registry's minimum.
+
+### 14.2 Spec repairs
+
+1. **The cycle has no status field.** TECHSPEC assumed `registry.cycle().status`. It does not exist.
+   The real gates are `isWritingOpen()`, `isCycleLive()`, `writeDeadline()` (which IS
+   `exerciseTimestamp`) and `canReplaceCycle()`. Every trigger binds to those.
+2. **Overcall rounds its 5% fee PER CONTRACT, not on the total.** Rounding on the total yields an
+   order that signs and validates and then cannot be partially filled (`InexactFraction`). Since
+   every Overcall order is `PARTIAL_OPEN`, that silently makes a listing full-fill-only.
+   `Policy.splitPremium` implements the per-contract rule and the vault enforces it on chain.
+3. **The listings API body is `{chainId, components, signature}`**, not the
+   `{chainId, order, signature, optionId, maker}` TECHSPEC guessed. The signature field must be
+   64 or 65 bytes, which is why the keeper sends a well-formed placeholder and the vault answers
+   by hash through EIP-1271.
+4. **There is one registry per market, and the frontend's top-level `registry` key is JUGGERNAUT,
+   not NVDA.** Wiring it would collateralise NVDA calls against the wrong token. The vault
+   constructor now refuses any registry whose `collateralToken`/`exerciseToken`/`clearinghouse`
+   do not match, and a fork test asserts the trap explicitly.
+5. **Testnet 46630 was mis-scoped at first, then re-verified as usable.** The initial pass searched
+   the testnet explorer by contract *name*, which misses unverified contracts, and reported no
+   Valorem and no Overcall. The adversarial re-check found both: Valorem Clear at
+   `0x0059df7c6229373a5afc0685b0ee8777f59bacbc` (byte-identical to mainnet), ten Overcall
+   registries including NVDA `0xdFA1cab9cdFeA9fBC1fEbcE536EAE90648264A56` (the new build, with
+   `isWritingOpen()`), a mock NVDA that implements `oraclePaused()`, and mock USDG with a
+   permissionless mint. M6 is therefore: two time-warped weeks on a mainnet fork with a mock
+   registry (the only place to compress a week into minutes), **plus** a real testnet cycle on
+   46630 once Overcall's operator sets a fresh one — or against our own mock registry deployed
+   there, which needs no one's cooperation. The only leg testnet can never cover is Overcall's
+   production listings API, which is mainnet-only.
+6. **The price feed stops at the weekend.** It is a `us_equities_24/5` feed: observed gaps are 17h
+   intra-week, ~52h over a weekend and ~78h over a holiday weekend, while Overcall's write window
+   stays open throughout. A 24h staleness rule would have skipped almost every week. `maxPriceAge`
+   is therefore a bounded governance parameter, `[1 hour, 7 days]`, launching at **4 days**. A
+   stale weekend price is also the economically right one: the market is shut, so Friday's close
+   is spot.
+7. **Chain 4663 has no Chainlink sequencer uptime feed**, so the usual L2 sequencer guard cannot
+   be implemented. A sequencer outage surfaces instead as a stale price, which the check catches.
+8. **Seaport's `incrementCounter` does not add one.** It jumps by a quasi-random amount
+   (observed 0 → 6.45e35), so anything building an order must re-read `getCounter` after a bump.
+9. **`minOtmBps` is a floor, not a ceiling.** Confirmed as written in plan section 1; the contract
+   enforces `MIN_OTM_FLOOR_BPS = 100` so an admin cannot sell at-the-money.
+
+### 14.3 Implementation decisions forced by the build
+
+- **`SeaportOrderLib` is a linked public library.** With the order-shape checks and Seaport's three
+  nested-struct encoders inlined, `Vault` compiled to 31.6 KB, well past the EIP-170 24 KB limit.
+  Moving them out brought it to ~23 KB. via-IR is on. The library must be deployed and linked
+  before the vault.
+- **Queued shares are governed by escrow alone.** An earlier draft both escrowed the shares and
+  subtracted `queuedSharesOf` from the owner's balance in `_update`, double counting them: queueing
+  a full position was impossible and a partial queue froze the remainder. The two designs are
+  alternatives. Escrow won; the balance check went.
+- **Redemption epochs draw down rather than divide.** Each epoch tracks remaining shares, assets
+  and USDG; every claimant takes their proportion of what is left, so the final claimant absorbs
+  the remainder and no dust is ever stranded.

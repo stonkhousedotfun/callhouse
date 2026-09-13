@@ -1,0 +1,633 @@
+[
+ {
+  "type": "function",
+  "name": "toParameters",
+  "inputs": [
+   {
+    "name": "c",
+    "type": "tuple",
+    "internalType": "struct OrderComponents",
+    "components": [
+     {
+      "name": "offerer",
+      "type": "address",
+      "internalType": "address"
+     },
+     {
+      "name": "zone",
+      "type": "address",
+      "internalType": "address"
+     },
+     {
+      "name": "offer",
+      "type": "tuple[]",
+      "internalType": "struct OfferItem[]",
+      "components": [
+       {
+        "name": "itemType",
+        "type": "ItemType",
+        "internalType": "enum ItemType"
+       },
+       {
+        "name": "token",
+        "type": "address",
+        "internalType": "address"
+       },
+       {
+        "name": "identifierOrCriteria",
+        "type": "uint256",
+        "internalType": "uint256"
+       },
+       {
+        "name": "startAmount",
+        "type": "uint256",
+        "internalType": "uint256"
+       },
+       {
+        "name": "endAmount",
+        "type": "uint256",
+        "internalType": "uint256"
+       }
+      ]
+     },
+     {
+      "name": "consideration",
+      "type": "tuple[]",
+      "internalType": "struct ConsiderationItem[]",
+      "components": [
+       {
+        "name": "itemType",
+        "type": "ItemType",
+        "internalType": "enum ItemType"
+       },
+       {
+        "name": "token",
+        "type": "address",
+        "internalType": "address"
+       },
+       {
+        "name": "identifierOrCriteria",
+        "type": "uint256",
+        "internalType": "uint256"
+       },
+       {
+        "name": "startAmount",
+        "type": "uint256",
+        "internalType": "uint256"
+       },
+       {
+        "name": "endAmount",
+        "type": "uint256",
+        "internalType": "uint256"
+       },
+       {
+        "name": "recipient",
+        "type": "address",
+        "internalType": "address payable"
+       }
+      ]
+     },
+     {
+      "name": "orderType",
+      "type": "OrderType",
+      "internalType": "enum OrderType"
+     },
+     {
+      "name": "startTime",
+      "type": "uint256",
+      "internalType": "uint256"
+     },
+     {
+      "name": "endTime",
+      "type": "uint256",
+      "internalType": "uint256"
+     },
+     {
+      "name": "zoneHash",
+      "type": "bytes32",
+      "internalType": "bytes32"
+     },
+     {
+      "name": "salt",
+      "type": "uint256",
+      "internalType": "uint256"
+     },
+     {
+      "name": "conduitKey",
+      "type": "bytes32",
+      "internalType": "bytes32"
+     },
+     {
+      "name": "counter",
+      "type": "uint256",
+      "internalType": "uint256"
+     }
+    ]
+   }
+  ],
+  "outputs": [
+   {
+    "name": "p",
+    "type": "tuple",
+    "internalType": "struct OrderParameters",
+    "components": [
+     {
+      "name": "offerer",
+      "type": "address",
+      "internalType": "address"
+     },
+     {
+      "name": "zone",
+      "type": "address",
+      "internalType": "address"
+     },
+     {
+      "name": "offer",
+      "type": "tuple[]",
+      "internalType": "struct OfferItem[]",
+      "components": [
+       {
+        "name": "itemType",
+        "type": "ItemType",
+        "internalType": "enum ItemType"
+       },
+       {
+        "name": "token",
+        "type": "address",
+        "internalType": "address"
+       },
+       {
+        "name": "identifierOrCriteria",
+        "type": "uint256",
+        "internalType": "uint256"
+       },
+       {
+        "name": "startAmount",
+        "type": "uint256",
+        "internalType": "uint256"
+       },
+       {
+        "name": "endAmount",
+        "type": "uint256",
+        "internalType": "uint256"
+       }
+      ]
+     },
+     {
+      "name": "consideration",
+      "type": "tuple[]",
+      "internalType": "struct ConsiderationItem[]",
+      "components": [
+       {
+        "name": "itemType",
+        "type": "ItemType",
+        "internalType": "enum ItemType"
+       },
+       {
+        "name": "token",
+        "type": "address",
+        "internalType": "address"
+       },
+       {
+        "name": "identifierOrCriteria",
+        "type": "uint256",
+        "internalType": "uint256"
+       },
+       {
+        "name": "startAmount",
+        "type": "uint256",
+        "internalType": "uint256"
+       },
+       {
+        "name": "endAmount",
+        "type": "uint256",
+        "internalType": "uint256"
+       },
+       {
+        "name": "recipient",
+        "type": "address",
+        "internalType": "address payable"
+       }
+      ]
+     },
+     {
+      "name": "orderType",
+      "type": "OrderType",
+      "internalType": "enum OrderType"
+     },
+     {
+      "name": "startTime",
+      "type": "uint256",
+      "internalType": "uint256"
+     },
+     {
+      "name": "endTime",
+      "type": "uint256",
+      "internalType": "uint256"
+     },
+     {
+      "name": "zoneHash",
+      "type": "bytes32",
+      "internalType": "bytes32"
+     },
+     {
+      "name": "salt",
+      "type": "uint256",
+      "internalType": "uint256"
+     },
+     {
+      "name": "conduitKey",
+      "type": "bytes32",
+      "internalType": "bytes32"
+     },
+     {
+      "name": "totalOriginalConsiderationItems",
+      "type": "uint256",
+      "internalType": "uint256"
+     }
+    ]
+   }
+  ],
+  "stateMutability": "pure"
+ },
+ {
+  "type": "error",
+  "name": "BadConduitKey",
+  "inputs": [
+   {
+    "name": "expected",
+    "type": "bytes32",
+    "internalType": "bytes32"
+   },
+   {
+    "name": "got",
+    "type": "bytes32",
+    "internalType": "bytes32"
+   }
+  ]
+ },
+ {
+  "type": "error",
+  "name": "BadConsiderationIdentifier",
+  "inputs": [
+   {
+    "name": "got",
+    "type": "uint256",
+    "internalType": "uint256"
+   }
+  ]
+ },
+ {
+  "type": "error",
+  "name": "BadConsiderationItemType",
+  "inputs": [
+   {
+    "name": "got",
+    "type": "uint8",
+    "internalType": "enum ItemType"
+   }
+  ]
+ },
+ {
+  "type": "error",
+  "name": "BadConsiderationLength",
+  "inputs": [
+   {
+    "name": "got",
+    "type": "uint256",
+    "internalType": "uint256"
+   }
+  ]
+ },
+ {
+  "type": "error",
+  "name": "BadConsiderationToken",
+  "inputs": [
+   {
+    "name": "expected",
+    "type": "address",
+    "internalType": "address"
+   },
+   {
+    "name": "got",
+    "type": "address",
+    "internalType": "address"
+   }
+  ]
+ },
+ {
+  "type": "error",
+  "name": "BadCounter",
+  "inputs": [
+   {
+    "name": "expected",
+    "type": "uint256",
+    "internalType": "uint256"
+   },
+   {
+    "name": "got",
+    "type": "uint256",
+    "internalType": "uint256"
+   }
+  ]
+ },
+ {
+  "type": "error",
+  "name": "BadFeeSplit",
+  "inputs": [
+   {
+    "name": "expectedToVault",
+    "type": "uint256",
+    "internalType": "uint256"
+   },
+   {
+    "name": "gotToVault",
+    "type": "uint256",
+    "internalType": "uint256"
+   },
+   {
+    "name": "expectedToOvercall",
+    "type": "uint256",
+    "internalType": "uint256"
+   },
+   {
+    "name": "gotToOvercall",
+    "type": "uint256",
+    "internalType": "uint256"
+   }
+  ]
+ },
+ {
+  "type": "error",
+  "name": "BadOfferIdentifier",
+  "inputs": [
+   {
+    "name": "expected",
+    "type": "uint256",
+    "internalType": "uint256"
+   },
+   {
+    "name": "got",
+    "type": "uint256",
+    "internalType": "uint256"
+   }
+  ]
+ },
+ {
+  "type": "error",
+  "name": "BadOfferItemType",
+  "inputs": [
+   {
+    "name": "got",
+    "type": "uint8",
+    "internalType": "enum ItemType"
+   }
+  ]
+ },
+ {
+  "type": "error",
+  "name": "BadOfferLength",
+  "inputs": [
+   {
+    "name": "got",
+    "type": "uint256",
+    "internalType": "uint256"
+   }
+  ]
+ },
+ {
+  "type": "error",
+  "name": "BadOfferToken",
+  "inputs": [
+   {
+    "name": "expected",
+    "type": "address",
+    "internalType": "address"
+   },
+   {
+    "name": "got",
+    "type": "address",
+    "internalType": "address"
+   }
+  ]
+ },
+ {
+  "type": "error",
+  "name": "BadOfferer",
+  "inputs": [
+   {
+    "name": "got",
+    "type": "address",
+    "internalType": "address"
+   }
+  ]
+ },
+ {
+  "type": "error",
+  "name": "BadOrderType",
+  "inputs": [
+   {
+    "name": "got",
+    "type": "uint8",
+    "internalType": "enum OrderType"
+   }
+  ]
+ },
+ {
+  "type": "error",
+  "name": "BadOvercallRecipient",
+  "inputs": [
+   {
+    "name": "expected",
+    "type": "address",
+    "internalType": "address"
+   },
+   {
+    "name": "got",
+    "type": "address",
+    "internalType": "address"
+   }
+  ]
+ },
+ {
+  "type": "error",
+  "name": "BadVaultRecipient",
+  "inputs": [
+   {
+    "name": "expected",
+    "type": "address",
+    "internalType": "address"
+   },
+   {
+    "name": "got",
+    "type": "address",
+    "internalType": "address"
+   }
+  ]
+ },
+ {
+  "type": "error",
+  "name": "BadZone",
+  "inputs": [
+   {
+    "name": "expected",
+    "type": "address",
+    "internalType": "address"
+   },
+   {
+    "name": "got",
+    "type": "address",
+    "internalType": "address"
+   }
+  ]
+ },
+ {
+  "type": "error",
+  "name": "BadZoneHash",
+  "inputs": [
+   {
+    "name": "got",
+    "type": "bytes32",
+    "internalType": "bytes32"
+   }
+  ]
+ },
+ {
+  "type": "error",
+  "name": "DutchAuctionNotAllowed",
+  "inputs": []
+ },
+ {
+  "type": "error",
+  "name": "ListingAlreadyEnded",
+  "inputs": [
+   {
+    "name": "endTime",
+    "type": "uint256",
+    "internalType": "uint256"
+   }
+  ]
+ },
+ {
+  "type": "error",
+  "name": "ListingOutlivesExercise",
+  "inputs": [
+   {
+    "name": "endTime",
+    "type": "uint256",
+    "internalType": "uint256"
+   },
+   {
+    "name": "exerciseTimestamp",
+    "type": "uint256",
+    "internalType": "uint256"
+   }
+  ]
+ },
+ {
+  "type": "error",
+  "name": "ListingStartsInFuture",
+  "inputs": [
+   {
+    "name": "startTime",
+    "type": "uint256",
+    "internalType": "uint256"
+   }
+  ]
+ },
+ {
+  "type": "error",
+  "name": "OfferAmountZero",
+  "inputs": []
+ },
+ {
+  "type": "error",
+  "name": "OfferExceedsInventory",
+  "inputs": [
+   {
+    "name": "requested",
+    "type": "uint256",
+    "internalType": "uint256"
+   },
+   {
+    "name": "available",
+    "type": "uint256",
+    "internalType": "uint256"
+   }
+  ]
+ },
+ {
+  "type": "error",
+  "name": "OrderHashMismatch",
+  "inputs": [
+   {
+    "name": "expected",
+    "type": "bytes32",
+    "internalType": "bytes32"
+   },
+   {
+    "name": "got",
+    "type": "bytes32",
+    "internalType": "bytes32"
+   }
+  ]
+ },
+ {
+  "type": "error",
+  "name": "OvercallFeeRoundsToZero",
+  "inputs": [
+   {
+    "name": "unitPriceUsdg",
+    "type": "uint256",
+    "internalType": "uint256"
+   },
+   {
+    "name": "minimum",
+    "type": "uint256",
+    "internalType": "uint256"
+   }
+  ]
+ },
+ {
+  "type": "error",
+  "name": "PremiumNotDivisibleByOrderSize",
+  "inputs": [
+   {
+    "name": "grossUsdg",
+    "type": "uint256",
+    "internalType": "uint256"
+   },
+   {
+    "name": "amount",
+    "type": "uint256",
+    "internalType": "uint256"
+   }
+  ]
+ },
+ {
+  "type": "error",
+  "name": "SeaportCancelFailed",
+  "inputs": []
+ },
+ {
+  "type": "error",
+  "name": "SeaportValidateFailed",
+  "inputs": []
+ },
+ {
+  "type": "error",
+  "name": "UnitPriceExceedsStrike",
+  "inputs": [
+   {
+    "name": "unitPriceUsdg",
+    "type": "uint256",
+    "internalType": "uint256"
+   },
+   {
+    "name": "strikeUsdg",
+    "type": "uint256",
+    "internalType": "uint256"
+   }
+  ]
+ }
+]

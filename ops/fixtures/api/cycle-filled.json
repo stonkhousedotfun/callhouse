@@ -1,0 +1,132 @@
+{
+  "cycle": 7,
+  "status": "closed",
+  "wrote": true,
+  "filled": true,
+  "assigned": false,
+  "registry": {
+    "optionIds": [
+      "64784291936308156455260294574860754954874527136357427096671392398063507079168",
+      "64784291936308156455260294574860754954874527136436655259185656735657051029504"
+    ],
+    "strikeCount": 2,
+    "lotSize": {
+      "raw": "1000000000000000000",
+      "decimals": 18,
+      "formatted": "1"
+    },
+    "exerciseTimestamp": "1788552000",
+    "exerciseAt": "2026-09-04T20:00:00.000Z",
+    "expiryTimestamp": "1788555600",
+    "expiryAt": "2026-09-04T21:00:00.000Z",
+    "setAt": "2026-08-28T20:05:00.000Z",
+    "setTx": "0x0000000000000000000000000000000000000000000000000000000000000071"
+  },
+  "written": {
+    "optionId": "64784291936308156455260294574860754954874527136357427096671392398063507079168",
+    "claimKey": "64784291936308156455260294574860754954874527136357427096671392398063507079169",
+    "strikeUsdg": {
+      "raw": "190000000",
+      "decimals": 6,
+      "formatted": "190"
+    },
+    "contracts": "12",
+    "collateral": {
+      "raw": "12000000000000000000",
+      "decimals": 18,
+      "formatted": "12"
+    },
+    "openedAt": "2026-08-31T14:35:00.000Z",
+    "txOpen": "0x0000000000000000000000000000000000000000000000000000000000000072"
+  },
+  "listing": {
+    "count": 1,
+    "orderHash": "0x0000000000000000000000000000000000000000000000000000000000000073",
+    "contracts": "12",
+    "grossUsdg": {
+      "raw": "48000000",
+      "decimals": 6,
+      "formatted": "48"
+    },
+    "unitPriceUsdg": {
+      "raw": "4000000",
+      "decimals": 6,
+      "formatted": "4"
+    },
+    "listedAt": "2026-08-31T14:36:00.000Z"
+  },
+  "fill": {
+    "contractsSold": "12",
+    "fillCount": 1,
+    "premiumGross": {
+      "raw": "48000000",
+      "decimals": 6,
+      "formatted": "48"
+    },
+    "premiumToVault": {
+      "raw": "45600000",
+      "decimals": 6,
+      "formatted": "45.6"
+    },
+    "overcallFee": {
+      "raw": "2400000",
+      "decimals": 6,
+      "formatted": "2.4"
+    },
+    "unitPriceUsdg": {
+      "raw": "4000000",
+      "decimals": 6,
+      "formatted": "4"
+    },
+    "firstFillAt": "2026-09-01T15:10:00.000Z",
+    "lastFillAt": "2026-09-01T15:10:00.000Z"
+  },
+  "settlement": {
+    "lockedAt": "2026-09-04T20:00:00.000Z",
+    "contractsAssigned": "0",
+    "assignmentUsdg": {
+      "raw": "0",
+      "decimals": 6,
+      "formatted": "0"
+    },
+    "assetsReturned": {
+      "raw": "12000000000000000000",
+      "decimals": 18,
+      "formatted": "12"
+    },
+    "marketExercised": "0",
+    "bucketIndex": "0",
+    "bucketAssigned": "0",
+    "closedAt": "2026-09-04T21:00:30.000Z",
+    "txClose": "0x0000000000000000000000000000000000000000000000000000000000000074"
+  },
+  "harvest": {
+    "harvested": true,
+    "grossUsdg": {
+      "raw": "45600000",
+      "decimals": 6,
+      "formatted": "45.6"
+    },
+    "fee": {
+      "raw": "4560000",
+      "decimals": 6,
+      "formatted": "4.56"
+    },
+    "premiumNet": {
+      "raw": "41040000",
+      "decimals": 6,
+      "formatted": "41.04"
+    },
+    "usdgPerShare": {
+      "raw": "410400",
+      "decimals": 6,
+      "formatted": "0.4104"
+    },
+    "supplyAtHarvest": {
+      "raw": "100000000000000000000",
+      "decimals": 18,
+      "formatted": "100"
+    },
+    "harvestedAt": "2026-09-04T21:00:30.000Z"
+  }
+}

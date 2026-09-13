@@ -1,0 +1,92 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  FOUNDRY_PROFILE: ci
+
+jobs:
+  contracts:
+    name: contracts (build + unit + invariant)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: contracts
+    steps:
+      - uses: actions/checkout@v4
+        with: {submodules: recursive}
+      - uses: foundry-rs/foundry-toolchain@v1
+        with: {version: stable}
+      - name: forge fmt --check
+        run: forge fmt --check
+      - name: forge build --sizes
+        run: forge build --sizes
+      - name: unit + invariant tests
+        run: forge test -vvv --no-match-path 'test/fork/*'
+      - name: coverage summary
+        run: forge coverage --no-match-path 'test/fork/*' --report summary || true
+
+  contracts-fork:
+    name: contracts (fork 4663)
+    runs-on: ubuntu-latest
+    # Fork tests need a live RPC. They are the gate for M2 but must not block a PR
+    # when the RPC secret is absent (forks of this repo).
+    if: github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository
+    defaults:
+      run:
+        working-directory: contracts
+    steps:
+      - uses: actions/checkout@v4
+        with: {submodules: recursive}
+      - uses: foundry-rs/foundry-toolchain@v1
+        with: {version: stable}
+      - name: fork tests
+        env:
+          RH_RPC: ${{ secrets.RH_RPC || 'https://rpc.mainnet.chain.robinhood.com' }}
+        run: FOUNDRY_PROFILE=fork forge test --fork-url "$RH_RPC" -vvv
+
+  js:
+    name: keeper / indexer / web / site
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with: {version: 9}
+      - uses: actions/setup-node@v4
+        with: {node-version: 22, cache: pnpm}
+      - run: pnpm install --frozen-lockfile
+      - name: typecheck keeper
+        run: pnpm --filter @callhouse/keeper typecheck
+      - name: build keeper
+        run: pnpm --filter @callhouse/keeper build
+      - name: keeper unit tests
+        run: pnpm --filter @callhouse/keeper test
+      - name: typecheck indexer
+        run: pnpm --filter @callhouse/indexer typecheck
+      - name: indexer tests
+        run: pnpm --filter @callhouse/indexer test
+      - name: lint web
+        run: pnpm --filter @callhouse/web lint
+      - name: build web
+        run: pnpm --filter @callhouse/web build
+      - name: web tests
+        run: pnpm --filter @callhouse/web test
+      - name: typecheck site
+        run: pnpm --filter @callhouse/site typecheck
+      - name: lint site
+        run: pnpm --filter @callhouse/site lint
+      - name: build site
+        run: pnpm --filter @callhouse/site build
+
+  copy-lint:
+    name: copy-lint (compliance)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: {node-version: 22}
+      - name: forbidden + required copy (site + web)
+        run: node scripts/copy-lint.mjs

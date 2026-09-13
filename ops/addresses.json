@@ -1,0 +1,332 @@
+{
+  "_readme": "Callhouse address book. Every entry carries the call that proved it. `confirmed: true` means an eth_getCode or eth_call was actually run against a chain-4663 RPC and returned the stated result. Never add an address here without that check, and never copy one out of a frontend bundle without re-deriving it from chain state.",
+  "_reconfirmedAt": "2026-09-12T18:36:00Z",
+  "_reconfirmedAtBlock": 61322378,
+  "_reconfirmedBy": "ops pass, cast 1.3.5 against https://rpc.mainnet.chain.robinhood.com. Every `confirmed: true` row on chain 4663 below was re-read in this pass, not copied from recon.",
+  "_sources": [
+    "ops/recon/R1-overcall-registry.md",
+    "ops/recon/R2-R9-seaport-order-shape.md",
+    "ops/recon/R3-overcall-api.md",
+    "ops/recon/R4-valorem-abi.md",
+    "ops/recon/R5-price-feed.md",
+    "ops/recon/R7-R8-testnet-explorer.md",
+    "ops/recon/R12-overcall-discovery.md",
+    "ops/recon/live-option-series.json",
+    "ops/recon/sample-overcall-order.json"
+  ],
+
+  "_TRAP_JUGGERNAUT_REGISTRY": {
+    "severity": "would silently collateralise the vault against the wrong token",
+    "what": "Overcall's frontend config object for chain 4663 has BOTH a `registries` map (one registry per market) AND a top-level `registry` key. The top-level key is 0x65dD407955912Be814f723724cE60f91ebd72616 — that is the JUGGERNAUT memecoin market, NOT NVDA. It is only the frontend's fallback default.",
+    "doNotWire": "0x65dD407955912Be814f723724cE60f91ebd72616",
+    "wireThisInstead": "0x8E973cE1A6884E28Ad3E377d5f670Bc0b463f4EA",
+    "whyItIsNotCaught": "Both are the same 5,905-byte OvercallRegistry bytecode and both answer every getter. The only difference is the immutable `collateralToken`.",
+    "howItIsCaughtNow": "Vault's constructor requires registry.collateralToken() == asset, registry.exerciseToken() == usdg and registry.clearinghouse() == clear (contracts/src/Vault.sol, RegistryAssetMismatch). script/Deploy.s.sol repeats the three checks in _preflight before broadcasting. Deploying the JUGGERNAUT registry against NVDA reverts."
+  },
+
+  "_notStale": "Addresses in this file are immutable contract addresses and do not go stale. Cycle data — option ids, strikes, exerciseTimestamp, expiryTimestamp — DOES go stale weekly and is deliberately NOT in this file. Read it live from the registry, or see ops/recon/live-option-series.json for the cycle-1 snapshot.",
+
+  "chains": {
+    "4663": {
+      "name": "Robinhood Chain",
+      "chainId": 4663,
+      "chainIdHex": "0x1237",
+      "type": "Arbitrum Orbit L2, settles to Ethereum mainnet",
+      "nativeCurrency": "ETH",
+      "rpc": {
+        "primary": "https://rpc.mainnet.chain.robinhood.com",
+        "backup": "https://robinhood-rpc.publicnode.com",
+        "dead": ["https://rpc.arrowrpc.com"],
+        "_backupLimitation": "The publicnode backup REJECTS eth_getLogs over old ranges with 'Archive requests require a personal token'. It is fine for eth_call / eth_getCode / eth_blockNumber and for recent-range logs. The indexer must use the primary.",
+        "_userAgentGotcha": "Both public RPCs return HTTP 403 to a client that sends no User-Agent (python urllib does this by default). Set one. curl and cast are fine."
+      },
+      "explorers": {
+        "blockscout": {
+          "url": "https://robinhoodchain.blockscout.com",
+          "apiUrl": "https://robinhoodchain.blockscout.com/api",
+          "canonical": true,
+          "hasVerificationApi": true,
+          "_cloudflare": "Behind a Cloudflare managed challenge that keys on the ABSENCE of a Referer header. Any Referer value at all clears it. Browsers send one automatically, so links from the web app work; server-side clients (forge, curl, the indexer) get an HTML interstitial instead of JSON. Use ops/bsproxy.js. Do not build anything that depends on this API without it.",
+          "_rateLimit": "Hosted Blockscout instance; throttles anonymous traffic with status=0 'Too many requests'. Get a key from https://dev.blockscout.com for deploy-day verification.",
+          "urlPatterns": {
+            "address": "https://robinhoodchain.blockscout.com/address/{address}",
+            "token": "https://robinhoodchain.blockscout.com/token/{address}",
+            "tx": "https://robinhoodchain.blockscout.com/tx/{txHash}",
+            "block": "https://robinhoodchain.blockscout.com/block/{number}",
+            "source": "https://robinhoodchain.blockscout.com/address/{address}?tab=contract"
+          }
+        },
+        "alternates": {
+          "_note": "Display only. None is a Blockscout, none has a contract-verification API, none should be depended on programmatically.",
+          "robinscan": "https://robinscan.io",
+          "hoodscan": "https://hoodscan.co",
+          "stonkscan": "https://stonkscan.io",
+          "_preferredNonCloudflareLink": "https://stonkscan.io — same /address|/tx|/token/{x} shape, no redirects, no Cloudflare gate."
+        }
+      },
+
+      "contracts": {
+        "valoremClear": {
+          "address": "0x9a7b40e5c1dB1Af822ef091c990b58b02C78C0C0",
+          "what": "ValoremOptionsClearinghouse ('Valorem Clear'). Unmodified upstream valorem-core @6436c823, solc 0.8.16. Holds the collateral, mints the option ERC-1155 and the claim NFT, settles exercise. The vault writes here directly and keeps its own claim NFT.",
+          "chainId": 4663,
+          "confirmed": true,
+          "evidence": "eth_getCode -> 16110 bytes (re-read 2026-09-12 block 61322378). Sourcify exact_match 2026-09-10T13:24:56Z. eth_call option(0x7dc3fe3e..) returned the NVDA/USDG option struct with underlyingAmount 1e18, exerciseAmount 246000000. feesEnabled() -> false, feeBps() -> 15, feeTo() -> 0xdAe7e82A....",
+          "liveState": {
+            "feesEnabled": false,
+            "feeBps": 15,
+            "feeTo": "0xdAe7e82A2E7D566C67E87C164B05a1C560190782",
+            "_feeSwitchWarning": "setFeesEnabled(bool) is owner-only with NO timelock. The 15 bps is charged on NOTIONAL, not premium, and write() pulls underlyingAmount*n + fee in one transferFrom. If it flips on, Vault.rollOpen reverts ValoremFeeNotAccepted until the admin Safe calls acceptValoremFee(true). That is deliberate."
+          },
+          "abi": "ops/abis/ValoremClear.json"
+        },
+        "seaport16": {
+          "address": "0x0000000000000068F116a894984e2DB1123eB395",
+          "what": "Seaport 1.6, canonical deployment. The vault is the OFFERER; it authorises an order hash on-chain via seaport.validate() and answers EIP-1271 for that hash.",
+          "chainId": 4663,
+          "confirmed": true,
+          "evidence": "eth_getCode -> 23981 bytes. information() -> ('1.6', domainSeparator 0xa6b20d2b6f71c703cd333de0c921d303988fb481ff2982df74a21e19af3730b0, conduitController 0x00000000F9490004C11Cef243f5400493c00Ad63). Re-read 2026-09-12."
+        },
+        "seaportConduitController": {
+          "address": "0x00000000F9490004C11Cef243f5400493c00Ad63",
+          "what": "Seaport ConduitController. Present on this chain but UNUSED by Overcall and unused by us — every Overcall order carries conduitKey 0x00..00 and Seaport pulls the ERC-1155 directly.",
+          "chainId": 4663,
+          "confirmed": true,
+          "evidence": "eth_getCode -> 8820 bytes; matches the controller Seaport's own information() reports.",
+          "_trap": "getConduit(bytes32(0)) on 4663 returns conduit 0xf9ed144bacaed98d0f3899b8b56c965d1a966d08 with exists=true, and there IS real conduit runtime code at that address. Seaport does NOT use it — it special-cases conduitKey == 0 and transfers directly. Any code shaped `if (conduitKey != 0) approve(getConduit(conduitKey))` must keep the `!= 0` guard. AdapterSeaport's constructor does."
+        },
+        "usdg": {
+          "address": "0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168",
+          "what": "USDG, the exercise asset and the premium currency. 6 decimals. Paxos-issued, behind a proxy.",
+          "chainId": 4663,
+          "confirmed": true,
+          "evidence": "eth_getCode -> 170 bytes (proxy). decimals() -> 6. Matches registry.exerciseToken() on all 11 Overcall registries.",
+          "decimals": 6
+        },
+        "nvdaStockToken": {
+          "address": "0xd0601CE157Db5bdC3162BbaC2a2C8aF5320D9EEC",
+          "what": "NVDA Stock Token — the vault's underlying asset and Valorem's underlyingAsset. 18 decimals, beacon proxy. A debt security issued by Robinhood Assets (Jersey) Limited, not equity.",
+          "chainId": 4663,
+          "confirmed": true,
+          "evidence": "eth_getCode -> 283 bytes (beacon proxy). symbol() -> 'NVDA'. decimals() -> 18. oraclePaused() -> false. uiMultiplier() -> 1000775159164630595. Matches registry.collateralToken() on the NVDA registry. Re-read 2026-09-12.",
+          "decimals": 18,
+          "beacon": "0xe10b6f6b275de231345c20d14ab812db62151b00",
+          "implementation": "0xb35490d6f9163DE4F80d88dc75c3516eb64C5aE2",
+          "_uiMultiplier": "ERC-8056 display multiplier. DISPLAY ONLY. The vault's internal maths use raw balances, and the Chainlink answer ALREADY has the multiplier applied — never apply it twice.",
+          "_oraclePaused": "An issuer broadcast flag on the token. Vault._requireOracleLive() staticcalls it and reverts OraclePaused when true, so the vault holds spot and writes nothing. It does not itself stop Chainlink transmitting."
+        },
+        "multicall3": {
+          "address": "0xcA11bde05977b3631167028862bE2a173976CA11",
+          "what": "Multicall3, canonical address. Used by the keeper and the web app to batch reads.",
+          "chainId": 4663,
+          "confirmed": true,
+          "evidence": "eth_getCode -> 3808 bytes. Re-read 2026-09-12."
+        },
+        "overcallFeeRecipient": {
+          "address": "0xdAe7e82A2E7D566C67E87C164B05a1C560190782",
+          "what": "Overcall's premium fee recipient AND ValoremClear.feeTo(). Receives consideration[1] — the 5% cut of gross premium — on every fill. An EOA, not a contract, not a Safe.",
+          "chainId": 4663,
+          "confirmed": true,
+          "isEOA": true,
+          "evidence": "eth_getCode -> 0 bytes. Appears as consideration[1].recipient in the one real filled NVDA order (orderHash 0xa11edb62..). ValoremClear.feeTo() returns the same address. USDG.balanceOf() showed exactly 0.200000 after that single 4.00 USDG fill — the 5% path is real and terminates at this EOA.",
+          "_wiring": "Passed to the Vault constructor as `overcallFeeRecipient` and stored immutable. AdapterSeaport rejects any proposed listing whose consideration[1].recipient is not this address (BadOvercallRecipient)."
+        },
+        "nvdaUsdFeed": {
+          "address": "0x379EC4f7C378F34a1B47E4F3cbeBCbAC3E8E9F15",
+          "what": "Chainlink AggregatorProxy, 'RHNVDA / USD', phaseId 1, 8 decimals. The vault's spot source for the OTM band gate and the UI. NEVER consulted in the settlement path. This is the same proxy Overcall's own frontend reads.",
+          "chainId": 4663,
+          "confirmed": true,
+          "evidence": "eth_getCode -> 9571 bytes. description() -> 'RHNVDA / USD'. decimals() -> 8. latestRoundData() -> (roundId 18446744073709552641, answer 21829793457 = $218.2979, startedAt 1789157011, updatedAt 1789157023 = Fri 2026-09-11 20:03:43 UTC). Re-read 2026-09-12 at block 61322378, age 22.5 h.",
+          "decimals": 8,
+          "heartbeatSeconds": 86400,
+          "deviationThresholdPct": 0.5,
+          "marketHours": "us_equities_24/5",
+          "_STALENESS_WARNING": "The 86400 s heartbeat is NOT honoured while the US equity market is shut. Observed gaps: 17 h 37 m worst intra-week, 52 h 04 m over a normal weekend, 78 h 14 m over the Labor Day weekend. Rounds restart at 00:00:54 UTC Monday (20:00 ET Sunday). A 24-hour staleness rule would block rollOpen every Saturday and Sunday and guarantee a 0% week. Vault.maxPriceAge ships at 4 days for exactly this reason (script/Deploy.s.sol MAX_PRICE_AGE), bounded in bytecode to [1 hour, 7 days].",
+          "_bindToTheProxy": "Bind to this proxy, never to aggregator(). The proxy exists to have its aggregator rotated; proposedAggregator() is currently zero.",
+          "secondaryProxy": "0xCF169363636D73dbBf77733629CB38919d14232d",
+          "underlyingAggregator": "0xC9d16E4f2569b9E3ea0468fD85844953713DC2a2"
+        },
+        "nvdaUsdFeedSecondary": {
+          "address": "0xCF169363636D73dbBf77733629CB38919d14232d",
+          "what": "Second Chainlink AggregatorProxy for RHNVDA/USD (SVR twin). Byte-identical to the primary proxy and wraps the same DualAggregator; returns the same answer and updatedAt. Held as a documented fallback only — the vault is wired to the primary.",
+          "chainId": 4663,
+          "confirmed": true,
+          "evidence": "Listed as `secondaryProxyAddress` in Chainlink's feeds-robinhood-mainnet.json; bytecode sha256 identical to the primary; same answer/updatedAt at the same block (ops/recon/R5-price-feed.md section 2.1)."
+        },
+        "usdgUsdFeed": {
+          "address": "0x61B7e5650328764B076A108EFF5fa7282a1B9aD2",
+          "what": "Chainlink AggregatorProxy 'USDG / USD', 8 decimals. Optional, display only — useful if the UI ever wants premium in USD rather than USDG. Nothing in the contracts reads it.",
+          "chainId": 4663,
+          "confirmed": true,
+          "evidence": "eth_getCode -> 9571 bytes. Re-read 2026-09-12."
+        },
+        "sequencerUptimeFeed": {
+          "address": null,
+          "what": "Chainlink L2 sequencer uptime feed. DOES NOT EXIST on chain 4663.",
+          "chainId": 4663,
+          "confirmed": true,
+          "evidence": "Chainlink's feeds-robinhood-mainnet.json has 57 feeds and ZERO sequencer/uptime entries. Overcall's own frontend hardcodes 0x0000...0000 for 4663.",
+          "_consequence": "The standard Arbitrum-style sequencer-down guard cannot be implemented here. Do not ship an interface that silently reads address(0). A sequencer stall surfaces instead as a stale price, which Vault._spotUsdg()'s StalePrice check does catch — because block.timestamp advances with the sequencer, the age check stalls with it rather than falsely reading fresh."
+        },
+        "tokenUriGenerator": {
+          "address": "0xE53cCB924d27f421a91b59087587fD866C5d64c7",
+          "what": "Valorem's TokenURIGenerator. Renders the option/claim ERC-1155 metadata. Informational; nothing in Callhouse calls it.",
+          "chainId": 4663,
+          "confirmed": true,
+          "evidence": "eth_getCode -> 9901 bytes. Sourcify exact_match. Re-read 2026-09-12."
+        },
+        "weth": {
+          "address": "0x0Bd7D308f8E1639FAb988df18A8011f41EAcAD73",
+          "what": "WETH on 4663. Not used by Callhouse. Recorded so nobody has to go looking.",
+          "chainId": 4663,
+          "confirmed": true,
+          "evidence": "eth_getCode -> 2202 bytes (ops/recon/R12-overcall-discovery.md section 1.3)."
+        }
+      },
+
+      "overcallRegistries": {
+        "_what": "One OvercallRegistry per market, one per collateral token. All 11 are the same 5,905-byte contract; they differ only in the immutable collateralToken baked into the bytecode at three sites. All use USDG as exerciseToken and the same Valorem Clear.",
+        "_marketWeUse": "NVDA",
+        "_ourRegistry": "0x8E973cE1A6884E28Ad3E377d5f670Bc0b463f4EA",
+        "_doNotUse": "0x65dD407955912Be814f723724cE60f91ebd72616 (JUGGERNAUT) — see _TRAP_JUGGERNAUT_REGISTRY at the top of this file.",
+        "_allReadLive": "Every row's bytecode size, collateralToken, cycleNumber and isWritingOpen below were re-read by this ops pass on 2026-09-12 at block 61322378. cycleNumber and isWritingOpen are live state and WILL change; they are recorded as a dated observation, not as configuration.",
+        "_deployer": "All 11 were deployed by 0x408adcFFebDF48EC23F1E3811A91AeD3cC951CC0, which is also the owner of all 11 and the sender of all 50 newOptionType calls on this chain.",
+        "markets": {
+          "NVDA": {
+            "address": "0x8E973cE1A6884E28Ad3E377d5f670Bc0b463f4EA",
+            "what": "OvercallRegistry for the NVDA market. THIS IS THE ONE CALLHOUSE BINDS TO.",
+            "chainId": 4663,
+            "confirmed": true,
+            "collateralToken": "0xd0601CE157Db5bdC3162BbaC2a2C8aF5320D9EEC",
+            "exerciseToken": "0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168",
+            "clearinghouse": "0x9a7b40e5c1dB1Af822ef091c990b58b02C78C0C0",
+            "deployBlock": 59378796,
+            "deployTx": "0xadb99c49fca5f5d3c7a8dd6b8f2a6edaff1d9204aaf9ce1d38b959822dfba9e9",
+            "indexerStartBlock": 59378796,
+            "observed": {"at": "2026-09-12T18:36:00Z", "bytes": 5905, "cycleNumber": 1, "isWritingOpen": true},
+            "evidence": "eth_getCode -> 5905 bytes; collateralToken() -> 0xd0601CE1..., exerciseToken() -> 0x5fc5360D..., clearinghouse() -> 0x9a7b40e5..., cycleNumber() -> 1, isWritingOpen() -> true. Fully verified source on Blockscout and Sourcify exact_match. Re-read 2026-09-12."
+          },
+          "AAPL": {"address": "0xB500929deb0100598D9A1392113a6F6D2A31C018", "what": "OvercallRegistry, AAPL market", "chainId": 4663, "confirmed": true, "collateralToken": "0xaF3D76f1834A1d425780943C99Ea8A608f8a93f9", "observed": {"at": "2026-09-12T18:36:00Z", "bytes": 5905, "cycleNumber": 1, "isWritingOpen": true}, "evidence": "eth_getCode -> 5905 bytes; collateralToken()/cycleNumber()/isWritingOpen() read live 2026-09-12."},
+          "AMZN": {"address": "0x195dcf905Ad9fDda76E492016E680B2D0F9F0877", "what": "OvercallRegistry, AMZN market", "chainId": 4663, "confirmed": true, "collateralToken": "0x12f190a9F9d7D37a250758b26824B97CE941bF54", "observed": {"at": "2026-09-12T18:36:00Z", "bytes": 5905, "cycleNumber": 1, "isWritingOpen": true}, "evidence": "eth_getCode -> 5905 bytes; collateralToken()/cycleNumber()/isWritingOpen() read live 2026-09-12."},
+          "TSLA": {"address": "0x66992dD28FB5267b5D817BF7d8D121E3787C5Ae1", "what": "OvercallRegistry, TSLA market", "chainId": 4663, "confirmed": true, "collateralToken": "0x322F0929c4625eD5bAd873c95208D54E1c003b2d", "observed": {"at": "2026-09-12T18:36:00Z", "bytes": 5905, "cycleNumber": 1, "isWritingOpen": true}, "evidence": "eth_getCode -> 5905 bytes; collateralToken()/cycleNumber()/isWritingOpen() read live 2026-09-12."},
+          "SPY": {"address": "0x6369CeCe2de602Ce1911039C123dc97E816715A9", "what": "OvercallRegistry, SPY market", "chainId": 4663, "confirmed": true, "collateralToken": "0x117cc2133c37B721F49dE2A7a74833232B3B4C0C", "observed": {"at": "2026-09-12T18:36:00Z", "bytes": 5905, "cycleNumber": 1, "isWritingOpen": true}, "evidence": "eth_getCode -> 5905 bytes; collateralToken()/cycleNumber()/isWritingOpen() read live 2026-09-12."},
+          "SPCX": {"address": "0x915148f98C0450251261654ffb6B54BA7005efFF", "what": "OvercallRegistry, SPCX market", "chainId": 4663, "confirmed": true, "collateralToken": "0x4a0E65A3EcceC6dBe60AE065F2e7bb85Fae35eEa", "observed": {"at": "2026-09-12T18:36:00Z", "bytes": 5905, "cycleNumber": 1, "isWritingOpen": true}, "evidence": "eth_getCode -> 5905 bytes; collateralToken()/cycleNumber()/isWritingOpen() read live 2026-09-12."},
+          "GME": {"address": "0xbDc50c663F33Cd6913Ce5598Ad23291046AA0335", "what": "OvercallRegistry, GME market. Deployed but NO cycle has ever been set — cycleNumber() is 0 and isWritingOpen() is false. This is the live proof that 'no cycle yet' is a reachable state the vault must handle (Vault.NoCycle / WritingNotOpen).", "chainId": 4663, "confirmed": true, "collateralToken": "0x1b0E319c6A659F002271B69dB8A7df2F911c153E", "observed": {"at": "2026-09-12T18:36:00Z", "bytes": 5905, "cycleNumber": 0, "isWritingOpen": false}, "evidence": "eth_getCode -> 5905 bytes; cycleNumber() -> 0; isWritingOpen() -> false. Read live 2026-09-12."},
+          "AI": {"address": "0xD1d56916f6E945F59C6E226A7429Da688532a113", "what": "OvercallRegistry, AI market (pool-priced, not an equity)", "chainId": 4663, "confirmed": true, "collateralToken": "0x2E8c31162b855A2ffa90F6F8634643Ad6F111e18", "observed": {"at": "2026-09-12T18:36:00Z", "bytes": 5905, "cycleNumber": 1, "isWritingOpen": true}, "evidence": "eth_getCode -> 5905 bytes; collateralToken()/cycleNumber()/isWritingOpen() read live 2026-09-12. Not on Sourcify, but byte-diff vs the verified NVDA registry differs only in the 20-byte collateralToken immutable at 3 offsets; trailing metadata CBOR is identical."},
+          "CASHCAT": {"address": "0x1E0F8a0ad60788a5563b8C1fc67c0C5Ad2527Bf1", "what": "OvercallRegistry, CASHCAT market (pool-priced, not an equity)", "chainId": 4663, "confirmed": true, "collateralToken": "0x020bfC650A365f8BB26819deAAbF3E21291018b4", "observed": {"at": "2026-09-12T18:36:00Z", "bytes": 5905, "cycleNumber": 1, "isWritingOpen": true}, "evidence": "eth_getCode -> 5905 bytes; collateralToken()/cycleNumber()/isWritingOpen() read live 2026-09-12. Not on Sourcify; same byte-diff argument as AI."},
+          "PONS": {"address": "0x365B4D099768F6B2fF07200e7d5AA14D899c1897", "what": "OvercallRegistry, PONS market (pool-priced, not an equity)", "chainId": 4663, "confirmed": true, "collateralToken": "0x39dBED3a2bd333467115dE45665cC57F813C4571", "observed": {"at": "2026-09-12T18:36:00Z", "bytes": 5905, "cycleNumber": 1, "isWritingOpen": true}, "evidence": "eth_getCode -> 5905 bytes; collateralToken()/cycleNumber()/isWritingOpen() read live 2026-09-12. Not on Sourcify; same byte-diff argument as AI."},
+          "JUGGERNAUT": {"address": "0x65dD407955912Be814f723724cE60f91ebd72616", "what": "OvercallRegistry, JUGGERNAUT market (pool-priced memecoin). THE TRAP ADDRESS — this is the value of the top-level `registry` key in Overcall's frontend config for 4663. It is NOT NVDA. Never wire it into a Callhouse vault.", "chainId": 4663, "confirmed": true, "collateralToken": "0xD7321801CAae694090694Ff55A9323139F043B88", "observed": {"at": "2026-09-12T18:36:00Z", "bytes": 5905, "cycleNumber": 1, "isWritingOpen": true}, "evidence": "eth_getCode -> 5905 bytes; collateralToken() -> 0xD7321801... (JUGGERNAUT token, NOT NVDA). Read live 2026-09-12."}
+        },
+        "owner": {
+          "address": "0x408adcFFebDF48EC23F1E3811A91AeD3cC951CC0",
+          "what": "Owner of all 11 Overcall registries, deployer of all 11, and the sender of every newOptionType and every setCycle on chain 4663. A single EOA — not a multisig.",
+          "chainId": 4663,
+          "confirmed": true,
+          "isEOA": true,
+          "evidence": "eth_getCode -> 0 bytes. owner() on the NVDA registry returns it; pendingOwner() is zero. All 50 NewOptionType logs on the clearinghouse have this address as tx.from.",
+          "_risk": "One Overcall key sets the strike grid for every market. It cannot touch funds — the registry has no payable, no receive, no fallback and not one transfer/transferFrom/approve/safeTransferFrom in the file — but it can replace the ladder the vault reads. renounceOwnership() is overridden to always revert RenounceDisabled(), so the registry can never become ownerless.",
+          "_race": "setCycle is gated by canReplaceCycle(), which is true only while NOTHING has been written on the current ladder. If Callhouse is the first writer of the week, the owner can legally swap the ladder between the keeper's cycle() read and the vault's write(). Vault.rollOpen re-checks registry.isApproved(optionId) and registry.cycleOf(optionId) == cycle.number in the SAME transaction as the Valorem write, and stores the cycleNumber it acted on. The keeper passing an optionId is a proposal, never a fact."
+        }
+      },
+
+      "seaportOrderConfig": {
+        "_what": "The exact Seaport order shape Overcall uses, copied from the one real filled NVDA order on chain (orderHash 0xa11edb6292fa1789a13419830d5bd1b5a0145954d3e8352bb6ff776ca67de522) and cross-checked against their live API and their client's zod schema. Do not invent a variant — a listing that does not match is either rejected by their API or invisible in their UI, and an invisible listing is an unfilled week.",
+        "conduitKey": "0x0000000000000000000000000000000000000000000000000000000000000000",
+        "zone": "0x0000000000000000000000000000000000000000",
+        "zoneHash": "0x0000000000000000000000000000000000000000000000000000000000000000",
+        "orderType": 1,
+        "orderTypeName": "PARTIAL_OPEN",
+        "startTime": "0",
+        "endTimeSource": "registry.exerciseTimestamp() — the Friday book close, NOT the Saturday expiry",
+        "totalOriginalConsiderationItems": 2,
+        "counterSource": "seaport.getCounter(vault), read live immediately before signing",
+        "saltStyle": "full random 256 bits, no domain prefix",
+        "approvalTarget": "0x0000000000000068F116a894984e2DB1123eB395",
+        "_approvalNote": "Because conduitKey is zero, Seaport moves the ERC-1155 itself. The vault calls clear.setApprovalForAll(SEAPORT, true) once in its constructor. Approving a conduit instead would leave every fill reverting.",
+        "offerItem": {"itemType": 3, "itemTypeName": "ERC1155", "token": "0x9a7b40e5c1dB1Af822ef091c990b58b02C78C0C0", "identifierOrCriteria": "the Valorem optionId", "startAmount": "N contracts", "endAmount": "N contracts (must equal startAmount — fixed price only)"},
+        "consideration": [
+          {"index": 0, "itemType": 1, "itemTypeName": "ERC20", "token": "0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168", "identifierOrCriteria": "0", "amount": "writerPerContract6 * N", "recipient": "the vault (must equal offerer)"},
+          {"index": 1, "itemType": 1, "itemTypeName": "ERC20", "token": "0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168", "identifierOrCriteria": "0", "amount": "feePerContract6 * N", "recipient": "0xdAe7e82A2E7D566C67E87C164B05a1C560190782"}
+        ],
+        "overcallFeeBps": 500,
+        "FEE_ROUNDING_RULE": {
+          "_severity": "gets this wrong and the listing signs, validates, and is then unfillable",
+          "feePerContract6": "floor(unitPrice6 * 500 / 10000)",
+          "writerPerContract6": "unitPrice6 - feePerContract6",
+          "consideration0": "writerPerContract6 * N",
+          "consideration1": "feePerContract6 * N",
+          "_why": "Round PER CONTRACT then multiply. Rounding on the total produces consideration amounts that are not divisible by the order size, and because every Overcall order is PARTIAL_OPEN, Seaport rejects a partial fill with InexactFraction. The listing silently becomes full-fill-only.",
+          "_minimumUnitPrice6": 20,
+          "_minimumWhy": "Below 20 USDG base units the 5% floors to zero and Overcall's schema rejects the order ('This premium is too small to carry the protocol fee').",
+          "_implementation": "contracts/src/Policy.sol splitPremium(); enforced on-chain by contracts/src/lib/SeaportOrderLib.sol (BadFeeSplit, OvercallFeeRoundsToZero, PremiumNotDivisibleByOrderSize)."
+        },
+        "signature": {
+          "_constraint": "Overcall's zod schema accepts ONLY /^0x([0-9a-fA-F]{128}|[0-9a-fA-F]{130})$/ — exactly 64 bytes (EIP-2098 compact) or 65 bytes. An arbitrary-length EIP-1271 blob is rejected at the schema, before any on-chain check.",
+          "_whatWeSend": "A well-formed 65-byte placeholder. The vault authorises by hash on-chain (seaport.validate + listingHash) and its isValidSignature IGNORES the signature bytes entirely, answering 0x1626ba7e for the authorised hash and 0xffffffff for anything else.",
+          "_serverAcceptsContractOfferers": "Overcall's own protocol docs state check 8 as 'the signature verifies for offerer (EOA or ERC-1271)'. There is no maker allowlist, no API key and no registration step. Confirmed by probe: an arbitrary offerer passed every structural check and failed only at signature recovery."
+        },
+        "listingsApi": {
+          "post": "https://overcall.finance/api/orders?market=NVDA",
+          "postHeaders": {"content-type": "application/json"},
+          "postBody": "{ \"chainId\": 4663, \"components\": {...}, \"signature\": \"0x<64 or 65 bytes>\" }",
+          "_bodyShape": "The body is {chainId, components, signature}. There is NO optionId and NO maker field — both are derived server-side. Every uint in `components` is a DECIMAL STRING, and totalOriginalConsiderationItems is NOT sent (it lives in OrderParameters, not OrderComponents).",
+          "get": "https://overcall.finance/api/orders?optionId=&offerer=&status=&limit=",
+          "getOne": "https://overcall.finance/api/orders/{orderHash}",
+          "delete": "https://overcall.finance/api/orders/{orderHash}",
+          "_deleteDoesNotDelete": "DELETE only records a cancellation and forces a chain re-read. It returns 409 and the row if Seaport still considers the order live. To actually kill a listing: vault.cancelListing(components) or vault.invalidateAllListings().",
+          "successCodes": {"201": "created, body {listing:{...}} with listing.orderHash", "200": "identical orderHash re-POSTed — idempotent, so keeper retries are safe"},
+          "errorCodes": {"400": "zod schema", "401": "signature did not verify for the offerer", "409": "counter moved, or duplicate/already-filled order", "422": "an on-chain fact did not hold (option not approved, balance, approval, price ceiling)", "429": "rate limit — 20 open listings per writer per chain, plus a per-IP token bucket"},
+          "errorEnvelope": "{\"error\":\"<human string>\"}",
+          "_noCors": "The endpoint returns no Access-Control-Allow-Origin. Server-to-server only — never POST from the web app's browser code.",
+          "_freshness": "Rows older than 30 s are re-synced against the chain as part of serving them, so a GET ~30 s after POST is a real confirmation that the listing landed."
+        }
+      },
+
+      "ours": {
+        "_status": "NOT DEPLOYED. Every address below is null and is filled at deploy from the broadcast receipt. Anything that reads this file must treat null as 'not deployed yet', never as address(0).",
+        "_fillFrom": "contracts/broadcast/Deploy.s.sol/4663/run-latest.json, then mirror into the root .env.example consumers (VAULT, SAFE_ADMIN, SAFE_FEE, GUARDIAN, KEEPER).",
+        "vault": {"address": null, "what": "Callhouse NVDA vault (cNVDA). ERC-20 shares, Seaport offerer, Valorem writer.", "chainId": 4663, "confirmed": false, "evidence": "filled at deploy", "_deployScript": "contracts/script/Deploy.s.sol"},
+        "seaportOrderLib": {"address": null, "what": "SeaportOrderLib, a public library that must be deployed and linked into Vault. forge script links it automatically.", "chainId": 4663, "confirmed": false, "evidence": "filled at deploy"},
+        "safeAdmin": {"address": null, "what": "Admin Safe, 2-of-3. Holds DEFAULT_ADMIN_ROLE. Can set policy, fee recipient, deposit cap, maxPriceAge, accept the Valorem fee, unhalt writes, and grant/revoke roles. Cannot move depositor funds.", "chainId": 4663, "confirmed": false, "evidence": "filled at deploy", "threshold": "2/3", "_see": "ops/safes.md"},
+        "safeFee": {"address": null, "what": "Fee Safe. Receives the 10% protocol fee on harvested USDG. Holds no role on the vault at all.", "chainId": 4663, "confirmed": false, "evidence": "filled at deploy", "_see": "ops/safes.md"},
+        "guardian": {"address": null, "what": "Guardian, 1-of-1, separate hardware, different continent. Holds GUARDIAN_ROLE. Can haltWrites, cancelListing, invalidateAllListings, and rollClose from expiry+1h. Can never move tokens anywhere.", "chainId": 4663, "confirmed": false, "evidence": "filled at deploy", "threshold": "1/1", "_see": "ops/safes.md"},
+        "keeper": {"address": null, "what": "Keeper hot key (EOA). Holds KEEPER_ROLE. Proposes the weekly roll. Never custodies the option ERC-1155 and can never move funds out.", "chainId": 4663, "confirmed": false, "evidence": "filled at deploy", "_gasFloat": "~0.05 ETH on 4663", "_see": "ops/safes.md"},
+        "_priceFeedIsNotOurs": "The price feed was an open question at plan time (R5) and is now RESOLVED and third-party: Chainlink's RHNVDA/USD proxy 0x379EC4f7C378F34a1B47E4F3cbeBCbAC3E8E9F15, recorded under contracts.nvdaUsdFeed above. We deploy nothing for it."
+      },
+
+      "roles": {
+        "DEFAULT_ADMIN_ROLE": "0x0000000000000000000000000000000000000000000000000000000000000000",
+        "KEEPER_ROLE": "0xfc8737ab85eb45125971625a9ebdb75cc78e01d5c1fa80c4c6e5203f47bc4fab",
+        "GUARDIAN_ROLE": "0x55435dd261a4b9b3364963f7738a7a662ad9c84396d64be3365284bb7f0a5041",
+        "_derivation": "keccak256('KEEPER_ROLE') and keccak256('GUARDIAN_ROLE'), computed with cast keccak. Verify with: cast call $VAULT 'KEEPER_ROLE()(bytes32)' --rpc-url $RH_RPC"
+      }
+    },
+
+    "46630": {
+      "name": "Robinhood Chain Testnet",
+      "chainId": 46630,
+      "chainIdHex": "0xb626",
+      "_VERDICT": "USELESS for a Callhouse dry run. There is NO Valorem Clear on 46630 (eth_getCode = 0 bytes at the mainnet address, and the testnet Blockscout indexes no contract matching Valorem/Clearinghouse/OptionSettlement), and there is NO NVDA Stock Token — the official StockFactory has emitted exactly five Deployed events ever: TSLA, AMZN, PLTR, NFLX, AMD. The testnet Stock implementation also predates oraclePaused(), so the vault's write gate cannot be exercised there. Do dry runs on a MAINNET FORK plus a mock registry. Do not write code or docs that assume a working testnet deployment.",
+      "_whatItIsGoodFor": "A free smoke test of the deploy script, constructor wiring, role grants, Blockscout verification, the real Robinhood Stock token transfer/approve/uiMultiplier path and Ponder's live-chain sync — against TSLA instead of NVDA. Skip the Valorem/Seaport legs.",
+      "rpc": {"primary": "https://rpc.testnet.chain.robinhood.com/rpc", "backup": "https://robinhood-sepolia-rpc.publicnode.com"},
+      "explorers": {"blockscout": {"url": "https://explorer.testnet.chain.robinhood.com", "apiUrl": "https://explorer.testnet.chain.robinhood.com/api", "hasVerificationApi": true, "_noCloudflare": "Self-hosted, no Cloudflare gate, no observed throttling. forge verify-contract works directly against it."}},
+      "faucet": "https://faucet.testnet.chain.robinhood.com",
+      "contracts": {
+        "seaport16": {"address": "0x0000000000000068F116a894984e2DB1123eB395", "what": "Seaport 1.6, same canonical address as mainnet", "chainId": 46630, "confirmed": true, "evidence": "eth_getCode -> non-zero, same deployment (ops/recon/R7-R8-testnet-explorer.md A.2)"},
+        "valoremClear": {"address": null, "what": "Valorem Clear — DOES NOT EXIST on 46630", "chainId": 46630, "confirmed": true, "evidence": "eth_getCode at the mainnet address -> 0 bytes; zero matching contracts in the testnet Blockscout index"},
+        "nvdaStockToken": {"address": null, "what": "NVDA Stock Token — DOES NOT EXIST on 46630", "chainId": 46630, "confirmed": true, "evidence": "the official StockFactory's complete Deployed event log is TSLA, AMZN, PLTR, NFLX, AMD"},
+        "tslaStockToken": {"address": "0xC9f9c86933092BbbfFF3CCb4b105A4A94bf3Bd4E", "what": "Official testnet TSLA Stock Token. The substitute underlying for a testnet smoke test.", "chainId": 46630, "confirmed": true, "evidence": "StockFactory Deployed event + Blockscout token page (ops/recon/R7-R8-testnet-explorer.md A.3)"}
+      },
+      "_overcallMocksOn46630": {
+        "_status": "UNVERIFIED BY US except where noted. These came out of Overcall's frontend config for chain 46630 and describe a deployment that predates and does not match the mainnet one. They are recorded so nobody re-derives them, NOT because they are usable.",
+        "registryNVDA": {"address": "0xdFA1cab9cdFeA9fBC1fEbcE536EAE90648264A56", "what": "An OvercallRegistry on 46630 with cycleNumber 2 whose cycle has already EXPIRED (isCycleLive false, isWritingOpen false). Its clearinghouse() points at 0x0059Df7C..., which recon found present in one pass and absent in another — do not rely on it.", "chainId": 46630, "confirmed": true, "evidence": "eth_getCode -> 5905 bytes; cycleNumber() -> 2; isCycleLive() -> false"},
+        "clearinghouse": {"address": "0x0059Df7C6229373a5AFC0685B0EE8777f59BAcbc", "what": "Address the testnet registry reports as its clearinghouse. CONTRADICTED: the R7/R8 pass found no Valorem contract on 46630 at all. Treat as unusable until someone re-reads it.", "chainId": 46630, "confirmed": false, "evidence": "registry.clearinghouse() returns it; a separate eth_getCode pass found no Valorem deployment on this chain. Unresolved contradiction — see ops/recon/R7-R8-testnet-explorer.md."},
+        "mockNvda": {"address": "0x40ab39E8E1D626fa506CCDF917697975a102D1D7", "what": "Overcall's mock NVDA on 46630 — NOT an official Robinhood Stock Token", "chainId": 46630, "confirmed": false, "evidence": "frontend config; registry.collateralToken() on the testnet NVDA registry"},
+        "mockUsdg": {"address": "0xe3B032b565d494A994772AEFF9919CC9AC574bEF", "what": "Overcall's mock USDG on 46630", "chainId": 46630, "confirmed": false, "evidence": "frontend config; registry.exerciseToken() on the testnet NVDA registry"},
+        "mockNvdaUsdFeed": {"address": "0xcac7742b5542F155efCbD1dfA3F2DFda8dE90CB5", "what": "MOCK aggregator with a permissionless setAnswer(). Chainlink has no real feeds on 46630.", "chainId": 46630, "confirmed": false, "evidence": "ops/recon/R5-price-feed.md section 6"},
+        "mockSequencerUptimeFeed": {"address": "0x86301F34D3F29805A6784FB20A5B36374814A040", "what": "MOCK 'L2 Sequencer Uptime Status Feed'. Useful only to exercise code written against the interface — mainnet 4663 has no such feed.", "chainId": 46630, "confirmed": false, "evidence": "ops/recon/R5-price-feed.md section 6"},
+        "feeTo": {"address": "0xf73B2cB96aE0bBe1A3Ec3446f4C36D82CAaAAB82", "what": "Overcall's throwaway testnet deployer / fee recipient. Their own client throws FeeConfigError if this address is ever seen as the fee recipient on chain 4663.", "chainId": 46630, "confirmed": false, "evidence": "frontend config"}
+      }
+    }
+  }
+}

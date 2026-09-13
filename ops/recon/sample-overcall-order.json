@@ -1,0 +1,154 @@
+{
+  "_source": {
+    "note": "Real, on-chain-confirmed Overcall order on Robinhood Chain. OrderParameters decoded from the fulfillOrder calldata of the fill tx; cross-checked byte-for-byte against https://overcall.finance/api/orders?status=filled .",
+    "chainId": 4663,
+    "seaport": "0x0000000000000068F116a894984e2DB1123eB395",
+    "seaportVersion": "1.6",
+    "domainSeparator": "0xa6b20d2b6f71c703cd333de0c921d303988fb481ff2982df74a21e19af3730b0",
+    "orderHash": "0xa11edb6292fa1789a13419830d5bd1b5a0145954d3e8352bb6ff776ca67de522",
+    "fillTx": "0x013cd30b541372fa7f505dfb743a563f39e284b7d2805dbcb964b6a754ae720b",
+    "fillBlock": 61153997,
+    "fillTimestampUTC": "2026-09-12T13:49:12+00:00",
+    "fillSelector": "0xb3a34c4c",
+    "fillFunction": "fulfillOrder(((address,address,(uint8,address,uint256,uint256,uint256)[],(uint8,address,uint256,uint256,uint256,address)[],uint8,uint256,uint256,bytes32,uint256,bytes32,uint256),bytes),bytes32)",
+    "fulfillerConduitKey": "0x0000000000000000000000000000000000000000000000000000000000000000",
+    "fulfiller": "0x8684C0b2E23D0c699A1Ff4437e8d92258bc82905"
+  },
+  "parameters": {
+    "offerer": "0xE73d7021A3ef2808C3Dd8237982FcC5FA11275be",
+    "zone": "0x0000000000000000000000000000000000000000",
+    "offer": [
+      {
+        "itemType": 3,
+        "_itemTypeName": "ERC1155",
+        "token": "0x9a7b40e5c1dB1Af822ef091c990b58b02C78C0C0",
+        "identifierOrCriteria": "56885395977254369119998982131173877604217583767740146085872832926902011297792",
+        "_identifierHex": "0x7dc3fe3e6e640b0e22b2e3206a1ff607437e9e54000000000000000000000000",
+        "startAmount": "1",
+        "endAmount": "1"
+      }
+    ],
+    "consideration": [
+      {
+        "itemType": 1,
+        "_itemTypeName": "ERC20",
+        "token": "0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168",
+        "_tokenSymbol": "USDG",
+        "_tokenDecimals": 6,
+        "identifierOrCriteria": "0",
+        "startAmount": "3800000",
+        "endAmount": "3800000",
+        "recipient": "0xE73d7021A3ef2808C3Dd8237982FcC5FA11275be",
+        "_note": "95% of gross premium -> writer/offerer"
+      },
+      {
+        "itemType": 1,
+        "_itemTypeName": "ERC20",
+        "token": "0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168",
+        "_tokenSymbol": "USDG",
+        "_tokenDecimals": 6,
+        "identifierOrCriteria": "0",
+        "startAmount": "200000",
+        "endAmount": "200000",
+        "recipient": "0xdAe7e82A2E7D566C67E87C164B05a1C560190782",
+        "_note": "5% of gross premium -> Overcall fee recipient (== Valorem Clear feeTo())"
+      }
+    ],
+    "orderType": 1,
+    "_orderTypeName": "PARTIAL_OPEN",
+    "startTime": "0",
+    "endTime": "1789761600",
+    "_endTimeUTC": "2026-09-18T20:00:00+00:00 (== the option's exerciseTimestamp / Friday book close)",
+    "zoneHash": "0x0000000000000000000000000000000000000000000000000000000000000000",
+    "salt": "95941992777576660739888578361827826050802484697670100586800480598437555708740",
+    "_saltHex": "0xd41d3e5932ad2f6d51910cd86e5482e154a23ea77275d006d602712094dda344",
+    "conduitKey": "0x0000000000000000000000000000000000000000000000000000000000000000",
+    "_conduitNote": "ZERO conduit key. Transfers go straight through Seaport. Offerer called Clear.setApprovalForAll(SEAPORT, true), NOT a conduit.",
+    "totalOriginalConsiderationItems": 2
+  },
+  "counter": "0",
+  "signature": "0x110031b6ee7194d2f32d90a12bde37ea048c81c4094da7207a25edadb4c081ec35ae8045cafac3191fbc3c0be75eba15c62fccabf9f72508318f528f51ab56b01b",
+  "_signature": {
+    "length": 65,
+    "v": 27,
+    "r": "0x110031b6ee7194d2f32d90a12bde37ea048c81c4094da7207a25edadb4c081ec",
+    "s": "0x35ae8045cafac3191fbc3c0be75eba15c62fccabf9f72508318f528f51ab56b0",
+    "eip712Digest": "0x82a7ecd0f5f5e41573f4ae76a957201ccc49465979da780585b259b011e82150",
+    "recoveredSigner": "0xe73d7021a3ef2808c3dd8237982fcc5fa11275be",
+    "note": "plain 65-byte ECDSA from an EOA offerer (eth_getCode(offerer) == 0x). Not EIP-2098 compact, not EIP-1271."
+  },
+  "_underlyingOption": {
+    "source": "Valorem Clear NewOptionType log, block 60254180, tx 0xb068d8355b5376899f82287e8736843ad023372b1f13def32b7c8a7665faf378",
+    "underlyingAsset": "0xd0601CE157Db5bdC3162BbaC2a2C8aF5320D9EEC",
+    "underlyingSymbol": "NVDA",
+    "underlyingAmount": "1000000000000000000",
+    "exerciseAsset": "0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168",
+    "exerciseSymbol": "USDG",
+    "exerciseAmount": "246000000",
+    "_strike": "246.000000 USDG per 1e18 NVDA",
+    "exerciseTimestamp": 1789761600,
+    "_exerciseUTC": "2026-09-18T20:00:00+00:00",
+    "expiryTimestamp": 1789848000,
+    "_expiryUTC": "2026-09-19T20:00:00+00:00",
+    "_sourceCorrection": "Corrected during the adversarial verification pass. The original value cited tx 0xb7488de2320a49a2b8408ae82a26f55854f8f6e9b92172f04f02b0a61ae2f6a5, which is a DIFFERENT newOptionType call (block 60254094) that created the NVDA $226 strike optionId 0xf9e23d199282d4611ff78a93abe9f31de2d43398000000000000000000000000. All option parameters below were re-read from the real NewOptionType log and are correct."
+  },
+  "_liveOpenOrderSecondSample": {
+    "orderHash": "0xeda0150a4b4fa3dbdac9fb4aca507c9784f19b9024dc24c52c6993429ef4bded",
+    "chainId": 4663,
+    "offerer": "0x789A7490718CF944D6F2cA411ED53cDeFd56306a",
+    "optionId": "873393324505681306211742772675693943830305973181304956549530887026947129344",
+    "quantity": "21",
+    "remaining": "21",
+    "unitPrice6": "50000",
+    "totalPrice6": "1050000",
+    "realisedPremium6": "0",
+    "startTime": "0",
+    "endTime": "1789761600",
+    "salt": "75794036196465706161439318797461512643738241961564828131921871581053974772386",
+    "counter": "0",
+    "status": "open",
+    "filledNumerator": "0",
+    "filledDenominator": "0",
+    "components": {
+      "salt": "75794036196465706161439318797461512643738241961564828131921871581053974772386",
+      "zone": "0x0000000000000000000000000000000000000000",
+      "offer": [
+        {
+          "token": "0x9a7b40e5c1dB1Af822ef091c990b58b02C78C0C0",
+          "itemType": 3,
+          "endAmount": "21",
+          "startAmount": "21",
+          "identifierOrCriteria": "873393324505681306211742772675693943830305973181304956549530887026947129344"
+        }
+      ],
+      "counter": "0",
+      "endTime": "1789761600",
+      "offerer": "0x789A7490718CF944D6F2cA411ED53cDeFd56306a",
+      "zoneHash": "0x0000000000000000000000000000000000000000000000000000000000000000",
+      "orderType": 1,
+      "startTime": "0",
+      "conduitKey": "0x0000000000000000000000000000000000000000000000000000000000000000",
+      "consideration": [
+        {
+          "token": "0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168",
+          "itemType": 1,
+          "endAmount": "997500",
+          "recipient": "0x789A7490718CF944D6F2cA411ED53cDeFd56306a",
+          "startAmount": "997500",
+          "identifierOrCriteria": "0"
+        },
+        {
+          "token": "0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168",
+          "itemType": 1,
+          "endAmount": "52500",
+          "recipient": "0xdAe7e82A2E7D566C67E87C164B05a1C560190782",
+          "startAmount": "52500",
+          "identifierOrCriteria": "0"
+        }
+      ]
+    },
+    "signature": "0xbb0484c18767f771eb8d27bd07550b21a6b0ff4262022dfe0a0b6a9029e1e01f680d1ee398dd870d47e4d0bd90b1799a3cf40ba8c1d9676fc6abfed4b866193f1c",
+    "createdAt": "2026-09-12T06:58:50.450Z",
+    "checkedAt": "2026-09-12T18:14:26.316Z"
+  }
+}

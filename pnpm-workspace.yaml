@@ -2,3 +2,4 @@ packages:
   - keeper
   - indexer
   - web
+  - site

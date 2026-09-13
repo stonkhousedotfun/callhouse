@@ -1,0 +1,54 @@
+/**
+ * The config schema's hard edges.
+ *
+ * WHY THIS FILE EXISTS: a keeper that boots on a malformed value discovers it at 20:00 UTC on
+ * a Friday, so this schema is deliberately strict. The edge pinned here: bigint fields.
+ * `BigInt('-1')` PARSES, and `KEEPER_MIN_GAS_WEI=-1` would then silently switch the low-gas
+ * alert off — the schema must refuse a negative at boot, loudly, like every other bad value.
+ *
+ * DELIBERATELY ABSENT: no RPC. loadConfig is pure; the module-level config it also builds reads
+ * the discard-port environment below.
+ */
+import assert from 'node:assert/strict';
+import { mkdtempSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { test } from 'node:test';
+
+/* ---- environment first: config.ts validates process.env the moment it is imported ---- */
+const scratch = mkdtempSync(join(tmpdir(), 'callhouse-keeper-config-'));
+process.env.KEEPER_ENV_FILE = '/dev/null';
+process.env.RH_RPC = 'http://127.0.0.1:9';
+process.env.REGISTRY = '0x8E973cE1A6884E28Ad3E377d5f670Bc0b463f4EA';
+process.env.VAULT = '0x1111111111111111111111111111111111111111';
+process.env.KEEPER_PK = `0x${'11'.repeat(32)}`;
+process.env.KEEPER_DB_PATH = join(scratch, 'keeper.db');
+process.env.KEEPER_LOG_LEVEL = 'fatal';
+
+const { loadConfig } = await import('./config.js');
+
+/** The minimal valid environment: the four keys without defaults. */
+const VALID: Record<string, string> = {
+  RH_RPC: 'http://127.0.0.1:9',
+  REGISTRY: '0x8E973cE1A6884E28Ad3E377d5f670Bc0b463f4EA',
+  VAULT: '0x1111111111111111111111111111111111111111',
+  KEEPER_PK: `0x${'11'.repeat(32)}`,
+};
+
+test('bigint fields reject a negative value loudly, naming the key', () => {
+  assert.throws(() => loadConfig({ ...VALID, KEEPER_MIN_GAS_WEI: '-1' }), /KEEPER_MIN_GAS_WEI: must not be negative/);
+  assert.throws(() => loadConfig({ ...VALID, KEEPER_UNIT_PRICE_USDG6: '-20' }), /KEEPER_UNIT_PRICE_USDG6: must not be negative/);
+  assert.throws(() => loadConfig({ ...VALID, KEEPER_MIN_GAS_WEI: 'abc' }), /KEEPER_MIN_GAS_WEI: not an integer/);
+});
+
+test('bigint fields parse zero and positive values, and defaults land when absent', () => {
+  const parsed = loadConfig({ ...VALID, KEEPER_MIN_GAS_WEI: '0', KEEPER_UNIT_PRICE_USDG6: '20' });
+  assert.equal(parsed.KEEPER_MIN_GAS_WEI, 0n);
+  assert.equal(parsed.KEEPER_UNIT_PRICE_USDG6, 20n);
+  assert.equal(loadConfig(VALID).KEEPER_MIN_GAS_WEI, 10_000_000_000_000_000n);
+  assert.equal(loadConfig(VALID).KEEPER_UNIT_PRICE_USDG6, undefined);
+});
+
+test('the boot failure message points at keeper/.env.example, which has the keeper keys', () => {
+  assert.throws(() => loadConfig({}), /keeper\/\.env\.example/);
+});
