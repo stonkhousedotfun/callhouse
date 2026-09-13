@@ -52,8 +52,12 @@ Cycle window     book close Fri 20:00 UTC, expiry Sat 20:00 UTC — but bind to 
                  never to the wall clock
 ```
 
-Testnet 46630 exists and is **useless for a dry run**: no Valorem Clear, no NVDA Stock Token, and a
-`Stock` build that predates `oraclePaused()`. Rehearse on a mainnet fork plus a mock registry.
+Testnet 46630 **can** host a dry run (an earlier version of this paragraph said it could not; the
+R7-R8 adversarial re-check refuted that): Valorem Clear is byte-identical to mainnet, the NVDA
+registry is live on the new build with `isWritingOpen()`, and the mock USDG mints permissionlessly.
+Its cycles are hand-set by Overcall's operator and lapse, and there is no Chainlink RHNVDA feed
+there — so a fork with a mock registry is still the only place to compress a week into minutes.
+Evidence: `recon/R7-R8-testnet-explorer.md`.
 
 ---
 

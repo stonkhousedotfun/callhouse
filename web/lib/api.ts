@@ -385,13 +385,17 @@ export async function fetchAccount(address: Address): Promise<AccountRow | null>
 
 export async function fetchHealth(): Promise<HealthRow> {
   try {
-    const body = asRecord(await getJson(`${API_BASE}/health`, 4000));
+    // Ponder reserves `/health` for its own bare liveness; the app payload is `/v1/health`.
+    const body = asRecord(await getJson(`${API_BASE}/v1/health`, 4000));
+    const indexer = asRecord(body.indexer);
+    const lag = asRecord(body.lag);
+    const vault = asRecord(body.vault);
     return {
       ok: true,
-      lastBeat: toNumber(pick(body, "lastBeat", "last_beat", "keeperLastBeat", "ts")),
-      rpcLagBlocks: toNumber(pick(body, "rpcLag", "rpc_lag", "rpcLagBlocks", "lag")),
-      phase: toNumber(pick(body, "phase")),
-      cycleNumber: toNumber(pick(body, "cycleNumber", "cycle")),
+      lastBeat: toNumber(pick(indexer, "headTimestamp", "head", "headAt")),
+      rpcLagBlocks: toNumber(pick(lag, "blocks")),
+      phase: toNumber(pick(vault, "phase")),
+      cycleNumber: toNumber(pick(vault, "cycle")),
     };
   } catch {
     return { ok: false };

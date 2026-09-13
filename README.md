@@ -92,6 +92,7 @@ Lot size is 1.0000 Stock Token per contract. USDG has 6 decimals. Stock Tokens h
 | Read this | For |
 |---|---|
 | [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) | how the four packages fit, trust boundaries, and the eight things that look wrong but are not |
+| [`docs/WIRING.md`](docs/WIRING.md) | the runtime map: every service hop, the env var that carries it, and what is proven end to end |
 | [`docs/ACCOUNTING.md`](docs/ACCOUNTING.md) | the money maths — two ledgers, the accrual index, the redeem queue, fees |
 | [`SECURITY.md`](SECURITY.md) | threat model, trust assumptions, audit scope, how to report something |
 | [`contracts/README.md`](contracts/README.md) | building, testing and deploying the vault |
@@ -162,7 +163,7 @@ Do not guess the Seaport order shape. It was copied from a real filled Overcall 
 | Min list premium | 0.40% of spot / week |
 | Max utilization | 95% of idle NVDA |
 | Protocol fee | 10% of USDG harvested (filled weeks only) |
-| Deposit cap | 20–50 NVDA at launch |
+| Deposit cap | 20 NVDA at launch |
 | Max listings signed per cycle | 3 |
 
 Strike is the nearest Overcall rung inside the OTM band. If no rung qualifies, the vault holds spot and writes nothing.

@@ -1,4 +1,6 @@
-// GENERATED from ops/abis/OvercallRegistry.abi.json — do not hand-edit.
+// Derived from ops/abis/OvercallRegistry.abi.json — maintained by hand: no generator exists for
+// this file (unlike vault.ts, which scripts/gen-abis.mjs produces). Re-check it against the
+// canonical artifact whenever ops/abis changes.
 //
 // GROUND TRUTH (ops/recon/R1-overcall-registry.md): the cycle struct has NO status field. The
 // gates are isWritingOpen() / isCycleLive() / writeDeadline(), and writeDeadline() == the

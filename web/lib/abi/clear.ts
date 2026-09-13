@@ -1,4 +1,6 @@
-// GENERATED from ops/abis/ValoremClear.json — do not hand-edit.
+// Derived from ops/abis/ValoremClear.json — maintained by hand: no generator exists for this
+// file (unlike vault.ts, which scripts/gen-abis.mjs produces). Re-check it against the canonical
+// artifact whenever ops/abis changes.
 //
 // The deployed 0x9a7b40e5c1dB1Af822ef091c990b58b02C78C0C0 is the exact upstream
 // ValoremOptionsClearinghouse (valorem-core @6436c823, solc 0.8.16). Read surface only —

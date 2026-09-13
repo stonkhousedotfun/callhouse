@@ -67,6 +67,21 @@ Done, each verified by a run rather than by a report:
   mismatch is check 7). The run's commit ref was added.
 - `keeper/dryrun-out/` added to `.gitignore`. **The session's work is committed locally as
   `8ff8bef` (proofread fixes on top); not pushed — GitHub `main` is still `27d502a`.**
+- **Frontend/backend wiring audited and documented** (user request): the web↔indexer link is
+  sound (fixture contract green at both ends), and the two paths that carry no traffic are now
+  written down in the new `docs/WIRING.md` (runtime hop map, env-var tables, proof status):
+  web never reads the keeper's `/orders` (the W-13 fallback), and the indexer's HMAC relay has
+  no caller (the keeper POSTs to Overcall directly). Fixes landed: `fetchHealth` pointed at
+  Ponder-reserved `/health` → `/v1/health` with nested parsing; root `.env.example` dropped the
+  unread `NEXT_PUBLIC_WALLETCONNECT_ID` and gained `NEXT_PUBLIC_RPC_URL_2` + `OVERCALL_API_BASE`;
+  keeper `.env.example` gained `KEEPER_ENV_FILE` + `DRYRUN_SKIP_CYCLE3`; indexer `.env.example`
+  gained `DATABASE_PRIVATE_URL`; `web/lib/abi/clear.ts`/`registry.ts` headers no longer claim to
+  be generated (no generator exists — hand-maintained derivatives, per `web/README.md`). Stale
+  facts corrected: `contracts/README.md` 328→307 tests; halt wording now "blocks `rollOpen` and
+  `approveListing` only" in `contracts/README.md` and `docs/ARCHITECTURE.md` (verified against
+  `Vault.sol:677,732`); `ops/README.md` testnet paragraph brought in line with the R7-R8
+  refutation; root `README.md` cap 20–50→20. Gates: web 48/48 tests, lint, copy-lint, build all
+  green. The `Vault.sol` NatSpec (L115, L995) stays with the D-05 audit batch.
 
 ### Next, in order
 
@@ -229,7 +244,16 @@ Evidence lives in `ops/recon/`. Spec repairs are written up in `plan.md` section
 - [~] E-03 Two rehearsal weeks on a **mainnet fork with a mock registry** (the only way to time-warp a week into minutes). The keeper side is done (three weeks in K-19). Still missing: the indexer syncing the same fork (X-11) and the web app reading it (W-13)
 - [ ] E-04 One full cycle on **testnet 46630** — real Valorem + Seaport, Overcall's NVDA registry once their operator sets a fresh cycle (or our own MockRegistry deployed there), mock-NVDA collateral, self-filled listing. Needs: testnet deploy config, a stand-in price feed (no Chainlink RHNVDA on 46630), funded key from the faucet. Covers everything except Overcall's production listings API
 - [~] E-05 Audit scope doc: **drafted 2026-09-13 as `docs/AUDIT-SCOPE.md`**. Seven in-scope files (1,190 nSLOC) plus the deploy scripts for configuration review; out-of-scope dependencies with verified links (Zellic's Valorem reports, Seaport audits); 25 falsifiable properties and 6 money invariants to break; ranked areas of concern; prior evidence and what it does not prove; build instructions; severity scale. Checked once for accuracy and completeness, with every blocking/major finding fixed; the second check round did not run (usage limit) and the main session spot-checked the fixes. To finish: pin the engagement commit, then do the Appendix B housekeeping (below, D-05)
-- [ ] D-05 Housekeeping before the audit tag, from `docs/AUDIT-SCOPE.md` Appendix A/B: correct the `writesHalted` NatSpec (`Vault.sol` L115, L995) and `contracts/README.md` L117 to say halt blocks `rollOpen` **and** `approveListing`; rewrite the `IValoremClear.sol` header (it names vendored files that do not exist); fix `ACCOUNTING.md` §6 "fees on the premium only" (the fee is also charged on strike proceeds — decide whether that is the intended, disclosed design); `contracts/README.md` 328 → 307 tests; README cap "20–50" vs 20; `ops/addresses.json` has no `valoremLib` slot; `ACCOUNTING.md` §7 six invariants vs seven functions; re-derive line numbers in the scope doc and `ops/safes.md` §4 at the tag
+- [~] D-05 Housekeeping before the audit tag, from `docs/AUDIT-SCOPE.md` Appendix A/B. **Done
+  2026-09-13:** `contracts/README.md` L117 and `docs/ARCHITECTURE.md` L124 now say halt blocks
+  `rollOpen` **and** `approveListing`; `contracts/README.md` 328 → 307 tests; root README cap
+  "20–50" → 20; `ops/README.md` testnet paragraph aligned with the R7-R8 refutation. **Remaining:**
+  correct the `writesHalted` NatSpec (`Vault.sol` L115, L995); rewrite the `IValoremClear.sol`
+  header (it names vendored files that do not exist); fix `ACCOUNTING.md` §6 "fees on the premium
+  only" (the fee is also charged on strike proceeds — decide whether that is the intended,
+  disclosed design); `ops/addresses.json` has no `valoremLib` slot; `ACCOUNTING.md` §7 six
+  invariants vs seven functions; re-derive line numbers in the scope doc and `ops/safes.md` §4 at
+  the tag
 - [ ] E-06 External audit engaged, findings triaged (E-00 was internal, not this)
 - [ ] E-07 Bug bounty drafted, opens mainnet week 2
 

@@ -3,8 +3,9 @@
 How the four packages fit together, and why each boundary is where it is.
 
 For the money maths see [ACCOUNTING.md](./ACCOUNTING.md). For the threat model see
-[../SECURITY.md](../SECURITY.md). For the build plan and the recon evidence see `../plan.md` and
-`../ops/recon/`.
+[../SECURITY.md](../SECURITY.md). For the runtime map — who calls whom, over which env var, and
+what is proven — see [WIRING.md](./WIRING.md). For the build plan and the recon evidence see
+`../plan.md` and `../ops/recon/`.
 
 ---
 
@@ -121,8 +122,8 @@ Idle ──rollOpen()──► Listed ──lockBook()──► Exercisable ─�
   into `pendingFeeUsdg` and anyone can complete it later with `sweepFee()`.
 - `Settling` is set inside `rollClose` and is only observable mid-transaction.
 
-Pause and halt block `rollOpen` **only**. `queueRedeem`, `completeRedeem`, `claimUsdg`,
-`cancelListing`, `lockBook` and `rollClose` all keep working.
+Pause and halt block `rollOpen` and `approveListing` **only**. `queueRedeem`, `completeRedeem`,
+`claimUsdg`, `cancelListing`, `lockBook` and `rollClose` all keep working.
 
 ---
 
