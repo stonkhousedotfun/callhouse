@@ -53,13 +53,13 @@ placeholder.
 
 | Thing | State | Where |
 |---|---|---|
-| Terms of Use | adopted v1-2026-09-13 by owner decision, no counsel; gap sentences still render | `callhouse.finance/terms` |
+| Terms of Use | adopted v1-2026-09-13 by owner decision, no counsel; corrected v2-2026-09-13; gap sentences still render | `callhouse.finance/terms` |
 | Privacy notice | adopted v1-2026-09-13, same basis | `callhouse.finance/privacy` |
 | Perimeter disclosure | live since before this runbook; now links the terms instead of "the terms you accept here" | `callhouse.finance/legal`, `app.callhouse.finance/legal` |
 | Vulnerability reporting | section exists; address set 2026-09-13 (`security@callhouse.finance`) | `callhouse.finance/legal#reporting` |
 | `security.txt` | returns **200** since 2026-09-13, Contact line present | `callhouse.finance/.well-known/security.txt` |
 | Operator constants | six; the three contacts are set, name / jurisdiction / governing law still `undefined` | `lib/legal.ts` (site repo) |
-| Document version | `v1-2026-09-13` | `LEGAL_DOCS_VERSION` in `lib/legal.ts` (site repo) |
+| Document version | `v2-2026-09-13` (v1 adopted 2026-09-13; v2 the same day corrects the Terms' third-party clause: an oracle pause stops writing and listing, not settlement) | `LEGAL_DOCS_VERSION` in `lib/legal.ts` (site repo) |
 | Accept flow | none. Use is acceptance; the pages say so | — |
 | Geoblock | none. The US-person perimeter is disclosure-only, on every legal page, in bold | — |
 | Cookies / analytics | none on either domain, verified by grep and stated on `/privacy` | — |

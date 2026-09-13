@@ -75,9 +75,10 @@ export default function LegalPage() {
           issuer fails, the token&apos;s value does not survive independently of it.
         </li>
         <li>
-          The issuer can <strong>freeze or restrict transfers</strong>, and the token can pause its
-          own price oracle. Either event can stop this vault writing, settling, or paying out until
-          it is lifted. No Callhouse contract can override that.
+          The issuer can <strong>freeze or restrict transfers</strong>, which can stop this vault
+          writing, settling, and paying out tokens until it is lifted. The token can also pause its
+          own price oracle, which stops this vault writing and listing new calls; settlement does
+          not read the oracle. No Callhouse contract can override either.
         </li>
         <li>
           Corporate actions — splits, dividend adjustments — are expressed through an ERC-8056
