@@ -304,10 +304,24 @@ cast call $VAULT "pendingFeeUsdg()(uint256)" --rpc-url $RH_RPC   # before close:
 
 ## 7. Deploy-day checklist
 
+**The checks below are automated.** `script/Verify.s.sol` in `contracts/` (leekzor/callhouse-contracts)
+performs every one of them and more: the vault's and both libraries' bytecode byte for byte against the
+audited build, every immutable, the policy field by field, roles for the admin phase, and the Safe's
+build, threshold, owners, modules and guard. Run it, per `contracts/docs/DEPLOY.md`, instead of the
+`cast` calls; the calls stay here as a manual cross-check.
+
+**Launch plan: bootstrap admin, then handover.** The vault is deployed with the deployer key as
+`DEFAULT_ADMIN_ROLE` (`ADMIN` = deployer), configured from that key, and later handed to the admin
+Safe with `script/HandoverAdmin.s.sol`: `STEP=grant`, the Safe executes the smoke batch, then
+`STEP=renounce`, which refuses until the Safe has executed a transaction after the grant. Until that
+renounce, check 1 below reads the other way round (the deployer is admin) — use
+`Verify.s.sol` with `ADMIN_PHASE=bootstrap`. While the deployer is admin, that one key has every power
+listed in §1 "Can".
+
 ```bash
-# 1. Admin is the Safe, and the deployer is not an admin
+# 1. After the handover: admin is the Safe, and the deployer is not an admin
 cast call $VAULT "hasRole(bytes32,address)(bool)" 0x0000000000000000000000000000000000000000000000000000000000000000 $SAFE_ADMIN --rpc-url $RH_RPC   # true
-cast call $VAULT "hasRole(bytes32,address)(bool)" 0x0000000000000000000000000000000000000000000000000000000000000000 <deployer>  --rpc-url $RH_RPC   # false
+cast call $VAULT "hasRole(bytes32,address)(bool)" 0x0000000000000000000000000000000000000000000000000000000000000000 <deployer>  --rpc-url $RH_RPC   # false (true during bootstrap)
 
 # 2. Keeper and guardian are exactly who they should be, and are not each other
 cast call $VAULT "hasRole(bytes32,address)(bool)" 0xfc8737ab85eb45125971625a9ebdb75cc78e01d5c1fa80c4c6e5203f47bc4fab $KEEPER   --rpc-url $RH_RPC
@@ -332,7 +346,9 @@ cast call $CLEAR "isApprovedForAll(address,address)(bool)" $VAULT $SEAPORT --rpc
 # 6. The guardian claim, re-verified against the deployed source (§4)
 ```
 
-Then, and only then, the deployer renounces `DEFAULT_ADMIN_ROLE` — **after** confirming the Safe holds
-it, and never from the only account that holds it.
+The deployer renounces `DEFAULT_ADMIN_ROLE` only through `HandoverAdmin.s.sol STEP=renounce` — **after**
+the Safe holds it and has executed a transaction as admin, and never from the only account that holds it.
 
-Record every address in `ops/addresses.json` under `chains.4663.ours`, replacing the nulls.
+Record every address in `ops/addresses.json` under `chains.4663.ours`, replacing the nulls (add a
+`valoremLib` slot; the CREATE2 address for the current build is in `contracts/docs/DEPLOY.md`), and
+record which admin phase the vault is in.
