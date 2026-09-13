@@ -747,6 +747,21 @@ export function seaportVerdict(current: ListingStatus, status: SeaportOrderStatu
   return current;
 }
 
+/**
+ * The row status to record after a POST to Overcall.
+ *
+ * WHY: `status` carries two facts — how far Seaport has filled the order, and whether Overcall's
+ * book accepted it. Seaport is the authority on the first, so a POST outcome must never overwrite
+ * `partial`/`filled`/`cancelled`/`expired`. Before this, a partly filled listing whose repost the
+ * book kept refusing flipped `partial` → `post_failed` → (next poll) `partial` → … every retry,
+ * which read as churn in /state and /orders (found by the W-13 fork acceptance). The POST result
+ * still lands in `api_status`/`api_error`, which is what `isPostRetryable` keys on for a partial.
+ */
+export function postOutcomeStatus(current: ListingStatus | undefined, outcome: 'posted' | 'post_failed'): ListingStatus {
+  if (current === 'partial' || current === 'filled' || current === 'cancelled' || current === 'expired') return current;
+  return outcome;
+}
+
 function applySeaportStatus(orderHash: string, current: ListingStatus, status: SeaportOrderStatus): ListingStatus {
   const next = seaportVerdict(current, status);
 
@@ -1415,7 +1430,7 @@ async function postToOvercall(orderHash: Hex, json: OrderComponentsJson, cycleNu
     const returnedHash = result.listing?.orderHash;
     if (returnedHash !== undefined && returnedHash.toLowerCase() !== orderHash.toLowerCase()) {
       store.updateListing(orderHash, {
-        status: 'post_failed',
+        status: postOutcomeStatus(store.getListing(orderHash)?.status, 'post_failed'),
         api_error: `book answered the POST with a different orderHash: ${returnedHash}`,
       });
       await alert(
@@ -1428,7 +1443,7 @@ async function postToOvercall(orderHash: Hex, json: OrderComponentsJson, cycleNu
       return;
     }
     store.updateListing(orderHash, {
-      status: 'posted',
+      status: postOutcomeStatus(store.getListing(orderHash)?.status, 'posted'),
       posted_at: Date.now(),
       api_status: result.listing?.status ?? null,
       api_error: null,
@@ -1442,7 +1457,7 @@ async function postToOvercall(orderHash: Hex, json: OrderComponentsJson, cycleNu
     const serverMessage = error instanceof OvercallApiError ? error.serverMessage : null;
     const status = error instanceof OvercallApiError ? error.status : 0;
     store.updateListing(orderHash, {
-      status: 'post_failed',
+      status: postOutcomeStatus(store.getListing(orderHash)?.status, 'post_failed'),
       api_error: serverMessage ?? describeError(error),
     });
     await alert(

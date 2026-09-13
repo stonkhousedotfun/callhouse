@@ -47,7 +47,7 @@ process.env.KEEPER_PK = `0x${'11'.repeat(32)}`;
 process.env.KEEPER_DB_PATH = join(scratch, 'keeper.db');
 process.env.KEEPER_LOG_LEVEL = 'fatal';
 
-const { bookVerdict, decodeRollClose, isPostRetryable, resolveContractsAssigned, rollCloseAlertData, rollCloseMessage, seaportVerdict } =
+const { bookVerdict, decodeRollClose, isPostRetryable, postOutcomeStatus, resolveContractsAssigned, rollCloseAlertData, rollCloseMessage, seaportVerdict } =
   await import('./roll.js');
 type RollCloseSummary = import('./roll.js').RollCloseSummary;
 const { vaultAbi } = await import('./abi.js');
@@ -316,4 +316,21 @@ test('rollCloseAlertData: premiumUsdg and strikeProceedsUsdg beside the gross/fe
   assert.equal(unknown.strikeProceedsUsdg, null);
   assert.equal(unknown.assetsReturned, null);
   assert.equal(unknown.grossUsdg, '2044.079259');
+});
+
+test('postOutcomeStatus: a POST result never overwrites what Seaport says about fills', () => {
+  // Regression (W-13 fork acceptance): a partly filled listing whose repost the book refused
+  // flipped partial -> post_failed -> partial on every retry.
+  assert.equal(postOutcomeStatus('partial', 'post_failed'), 'partial');
+  assert.equal(postOutcomeStatus('partial', 'posted'), 'partial');
+  assert.equal(postOutcomeStatus('filled', 'post_failed'), 'filled');
+  assert.equal(postOutcomeStatus('cancelled', 'posted'), 'cancelled');
+  assert.equal(postOutcomeStatus('expired', 'post_failed'), 'expired');
+  // Book-side states still take the POST outcome.
+  assert.equal(postOutcomeStatus('approved', 'post_failed'), 'post_failed');
+  assert.equal(postOutcomeStatus('approved', 'posted'), 'posted');
+  assert.equal(postOutcomeStatus('post_failed', 'posted'), 'posted');
+  assert.equal(postOutcomeStatus(undefined, 'posted'), 'posted');
+  // A partial the book refused stays retryable through api_status, not through status.
+  assert.equal(isPostRetryable({ status: 'partial', api_status: null }), true);
 });
