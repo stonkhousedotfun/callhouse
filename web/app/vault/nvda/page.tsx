@@ -184,8 +184,8 @@ export default function VaultPage() {
                 </div>
               </div>
               <div className="rows" style={{ marginTop: 12 }}>
-                <div className="row">
-                  <span className="k">Gross premium</span>
+                <div className="row" title="USDG the vault received from buyers after Overcall's 5%, before the protocol fee. Strike proceeds excluded.">
+                  <span className="k">Premium received</span>
                   <span className="v">{fmtUsdg(last.premiumGrossUsdg)}</span>
                 </div>
                 <div className="row">

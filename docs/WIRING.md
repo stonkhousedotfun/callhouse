@@ -143,6 +143,15 @@ Do not "fix" these; they are different models of the same week:
 - Listing status — indexer: `approved | partially_filled | filled | cancelled | invalidated |
   expired`; keeper: `approved | posted | visible | post_failed | partial | filled | cancelled |
   expired | unfillable`.
+- Premium vs strike proceeds (W-21) — indexer `harvest`: `grossUsdg` is the vault's whole USDG take
+  (premium plus strike proceeds); `premiumGross` is premium as harvested,
+  AFTER Overcall's 5% and before the protocol fee (`Harvest.grossUsdg − RollClose.usdgFromAssignment`);
+  `premiumNet` = `premiumGross − fee`; `strikeProceedsUsdg` is the assigned collateral sold at the
+  strike; `creditedUsdg` = `premiumNet + strikeProceedsUsdg` (what holders were credited);
+  `premiumNetPerShare` is premium only, `usdgPerShare` is `creditedUsdg` per share and is NOT a return. `fill.premiumGross` is a different number: what buyers paid,
+  BEFORE Overcall's cut. Keeper `/cycles`: `gross_usdg6` still includes strike proceeds (the Harvest
+  event's own figure); `premium_gross_usdg6` and `strike_proceeds_usdg6` split it. Every figure named
+  `premium*` in either service is premium only.
 - JSON style — indexer: camelCase, bigints as decimal strings, money as `{raw, decimals,
   formatted}`; keeper `/state` and `/cycles`: raw SQLite rows in snake_case.
 
