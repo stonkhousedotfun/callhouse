@@ -1,84 +1,60 @@
-# Handoff — 2026-09-13
+# Handoff — 2026-09-13 (late)
 
-Callhouse is **not launchable yet**. The contracts and the keeper are proven on a mainnet fork.
-Legal, CI, the external audit, deployment and hosting are not done. The full tracker is
-`tasks.md`, and its "Session log" and "Next, in order" sections go deeper than this page.
+Callhouse is **not deployed and not audited**. The contracts, keeper, indexer and web app are
+proven on a mainnet fork. The public site and the docs are live. What remains needs the owner:
+the external audit, keys and Safes, the mainnet deploy, and the admin handover. The live launch
+sequence is `docs/LAUNCH-PLAN.md`. The full tracker is `tasks.md`.
 
-**Three private repositories since 2026-09-13** (user decision):
+**Four private repositories:**
 
-| Repo | Holds | Deploys |
+| Repo | Holds | Live at |
 |---|---|---|
-| `leekzor/callhouse` (this) | `web/`, `keeper/`, `indexer/`, `ops/`, `docs/`, trackers; `contracts/` is a git submodule | app.callhouse.finance, keeper, indexer on Railway |
-| `leekzor/callhouse-contracts` | the Foundry project, `docs/AUDIT-SCOPE.md`, `docs/ACCOUNTING.md`, `SECURITY.md` | the vault (not deployed) |
-| `leekzor/callhouse-site` | the landing, standalone | callhouse.finance on Railway |
+| `leekzor/callhouse` (this) | `web/`, `keeper/`, `indexer/`, `relay/`, `ops/`, `docs/`, trackers; `contracts/` is a git submodule pinned to 634bf55 | app.callhouse.finance (Railway service `web`; no vault yet) |
+| `leekzor/callhouse-contracts` | the Foundry project, deploy/verify/handover scripts, `docs/AUDIT-SCOPE.md`, `docs/DEPLOY.md`, `SECURITY.md` | not deployed |
+| `leekzor/callhouse-site` | the landing, standalone | https://callhouse.finance (push-to-deploy) |
+| `leekzor/callhouse-docs` | GitBook Git Sync source | https://docs.callhouse.finance (push-to-publish) |
 
-Clone with `git clone --recurse-submodules`. The 2026-09-13 protocol fee change (5% of premium
-only) landed before the split, so all three start from the same tree.
+Clone with `git clone --recurse-submodules`.
 
 ## State of the gates
 
 | Gate | State |
 |---|---|
-| Contracts | 310 unit+invariant pass, 21 fork tests pass against live chain 4663. Unaudited. Vault 23,426 B (margin 1,150) |
-| Keeper | typecheck clean, 66/66 tests |
-| Keeper dry run | **passed, three cycles**; re-run after the fee change at fork block 62142174, 20.9 s (cycle 3 fee 0.953962 USDG) |
-| Indexer / web / site | green locally. Never run against a live cycle. **Site deployed 2026-09-13**: Railway project `callhouse`, service `site`, healthy at its `*.up.railway.app` host; `callhouse.finance` + `www` attached (TLS validating), waiting on the two CNAMEs in Cloudflare |
-| CI on GitHub | billing fixed 2026-09-13; runs should go green on next push |
+| Contracts | 319 unit+invariant (14 suites), 21 fork tests vs live 4663. Vault 23,618 B (margin 958). Deploy rehearsal with real Safes passes (`script/rehearse-deploy.sh`) |
+| Keeper | 89/89 tests; `dryrun` and `dryrun:extended` pass on merged `main` (`keeper/DRYRUN.md`) |
+| Indexer | typecheck, fixtures, X-11 fork sync (1452 assertions) |
+| Web | lint, typecheck, build, 54 tests, copy-lint; W-13 fork acceptance |
+| Relay | 38 tests |
+| CI on GitHub | green in app, contracts and site. `RH_RPC` repo secret not set |
 
 ## Done on 2026-09-13
 
-- **Keeper dry run extended to three cycles** (`keeper/src/dryrun.ts`, record in `keeper/DRYRUN.md`).
-  Cycle 3 is the first real option exercise in this repo, on the real Valorem Clear. 9 of 23 were
-  assigned and a queued redeem settled. Every amount is asserted exactly.
-- **Keeper defect fixed** (`keeper/src/roll.ts`). A failed pre-close Valorem read used to publish
-  as "0 assigned". It is now "unknown" with a warning. 7 new tests cover it.
-- **Audit scope written** (`docs/AUDIT-SCOPE.md`). One accuracy and completeness round ran, and its
-  fixes were spot-checked by hand. The second check round was lost to the usage limit.
-- **`ops/safes.md` §4 corrected.** Its grep proof missed the fee transfer, which is a raw `.call`.
-- `keeper/dryrun-out/` added to `.gitignore`.
-- `keeper/DRYRUN.md` rewritten for the three-cycle run and **proofread against the run report**
-  (`report.md`, `run.json`, `keeper.db` in `keeper/dryrun-out/2026-09-13T05-49-32-373Z/`). Every
-  hash, block, gas figure, amount, address and alert matched; one error found and fixed (the
-  Overcall validator's check count, now R3's 0–12 table), and the run's commit ref added.
-
-Committed as `8ff8bef`:
-
-```
-.gitignore  HANDOFF.md  tasks.md  ops/safes.md  docs/AUDIT-SCOPE.md
-keeper/DRYRUN.md  keeper/README.md  keeper/src/dryrun.ts
-keeper/src/roll.ts  keeper/src/abi.ts  keeper/src/roll.test.ts  keeper/src/roll.close.test.ts
-```
+- **Two contract defects fixed**: registry lot size must be exactly 1e18; the redeem queue pays each
+  entry what its own shares earned.
+- **Protocol fee** 5% of premium only (user decision); strike proceeds fee-free.
+- **Deploy path**: the deployer key is the bootstrap admin (user decision), then `HandoverAdmin.s.sol`
+  grant → Safe smoke batch → renounce. `Verify.s.sol` checks bytecode, immutables, policy, roles and
+  the Safe.
+- **App launch code**: W-21 (premium vs strike proceeds), K-21, `PREMIUM_MARGIN_BPS`, indexer
+  Dockerfile, X-11, alert relay, K-22, W-13; three indexer defects and two keeper defects found by
+  the fork runs and fixed.
+- **Site** live with corrected copy; **docs** live on GitBook, audited claim by claim against the code.
 
 ## Decisions only you can make
 
-1. ~~**Protocol fee on strike proceeds.**~~ **Decided and implemented 2026-09-13:** 5% of premium
-   only, strike proceeds fee-free. See the afternoon session log in `tasks.md`.
-2. ~~**GitHub billing.**~~ **Done 2026-09-13.** Still open: add the `RH_RPC` repo secret.
-3. ~~**Counsel and operating entity**~~ Partially superseded 2026-09-13: the owner adopted
-   `/terms` and `/privacy` as `v1-2026-09-13` without counsel (boilerplate added, no facts
-   invented), and the three contact mailboxes exist (`legal@` / `privacy@` /
-   `security@callhouse.finance` → owner). Still genuinely open: the operating entity,
-   jurisdiction, governing law and GDPR controller — the legal pages keep rendering those gaps
-   in words until they exist. See `ops/launch-legal.md` §2, items 1, 2, 4, 5.
+1. **External audit**: which firm, and when to tag the commit (`LAUNCH-PLAN.md` §5).
+2. **Legal residue**: operating entity, governing law, GDPR controller (`ops/launch-legal.md` §2).
+3. **Keys**: Admin Safe 2/3 signers, fee Safe, guardian hardware (`ops/safes.md`).
+4. **`PREMIUM_MARGIN_BPS`**: defaults to 0 (list at the floor); 50 absorbs a normal oracle tick.
 
 ## Next, in order
 
-1. ~~Commit this work, then proofread `keeper/DRYRUN.md` against the run report.~~ Done and
-   pushed (2026-09-13), followed by the fee change and the repository split.
-2. ~~Fix GitHub billing (L-01)~~ Done. Legal's code half is done (site deployed, documents
-   adopted, contacts live); what remains is naming the operating entity, governing law and GDPR
-   controller (L-05's residue) — and `app.callhouse.finance` (web) is still not deployed.
-3. ~~Decide the fee question above.~~ Done. Fix W-21 (assigned-week yield labels) before launch.
-4. Audit prep: work through the D-05 housekeeping list in `tasks.md`, tag a commit in
-   `leekzor/callhouse-contracts`, point the `contracts/` submodule here at it, send
-   `contracts/docs/AUDIT-SCOPE.md`, and engage an auditor (E-06).
-5. Finish the fork rehearsal. The indexer still has to sync against a fork (X-11), and the web app
-   needs an acceptance test from a fresh wallet (W-13).
-6. Keeper follow-ups. K-21: the assigned-week alert calls strike proceeds "harvested". K-22 lists
-   the paths the dry run still does not cover.
-7. Keys and deploy: Admin Safe 2/3, guardian key, mainnet deploy per `ops/deploy.md`, cap 20 NVDA.
-8. Hosting and alerting: Railway services, apex DNS, uptime monitors, the alert webhook relay.
-9. Post one real 1-contract Overcall listing to settle EIP-1271 (L-04). Then publish four weeks.
+1. Audit (E-06). 2. Keys (L-02, L-03). 3. Mainnet deploy + handover (`LAUNCH-PLAN.md` §6–7).
+4. Point `web`, `indexer`, `keeper`, `relay` on Railway at the vault; uptime monitors (L-08, L-09).
+5. One real Overcall listing (L-04), then four published weeks.
+
+Smaller open items: keeper `/orders` fallback on the cycle page (`docs/WIRING.md` §7); rename the
+GitBook site title from "callhouse Docs" (GitBook UI); `RH_RPC` secret.
 
 ## Traps
 
@@ -91,10 +67,12 @@ keeper/src/roll.ts  keeper/src/abi.ts  keeper/src/roll.test.ts  keeper/src/roll.
   pnpm --filter @callhouse/keeper dryrun
   ```
 
+- Pass `--no-storage-caching` to every forked `forge script`/`forge test` run near anvil: forge's
+  RPC cache (`~/.foundry/cache/rpc/4663/`) can store anvil blocks and silently make later runs lie.
 - `contracts/` is a submodule. An empty `contracts/` means `git submodule update --init --recursive`
-  was never run, and the dry run then fails at the artifact link check. The dry run builds whatever
-  commit the submodule is pinned to, not the tip of `leekzor/callhouse-contracts`.
-- A change that spans repos (a contract change that alters amounts, copy rules, design tokens) is
-  paired commits. Land the contracts commit first, bump the pin here in the same commit as the
-  app-side changes that depend on it.
-- Web-scraping agents have left files at the repo root before. Run `git status` before committing.
+  was never run. `git submodule update` resets the pin to what this repo records.
+- A change that spans repos is paired commits. Land the contracts commit first, then bump the pin
+  here in the same commit as the app-side changes that depend on it. Copy that changes in `web/`
+  usually needs the same change in `callhouse-site` and `callhouse-docs`.
+- Several Claude sessions work in these trees at once. Run `git status` before committing, stage
+  only your own files, and push fast-forward only.

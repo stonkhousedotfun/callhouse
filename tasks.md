@@ -1,6 +1,6 @@
 # Callhouse — Tasks & Progress
 
-Companion to `plan.md`. Progress as of **2026-09-13**.
+Companion to `plan.md`. Progress as of **2026-09-13, 15:30 PT**. The launch sequence and its live status are in `docs/LAUNCH-PLAN.md`.
 
 > **Three repositories since 2026-09-13.** This file tracks the whole product and lives in the app
 > repo, `leekzor/callhouse` (web, keeper, indexer, ops). The contracts, `AUDIT-SCOPE.md`,
@@ -19,20 +19,20 @@ Milestones: M0 scaffold+recon → **M1 contracts on mocks** → **M2 contracts o
 
 | Gate | State |
 |---|---|
-| Unit + invariant tests | **310 passed, 0 failed, 0 skipped** across 12 suites (307 before the 2026-09-13 fee change; +2 fee guards in `VaultAssignment`, +1 invariant `invariant_feeNeverTouchesStrikeProceeds`) |
+| Unit + invariant tests | **319 passed, 0 failed** across 14 suites (310 after the fee change; +5 `VaultLotSize`, +3 and a fuzz in `VaultQueueFairness` for the two 2026-09-13 contract fixes) |
 | Fork tests vs live chain 4663 | **21 passed, 0 failed** (re-run after the fee change) (incl. `test_fork_writeAndListForReal`, 1.05M gas — a real write+list through live Valorem) |
-| `Vault` runtime size | 23,426 B (EIP-170 limit 24,576, margin 1,150; two linked libraries). 23,142 B before the fee change, measured at `cb82bf3` |
-| keeper | typecheck clean; **66/66 tests** across 8 files (59 on 2026-09-12, +7 for the assignment-count resolver) |
-| Keeper dry run (anvil fork of 4663) | **passed, three cycles**, re-run after the fee change (2026-09-13T17:42Z, fork block 62142174, 20.9 s; first run fork block 61720714, 27.9 s): filled OTM week, adopted unfilled week, and an ITM week with 9 of 23 exercised on the real Valorem Clear plus a queued redeem. Record: `keeper/DRYRUN.md` |
-| indexer | typecheck clean; API shape pinned to `ops/fixtures/api/` |
-| web | lint clean, build clean (7 routes), tests green |
-| site | typecheck + lint clean, Docker build green |
+| `Vault` runtime size | 23,618 B (EIP-170 limit 24,576, margin 958; two linked libraries, both CREATE2) |
+| keeper | typecheck clean; **89/89 tests** |
+| Keeper dry run (anvil fork of 4663) | **passed**: three cycles at default and non-default deposit, plus the K-22 extended harness (`EXTENDED DRY RUN PASSED`), all on merged `main` 2026-09-13. Record: `keeper/DRYRUN.md` |
+| indexer | typecheck clean; API shape pinned to `ops/fixtures/api/`; **X-11 fork sync passes** (1452 assertions); Dockerfile + `railway.json` |
+| web | lint, typecheck, build, 54 tests, copy-lint; **W-13 fork acceptance passes** |
+| site | **live on `callhouse.finance`** (Railway, push-to-deploy from `leekzor/callhouse-site`) |
 | Docker | **all three images build** (`callhouse-web`, `callhouse-site`, `callhouse-keeper` — incl. the better-sqlite3 load assertion) |
 | copy-lint (compliance) | 43 files in `web`, 20 in `site`, 0 violations; **7-case self-test runs on every invocation**; wrapped forbidden phrases caught by a full-buffer pass |
 | Recon unknowns resolved | 9 of 9 |
 | Real defects found and fixed | 13 in the first review + **18 in the second sweep** (keeper-focused, 2026-09-12; 38 raw findings, cross-confirmed, incl. the `.dockerignore` exclusion that kept the keeper image unbuildable) |
-| Audit scope | `contracts/docs/AUDIT-SCOPE.md` drafted and fact-checked (E-05); needs a pinned commit (a tag in `leekzor/callhouse-contracts`) and the Appendix B housekeeping |
-| Repositories | **split 2026-09-13**: `leekzor/callhouse` (app), `leekzor/callhouse-contracts` (submodule at `contracts/`), `leekzor/callhouse-site`; all private |
+| Audit scope | `contracts/docs/AUDIT-SCOPE.md` updated for the 2026-09-13 fixes (P-27, P-28, defects 14–15); needs a pinned tag in `leekzor/callhouse-contracts` (E-06) |
+| Repositories | **four, all private**: `leekzor/callhouse` (app), `leekzor/callhouse-contracts` (submodule at `contracts/`, pinned 634bf55), `leekzor/callhouse-site`, `leekzor/callhouse-docs` (GitBook, live on `docs.callhouse.finance`) |
 | Subagents run | 42 across the build workflows + 85 across the review + 4 in the second sweep + 29 on 2026-09-13 (dry-run cycle 3, audit scope, recording) |
 
 M0, M1 and M2 are complete. M3 is complete: the keeper's production modules have run three
@@ -45,6 +45,32 @@ state-reconciliation trio: unwitnessed `rollClose`, unservable authorised listin
 `/health` RPC-URL leak; the `.dockerignore` exclusion that kept the keeper image
 unbuildable). `ops/alerts.md` now documents the 13 kinds the keeper actually emits; the old
 36-code vocabulary is retired and mapped. The external audit is still ahead.
+
+### Session log — 2026-09-13 (late): launch plan parts 1–4
+
+Plan and live status: `docs/LAUNCH-PLAN.md`. Everything below is pushed.
+
+- **Contracts** (`leekzor/callhouse-contracts` 634bf55): two real defects found and fixed with PoCs
+  — a registry lot size other than 1e18 is refused (`UnexpectedLotSize`), and the redeem queue pays
+  each entry what its own shares earned (per-entry reward debt; before, a late joiner shared an
+  epoch's USDG pro rata). Bootstrap-admin deploy (user decision: the deployer key holds the admin
+  role first) with `HandoverAdmin.s.sol`; `Configure.s.sol` writes a Safe batch; `Verify.s.sol`
+  checks everything; rehearsal with real Safes on a fork, including negative tests. 319 + 21 tests.
+  **Trap:** forge's fork RPC cache was poisoned by anvil blocks — always `--no-storage-caching`.
+- **App**: CI green; W-21, K-21, `PREMIUM_MARGIN_BPS`, indexer deployable, X-11 (three indexer
+  defects), `relay/` (L-09 code), K-22 (dead-listing defect), W-13 (status flip-flop defect,
+  e5392fe); "unfilled, assigned N" label (1c3de3d); "Premium received" (ac69149); docs link in the
+  footer (877b11d); `ops/addresses.json` `valoremLib` slot and corrected guardian/admin notes.
+- **Site**: live on `callhouse.finance` with TLS, repo-connected. Copy corrected where the code
+  contradicted it (an unfilled week can still be assigned; anyone can close an hour after expiry;
+  an oracle pause is not a settlement stop; cap 20 NVDA; per-entry queue USDG), legal docs
+  `v2-2026-09-13`, docs link in nav and footer.
+- **Docs**: `leekzor/callhouse-docs` on GitBook Git Sync, live on `docs.callhouse.finance` (Cloudflare
+  1014 for about an hour while GitBook activated the hostname). A 132-agent audit checked 718 claims
+  against the code; 40 confirmed errors fixed (29823dd, 3cf2b4e).
+- **Not done here:** the keeper `/orders` fallback on the cycle page (`docs/WIRING.md` §7) — a
+  workflow was building it when this log was written; the GitBook site title ("callhouse Docs",
+  GitBook UI only).
 
 ### Session log — 2026-09-13 (evening): repository split
 
@@ -149,28 +175,17 @@ Done, each verified by a run rather than by a report:
 
 ### Next, in order
 
-1. **You, GitHub UI** (L-01): leekzor → Settings → Billing → Actions spending limit, then set the
-   `RH_RPC` secret. Until then no gate runs anywhere but locally.
-2. **Legal, start now** (L-05): counsel on `site/app/terms` + `privacy`, operating-entity constants,
-   a security.txt contact. Longest pole.
-3. ~~Decide the fee-on-strike-proceeds question~~ **Done 2026-09-13:** 5% of premium only,
-   implemented, tested, dry-run re-run, docs and copy aligned. Fix W-21 (assigned-week labels)
-   before launch.
-4. **Audit prep** (D-05 → E-05 → E-06): do the housekeeping list in `leekzor/callhouse-contracts`,
-   tag the engagement commit there, point this repo's `contracts/` submodule at the tag, send
-   `contracts/docs/AUDIT-SCOPE.md`, engage the auditor.
-5. **Finish the fork rehearsal** (E-03): indexer sync against a fork (X-11; the indexer already takes
-   address overrides, runs on PGlite without `DATABASE_URL`, and `END_BLOCK` bounds a replay), then
-   the web acceptance test from a fresh wallet including a fill from the keeper's `/orders` (W-13).
-6. **Keeper follow-ups** (K-21, K-22): persist `assetsReturned` / `usdgFromAssignment` and word the
-   assigned-week alert; cover `index.ts`, multi-exerciser assignment and guardian `rollClose`.
-7. **Keys, then deploy** (L-02, L-03, L-06, L-07): Admin Safe 2/3, guardian key on separate hardware,
-   mainnet deploy per `ops/deploy.md`, cap 20 NVDA.
-8. **Hosting and alerting** (W-19, W-20, L-08, L-09): four Railway services (site from
-   `leekzor/callhouse-site`; web, keeper, indexer from this repo), apex DNS, two uptime
-   monitors, the `ALERT_WEBHOOK` relay.
-9. **L-04**: one real 1-contract Overcall listing to settle EIP-1271 against their validator, then
+Superseded by `docs/LAUNCH-PLAN.md` (parts 5–7) as of 2026-09-13 late. In short:
+
+1. **Audit** (E-06): tag the engagement commit in `leekzor/callhouse-contracts`, re-derive line
+   numbers (D-05 residue), send `contracts/docs/AUDIT-SCOPE.md`, engage.
+2. **Legal residue** (L-05): operating entity, governing law, GDPR controller.
+3. **Keys** (L-02, L-03): Admin Safe 2/3 and fee Safe on 4663, guardian key on separate hardware.
+4. **Deploy** (L-06, L-07): bootstrap deploy, verify, configure, handover per `LAUNCH-PLAN.md` §6–7,
+   cap 20 NVDA. Then point `web`, `indexer`, `keeper`, `relay` at the vault (L-08, L-09).
+5. **L-04**: one real 1-contract Overcall listing to settle EIP-1271 against their validator, then
    four published weeks (L-10..13).
+6. `RH_RPC` repo secret (L-01 residue); keeper `/orders` fallback on the cycle page.
 
 ---
 
@@ -257,8 +272,8 @@ Evidence lives in `ops/recon/`. Spec repairs are written up in `plan.md` section
 - [x] K-18 First real keeper tests: 59/59 across 7 suites (`alerts`, `config`, `overcallApi`, `policy`, `roll`, `seaport`, `state`) — the package previously had a test script whose glob matched zero files
 - [x] K-19 Dry run executed and recorded (2026-09-13, `keeper/DRYRUN.md`). Three cycles on an anvil fork: (1) live series, filled, expired OTM, harvest claimed; (2) rolled while the keeper was asleep, adopted, unfilled, published 0; (3) **the keeper wrote and listed itself, the listing filled, the depositor queued 10 of 25 shares, the buyer exercised 9 of 23 on the real Valorem Clear**, `rollClose` emitted `RollClose(3, 14e18, 2025 USDG, 9)`, harvest 2044.079259 gross / 204.407925 fee / 1839.671334 net, `completeRedeem` paid 6.4 NVDA + 735.868533 USDG exactly, `claimUsdg` paid 1103.8028. Built by one implementer, attacked by an honesty auditor, a math reviewer and an independent runner, then re-run independently by the main session on a fresh fork
 - [x] K-20 Assignment-count hardening, found by that review: `contractsAssignedAt` swallowed a failed Valorem read into `0n`, indistinguishable from a real zero. It now returns null and warns; `resolveContractsAssigned` publishes the `RollClose` count, falls back to the pre-read only without the event, and flags a mismatch; the `roll_close` alert carries `contractsAssignedSource`. 7 new unit tests (`roll.test.ts`, new `roll.close.test.ts`). The published number is unchanged whenever the vault emits `RollClose`, which the deployed bytecode always does
-- [ ] K-21 Observability gap, not a wrong number: on an assigned week the `roll_close` alert and the cycle row call strike proceeds "harvested" (cycle 3 published 2044 USDG with no assignment wording), and `RollClose.assetsReturned` / `usdgFromAssignment` are decoded but not persisted, so `/cycles` cannot separate premium from returned principal. Needs two columns, alert wording and the `/cycles` shape
-- [ ] K-22 Dry-run gaps still open: `index.ts` (poll loop, SIGTERM), multiple exercisers or exercise across several txs, the Valorem exercise-fee branch (fees are off on the live chain), guardian `rollClose`, cancel / partial fill / relist budget, and a non-default `DRYRUN_DEPOSIT` (cycle 3's index and dust expectations assume no carried `usdgDust`)
+- [x] K-21 Observability: `assets_returned` and `usdg_from_assignment` persisted per cycle (migration), `/cycles` derives `premium_gross_usdg6` / `strike_proceeds_usdg6`, and the assigned-week `roll_close` alert names premium and strike proceeds separately. Asserted in the dry run and the extended harness (2026-09-13)
+- [x] K-22 Dry-run gaps: `keeper/src/dryrun-extended.ts` covers `index.ts` + SIGTERM, several exercisers across several txs, the Valorem fee on/accept branch, anyone-`rollClose` at expiry + 3600, cancel / partial fill / relist budget to `TooManyListings(3, 3)`, and a non-default `DRYRUN_DEPOSIT`. Found and fixed: dead listings left `partial` after a guardian cancel (retired on relist) and a POST outcome overwriting Seaport's fill status (e5392fe). Still open, with reasons: `keeper/DRYRUN.md` "Still open after these runs"
 
 ---
 
@@ -266,7 +281,7 @@ Evidence lives in `ops/recon/`. Spec repairs are written up in `plan.md` section
 
 - [x] X-01..08 Ponder config, schema, handlers for vault / Valorem / Seaport / registry / token; unfilled weeks stored as first-class rows with zeros
 - [x] X-09..10 `/v1/vault`, `/v1/cycles`, `/v1/account/:addr`, `/v1/listings`, `/health`, HMAC-gated `/v1/overcall/list`
-- [ ] X-11 Sync against a fork and assert the tables match chain state
+- [x] X-11 Sync against a fork and assert the tables match chain state: `indexer/scripts/fork-sync` (1452 assertions). Found and fixed three indexer defects (policy/feeRecipient/depositCap read at START_BLOCK, `usdg.claimed` missing `QueueSettled`, `bucketIndex` held in vault state)
 
 ---
 
@@ -277,8 +292,8 @@ Evidence lives in `ops/recon/`. Spec repairs are written up in `plan.md` section
 - [x] W-09..10 All components; required disclosures rendered verbatim
 - [x] W-11 copy-lint wired to CI — forbidden terms and required disclosures both enforced
 - [x] W-12 Mobile pass, no charts
-- [ ] W-21 Assigned-week labels overstate yield: `web/app/vault/nvda/page.tsx` "Gross premium" / "Net", `/activity` Gross and Net/TVL, `fmtRealizedWeek(netUsdg, tvl)` and `usdgPerShare(netUsdg, …)` sum `Harvest` amounts, which include strike proceeds on an assigned week; the indexer's `premiumNet`/`usdgPerShare` (`indexer/src/api/index.ts` ~L199–251, L448) do the same. Needs `settlement.assignmentUsdg` read into `web/lib/api.ts` and subtracted for premium figures. Disclosure accuracy, fix before launch
-- [ ] W-13 Acceptance test from a fresh wallet against a fork, **including a fill served from the keeper's own `/orders` payload** — the self-hosted fallback on `/vault/nvda/cycle` is the answer if Overcall's book rejects us, and it has never filled anything end to end
+- [x] W-21 Assigned-week labels: indexer `harvest.premiumGross/premiumNet/strikeProceedsUsdg/creditedUsdg/premiumNetPerShare` (premium figures exclude strike proceeds), web shows strike proceeds on their own line and in no ratio; fixtures regenerated. Follow-ups 1c3de3d ("unfilled, assigned N" for a no-buyer week Valorem assigned anyway) and ac69149 ("Premium received"); fields documented in `docs/WIRING.md` §6
+- [x] W-13 Fork acceptance from fresh wallets (`pnpm --filter @callhouse/web acceptance:fork`, Playwright with an injected EIP-1193 wallet): deposit, queue, claim, and a fill built from the keeper's `/orders` payload. The cycle page's own `/orders` fallback UI is separate work (`docs/WIRING.md` §7)
 
 ### Frontend split — two domains, two services (code written, nothing deployed)
 
@@ -287,8 +302,8 @@ Evidence lives in `ops/recon/`. Spec repairs are written up in `plan.md` section
 - [x] W-16 **Since the 2026-09-13 split the two copies live in different repositories (`web/app/globals.css` here, `app/globals.css` in `leekzor/callhouse-site`): change them in paired commits.** Design tokens duplicated, not imported: the token block in `web/app/globals.css` is copied into `site/app/globals.css` so `site/` builds with no dependency on `web/`. **The two must be changed in the same commit** or the domains drift
 - [x] W-17 **Since the split: this repo's `scripts/copy-lint.mjs` lints `web/`, its twin in `leekzor/callhouse-site` lints the landing; the FORBIDDEN tables must stay identical.** copy-lint now walks both packages under one rule set, and a missing package is a hard failure rather than a silent pass. CI `js` job typechecks and builds `@callhouse/site` alongside `web`
 - [x] W-18 **Since the split the site's Dockerfile and `railway.json` live in `leekzor/callhouse-site` with that repo as build context.** `site/Dockerfile` + `site/railway.json`, `web/Dockerfile` + `web/railway.json`; `output: "standalone"`, repo root as build context (a `site/`-scoped context cannot install — the lockfile is workspace-wide), per-service `watchPatterns` so one push does not rebuild both. Runbook: `ops/deploy.md`
-- [~] W-19 Two Railway services created and deployed from `main`. **Site half done 2026-09-13**: project `callhouse`, service `site`, deployed via `railway up` (repo NOT connected — pushes do not auto-deploy; connect in the dashboard), both URL variables set before the first build, contacts set later + rebuilt. `web` service still to create. Every `NEXT_PUBLIC_*` must be set as a build variable **before** the first build, because they are inlined by `next build` and not read at runtime
-- [~] W-20 DNS. `app.callhouse.finance` is a plain `CNAME`. **`callhouse.finance` is an apex**, and a `CNAME` at a zone apex is not valid DNS — the zone is on Cloudflare (active), which flattens an apex CNAME automatically. **2026-09-13**: both custom domains are attached on Railway (`@` → `knpvo8xp.up.railway.app`, `www` → `utodkt24.up.railway.app`); what remains is creating those two CNAME records (DNS only) in Cloudflare plus the www→apex 301. Attach the domains only after a deploy is healthy — done in that order; TLS validates once the records resolve
+- [~] W-19 Railway services. **Site done**: service `site`, repo-connected to `leekzor/callhouse-site` (pushes to `main` deploy), live on `callhouse.finance` + `www`. Services `web`, `indexer`, `keeper`, `relay` and a Postgres exist in project `callhouse` as of 2026-09-13 (another session, `ops/go-live-app.sh`); `web` was deploying. Every `NEXT_PUBLIC_*` must be set as a build variable **before** the first build
+- [x] W-20 DNS (Cloudflare, all DNS only): apex `callhouse.finance` (flattened CNAME) and `www` → Railway with `_railway-verify` TXT records, TLS live; `docs` → GitBook (`9cbc89af57-hosting.gitbook.io`), live 2026-09-13 14:54 PT; `app` → Railway (added by the go-live session)
 
 ---
 
@@ -309,19 +324,10 @@ Evidence lives in `ops/recon/`. Spec repairs are written up in `plan.md` section
 - [x] E-00b Second sweep, keeper-focused (2026-09-12): three auditors (correctness / adversarial / operator), 38 raw findings, 18 real defects fixed and re-verified — see K-17 and the status table. Also: copy-lint gained its self-test and a full-buffer pass, and `ops/alerts.md` was rewritten to match the emitted kinds
 - [x] E-01 Full cycle on an anvil fork: deposit → open → fill → expire OTM → close → claim → queue redeem. Covered by the keeper dry run (K-19), with a mock registry and a mock feed seeded from the real ones
 - [x] E-02 ITM variant with partial assignment: dry-run cycle 3, 9 of 23 exercised on the real clearinghouse (single exerciser, one tx; see K-22 for what that does not cover)
-- [~] E-03 Two rehearsal weeks on a **mainnet fork with a mock registry** (the only way to time-warp a week into minutes). The keeper side is done (three weeks in K-19). Still missing: the indexer syncing the same fork (X-11) and the web app reading it (W-13)
+- [x] E-03 Rehearsal on a mainnet fork with a mock registry: keeper (three cycles + extended harness), indexer (X-11) and web (W-13) all run against the fork
 - [ ] E-04 One full cycle on **testnet 46630** — real Valorem + Seaport, Overcall's NVDA registry once their operator sets a fresh cycle (or our own MockRegistry deployed there), mock-NVDA collateral, self-filled listing. Needs: testnet deploy config, a stand-in price feed (no Chainlink RHNVDA on 46630), funded key from the faucet. Covers everything except Overcall's production listings API
 - [~] E-05 Audit scope doc: **drafted 2026-09-13 as `docs/AUDIT-SCOPE.md`**. Seven in-scope files (1,190 nSLOC) plus the deploy scripts for configuration review; out-of-scope dependencies with verified links (Zellic's Valorem reports, Seaport audits); 25 falsifiable properties and 6 money invariants to break; ranked areas of concern; prior evidence and what it does not prove; build instructions; severity scale. Checked once for accuracy and completeness, with every blocking/major finding fixed; the second check round did not run (usage limit) and the main session spot-checked the fixes. To finish: pin the engagement commit, then do the Appendix B housekeeping (below, D-05)
-- [~] D-05 Housekeeping before the audit tag, from `docs/AUDIT-SCOPE.md` Appendix A/B. **Done
-  2026-09-13:** `contracts/README.md` L117 and `docs/ARCHITECTURE.md` L124 now say halt blocks
-  `rollOpen` **and** `approveListing`; `contracts/README.md` 328 → 307 tests (now 310); root README cap
-  "20–50" → 20; `ops/README.md` testnet paragraph aligned with the R7-R8 refutation. **Remaining:**
-  correct the `writesHalted` NatSpec (`Vault.sol` L115, and the halt function's NatSpec, shifted by
-  the fee change); rewrite the `IValoremClear.sol` header (it names vendored files that do not
-  exist); ~~fix `ACCOUNTING.md` §6~~ (resolved 2026-09-13: the code now matches it, 5% of premium
-  only); `ops/addresses.json` has no `valoremLib` slot; `ACCOUNTING.md` §7 six
-  invariants vs seven functions; re-derive line numbers in the scope doc and `ops/safes.md` §4 at
-  the tag
+- [~] D-05 Housekeeping before the audit tag. **Done 2026-09-13** in `leekzor/callhouse-contracts` (634bf55): `writesHalted` / `haltWrites` NatSpec, `IValoremClear.sol` provenance header, `ACCOUNTING.md` §5/§7, `Verify.s.sol` rewritten to check everything (bytecode, immutables, policy, roles, Safe); in this repo `ops/addresses.json` gained its `valoremLib` slot. **Remaining:** re-derive the line numbers in `AUDIT-SCOPE.md` and `ops/safes.md` §4 at the audit tag
 - [ ] E-06 External audit engaged, findings triaged (E-00 was internal, not this)
 - [ ] E-07 Bug bounty drafted, opens mainnet week 2
 
@@ -330,15 +336,15 @@ Evidence lives in `ops/recon/`. Spec repairs are written up in `plan.md` section
 ## Phase 7 — Launch (M7, M8)
 
 - [x] L-00 Repo on GitHub: `leekzor/callhouse` (**private**), `main` pushed with the full tree, forge-std/OpenZeppelin as submodules (2026-09-12)
-- [ ] L-01 CI green on every push. The workflow is committed and the full gate passes locally (forge unit+fork, keeper 59, indexer, web/site lint+build+tests, copy-lint self-test), but on GitHub every run dies as `startup_failure` before the first job — a one-step probe workflow fails identically, so the file is not the problem: it is account-level (Actions spending limit / private-repo minutes on the free `leekzor` plan; 2015 account, Actions enabled, token is leekzor's). Fix in the GitHub UI: Settings → Billing → spending limit. Until then the local gate is the gate. Also set the `RH_RPC` repo secret (archive RPC); the fork job falls back to the public endpoint without it
+- [~] L-01 CI green on every push: **green in all three repos since 2026-09-13** (billing fixed; the app workflow's duplicate pnpm version removed). Still open: the `RH_RPC` repo secret (archive RPC) — not set, so the fork job uses the public endpoint
 - [ ] L-02 Admin Safe 2/3 on 4663
 - [ ] L-03 Guardian key provisioned on separate hardware
 - [ ] L-04 One real 1-contract listing posted to Overcall to close out the EIP-1271 question (see Open questions)
 - [ ] L-05 Legal, the real blocker: counsel reviews `site/app/terms` + `site/app/privacy`. Both render "Draft — pending review by counsel" and copy-lint fails CI until `LEGAL_DOCS_VERSION` drops the `draft-` prefix in the same commit as adoption — that is deliberate, do not bypass it. Set the operating-entity constants (the site renders "no operating entity designated" until then — also deliberate). Set a real `Contact:` for `.well-known/security.txt` (the route 404s without one; a security.txt with no contact is worse than none)
-- [ ] L-06 Mainnet deploy, verify, configure roles, renounce deployer (D-04; runbook `ops/deploy.md`)
+- [ ] L-06 Mainnet deploy, verify, configure, admin handover (deployer key is the bootstrap admin, then `HandoverAdmin.s.sol` grant → Safe smoke batch → renounce; rehearsed in `contracts/script/rehearse-deploy.sh`; runbooks `contracts/docs/DEPLOY.md`, `ops/deploy.md`, `docs/LAUNCH-PLAN.md` §6–7)
 - [ ] L-07 Vault live, cap 20 NVDA
-- [ ] L-08 Hosting beyond the two frontends (W-19): the keeper Railway service (keeper/Dockerfile, volume mounted at `/data`, `PORT=8787`, `KEEPER_PK` as a runtime service variable — never a build ARG) and the indexer service. Plus the two external uptime monitors: keeper `/health` and the indexer health endpoint (`ops/alerts.md` §11, §26 — currently "not yet stood up")
-- [ ] L-09 Alerting delivery: `ALERT_WEBHOOK` pointed at a relay that wraps the JSON payload for Telegram/Discord — a raw Discord URL returns 400 forever (ops/alerts.md "Transport"). Webhook test is part of the Saturday `close-week.md` ritual
+- [~] L-08 Hosting beyond the frontends: Railway services `keeper`, `indexer`, `relay` and Postgres exist (2026-09-13, go-live session); nothing is deployed against a vault yet (there is none). Still to do: the keeper volume at `/data`, `KEEPER_PK` as a runtime variable (never a build ARG), and the two external uptime monitors (keeper `/health`, indexer `/v1/health`; `ops/alerts.md` §11, §26)
+- [~] L-09 Alerting delivery: `relay/` built (POST /alert with a bearer token → Discord and/or Telegram, 38 tests, Dockerfile + `railway.json`; `ops/deploy.md` §12). The keeper sends `ALERT_WEBHOOK_TOKEN` as `authorization: Bearer`. Remaining: deploy the Railway `relay` service, set its secrets, and run the webhook test in the Saturday `close-week.md` ritual
 - [ ] L-10..13 Publish four weekly results, including any "unfilled, 0"; raise the cap
 - [ ] L-14 Decide the PFE / SCHD second deploy
 
