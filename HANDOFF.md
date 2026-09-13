@@ -4,11 +4,16 @@ Callhouse is **not launchable yet**. The contracts and the keeper are proven on 
 Legal, CI, the external audit, deployment and hosting are not done. The full tracker is
 `tasks.md`, and its "Session log" and "Next, in order" sections go deeper than this page.
 
-**Pushed.** `main` on GitHub (`leekzor/callhouse`, private) carries the dry run, audit scope and
-wiring audit (`cb82bf3`) and, on top, the 2026-09-13 protocol fee change (5% of premium only).
-**Next structural step, decided by the user:** split into three private repos — `callhouse-contracts`,
-`callhouse-site`, and this repo as the app (web + keeper + indexer + ops), mounting contracts as a
-git submodule at `contracts/`.
+**Three private repositories since 2026-09-13** (user decision):
+
+| Repo | Holds | Deploys |
+|---|---|---|
+| `leekzor/callhouse` (this) | `web/`, `keeper/`, `indexer/`, `ops/`, `docs/`, trackers; `contracts/` is a git submodule | app.callhouse.xyz, keeper, indexer on Railway |
+| `leekzor/callhouse-contracts` | the Foundry project, `docs/AUDIT-SCOPE.md`, `docs/ACCOUNTING.md`, `SECURITY.md` | the vault (not deployed) |
+| `leekzor/callhouse-site` | the landing, standalone | callhouse.xyz on Railway |
+
+Clone with `git clone --recurse-submodules`. The 2026-09-13 protocol fee change (5% of premium
+only) landed before the split, so all three start from the same tree.
 
 ## State of the gates
 
@@ -50,16 +55,18 @@ keeper/src/roll.ts  keeper/src/abi.ts  keeper/src/roll.test.ts  keeper/src/roll.
    only, strike proceeds fee-free. See the afternoon session log in `tasks.md`.
 2. **GitHub billing.** Go to leekzor → Settings → Billing and raise the Actions spending limit. Then
    add the `RH_RPC` repo secret.
-3. **Counsel and operating entity** for `site/app/terms` and `privacy`, plus a security.txt contact.
+3. **Counsel and operating entity** for `app/terms` and `app/privacy` in `leekzor/callhouse-site`,
+   plus a security.txt contact.
 
 ## Next, in order
 
-1. ~~Commit this work, then proofread `keeper/DRYRUN.md` against the run report.~~ Done
-   (2026-09-13): `8ff8bef` locally, proofread commit on top, one error fixed. Still to push.
+1. ~~Commit this work, then proofread `keeper/DRYRUN.md` against the run report.~~ Done and
+   pushed (2026-09-13), followed by the fee change and the repository split.
 2. Fix GitHub billing (L-01) and start legal (L-05). Legal is the longest pole.
 3. ~~Decide the fee question above.~~ Done. Fix W-21 (assigned-week yield labels) before launch.
-4. Audit prep: work through the D-05 housekeeping list in `tasks.md`, pin a commit, send
-   `docs/AUDIT-SCOPE.md`, and engage an auditor (E-06).
+4. Audit prep: work through the D-05 housekeeping list in `tasks.md`, tag a commit in
+   `leekzor/callhouse-contracts`, point the `contracts/` submodule here at it, send
+   `contracts/docs/AUDIT-SCOPE.md`, and engage an auditor (E-06).
 5. Finish the fork rehearsal. The indexer still has to sync against a fork (X-11), and the web app
    needs an acceptance test from a fresh wallet (W-13).
 6. Keeper follow-ups. K-21: the assigned-week alert calls strike proceeds "harvested". K-22 lists
@@ -79,4 +86,10 @@ keeper/src/roll.ts  keeper/src/abi.ts  keeper/src/roll.test.ts  keeper/src/roll.
   pnpm --filter @callhouse/keeper dryrun
   ```
 
+- `contracts/` is a submodule. An empty `contracts/` means `git submodule update --init --recursive`
+  was never run, and the dry run then fails at the artifact link check. The dry run builds whatever
+  commit the submodule is pinned to, not the tip of `leekzor/callhouse-contracts`.
+- A change that spans repos (a contract change that alters amounts, copy rules, design tokens) is
+  paired commits. Land the contracts commit first, bump the pin here in the same commit as the
+  app-side changes that depend on it.
 - Web-scraping agents have left files at the repo root before. Run `git status` before committing.

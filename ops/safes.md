@@ -204,8 +204,8 @@ grep -rnE "safeTransfer|safeTransferFrom\(|forceApprove|setApprovalForAll|\.tran
 ```
 
 The pattern deliberately includes `IERC20.transfer` and `.call(`/`.call{`: since the best-effort
-fee change (SECURITY.md §4, defect 12) the fee leg is a **raw call**, not a `safeTransfer`, and the
-older five-alternative pattern misses it entirely. Expect exactly **twelve hits: eleven
+fee change (`contracts/SECURITY.md` §4, defect 12) the fee leg is a **raw call**, not a
+`safeTransfer`, and the older five-alternative pattern misses it entirely. Expect exactly **twelve hits: eleven
 transfer/approve sites plus one comment line** (`ValoremLib.sol:81`, which merely mentions
 `forceApprove`). With the old pattern you get eleven and silently lose the fee leg. Re-run against
 `27d502a` on 2026-09-12. Again: match the enclosing function, not the line number.

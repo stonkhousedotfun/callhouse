@@ -77,7 +77,7 @@ export default function LegalPage() {
         <li>
           The issuer can <strong>freeze or restrict transfers</strong>, and the token can pause its
           own price oracle. Either event can stop this vault writing, settling, or paying out until
-          it is lifted. No contract in this repository can override that.
+          it is lifted. No Callhouse contract can override that.
         </li>
         <li>
           Corporate actions — splits, dividend adjustments — are expressed through an ERC-8056
@@ -110,7 +110,7 @@ export default function LegalPage() {
           offer of securities.
         </li>
         <li>
-          The smart contracts in this repository have not been audited. They are provided as-is,
+          The Callhouse smart contracts have not been audited. They are provided as-is,
           under the MIT licence, with no warranty of any kind. You can lose the collateral you
           deposit.
         </li>

@@ -1,8 +1,9 @@
 /**
  * The in-app docs: the weekly cycle in one page, what it costs, and the unabridged risk list.
  *
- * This page is a condensation, not the source of truth. The canonical documents are docs/ at
- * the repo root (ARCHITECTURE.md, ACCOUNTING.md) and the operator material in ops/runbooks/.
+ * This page is a condensation, not the source of truth. The canonical documents are
+ * docs/ARCHITECTURE.md at the repo root, contracts/docs/ACCOUNTING.md (the contracts submodule,
+ * leekzor/callhouse-contracts) and the operator material in ops/runbooks/.
  * Where this page and those disagree, this page is the one that is wrong.
  */
 import type { Metadata } from "next";
@@ -230,7 +231,7 @@ export default function DocsPage() {
         </li>
         <li>
           <strong>This vault is unaudited.</strong> Valorem Clear was audited by Zellic under its
-          former name; this repository&apos;s vault has not been audited. Treat the deposit cap as
+          former name; the Callhouse vault has not been audited. Treat the deposit cap as
           the real statement of confidence.
         </li>
       </ul>

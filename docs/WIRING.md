@@ -20,11 +20,14 @@ Two facts frame everything below:
 
 | Process | Package | Default port | Public name | What it is |
 |---|---|---|---|---|
-| `site` | `site/` | 3001 | `callhouse.xyz` | static marketing; **no fetches, no wallet, no chain reads, ever** |
+| `site` | `leekzor/callhouse-site` (separate repo) | 3001 | `callhouse.xyz` | static marketing; **no fetches, no wallet, no chain reads, ever** |
 | `web` | `web/` | 3000 | `app.callhouse.xyz` | the dapp; Next.js SSR + browser wagmi |
 | indexer | `indexer/` | 42069 | not yet chosen (W-19) | Ponder: event indexer + the `/v1/*` read API |
 | keeper | `keeper/` | 8787 | none (operator-only) | the roll bot; serves `/health` `/state` `/cycles` `/orders` |
-| — | `contracts/` | — | — | the Vault on chain 4663; not deployed yet |
+| — | `contracts/` (git submodule → `leekzor/callhouse-contracts`) | — | — | the Vault on chain 4663; not deployed yet |
+
+`site` builds and deploys from its own repository; nothing in this one builds, imports or
+deploys it.
 
 ## 2. Every hop
 
@@ -122,11 +125,14 @@ shows as "unfilled, 0" against a live API, run both tests before touching anythi
 
 ## 5. ABIs flow one way
 
-`contracts/out` → `ops/abis/*.json` → generated copies. After any contract change: refresh
-`ops/abis/`, then `pnpm gen:abis` in `indexer/` (all four contracts) and in `web/`
-(`lib/abi/vault.ts` only — `clear.ts` and `registry.ts` are hand-maintained derivatives, so check
-them by eye). The keeper's `keeper/src/abi.ts` is hand-transcribed by design and must name every
-custom error the keeper can hit, or a simulation revert prints a bare selector.
+`forge build` in `leekzor/callhouse-contracts` → the `contracts/` submodule pin →
+`ops/abis/*.json` → generated copies. After any contract change: `forge build` in the contracts
+repo, bump the submodule pin here, refresh `ops/abis/` (`Vault.json` takes `.abi` from
+`contracts/out/Vault.sol/Vault.json`), then `pnpm gen:abis` in `indexer/` (all four contracts)
+and in `web/` (`lib/abi/vault.ts` only — `clear.ts` and `registry.ts` are hand-maintained
+derivatives, so check them by eye). The keeper's `keeper/src/abi.ts` is hand-transcribed by
+design and must name every custom error the keeper can hit, or a simulation revert prints a bare
+selector.
 
 ## 6. Same week, two vocabularies — by design
 

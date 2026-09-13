@@ -2,6 +2,13 @@
 
 Companion to `plan.md`. Progress as of **2026-09-13**.
 
+> **Three repositories since 2026-09-13.** This file tracks the whole product and lives in the app
+> repo, `leekzor/callhouse` (web, keeper, indexer, ops). The contracts, `AUDIT-SCOPE.md`,
+> `ACCOUNTING.md` and the full `SECURITY.md` are in `leekzor/callhouse-contracts`, mounted here as a
+> git submodule at `contracts/` (so `docs/AUDIT-SCOPE.md` below now means
+> `contracts/docs/AUDIT-SCOPE.md`). The landing is `leekzor/callhouse-site`. Session logs keep the
+> paths they were written with.
+
 Legend: `[x]` done · `[~]` in progress · `[ ]` todo · `[!]` blocked
 
 Milestones: M0 scaffold+recon → **M1 contracts on mocks** → **M2 contracts on fork** → M3 keeper dry-run → M4 indexer+API → M5 web → M6 ops+audit → M7 launch wk0–1 → M8 wk2–4
@@ -24,7 +31,8 @@ Milestones: M0 scaffold+recon → **M1 contracts on mocks** → **M2 contracts o
 | copy-lint (compliance) | 43 files in `web`, 20 in `site`, 0 violations; **7-case self-test runs on every invocation**; wrapped forbidden phrases caught by a full-buffer pass |
 | Recon unknowns resolved | 9 of 9 |
 | Real defects found and fixed | 13 in the first review + **18 in the second sweep** (keeper-focused, 2026-09-12; 38 raw findings, cross-confirmed, incl. the `.dockerignore` exclusion that kept the keeper image unbuildable) |
-| Audit scope | `docs/AUDIT-SCOPE.md` drafted and fact-checked (E-05); needs a pinned commit and the Appendix B housekeeping |
+| Audit scope | `contracts/docs/AUDIT-SCOPE.md` drafted and fact-checked (E-05); needs a pinned commit (a tag in `leekzor/callhouse-contracts`) and the Appendix B housekeeping |
+| Repositories | **split 2026-09-13**: `leekzor/callhouse` (app), `leekzor/callhouse-contracts` (submodule at `contracts/`), `leekzor/callhouse-site`; all private |
 | Subagents run | 42 across the build workflows + 85 across the review + 4 in the second sweep + 29 on 2026-09-13 (dry-run cycle 3, audit scope, recording) |
 
 M0, M1 and M2 are complete. M3 is complete: the keeper's production modules have run three
@@ -37,6 +45,28 @@ state-reconciliation trio: unwitnessed `rollClose`, unservable authorised listin
 `/health` RPC-URL leak; the `.dockerignore` exclusion that kept the keeper image
 unbuildable). `ops/alerts.md` now documents the 13 kinds the keeper actually emits; the old
 36-code vocabulary is retired and mapped. The external audit is still ahead.
+
+### Session log — 2026-09-13 (evening): repository split
+
+User decision: three private repositories so the landing and the app can deploy on Railway
+independently and agents can own a repo each.
+
+- **`leekzor/callhouse-contracts`**: `git subtree split` of `contracts/` (history kept), Foundry
+  project at the root, `lib/` submodules re-rooted, `docs/AUDIT-SCOPE.md`, `docs/ACCOUNTING.md`
+  and `SECURITY.md` moved in with paths rewritten, its own CI (fmt, build, unit + invariant, fork).
+- **`leekzor/callhouse-site`**: `git subtree split` of `site/`, made standalone: own lockfile,
+  Dockerfile with the repo as build context, `railway.json`, a copy-lint twin with the site
+  disclosure table, CI, and the site parts of `ops/deploy.md` (apex DNS) in its README.
+- **`leekzor/callhouse` (this repo)**: `site/` removed; `contracts/` is now a git submodule pinned
+  to one contracts commit (bump it deliberately, then refresh `ops/abis` and `pnpm gen:abis`);
+  copy-lint lints `web/` only; Dockerfiles, `.dockerignore`, workspace and lockfile drop `site`;
+  CI keeps the js and copy-lint jobs; `SECURITY.md` is a pointer plus the reporting section.
+- **What the split costs, stated so nobody rediscovers it:** a change like the fee change
+  (contracts + keeper + indexer + web + site) is now paired commits in up to three repos; the
+  copy-lint FORBIDDEN table and the design-token block are duplicated across the app and site
+  repos and must change together; app CI cannot check out the private submodule without a read
+  token secret, so keeper's artifact cross-check skips there; GitHub billing (L-01) blocks CI in
+  all three.
 
 ### Session log — 2026-09-13 (afternoon): protocol fee decided and implemented
 
@@ -126,8 +156,9 @@ Done, each verified by a run rather than by a report:
 3. ~~Decide the fee-on-strike-proceeds question~~ **Done 2026-09-13:** 5% of premium only,
    implemented, tested, dry-run re-run, docs and copy aligned. Fix W-21 (assigned-week labels)
    before launch.
-4. **Audit prep** (D-05 → E-05 → E-06): do the housekeeping list, pin a commit, send
-   `docs/AUDIT-SCOPE.md`, engage the auditor.
+4. **Audit prep** (D-05 → E-05 → E-06): do the housekeeping list in `leekzor/callhouse-contracts`,
+   tag the engagement commit there, point this repo's `contracts/` submodule at the tag, send
+   `contracts/docs/AUDIT-SCOPE.md`, engage the auditor.
 5. **Finish the fork rehearsal** (E-03): indexer sync against a fork (X-11; the indexer already takes
    address overrides, runs on PGlite without `DATABASE_URL`, and `END_BLOCK` bounds a replay), then
    the web acceptance test from a fresh wallet including a fill from the keeper's `/orders` (W-13).
@@ -135,7 +166,8 @@ Done, each verified by a run rather than by a report:
    assigned-week alert; cover `index.ts`, multi-exerciser assignment and guardian `rollClose`.
 7. **Keys, then deploy** (L-02, L-03, L-06, L-07): Admin Safe 2/3, guardian key on separate hardware,
    mainnet deploy per `ops/deploy.md`, cap 20 NVDA.
-8. **Hosting and alerting** (W-19, W-20, L-08, L-09): four Railway services, apex DNS, two uptime
+8. **Hosting and alerting** (W-19, W-20, L-08, L-09): four Railway services (site from
+   `leekzor/callhouse-site`; web, keeper, indexer from this repo), apex DNS, two uptime
    monitors, the `ALERT_WEBHOOK` relay.
 9. **L-04**: one real 1-contract Overcall listing to settle EIP-1271 against their validator, then
    four published weeks (L-10..13).
@@ -252,9 +284,9 @@ Evidence lives in `ops/recon/`. Spec repairs are written up in `plan.md` section
 
 - [x] W-14 New `site/` package = `callhouse.xyz`, the marketing landing: `/`, `/how-it-works`, `/risks`, `/legal`. **No wallet code** — `wagmi`, `viem` and `@tanstack/react-query` are not dependencies and must not become dependencies. No chain read, no `fetch()`, no live figure: the vault is not deployed, so every live number would render zero, and a zero beside "realized" reads as a result rather than an absence. Every CTA is an absolute external link to `https://app.callhouse.xyz/...`
 - [x] W-15 `web/` retargeted to `app.callhouse.xyz`, routes unchanged, and set `noindex` — the disclosures get one canonical address and it is the other domain (reasoning in `web/app/layout.tsx`, restated by `app/robots.ts`). `NEXT_PUBLIC_SITE_URL` / `NEXT_PUBLIC_APP_URL` added to both packages via `lib/site.ts`, production values compiled in as defaults
-- [x] W-16 Design tokens duplicated, not imported: the token block in `web/app/globals.css` is copied into `site/app/globals.css` so `site/` builds with no dependency on `web/`. **The two must be changed in the same commit** or the domains drift
-- [x] W-17 copy-lint now walks both packages under one rule set, and a missing package is a hard failure rather than a silent pass. CI `js` job typechecks and builds `@callhouse/site` alongside `web`
-- [x] W-18 `site/Dockerfile` + `site/railway.json`, `web/Dockerfile` + `web/railway.json`; `output: "standalone"`, repo root as build context (a `site/`-scoped context cannot install — the lockfile is workspace-wide), per-service `watchPatterns` so one push does not rebuild both. Runbook: `ops/deploy.md`
+- [x] W-16 **Since the 2026-09-13 split the two copies live in different repositories (`web/app/globals.css` here, `app/globals.css` in `leekzor/callhouse-site`): change them in paired commits.** Design tokens duplicated, not imported: the token block in `web/app/globals.css` is copied into `site/app/globals.css` so `site/` builds with no dependency on `web/`. **The two must be changed in the same commit** or the domains drift
+- [x] W-17 **Since the split: this repo's `scripts/copy-lint.mjs` lints `web/`, its twin in `leekzor/callhouse-site` lints the landing; the FORBIDDEN tables must stay identical.** copy-lint now walks both packages under one rule set, and a missing package is a hard failure rather than a silent pass. CI `js` job typechecks and builds `@callhouse/site` alongside `web`
+- [x] W-18 **Since the split the site's Dockerfile and `railway.json` live in `leekzor/callhouse-site` with that repo as build context.** `site/Dockerfile` + `site/railway.json`, `web/Dockerfile` + `web/railway.json`; `output: "standalone"`, repo root as build context (a `site/`-scoped context cannot install — the lockfile is workspace-wide), per-service `watchPatterns` so one push does not rebuild both. Runbook: `ops/deploy.md`
 - [ ] W-19 Two Railway services created and deployed from `main`. Nothing is deployed yet; every `NEXT_PUBLIC_*` must be set as a build variable **before** the first build, because they are inlined by `next build` and not read at runtime
 - [ ] W-20 DNS. `app.callhouse.xyz` is a plain `CNAME`. **`callhouse.xyz` is an apex**, and a `CNAME` at a zone apex is not valid DNS — it needs a provider offering `ALIAS`/`ANAME` or Cloudflare CNAME flattening. Prerequisite for W-19 being publicly reachable; attach the domains only after a deploy is healthy, so a DNS failure stays distinguishable from an application failure
 

@@ -5,51 +5,14 @@ on:
     branches: [main]
   pull_request:
 
-env:
-  FOUNDRY_PROFILE: ci
-
 jobs:
-  contracts:
-    name: contracts (build + unit + invariant)
-    runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: contracts
-    steps:
-      - uses: actions/checkout@v4
-        with: {submodules: recursive}
-      - uses: foundry-rs/foundry-toolchain@v1
-        with: {version: stable}
-      - name: forge fmt --check
-        run: forge fmt --check
-      - name: forge build --sizes
-        run: forge build --sizes
-      - name: unit + invariant tests
-        run: forge test -vvv --no-match-path 'test/fork/*'
-      - name: coverage summary
-        run: forge coverage --no-match-path 'test/fork/*' --report summary || true
-
-  contracts-fork:
-    name: contracts (fork 4663)
-    runs-on: ubuntu-latest
-    # Fork tests need a live RPC. They are the gate for M2 but must not block a PR
-    # when the RPC secret is absent (forks of this repo).
-    if: github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository
-    defaults:
-      run:
-        working-directory: contracts
-    steps:
-      - uses: actions/checkout@v4
-        with: {submodules: recursive}
-      - uses: foundry-rs/foundry-toolchain@v1
-        with: {version: stable}
-      - name: fork tests
-        env:
-          RH_RPC: ${{ secrets.RH_RPC || 'https://rpc.mainnet.chain.robinhood.com' }}
-        run: FOUNDRY_PROFILE=fork forge test --fork-url "$RH_RPC" -vvv
+  # The Solidity jobs (build, fmt, unit + invariant, fork 4663) live in leekzor/callhouse-contracts
+  # since the 2026-09-13 repo split. This repository mounts that repo at contracts/ as a git
+  # submodule pinned to one commit; the js job below does not check it out (a private submodule
+  # needs a read token secret), and keeper's artifact cross-check test skips without contracts/out.
 
   js:
-    name: keeper / indexer / web / site
+    name: keeper / indexer / web
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -74,12 +37,6 @@ jobs:
         run: pnpm --filter @callhouse/web build
       - name: web tests
         run: pnpm --filter @callhouse/web test
-      - name: typecheck site
-        run: pnpm --filter @callhouse/site typecheck
-      - name: lint site
-        run: pnpm --filter @callhouse/site lint
-      - name: build site
-        run: pnpm --filter @callhouse/site build
 
   copy-lint:
     name: copy-lint (compliance)
@@ -88,5 +45,5 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with: {node-version: 22}
-      - name: forbidden + required copy (site + web)
+      - name: forbidden + required copy (web; the landing is linted in leekzor/callhouse-site)
         run: node scripts/copy-lint.mjs

@@ -1,12 +1,13 @@
 # ---------------------------------------------------------------------------------------------
 # Build-context filter for the repo root.
 #
-# WHY THIS FILE EXISTS: all three deployable images — web/Dockerfile (app.callhouse.xyz),
-# site/Dockerfile (callhouse.xyz) and keeper/Dockerfile (the weekly roll) — are built with the
+# WHY THIS FILE EXISTS: both deployable images in this repository — web/Dockerfile
+# (app.callhouse.xyz) and keeper/Dockerfile (the weekly roll) — are built with the
 # REPO ROOT as the build context, because pnpm-lock.yaml and pnpm-workspace.yaml live here and
 # the install has to be workspace-aware. Without this file the daemon uploads node_modules,
-# every .next cache and the Foundry submodules under contracts/lib on every deploy — hundreds
-# of megabytes, to produce the same image.
+# every .next cache and the contracts/ submodule (with its own Foundry submodules) on every
+# deploy — hundreds of megabytes, to produce the same image. The landing (callhouse.xyz) builds
+# from its own repository, leekzor/callhouse-site, since the 2026-09-13 split.
 #
 # WHAT MUST STAY IN, and why:
 #   package.json, pnpm-lock.yaml, pnpm-workspace.yaml  — the workspace install reads all three.
@@ -15,7 +16,7 @@
 #     fails with "lockfile is not up to date", even though not one line of keeper code reaches the
 #     web image. That is the only reason for the `dir/*` + `!dir/package.json` pairs below.
 #   keeper/tsconfig.json, keeper/src                   — keeper/Dockerfile COPYs both; it is the
-#     one image that ships keeper code. keeper/src also rides into the web/site contexts
+#     one image that ships keeper code. keeper/src also rides into the web context
 #     unread — a few hundred kilobytes, and cheaper than per-image context files.
 #   scripts/                                           — small, and package scripts reach for it
 #     (`web/package.json` → `node ../scripts/copy-lint.mjs`).

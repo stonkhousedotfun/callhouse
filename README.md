@@ -40,12 +40,33 @@ That is the whole app.
 
 ## Domains
 
-Two frontends, two domains, one repo. `callhouse.xyz` is the public landing: static, no wallet code, no chain reads, indexed. `app.callhouse.xyz` is the dapp, `noindex`, reached by link from the landing. Both deploy from this repository as separate Railway services; the runbook is [`ops/deploy.md`](ops/deploy.md).
+Two frontends, two domains, two repositories. `callhouse.xyz` is the public landing: static, no wallet code, no chain reads, indexed. `app.callhouse.xyz` is the dapp, `noindex`, reached by link from the landing. Each is a separate Railway service: the dapp deploys from this repository (runbook: [`ops/deploy.md`](ops/deploy.md)), the landing from `leekzor/callhouse-site` (runbook: that repository's README).
 
-| Domain | Package | What it is |
+| Domain | Code | What it is |
 |---|---|---|
-| `callhouse.xyz` | `/site` | explains the product. No wallet, no live numbers. Indexed |
-| `app.callhouse.xyz` | `/web` | deposit, cycle tape, claim USDG. Noindex, reached by link |
+| `callhouse.xyz` | `leekzor/callhouse-site` | explains the product. No wallet, no live numbers. Indexed |
+| `app.callhouse.xyz` | `/web` (this repo) | deposit, cycle tape, claim USDG. Noindex, reached by link |
+
+---
+
+## Repositories
+
+Callhouse is three private repositories, split out of one on 2026-09-13:
+
+| Repository | What lives there |
+|---|---|
+| `leekzor/callhouse` (this one) | the app: `web/`, `keeper/`, `indexer/`, `ops/`, `docs/ARCHITECTURE.md`, `docs/WIRING.md`, the spec, plan and task list. Railway `web` and `keeper` (and later `indexer`) deploy from here |
+| `leekzor/callhouse-contracts` | the Foundry project, plus `docs/AUDIT-SCOPE.md`, `docs/ACCOUNTING.md` and `SECURITY.md` (the full threat model and the 2026-09-12 review). Solidity CI runs there |
+| `leekzor/callhouse-site` | the marketing landing at `callhouse.xyz`: its own Dockerfile, `railway.json`, lockfile, copy-lint twin, and the Railway + apex DNS notes in its README |
+
+The contracts repository is mounted here as a git submodule at `contracts/`, so every `contracts/...` path in these docs resolves inside a full checkout. Clone with it:
+
+```bash
+git clone --recurse-submodules git@github.com:leekzor/callhouse.git
+git submodule update --init --recursive     # an existing clone, or an empty contracts/
+```
+
+The submodule pins one contracts commit. Once the audit commit is tagged, that pin is the audit commit. A contract change reaches this repo only by bumping the pin and then refreshing the ABIs ([`docs/WIRING.md`](docs/WIRING.md) §5). The landing is not a submodule: nothing here builds, imports or deploys it.
 
 ---
 
@@ -80,27 +101,30 @@ Lot size is 1.0000 Stock Token per contract. USDG has 6 decimals. Stock Tokens h
 ## Repo
 
 ```
-/contracts    Foundry — Vault, Policy, Valorem + Seaport adapters, Distributor
+/contracts    git submodule → leekzor/callhouse-contracts. Foundry — Vault, Policy, Valorem + Seaport adapters, Distributor
 /keeper       Node 22 — weekly roll state machine
 /indexer      Ponder — vault / Valorem / Seaport / registry events
 /web          Next.js — the dapp at app.callhouse.xyz: deposit, cycle tape, claim USDG
-/site         Next.js — the landing at callhouse.xyz: static, no wallet code
 /ops          runbooks, ABIs, Safe addresses, on-chain recon evidence
-/docs         architecture and accounting references
+/docs         architecture and runtime wiring references
 ```
+
+The landing at `callhouse.xyz` is not in this tree; it is `leekzor/callhouse-site`.
 
 | Read this | For |
 |---|---|
 | [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) | how the four packages fit, trust boundaries, and the eight things that look wrong but are not |
 | [`docs/WIRING.md`](docs/WIRING.md) | the runtime map: every service hop, the env var that carries it, and what is proven end to end |
-| [`docs/ACCOUNTING.md`](docs/ACCOUNTING.md) | the money maths — two ledgers, the accrual index, the redeem queue, fees |
-| [`SECURITY.md`](SECURITY.md) | threat model, trust assumptions, audit scope, how to report something |
+| [`contracts/docs/ACCOUNTING.md`](contracts/docs/ACCOUNTING.md) | the money maths — two ledgers, the accrual index, the redeem queue, fees |
+| [`contracts/SECURITY.md`](contracts/SECURITY.md) | threat model, trust assumptions, the 2026-09-12 review |
+| [`contracts/docs/AUDIT-SCOPE.md`](contracts/docs/AUDIT-SCOPE.md) | audit scope |
+| [`SECURITY.md`](SECURITY.md) | how to report something, and pointers to the above |
 | [`contracts/README.md`](contracts/README.md) | building, testing and deploying the vault |
 | [`keeper/README.md`](keeper/README.md) | running the keeper, every env var, what each alert means |
 | [`indexer/README.md`](indexer/README.md) | the schema, the API, backfilling |
 | [`web/README.md`](web/README.md) | routes and the copy rules CI enforces |
-| [`site/README.md`](site/README.md) | the landing package: what it must never grow, and why it holds no live numbers |
-| [`ops/deploy.md`](ops/deploy.md) | the two Railway services, every build variable, and the apex-domain DNS step |
+| `leekzor/callhouse-site` README | the landing: what it must never grow, why it holds no live numbers, its Railway service and the apex-domain DNS step |
+| [`ops/deploy.md`](ops/deploy.md) | the `web` and `keeper` Railway services and every build variable |
 | [`ops/recon/`](ops/recon/) | the on-chain recon every integration fact in this repo rests on |
 | [`plan.md`](plan.md) · [`tasks.md`](tasks.md) | the build plan and current progress |
 
@@ -176,9 +200,9 @@ Prereqs: Foundry, Node 22, a 4663 RPC.
 
 ```bash
 cp .env.example .env
-pnpm i                     # installs keeper, indexer, web, site
+pnpm i                     # installs keeper, indexer, web
 
-# contracts
+# contracts — the submodule (git submodule update --init --recursive if empty)
 cd contracts
 forge install
 forge test                                          # unit + invariant, mocks only
@@ -192,13 +216,11 @@ pnpm --filter @callhouse/indexer dev
 
 # web — the dapp, app.callhouse.xyz
 pnpm --filter @callhouse/web dev
-
-# site — the landing, callhouse.xyz
-pnpm --filter @callhouse/site dev
 ```
 
-The two frontends run side by side: web on port 3000, site on 3001. Nothing is shared between
-them at runtime, so a CTA on site is an absolute link to `app.callhouse.xyz`, not a route.
+The two frontends run side by side: web on port 3000 from this checkout, the landing on 3001 from
+a checkout of `leekzor/callhouse-site`. Nothing is shared between them at runtime, so a CTA on the
+landing is an absolute link to `app.callhouse.xyz`, not a route.
 
 `SeaportOrderLib` and `ValoremLib` are linked public libraries: without them the vault exceeds
 the 24 KB runtime limit. Foundry deploys and links them automatically in tests and scripts.
@@ -252,7 +274,7 @@ Not allowed on the marketing surface: APY, “10% weekly,” projected yield, �
 
 Required disclosures: Stock Token legal form, assignment, empty-book weeks, geographic restrictions.
 
-`scripts/copy-lint.mjs` enforces both lists on **both** packages — `site/` and `web/` — with no per-package exemption, and it fails CI. The landing at `callhouse.xyz` is the surface these rules were written for: it is the page a stranger reads before they have connected anything, so the rules are tighter there, not looser.
+`scripts/copy-lint.mjs` enforces both lists on **both** frontends — `web/` here, and the landing through its twin copy in `leekzor/callhouse-site` — with no per-package exemption, and it fails CI in each repository. The forbidden list must stay identical in both copies: change it in paired commits to both repos. The landing at `callhouse.xyz` is the surface these rules were written for: it is the page a stranger reads before they have connected anything, so the rules are tighter there, not looser.
 
 ---
 
@@ -266,7 +288,7 @@ Required disclosures: Stock Token legal form, assignment, empty-book weeks, geog
 - **Sequencer / API down** into the Friday window.
 - **Admin.** Bounds are on-chain; they can still be set too tight or too loose.
 
-Valorem was audited by Zellic (2022–2023) under the old name `OptionSettlementEngine`. This repo’s Vault has not. Do not mainnet without an audit of *this* code.
+Valorem was audited by Zellic (2022–2023) under the old name `OptionSettlementEngine`. Callhouse’s Vault (`contracts/`) has not. Do not mainnet without an audit of *this* code.
 
 ---
 

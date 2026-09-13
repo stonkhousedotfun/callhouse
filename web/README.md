@@ -3,9 +3,9 @@
 `app.callhouse.xyz` — the Callhouse dapp. Next.js App Router, React 19, wagmi 3, viem. No custody,
 no private keys, no server-side signing.
 
-The marketing landing is a separate package, `site/`, served at `callhouse.xyz`. It carries no
-wallet code at all and it is not a copy of anything here; the two domains share a repository and a
-palette, nothing else at runtime.
+The marketing landing is a separate repository, `leekzor/callhouse-site`, served at
+`callhouse.xyz`. It carries no wallet code at all and it is not a copy of anything here; the two
+domains share a palette, nothing else at runtime.
 
 **This package is `noindex`.** That is deliberate: the disclosures should have one canonical
 address and it is the other domain. The full reasoning is in the comment above `metadata` in
@@ -13,7 +13,7 @@ address and it is the other domain. The full reasoning is in the comment above `
 be changed together.
 
 ```bash
-pnpm --filter @callhouse/web dev     # http://localhost:3000  (site owns 3001)
+pnpm --filter @callhouse/web dev     # http://localhost:3000  (the landing owns 3001)
 pnpm --filter @callhouse/web build
 node ../scripts/copy-lint.mjs        # compliance gate, also runs in CI
 ```
@@ -33,8 +33,9 @@ node ../scripts/copy-lint.mjs        # compliance gate, also runs in CI
 
 `scripts/copy-lint.mjs` fails the build on forbidden marketing copy and on missing disclosures.
 These come from README "Frontend copy" and TECHSPEC 7.3, and they exist because the product is a
-tokenized security in a restricted perimeter. The same script scans `site/` under the identical
-rule set — there is no per-package exemption in either direction.
+tokenized security in a restricted perimeter. The landing repository carries a twin of the same
+script with the identical forbidden list — there is no per-package exemption in either direction.
+Change that list in paired commits to both repos.
 
 **Never appears anywhere under `web/`:** APY, APR, "10% weekly", "projected yield", "annualized", <!-- copy-lint-allow: this line names the forbidden phrases inside an explicit "never" -->
 "backed by Nvidia", "dividend paid by Nvidia", "guaranteed yield", "risk-free". <!-- copy-lint-allow: same enumeration, continued -->
@@ -62,13 +63,14 @@ If a forbidden phrase genuinely belongs inside an explicit negation on the docs 
 - No price chart. No candlesticks on a vault share.
 - Must work at 400px wide.
 
-## Design tokens are duplicated into `site/`
+## Design tokens are duplicated into the landing
 
 `app/globals.css` owns the palette, the radii and the two font stacks, and that token block is
-copied verbatim into `site/app/globals.css`. It is duplicated rather than imported because `site/`
-has to build and deploy with no dependency on this package: two Railway services, two containers,
-one repo. **Change a token in one and change it in the other in the same commit.** Otherwise the
-two domains drift and a reader sees the seam on the click through from `callhouse.xyz`.
+copied verbatim into `app/globals.css` in `leekzor/callhouse-site`. It is duplicated rather than
+imported because the landing has to build and deploy with no dependency on this package: two
+Railway services, two containers, two repositories. **Change a token in one and change it in the
+other in paired commits to both repos.** Otherwise the two domains drift and a reader sees the
+seam on the click through from `callhouse.xyz`.
 
 ## Environment
 

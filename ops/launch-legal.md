@@ -21,14 +21,20 @@ plus two rebuilds.
 ## 0. The shape of it
 
 ```
-site/lib/legal.ts             one constant per operator fact, read from NEXT_PUBLIC_*, no defaults
-site/app/terms/page.tsx       Terms of Use, DRAFT, renders the gaps
-site/app/privacy/page.tsx     Privacy notice, DRAFT, renders the gaps
-site/app/legal/page.tsx       links /terms; "Reporting a vulnerability" section at #reporting
-site/app/.well-known/security.txt/route.ts
+leekzor/callhouse-site (the landing's own repository):
+lib/legal.ts                  one constant per operator fact, read from NEXT_PUBLIC_*, no defaults
+app/terms/page.tsx            Terms of Use, DRAFT, renders the gaps
+app/privacy/page.tsx          Privacy notice, DRAFT, renders the gaps
+app/legal/page.tsx            links /terms; "Reporting a vulnerability" section at #reporting
+app/.well-known/security.txt/route.ts
                               RFC 9116; 404 until a security contact exists
+
+this repository (leekzor/callhouse):
 web/lib/site.ts               TERMS_URL / PRIVACY_URL, links into the site; nothing duplicated
-SECURITY.md §6                points at security.txt and says it is unset
+SECURITY.md "Reporting"       points at security.txt and says it is unset
+
+leekzor/callhouse-contracts (the contracts/ submodule here):
+SECURITY.md §6                the same reporting paragraph, carried with the threat model
 ```
 
 The pages are deliberately published in their unfinished state. Every unset fact renders as
@@ -48,14 +54,14 @@ placeholder.
 | Perimeter disclosure | live since before this runbook; now links the terms instead of "the terms you accept here" | `callhouse.xyz/legal`, `app.callhouse.xyz/legal` |
 | Vulnerability reporting | section exists, address unset | `callhouse.xyz/legal#reporting` |
 | `security.txt` | route exists, returns **404** with a one-line explanation until the contact is set | `callhouse.xyz/.well-known/security.txt` |
-| Operator constants | six, all `undefined` | `site/lib/legal.ts` |
-| Document version | `draft-2026-09-12` | `LEGAL_DOCS_VERSION` in `site/lib/legal.ts` |
+| Operator constants | six, all `undefined` | `lib/legal.ts` (site repo) |
+| Document version | `draft-2026-09-12` | `LEGAL_DOCS_VERSION` in `lib/legal.ts` (site repo) |
 | Accept flow | none. Use is acceptance; the pages say so | — |
 | Geoblock | none. The US-person perimeter is disclosure-only, on every legal page, in bold | — |
 | Cookies / analytics | none on either domain, verified by grep and stated on `/privacy` | — |
 
 What the privacy notice says the system does is grounded file by file in the header comment of
-`site/app/privacy/page.tsx`. If counsel wants a sentence changed, check that comment first: the
+`app/privacy/page.tsx` in `leekzor/callhouse-site`. If counsel wants a sentence changed, check that comment first: the
 sentence may be describing a fact rather than a policy.
 
 ---
@@ -101,8 +107,8 @@ Each item ends with the variable it becomes, or "no variable" when it is a text 
 
 7. **Geoblocking.** The "not available to US persons" perimeter is disclosure-only. There is no
    IP check, no wallet screening, and no country gate on either domain; the copy says so and
-   `site/app/legal/page.tsx` explains why a checkbox would imply a control that does not exist.
-   Decide whether disclosure is sufficient or whether a technical control is required. A
+   `app/legal/page.tsx` (site repo) explains why a checkbox would imply a control that does not
+   exist. Decide whether disclosure is sufficient or whether a technical control is required. A
    technical control is a product change and a runtime dependency, not a variable.
    → no variable; a decision that either closes the item or opens a task
 
@@ -114,20 +120,21 @@ Each item ends with the variable it becomes, or "no variable" when it is a text 
      `NEXT_PUBLIC_SECURITY_CONTACT_EMAIL`
 
 9. **Adoption.** When the text of `/terms` and `/privacy` is what counsel wants, the draft
-   markers come off by changing `LEGAL_DOCS_VERSION` in `site/lib/legal.ts` from
+   markers come off by changing `LEGAL_DOCS_VERSION` in `lib/legal.ts` (site repo) from
    `draft-YYYY-MM-DD` to a value without the `draft-` prefix, e.g. `v1-2026-10-01`. That is a
-   code change, reviewed like any other. `scripts/copy-lint.mjs` requires the literal
-   `export const LEGAL_DOCS_VERSION = "draft-` in `site/lib/legal.ts`, so dropping the prefix fails CI until
-   that REQUIRED entry is removed in the same commit — which is the intended reminder. (The
-   two "Draft" entries for the pages only prove the marker code is still there; they may stay.)
+   code change, reviewed like any other. The site repo's `scripts/copy-lint.mjs` requires the
+   literal `export const LEGAL_DOCS_VERSION = "draft-` in `lib/legal.ts`, so dropping the prefix
+   fails CI until that REQUIRED entry is removed in the same commit — which is the intended
+   reminder. (The two "Draft" entries for the pages only prove the marker code is still there;
+   they may stay.)
    → `LEGAL_DOCS_VERSION` (code, not env)
 
 ---
 
 ## 3. The variables
 
-All six are `NEXT_PUBLIC_*`, read by `site/lib/legal.ts`, and therefore **inlined at build time**
-into the `site` service only. `web` reads none of them; it links to the site's pages.
+All six are `NEXT_PUBLIC_*`, read by `lib/legal.ts` in the site repo, and therefore **inlined at
+build time** into the `site` service only. `web` reads none of them; it links to the site's pages.
 
 | Variable | Rendered where | If unset |
 |---|---|---|
@@ -145,11 +152,11 @@ the edge: with the name and only the security contact set, both drafts drop the 
 hidden — the gap is still printed inline — but set all three contacts in one go so it never
 shows.
 
-**`site/Dockerfile` does not yet declare these as build ARGs.** As of 2026-09-12 it declares only
-`NEXT_PUBLIC_SITE_URL` and `NEXT_PUBLIC_APP_URL`, and a Railway service variable reaches a
+**The site repo's `Dockerfile` does not yet declare these as build ARGs.** As of 2026-09-12 it
+declares only `NEXT_PUBLIC_SITE_URL` and `NEXT_PUBLIC_APP_URL`, and a Railway service variable reaches a
 Dockerfile build only through a declared `ARG` (`ops/deploy.md` §3). Setting the six on Railway
 today builds a site that still says "not yet designated". Before §4 step 2, add six `ARG`/`ENV`
-pairs to `site/Dockerfile`, in the build-time configuration block, with **no default values** —
+pairs to that `Dockerfile`, in the build-time configuration block, with **no default values** —
 the whole point is that an absent value renders the gap. That edit was outside the scope of the
 change that created this runbook and is still open.
 
@@ -162,7 +169,8 @@ Do these in order. Step 1 is the long one and it is not ours.
 1. **Decide.** Counsel closes every item in §2 that becomes a variable, and answers items 3, 5
    and 7 in writing so the answer is on record even when it is "the current behaviour stands".
 
-2. **Declare the ARGs.** Add the six `ARG`/`ENV` pairs to `site/Dockerfile` (see §3). Merge.
+2. **Declare the ARGs.** Add the six `ARG`/`ENV` pairs to the site repo's `Dockerfile` (see §3).
+   Merge.
 
 3. **Set the variables** on the Railway `site` service. All six, exactly as they should read on
    the page. Then **rebuild** `site` — Railway → service → Deploy → Redeploy, or push a commit. A
@@ -202,8 +210,10 @@ Do these in order. Step 1 is the long one and it is not ours.
    are next reviewed, bump the version and the expiry moves with it; when they are not, the file
    expires on its own, which is what RFC 9116 wants.
 
-7. **Update `SECURITY.md` §6** to drop the sentence saying the address is unset. Same commit as
-   the version bump in §2 item 9 if they land together.
+7. **Update the reporting paragraph in both places** to drop the sentence saying the address is
+   unset: the "Reporting" section of this repository's `SECURITY.md` and `contracts/SECURITY.md`
+   §6 in `leekzor/callhouse-contracts`. Both carry it now, so both must change, in paired commits.
+   Pair them with the version bump in §2 item 9 (site repo) if they land together.
 
 8. **Check the mailboxes.** Send one message to each of the three addresses from outside and
    confirm a human reads it. Then close the audit blocker.
@@ -225,8 +235,9 @@ Do these in order. Step 1 is the long one and it is not ours.
 
 | File | What it covers |
 |---|---|
-| `site/lib/legal.ts` | the six constants, `operatorIsDesignated()`, `LEGAL_DOCS_VERSION` |
-| `site/.env.example` | the same six, documented as build-time |
+| `lib/legal.ts` (site repo) | the six constants, `operatorIsDesignated()`, `LEGAL_DOCS_VERSION` |
+| `.env.example` (site repo) | the same six, documented as build-time |
 | `ops/deploy.md` | why `NEXT_PUBLIC_*` needs a rebuild and a Dockerfile `ARG` |
-| `SECURITY.md` §6 | the reporting paragraph that points here |
-| `scripts/copy-lint.mjs` | the CI gate that fails on adoption (`draft-` prefix) until its REQUIRED entry is removed |
+| `SECURITY.md` "Reporting" | the reporting paragraph that points here |
+| `contracts/SECURITY.md` §6 | the same paragraph in the contracts repo; change it with the one above |
+| `scripts/copy-lint.mjs` (site repo) | the CI gate that fails on adoption (`draft-` prefix) until its REQUIRED entry is removed |

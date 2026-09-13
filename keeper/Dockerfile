@@ -70,7 +70,6 @@ RUN corepack enable
 COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
 COPY keeper/package.json ./keeper/
 COPY web/package.json ./web/
-COPY site/package.json ./site/
 COPY indexer/package.json ./indexer/
 
 # `--filter <pkg>...` (trailing ellipsis) = this package plus its dependencies, and nothing

@@ -3,14 +3,15 @@
  * copy-lint — enforces the frontend copy rules from README "Frontend copy" and
  * TECHSPEC 7.3. These are compliance rules, not style rules. They fail CI.
  *
- * Both frontend packages are scanned:
- *   site/  → callhouse.xyz, the public marketing landing. This is the surface the
- *            rules were actually written about: it is the page a stranger reads
- *            before they have connected anything, so every forbidden claim and
- *            every required disclosure matters most here.
- *   web/   → app.callhouse.xyz, the dapp. Same rules, no exemption.
- * Both directories must exist and must yield files; a package that has vanished
- * is a hard failure, not a silent pass.
+ * Scanned here: web/ → app.callhouse.xyz, the dapp. The directory must exist and
+ * must yield files; a package that has vanished is a hard failure, not a silent pass.
+ *
+ * TWIN FILE. The marketing landing (callhouse.xyz) moved to its own repository,
+ * leekzor/callhouse-site, on 2026-09-13 and carries its own copy of this script with
+ * the site/ disclosure table. FORBIDDEN below must stay IDENTICAL in both copies:
+ * change it in paired commits to both repos. Before the split this was one file
+ * applying one rule set to both surfaces; now drift is possible, so diff the two
+ * FORBIDDEN tables whenever either changes.
  *
  * FORBIDDEN: marketing claims we are not allowed to make. Checked twice per file:
  *   once per line (so the report names the line), and once against the whole file
@@ -28,7 +29,7 @@
  *
  * DELIBERATELY ABSENT: no dependencies (this runs in CI before install of any
  * workspace), no auto-fix, no severity levels, no per-package rule overrides —
- * one rule set, applied identically to both surfaces.
+ * one rule set, applied identically to every surface (and to the site repo's twin).
  *
  * Escape hatch: put `copy-lint-allow` in a comment on the same line. Use it only
  * where the forbidden phrase appears inside an explicit negation, e.g. a docs page
@@ -44,11 +45,8 @@ const ROOT = join(fileURLToPath(new URL(".", import.meta.url)), "..");
 const EXT = new Set([".tsx", ".ts", ".jsx", ".js", ".md", ".mdx", ".html", ".json"]);
 const SKIP_DIR = new Set(["node_modules", ".next", "dist", "out", ".git", "coverage"]);
 
-/** Frontend packages under compliance. Both are expected to exist. */
-const PACKAGES = [
-  {name: "web", dir: join(ROOT, "web")},
-  {name: "site", dir: join(ROOT, "site")},
-];
+/** Frontend packages under compliance in this repository. Each is expected to exist. */
+const PACKAGES = [{name: "web", dir: join(ROOT, "web")}];
 
 /** Phrases that must never appear on the marketing surface. */
 const FORBIDDEN = [
@@ -68,8 +66,8 @@ const FORBIDDEN = [
  * in; `page` is matched against the POSIX relative path of the file inside it.
  *
  * The assignment wording differs by surface on purpose. On web/ the reader is a
- * depositor, so it is "your tokens". On site/ nobody has deposited yet, so it is
- * "the collateral". Do not unify them.
+ * depositor, so it is "your tokens". On the landing (leekzor/callhouse-site) nobody
+ * has deposited yet, so it is "the collateral". Do not unify them.
  */
 const REQUIRED = [
   {
@@ -86,47 +84,6 @@ const REQUIRED = [
     pkg: "web",
     page: "app/legal/page.tsx",
     phrases: ["not available to US persons", "Robinhood Assets (Jersey) Limited"],
-  },
-  {
-    pkg: "site",
-    page: "app/legal/page.tsx",
-    phrases: ["not available to US persons", "Robinhood Assets (Jersey) Limited"],
-  },
-  {
-    // The Terms of Use restate the perimeter verbatim. "Draft" here only proves the draft-marker
-    // code is still in the file; whether it renders is decided by LEGAL_DOCS_VERSION below.
-    pkg: "site",
-    page: "app/terms/page.tsx",
-    phrases: ["not available to US persons", "Draft"],
-  },
-  {
-    pkg: "site",
-    page: "app/privacy/page.tsx",
-    phrases: ["Draft"],
-  },
-  {
-    // Not a route: the constant both drafts read their marker from. While it starts with
-    // "draft-" the pages render "Draft — pending review by counsel"; dropping the prefix is
-    // adoption, and it must be a deliberate act that touches this file too, so this entry
-    // fails CI until it is removed in the same commit. The phrase is anchored on the export
-    // so a comment in that file cannot satisfy it (it did, once).
-    pkg: "site",
-    page: "lib/legal.ts",
-    phrases: ['export const LEGAL_DOCS_VERSION = "draft-'],
-  },
-  {
-    pkg: "site",
-    page: "app/page.tsx",
-    phrases: [
-      "Premium is paid only if a buyer fills",
-      "Assignment can take the collateral at the strike",
-      "Stock Tokens are debt securities",
-    ],
-  },
-  {
-    pkg: "site",
-    page: "app/risks/page.tsx",
-    phrases: ["Premium is paid only if a buyer fills"],
   },
 ];
 
@@ -168,7 +125,7 @@ function lintPackages(packages, required) {
   for (const {name, dir} of packages) {
     counts.set(name, 0);
     if (!isDir(dir)) {
-      errors.push(`${name}/  MISSING — package directory does not exist; both frontend packages are scanned`);
+      errors.push(`${name}/  MISSING — package directory does not exist; every listed frontend package is scanned`);
       continue;
     }
     present.add(name);
@@ -243,10 +200,7 @@ function lintPackages(packages, required) {
  */
 function selfTest() {
   const tmp = mkdtempSync(join(tmpdir(), "copy-lint-"));
-  const packages = [
-    {name: "web", dir: join(tmp, "web")},
-    {name: "site", dir: join(tmp, "site")},
-  ];
+  const packages = [{name: "web", dir: join(tmp, "web")}];
   const writeCleanTree = () => {
     for (const {dir} of packages) {
       mkdirSync(dir, {recursive: true});
@@ -291,21 +245,21 @@ function selfTest() {
     );
     expect(
       "a missing required disclosure is caught",
-      () => writeFileSync(join(tmp, "site", "app", "risks", "page.tsx"), "nothing disclosed here\n"),
+      () => writeFileSync(join(tmp, "web", "app", "vault", "nvda", "page.tsx"), "nothing disclosed here\n"),
       (e) => e.some((x) => x.includes("missing required disclosure")),
     );
     expect(
       "a required disclosure may itself wrap lines",
       () =>
         writeFileSync(
-          join(tmp, "site", "app", "risks", "page.tsx"),
-          "Premium is paid only if\n  a buyer fills\n",
+          join(tmp, "web", "app", "legal", "page.tsx"),
+          "not available to\n  US persons\nRobinhood Assets\n (Jersey) Limited\n",
         ),
       (e) => !e.some((x) => x.includes("missing required disclosure")),
     );
     expect(
       "a vanished package is a hard failure",
-      () => rmSync(join(tmp, "site"), {recursive: true, force: true}),
+      () => rmSync(join(tmp, "web"), {recursive: true, force: true}),
       (e) => e.some((x) => x.includes("MISSING")),
     );
   } finally {
@@ -323,8 +277,8 @@ if (errors.length) {
   console.error(`\ncopy-lint FAILED — ${errors.length} violation(s) across ${tally}:\n`);
   for (const e of errors) console.error("  " + e);
   console.error("\nThese are compliance rules from README 'Frontend copy' and TECHSPEC 7.3.");
-  console.error("Both frontend packages are scanned: site/ (callhouse.xyz, the public landing these");
-  console.error("rules exist for) and web/ (app.callhouse.xyz, the dapp). Neither is exempt.");
+  console.error("web/ (app.callhouse.xyz, the dapp) is scanned and is not exempt. The landing,");
+  console.error("callhouse.xyz, is linted by the same rules in leekzor/callhouse-site.");
   console.error("If a hit is inside an explicit negation, add a `copy-lint-allow` comment on that line.\n");
   process.exit(1);
 }

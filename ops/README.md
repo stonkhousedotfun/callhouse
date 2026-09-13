@@ -88,7 +88,7 @@ Evidence: `recon/R7-R8-testnet-explorer.md`.
 
 | File | Entries | Origin |
 |---|---|---|
-| `Vault.json` | 193 (1 constructor, 108 functions, 30 events, 54 errors) | Compiled from `contracts/src/Vault.sol` in this repo. Regenerate from `contracts/out/Vault.sol/Vault.json` (take `.abi`), then `pnpm gen:abis` in `indexer/` and `web/` |
+| `Vault.json` | 193 (1 constructor, 108 functions, 30 events, 54 errors) | Compiled from `contracts/src/Vault.sol` in the `contracts/` submodule (`leekzor/callhouse-contracts`). After bumping the submodule pin, regenerate from `contracts/out/Vault.sol/Vault.json` (take `.abi`), then `pnpm gen:abis` in `indexer/` and `web/` |
 | `Policy.json` | 14 errors | Compiled from `contracts/src/Policy.sol`. A library — the error selectors are what the keeper needs to decode a reverted roll |
 | `SeaportOrderLib.json` | 30 (1 function, 29 errors) | Compiled from `contracts/src/lib/SeaportOrderLib.sol`. Same reason: these are the errors `approveListing` throws when a proposed order is malformed |
 | `ValoremClear.json` | 57 (1 constructor, 26 functions, 15 events, 15 errors) | **Reproduced upstream build.** No 4663 explorer serves verified source for it, so the ABI was rebuilt from `github.com/valorem-labs-inc/valorem-core` @ `6436c823f560af493af119d6148fb3237037aca4`, solc 0.8.16, optimizer 200, no via-ir — the commit whose bytecode matches the deployed 16,110 bytes. Sourcify reports `exact_match` for the deployment |

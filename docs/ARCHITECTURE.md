@@ -2,10 +2,11 @@
 
 How the four packages fit together, and why each boundary is where it is.
 
-For the money maths see [ACCOUNTING.md](./ACCOUNTING.md). For the threat model see
-[../SECURITY.md](../SECURITY.md). For the runtime map — who calls whom, over which env var, and
-what is proven — see [WIRING.md](./WIRING.md). For the build plan and the recon evidence see
-`../plan.md` and `../ops/recon/`.
+For the money maths see [contracts/docs/ACCOUNTING.md](../contracts/docs/ACCOUNTING.md). For the
+threat model see [contracts/SECURITY.md](../contracts/SECURITY.md). Both live in
+`leekzor/callhouse-contracts`, mounted at `contracts/` as a git submodule. For the runtime map —
+who calls whom, over which env var, and what is proven — see [WIRING.md](./WIRING.md). For the
+build plan and the recon evidence see `../plan.md` and `../ops/recon/`.
 
 ---
 
@@ -13,7 +14,7 @@ what is proven — see [WIRING.md](./WIRING.md). For the build plan and the reco
 
 ```
                       ┌──────────────────────────────────────────┐
-  depositor ──NVDA──► │  Vault  (this repo)                      │
+  depositor ──NVDA──► │  Vault  (ours, contracts/)               │
                       │  ERC-20 shares: cNVDA                    │
                       │  is the Valorem writer                   │
                       │  is the Seaport offerer                  │
@@ -112,7 +113,8 @@ Idle ──rollOpen()──► Listed ──lockBook()──► Exercisable ─�
 - **Deposits close on the cycle's exercise timestamp**, whether or not anyone calls `lockBook`.
   Gating on the phase alone left the whole exercise window open, and assignment crashes NAV with
   no callback — minting against that crash was the one critical finding of the 2026-09-12
-  review. `maxDeposit`/`maxMint` return 0 from the timestamp on. See [SECURITY.md](../SECURITY.md).
+  review. `maxDeposit`/`maxMint` return 0 from the timestamp on. See
+  [contracts/SECURITY.md](../contracts/SECURITY.md).
 - `lockBook` is **permissionless** after the exercise timestamp. It only ever moves Listed →
   Exercisable after a time the registry already fixed, so there is nothing to gain by calling it and
   something to lose if nobody can.
@@ -240,7 +242,7 @@ Things that look wrong and are not, or look fine and are not. Each is commented 
 3. **Overcall's frontend config has a top-level `registry` key that is the JUGGERNAUT market**, not
    NVDA. Wiring it would collateralise NVDA calls with the wrong token. The vault constructor
    refuses any registry whose collateral, exercise and clearinghouse do not match.
-4. **The 5% fee rounds per contract, then multiplies.** See ACCOUNTING.md §6.
+4. **The 5% fee rounds per contract, then multiplies.** See `contracts/docs/ACCOUNTING.md` §6.
 5. **`redeem` does not require unsold options to be burned.** Leftover option ERC-1155 sit in the
    vault as permanently inert dust and are valued at zero. Their collateral already came back
    through the claim.
@@ -251,7 +253,8 @@ Things that look wrong and are not, or look fine and are not. Each is commented 
 8. **`totalAssets()` collapses the moment a buyer is assigned**, mid-transaction, with no callback
    — Valorem takes the collateral and the strike USDG sits in the claim until `rollClose`. That is
    honest accounting, but it is why the deposit window closes on the exercise timestamp rather than
-   on the phase: pricing new shares against the gap was the critical finding in SECURITY.md.
+   on the phase: pricing new shares against the gap was the critical finding in
+   `contracts/SECURITY.md`.
 9. **A queue entry can settle without a payout.** `queueRedeem` auto-settling a stale slot moves
    value into the owner's owed balances as pure bookkeeping (an issuer freeze must never block
    queueing). It emits `QueueEntrySettled`, not `CompleteRedeem` — off-chain readers that only

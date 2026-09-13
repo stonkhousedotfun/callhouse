@@ -21,7 +21,7 @@ Do not auto-buy the stock back after assignment in v1. Assignment leaves the vau
 One vault = one Stock Token + USDG.
 Depositors own a pro-rata claim on vault assets: idle Stock Token + USDG + Overcall claim NFT + unsold option ERC-1155.
 Yield paid out is USDG only (call premium, and USDG received if assigned).
-Protocol fee: 5% of the premium harvested that week, only if premium > 0. USDG received from assignment (strike proceeds) is never fee'd. No fee on deposits, no fee on idle stock. (Changed 2026-09-13 from 10% of all harvested USDG; see docs/ACCOUNTING.md §6.)
+Protocol fee: 5% of the premium harvested that week, only if premium > 0. USDG received from assignment (strike proceeds) is never fee'd. No fee on deposits, no fee on idle stock. (Changed 2026-09-13 from 10% of all harvested USDG; see contracts/docs/ACCOUNTING.md §6.)
 While a call is open, withdrawals are queued until Saturday reclaim.
 If Overcall has no cycle, or Chainlink/oraclePaused() is true on the token, the vault holds spot and writes nothing.
 Unfilled listing = that week’s option yield is 0. UI must say so.
@@ -30,7 +30,7 @@ Default first market: NVDA. Same code, second deploy: PFE or SCHD.
 
 2. External system map
 
-User ──ERC-20──► Vault (this repo)
+User ──ERC-20──► Vault (ours, contracts/)
                     │
                     │ write / redeem
                     ▼

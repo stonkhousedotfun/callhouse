@@ -49,7 +49,6 @@ RUN corepack enable && corepack prepare pnpm@9 --activate
 # "lockfile is not up to date" even though its code never enters this image.
 COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
 COPY web/package.json ./web/
-COPY site/package.json ./site/
 COPY keeper/package.json ./keeper/
 COPY indexer/package.json ./indexer/
 

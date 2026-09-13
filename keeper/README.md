@@ -73,7 +73,8 @@ from roll.ts, with state.ts, policy.ts, seaport.ts, overcallApi.ts, alerts.ts an
 running unmodified — through three cycles against a fork. `DRYRUN.md` is the recorded run.
 
 ```bash
-# 1. build the artifacts the dry run deploys (Vault + both linked libraries + the two mocks)
+# 1. build the artifacts the dry run deploys (Vault + both linked libraries + the two mocks).
+#    contracts/ is the leekzor/callhouse-contracts submodule: git submodule update --init --recursive
 (cd contracts && forge build)
 
 # 2. fork mainnet, keeping chain id 4663, and RUN STEP 3 WITHIN A FEW MINUTES — see the trap below
@@ -158,7 +159,7 @@ Three traps, each of which cost an afternoon:
 
 ### Docker
 
-The image is built from the **repo root**, like the two frontends, because the lockfile is
+The image is built from the **repo root**, like the web image, because the lockfile is
 workspace-wide. `keeper/Dockerfile` explains every layer; `ops/deploy.md` ("keeper") is the
 Railway runbook, and `keeper/railway.json` is the config-as-code.
 
@@ -170,7 +171,7 @@ docker run --env-file keeper/.env --env KEEPER_DB_PATH=/data/keeper.db -v callho
 ```
 
 The root `.dockerignore` must let `keeper/src` and `keeper/tsconfig.json` into the context; it is
-shared with the web and site images, so the exceptions live there, not in a per-package file.
+shared with the web image, so the exceptions live there, not in a per-package file.
 The runner is the stock `node` user, carries no pnpm and no compiler, and reads
 `KEEPER_DB_PATH=/data/keeper.db` by default — mount a volume at `/data`. An env file that sets
 `KEEPER_DB_PATH` (keeper/.env.example ships `./keeper.db`) OVERRIDES the image default, so the

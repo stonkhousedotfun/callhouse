@@ -13,7 +13,7 @@ Product in one line: pooled covered-call vault for Robinhood Chain Stock Tokens.
 - ERC-4626-style shares with queued redeem while a call is open.
 - Weekly phase machine `Idle → Listed → Exercisable → Settling → Idle`.
 - Valorem Clear write / redeem adapter. Seaport 1.6 listing with vault as offerer (EIP-1271).
-- 5% protocol fee on harvested premium, filled weeks only; strike proceeds from assignment are never fee'd. `accUsdgPerShare` distribution. *(2026-09-13: changed from 10% of all harvested USDG; see docs/ACCOUNTING.md §6.)*
+- 5% protocol fee on harvested premium, filled weeks only; strike proceeds from assignment are never fee'd. `accUsdgPerShare` distribution. *(2026-09-13: changed from 10% of all harvested USDG; see contracts/docs/ACCOUNTING.md §6.)*
 - Keeper (Node 22) that binds to `registry.cycle()`, picks strike, signs, POSTs to Overcall listings API, closes, harvests.
 - Ponder indexer + small read API.
 - Next.js frontend: deposit, queue withdraw, claim USDG, cycle tape, activity, docs, legal.

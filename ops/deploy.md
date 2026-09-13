@@ -1,7 +1,9 @@
 # Runbook — Deploy the frontend
 
-**What this is.** How the two web surfaces get onto Railway, what every setting means, and the
-three things that go wrong. Contracts, keeper and indexer are not covered here.
+**What this is.** How the dapp (`app.callhouse.xyz`) gets onto Railway, what every setting means,
+and the three things that go wrong. Contracts, keeper and indexer are not covered here. The
+landing (`callhouse.xyz`) deploys from its own repository, `leekzor/callhouse-site`, and that
+repository's README is its runbook.
 
 **Who runs it.** Anyone with write access to the Railway project. Nothing in this runbook touches
 a private key, signs a transaction, or can move a token. The worst outcome of getting it wrong is
@@ -15,59 +17,58 @@ redeploy.
 ## 0. The shape of it
 
 ```
-callhouse.xyz          ->  Railway service "site"  ->  site/Dockerfile  ->  site/server.js
-                           Static marketing landing. No wallet code, no chain reads, no live
-                           numbers. Routes: /, /how-it-works, /risks, /legal.
+callhouse.xyz          ->  Railway service "site"  ->  leekzor/callhouse-site (its own repo,
+                           its own Dockerfile and build context). Not covered here.
 
 app.callhouse.xyz      ->  Railway service "web"   ->  web/Dockerfile   ->  web/server.js
                            The dapp, every route unchanged. wagmi + viem, one server route
                            (/api/overcall/listings).
 ```
 
-Two services, one repository, **one build context: the repo root**. Both Dockerfiles copy
-`pnpm-lock.yaml`, `pnpm-workspace.yaml` and every workspace member's `package.json` before they
-install, because the lockfile is workspace-wide. This is why the Root Directory setting in §1 is
-not negotiable.
+One frontend service in this repository, **one build context: the repo root**. `web/Dockerfile`
+copies `pnpm-lock.yaml`, `pnpm-workspace.yaml` and every workspace member's `package.json` before
+it installs, because the lockfile is workspace-wide. This is why the Root Directory setting in §1
+is not negotiable.
 
 Nothing is shared between the two domains at runtime. No cookie, no session, no CORS grant, no
 shared origin. Every "go and do something" control on `callhouse.xyz` is a plain absolute link to
 `https://app.callhouse.xyz/...`, which is the whole reason the split is cheap.
 
-`site/railway.json` and `web/railway.json` carry no comments — JSON has none. This file is their
-documentation. If you change one of those files, change this one.
+`web/railway.json` carries no comments — JSON has none. This file is its documentation. If you
+change that file, change this one.
 
 ---
 
 ## 1. Railway service settings
 
-Create two services in one project, both from this GitHub repository. Then, per service:
+Create the `web` service from this GitHub repository. (The `site` service's source is
+`leekzor/callhouse-site`; its settings are in that repository's README.)
 
-| Setting | `site` | `web` |
-|---|---|---|
-| Service name | `site` | `web` |
-| Source → Repo | this repo | this repo |
-| Source → Branch | `main` | `main` |
-| **Source → Root Directory** | **empty (repo root)** | **empty (repo root)** |
-| Settings → Config-as-code path | `site/railway.json` | `web/railway.json` |
-| Builder | `DOCKERFILE` (from railway.json) | `DOCKERFILE` (from railway.json) |
-| Dockerfile path | `site/Dockerfile` (from railway.json) | `web/Dockerfile` (from railway.json) |
-| Public networking | enabled, port 3000 | enabled, port 3000 |
+| Setting | `web` |
+|---|---|
+| Service name | `web` |
+| Source → Repo | this repo |
+| Source → Branch | `main` |
+| **Source → Root Directory** | **empty (repo root)** |
+| Settings → Config-as-code path | `web/railway.json` |
+| Builder | `DOCKERFILE` (from railway.json) |
+| Dockerfile path | `web/Dockerfile` (from railway.json) |
+| Public networking | enabled, port 3000 |
 
 **Root Directory must stay empty.** It is the single setting people get wrong. Setting it to
-`/site` makes Railway use `site/` as the build context, `pnpm-lock.yaml` and `pnpm-workspace.yaml`
+`/web` makes Railway use `web/` as the build context, `pnpm-lock.yaml` and `pnpm-workspace.yaml`
 are then outside the context, and the install either fails or silently resolves a different tree.
 
 `dockerfilePath` inside each `railway.json` is resolved **relative to the Root Directory**. Root
-Directory empty + `"dockerfilePath": "site/Dockerfile"` is a consistent pair. If you ever move the
+Directory empty + `"dockerfilePath": "web/Dockerfile"` is a consistent pair. If you ever move the
 root, both halves move together.
 
 ### Watch paths
 
-Both services watch the same repository, so without a filter every push rebuilds both. Each
-`railway.json` declares `build.watchPatterns`:
+`web` and `keeper` (§10) watch the same repository, so without a filter every push rebuilds both.
+Each `railway.json` declares `build.watchPatterns`:
 
 ```
-site:  site/**   scripts/**  package.json  pnpm-lock.yaml  pnpm-workspace.yaml
 web:   web/**    scripts/**  package.json  pnpm-lock.yaml  pnpm-workspace.yaml
 ```
 
@@ -80,17 +81,18 @@ A lockfile change rebuilds both. That is correct: a workspace install feeds both
 Do these in order. Step 2 before step 3, or the first image is built with an empty configuration
 and you will deploy a page pointed at nothing.
 
-1. **Confirm the workspace is coherent.** `site` must be listed in `pnpm-workspace.yaml`, and
-   `pnpm-lock.yaml` must have been regenerated and committed after it was added. Verify locally:
+1. **Confirm the workspace is coherent.** `keeper`, `indexer` and `web` must be listed in
+   `pnpm-workspace.yaml`, and `pnpm-lock.yaml` must have been regenerated and committed after the
+   last change to that list. Verify locally:
 
    ```bash
    pnpm install --frozen-lockfile     # must succeed with no lockfile update
    ```
 
-   If that command wants to modify the lockfile, **stop**. Both Docker builds run
-   `pnpm install --frozen-lockfile` and both will fail with "lockfile is not up to date".
+   If that command wants to modify the lockfile, **stop**. The `web` and `keeper` Docker builds
+   run `pnpm install --frozen-lockfile` and both will fail with "lockfile is not up to date".
 
-2. **Set every variable** from §3 on each service, before triggering a build.
+2. **Set every variable** from §3 on the service, before triggering a build.
 
 3. **Deploy.** Push to `main`, or Railway → service → Deploy.
 
@@ -113,19 +115,8 @@ The split below is the most important thing in this file.
 >
 > **Changing any of these requires a REBUILD, not a restart.**
 
-### `site` — build-time
-
-| Variable | Value | If unset |
-|---|---|---|
-| `NEXT_PUBLIC_SITE_URL` | `https://callhouse.xyz` | Falls back to the same value, compiled in. Safe. |
-| `NEXT_PUBLIC_APP_URL` | `https://app.callhouse.xyz` | Falls back to the same value, compiled in. Safe. |
-
-Set them anyway. An explicit variable is what a preview environment overrides.
-
-### `site` — runtime
-
-None. This package has no server-side configuration at all. `PORT` is injected by Railway and read
-by `server.js`; do not set it by hand.
+The `site` service's variables are documented in `leekzor/callhouse-site`; the rule above applies
+to it identically.
 
 ### `web` — build-time
 
@@ -180,54 +171,21 @@ Type   Name   Value
 CNAME  app    <target>.up.railway.app
 ```
 
-### `callhouse.xyz` — the apex, and the step that surprises people
-
-**A `CNAME` at the apex is not valid DNS.** RFC 1034 forbids a CNAME coexisting with the `SOA` and
-`NS` records that every zone apex must carry. Railway hands you a hostname, not an IP, and it does
-not publish a stable A record you could point at instead. So the apex needs a DNS provider that
-implements one of:
-
-- **`ALIAS` / `ANAME`** — a synthetic record that resolves the target and answers with its A/AAAA.
-  Offered by Cloudflare (as "CNAME flattening"), DNSimple, Namecheap, Route 53 (`ALIAS`), and
-  others.
-- **CNAME flattening** — Cloudflare's name for the same trick. Create a normal `CNAME` at the root
-  and Cloudflare flattens it on the way out.
-
-```
-Type          Name   Value
-ALIAS/ANAME   @      <target>.up.railway.app
-```
-
-If your registrar offers neither, move DNS to one that does. Cloudflare is the usual answer and is
-free. **Do not** pick an IP out of a `dig` against the Railway target and pin an A record to it —
-it is not yours, it will move, and the site will go dark without a deploy to blame.
-
-If the zone is on Cloudflare, set the record to **DNS only** (grey cloud) unless you have decided
-to run proxied on purpose. Proxied works, but it puts a second cache and a second TLS terminator
-in front of Railway's, and it is one more thing to rule out when something looks stale.
-
-### `www` — decision
-
-**`www.callhouse.xyz` redirects to the apex, 301.** One canonical host. The metadata base in
-`lib/site.ts` is `https://callhouse.xyz`, the compliance pages are canonical there, and two live
-hostnames serving identical disclosure pages is the kind of thing that is easy to create and
-tedious to explain.
-
-Implement the redirect at the DNS/CDN layer, not in the app — Cloudflare "Redirect Rules", or the
-registrar's URL-forwarding record. Neither service has redirect middleware, and neither should
-grow one for this.
-
-```
-CNAME  www  -> callhouse.xyz        (then a redirect rule: www.callhouse.xyz/* -> callhouse.xyz/$1, 301)
-```
-
 TLS is issued by Railway automatically once the record resolves. Expect a few minutes.
+
+### `callhouse.xyz` and `www` — the landing's records, documented with the landing
+
+The apex and `www` attach to the `site` service, and the full step is in the
+`leekzor/callhouse-site` README. Two facts are repeated here because they live in the same DNS
+zone as the record above: **a `CNAME` at the apex is not valid DNS**, so the apex needs
+`ALIAS`/`ANAME` or Cloudflare's CNAME flattening, never an A record pinned to an IP you resolved
+yourself; and `www.callhouse.xyz` redirects to the apex, 301, at the DNS/CDN layer.
 
 ---
 
 ## 5. Healthchecks, and how to verify a deploy
 
-Both services declare, in their `railway.json`:
+`web/railway.json` declares:
 
 ```json
 "healthcheckPath": "/", "healthcheckTimeout": 120,
@@ -237,7 +195,7 @@ Both services declare, in their `railway.json`:
 **A healthcheck that times out almost always means the server is bound to the wrong interface.**
 Next's standalone server binds `127.0.0.1` unless `HOSTNAME` says otherwise; inside a container
 that means nothing outside the container can reach it, and Railway reports a timeout that reads
-like a slow boot. Both Dockerfiles set `ENV HOSTNAME=0.0.0.0` for exactly this reason. If you are
+like a slow boot. `web/Dockerfile` sets `ENV HOSTNAME=0.0.0.0` for exactly this reason. If you are
 debugging a failing healthcheck, confirm that line survives before you look anywhere else.
 
 The second cause is a `PORT` mismatch: Railway injects `$PORT` and probes it, and `server.js` reads
@@ -246,20 +204,11 @@ The second cause is a `PORT` mismatch: Railway injects `$PORT` and probes it, an
 ### Verify
 
 ```bash
-# 1. Both hosts answer.
-curl -sI https://callhouse.xyz/            | head -1     # HTTP/2 200
+# 1. The host answers.
 curl -sI https://app.callhouse.xyz/        | head -1     # HTTP/2 200
 
-# 2. site/ has no live data and no wallet code. Expect no wagmi chunk, no connect control.
-curl -s https://callhouse.xyz/ | grep -ci 'connect wallet'          # 0
-
-# 3. site/'s CTAs point at the app, absolutely. Expect app.callhouse.xyz, never a relative /vault.
-curl -s https://callhouse.xyz/ | grep -o 'https://app\.callhouse\.xyz[^"]*' | sort -u
-
-# 4. The four site routes exist.
-for p in "" how-it-works risks legal; do
-  printf '%-14s %s\n' "/$p" "$(curl -s -o /dev/null -w '%{http_code}' https://callhouse.xyz/$p)"
-done
+# 2-4. The landing's checks (no wallet code, absolute CTAs into the app, its four routes)
+#      moved with the landing to the leekzor/callhouse-site README.
 
 # 5. THE ONE THAT MATTERS: which vault did this image get baked with?
 curl -s https://app.callhouse.xyz/vault/nvda | grep -oiE '0x[0-9a-f]{40}' | sort -u
@@ -272,8 +221,9 @@ time**. Setting it now and restarting changes nothing — see §6.
 Then look at the page itself: the vault card renders, an unfilled week shows as `unfilled, 0`
 rather than an error, and the layout does not scroll sideways at 400px.
 
-`scripts/copy-lint.mjs` is a CI gate on `site/` and `web/`, not a deploy gate. A deploy cannot
-introduce a copy violation that CI did not already see, because both build from the same commit.
+`scripts/copy-lint.mjs` is a CI gate on `web/`, not a deploy gate; its twin gates the landing in
+`leekzor/callhouse-site` the same way. A deploy cannot introduce a copy violation that CI did not
+already see, because CI and the image build from the same commit.
 
 ---
 
@@ -281,7 +231,7 @@ introduce a copy violation that CI did not already see, because both build from 
 
 | What changed | What to do |
 |---|---|
-| `NEXT_PUBLIC_*` on either service | **Rebuild.** Railway → service → Deploy → Redeploy, or push a commit. The value is compiled into the JavaScript; a restart re-runs the identical bundle |
+| `NEXT_PUBLIC_*` on `web` | **Rebuild.** Railway → service → Deploy → Redeploy, or push a commit. The value is compiled into the JavaScript; a restart re-runs the identical bundle |
 | `OVERCALL_API_BASE` on `web` | **Restart.** It is read per request |
 | Anything in `railway.json` | Push the commit. Config-as-code is applied at the start of the next build |
 
@@ -302,7 +252,7 @@ therefore the same action as rolling back bad code: redeploy the deployment from
 The corollary: reverting the commit alone does **not** undo a variable change. The variable lives
 on the service, and the next build will pick it up again. Fix the variable, then rebuild.
 
-Rolling back one service does not affect the other. They share a repository and nothing else, so
+Rolling back `web` does not affect the landing. They share nothing, not even a repository, so
 `callhouse.xyz` can sit on last week's build while `app.callhouse.xyz` ships.
 
 ---
@@ -314,17 +264,13 @@ Worth doing once, and any time a Dockerfile changes. The context is the repo roo
 
 ```bash
 # from the repo root
-docker build -f site/Dockerfile -t callhouse-site .
-docker run --rm -p 3000:3000 callhouse-site
-# -> http://localhost:3000
-
 docker build -f web/Dockerfile -t callhouse-web \
   --build-arg NEXT_PUBLIC_VAULT=0x0000000000000000000000000000000000000000 \
   --build-arg NEXT_PUBLIC_API_URL=http://localhost:42069 .
 docker run --rm -p 3000:3000 -e OVERCALL_API_BASE=https://overcall.finance callhouse-web
 ```
 
-Each build asserts its own standalone entry point and fails with a readable message rather than a
+The build asserts its standalone entry point and fails with a readable message rather than a
 bare COPY error. If you see that message, read the next section.
 
 ---
@@ -336,7 +282,8 @@ bare COPY error. If you see that message, read the next section.
    the wrong vault. Rebuild, never restart, and verify with §5 step 5.
 
 2. **A `CNAME` at the apex is invalid DNS.** `callhouse.xyz` needs `ALIAS`/`ANAME` or Cloudflare's
-   CNAME flattening. Do not pin an A record to an IP you resolved yourself.
+   CNAME flattening. Do not pin an A record to an IP you resolved yourself. (The landing's record;
+   the full step is in the `leekzor/callhouse-site` README, §4 here has the summary.)
 
 3. **`HOSTNAME=0.0.0.0`.** Remove it and standalone binds localhost, unreachable from outside the
    container, and every healthcheck times out. This is the first thing to check on a failing
@@ -345,34 +292,34 @@ bare COPY error. If you see that message, read the next section.
 4. **Root Directory must be the repo root.** Point it at `/web` and the build context loses
    `pnpm-lock.yaml` and `pnpm-workspace.yaml`, and the workspace install has nothing to work from.
 
-5. **The install is filtered, and it has to be.** Both images run
-   `pnpm install --frozen-lockfile --filter @callhouse/<pkg>...` — that package plus its
+5. **The install is filtered, and it has to be.** The web image runs
+   `pnpm install --frozen-lockfile --filter @callhouse/web...` — that package plus its
    dependencies, nothing else. Drop the filter and pnpm also installs `keeper`, whose
    `better-sqlite3` is a native addon: `node-gyp` runs on `node:22-alpine`, finds no Python, and
    the build dies with `Could not find any Python installation to use`. Both alternatives are
    worse than a filter — install `python3` and `build-base` to compile a database driver into a
    web image, or pass `--ignore-scripts` and silently skip every legitimate postinstall. The
-   trailing `...` is load-bearing: `--filter @callhouse/site` alone omits the dependencies.
+   trailing `...` is load-bearing: `--filter @callhouse/web` alone omits the dependencies.
 
-6. **Every member's `package.json` is still copied.** `site`, `web`, `keeper`, `indexer` — all
-   four, filtered install or not, because pnpm compares the lockfile's importer set against the
+6. **Every member's `package.json` is still copied.** `web`, `keeper`, `indexer` — all
+   three, filtered install or not, because pnpm compares the lockfile's importer set against the
    workspace before it resolves anything. Add a package to `pnpm-workspace.yaml` without
    regenerating and committing `pnpm-lock.yaml`, or forget to copy its manifest, and **both**
-   images fail with "lockfile is not up to date". No keeper or indexer *code* reaches either
-   image; only the manifests do.
+   images (web and keeper) fail with "lockfile is not up to date". No keeper or indexer *code*
+   reaches the web image; only the manifests do.
 
 7. **The standalone entry point nests.** `outputFileTracingRoot` is the repo root, so the output
    mirrors it: `.next/standalone/web/server.js`, not `.next/standalone/server.js`. `.next/static`
    is **not** inside the standalone tree and is copied separately to `web/.next/static` — miss it
-   and the page renders unstyled with every asset 404ing. Both Dockerfiles assert the entry point
+   and the page renders unstyled with every asset 404ing. `web/Dockerfile` asserts the entry point
    exists at the end of the builder stage so this fails with an explanation.
 
-8. **`output: 'standalone'` lives in each package's `next.config.mjs`.** Delete it there and the
+8. **`output: 'standalone'` lives in `web/next.config.mjs`.** Delete it there and the
    image build fails at the assertion, not at deploy time. If a future Next release stops emitting
    standalone output under a Turbopack build, build with `--webpack` before changing anything
    else — the rest of this file is unaffected.
 
-9. **Both services watch one repository.** Without `build.watchPatterns` in each `railway.json`
+9. **`web` and `keeper` watch one repository.** Without `build.watchPatterns` in each `railway.json`
    every push rebuilds both. If Railway rejects that key on a future schema, the fallback is the
    Watch Paths field in the service settings; the deploy is not broken either way, just noisier.
 
@@ -387,8 +334,9 @@ bare COPY error. If you see that message, read the next section.
     deliberate — it tracks the lockfile's format, not a pinned patch. If corepack ever fails to
     fetch, it fails loudly in the install layer and no image ships.
 
-12. **The images run as `nextjs` (uid 1001), not root.** Anything that needs to write at runtime
-    needs to be writable by that user. Nothing does today; neither package writes to disk.
+12. **The web image runs as `nextjs` (uid 1001), not root.** Anything that needs to write at
+    runtime needs to be writable by that user. Nothing does today; the package does not write to
+    disk.
 
 13. **`ops/`, `docs/` and `contracts/` are excluded from the build context** by the root
     `.dockerignore`. `web/lib/abi/*.ts` are generated and committed, so `next build` never reads
@@ -402,7 +350,7 @@ bare COPY error. If you see that message, read the next section.
 | File | What it covers |
 |---|---|
 | [`../web/Dockerfile`](../web/Dockerfile) | The dapp image. The build-arg block is commented at length |
-| [`../site/Dockerfile`](../site/Dockerfile) | The landing image. Two variables, no chain access |
+| `leekzor/callhouse-site` README | The landing: its image, Railway service, variables and the apex-domain DNS step |
 | [`../.dockerignore`](../.dockerignore) | What reaches the build context, and what must stay in |
 | [`../web/.env.example`](../web/.env.example) | Authoritative list of what `web/` reads |
 | [`addresses.json`](addresses.json) | The address book. Diff §5 step 5 against it |
@@ -412,9 +360,9 @@ bare COPY error. If you see that message, read the next section.
 
 ## 10. The keeper
 
-Added 2026-09-13. Everything above is about the two frontends; this section is the third Railway
-service, and it is different in kind: it holds a hot key, it writes to chain, and it keeps state.
-Read [`../keeper/README.md`](../keeper/README.md) first.
+Added 2026-09-13. Everything above is about the `web` frontend; this section is the other Railway
+service this repository deploys, and it is different in kind: it holds a hot key, it writes to
+chain, and it keeps state. Read [`../keeper/README.md`](../keeper/README.md) first.
 
 ### 10.0 The shape of it
 
@@ -425,7 +373,7 @@ Read [`../keeper/README.md`](../keeper/README.md) first.
                            week. Health on GET /health. SQLite at /data/keeper.db on a volume.
 ```
 
-Same build context as the frontends — **the repo root** — for the same reason: the lockfile is
+Same build context as `web` — **the repo root** — for the same reason: the lockfile is
 workspace-wide. `keeper/railway.json` is the config-as-code and this section is its documentation.
 
 **Exactly one instance. Never scale it.** Two keepers see the same `Idle` vault, both pick the
@@ -449,7 +397,7 @@ enforcement. If Railway ever offers you a second replica, the answer is no.
 | Healthcheck | `GET /health` on `PORT`, timeout 300 s (from railway.json). 503 only when the loop is wedged; `degraded` is a 200 |
 
 Watch paths: `keeper/**`, `package.json`, `pnpm-lock.yaml`, `pnpm-workspace.yaml`. A lockfile change
-rebuilds all three services, which is correct.
+rebuilds both of this repository's services, which is correct. (The landing has its own lockfile.)
 
 ### 10.2 Environment variables
 

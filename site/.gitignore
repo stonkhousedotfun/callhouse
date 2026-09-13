@@ -1,4 +1,0 @@
-# Build artefacts that Next and tsc regenerate on every build.
-# The root .gitignore already covers .next/ and node_modules/; these two are package-local.
-*.tsbuildinfo
-next-env.d.ts
