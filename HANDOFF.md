@@ -53,8 +53,10 @@ Clone with `git clone --recurse-submodules`.
 4. Point `web`, `indexer`, `keeper`, `relay` on Railway at the vault; uptime monitors (L-08, L-09).
 5. One real Overcall listing (L-04), then four published weeks.
 
-Smaller open items: keeper `/orders` fallback on the cycle page (`docs/WIRING.md` §7); rename the
-GitBook site title from "callhouse Docs" (GitBook UI); `RH_RPC` secret.
+Before L-04: the keeper must post a real ECDSA signature, not the placeholder (L-1 in
+`~/Desktop/robinhood-dev/projects/callhouse/HANDOFF-BUGS-2026-09-13.md`, with the other open
+rehearsal defects). Owner decision W-1 (deposits into an open week) is in `docs/LAUNCH-PLAN.md`.
+Smaller: rename the GitBook site title from "callhouse Docs" (GitBook UI); `RH_RPC` secret.
 
 ## Traps
 

@@ -23,7 +23,10 @@ Status (2026-09-13 ~14:30 PT):
 | 2 | **done.** `callhouse-site` 39caed5, c721dba, 69fb6b3 (no-buyer weeks pay zero *premium*; queue USDG per entry; an issuer freeze can hold up the close). GitBook docs audited against the code (718 claims): `callhouse-docs` 29823dd, 3cf2b4e |
 | 3 | **done.** Contracts `634bf55` on GitHub; app submodule pinned; `ops/safes.md` §7 updated |
 | 4.1–4.9 | **done.** CI green; W-21, K-21, margin, indexer Dockerfile, X-11 (three indexer defects fixed), relay, K-22 (dead-listing defect fixed), W-13 (status flip-flop fixed in e5392fe). Follow-up 1c3de3d: an unfilled week that Valorem assigned anyway is labelled "unfilled, assigned N" in the web app |
-| Open | keeper `/orders` fallback not wired into the web app (`docs/WIRING.md` §7); GitBook site title shows "callhouse Docs" (rename in GitBook site settings) |
+| Fallback | **done.** The cycle page falls back to the keeper's `/orders` through a server route that checks every order against the chain (457c4fc, 41b0a66; 11 review findings fixed); W-13 fork acceptance passes on merged `main`, including a tampered order that is refused. Deploy needs `KEEPER_ORDERS_URL` on the `web` service (`ops/deploy.md` §3) |
+| E-03 rehearsal defects | from the other session's fork rehearsal: W-3–W-6 fixed (0c6cd47). **Open, handed to a separate workflow** (`~/Desktop/robinhood-dev/projects/callhouse/HANDOFF-BUGS-2026-09-13.md`): L-1 the keeper posts an off-curve placeholder signature that Overcall's verifier may reject before ERC-1271 (**blocks L-04**); the K-1 remainder; X-1–X-3 indexer; W-2 deposit form; K-2; D-1 |
+| Owner decision | **W-1:** a deposit while a call is open is priced at face value and shares that week's assignment. Copy on site (46d79b2) and docs (fe82ec0) now says so; the alternative is Idle-only deposits, a contract change |
+| Open | GitBook site title shows "callhouse Docs" (rename in GitBook site settings) |
 
 ---
 

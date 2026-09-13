@@ -68,9 +68,13 @@ Plan and live status: `docs/LAUNCH-PLAN.md`. Everything below is pushed.
 - **Docs**: `leekzor/callhouse-docs` on GitBook Git Sync, live on `docs.callhouse.finance` (Cloudflare
   1014 for about an hour while GitBook activated the hostname). A 132-agent audit checked 718 claims
   against the code; 40 confirmed errors fixed (29823dd, 3cf2b4e).
-- **Not done here:** the keeper `/orders` fallback on the cycle page (`docs/WIRING.md` §7) — a
-  workflow was building it when this log was written; the GitBook site title ("callhouse Docs",
-  GitBook UI only).
+- **Keeper `/orders` fallback on the cycle page** (457c4fc, 41b0a66, 35544e8): server route
+  `web/app/api/keeper/orders`, every order checked against the chain; 11 adversarial review
+  findings fixed; W-13 fork acceptance passes on merged `main`. Needs `KEEPER_ORDERS_URL` on `web`.
+- **From the other session's E-03 fork rehearsal:** W-3–W-6 fixed (0c6cd47); W-1 copy corrected on
+  site and docs (owner decision on Idle-only deposits pending); the rest (L-1 listing signature,
+  K-1 remainder, X-1–X-3, W-2, K-2, D-1) is in `~/Desktop/robinhood-dev/projects/callhouse/HANDOFF-BUGS-2026-09-13.md`.
+- **Not done here:** the GitBook site title ("callhouse Docs", GitBook UI only).
 
 ### Session log — 2026-09-13 (evening): repository split
 
@@ -185,7 +189,8 @@ Superseded by `docs/LAUNCH-PLAN.md` (parts 5–7) as of 2026-09-13 late. In shor
    cap 20 NVDA. Then point `web`, `indexer`, `keeper`, `relay` at the vault (L-08, L-09).
 5. **L-04**: one real 1-contract Overcall listing to settle EIP-1271 against their validator, then
    four published weeks (L-10..13).
-6. `RH_RPC` repo secret (L-01 residue); keeper `/orders` fallback on the cycle page.
+6. L-1 real keeper signature before L-04, and the other open rehearsal defects (HANDOFF-BUGS doc);
+   owner decision W-1; `RH_RPC` repo secret (L-01 residue).
 
 ---
 
