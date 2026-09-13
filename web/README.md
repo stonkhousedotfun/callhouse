@@ -123,3 +123,80 @@ change. The filter keeps the read surface plus the functions a depositor may cal
 keeper or admin entry points — and every event and custom error, so a revert decodes to a name
 instead of a selector. The other files in that directory have hand-maintained headers over
 canonical sources (see their comments); do not edit the bodies by hand either.
+
+## Fork acceptance (W-13)
+
+`tests/acceptance/fork.acceptance.ts` drives this app in a real browser, from wallets created for
+the run, against an anvil fork of 4663 with the keeper running beside it, and ends with a fill
+served from the keeper's own `/orders`. It is not part of `pnpm test` or CI: it needs anvil, a
+network fork and a Chromium.
+
+```bash
+anvil --fork-url https://rpc.mainnet.chain.robinhood.com --chain-id 4663 --port 8548   # own terminal
+(cd ../contracts && forge build)
+pnpm --filter @callhouse/web acceptance:fork     # ~1 min; last line: W-13 FORK ACCEPTANCE PASSED
+```
+
+Optional: `ACCEPTANCE_RPC` (default `http://127.0.0.1:8548`), `ACCEPTANCE_OUT` (default a temp
+dir: `run.json` with every tx hash and amount, `keeper.db`, next and browser logs, and a screenshot
+plus DOM of each page on failure), `ACCEPTANCE_HEADFUL=1`, `ACCEPTANCE_KEEPER_LOG_LEVEL`. The
+Chromium is Playwright's (`playwright-core` 1.63.0, revision 1243); if it is not cached, run
+`pnpm --filter @callhouse/web exec playwright-core install chromium` once. **The run overwrites
+`web/.next` with a build pointed at the fork**; rebuild before serving anything else from the
+checkout. It refuses any RPC that is not anvil on chain 4663.
+
+**Approach.** A real browser, not calls re-implemented beside the components. The setup deploys a
+Vault with MockRegistry and MockFeed and a fresh option series on the real Valorem Clear, the way
+`keeper/src/dryrun.ts` does (that file exports nothing and runs itself on import, so its fork
+primitives are mirrored, not imported), then imports the keeper's production modules and calls
+`reconcile()`/`tick()` and `startHealthServer()`. The app is `next build` + `next start` with every
+`NEXT_PUBLIC_*` on the fork (both RPC slots, vault, registry, deploy block) and
+`NEXT_PUBLIC_API_URL` unreachable, so history comes from the log fallback. Each wallet is an
+EIP-1193 provider injected into headless Chromium and announced over EIP-6963; wagmi's
+`injected()` connector lists it like an extension, it exposes no account until the page's Connect
+flow asks, and it signs the page's `eth_sendTransaction` with a key generated for the run. It
+refuses a call it cannot decode against `lib/abi`, so every page transaction is checked by name
+and exact arguments.
+
+**What it proves**, each figure checked to the base unit on chain and as rendered:
+
+1. **Deposit** (`/vault/nvda`, fresh wallet): Connect, type 25, "Approve and deposit" sends
+   `approve(vault, 25e18)` then `deposit(25e18, owner)`; 25 cNVDA minted, "worth 25.0000 NVDA raw".
+2. **The fallback fill.** The book the keeper posts to refuses the listing (400, the L-04 failure
+   mode): the keeper records `post_failed`, alerts `api_reject`, and `/orders` serves the order.
+   With the web proxy's upstream answering like that book, `/vault/nvda/cycle` shows the on-chain
+   listing, says "Overcall's book has no listing matching the vault's current order hash." and
+   offers no fill. The upstream is then switched to relay the keeper's `/orders` (adding Seaport's
+   counter; the relay checks `seaport.getOrderHash` of what it serves equals the vault's
+   `listingHash`); the row passes the proxy's shape gate and `checkListingIsOurs`, the page renders
+   "Signed order · fill from here", and a second fresh wallet fills 2 of 23 from its button:
+   `approve(Seaport, cost)` and `fulfillAdvancedOrder` with numerator 2, denominator 23, the
+   placeholder signature, no conduit. The vault receives exactly writer-per-contract × 2, Overcall
+   fee-per-contract × 2, the buyer holds 2 option tokens. A raw Seaport client then fills 3 more
+   straight from the `/orders` JSON, and the `OrderParameters` it sends are asserted identical to
+   the ones the page sent.
+3. **Queue while Listed**: "Queue redemption" sends `queueRedeem(10e18)`; 10 shares escrowed,
+   epoch shown.
+4. **Close and collect**: warp, keeper `lockBook` and `rollClose`; one `Harvest` whose gross is
+   exactly the two writer legs, fee = floor(gross × 500 / 10000), `QueueSettled` = 10 NVDA plus
+   10e18 × index delta / 1e27; "Complete redemption" and "Claim … USDG" deliver exactly those, and
+   escrow + claim + fee + dust + owed = gross.
+5. **Pages**: "Last week realized" (gross, fee, net, per-share, 0 assigned, no strike-proceeds row)
+   and the account's shares, NAV, wallet NVDA and USDG on `/vault/nvda`; the `/activity` row,
+   totals, "rebuilt from vault logs" and the indexer notice. No uncaught page error.
+
+**What it does not prove:**
+
+- A real wallet extension (MetaMask, Rabby …), its approval UI, or a hardware wallet; mobile
+  browsers or the 400px layout.
+- Overcall's hosted book, their validator accepting the vault's EIP-1271 listing (L-04), or their
+  front end. Both upstreams here are local stubs.
+- That this app can reach the keeper at all. **It cannot today**: no route or env var reads
+  `/orders` (docs/WIRING.md §7). The run's relay, including the counter lookup, is the piece a
+  real fallback still has to build.
+- The indexer path (`NEXT_PUBLIC_API_URL` live, X-11), so "Net / collateral at harvest" renders its
+  honest dash; an assigned week on the pages (strike proceeds non-zero); an unfilled week; a
+  mid-week deposit checkpoint.
+- The real OvercallRegistry and Chainlink feed (mocked so the clock can be warped), the production
+  Docker image (`next start` on the build output, not `web/server.js`), and real RPC latency or
+  reorgs.
