@@ -1584,7 +1584,7 @@ async function main(): Promise<void> {
       await expectText("last week: cycle", last.locator(".card-head .mono"), "cycle #1");
       await expectText("last week: Net premium per cNVDA", stat(last, /^Net premium per cNVDA$/).value, fmtUsdg(perShare, 6));
       await expectText("last week: result", stat(last, /^Net premium per cNVDA$/).sub, `a buyer filled the listing · ${fmtUtcDate(closed.closedAt)}`);
-      await expectText("last week: Gross premium", rowValue(last, /^Gross premium$/), fmtUsdg(closed.gross));
+      await expectText("last week: Premium received", rowValue(last, /^Premium received$/), fmtUsdg(closed.gross));
       await expectText("last week: Protocol fee", rowValue(last, /^Protocol fee$/), fmtUsdg(closed.fee));
       await expectText("last week: Net premium to depositors", rowValue(last, /^Net premium to depositors$/), fmtUsdg(closed.net));
       await expectText("last week: Contracts assigned", rowValue(last, /^Contracts assigned$/), "0");
@@ -1600,6 +1600,13 @@ async function main(): Promise<void> {
       await expectText("position: Wallet USDG", rowValue(position, /^Wallet USDG$/), fmtUsdg(collected.usdg));
       const claimCard = card(page, exactly("USDG"));
       await expectText("usdg: Vault total distributed", rowValue(claimCard, /^Vault total distributed$/), `${fmtUsdg(await read<bigint>(vault, vaultAbi, "totalUsdgDistributed"))} USDG`);
+      // W-3: the distributor's own index (1e27 per share base unit) per whole share, not lifetime
+      // distribution over the supply left after the queue burned its shares.
+      await expectText(
+        "usdg: Distributed to date, per cNVDA",
+        rowValue(claimCard, /^Distributed to date, per cNVDA$/),
+        `${fmtUsdg((await read<bigint>(vault, vaultAbi, "accUsdgPerShare")) / 1_000_000_000n, 6)} USDG`,
+      );
       await expectText("usdg: button", claimCard.getByRole("button"), "Nothing to claim");
     });
 
