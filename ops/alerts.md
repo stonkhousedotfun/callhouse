@@ -26,9 +26,28 @@ hour. State changes (`boot`, `roll_open`, `roll_close`, an on-chain revert) fire
 are never suppressed.
 
 **Transport:** `ALERT_WEBHOOK` is a generic JSON POST. Telegram and Discord do not accept this
-shape directly — point it at a relay that wraps `message` into their `content`/`text` field. A
-raw Discord URL returns 400 forever and you will see nothing. With `ALERT_WEBHOOK` unset, alerts
-are logged at their own severity and stored in SQLite (`alerts` table), nowhere else.
+shape directly — a raw Discord URL returns 400 forever and you will see nothing. `ALERT_WEBHOOK`
+therefore points at **`relay/`**, the Railway service `relay` (`relay/README.md`,
+`ops/deploy.md` §12), which checks a shared token, validates the payload, and posts it to Discord
+(`content`, ≤ 2000 chars, mentions disabled) and/or Telegram (`sendMessage`, plain text, ≤ 4096),
+prefixed 🔴 ERROR / 🟠 WARN / 🔵 INFO. With `ALERT_WEBHOOK` unset, alerts are logged at their own
+severity and stored in SQLite (`alerts` table), nowhere else.
+
+- **The token.** The relay requires `RELAY_TOKEN`, as `Authorization: Bearer <token>` or as
+  `?token=<token>`. `keeper/src/alerts.ts` sends only `content-type` today, so the keeper uses the
+  query form:
+  `ALERT_WEBHOOK=http://relay.railway.internal:8080/alert?token=<RELAY_TOKEN>` (private network,
+  same Railway project; the public relay domain works the same way). A token in a query string can
+  land in proxy logs — when the keeper gains a header option (an `ALERT_WEBHOOK_TOKEN` sent as
+  `Authorization: Bearer`), move to it and rotate the token.
+- **What the keeper hears.** 200 when at least one configured target accepted (a partial failure
+  is logged by the relay, not retried — a retry would duplicate the message where it landed); 502
+  when every target refused, timed out (`RELAY_TIMEOUT_MS`, default 5 s, under the keeper's 10 s
+  abort) or was unreachable — so the keeper's five-minute retry applies; 401 wrong/missing token;
+  400 not a keeper alert. `kind` is not an enum on the relay side, so a new kind still arrives.
+- **Silence is the failure mode.** A relay with a wrong token, a deleted Discord webhook, or a bot
+  removed from its chat looks exactly like a quiet week. The Saturday webhook test below is the
+  control; `ops/deploy.md` §12.4 is the one-line test.
 
 **Health endpoint:** `GET /health` on `KEEPER_PORT` (default 8787). 200 `ok`/`degraded` while the
 keeper ticks (degraded covers low gas, RPC lag, a slow in-flight transaction); 503 `wedged` only

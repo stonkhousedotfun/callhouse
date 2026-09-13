@@ -91,6 +91,48 @@ To start over, drop the schema (`DROP SCHEMA callhouse CASCADE`) or `rm -rf .pon
 
 ---
 
+## Deploy (Railway)
+
+`indexer/Dockerfile` + `indexer/railway.json`, repo root as the build context, one Railway
+Postgres. Every setting and variable is in `ops/deploy.md` §11; the four facts that decide whether
+a deploy works:
+
+- **The schema changes on every deploy.** The image runs
+  `ponder start --schema ${DATABASE_SCHEMA:-$RAILWAY_DEPLOYMENT_ID}`. Leave `DATABASE_SCHEMA`
+  **unset** on Railway. A schema remembers the build that created it — reusing one with different
+  code or config fails with `Schema "…" was previously used by a different Ponder app` — and it is
+  locked by a heartbeat while the old deployment is still serving, which Railway keeps doing until
+  the new one is healthy. The first was reproduced against a local Postgres; the second is
+  Ponder 0.17's `tryAcquireLockAndMigrate` (`Failed to acquire lock on schema`).
+- **A new schema is not a cold backfill.** RPC responses are cached in the shared `ponder_sync`
+  schema; a redeploy re-runs the handlers over cached logs and only fetches blocks newer than the
+  cache. Old deployment schemas stay in the database until `ponder db prune`.
+- **The Railway healthcheck is `/ready`, not `/health` or `/v1/health`.** `/ready` is 503 until the
+  backfill finishes, so Railway keeps traffic on the previous deployment until the new one has the
+  whole history — no half-indexed tape is ever served. `/health` is 200 as soon as the HTTP server
+  exists (before any block is indexed), and `/v1/health` is 503 until the first checkpoint and then
+  200 while still `lagging`, and it also fails when the RPC blips. `/v1/health` is for the uptime
+  monitor, after the deploy.
+- **Pick `START_BLOCK` well behind the head.** The public RPC load-balances across nodes whose heads
+  were measured up to ~4,000 blocks apart. A `START_BLOCK` newer than a lagging node's head makes
+  Ponder's first `eth_getBlockByNumber` fail with `BlockNotFoundError` and the process exit (code
+  75). The vault's deploy block is always far enough back; a smoke test should be too.
+
+```bash
+# from the repo root — the smoke test this section was written from
+docker build -f indexer/Dockerfile -t callhouse-indexer .
+docker run -d --name ch-pg -e POSTGRES_PASSWORD=pw -p 55432:5432 postgres:16
+docker run --rm -p 42069:42069 \
+  -e DATABASE_URL=postgres://postgres:pw@host.docker.internal:55432/postgres \
+  -e DATABASE_SCHEMA=smoke \
+  -e PONDER_RPC_URL_4663=https://rpc.mainnet.chain.robinhood.com \
+  -e VAULT_ADDRESS=<vault> -e START_BLOCK=<head - 2000> callhouse-indexer
+curl -si localhost:42069/ready     # 503 "Historical indexing is not complete." → 200
+curl -s  localhost:42069/v1/health # {"status":"ok", …, "lag":{"blocks":"123","seconds":"14"}}
+```
+
+---
+
 ## What is indexed, and why
 
 | Source | Address | Filtered by | Why |

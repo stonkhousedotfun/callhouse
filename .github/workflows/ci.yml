@@ -32,6 +32,10 @@ jobs:
         run: pnpm --filter @callhouse/indexer typecheck
       - name: indexer tests
         run: pnpm --filter @callhouse/indexer test
+      - name: typecheck relay
+        run: pnpm --filter @callhouse/relay typecheck
+      - name: relay tests
+        run: pnpm --filter @callhouse/relay test
       - name: lint web
         run: pnpm --filter @callhouse/web lint
       - name: build web

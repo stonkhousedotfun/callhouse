@@ -1,7 +1,8 @@
 # Runbook — Deploy the frontend
 
 **What this is.** How the dapp (`app.callhouse.finance`) gets onto Railway, what every setting means,
-and the three things that go wrong. Contracts, keeper and indexer are not covered here. The
+and the three things that go wrong. The other Railway services this repository deploys have their
+own sections at the end: keeper §10, indexer §11, alert relay §12. Contracts are not covered. The
 landing (`callhouse.finance`) deploys from its own repository, `leekzor/callhouse-site`, and that
 repository's README is its runbook.
 
@@ -514,3 +515,267 @@ curl -s localhost:8787/health | jq .status
    `/orders`, `/cycles` — they are read-only and hold no secret, but they name the vault and the
    keeper address. Keep them private unless the fallback buy page needs `/orders`.
 5. **One instance.** Said twice in this section on purpose.
+
+---
+
+## 11. The indexer
+
+Added 2026-09-13 (L-08). Ponder and the public read API (`/v1/*`) in one process, over one
+Postgres. Read [`../indexer/README.md`](../indexer/README.md) → "Deploy (Railway)" first; this
+section is the settings list.
+
+### 11.0 The shape of it
+
+```
+<indexer domain>  ->  Railway service "indexer"  ->  indexer/Dockerfile  ->  ponder start
+                      Backfills from START_BLOCK, then follows the head. Serves /v1/*, /graphql
+                      and Ponder's /health /ready /status /metrics on $PORT.
+                  ->  Railway service "Postgres" (the database plugin), private network only.
+```
+
+Same build context as every other service here — **the repo root**. There is no compile step:
+Ponder loads the TypeScript sources at boot with esbuild and does not type-check them, so CI's
+`pnpm --filter @callhouse/indexer typecheck` is the only type gate. `indexer/railway.json` is the
+config-as-code and this section is its documentation.
+
+Nothing else in the system calls the indexer's write surface except the keeper's optional HMAC
+relay route; the web app reads it from the **browser** (`NEXT_PUBLIC_API_URL`), so it needs a
+public domain.
+
+### 11.1 Railway service settings
+
+| Setting | `indexer` |
+|---|---|
+| Service name | `indexer` |
+| Source → Repo / Branch | this repo / `main` |
+| **Source → Root Directory** | **empty (repo root)** — same rule as §1 |
+| Settings → Config-as-code path | `indexer/railway.json` |
+| Builder / Dockerfile path | `DOCKERFILE` / `indexer/Dockerfile` (from railway.json) |
+| Replicas | **1** (from railway.json). A second replica would open a second indexer on its own schema and double the RPC load for nothing |
+| Public networking | **enabled**, target port `42069` (= `PORT`, 11.2). The domain goes into `web`'s `NEXT_PUBLIC_API_URL` — a build-time variable there, so `web` needs a **rebuild** after it changes (§6) |
+| Volume | **none.** All state is in Postgres |
+| Healthcheck | `GET /ready`, timeout **3600 s** (from railway.json) — see 11.4 |
+| Restart | `ON_FAILURE`, 10 retries (from railway.json) |
+
+Watch paths: `indexer/**`, `package.json`, `pnpm-lock.yaml`, `pnpm-workspace.yaml`.
+
+**Postgres.** Add Railway's PostgreSQL database to the same project and environment. Give the
+indexer `DATABASE_URL=${{Postgres.DATABASE_URL}}` (a reference variable; the plugin's
+`DATABASE_URL` is its private-network URL, so indexing traffic never leaves Railway). Do not use
+`DATABASE_PUBLIC_URL` for the indexer. Nothing else in the system connects to this database.
+
+### 11.2 Environment variables
+
+**Build-time: none.** `indexer/Dockerfile` declares no `ARG`. Every value below is read at boot by
+`indexer/lib/env.ts` or by Ponder itself, so a variable change is a **restart** — except that any
+change to a value `ponder.config.ts` reads (addresses, blocks, RPC) is also a new Ponder build and
+re-indexes, see 11.3. The authoritative list is [`../indexer/.env.example`](../indexer/.env.example).
+
+| Variable | Set to | Notes |
+|---|---|---|
+| `PONDER_RPC_URL_4663` | `https://rpc.mainnet.chain.robinhood.com` | **required.** Archive-capable; backfill runs historical `eth_getLogs`. **Never** the publicnode backup — it refuses archive log queries. A dedicated endpoint turns a backfill from hours into minutes |
+| `VAULT_ADDRESS` (alias `VAULT`) | `ops/addresses.json` → `chains.4663.ours.vault` | **required.** No default by design |
+| `START_BLOCK` | the vault's deploy block | **required.** No default: a genesis scan of a 61M-block chain is not a backfill |
+| `DATABASE_URL` | `${{Postgres.DATABASE_URL}}` | **required on Railway.** Unset means PGlite inside the container, which dies with the container |
+| `DATABASE_PRIVATE_URL` | leave unset | Ponder prefers it over `DATABASE_URL` when both are set. Set one, not both |
+| `DATABASE_SCHEMA` | **leave unset** | The image falls back to `RAILWAY_DEPLOYMENT_ID`, one schema per deploy (11.3). Setting it to a fixed name breaks the second deploy |
+| `DATABASE_VIEWS_SCHEMA` | optional, e.g. `callhouse` | Ponder-native. When set, Ponder maintains views of the live deployment's tables under this stable name once it is ready — only useful for someone querying Postgres directly. Must differ from the deploy schema |
+| `PORT` | `42069` | Ponder reads `$PORT` and it wins over the CLI default. Set it explicitly so the public domain's target port is fixed |
+| `KEEPER_HMAC_SECRET` | `openssl rand -hex 32`, **sealed** | optional. Enables `POST /v1/overcall/list`; unset ⇒ that route answers 503 and `/v1/health` reports `relay.keeperAuthConfigured: false` |
+| `REGISTRY_START_BLOCK` | optional | Scan the Overcall registry from before the vault existed so pre-launch cycles appear in the tape. Defaults to `START_BLOCK` |
+| `END_BLOCK` | **leave unset** | Bounds a replay. Set in production and the indexer stops following the head |
+| `LIVE_READ_TIMEOUT_MS` | leave unset | Default 8000. Deadline on one Multicall3 batch of live reads |
+| `OVERCALL_ORDERS_URL` | leave unset | Default `https://overcall.finance/api/orders` |
+| `OVERCALL_MARKET` | leave unset | Default `NVDA` |
+| `REGISTRY`, `CLEARINGHOUSE`, `SEAPORT`, `USDG`, `ASSET`, `OVERCALL_FEE_RECIPIENT`, `MULTICALL3` | leave unset | Recon-confirmed defaults in `lib/env.ts`. Override only for a fork. `REGISTRY` is the NVDA registry, never Overcall's top-level JUGGERNAUT one |
+| `PONDER_LOG_LEVEL` | leave unset | `info`. Logs are JSON (`--log-format json` in the image) |
+| `RAILWAY_DEPLOYMENT_ID` | — | Injected by Railway. Do not set it |
+
+### 11.3 Schemas, and what a redeploy does to sync state
+
+The image starts `ponder start --schema "${DATABASE_SCHEMA:-$RAILWAY_DEPLOYMENT_ID}"`. On Railway,
+with `DATABASE_SCHEMA` unset, **every deployment indexes into a new Postgres schema named after
+its deployment id.** This is not optional, for two reasons:
+
+1. **A schema belongs to one build.** Ponder records a build id (a hash of config, schema and
+   handlers) in the schema. Start a different build on it and Ponder exits:
+   `Schema "…" was previously used by a different Ponder app. Drop the schema first, or use a
+   different schema.` Reproduced locally by changing only `START_BLOCK` between two runs.
+2. **A schema is locked while its app is alive.** The running instance heartbeats every 10 s;
+   a second instance waits out the 25 s lock window, retries once, then exits with
+   `Failed to acquire lock on schema`. Railway keeps the old deployment serving until the new one
+   passes its healthcheck — so a new container on the old schema could never go healthy.
+
+What survives a redeploy, and what does not:
+
+| Thing | Where it lives | On redeploy |
+|---|---|---|
+| RPC cache (blocks, logs, `eth_call` results) | shared `ponder_sync` schema | **Kept and reused.** The new deployment re-runs every handler from `START_BLOCK` over cached logs, and only fetches blocks newer than the cache. Expect minutes, not a cold backfill |
+| Indexed tables (`cycle`, `listing`, …) | the deployment's own schema | **Rebuilt** in the new schema. The old deployment keeps serving its copy until the new one is ready |
+| Old deployment schemas | Postgres | **Left behind.** Harmless, but they grow. Clean up with `ponder db prune` (drops every Ponder schema not held by a live instance), run from a checkout with the service's variables and the database's **public** URL (the private one does not resolve off Railway): `railway run --service indexer -- env DATABASE_URL=<Postgres DATABASE_PUBLIC_URL> pnpm --filter @callhouse/indexer exec ponder db prune` |
+| `ponder_sync` itself | Postgres | Never dropped by Ponder. Dropping it by hand forces a cold backfill on the next deploy |
+
+A **restart** (same deployment, same id, same schema, same build) is crash recovery: Ponder reverts
+unfinalised rows and resumes from its last checkpoint. After a hard kill, the restart can wait up to
+25 s for the dead instance's lock to expire before it proceeds.
+
+### 11.4 Healthcheck: why `/ready`
+
+| Path | Served by | Answers | Use |
+|---|---|---|---|
+| `/health` | Ponder (reserved) | empty 200 the moment the HTTP server exists — before a single block is indexed | nothing here |
+| `/ready` | Ponder (reserved) | 503 `Historical indexing is not complete.` until the backfill finishes, then 200 | **Railway healthcheck** |
+| `/status` | Ponder (reserved) | `{"robinhood":{"id":4663,"block":{…}}}` | debugging |
+| `/v1/health` | this app | 503 `degraded` until the first checkpoint or when the RPC is unreachable; 200 `lagging` past 120 s behind; 200 `ok` | **uptime monitor** (`ops/alerts.md` §26) |
+
+`/ready` is the cutover signal: Railway keeps routing to the previous deployment until the new one
+has the whole history, so the public tape never goes backwards mid-deploy. `/v1/health` is the
+wrong deploy gate twice over — it would cut traffic to a deployment that is still backfilling as
+soon as its first checkpoint lands (200 `lagging`), and an RPC blip at deploy time would fail an
+otherwise good deploy. `healthcheckTimeout` is 3600 s because a first backfill from the vault's
+deploy block on the public RPC can take tens of minutes; a redeploy over the cache takes minutes.
+If the Railway UI caps the timeout lower, use the largest value it accepts and expect a first
+deploy with a long backfill to need one retry — the second attempt runs over the cache.
+
+Observed on the local smoke run (2,140-block range, public RPC, Postgres 16):
+`/health` 200 at +4 s; `/ready` 503 until +22 s, then 200; `/v1/health` 503 `degraded` before the
+first checkpoint, then `{"status":"ok", … "lag":{"blocks":"123","seconds":"14"}}`; `docker stop`
+returned in 0.2 s with exit 0 (SIGTERM reaches Ponder, `Started shutdown sequence`).
+
+### 11.5 First deploy, in order
+
+1. `pnpm install --frozen-lockfile` passes locally and CI is green on the commit.
+2. Postgres plugin exists (11.1). Every **required** variable in 11.2 is set; `DATABASE_SCHEMA` is
+   **not**.
+3. Deploy. Logs in order: `Connected to database` → `Connected to JSON-RPC` → `Created database
+   tables` → `Created HTTP server` → `Started backfill indexing` → `Updated backfill indexing
+   progress` … → `Completed backfill indexing across all chains` → `Started returning 200
+   responses {"endpoint":"/ready"}` → `Started live indexing`.
+4. Verify:
+   ```bash
+   curl -si https://<indexer domain>/ready       | head -1   # 200
+   curl -s  https://<indexer domain>/v1/health   | jq '.status, .lag, .vault.address'
+   curl -s -o /dev/null -w '%{http_code}\n' https://<indexer domain>/v1/cycles   # 200
+   ```
+   `.vault.address` must equal `ops/addresses.json`.
+5. Set `NEXT_PUBLIC_API_URL` on `web` to the domain and **rebuild** `web` (§6).
+6. Point the external uptime monitor at `/v1/health` (`ops/alerts.md` §26).
+
+### 11.6 Known sharp edges, indexer edition
+
+1. **`DATABASE_SCHEMA` must stay unset on Railway.** With a fixed schema the first deploy works and
+   the second one crash-loops (11.3). The previous deployment keeps serving, so it looks like a
+   deploy that is merely slow.
+2. **`START_BLOCK` must be behind every RPC node's head.** `rpc.mainnet.chain.robinhood.com`
+   load-balances across nodes that were measured ~4,000 blocks apart. A smoke test with
+   `START_BLOCK` = head − 500 exited 75 with `BlockNotFoundError: Block at number "0x3b5b6f4"
+   could not be found`; head − 2,000 worked. The vault's deploy block is always safe.
+3. **Builder toolchain for a dependency the indexer never loads.** drizzle-orm (under Ponder)
+   declares better-sqlite3 as an optional peer, the workspace lockfile resolves it to the keeper's
+   copy, and its install script needs `python3 make g++`. The Dockerfile's header has the detail.
+   Only the builder carries them.
+4. **No `startCommand` in railway.json**, same reason as the keeper (§9.10): the Dockerfile's `CMD`
+   runs `sh -c 'exec node … ponder start …'` — the `exec` makes node PID 1 so SIGTERM reaches Ponder
+   and it releases the schema lock. A Railway `startCommand` would add a second shell above it.
+5. **No `--hostname`.** Node binds `::` (and IPv4 with it). Pinning `0.0.0.0` would cut the service
+   off Railway's IPv6 private network.
+6. **`/graphql` is public** and auto-generated from `ponder.schema.ts`. It exposes nothing the
+   `/v1/*` routes do not, but it is a query surface; it is not rate-limited here.
+
+### 11.7 Building locally, before you push
+
+```bash
+# from the repo root
+docker build -f indexer/Dockerfile -t callhouse-indexer .
+docker run --rm callhouse-indexer
+#   sh: 1: RAILWAY_DEPLOYMENT_ID: set DATABASE_SCHEMA, or run on Railway where RAILWAY_DEPLOYMENT_ID is injected
+#   -> exit 2. That is the correct answer to "no schema".
+```
+
+The full Postgres smoke run is in `indexer/README.md` → "Deploy (Railway)".
+
+---
+
+## 12. The alert relay
+
+Added 2026-09-13 (L-09). A small stateless HTTP service that turns the keeper's JSON alert
+webhook into Discord and/or Telegram messages. Package and HTTP contract:
+[`../relay/README.md`](../relay/README.md). Keeper-side wiring: `ops/alerts.md` "Transport".
+
+### 12.0 The shape of it
+
+```
+keeper  --POST ALERT_WEBHOOK-->  Railway service "relay"  ->  relay/Dockerfile  ->  node dist/index.js
+                                   GET /health, POST /alert (token)
+                                     -> Discord webhook       (DISCORD_WEBHOOK_URL)
+                                     -> Telegram sendMessage  (TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID)
+```
+
+### 12.1 Railway service settings
+
+| Setting | `relay` |
+|---|---|
+| Service name | `relay` |
+| Source → Repo / Branch | this repo / `main` |
+| **Source → Root Directory** | **empty (repo root)** — same rule as §1 |
+| Settings → Config-as-code path | `relay/railway.json` |
+| Builder / Dockerfile path | `DOCKERFILE` / `relay/Dockerfile` (from railway.json) |
+| Replicas | 1 (from railway.json). It is stateless, so more would be safe; one is enough |
+| Public networking | **not required** when the keeper is in the same Railway project: use the private URL `http://relay.railway.internal:8080/alert`. Enable a public domain only if the keeper runs elsewhere — the token (12.2) is what protects it |
+| Volume | none |
+| Healthcheck | `GET /health`, timeout 60 s (from railway.json) |
+
+Watch paths: `relay/**`, `package.json`, `pnpm-lock.yaml`, `pnpm-workspace.yaml`.
+
+### 12.2 Environment variables
+
+Build-time: **none**. All runtime; a change is a **restart**. The relay refuses to boot on a bad
+configuration and prints which variable is wrong, never its value.
+
+| Variable | Set to | Notes |
+|---|---|---|
+| `RELAY_TOKEN` | `openssl rand -hex 32`, **sealed** | **required.** ≥ 32 characters. The same value goes into the keeper's `ALERT_WEBHOOK` (12.3) |
+| `DISCORD_WEBHOOK_URL` | Discord → channel → Integrations → Webhooks → Copy URL, **sealed** | one of Discord / Telegram required. The URL's path is the credential |
+| `TELEGRAM_BOT_TOKEN` | from @BotFather, **sealed** | with `TELEGRAM_CHAT_ID` |
+| `TELEGRAM_CHAT_ID` | the chat id; `-100…` for a channel. Add the bot to the chat first | with the bot token |
+| `PORT` | `8080` | Set explicitly so the private URL's port is fixed |
+| `RELAY_TIMEOUT_MS` | leave unset | Default 5000, max 9000 (the keeper aborts at 10 s) |
+| `TELEGRAM_API_BASE` | leave unset | Tests only |
+
+### 12.3 Wiring the keeper
+
+`keeper/src/alerts.ts` sends `content-type: application/json` and **no other header**, so the
+token rides in the URL. On the `keeper` service (§10.2):
+
+```
+ALERT_WEBHOOK=http://relay.railway.internal:8080/alert?token=<RELAY_TOKEN>
+```
+
+Use a Railway reference so the token is written once:
+`http://relay.railway.internal:8080/alert?token=${{relay.RELAY_TOKEN}}`. Restart the keeper; its
+`boot` alert is the first end-to-end test. When the keeper can send `Authorization: Bearer`, switch
+to that and rotate `RELAY_TOKEN` — a token in a query string can land in proxy logs.
+
+### 12.4 Verify
+
+```bash
+# from a shell with the keeper's variables (railway run --service keeper -- sh)
+curl -s "$ALERT_WEBHOOK" -H 'content-type: application/json' \
+  -d '{"source":"callhouse-keeper","kind":"boot","severity":"info","message":"relay wiring test","data":{}}'
+# {"ok":true,"delivered":["discord"],"failed":[]}   and the message is in the channel
+```
+
+`502` with `failed[].error` = `http_401`/`http_404` on Discord means the webhook URL is wrong or was
+deleted; `http_400`/`http_403` from Telegram usually means a wrong chat id or a bot that is not in the chat. The relay's own log
+line carries the same codes.
+
+### 12.5 Building locally
+
+```bash
+# from the repo root
+docker build -f relay/Dockerfile -t callhouse-relay .
+docker run --rm callhouse-relay
+#   Relay configuration is not usable:
+#     RELAY_TOKEN: Required
+#   -> exit 1.
+```

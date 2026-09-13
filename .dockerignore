@@ -1,8 +1,9 @@
 # ---------------------------------------------------------------------------------------------
 # Build-context filter for the repo root.
 #
-# WHY THIS FILE EXISTS: both deployable images in this repository — web/Dockerfile
-# (app.callhouse.finance) and keeper/Dockerfile (the weekly roll) — are built with the
+# WHY THIS FILE EXISTS: every deployable image in this repository — web/Dockerfile
+# (app.callhouse.finance), keeper/Dockerfile (the weekly roll), indexer/Dockerfile (Ponder and the
+# /v1 read API) and relay/Dockerfile (keeper alerts → Discord/Telegram) — is built with the
 # REPO ROOT as the build context, because pnpm-lock.yaml and pnpm-workspace.yaml live here and
 # the install has to be workspace-aware. Without this file the daemon uploads node_modules,
 # every .next cache and the contracts/ submodule (with its own Foundry submodules) on every
@@ -18,6 +19,9 @@
 #   keeper/tsconfig.json, keeper/src                   — keeper/Dockerfile COPYs both; it is the
 #     one image that ships keeper code. keeper/src also rides into the web context
 #     unread — a few hundred kilobytes, and cheaper than per-image context files.
+#   indexer/{abis,lib,src,ponder.*.ts,tsconfig.json}   — indexer/Dockerfile COPYs these; Ponder
+#     loads the TypeScript sources at boot, so they are the whole of the indexer image.
+#   relay/tsconfig.json, relay/src                     — relay/Dockerfile COPYs both.
 #   scripts/                                           — small, and package scripts reach for it
 #     (`web/package.json` → `node ../scripts/copy-lint.mjs`).
 #
@@ -66,14 +70,26 @@ TECHSPEC.md
 SECURITY.md
 
 # ---- workspace packages that never belong in a web image, except their manifest. Removing the
-#      manifest breaks the frozen install — see the header. The keeper image re-admits the two
-#      paths keeper/Dockerfile COPYs; without them that build fails at `COPY keeper/src`. ----
+#      manifest breaks the frozen install — see the header. Each package then re-admits exactly
+#      the paths its own Dockerfile COPYs; without them that build fails at the COPY. Tests,
+#      READMEs, the indexer's vitest config and scripts/gen-abis.mjs stay out. ----
 keeper/*
 !keeper/package.json
 !keeper/tsconfig.json
 !keeper/src
 indexer/*
 !indexer/package.json
+!indexer/tsconfig.json
+!indexer/ponder.config.ts
+!indexer/ponder.schema.ts
+!indexer/ponder-env.d.ts
+!indexer/abis
+!indexer/lib
+!indexer/src
+relay/*
+!relay/package.json
+!relay/tsconfig.json
+!relay/src
 
 # ---- runtime state that can exist locally ----
 **/.ponder
