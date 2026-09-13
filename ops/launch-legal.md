@@ -6,8 +6,12 @@ in. It exists because the 2026-09-12 readiness audit found the perimeter was a s
 at nothing: `/legal` said access was restricted "by the terms you accept here" and there were no
 terms, no privacy notice, no disclosure address and no legal person behind the fee Safe.
 
-**Who runs it.** Counsel makes the decisions in §2. Whoever has write access to the Railway
-project applies §3 and §4. Nothing here touches a key or moves a token.
+**Who runs it.** Counsel makes the decisions in §2 — with one recorded exception: on 2026-09-13
+the owner elected to adopt the terms and privacy notice without counsel, reviewed against the
+code, with standard boilerplate added and no facts invented (item 9, and items 3 and 7 answered
+as "the current behaviour stands"). Items 1, 2, 4, 5 and 8 remain open and still need counsel or
+a real-world fact. Whoever has write access to the Railway project applies §3 and §4. Nothing
+here touches a key or moves a token.
 
 **Nothing in this file is legal advice.** It was written by engineers to make the gaps visible
 and to make closing them a mechanical step once a lawyer has decided. Where it names an option it
@@ -23,8 +27,8 @@ plus two rebuilds.
 ```
 leekzor/callhouse-site (the landing's own repository):
 lib/legal.ts                  one constant per operator fact, read from NEXT_PUBLIC_*, no defaults
-app/terms/page.tsx            Terms of Use, DRAFT, renders the gaps
-app/privacy/page.tsx          Privacy notice, DRAFT, renders the gaps
+app/terms/page.tsx            Terms of Use, adopted v1-2026-09-13, renders the gaps
+app/privacy/page.tsx          Privacy notice, adopted v1-2026-09-13, renders the gaps
 app/legal/page.tsx            links /terms; "Reporting a vulnerability" section at #reporting
 app/.well-known/security.txt/route.ts
                               RFC 9116; 404 until a security contact exists
@@ -38,7 +42,7 @@ SECURITY.md §6                the same reporting paragraph, carried with the th
 ```
 
 The pages are deliberately published in their unfinished state. Every unset fact renders as
-**not yet designated**, in words, on the page, and both drafts carry a warn notice while
+**not yet designated**, in words, on the page, and both legal documents carry a warn notice while
 `operatorIsDesignated()` is false. This product publishes an unfilled week as "unfilled, 0"; the
 operator line gets the same treatment. Do not "fix" a notice by filling a variable with a
 placeholder.
@@ -49,13 +53,13 @@ placeholder.
 
 | Thing | State | Where |
 |---|---|---|
-| Terms of Use | drafted, not adopted, marked "Draft — pending review by counsel" top and bottom | `callhouse.xyz/terms` |
-| Privacy notice | drafted from the code, not adopted, same markers | `callhouse.xyz/privacy` |
+| Terms of Use | adopted v1-2026-09-13 by owner decision, no counsel; gap sentences still render | `callhouse.xyz/terms` |
+| Privacy notice | adopted v1-2026-09-13, same basis | `callhouse.xyz/privacy` |
 | Perimeter disclosure | live since before this runbook; now links the terms instead of "the terms you accept here" | `callhouse.xyz/legal`, `app.callhouse.xyz/legal` |
 | Vulnerability reporting | section exists, address unset | `callhouse.xyz/legal#reporting` |
 | `security.txt` | route exists, returns **404** with a one-line explanation until the contact is set | `callhouse.xyz/.well-known/security.txt` |
 | Operator constants | six, all `undefined` | `lib/legal.ts` (site repo) |
-| Document version | `draft-2026-09-12` | `LEGAL_DOCS_VERSION` in `lib/legal.ts` (site repo) |
+| Document version | `v1-2026-09-13` | `LEGAL_DOCS_VERSION` in `lib/legal.ts` (site repo) |
 | Accept flow | none. Use is acceptance; the pages say so | — |
 | Geoblock | none. The US-person perimeter is disclosure-only, on every legal page, in bold | — |
 | Cookies / analytics | none on either domain, verified by grep and stated on `/privacy` | — |
@@ -119,14 +123,12 @@ Each item ends with the variable it becomes, or "no variable" when it is a text 
    → `NEXT_PUBLIC_LEGAL_CONTACT_EMAIL`, `NEXT_PUBLIC_PRIVACY_CONTACT_EMAIL`,
      `NEXT_PUBLIC_SECURITY_CONTACT_EMAIL`
 
-9. **Adoption.** When the text of `/terms` and `/privacy` is what counsel wants, the draft
-   markers come off by changing `LEGAL_DOCS_VERSION` in `lib/legal.ts` (site repo) from
-   `draft-YYYY-MM-DD` to a value without the `draft-` prefix, e.g. `v1-2026-10-01`. That is a
-   code change, reviewed like any other. The site repo's `scripts/copy-lint.mjs` requires the
-   literal `export const LEGAL_DOCS_VERSION = "draft-` in `lib/legal.ts`, so dropping the prefix
-   fails CI until that REQUIRED entry is removed in the same commit — which is the intended
-   reminder. (The two "Draft" entries for the pages only prove the marker code is still there;
-   they may stay.)
+9. **Adoption.** Done 2026-09-13: `LEGAL_DOCS_VERSION` in `lib/legal.ts` (site repo) is
+   `v1-2026-09-13` — no `draft-` prefix, and the copy-lint gate that pinned it was removed in
+   the same commit, as designed. Adopted by the owner without counsel; the operator, governing
+   law and contact gaps are still rendered in words until items 1, 2 and 8 are decided. The two
+   "Draft" REQUIRED entries for the pages stayed, as planned — they only prove the marker code
+   is still there for a future draft revision.
    → `LEGAL_DOCS_VERSION` (code, not env)
 
 ---
@@ -147,7 +149,7 @@ build time** into the `site` service only. `web` reads none of them; it links to
 
 The warn notice clears when the legal name **and at least one** of the three contacts is set
 (`operatorIsDesignated()`). A name with no mailbox, or a mailbox with no name, keeps it up. Note
-the edge: with the name and only the security contact set, both drafts drop the notice while
+the edge: with the name and only the security contact set, both documents drop the notice while
 `/terms` Contact and `/privacy` Contact still read "not yet designated". That is accepted, not
 hidden — the gap is still printed inline — but set all three contacts in one go so it never
 shows.
@@ -182,7 +184,7 @@ Do these in order. Step 1 is the long one and it is not ours.
 5. **Verify the notice is gone.**
 
    ```bash
-   # Both drafts still carry the draft marker (until §2 item 9) but the operator gap is closed:
+   # The operator gap is closed (the draft marker is gone since adoption, §2 item 9):
    curl -s https://callhouse.xyz/terms   | grep -c 'not yet designated'     # 0
    curl -s https://callhouse.xyz/privacy | grep -c 'not yet designated'     # 0
    curl -s https://callhouse.xyz/terms   | grep -c 'No operating entity'    # 0
@@ -238,4 +240,4 @@ Do these in order. Step 1 is the long one and it is not ours.
 | `ops/deploy.md` | why `NEXT_PUBLIC_*` needs a rebuild and a Dockerfile `ARG` |
 | `SECURITY.md` "Reporting" | the reporting paragraph that points here |
 | `contracts/SECURITY.md` §6 | the same paragraph in the contracts repo; change it with the one above |
-| `scripts/copy-lint.mjs` (site repo) | the CI gate that fails on adoption (`draft-` prefix) until its REQUIRED entry is removed |
+| `scripts/copy-lint.mjs` (site repo) | the CI gate that pinned the `draft-` prefix until adoption; the entry was removed in the 2026-09-13 adoption commit |
