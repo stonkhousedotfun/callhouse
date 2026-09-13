@@ -100,6 +100,7 @@ export const vaultState = onchainTable("vault_state", (t) => ({
   /** Distributor index, 1e27-scaled USDG per share. */
   accUsdgPerShare: t.bigint().notNull().default(0n),
   totalUsdgDistributed: t.bigint().notNull().default(0n),
+  /** Mirrors `Distributor.totalUsdgClaimed`: every `ClaimUsdg` plus the queue escrow's take (`QueueSettled.usdgOut`). */
   totalUsdgClaimed: t.bigint().notNull().default(0n),
 
   /** Lifetime totals across every cycle. USDG base units. */
@@ -138,6 +139,14 @@ export const vaultState = onchainTable("vault_state", (t) => ({
 
   /** USDG received while there were no shares, or too small to index. Carried, never dropped. */
   usdgUnallocated: t.bigint().notNull().default(0n),
+
+  /**
+   * Valorem bucket the open claim was written into, from `BucketWrittenInto`. That event fires
+   * inside `clear.write`, BEFORE the vault's `RollOpen`, while `cycleNumber` still names the
+   * previous week — so it is held here and copied onto the cycle row at `RollOpen`, the same way
+   * `claimKey` is. Cleared when the claim is redeemed.
+   */
+  bucketIndex: t.bigint(),
 
   /** Seaport nonce for this offerer. Bumped by `invalidateAllListings()`. */
   seaportCounter: t.bigint().notNull().default(0n),

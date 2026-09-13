@@ -1,7 +1,9 @@
 import { ponder } from "ponder:registry";
 import schema from "ponder:schema";
 
-import { BPS, OVERCALL_FEE_BPS } from "../lib/env";
+import { vaultAbi } from "../abis/vault";
+import { constructorSettings } from "../lib/deployment";
+import { BPS, OVERCALL_FEE_BPS, VAULT } from "../lib/env";
 import { addHarvest, splitHarvest } from "../lib/harvest";
 import { log } from "../lib/log";
 import { roleName } from "../lib/roles";
@@ -22,6 +24,35 @@ import {
   sub,
   ZERO_ADDRESS,
 } from "../lib/indexing";
+
+/*//////////////////////////////////////////////////////////////
+                       CONSTRUCTOR SETTINGS
+//////////////////////////////////////////////////////////////*/
+
+/**
+ * Seed the settings the constructor sets without an event: `policy().protocolFeeBps`,
+ * `feeRecipient()` and `depositCap()`. Runs once, before any vault event, with the client pinned
+ * to START_BLOCK. Governance events later in the log overwrite them as before. See lib/deployment.ts.
+ */
+ponder.on("Vault:setup", async ({ context }) => {
+  const read = async <T>(functionName: "policy" | "feeRecipient" | "depositCap"): Promise<T | null> => {
+    try {
+      return (await context.client.readContract({ abi: vaultAbi, address: VAULT, functionName })) as T;
+    } catch {
+      return null;
+    }
+  };
+  const settings = constructorSettings({
+    policy: await read("policy"),
+    feeRecipient: await read("feeRecipient"),
+    depositCap: await read("depositCap"),
+  });
+  if (Object.keys(settings).length === 0) {
+    log.warn({ vault: VAULT }, "vault settings unreadable at START_BLOCK; fee bps, fee recipient and cap stay unset until a governance event");
+    return;
+  }
+  await patchState(context.db, settings);
+});
 
 /*//////////////////////////////////////////////////////////////
                        SHARES (ERC-20)
@@ -144,6 +175,11 @@ ponder.on("Vault:QueueSettled", async ({ event, context }) => {
     queuedShares: sub(state.queuedShares, shares),
     reservedAssets: state.reservedAssets + assets,
     usdgReservedForQueue: state.usdgReservedForQueue + usdgOut,
+    // `_settleQueue` takes the escrow's accrual through `Distributor._takeAccrued`, which adds it
+    // to `totalUsdgClaimed` exactly as `_claimUsdg` does; `usdgOut` is that amount. Counting only
+    // `ClaimUsdg` left the queue's USDG claimed nowhere, so `distributed − claimed` read the whole
+    // escrow as still owed to holders (X-11: 1244.000475 published against 2061.250593 on chain).
+    totalUsdgClaimed: state.totalUsdgClaimed + usdgOut,
     // The vault bumps its epoch counter immediately after emitting this.
     epochId: epochId + 1n,
     lastBlock: event.block.number,
@@ -288,6 +324,9 @@ ponder.on("Vault:RollOpen", async ({ event, context }) => {
     wrote: true,
     optionId,
     claimKey: state.claimKey,
+    // Held on vault state by `Clear:BucketWrittenInto`, which fires before this event while
+    // `cycleNumber` still names the previous week.
+    bucketIndex: state.bucketIndex,
     strikeUsdg,
     contractsWritten: contractsCount,
     // `CallsWritten` ran first in this same transaction, so the collateral is already known.
@@ -398,6 +437,7 @@ ponder.on("Vault:RollClose", async ({ event, context }) => {
 ponder.on("Vault:ClaimRedeemed", async ({ event, context }) => {
   await patchState(context.db, {
     claimKey: null,
+    bucketIndex: null,
     optionId: null,
     contractsWritten: 0n,
     contractsSold: 0n,

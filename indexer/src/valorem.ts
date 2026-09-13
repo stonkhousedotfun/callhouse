@@ -55,11 +55,15 @@ ponder.on("Clear:OptionsWritten", async ({ event, context }) => {
 ponder.on("Clear:BucketWrittenInto", async ({ event, context }) => {
   const { claimId, bucketIndex } = event.args;
 
+  // `OptionsWritten` (one log earlier) has already set `claimKey`, so this is our write. But the
+  // vault's `RollOpen` has not fired yet and `cycleNumber` still names the PREVIOUS week: patching
+  // that cycle stamped every week's bucket onto the one before it and left the week actually
+  // written with none, so its `BucketAssignedExercise` never matched (X-11). Hold it on vault
+  // state; `Vault:RollOpen` copies it onto the right cycle row.
   const state = await getState(context.db);
   if (state.claimKey === null || state.claimKey !== claimId) return;
-  if (state.cycleNumber === 0) return;
 
-  await patchCycle(context.db, state.cycleNumber, { bucketIndex });
+  await patchState(context.db, { bucketIndex });
 });
 
 /**
