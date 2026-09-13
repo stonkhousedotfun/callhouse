@@ -118,7 +118,7 @@ Evidence lives in `ops/recon/`. Spec repairs are written up in `plan.md` section
 - [x] K-15..16 Dockerfile, systemd unit, keeper-dead runbook
 - [x] K-17 Second-sweep hardening (2026-09-12): boot reconciliation now closes a cycle someone else closed (sums Harvest from logs, fires `roll_close`), recovers an authorised-but-unservable listing via `invalidateAllListings` + relist, backfills `roll_open_tx` from the tx table and the `RollOpen` log; relists price at `max(previous, live policy floor)`; the last-fill lift is clamped at 3× floor; book-reported `filled`/`unfillable` no longer latch against chain evidence; `/health` serves RPC origins only and stays 200 during a slow close; failed webhook deliveries retry in 5 min instead of burning the hour; `railway.json` `startCommand` deleted so SIGTERM reaches node
 - [x] K-18 First real keeper tests: 59/59 across 7 suites (`alerts`, `config`, `overcallApi`, `policy`, `roll`, `seaport`, `state`) — the package previously had a test script whose glob matched zero files
-- [ ] Run `dryrun.ts` end to end and record the output (anvil fork; the honest gate for M3)
+- [ ] Run `dryrun.ts` end to end and record the output (anvil fork; the honest gate for M3, and a launch prerequisite — the keeper has never executed a live cycle)
 
 ---
 
@@ -137,7 +137,7 @@ Evidence lives in `ops/recon/`. Spec repairs are written up in `plan.md` section
 - [x] W-09..10 All components; required disclosures rendered verbatim
 - [x] W-11 copy-lint wired to CI — forbidden terms and required disclosures both enforced
 - [x] W-12 Mobile pass, no charts
-- [ ] W-13 Acceptance test from a fresh wallet against a fork
+- [ ] W-13 Acceptance test from a fresh wallet against a fork, **including a fill served from the keeper's own `/orders` payload** — the self-hosted fallback on `/vault/nvda/cycle` is the answer if Overcall's book rejects us, and it has never filled anything end to end
 
 ### Frontend split — two domains, two services (code written, nothing deployed)
 
@@ -178,15 +178,18 @@ Evidence lives in `ops/recon/`. Spec repairs are written up in `plan.md` section
 
 ## Phase 7 — Launch (M7, M8)
 
-- [ ] L-01 CI green on every push (gate is already met locally)
+- [x] L-00 Repo on GitHub: `leekzor/callhouse` (**private**), `main` pushed with the full tree, forge-std/OpenZeppelin as submodules (2026-09-12)
+- [ ] L-01 CI green on every push. The workflow is committed and the full gate passes locally (forge unit+fork, keeper 59, indexer, web/site lint+build+tests, copy-lint self-test), but on GitHub every run dies as `startup_failure` before the first job — a one-step probe workflow fails identically, so the file is not the problem: it is account-level (Actions spending limit / private-repo minutes on the free `leekzor` plan; 2015 account, Actions enabled, token is leekzor's). Fix in the GitHub UI: Settings → Billing → spending limit. Until then the local gate is the gate. Also set the `RH_RPC` repo secret (archive RPC); the fork job falls back to the public endpoint without it
 - [ ] L-02 Admin Safe 2/3 on 4663
 - [ ] L-03 Guardian key provisioned on separate hardware
 - [ ] L-04 One real 1-contract listing posted to Overcall to close out the EIP-1271 question (see Open questions)
-- [ ] L-05 Docs and legal live
-- [ ] L-06 Mainnet deploy, verify, configure roles, renounce deployer
+- [ ] L-05 Legal, the real blocker: counsel reviews `site/app/terms` + `site/app/privacy`. Both render "Draft — pending review by counsel" and copy-lint fails CI until `LEGAL_DOCS_VERSION` drops the `draft-` prefix in the same commit as adoption — that is deliberate, do not bypass it. Set the operating-entity constants (the site renders "no operating entity designated" until then — also deliberate). Set a real `Contact:` for `.well-known/security.txt` (the route 404s without one; a security.txt with no contact is worse than none)
+- [ ] L-06 Mainnet deploy, verify, configure roles, renounce deployer (D-04; runbook `ops/deploy.md`)
 - [ ] L-07 Vault live, cap 20 NVDA
-- [ ] L-08..11 Publish four weekly results, including any "unfilled, 0"; raise the cap
-- [ ] L-12 Decide the PFE / SCHD second deploy
+- [ ] L-08 Hosting beyond the two frontends (W-19): the keeper Railway service (keeper/Dockerfile, volume mounted at `/data`, `PORT=8787`, `KEEPER_PK` as a runtime service variable — never a build ARG) and the indexer service. Plus the two external uptime monitors: keeper `/health` and the indexer health endpoint (`ops/alerts.md` §11, §26 — currently "not yet stood up")
+- [ ] L-09 Alerting delivery: `ALERT_WEBHOOK` pointed at a relay that wraps the JSON payload for Telegram/Discord — a raw Discord URL returns 400 forever (ops/alerts.md "Transport"). Webhook test is part of the Saturday `close-week.md` ritual
+- [ ] L-10..13 Publish four weekly results, including any "unfilled, 0"; raise the cap
+- [ ] L-14 Decide the PFE / SCHD second deploy
 
 ---
 
