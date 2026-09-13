@@ -12,10 +12,11 @@
  * directory, and restart-safety is only a test if there is a file to reopen.
  */
 import assert from 'node:assert/strict';
-import { existsSync, mkdtempSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
+import Database from 'better-sqlite3';
 
 /* ---- environment first: config.ts validates process.env the moment it is imported ---- */
 const scratch = mkdtempSync(join(tmpdir(), 'callhouse-keeper-state-'));
@@ -27,10 +28,11 @@ process.env.KEEPER_PK = `0x${'11'.repeat(32)}`;
 process.env.KEEPER_DB_PATH = join(scratch, 'default', 'keeper.db');
 process.env.KEEPER_LOG_LEVEL = 'fatal';
 
-const { KeeperStore, bigintReplacer, store } = await import('./state.js');
+const { KeeperStore, bigintReplacer, cycleTapeRow, splitGross, store } = await import('./state.js');
 const { PLACEHOLDER_SIGNATURE, buildOrderComponents, componentsFromJson, componentsToJson, localOrderHash } =
   await import('./seaport.js');
 type ListingRow = import('./state.js').ListingRow;
+type CycleRow = import('./state.js').CycleRow;
 type OrderComponentsJson = import('./seaport.js').OrderComponentsJson;
 
 /*//////////////////////////////////////////////////////////////
@@ -328,4 +330,123 @@ test('restart safety: close the file, reopen it, every row is still there', () =
   } finally {
     second.close();
   }
+});
+
+/*//////////////////////////////////////////////////////////////
+               K-21: STRIKE PROCEEDS SEPARATE FROM PREMIUM
+//////////////////////////////////////////////////////////////*/
+
+/** The `cycles` table exactly as the keeper before K-21 created it: no assets_returned, no
+ *  usdg_from_assignment. A production volume holds a file like this. */
+const PRE_K21_CYCLES = `
+CREATE TABLE cycles (
+  cycle_number       INTEGER PRIMARY KEY,
+  option_id          TEXT,
+  strike_usdg6       TEXT,
+  contracts          INTEGER,
+  exercise_ts        INTEGER,
+  expiry_ts          INTEGER,
+  lot_size           TEXT,
+  status             TEXT NOT NULL,
+  skip_reason        TEXT,
+  roll_open_tx       TEXT,
+  lock_tx            TEXT,
+  roll_close_tx      TEXT,
+  gross_usdg6        TEXT,
+  fee_usdg6          TEXT,
+  net_usdg6          TEXT,
+  contracts_assigned INTEGER,
+  relists_used       INTEGER NOT NULL DEFAULT 0,
+  opened_at          INTEGER,
+  locked_at          INTEGER,
+  closed_at          INTEGER,
+  created_at         INTEGER NOT NULL,
+  updated_at         INTEGER NOT NULL
+);`;
+
+function columnsOf(db: Database.Database): string[] {
+  return (db.prepare('PRAGMA table_info(cycles)').all() as Array<{ name: string }>).map((c) => c.name).sort();
+}
+
+test('migration: a database from the previous keeper opens, gains both columns as NULL, and keeps every row', () => {
+  const path = join(scratch, 'pre-k21', 'keeper.db');
+  const fresh = new KeeperStore(join(scratch, 'post-k21.db'));
+  const freshColumns = columnsOf(fresh.db);
+  fresh.close();
+  assert.ok(freshColumns.includes('assets_returned') && freshColumns.includes('usdg_from_assignment'), 'a fresh database has them from SCHEMA');
+
+  // Build the old file by hand, with a closed week recorded the old way.
+  mkdirSync(join(scratch, 'pre-k21'), { recursive: true });
+  const old = new Database(path);
+  old.exec(PRE_K21_CYCLES);
+  old
+    .prepare(
+      "INSERT INTO cycles (cycle_number, status, roll_close_tx, gross_usdg6, fee_usdg6, net_usdg6, contracts_assigned, relists_used, created_at, updated_at) VALUES (3, 'closed', ?, '2044079259', '953962', '2043125297', 9, 0, 1, 1)",
+    )
+    .run(`0x${'0c'.repeat(32)}`);
+  assert.equal(columnsOf(old).includes('assets_returned'), false);
+  old.close();
+
+  const migrated = new KeeperStore(path);
+  try {
+    assert.deepEqual(columnsOf(migrated.db), freshColumns, 'same column set as a fresh database');
+    const row = migrated.getCycle(3);
+    assert.ok(row);
+    assert.equal(row.gross_usdg6, '2044079259', 'the old row survived');
+    assert.equal(row.contracts_assigned, 9);
+    assert.equal(row.assets_returned, null, 'not recorded before the column existed: NULL, not 0');
+    assert.equal(row.usdg_from_assignment, null);
+    const tape = cycleTapeRow(row);
+    assert.equal(tape.premium_gross_usdg6, null, 'an unknown split is not published as all-premium');
+    assert.equal(tape.strike_proceeds_usdg6, null);
+
+    // The migrated columns are writable through the allowlisted updater.
+    migrated.updateCycle(3, { assets_returned: (14n * 10n ** 18n).toString(), usdg_from_assignment: '2025000000' });
+    migrated.ensureCycle(4, 'open');
+  } finally {
+    migrated.close();
+  }
+
+  // Reopening runs the migration again: a no-op, not "duplicate column name".
+  const reopened = new KeeperStore(path);
+  try {
+    assert.deepEqual(columnsOf(reopened.db), freshColumns);
+    assert.equal(reopened.getCycle(3)?.assets_returned, '14000000000000000000');
+    assert.equal(reopened.getCycle(3)?.usdg_from_assignment, '2025000000');
+    assert.equal(reopened.getCycle(4)?.usdg_from_assignment, null, 'a new row starts NULL too');
+    assert.equal(reopened.counts().cycles, 2);
+  } finally {
+    reopened.close();
+  }
+});
+
+test('cycleTapeRow / splitGross: premium = gross - strike proceeds, null wherever either is unknown', () => {
+  const base = { cycle_number: 1, status: 'closed' } as CycleRow;
+  // Dry-run cycle 3: 19.079259 premium + 2025 strike proceeds from 9 assigned.
+  const assigned = cycleTapeRow({ ...base, gross_usdg6: '2044079259', usdg_from_assignment: '2025000000', assets_returned: '14000000000000000000' });
+  assert.equal(assigned.premium_gross_usdg6, '19079259');
+  assert.equal(assigned.strike_proceeds_usdg6, '2025000000');
+  assert.equal(assigned.gross_usdg6, '2044079259', 'the stored columns pass through untouched');
+  assert.equal(assigned.assets_returned, '14000000000000000000');
+
+  const unassigned = cycleTapeRow({ ...base, gross_usdg6: '19079259', usdg_from_assignment: '0' });
+  assert.equal(unassigned.premium_gross_usdg6, '19079259', 'nothing assigned: all of the gross is premium');
+  assert.equal(unassigned.strike_proceeds_usdg6, '0');
+
+  const unfilled = cycleTapeRow({ ...base, gross_usdg6: '0', usdg_from_assignment: '0' });
+  assert.equal(unfilled.premium_gross_usdg6, '0');
+  assert.equal(unfilled.strike_proceeds_usdg6, '0');
+
+  const skipped = cycleTapeRow({ ...base, status: 'skipped', gross_usdg6: null, usdg_from_assignment: null });
+  assert.equal(skipped.premium_gross_usdg6, null);
+  assert.equal(skipped.strike_proceeds_usdg6, null);
+
+  const legacy = cycleTapeRow({ ...base, gross_usdg6: '2044079259', usdg_from_assignment: null });
+  assert.equal(legacy.premium_gross_usdg6, null);
+  assert.equal(legacy.strike_proceeds_usdg6, null);
+
+  // A vault defect (proceeds above the gross) reads premium 0, never negative.
+  assert.equal(cycleTapeRow({ ...base, gross_usdg6: '100', usdg_from_assignment: '101' }).premium_gross_usdg6, '0');
+  assert.deepEqual(splitGross(2_044_079_259n, 2_025_000_000n), { premium: 19_079_259n, strikeProceeds: 2_025_000_000n });
+  assert.deepEqual(splitGross(2_044_079_259n, null), { premium: null, strikeProceeds: null });
 });

@@ -71,6 +71,13 @@ export interface CycleRow {
   fee_usdg6: string | null;
   net_usdg6: string | null;
   contracts_assigned: number | null;
+  /** `RollClose.assetsReturned`: underlying handed back by the redeemed claim, asset base units
+   *  (wei). NULL on a row closed before this column existed, or a close with no RollClose. */
+  assets_returned: string | null;
+  /** `RollClose.usdgFromAssignment`: strike proceeds from assigned contracts, USDG base units.
+   *  Already INSIDE `gross_usdg6` (the terminal Harvest includes it) and fee-free, so premium is
+   *  `gross_usdg6 - usdg_from_assignment`. NULL means unknown, never 0. */
+  usdg_from_assignment: string | null;
   relists_used: number;
   opened_at: number | null;
   locked_at: number | null;
@@ -154,6 +161,8 @@ CREATE TABLE IF NOT EXISTS cycles (
   fee_usdg6          TEXT,
   net_usdg6          TEXT,
   contracts_assigned INTEGER,
+  assets_returned    TEXT,
+  usdg_from_assignment TEXT,
   relists_used       INTEGER NOT NULL DEFAULT 0,
   opened_at          INTEGER,
   locked_at          INTEGER,
@@ -225,6 +234,22 @@ CREATE TABLE IF NOT EXISTS meta (
 );
 `;
 
+/**
+ * Columns added after the first release, as forward migrations.
+ *
+ * `CREATE TABLE IF NOT EXISTS` is a no-op on a database created by an earlier keeper, so a column
+ * added to SCHEMA alone never reaches the production file on the volume — and the first
+ * `updateCycle` naming it would throw "no such column" inside rollClose. Each entry is applied
+ * with `ALTER TABLE ... ADD COLUMN` only when `PRAGMA table_info` says it is missing, so the
+ * migration is idempotent and a fresh database (which already has the column) skips it. Existing
+ * rows read NULL: "not recorded", which is the truth for a week closed before the column existed.
+ * Append only; never reorder or remove.
+ */
+const MIGRATIONS: ReadonlyArray<{ table: string; column: string; type: string }> = [
+  { table: 'cycles', column: 'assets_returned', type: 'TEXT' },
+  { table: 'cycles', column: 'usdg_from_assignment', type: 'TEXT' },
+];
+
 /** Columns the generic updaters are allowed to touch. Keeps the dynamic SQL honest. */
 const CYCLE_COLUMNS = new Set<keyof CycleRow>([
   'option_id',
@@ -242,6 +267,8 @@ const CYCLE_COLUMNS = new Set<keyof CycleRow>([
   'fee_usdg6',
   'net_usdg6',
   'contracts_assigned',
+  'assets_returned',
+  'usdg_from_assignment',
   'relists_used',
   'opened_at',
   'locked_at',
@@ -281,11 +308,25 @@ export class KeeperStore {
     this.db.pragma('journal_mode = WAL');
     this.db.pragma('synchronous = FULL'); // durability beats throughput; we write a few rows a week
     this.db.exec(SCHEMA);
+    this.migrate();
     log.state.info({ path: this.path }, 'state database opened');
   }
 
   close(): void {
     this.db.close();
+  }
+
+  /** Apply MIGRATIONS that this file has not had yet. Runs in one transaction. */
+  private migrate(): void {
+    const apply = this.db.transaction(() => {
+      for (const { table, column, type } of MIGRATIONS) {
+        const columns = this.db.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>;
+        if (columns.some((c) => c.name === column)) continue;
+        this.db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${type}`);
+        log.state.info({ table, column }, 'migrated: added column');
+      }
+    });
+    apply();
   }
 
   /*------------------------------- meta -------------------------------*/
@@ -547,6 +588,44 @@ export class KeeperStore {
 /*//////////////////////////////////////////////////////////////
                             HELPERS
 //////////////////////////////////////////////////////////////*/
+
+/** A cycle row as `/cycles` serves it: the stored columns plus the harvest split. */
+export type CycleTapeRow = CycleRow & {
+  /** `gross_usdg6 - usdg_from_assignment`: the premium the week earned, before the fee. */
+  premium_gross_usdg6: string | null;
+  /** `usdg_from_assignment` under the name a reader looks for: returned principal, not yield. */
+  strike_proceeds_usdg6: string | null;
+};
+
+/**
+ * Split a cycle's gross harvest into premium and strike proceeds.
+ *
+ * On an assigned week the terminal `Harvest.grossUsdg` includes `RollClose.usdgFromAssignment`,
+ * so the gross alone reads returned principal as yield. Both halves are null when the strike
+ * proceeds are unknown (a row closed before the column existed, a receipt with no RollClose):
+ * an unknown split is never published as "0 strike proceeds". Proceeds above the gross would be
+ * a vault defect; the premium then reads 0, never a negative number.
+ */
+export function splitGross(
+  gross: bigint,
+  usdgFromAssignment: bigint | null,
+): { premium: bigint | null; strikeProceeds: bigint | null } {
+  if (usdgFromAssignment === null) return { premium: null, strikeProceeds: null };
+  return { premium: gross > usdgFromAssignment ? gross - usdgFromAssignment : 0n, strikeProceeds: usdgFromAssignment };
+}
+
+/** `/cycles` row: every stored column plus the split. Null wherever the gross or the proceeds are. */
+export function cycleTapeRow(row: CycleRow): CycleTapeRow {
+  if (row.gross_usdg6 === null || row.usdg_from_assignment === null) {
+    return { ...row, premium_gross_usdg6: null, strike_proceeds_usdg6: null };
+  }
+  const { premium, strikeProceeds } = splitGross(BigInt(row.gross_usdg6), BigInt(row.usdg_from_assignment));
+  return {
+    ...row,
+    premium_gross_usdg6: premium === null ? null : premium.toString(),
+    strike_proceeds_usdg6: strikeProceeds === null ? null : strikeProceeds.toString(),
+  };
+}
 
 /** better-sqlite3 binds only string/number/bigint/Buffer/null. Booleans and bigints come
  *  through the patch objects, so normalise them here rather than at every call site. */

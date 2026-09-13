@@ -143,6 +143,13 @@ const schema = z.object({
   /** Optional manual override for the per-contract ask, in USDG base units. Set this only to
    *  override the policy/last-fill price for one cycle; leave unset in normal operation. */
   KEEPER_UNIT_PRICE_USDG6: bigintField.optional(),
+  /** Basis points added on top of the policy premium floor when the keeper prices a listing:
+   *  unit = ceil(floor * (10000 + margin) / 10000). The vault re-reads spot at approveListing,
+   *  so a listing priced exactly at the floor reverts PremiumBelowMinimum on one upward oracle
+   *  tick between the keeper's read and the vault's. A margin absorbs a spot move of up to
+   *  margin/100 percent, at the cost of a slightly higher ask. 0 (default) prices at the floor
+   *  exactly, as before. Capped at 1000 (10%). Not applied to KEEPER_UNIT_PRICE_USDG6. */
+  PREMIUM_MARGIN_BPS: intField(0, 1000).default(0),
   /** Directory to mirror signed order payloads into, for the self-hosted fallback buy page.
    *  The payload is always kept in SQLite and served from /orders; this is belt and braces. */
   KEEPER_FALLBACK_DIR: z.string().min(1).optional(),

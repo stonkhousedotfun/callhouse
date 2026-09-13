@@ -30,10 +30,21 @@ process.env.KEEPER_PK = `0x${'11'.repeat(32)}`;
 process.env.KEEPER_DB_PATH = join(scratch, 'keeper.db');
 process.env.KEEPER_LOG_LEVEL = 'fatal';
 delete process.env.KEEPER_UNIT_PRICE_USDG6;
+delete process.env.PREMIUM_MARGIN_BPS; // the default (0) unless a test passes the seam
 delete process.env.RH_RPC_2;
 
 const { BPS } = await import('./config.js');
-const { LAST_FILL_MAX_LIFT, ceilDiv, maxContracts, minUnitPrice6, pickWrite, strikeBand } = await import('./policy.js');
+const {
+  LAST_FILL_MAX_LIFT,
+  ceilDiv,
+  liftedUnitPrice6,
+  maxContracts,
+  minUnitPrice6,
+  pickWrite,
+  relistUnitPrice6,
+  strikeBand,
+  withPremiumMargin,
+} = await import('./policy.js');
 const { MIN_LISTABLE_UNIT_PRICE_6, OVERCALL_FEE_BPS, splitPremium } = await import('./seaport.js');
 type PolicyParams = import('./policy.js').PolicyParams;
 type Rung = import('./policy.js').Rung;
@@ -307,6 +318,129 @@ test('the manual override wins over both the floor and the last fill, and is sti
   const tooHigh = await pick({ unitPriceOverride6: 226_000_001n });
   assert.equal(tooHigh.ok, false);
   if (!tooHigh.ok) assert.equal(tooHigh.reason, 'premium-above-strike');
+});
+
+/*//////////////////////////////////////////////////////////////
+                  THE PREMIUM MARGIN (PREMIUM_MARGIN_BPS)
+//////////////////////////////////////////////////////////////*/
+
+/** Policy.checkPremium's on-chain minimum for `n` contracts at `spot`. */
+const onChainMinGross = (spot: bigint, n: bigint) => (spot * n * LAUNCH.minPremiumBps) / BPS;
+
+test('withPremiumMargin: margin 0 is the identity, the margin rounds UP, a negative is refused', () => {
+  for (const floor of [0n, 1n, 20n, 873_192n, 2_619_576n, 123_456_789n]) {
+    assert.equal(withPremiumMargin(floor, 0), floor, `ceil(f * 10000 / 10000) = f at ${floor}`);
+  }
+  // 873192 * 10050 / 10000 = 877557.96 -> 877558. The floored 877557 is short of +0.5%.
+  assert.equal(withPremiumMargin(873_192n, 50), 877_558n);
+  assert.ok(877_557n * BPS < 873_192n * 10_050n, 'rounding down would miss the margin');
+  assert.equal(withPremiumMargin(1_000_000n, 50), 1_005_000n, 'an exact multiple does not round');
+  assert.equal(withPremiumMargin(1n, 1), 2n, 'ceil(1.0001) = 2');
+  assert.equal(withPremiumMargin(873_192n, 1000), 960_512n, 'the 10% cap: 960511.2 -> 960512');
+  assert.equal(withPremiumMargin(873_192n, 50n), 877_558n, 'bigint and number margins agree');
+  assert.throws(() => withPremiumMargin(873_192n, -1), /must not be negative/);
+});
+
+test('liftedUnitPrice6 at margin 0 is exactly the old inline max(floor, clamped last fill)', () => {
+  const old = (floor: bigint, lastFill: bigint | null) =>
+    lastFill !== null && floor > 0n && lastFill > floor
+      ? lastFill < floor * LAST_FILL_MAX_LIFT
+        ? lastFill
+        : floor * LAST_FILL_MAX_LIFT
+      : floor;
+  for (const floor of [0n, 1n, 20n, 873_192n]) {
+    const fills = [null, 0n, floor - 1n, floor, floor + 1n, 2n * floor, 3n * floor, 3n * floor + 1n, 300_000_000n];
+    for (const lastFill of fills) {
+      const got = liftedUnitPrice6(floor, 0, lastFill);
+      assert.equal(got.unitPrice6, old(floor, lastFill), `floor ${floor}, last fill ${lastFill}`);
+      assert.equal(got.lifted, lastFill !== null && floor > 0n && lastFill > floor, 'lifted exactly when the old code set last-fill');
+    }
+  }
+});
+
+test('pickWrite at margin 0 reproduces every existing price exactly', async () => {
+  const cases: Array<[Partial<Parameters<typeof pickWrite>[0]>, bigint, string]> = [
+    [{}, 873_192n, 'policy-floor'],
+    [{ readLastFill: async () => 2_000_000n }, 2_000_000n, 'last-fill'],
+    [{ readLastFill: async () => 4_000_000n }, 873_192n * 3n, 'last-fill'],
+    [{ readLastFill: async () => 500_000n }, 873_192n, 'policy-floor'],
+    [{ unitPriceOverride6: 2_500_000n }, 2_500_000n, 'manual-override'],
+    [{ spotUsdg6: 1_000n, rungs: rungs({ 0: { strikeUsdg6: 1_050n } }) }, MIN_LISTABLE_UNIT_PRICE_6, 'policy-floor'],
+  ];
+  for (const [overrides, price, source] of cases) {
+    const explicit = await pick({ ...overrides, premiumMarginBps: 0 });
+    const fromEnv = await pick(overrides);
+    assert.ok(explicit.ok && fromEnv.ok);
+    assert.equal(explicit.unitPrice6, price);
+    assert.equal(explicit.priceSource, source);
+    assert.deepEqual(explicit, fromEnv, 'the default PREMIUM_MARGIN_BPS is 0: same plan, field for field');
+  }
+});
+
+test('pickWrite at margin 50: at least +0.5%, survives a +0.5% spot tick, and the fee still splits per contract', async () => {
+  const atFloor = await pick({ premiumMarginBps: 0 });
+  const margined = await pick({ premiumMarginBps: 50 });
+  assert.ok(atFloor.ok && margined.ok);
+  assert.equal(margined.unitPrice6, 877_558n);
+  assert.equal(margined.priceSource, 'policy-floor', 'the margin is part of the floor price, not a lift');
+  assert.ok(margined.unitPrice6 * BPS >= atFloor.unitPrice6 * 10_050n, 'raised by >= 0.5%');
+
+  // The revert the margin exists for. Spot ticks up 0.5% between the keeper's read and the
+  // vault's approveListing: 218297934 -> 219389423. At the floor, 23 contracts miss the new
+  // minimum; with the margin they clear it, at every size the sizer can produce.
+  const ticked = (SPOT * 10_050n) / BPS;
+  assert.equal(ticked, 219_389_423n);
+  assert.ok(atFloor.unitPrice6 * 23n < onChainMinGross(ticked, 23n), 'margin 0: PremiumBelowMinimum on the uptick');
+  for (let n = 1n; n <= LAUNCH.maxContractsCap; n += 1n) {
+    assert.ok(margined.unitPrice6 * n >= onChainMinGross(ticked, n), `margin 50 clears the ticked floor at n=${n}`);
+  }
+
+  // Overcall's 5% is rounded per contract on the MARGINED unit: floor(877558 * 5%) = 43877.
+  assert.equal(margined.contracts, 23n);
+  assert.equal(margined.toOvercall6, 43_877n * 23n);
+  assert.equal(margined.toVault6, (877_558n - 43_877n) * 23n);
+  assert.equal(margined.toVault6 % margined.contracts, 0n);
+  assert.equal(margined.toOvercall6 % margined.contracts, 0n);
+  assert.equal(margined.gross6, margined.unitPrice6 * margined.contracts);
+
+  // A last fill between the floor and the margined floor does not pull the price back down.
+  const between = await pick({ premiumMarginBps: 50, readLastFill: async () => 875_000n });
+  assert.ok(between.ok);
+  assert.equal(between.unitPrice6, 877_558n);
+  assert.equal(between.priceSource, 'policy-floor');
+  // Above it, the last fill wins as before...
+  const lifted = await pick({ premiumMarginBps: 50, readLastFill: async () => 2_000_000n });
+  assert.ok(lifted.ok);
+  assert.equal(lifted.unitPrice6, 2_000_000n);
+  assert.equal(lifted.priceSource, 'last-fill');
+  // ...and the 3x clamp stays anchored to the POLICY floor, so the margin does not widen what a
+  // self-filled print can buy.
+  const clamped = await pick({ premiumMarginBps: 50, readLastFill: async () => 300_000_000n });
+  assert.ok(clamped.ok);
+  assert.equal(clamped.unitPrice6, 873_192n * LAST_FILL_MAX_LIFT);
+  // The manual override is an absolute price; the margin does not touch it.
+  const manual = await pick({ premiumMarginBps: 50, unitPriceOverride6: 2_500_000n });
+  assert.ok(manual.ok);
+  assert.equal(manual.unitPrice6, 2_500_000n);
+});
+
+test('relistUnitPrice6: max(previous ask, margined LIVE floor); margin 0 is the old rule', () => {
+  // Margin 0: exactly `floor > previous ? floor : previous`, and a failed read keeps previous.
+  assert.equal(relistUnitPrice6(900_000n, 873_192n, 0), 900_000n);
+  assert.equal(relistUnitPrice6(800_000n, 873_192n, 0), 873_192n);
+  assert.equal(relistUnitPrice6(873_192n, 873_192n, 0), 873_192n);
+  assert.equal(relistUnitPrice6(900_000n, null, 0), 900_000n);
+  assert.equal(relistUnitPrice6(900_000n, null, 50), 900_000n, 'no live floor: the previous price, margin or not');
+
+  // Margin 50 at an unchanged spot: an ask that sat at the bare floor is relisted with the margin.
+  assert.equal(relistUnitPrice6(873_192n, 873_192n, 50), 877_558n);
+  assert.equal(relistUnitPrice6(880_000n, 873_192n, 50), 880_000n, 'a higher previous ask is kept');
+
+  // After a +0.5% tick the live floor is ceil(219389423 * 40 / 10000) = 877558.
+  const tickedFloor = minUnitPrice6(219_389_423n, LAUNCH);
+  assert.equal(tickedFloor, 877_558n);
+  assert.equal(relistUnitPrice6(873_192n, tickedFloor, 0), 877_558n);
+  assert.equal(relistUnitPrice6(877_558n, tickedFloor, 50), 881_946n, 'ceil(877558 * 1.005) = ceil(881945.79)');
 });
 
 /*//////////////////////////////////////////////////////////////

@@ -42,13 +42,14 @@ import {
   recordCancellation,
 } from './overcallApi.js';
 import {
-  LAST_FILL_MAX_LIFT,
   MAX_LISTINGS_PER_CYCLE,
+  liftedUnitPrice6,
   minUnitPrice6,
   pickWrite,
   readCycle,
   readPolicy,
   readRungs,
+  relistUnitPrice6,
   type CycleView,
   type Rung,
 } from './policy.js';
@@ -66,7 +67,7 @@ import {
   type OrderComponentsStruct,
   type SeaportOrderStatus,
 } from './seaport.js';
-import { store, type CycleRow, type ListingRow, type ListingStatus, type TxKind } from './state.js';
+import { splitGross, store, type CycleRow, type ListingRow, type ListingStatus, type TxKind } from './state.js';
 
 /*//////////////////////////////////////////////////////////////
                               TYPES
@@ -605,6 +606,10 @@ async function closeCycleFromLogs(cycleNumber: number, snap: ChainSnapshot): Pro
   }
 
   const assigned = Number(closeLog.args.contractsAssignedCount ?? 0n);
+  // Both straight from the RollClose log. A log that somehow lacks them reads null ("unknown"),
+  // never 0: a 0 here would publish an assigned week's strike proceeds as premium.
+  const assetsReturned = closeLog.args.assetsReturned ?? null;
+  const usdgFromAssignment = closeLog.args.usdgFromAssignment ?? null;
 
   // Same retirement as doRollClose: the close bumped the Seaport counter, which kills every
   // still-live order without setting isCancelled — and tell the book, best-effort, or its row
@@ -624,6 +629,8 @@ async function closeCycleFromLogs(cycleNumber: number, snap: ChainSnapshot): Pro
     fee_usdg6: fee.toString(),
     net_usdg6: net.toString(),
     contracts_assigned: assigned,
+    assets_returned: assetsReturned === null ? null : assetsReturned.toString(),
+    usdg_from_assignment: usdgFromAssignment === null ? null : usdgFromAssignment.toString(),
   };
   if (existing === null) {
     // A week another operator ran end to end. The vault zeroed optionId and contractsWritten
@@ -641,22 +648,20 @@ async function closeCycleFromLogs(cycleNumber: number, snap: ChainSnapshot): Pro
   store.updateCycle(cycleNumber, patch);
   backfillOpenTx(cycleNumber);
 
+  const summary: RollCloseSummary = {
+    cycleNumber,
+    gross,
+    fee,
+    net,
+    usdgFromAssignment,
+    assetsReturned,
+    contractsAssigned: assigned,
+    witnessedLive: false,
+  };
   await alert(
     'roll_close',
-    gross === 0n
-      ? `cycle ${cycleNumber} closed unfilled: 0 USDG harvested. The close ran without this keeper ` +
-        'witnessing it; reconstructed from chain logs.'
-      : `cycle ${cycleNumber} closed: ${formatUsdg(gross)} USDG harvested, ${formatUsdg(net)} to depositors. ` +
-        'The close ran without this keeper witnessing it; reconstructed from chain logs.',
-    {
-      cycleNumber,
-      grossUsdg: formatUsdg(gross),
-      feeUsdg: formatUsdg(fee),
-      netUsdg: formatUsdg(net),
-      contractsAssigned: assigned,
-      tx: closeLog.transactionHash,
-      witnessedLive: false,
-    },
+    rollCloseMessage(summary),
+    { ...rollCloseAlertData(summary), tx: closeLog.transactionHash, witnessedLive: false },
     { force: true },
   );
   log.boot.warn(
@@ -1505,12 +1510,12 @@ async function maybeRelist(snap: ChainSnapshot): Promise<void> {
   let unitPrice6: bigint;
   if (previous) {
     // But never below the floor the chain re-derives from LIVE spot at approveListing
-    // (Vault.approveListing -> Policy.checkPremium): our memory of the earlier price is not a
-    // floor, and after a spot uptick it would revert PremiumBelowMinimum on every retry. On a
-    // read failure keep the old price; the simulation gate catches a genuinely bad one.
+    // (Vault.approveListing -> Policy.checkPremium), plus PREMIUM_MARGIN_BPS: our memory of the
+    // earlier price is not a floor, and after a spot uptick it would revert PremiumBelowMinimum
+    // on every retry. On a read failure keep the old price; the simulation gate catches a
+    // genuinely bad one.
     const floor = await liveFloorUnit6();
-    const previousPrice = BigInt(previous.unit_price6);
-    unitPrice6 = floor !== null && floor > previousPrice ? floor : previousPrice;
+    unitPrice6 = relistUnitPrice6(BigInt(previous.unit_price6), floor, config.PREMIUM_MARGIN_BPS);
   } else {
     unitPrice6 = await repriceFromPolicy(snap);
   }
@@ -1542,23 +1547,20 @@ async function liveFloorUnit6(): Promise<bigint | null> {
   }
 }
 
-/** Price a listing when no earlier one exists for this cycle: the policy floor, lifted to the
- *  last observed fill if the book has one. The strike is NOT re-picked — the vault is already
- *  written into one option id and that cannot change mid-cycle. */
+/** Price a listing when no earlier one exists for this cycle: the policy floor plus
+ *  PREMIUM_MARGIN_BPS, lifted to the last observed fill if the book has one. The strike is NOT
+ *  re-picked — the vault is already written into one option id and that cannot change mid-cycle. */
 async function repriceFromPolicy(snap: ChainSnapshot): Promise<bigint> {
   const floor = await liveFloorUnit6();
   if (floor === null) {
     log.roll.warn({}, 'could not reprice; leaving the inventory unlisted');
     return 0n;
   }
-  let price = floor;
   const lastFill = await lastFilledUnitPrice6([snap.vaultOptionId]);
-  // The same clamp pickWrite applies (see LAST_FILL_MAX_LIFT in policy.ts): a self-fill is a
-  // cheap way to shout a fake price, so the signal is honoured only to a multiple of the
-  // floor. A zero floor anchors nothing — skip the lift.
-  if (lastFill !== null && floor > 0n && lastFill > price) {
-    price = lastFill < floor * LAST_FILL_MAX_LIFT ? lastFill : floor * LAST_FILL_MAX_LIFT;
-  }
+  // The same margin and clamp pickWrite applies (see liftedUnitPrice6 in policy.ts): a
+  // self-fill is a cheap way to shout a fake price, so the signal is honoured only to a
+  // multiple of the floor. A zero floor anchors nothing — skip the lift.
+  const { unitPrice6: price } = liftedUnitPrice6(floor, config.PREMIUM_MARGIN_BPS, lastFill);
   if (price > snap.vaultStrikeUsdg6 && snap.vaultStrikeUsdg6 > 0n) return 0n;
   return price;
 }
@@ -1706,6 +1708,9 @@ async function doRollClose(snap: ChainSnapshot): Promise<void> {
     );
   }
   const assigned = resolved.assigned;
+  // The amounts ride in the same RollClose log as the count. No log (the claim-preread and
+  // unknown branches above) means unknown: stored NULL and published without a split, never 0.
+  const closed = decodeRollClose(receipt);
 
   // Whatever was still live is dead now: `rollClose` bumps the Seaport counter, which makes
   // the order unfillable without ever setting `isCancelled`, so nothing else would retire
@@ -1727,21 +1732,26 @@ async function doRollClose(snap: ChainSnapshot): Promise<void> {
     fee_usdg6: harvest.fee.toString(),
     net_usdg6: harvest.net.toString(),
     contracts_assigned: assigned,
+    assets_returned: closed === null ? null : closed.assetsReturned.toString(),
+    usdg_from_assignment: closed === null ? null : closed.usdgFromAssignment.toString(),
   });
 
   const gross = harvest.gross;
+  const summary: RollCloseSummary = {
+    cycleNumber: snap.vaultCycleNumber,
+    gross,
+    fee: harvest.fee,
+    net: harvest.net,
+    usdgFromAssignment: closed?.usdgFromAssignment ?? null,
+    assetsReturned: closed?.assetsReturned ?? null,
+    contractsAssigned: assigned,
+    witnessedLive: true,
+  };
   await alert(
     'roll_close',
-    gross === 0n
-      ? `cycle ${snap.vaultCycleNumber} closed unfilled: 0 USDG harvested.`
-      : `cycle ${snap.vaultCycleNumber} closed: ${formatUsdg(gross)} USDG harvested, ` +
-        `${formatUsdg(harvest.net)} to depositors.`,
+    rollCloseMessage(summary),
     {
-      cycleNumber: snap.vaultCycleNumber,
-      grossUsdg: formatUsdg(gross),
-      feeUsdg: formatUsdg(harvest.fee),
-      netUsdg: formatUsdg(harvest.net),
-      contractsAssigned: assigned,
+      ...rollCloseAlertData(summary),
       contractsAssignedSource: resolved.source,
       contractsAssignedFromClaim: resolved.fromClaim === null ? null : Number(resolved.fromClaim),
       tx: receipt.transactionHash,
@@ -1768,12 +1778,99 @@ function decodeHarvest(receipt: TransactionReceipt): { gross: bigint; fee: bigin
   return { gross: harvest.args.grossUsdg, fee: harvest.args.feeUsdg, net: harvest.args.netUsdg };
 }
 
-/** The `RollClose` event, which carries the assignment count the vault read before redeeming. */
-function decodeRollClose(receipt: TransactionReceipt): { contractsAssignedCount: bigint } | null {
+export interface RollCloseAmounts {
+  /** Underlying the redeemed claim handed back, asset base units. */
+  assetsReturned: bigint;
+  /** Strike proceeds from assigned contracts, USDG base units. Inside Harvest.grossUsdg, fee-free. */
+  usdgFromAssignment: bigint;
+  /** The assignment count the vault read immediately before redeeming. */
+  contractsAssignedCount: bigint;
+}
+
+/** The vault's `RollClose` event in a receipt, or null when the vault emitted none. */
+export function decodeRollClose(receipt: TransactionReceipt): RollCloseAmounts | null {
   const events = parseEventLogs({ abi: vaultAbi, eventName: 'RollClose', logs: receipt.logs });
   const found = events.find((event) => event.address.toLowerCase() === config.VAULT.toLowerCase());
   if (!found) return null;
-  return { contractsAssignedCount: found.args.contractsAssignedCount };
+  return {
+    assetsReturned: found.args.assetsReturned,
+    usdgFromAssignment: found.args.usdgFromAssignment,
+    contractsAssignedCount: found.args.contractsAssignedCount,
+  };
+}
+
+/** Everything the `roll_close` alert says, from either close path. */
+export interface RollCloseSummary {
+  cycleNumber: number;
+  /** Cycle-summed Harvest: premium plus, on an assigned week, the strike proceeds. */
+  gross: bigint;
+  fee: bigint;
+  net: bigint;
+  /** `RollClose.usdgFromAssignment`; null when unknown. */
+  usdgFromAssignment: bigint | null;
+  /** `RollClose.assetsReturned`; null when unknown. */
+  assetsReturned: bigint | null;
+  contractsAssigned: number;
+  /** false for a close reconstructed from logs at boot. */
+  witnessedLive: boolean;
+}
+
+const UNWITNESSED_SUFFIX = ' The close ran without this keeper witnessing it; reconstructed from chain logs.';
+
+/**
+ * The `roll_close` message. Pure; roll.test.ts pins every wording.
+ *
+ * On an assigned week the gross includes the strike proceeds, which are returned principal and
+ * carry no fee, so the message names premium and strike proceeds separately instead of calling
+ * the whole gross "harvested" (K-21):
+ *   cycle 3 closed: premium 19.079259 USDG (fee 0.953962), strike proceeds 2025 USDG from 9
+ *   contracts assigned; 2043.125297 USDG to depositors.
+ * Unfilled and unassigned weeks keep their original wording. An assignment whose proceeds are
+ * unknown (no RollClose from the vault — unreachable with the deployed bytecode) says so rather
+ * than calling the gross premium.
+ */
+export function rollCloseMessage(s: RollCloseSummary): string {
+  const suffix = s.witnessedLive ? '' : UNWITNESSED_SUFFIX;
+  if (s.gross === 0n) return `cycle ${s.cycleNumber} closed unfilled: 0 USDG harvested.${suffix}`;
+  const { premium, strikeProceeds } = splitGross(s.gross, s.usdgFromAssignment);
+  if (premium !== null && strikeProceeds !== null && strikeProceeds > 0n) {
+    const noun = s.contractsAssigned === 1 ? 'contract' : 'contracts';
+    return (
+      `cycle ${s.cycleNumber} closed: premium ${formatUsdg(premium)} USDG (fee ${formatUsdg(s.fee)}), ` +
+      `strike proceeds ${formatUsdg(strikeProceeds)} USDG from ${s.contractsAssigned} ${noun} assigned; ` +
+      `${formatUsdg(s.net)} USDG to depositors.${suffix}`
+    );
+  }
+  if (strikeProceeds === null && s.contractsAssigned > 0) {
+    const noun = s.contractsAssigned === 1 ? 'contract' : 'contracts';
+    return (
+      `cycle ${s.cycleNumber} closed: ${formatUsdg(s.gross)} USDG gross including strike proceeds from ` +
+      `${s.contractsAssigned} ${noun} assigned (premium/proceeds split unknown), ` +
+      `${formatUsdg(s.net)} to depositors.${suffix}`
+    );
+  }
+  return `cycle ${s.cycleNumber} closed: ${formatUsdg(s.gross)} USDG harvested, ${formatUsdg(s.net)} to depositors.${suffix}`;
+}
+
+/** The amount fields of the `roll_close` alert's `data`, shared by both close paths. */
+export function rollCloseAlertData(s: RollCloseSummary): Record<string, unknown> {
+  const { premium, strikeProceeds } = splitGross(s.gross, s.usdgFromAssignment);
+  if (s.usdgFromAssignment !== null && s.usdgFromAssignment > s.gross) {
+    log.roll.warn(
+      { cycleNumber: s.cycleNumber, grossUsdg6: s.gross.toString(), usdgFromAssignment: s.usdgFromAssignment.toString() },
+      'RollClose.usdgFromAssignment exceeds the summed Harvest gross; premium published as 0',
+    );
+  }
+  return {
+    cycleNumber: s.cycleNumber,
+    grossUsdg: formatUsdg(s.gross),
+    feeUsdg: formatUsdg(s.fee),
+    netUsdg: formatUsdg(s.net),
+    premiumUsdg: premium === null ? null : formatUsdg(premium),
+    strikeProceedsUsdg: strikeProceeds === null ? null : formatUsdg(strikeProceeds),
+    assetsReturned: s.assetsReturned === null ? null : s.assetsReturned.toString(),
+    contractsAssigned: s.contractsAssigned,
+  };
 }
 
 export type ContractsAssignedSource = 'RollClose' | 'claim-preread' | 'unknown';

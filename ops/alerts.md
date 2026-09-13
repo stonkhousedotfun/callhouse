@@ -78,7 +78,7 @@ export VAULT=<from ops/addresses.json>
 | `no_rung` | info (**warn** for `stale-oracle`) | INFO/P2 | The week is being skipped; `data.reason` says why: `no-rung-in-band`, `premium-above-strike`, `stale-oracle: …`, `writes-halted`, `no-keeper-role`, `valorem-fees-enabled`, `oracle-paused`, `no-idle-collateral` | §10 |
 | `boot` | info (**warn** if no KEEPER_ROLE) | INFO | Process online and reconciled. Warn variant: the key can close but not open | — |
 | `roll_open` | info, `force` | INFO | Cycle opened: strike, contracts, price, tx hash in `data` | — |
-| `roll_close` | info, `force` | INFO | Week closed: summed gross/fee/net in `data`. Emitted by the keeper's own close AND by the boot reconciliation when someone else closed the week | — |
+| `roll_close` | info, `force` | INFO | Week closed: summed gross/fee/net plus `premiumUsdg` / `strikeProceedsUsdg` in `data`; an assigned week's message names premium and strike proceeds separately. Emitted by the keeper's own close AND by the boot reconciliation when someone else closed the week | [payload](#roll_close--info-payload-and-message) |
 
 ## Index — conditions this file covers that the keeper does NOT emit
 
@@ -267,6 +267,45 @@ The week is being skipped; `data.reason` says why:
   roll". Only one cycle has ever been set on this registry, so the weekly cadence is stated
   intent, not observed history. Publish `no cycle, unfilled, 0`. `open-week.md` §1.
 
+### `roll_close` — INFO: payload and message
+No action; it feeds the weekly publish. On an assigned week the vault's `Harvest.grossUsdg`
+includes the strike proceeds (`RollClose.usdgFromAssignment`), which are returned principal and
+carry no fee. Publishing the gross as "harvested" would show principal as yield, so the keeper
+splits it: premium = gross − strike proceeds.
+
+Message, by outcome (`<n>` the cycle, amounts in USDG to at most 6 decimals, trailing zeros dropped):
+
+| Outcome | Message |
+|---|---|
+| Unfilled | `cycle <n> closed unfilled: 0 USDG harvested.` |
+| Filled, nothing assigned | `cycle <n> closed: <gross> USDG harvested, <net> to depositors.` |
+| Filled, assigned | `cycle <n> closed: premium <premium> USDG (fee <fee>), strike proceeds <proceeds> USDG from <k> contracts assigned; <net> USDG to depositors.` |
+| Assigned, proceeds unknown (no `RollClose` in the receipt — unreachable with the deployed vault) | `cycle <n> closed: <gross> USDG gross including strike proceeds from <k> contracts assigned (premium/proceeds split unknown), <net> to depositors.` |
+
+A close reconstructed at boot (someone else closed the week) appends ` The close ran without this
+keeper witnessing it; reconstructed from chain logs.` to any of the four. Example, dry-run cycle 3:
+`cycle 3 closed: premium 19.079259 USDG (fee 0.953962), strike proceeds 2025 USDG from 9 contracts assigned; 2043.125297 USDG to depositors.`
+
+`data`:
+
+| Field | Meaning |
+|---|---|
+| `cycleNumber` | The vault cycle |
+| `grossUsdg` / `feeUsdg` / `netUsdg` | Every `Harvest` for the cycle, summed (§20). Gross includes strike proceeds |
+| `premiumUsdg` | `grossUsdg − strikeProceedsUsdg`. `null` when the proceeds are unknown |
+| `strikeProceedsUsdg` | `RollClose.usdgFromAssignment`; `"0"` when nothing was assigned, `null` when unknown |
+| `assetsReturned` | `RollClose.assetsReturned`, underlying base units (wei) as a string; `null` when unknown |
+| `contractsAssigned` | `RollClose.contractsAssignedCount` |
+| `contractsAssignedSource` / `contractsAssignedFromClaim` | Keeper's own close only: where the count came from (`RollClose` \| `claim-preread` \| `unknown`) and its pre-close Valorem read |
+| `tx` | The `rollClose` transaction |
+| `witnessedLive` | Boot reconciliation only: `false` |
+
+The same split is on the keeper's `GET /cycles`: `assets_returned`, `usdg_from_assignment`,
+`premium_gross_usdg6`, `strike_proceeds_usdg6` (the derived pair is `null` for a week closed
+before the keeper recorded them). Check before publishing: `fee == floor(premium × protocolFeeBps / 10000)`
+for a single-`Harvest` week; when a deposit checkpoint split the harvest, the fee is a sum of
+per-event floors and may sit a few base units under that.
+
 ---
 
 ## Not emitted by the keeper — checks and external monitors
@@ -371,7 +410,9 @@ an earlier `Harvest` and leaves the close's own event at `(0, 0, 0)`. Reading on
 event reports a filled week as unfilled. The keeper sums every `Harvest` carrying the cycle number
 from the rollOpen block (recovered from the tx row or the `RollOpen` log) through the close block;
 the indexer folds the same way; the web history reads the indexer's sum. The fee still leaves the
-vault exactly once, from `rollClose`. `close-week.md` §5.
+vault exactly once, from `rollClose`. On an assigned week the close's gross also carries the
+strike proceeds (`RollClose.usdgFromAssignment`, fee-free): premium is gross minus that, and the
+keeper records both (`roll_close` payload above, `GET /cycles`). `close-week.md` §5.
 
 1. `cast logs --address $VAULT $(cast keccak "Harvest(uint32,uint256,uint256,uint256)") $(cast to-uint256 <cycle>) --from-block <rollOpen block> --rpc-url $RH_RPC`
 2. `cast call $VAULT "pendingFeeUsdg()(uint256)" --rpc-url $RH_RPC` — must be 0 after close; non-zero means premium WAS taken this cycle

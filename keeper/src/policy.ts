@@ -226,6 +226,60 @@ export function minUnitPrice6(spotUsdg6: bigint, p: PolicyParams): bigint {
   return ceilDiv(spotUsdg6 * p.minPremiumBps, BPS);
 }
 
+/**
+ * The list floor: the policy floor lifted by PREMIUM_MARGIN_BPS, rounded UP.
+ *
+ *   listFloor = ceil(floorUnit6 * (10000 + marginBps) / 10000)
+ *
+ * WHY: `approveListing` re-derives the floor from spot read in ITS block. A price exactly at
+ * the floor the keeper computed one block earlier reverts `PremiumBelowMinimum` on any uptick in
+ * between. A margin of m bps survives a spot rise of up to m bps: the ceiling guarantees
+ * `listFloor >= floor * (1 + m/1e4) >= spot' * minPremiumBps / 1e4` for every spot' within it.
+ * The trade-off is the other direction: a higher ask is slightly less likely to fill.
+ *
+ * margin 0 is the identity — ceil(f * 10000 / 10000) is f exactly — so the default reproduces the
+ * floor price bit for bit. The per-contract Overcall 5% split is applied to the resulting unit
+ * price by `splitPremium`, so the margin cannot break the fee rounding.
+ */
+export function withPremiumMargin(floorUnit6: bigint, marginBps: number | bigint): bigint {
+  const margin = BigInt(marginBps);
+  if (margin < 0n) throw new Error(`premium margin must not be negative: ${margin}`);
+  return ceilDiv(floorUnit6 * (BPS + margin), BPS);
+}
+
+/**
+ * The ask when there is no manual override: the margined list floor, lifted to the last observed
+ * fill but no further than LAST_FILL_MAX_LIFT times the POLICY floor (the clamp is anchored to
+ * the on-chain floor, not the margin, so the margin never widens what a fake print can buy). A
+ * zero floor anchors nothing — the lift is skipped. Returns whether the lift applied.
+ */
+export function liftedUnitPrice6(
+  floorUnit6: bigint,
+  marginBps: number | bigint,
+  lastFill6: bigint | null,
+): { unitPrice6: bigint; lifted: boolean } {
+  const listFloor6 = withPremiumMargin(floorUnit6, marginBps);
+  if (lastFill6 !== null && floorUnit6 > 0n && lastFill6 > listFloor6) {
+    const cap6 = floorUnit6 * LAST_FILL_MAX_LIFT;
+    // A margin of at most 10% keeps the list floor under the 3x cap, but never publish less
+    // than the list floor whatever the constants become.
+    const lifted6 = lastFill6 < cap6 ? lastFill6 : cap6;
+    return lifted6 > listFloor6 ? { unitPrice6: lifted6, lifted: true } : { unitPrice6: listFloor6, lifted: false };
+  }
+  return { unitPrice6: listFloor6, lifted: false };
+}
+
+/**
+ * The replacement ask after a cancel or invalidation: never below the previous ask (our own
+ * earlier price), never below the margined floor the vault will re-derive from LIVE spot. A
+ * failed live-floor read (null) keeps the previous price; the simulation gate judges it.
+ */
+export function relistUnitPrice6(previous6: bigint, liveFloorUnit6: bigint | null, marginBps: number | bigint): bigint {
+  if (liveFloorUnit6 === null) return previous6;
+  const listFloor6 = withPremiumMargin(liveFloorUnit6, marginBps);
+  return listFloor6 > previous6 ? listFloor6 : previous6;
+}
+
 export function ceilDiv(a: bigint, b: bigint): bigint {
   if (b === 0n) throw new Error('division by zero');
   return (a + b - 1n) / b;
@@ -269,6 +323,8 @@ export interface PickInput {
    * at import time and a test needs both branches in one process.
    */
   unitPriceOverride6?: bigint | null;
+  /** SEAM, for tests only. Stands in for PREMIUM_MARGIN_BPS; `undefined` reads the environment. */
+  premiumMarginBps?: number;
 }
 
 /**
@@ -280,10 +336,11 @@ export interface PickInput {
  *   3. take the NEAREST out-of-the-money one, i.e. the lowest eligible strike. Nearest OTM is
  *      where the premium is; the far rungs earn nothing on a weekly.
  *   4. size = floor(idle * maxUtilizationBps / 10000 / lotSize), capped by maxContractsCap
- *   5. price = max(policy floor, last fill), the last-fill lift clamped at LAST_FILL_MAX_LIFT
- *      times the floor (a self-filled print is a cheap fake signal), floored again at 20 base
- *      units so Overcall's 5% does not round to zero, and never above the strike (both the
- *      vault and Overcall reject a premium above the strike as a fat finger)
+ *   5. price = max(policy floor lifted by PREMIUM_MARGIN_BPS, last fill), the last-fill lift
+ *      clamped at LAST_FILL_MAX_LIFT times the policy floor (a self-filled print is a cheap fake
+ *      signal), floored again at 20 base units so Overcall's 5% does not round to zero, and
+ *      never above the strike (both the vault and Overcall reject a premium above the strike as
+ *      a fat finger)
  *
  * Any failure returns `ok: false` with a reason. Skipping a week is legitimate; forcing a bad
  * write is not.
@@ -337,8 +394,7 @@ export async function pickWrite(input: PickInput): Promise<PickResult> {
   }
 
   const floorUnit6 = minUnitPrice6(spotUsdg6, policy);
-  let unitPrice6 = floorUnit6;
-  let priceSource: WritePlan['priceSource'] = 'policy-floor';
+  const marginBps = input.premiumMarginBps ?? config.PREMIUM_MARGIN_BPS;
 
   // Prefer a fill on the rung we are actually writing. Only if that rung has never traded do
   // we fall back to any rung in the cycle — a fill on a further-out strike is a weak signal
@@ -346,11 +402,10 @@ export async function pickWrite(input: PickInput): Promise<PickResult> {
   const readLastFill = input.readLastFill ?? lastFilledUnitPrice6;
   const lastFill6 =
     (await readLastFill([chosen.optionId])) ?? (await readLastFill(live.map((rung) => rung.optionId)));
-  if (lastFill6 !== null && floorUnit6 > 0n && lastFill6 > unitPrice6) {
-    // Clamped — see LAST_FILL_MAX_LIFT. A zero floor anchors no signal, so the lift is skipped.
-    unitPrice6 = lastFill6 < floorUnit6 * LAST_FILL_MAX_LIFT ? lastFill6 : floorUnit6 * LAST_FILL_MAX_LIFT;
-    priceSource = 'last-fill';
-  }
+  // The margined floor, lifted to a clamped last fill — see liftedUnitPrice6.
+  const priced = liftedUnitPrice6(floorUnit6, marginBps, lastFill6);
+  let unitPrice6 = priced.unitPrice6;
+  let priceSource: WritePlan['priceSource'] = priced.lifted ? 'last-fill' : 'policy-floor';
 
   // The seam resolves to exactly the old read when the field is absent (see PickInput).
   const override6 =
@@ -385,6 +440,8 @@ export async function pickWrite(input: PickInput): Promise<PickResult> {
       contracts: contracts.toString(),
       unitPrice6: unitPrice6.toString(),
       priceSource,
+      floorUnit6: floorUnit6.toString(),
+      premiumMarginBps: marginBps,
       bandLowUsdg6: lo.toString(),
       bandHighUsdg6: hi.toString(),
       spotUsdg6: spotUsdg6.toString(),

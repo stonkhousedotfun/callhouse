@@ -49,6 +49,17 @@ test('bigint fields parse zero and positive values, and defaults land when absen
   assert.equal(loadConfig(VALID).KEEPER_UNIT_PRICE_USDG6, undefined);
 });
 
+test('PREMIUM_MARGIN_BPS: default 0 (price at the floor), an integer 0..1000, anything else refused at boot', () => {
+  assert.equal(loadConfig(VALID).PREMIUM_MARGIN_BPS, 0);
+  assert.equal(loadConfig({ ...VALID, PREMIUM_MARGIN_BPS: '0' }).PREMIUM_MARGIN_BPS, 0);
+  assert.equal(loadConfig({ ...VALID, PREMIUM_MARGIN_BPS: '50' }).PREMIUM_MARGIN_BPS, 50);
+  assert.equal(loadConfig({ ...VALID, PREMIUM_MARGIN_BPS: '1000' }).PREMIUM_MARGIN_BPS, 1000);
+  assert.equal(loadConfig({ ...VALID, PREMIUM_MARGIN_BPS: '' }).PREMIUM_MARGIN_BPS, 0, 'blank in .env is unset');
+  for (const bad of ['1001', '-1', '12.5', 'fifty']) {
+    assert.throws(() => loadConfig({ ...VALID, PREMIUM_MARGIN_BPS: bad }), /PREMIUM_MARGIN_BPS:/, `refuses ${bad}`);
+  }
+});
+
 test('the boot failure message points at keeper/.env.example, which has the keeper keys', () => {
   assert.throws(() => loadConfig({}), /keeper\/\.env\.example/);
 });

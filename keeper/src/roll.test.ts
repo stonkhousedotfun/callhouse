@@ -20,6 +20,11 @@
  *                    unreachable through a tick with the deployed bytecode (the event is always
  *                    there), so they are pinned here on synthetic receipts and driven on a real
  *                    one by dryrun.ts cycle 3.
+ *   rollCloseMessage / rollCloseAlertData
+ *                    what the roll_close alert says (K-21). On an assigned week the gross includes
+ *                    the strike proceeds, which are returned principal, so premium and strike
+ *                    proceeds are named separately; unfilled and unassigned wordings are pinned
+ *                    verbatim so they never drift. roll.close.test.ts drives both close paths.
  *
  * DELIBERATELY ABSENT: no chain, no HTTP. roll.ts is imported for its pure exports only; the
  * RPC in the environment is a discard port. (roll.close.test.ts covers the one impure piece of
@@ -42,7 +47,9 @@ process.env.KEEPER_PK = `0x${'11'.repeat(32)}`;
 process.env.KEEPER_DB_PATH = join(scratch, 'keeper.db');
 process.env.KEEPER_LOG_LEVEL = 'fatal';
 
-const { bookVerdict, isPostRetryable, resolveContractsAssigned, seaportVerdict } = await import('./roll.js');
+const { bookVerdict, decodeRollClose, isPostRetryable, resolveContractsAssigned, rollCloseAlertData, rollCloseMessage, seaportVerdict } =
+  await import('./roll.js');
+type RollCloseSummary = import('./roll.js').RollCloseSummary;
 const { vaultAbi } = await import('./abi.js');
 type SeaportOrderStatus = import('./seaport.js').SeaportOrderStatus;
 
@@ -208,4 +215,105 @@ test('resolveContractsAssigned: without a RollClose from the vault, the pre-read
     fromClaim: null,
     mismatch: false,
   });
+});
+
+/* ---- rollClose: what the roll_close alert says (K-21) ---- */
+
+test('decodeRollClose: all three amounts from the vault\'s RollClose, null without one', () => {
+  assert.deepEqual(decodeRollClose(receiptWith(harvestLog(), rollCloseLog(9n))), {
+    assetsReturned: 14n * LOT,
+    usdgFromAssignment: 2_025_000_000n,
+    contractsAssignedCount: 9n,
+  });
+  assert.deepEqual(decodeRollClose(receiptWith(rollCloseLog(0n))), { assetsReturned: 23n * LOT, usdgFromAssignment: 0n, contractsAssignedCount: 0n });
+  assert.equal(decodeRollClose(receiptWith(harvestLog(), rollCloseLog(9n, OTHER))), null, "another contract's RollClose is not the vault's");
+  assert.equal(decodeRollClose(receiptWith(harvestLog())), null);
+});
+
+/** Dry-run cycle 3 in USDG base units: 19.079259 premium, 5% fee on the premium only, 2025 strike
+ *  proceeds from 9 contracts at 225, 14 NVDA returned. */
+const ASSIGNED: RollCloseSummary = {
+  cycleNumber: 3,
+  gross: 2_044_079_259n,
+  fee: 953_962n,
+  net: 2_043_125_297n,
+  usdgFromAssignment: 2_025_000_000n,
+  assetsReturned: 14n * LOT,
+  contractsAssigned: 9,
+  witnessedLive: true,
+};
+const UNWITNESSED = ' The close ran without this keeper witnessing it; reconstructed from chain logs.';
+
+test('rollCloseMessage: an assigned week names premium and strike proceeds separately', () => {
+  assert.equal(ASSIGNED.fee, (ASSIGNED.gross - (ASSIGNED.usdgFromAssignment ?? 0n)) * 500n / 10_000n, 'fixture: fee on premium only');
+  assert.equal(ASSIGNED.net, ASSIGNED.gross - ASSIGNED.fee, 'fixture: net = gross - fee');
+  assert.equal(
+    rollCloseMessage(ASSIGNED),
+    'cycle 3 closed: premium 19.079259 USDG (fee 0.953962), strike proceeds 2025 USDG from 9 contracts assigned; 2043.125297 USDG to depositors.',
+  );
+  assert.doesNotMatch(rollCloseMessage(ASSIGNED), /harvested/, 'strike proceeds are not "harvested"');
+  assert.equal(
+    rollCloseMessage({ ...ASSIGNED, witnessedLive: false }),
+    `cycle 3 closed: premium 19.079259 USDG (fee 0.953962), strike proceeds 2025 USDG from 9 contracts assigned; 2043.125297 USDG to depositors.${UNWITNESSED}`,
+  );
+  const one = { ...ASSIGNED, gross: 244_079_259n, usdgFromAssignment: 225_000_000n, net: 243_125_297n, contractsAssigned: 1 };
+  assert.equal(
+    rollCloseMessage(one),
+    'cycle 3 closed: premium 19.079259 USDG (fee 0.953962), strike proceeds 225 USDG from 1 contract assigned; 243.125297 USDG to depositors.',
+  );
+});
+
+test('rollCloseMessage: unassigned and unfilled wordings are unchanged, live and reconstructed', () => {
+  const unassigned: RollCloseSummary = {
+    ...ASSIGNED,
+    cycleNumber: 1,
+    gross: 19_079_259n,
+    net: 18_125_297n,
+    usdgFromAssignment: 0n,
+    assetsReturned: 23n * LOT,
+    contractsAssigned: 0,
+  };
+  // The exact templates the keeper published before K-21.
+  assert.equal(rollCloseMessage(unassigned), 'cycle 1 closed: 19.079259 USDG harvested, 18.125297 to depositors.');
+  assert.equal(rollCloseMessage({ ...unassigned, witnessedLive: false }), `cycle 1 closed: 19.079259 USDG harvested, 18.125297 to depositors.${UNWITNESSED}`);
+  // Strike proceeds unknown with nothing assigned (no RollClose in the receipt, a legacy row): the same wording.
+  assert.equal(rollCloseMessage({ ...unassigned, usdgFromAssignment: null, assetsReturned: null }), 'cycle 1 closed: 19.079259 USDG harvested, 18.125297 to depositors.');
+
+  const unfilled: RollCloseSummary = { ...unassigned, cycleNumber: 2, gross: 0n, fee: 0n, net: 0n };
+  assert.equal(rollCloseMessage(unfilled), 'cycle 2 closed unfilled: 0 USDG harvested.');
+  assert.equal(rollCloseMessage({ ...unfilled, witnessedLive: false }), `cycle 2 closed unfilled: 0 USDG harvested.${UNWITNESSED}`);
+  assert.equal(rollCloseMessage({ ...unfilled, usdgFromAssignment: null }), 'cycle 2 closed unfilled: 0 USDG harvested.');
+});
+
+test('rollCloseMessage: assigned with the proceeds unknown says so instead of calling the gross premium', () => {
+  const unknown = { ...ASSIGNED, usdgFromAssignment: null, assetsReturned: null };
+  assert.equal(
+    rollCloseMessage(unknown),
+    'cycle 3 closed: 2044.079259 USDG gross including strike proceeds from 9 contracts assigned (premium/proceeds split unknown), 2043.125297 to depositors.',
+  );
+  assert.doesNotMatch(rollCloseMessage(unknown), /premium \d/);
+});
+
+test('rollCloseAlertData: premiumUsdg and strikeProceedsUsdg beside the gross/fee/net, null when unknown', () => {
+  assert.deepEqual(rollCloseAlertData(ASSIGNED), {
+    cycleNumber: 3,
+    grossUsdg: '2044.079259',
+    feeUsdg: '0.953962',
+    netUsdg: '2043.125297',
+    premiumUsdg: '19.079259',
+    strikeProceedsUsdg: '2025',
+    assetsReturned: '14000000000000000000',
+    contractsAssigned: 9,
+  });
+  const unassigned = rollCloseAlertData({ ...ASSIGNED, gross: 19_079_259n, net: 18_125_297n, usdgFromAssignment: 0n, contractsAssigned: 0 });
+  assert.equal(unassigned.premiumUsdg, '19.079259', 'nothing assigned: the whole gross is premium');
+  assert.equal(unassigned.strikeProceedsUsdg, '0');
+  const unfilled = rollCloseAlertData({ ...ASSIGNED, gross: 0n, fee: 0n, net: 0n, usdgFromAssignment: 0n, contractsAssigned: 0 });
+  assert.equal(unfilled.premiumUsdg, '0');
+  assert.equal(unfilled.strikeProceedsUsdg, '0');
+  const unknown = rollCloseAlertData({ ...ASSIGNED, usdgFromAssignment: null, assetsReturned: null });
+  assert.equal(unknown.premiumUsdg, null);
+  assert.equal(unknown.strikeProceedsUsdg, null);
+  assert.equal(unknown.assetsReturned, null);
+  assert.equal(unknown.grossUsdg, '2044.079259');
 });

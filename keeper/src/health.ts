@@ -11,7 +11,10 @@
  *                 This is the censorship/downtime fallback: if Overcall's book never shows our
  *                 listing, our own /vault/nvda/cycle page serves these and a buyer fills
  *                 directly against Seaport. An invisible listing is an unfilled week.
- *   GET /cycles   the last few cycles as the keeper recorded them, unfilled weeks included.
+ *   GET /cycles   the last few cycles as the keeper recorded them, unfilled weeks included. Each
+ *                 row also carries `premium_gross_usdg6` (gross minus strike proceeds) and
+ *                 `strike_proceeds_usdg6`, so an assigned week's returned principal is not read
+ *                 as yield. Both null when the split is not known.
  *
  * Bound to 0.0.0.0 so a container healthcheck can reach it; put it behind your own network
  * boundary. Nothing here is a write endpoint and nothing here needs a secret — which is also
@@ -23,7 +26,7 @@ import { account, rpcEndpoints } from './clients.js';
 import { config } from './config.js';
 import { log } from './logger.js';
 import { PHASE_NAMES, getLastSnapshot, getTickStartedAt } from './roll.js';
-import { store } from './state.js';
+import { cycleTapeRow, store } from './state.js';
 import { toOrderParametersJson, componentsFromJson, type OrderComponentsJson } from './seaport.js';
 
 const startedAt = Date.now();
@@ -184,7 +187,7 @@ export function buildApp(): Hono {
     return c.json({ orders });
   });
 
-  app.get('/cycles', (c) => c.json({ cycles: store.recentCycles(26) }));
+  app.get('/cycles', (c) => c.json({ cycles: store.recentCycles(26).map(cycleTapeRow) }));
 
   app.get('/', (c) =>
     c.json({

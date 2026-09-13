@@ -241,6 +241,7 @@ All of these are cross-checked against the deployed vault at boot. A mismatch is
 | `KEEPER_ALERT_COOLDOWN_MS` | `3600000` | Repeat suppression per alert kind. State changes ignore it. |
 | `KEEPER_TX_TIMEOUT_MS` | `180000` | Receipt wait before the tick gives up and alerts. |
 | `KEEPER_UNIT_PRICE_USDG6` | — | Manual per-contract ask override, USDG base units. For one unusual cycle. Leave unset normally. |
+| `PREMIUM_MARGIN_BPS` | `0` | Basis points added to the policy premium floor when pricing a listing, integer `0`–`1000`: `unit = ceil(floor × (10000 + margin) / 10000)`. `0` prices exactly at the floor, as before. The vault re-reads spot at `approveListing`, so a floor-priced listing reverts `PremiumBelowMinimum` on one upward oracle tick between the keeper's read and the vault's; a margin of `m` absorbs a spot rise of up to `m` bps. **Trade-off:** higher margin → fewer reverts on an uptick, but a slightly higher ask that is slightly less likely to fill. `50` (0.5%) covers a normal tick. Not applied to `KEEPER_UNIT_PRICE_USDG6`. See "Picking the strike". |
 | `KEEPER_FALLBACK_DIR` | — | Mirrors each signed order payload to disk. The payload is always in SQLite and served from `/orders`; this is belt and braces. |
 | `ALERT_WEBHOOK` | — | Generic JSON `POST`. Unset means alerts are still logged and stored, just not delivered. |
 | `KEEPER_ENV_FILE` | `.env` | Alternative dotenv path. |
@@ -275,10 +276,23 @@ band      = [ spot * (1 + minOtmBps/1e4) , spot * (1 + maxOtmBps/1e4) ]     (flo
 eligible  = approved rungs in the live cycle whose strike is inside the band
 pick      = the LOWEST eligible strike — nearest out of the money, where the premium is
 contracts = floor(idleAssets * maxUtilizationBps / 1e4 / lotSize), capped by maxContractsCap
-unitPrice = max(policy floor, last observed fill on that rung), the last-fill lift clamped at
-            3x the floor (a self-filled print is a cheap fake signal), never below 20 base units,
-            never above the strike
+listFloor = ceil(policy floor * (10000 + PREMIUM_MARGIN_BPS) / 10000)     (= the floor when 0)
+unitPrice = max(listFloor, last observed fill on that rung), the last-fill lift clamped at
+            3x the POLICY floor (a self-filled print is a cheap fake signal), never below 20
+            base units, never above the strike
 ```
+
+**The premium margin.** `vault.approveListing` re-derives the premium floor from spot read in its
+own block. A listing priced exactly at the floor the keeper computed a block earlier reverts
+`PremiumBelowMinimum` after any upward oracle tick in between — it self-heals on the next tick,
+but it is Friday-night noise. `PREMIUM_MARGIN_BPS` (default `0`) lifts the floor by that many bps,
+rounded up, so a spot rise of up to the margin still clears the vault's check. Higher margin means
+fewer reverts on an uptick and a slightly higher ask, which is slightly less likely to fill. The
+margin applies wherever the keeper prices from the floor: the first listing (`pickWrite`), a
+reprice with no earlier listing, and a relist (`max(previous ask, margined live floor)`). The 3×
+last-fill clamp stays anchored to the unmargined policy floor, the manual override is not touched,
+and Overcall's 5% is still rounded per contract on the resulting unit price. `policy.test.ts` pins
+margin `0` against the old prices and margin `50` against a real +0.5% spot tick.
 
 If no rung qualifies, the keeper writes nothing and says so. That is a legitimate outcome and it
 stays a legitimate outcome all week: the keeper keeps re-evaluating until the write deadline, so
@@ -317,6 +331,27 @@ the number this product promises to publish honestly. Every `Harvest` is tagged 
 cycle number, so the keeper sums the cycle's logs from the `rollOpen` block to the `rollClose`
 block (over the primary archive RPC — the backup refuses archive ranges) and falls back to the
 receipt only if that range cannot be resolved.
+
+**On an assigned week the gross is not all premium.** The close's `Harvest.grossUsdg` includes
+the strike proceeds from assigned contracts (`RollClose.usdgFromAssignment`), which are returned
+principal and fee-free: the vault's fee is `floor((gross − usdgFromAssignment) × bps / 10000)`.
+Both close paths — the keeper's own `rollClose` and the boot reconciliation of a close someone
+else ran — record `RollClose.assetsReturned` (wei) and `usdgFromAssignment` (USDG6) on the cycle
+row, as `assets_returned` and `usdg_from_assignment`. `GET /cycles` serves them plus
+`premium_gross_usdg6` (gross − strike proceeds) and `strike_proceeds_usdg6`. When the proceeds
+are unknown — a week closed by a keeper older than these columns, or a receipt with no
+`RollClose` — the columns are `NULL` and the derived pair is `null`, never an invented `0`. The
+`roll_close` alert names the two separately on an assigned week:
+
+```
+cycle 3 closed: premium 19.079259 USDG (fee 0.953962), strike proceeds 2025 USDG from 9 contracts assigned; 2043.125297 USDG to depositors.
+```
+
+Unfilled (`closed unfilled: 0 USDG harvested.`) and unassigned (`closed: <gross> USDG harvested,
+<net> to depositors.`) weeks keep their wording; `data` gains `premiumUsdg`,
+`strikeProceedsUsdg` and `assetsReturned`. Every wording is in `ops/alerts.md`. The two columns
+arrive on an existing database by a forward migration at open (`ALTER TABLE … ADD COLUMN`, only
+when missing), so a volume written by the previous keeper opens unchanged.
 
 Both closing paths also retire every still-live listing row for the cycle. `rollClose` and
 `lockBook` kill orders by bumping the Seaport counter, which does **not** set `isCancelled`, so
