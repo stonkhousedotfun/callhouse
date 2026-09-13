@@ -19,7 +19,7 @@ Status (2026-09-13 ~14:30 PT):
 |---|---|
 | 1.1–1.3 | **done.** Apex and `www` CNAMEs (DNS only) plus Railway's `_railway-verify` TXT records; both return 200 with valid TLS |
 | 1.4 | **done** (owner connected the repo). Pushes to `callhouse-site` `main` deploy |
-| 1.5 | **waiting on GitBook.** `CNAME docs → 9cbc89af57-hosting.gitbook.io` (DNS only) is in place, and GitBook already redirects `callhouse.gitbook.io/callhouse-docs` to `docs.callhouse.finance`, but that host answers Cloudflare **1014** until GitBook activates the custom hostname. **The docs are unreachable until then.** If it does not clear, remove the custom domain in GitBook to restore the gitbook.io URL |
+| 1.5 | **done** (14:54 PT). `CNAME docs → 9cbc89af57-hosting.gitbook.io` (DNS only); after ~2 h of Cloudflare 1014 while GitBook activated the custom hostname, `docs.callhouse.finance` serves 200 with its own certificate and the latest synced content |
 | 2 | **done.** `callhouse-site` 39caed5, c721dba, 69fb6b3 (no-buyer weeks pay zero *premium*; queue USDG per entry; an issuer freeze can hold up the close). GitBook docs audited against the code (718 claims): `callhouse-docs` 29823dd, 3cf2b4e |
 | 3 | **done.** Contracts `634bf55` on GitHub; app submodule pinned; `ops/safes.md` §7 updated |
 | 4.1–4.9 | **done.** CI green; W-21, K-21, margin, indexer Dockerfile, X-11 (three indexer defects fixed), relay, K-22 (dead-listing defect fixed), W-13 (status flip-flop fixed in e5392fe). Follow-up 1c3de3d: an unfilled week that Valorem assigned anyway is labelled "unfilled, assigned N" in the web app |
