@@ -42,6 +42,7 @@ pnpm --filter @callhouse/indexer typecheck
 | `DATABASE_SCHEMA` | yes | Ponder refuses to start without a schema; `--schema <name>` also works. |
 | `REGISTRY_START_BLOCK` | no | Scan the registry from earlier than the vault, to pick up pre-launch cycles. Defaults to `START_BLOCK`. |
 | `END_BLOCK` | no | Stop indexing here. Leave unset in production. Used to bound a replay. |
+| `PGLITE_DIRECTORY` | no | Force PGlite at this path, even with `DATABASE_URL` set. For the fork sync's throwaway database; leave unset otherwise. |
 | `KEEPER_HMAC_SECRET` | no | Shared secret for `POST /v1/overcall/list`. Unset ⇒ that route answers 503. |
 | `OVERCALL_ORDERS_URL` | no | Defaults to `https://overcall.finance/api/orders`. |
 | `OVERCALL_MARKET` | no | Defaults to `NVDA`. Sent as `?market=`. |
@@ -452,6 +453,62 @@ Responses:
 
 ---
 
+## Fork sync (X-11)
+
+```bash
+(cd contracts && forge build)                 # the dry run deploys contracts/out
+pnpm --filter @callhouse/indexer fork:sync
+```
+
+`scripts/fork-sync.ts` starts anvil (fork of 4663, port 8547 — itself, because the public RPC only
+serves a few thousand trailing blocks of state), runs the keeper dry run on it (cycle 1 filled out
+of the money, cycle 2 adopted and unfilled, cycle 3 filled with 9 of 23 assigned and 10 of 25
+shares queued), then `ponder start` on the same node: the dry run's vault and MockRegistry,
+`START_BLOCK` = the vault's deploy block, `END_BLOCK` = the last dry-run block, a throwaway PGlite
+database under `.ponder/fork-sync/<utc>/`. When `/v1/health` reports the head at `END_BLOCK` it
+queries `/v1/vault`, `/v1/cycles`, `/v1/cycles/{1,2,3}`, `/v1/account/<depositor>`,
+`/v1/listings`, `/v1/activity`, `/v1/health` and `/graphql`, and compares every leaf exactly with
+values from `run.json` and the fork's own logs and views, never from the indexer: per cycle the
+status, contracts written / sold / assigned, strike, listing and fills, harvest gross / fee /
+`premiumGross` / `premiumNet` / `strikeProceedsUsdg` / `creditedUsdg`, both per-share figures,
+`assetsReturned`, timestamps and hashes; the queue epoch; lifetime sums; Distributor totals; the
+depositor's position. `run.json` and the chain are cross-checked first. Exit 0 with a summary or
+1 with a per-field diff; every process it started is stopped. `FORK_SYNC_*` knobs are listed at
+the top of the script.
+
+Ponder needed no change to run against anvil: it backfills to head − 30 (its finality depth for
+an unknown chain), answers `/ready`, then indexes the rest through realtime sync — which is why
+the script waits on `/v1/health`, not `/ready`. `lag.seconds` is negative on the fork because the
+dry run warps the clock ahead. The only config addition is `PGLITE_DIRECTORY`, so each run gets a
+clean database (every fork deploys the vault at the same address).
+
+**Last passing run** — 2026-09-13, fork block 62263964, anvil 1.6.0: vault
+`0x07fF75F92DAC990C0Bf49690A50b9e129f4C14A6` (block 62263969), MockRegistry
+`0x1CE47ae17A39b86B1aE5aD333D8F29ebAaf2bb9D`; blocks 62263969..62264017 indexed in 8.0 s;
+**1452 of 1452 API assertions** across 11 routes and **135 run.json/chain cross-checks** passed.
+
+The first run failed 14 assertions, on three indexer defects, fixed in the same change:
+
+- **Constructor settings were never indexed.** `Vault`'s constructor sets `policy`,
+  `feeRecipient` and `depositCap` with no event, so `/v1/vault` published `protocolFeeBps: 0` and
+  `feeRecipient: null` (and `vault_state.depositCap` 0) for a vault charging 500 bps. A
+  `Vault:setup` handler now seeds them from views at `START_BLOCK` (`lib/deployment.ts`, unit
+  tested); governance events still overwrite them.
+- **`usdg.claimed` left out the redeem queue.** `Distributor.totalUsdgClaimed` also counts the
+  escrow's accrual taken at `_settleQueue` (`QueueSettled.usdgOut`); the index counted `ClaimUsdg`
+  only and published 1244.000475 against 2061.250593 on chain. `QueueSettled` now adds it.
+- **The Valorem bucket landed on the previous week.** `BucketWrittenInto` fires inside
+  `clear.write`, before `RollOpen`, while `cycleNumber` still names the last cycle. Each week's
+  bucket was stamped on the week before, the week written got `bucketIndex: null`, and its
+  `BucketAssignedExercise` never matched (`bucketAssigned` 0 on cycle 3, 9 on chain). The bucket
+  is now held on `vault_state.bucketIndex` and copied at `RollOpen`, like the claim key. Cycles 1
+  and 2 had passed only because every bucket in the run is 0.
+
+The last two are handler-only changes and are not unit tested (`vitest.config.ts` explains why
+handlers are not mocked); this sync is their test.
+
+---
+
 ## ABIs
 
 `abis/*.ts` are **generated** from `ops/abis/*.json` by `pnpm gen:abis`. They are `as const`
@@ -478,6 +535,7 @@ abis/                 generated (+ hand-written seaport.ts)
 lib/env.ts            every address and knob, resolved once
 lib/indexing.ts       shared reducers: state, snapshots, users, cycles, epochs
 lib/roles.ts          the three AccessControl role hashes and what each one can do
+lib/deployment.ts     constructor-set vault settings, seeded by Vault:setup
 src/vault.ts          every vault event
 src/valorem.ts        Valorem, narrowed to our writer / claim / option
 src/seaport.ts        OrderFulfilled → contractsSold and the real fill price
@@ -490,6 +548,7 @@ src/api/overcall.ts   the relay
 src/api/cache.ts      the 15s cache
 src/api/serialize.ts  bigint → decimal string, and `{raw, decimals, formatted}` amounts
 scripts/gen-abis.mjs  ops/abis/*.json → abis/*.ts
+scripts/fork-sync.ts  X-11: dry run on a fork, sync, assert the API (fork-sync/: chain reads, expectations, diff)
 ```
 
 Files under `src/` other than `src/api/**` are indexing functions and are executed by Ponder at

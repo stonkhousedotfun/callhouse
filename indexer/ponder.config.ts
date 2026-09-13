@@ -11,6 +11,7 @@ import {
   CHAIN_ID,
   CLEARINGHOUSE,
   END_BLOCK,
+  PGLITE_DIRECTORY,
   REGISTRY,
   REGISTRY_START_BLOCK,
   RPC_URL,
@@ -54,6 +55,11 @@ import {
  * unset — production follows the head — and exists to bound a replay for a dry-run.
  */
 export default createConfig({
+  // Only when PGLITE_DIRECTORY is set (the fork sync's throwaway database). Otherwise Ponder
+  // decides: Postgres if DATABASE_URL is set, `.ponder/pglite` if not.
+  ...(PGLITE_DIRECTORY === undefined
+    ? {}
+    : { database: { kind: "pglite" as const, directory: PGLITE_DIRECTORY } }),
   chains: {
     robinhood: {
       id: CHAIN_ID,

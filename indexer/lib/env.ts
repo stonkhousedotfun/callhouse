@@ -166,6 +166,15 @@ export const END_BLOCK: number | undefined = (() => {
   return n;
 })();
 
+/**
+ * Optional PGlite data directory. Unset (the normal case) leaves Ponder's own choice alone:
+ * Postgres when `DATABASE_URL` is set, `.ponder/pglite` otherwise. Set, it forces PGlite at this
+ * path even if a `DATABASE_URL` is present. It exists for `scripts/fork-sync.ts`, which needs a
+ * throwaway database per run: every fork deploys the dry-run vault at the same address, and a
+ * reused `.ponder/pglite` would carry Ponder's RPC cache for chain 4663 from an earlier fork.
+ */
+export const PGLITE_DIRECTORY = env("PGLITE_DIRECTORY");
+
 /** Overcall's listings API. The keeper proxy route forwards here verbatim. */
 export const OVERCALL_ORDERS_URL =
   env("OVERCALL_ORDERS_URL") ?? "https://overcall.finance/api/orders";

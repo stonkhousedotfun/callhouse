@@ -12,7 +12,8 @@
     "build": "ponder codegen && tsc --noEmit",
     "typecheck": "tsc --noEmit",
     "lint": "tsc --noEmit",
-    "test": "vitest run"
+    "test": "vitest run",
+    "fork:sync": "node --experimental-strip-types scripts/fork-sync.ts"
   },
   "dependencies": {
     "ponder": "^0.17.10",
