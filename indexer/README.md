@@ -147,6 +147,14 @@ Two sources per token because a log filter **ANDs** its topics: `from == vault` 
   strike proceeds cannot be in the balance before `rollClose`). The handler takes all three
   amounts from the event verbatim and never recomputes the fee. `netUsdg == grossUsdg − feeUsdg`
   always.
+- **On an assigned week `Harvest.netUsdg` is not premium.** The strike proceeds in it are
+  returned principal: collateral that left at the strike and came back as USDG. `lib/harvest.ts`
+  splits every `Harvest` into `strikeProceeds` (the terminal harvest's
+  `RollClose.usdgFromAssignment`, clamped to the sweep; 0 for a checkpoint), `premiumGross =
+  grossUsdg − strikeProceeds` and `premiumNet = premiumGross − feeUsdg`. Every column and API
+  field named `premium*` is premium only; the whole credited amount is published beside it as
+  `creditedUsdg` / `usdgPerShare`. Summing `netUsdg` as premium is what W-21 fixed: the
+  assigned fixture week earned 43.32 USDG and published 993.32.
 - **The protocol fee accrues and pays on different events.** It accrues at every
   `Harvest` with premium in it (`feeUsdg`, tallied in `lifetimeProtocolFee`), but the push inside `rollClose` is
   best-effort — a blocked recipient must not freeze the close — so payment happens whenever it
@@ -204,16 +212,28 @@ the vault ever writes into it.
 `idle` and `unfilled` are different facts and the distinction matters: *we did not write* versus
 *we wrote and nobody bought*.
 
-The three money columns the site quotes:
+The money columns the site quotes:
 
 | column | meaning |
 |---|---|
 | `premiumGross` | What buyers paid for our calls, **including** Overcall's 5%. |
+| `harvestGross` | The vault's whole USDG take as the `Harvest` events measured it: premium that reached the vault **plus**, on an assigned week, the strike proceeds. Not a premium figure. |
+| `harvestPremiumGross` | `harvestGross − strikeProceeds`. Premium only, after Overcall's 5%. |
+| `strikeProceeds` | The strike-proceeds part of the terminal harvest (`RollClose.usdgFromAssignment`). Returned principal, never yield. 0 on every week not assigned. |
 | `fee` | The protocol fee: `protocolFeeBps` (launch 500, 5%) of the premium only, taken at harvest, on filled weeks only. Strike proceeds are never fee'd. |
-| `premiumNet` | What depositors actually received, after Overcall's 5% **and** the protocol fee: `harvestGross − fee`. On an assigned week it **includes** `assignmentUsdg`, not only premium. |
+| `premiumNet` | `harvestPremiumGross − fee`: premium after Overcall's 5% **and** the protocol fee. **Premium only.** |
+| `creditedUsdg` | `harvestGross − fee` = `premiumNet + strikeProceeds`: everything the Distributor credited to holders. Real money, not a return. |
+| `premiumNetPerShare` | `premiumNet` per whole share, summed per sweep. The per-share premium figure. |
+| `usdgPerShare` | `creditedUsdg` per whole share, summed per sweep. Includes strike proceeds. |
 
-`premiumToVault`, `overcallFee`, `assignmentUsdg` and `harvestGross` sit alongside so nothing
-about the two stacked fees has to be inferred. `marketExercised`, `bucketIndex` and
+**Changed by W-21 (2026-09-13).** `premiumNet` used to be `harvestGross − fee` and so, on an
+assigned week, included the strike proceeds; that figure is now `creditedUsdg`, and
+`premiumNet` is premium only. On a week with nothing assigned the two are equal, so only
+assigned weeks read differently. `vault_state.lifetimePremiumNet` changed the same way, with
+`lifetimeStrikeProceeds` and `lifetimeCreditedUsdg` beside it.
+
+`premiumToVault`, `overcallFee` and `assignmentUsdg` sit alongside so nothing about the two
+stacked fees or the assignment has to be inferred. `marketExercised`, `bucketIndex` and
 `bucketAssigned` are intra-week *signals* about Valorem's bucket lottery, not claims about our
 assignment — that is only known at redeem.
 
@@ -235,8 +255,11 @@ Distributor that no event exposes. `GET /v1/account/:addr` reads `claimableUsdg(
 ### `harvest` — one row per `Harvest` event, including the zero ones
 
 The terminal harvest fires on every `rollClose` unconditionally, so an unfilled week always
-produces a row with `terminal: true`, `filled: false` and `grossUsdg: 0`. `usdgPerShare` is
-`netUsdg × 1e18 / supply`, where `supply` is the pre-burn, pre-mint share count: `_settleQueue`
+produces a row with `terminal: true`, `filled: false` and `grossUsdg: 0`. Each row carries the
+event's own `grossUsdg` / `feeUsdg` / `netUsdg` and that event split: `strikeProceedsUsdg`
+(non-zero only on the terminal harvest of an assigned week), `premiumGrossUsdg` and
+`premiumNetUsdg`. `premiumNetPerShare` is `premiumNetUsdg × 1e18 / supply`; `usdgPerShare` is
+`netUsdg × 1e18 / supply` and includes strike proceeds. `supply` is the pre-burn, pre-mint share count: `_settleQueue`
 runs *after* `_harvest`, so shares escrowed for the queue earn the week they sat through, and
 `_checkpointHarvest()` runs *before* `_mint`, which is the whole point of it existing.
 
@@ -295,7 +318,8 @@ max-age=15`. Responses carry `x-cache: HIT|MISS`.
 What `/v1/cycles` emits for one week — `cycleJson` in `src/api/index.ts` — is pinned by the
 four files under `../ops/fixtures/api/`: a filled, an unfilled, an assigned and a skipped week,
 with real numbers (48 USDG gross, 5% per contract to Overcall, 5% of the 45.6 premium to the
-protocol, 5 × 190 of strike proceeds on the assigned one, fee-free; the skipped one is what
+protocol, 5 × 190 of strike proceeds on the assigned one, fee-free and published as
+`harvest.strikeProceedsUsdg` beside a premium-only `harvest.premiumNet` of 43.32; the skipped one is what
 `Registry:CycleSet` leaves when no `Vault:RollOpen` follows — `idle`, `wrote: false`, and no
 `closedAt` ever). `src/api/index.test.ts` builds those rows as typed
 schema literals, runs `cycleJson`, and deep-equals the result against the files; the dapp's

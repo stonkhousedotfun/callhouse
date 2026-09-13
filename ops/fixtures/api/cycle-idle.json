@@ -107,12 +107,32 @@
       "decimals": 6,
       "formatted": "0"
     },
+    "premiumGross": {
+      "raw": "0",
+      "decimals": 6,
+      "formatted": "0"
+    },
+    "strikeProceedsUsdg": {
+      "raw": "0",
+      "decimals": 6,
+      "formatted": "0"
+    },
     "fee": {
       "raw": "0",
       "decimals": 6,
       "formatted": "0"
     },
     "premiumNet": {
+      "raw": "0",
+      "decimals": 6,
+      "formatted": "0"
+    },
+    "creditedUsdg": {
+      "raw": "0",
+      "decimals": 6,
+      "formatted": "0"
+    },
+    "premiumNetPerShare": {
       "raw": "0",
       "decimals": 6,
       "formatted": "0"

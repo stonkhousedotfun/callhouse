@@ -108,23 +108,44 @@ export function fmtMultiplier(uiMultiplier: bigint | undefined | null): string {
  * Realized weekly figures
  *
  * Two different numbers, and they are not interchangeable:
- *   usdgPerShare  — what a holder of one cNVDA actually received. Denominated in USDG.
- *   realizedWeek  — net USDG harvested / TVL in USD at harvest. A fraction of the book.
+ *   premiumPerShare — net premium a holder of one cNVDA received. Denominated in USDG.
+ *   realizedWeek    — net premium / TVL in USD at harvest. A fraction of the book.
  *
  * Neither is ever multiplied by 52. A week with no buyer is 0, and 0 is a result, not a gap.
+ *
+ * PREMIUM ONLY (W-21). On an assigned week the harvest also sweeps the strike proceeds — the
+ * USDG the collateral taken at the strike was sold for. That is returned principal, not yield,
+ * and passing it to either function below turned a 43.32 USDG week into a 993.32 USDG one.
+ * Pass `CycleRow.premiumNetUsdg`, never `creditedUsdg` or `harvestGrossUsdg`; the strike
+ * proceeds are shown on their own line.
  * ----------------------------------------------------------------------------------------- */
 
 /**
- * Net USDG harvested per ONE whole share, in USDG base units (6 dec).
+ * A USDG amount per ONE whole share, in USDG base units (6 dec).
  * `shares` is the vault's total supply at harvest (18 dec).
  */
-export function usdgPerShare(netUsdg6: bigint | undefined, shares18: bigint | undefined): bigint | undefined {
-  if (netUsdg6 === undefined) return undefined;
+export function usdgPerShare(usdg6: bigint | undefined, shares18: bigint | undefined): bigint | undefined {
+  if (usdg6 === undefined) return undefined;
   // An unfilled week is exactly zero per share, and it is knowable without a denominator.
   // Returning undefined there would render an em dash and read like missing data.
-  if (netUsdg6 === 0n) return 0n;
+  if (usdg6 === 0n) return 0n;
   if (shares18 === undefined || shares18 === 0n) return undefined;
-  return (netUsdg6 * WAD) / shares18;
+  return (usdg6 * WAD) / shares18;
+}
+
+/**
+ * Net premium per ONE whole share for a week, in USDG base units. Prefers the indexer's own
+ * figure, summed per sweep against each sweep's supply (exact across a mid-week deposit), and
+ * falls back to `premiumNetUsdg / sharesAtHarvest` for a row rebuilt from logs. Strike proceeds
+ * are never in either. Undefined, and so a dash, when the week's premium is not known.
+ */
+export function premiumPerShare(row: {
+  premiumNetPerShare?: bigint;
+  premiumNetUsdg?: bigint;
+  sharesAtHarvest?: bigint;
+}): bigint | undefined {
+  if (row.premiumNetPerShare !== undefined) return row.premiumNetPerShare;
+  return usdgPerShare(row.premiumNetUsdg, row.sharesAtHarvest);
 }
 
 /**
@@ -138,13 +159,14 @@ export function tvlUsdg(assets18: bigint | undefined, spotUsdg6: bigint | undefi
 }
 
 /**
- * The realized-week figure: net USDG harvested / TVL in USD at harvest, as a percent string.
+ * The realized-week figure: net PREMIUM / TVL in USD at harvest, as a percent string. Strike
+ * proceeds are never an input (see the block comment above).
  * Returns "0.000%" for an unfilled week, because that is the honest answer.
  */
-export function fmtRealizedWeek(netUsdg6: bigint | undefined, tvlUsdg6: bigint | undefined): string {
-  if (netUsdg6 === undefined || tvlUsdg6 === undefined || tvlUsdg6 === 0n) return "—";
+export function fmtRealizedWeek(premiumNetUsdg6: bigint | undefined, tvlUsdg6: bigint | undefined): string {
+  if (premiumNetUsdg6 === undefined || tvlUsdg6 === undefined || tvlUsdg6 === 0n) return "—";
   // 1e5 keeps three decimal places of a percent through integer maths.
-  const bps100k = (netUsdg6 * 100n * 100000n) / tvlUsdg6;
+  const bps100k = (premiumNetUsdg6 * 100n * 100000n) / tvlUsdg6;
   return `${formatAmount(bps100k, 5, 3)}%`;
 }
 

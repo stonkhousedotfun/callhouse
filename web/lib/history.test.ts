@@ -14,6 +14,7 @@
  */
 import { describe, expect, it } from "vitest";
 
+import { fmtRealizedWeek, fmtUsdg, premiumPerShare } from "./format";
 import { foldVaultLogs, type LooseLog } from "./history";
 
 const WAD = 10n ** 18n;
@@ -102,9 +103,13 @@ describe("foldVaultLogs", () => {
     expect(row.filled).not.toBe(false);
     expect(row.filled).toBe(true);
 
-    expect(row.grossUsdg).toBe(48_000000n);
+    expect(row.harvestGrossUsdg).toBe(48_000000n);
     expect(row.feeUsdg).toBe(2_400000n);
-    expect(row.netUsdg).toBe(45_600000n);
+    expect(row.creditedUsdg).toBe(45_600000n);
+    // Not assigned: every USDG of it is premium.
+    expect(row.strikeProceedsUsdg).toBe(0n);
+    expect(row.premiumGrossUsdg).toBe(48_000000n);
+    expect(row.premiumNetUsdg).toBe(45_600000n);
     expect(row.settled).toBe(true);
 
     // The terminal Harvest had no UsdgDistributed; the denominator from the last sweep that
@@ -135,9 +140,12 @@ describe("foldVaultLogs", () => {
     ]);
     const row = rows[0]!;
     expect(row.filled).toBe(true);
-    expect(row.grossUsdg).toBe(48_000000n);
+    expect(row.harvestGrossUsdg).toBe(48_000000n);
     expect(row.feeUsdg).toBe(2_400000n);
-    expect(row.netUsdg).toBe(45_600000n);
+    expect(row.creditedUsdg).toBe(45_600000n);
+    // RollClose(0 assigned) shares this Harvest's tx: usdgFromAssignment is 0, so nothing is split off.
+    expect(row.strikeProceedsUsdg).toBe(0n);
+    expect(row.premiumNetUsdg).toBe(45_600000n);
     expect(row.sharesAtHarvest).toBe(100n * WAD);
     expect(row.settled).toBe(true);
   });
@@ -149,9 +157,11 @@ describe("foldVaultLogs", () => {
     const row = rows[0]!;
     expect(row.filled).toBe(false);
     expect(row.settled).toBe(true);
-    expect(row.grossUsdg).toBe(0n);
+    expect(row.harvestGrossUsdg).toBe(0n);
     expect(row.feeUsdg).toBe(0n);
-    expect(row.netUsdg).toBe(0n);
+    expect(row.premiumNetUsdg).toBe(0n);
+    expect(row.strikeProceedsUsdg).toBe(0n);
+    expect(row.creditedUsdg).toBe(0n);
     expect(row.contracts).toBe(12n);
     expect(row.contractsAssigned).toBe(0n);
     // No UsdgDistributed fired, so there is no denominator; the page renders 0 per share from
@@ -159,7 +169,7 @@ describe("foldVaultLogs", () => {
     expect(row.sharesAtHarvest).toBeUndefined();
   });
 
-  it("an assigned week carries the assignment count from RollClose and the strike proceeds in the harvest", () => {
+  it("an assigned week carries the assignment count from RollClose and splits the strike proceeds out", () => {
     const rows = foldVaultLogs([
       rollOpen,
       listingApproved,
@@ -175,10 +185,68 @@ describe("foldVaultLogs", () => {
     expect(row.filled).toBe(true);
     expect(row.settled).toBe(true);
     expect(row.contractsAssigned).toBe(5n);
-    expect(row.grossUsdg).toBe(995_600000n);
+    expect(row.harvestGrossUsdg).toBe(995_600000n);
     // 5% of the 45.6 premium only; the strike proceeds are never fee'd.
     expect(row.feeUsdg).toBe(2_280000n);
-    expect(row.netUsdg).toBe(993_320000n);
+    expect(row.creditedUsdg).toBe(993_320000n);
+    // Premium only: the checkpoint's 45.6 is premium; the terminal 950 is all strike proceeds
+    // (RollClose.usdgFromAssignment in the same tx). 45.6 − 2.28 = 43.32.
+    expect(row.strikeProceedsUsdg).toBe(950_000000n);
+    expect(row.premiumGrossUsdg).toBe(45_600000n);
+    expect(row.premiumNetUsdg).toBe(43_320000n);
+  });
+
+  it("fallback, assigned week: premium-only realized figures and a separate strike line, split within one close", () => {
+    // A buyer fills 12 contracts at 4 USDG: 45.6 reaches the vault after Overcall's 5%. No deposit
+    // checkpoints it, so the whole 45.6 premium AND the 950 of strike proceeds arrive in ONE
+    // terminal Harvest: the case where the split has to happen inside a single event.
+    //   gross  = 45_600000 + 950_000000                            = 995_600000
+    //   fee    = floor((995_600000 − 950_000000) × 500 / 10_000)    = 2_280000
+    //   net    = 995_600000 − 2_280000                             = 993_320000
+    //   strike = RollClose.usdgFromAssignment (same tx)            = 950_000000
+    //   premiumGross = 995_600000 − 950_000000                     = 45_600000
+    //   premiumNet   = 45_600000 − 2_280000                        = 43_320000
+    //   per share    = 43_320000 × 1e18 / 100e18                   = 433_200  (0.433200 USDG)
+    //   Net / TVL with 1_400 USDG of collateral: 43_320000 × 1e7 / 1_400_000000 = 309_428 → 3.094%
+    const rows = foldVaultLogs([
+      rollOpen,
+      listingApproved,
+      rollClose(5n),
+      distributed(993_320000n, 100n * WAD, TX_CLOSE, 200n),
+      harvest(995_600000n, TX_CLOSE, 200n, 950_000000n),
+    ]);
+    const row = rows[0]!;
+    expect(row.feeUsdg).toBe(2_280000n);
+    expect(row.creditedUsdg).toBe(993_320000n);
+    expect(row.strikeProceedsUsdg).toBe(950_000000n);
+    expect(row.premiumGrossUsdg).toBe(45_600000n);
+    expect(row.premiumNetUsdg).toBe(43_320000n);
+    // The log fallback has no per-sweep figure; the page divides net premium by the supply.
+    expect(row.premiumNetPerShare).toBeUndefined();
+    expect(premiumPerShare(row)).toBe(433200n);
+    expect(fmtUsdg(premiumPerShare(row), 6)).toBe("0.433200");
+    expect(fmtRealizedWeek(row.premiumNetUsdg, 1_400_000000n)).toBe("3.094%");
+    expect(fmtUsdg(row.strikeProceedsUsdg)).toBe("950.00");
+  });
+
+  it("a RollClose in another transaction never turns a checkpoint's premium into strike proceeds", () => {
+    // The pairing is by transaction hash only. A checkpoint Harvest is premium even when the
+    // week was assigned: its gross is 30, and it must stay 30 of premium.
+    const rows = foldVaultLogs([
+      rollOpen,
+      distributed(28_500000n, 100n * WAD, TX_DEPOSIT_1, 150n),
+      harvest(30_000000n, TX_DEPOSIT_1, 150n),
+      rollClose(5n),
+      harvest(950_000000n + 15_600000n, TX_CLOSE, 200n, 950_000000n),
+    ]);
+    const row = rows[0]!;
+    // Checkpoint: 30 premium, fee 1.5, net premium 28.5. Terminal: 15.6 premium + 950 strike,
+    // fee floor(15_600000 × 500 / 10_000) = 0.78, net premium 14.82. Week: 45.6 / 2.28 / 43.32.
+    expect(row.strikeProceedsUsdg).toBe(950_000000n);
+    expect(row.premiumGrossUsdg).toBe(45_600000n);
+    expect(row.feeUsdg).toBe(2_280000n);
+    expect(row.premiumNetUsdg).toBe(43_320000n);
+    expect(row.creditedUsdg).toBe(993_320000n);
   });
 
   it("a checkpoint after rollClose does not restate a published unfilled week", () => {
@@ -199,9 +267,10 @@ describe("foldVaultLogs", () => {
     const row = rows[0]!;
     expect(row.settled).toBe(true);
     expect(row.filled).toBe(false);
-    expect(row.grossUsdg).toBe(0n);
+    expect(row.harvestGrossUsdg).toBe(0n);
     expect(row.feeUsdg).toBe(0n);
-    expect(row.netUsdg).toBe(0n);
+    expect(row.premiumNetUsdg).toBe(0n);
+    expect(row.creditedUsdg).toBe(0n);
     // The late sweep's supply must not become this week's denominator either.
     expect(row.sharesAtHarvest).toBeUndefined();
   });
@@ -211,7 +280,9 @@ describe("foldVaultLogs", () => {
     const row = rows[0]!;
     expect(row.settled).toBe(false);
     expect(row.filled).toBe(false);
-    expect(row.grossUsdg).toBeUndefined();
+    expect(row.harvestGrossUsdg).toBeUndefined();
+    expect(row.premiumNetUsdg).toBeUndefined();
+    expect(row.strikeProceedsUsdg).toBeUndefined();
     expect(row.txClose).toBeUndefined();
   });
 

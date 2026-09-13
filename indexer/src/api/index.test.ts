@@ -51,11 +51,13 @@ vi.mock("ponder", async (importOriginal) => {
   return { ...real, graphql: () => async (_c: unknown, next: () => Promise<void>) => next() };
 });
 
-import { cycleJson, listingJson } from "./index";
+import { ZERO_HARVEST_TOTALS, addHarvest, splitHarvest, type HarvestEvent } from "../../lib/harvest";
+import { cycleJson, harvestJson, listingJson } from "./index";
 import { toJson } from "./serialize";
 
 type CycleRow = typeof schema.cycle.$inferSelect;
 type ListingRow = typeof schema.listing.$inferSelect;
+type HarvestRow = typeof schema.harvest.$inferSelect;
 
 const FIXTURE_DIR = join(import.meta.dirname, "..", "..", "..", "ops", "fixtures", "api");
 
@@ -88,8 +90,14 @@ const PROTOCOL_FEE_BPS = 500n;
  */
 const protocolFee = (harvestGross: bigint, assignmentUsdg = 0n): bigint =>
   ((harvestGross > assignmentUsdg ? harvestGross - assignmentUsdg : 0n) * PROTOCOL_FEE_BPS) / 10_000n;
-/** premiumNet × 1e18 / supply: USDG base units per whole share. */
-const perShare = (net: bigint): bigint => (net * 10n ** 18n) / SUPPLY;
+/**
+ * A `Harvest` event as the vault emits it, plus the fee-free part the handler passes in:
+ * `RollClose.usdgFromAssignment` for the terminal harvest, 0 for a deposit checkpoint.
+ */
+const harvestEvent = (grossUsdg: bigint, usdgFromAssignment = 0n, supply = SUPPLY): HarvestEvent => {
+  const feeUsdg = protocolFee(grossUsdg, usdgFromAssignment);
+  return { grossUsdg, feeUsdg, netUsdg: grossUsdg - feeUsdg, usdgFromAssignment, supply };
+};
 
 const OPTION_ID = 0x8f3a9c1d2e4b5a6f7c8d9e0f1a2b3c4d5e6f7a8b_000000000000000000000000n;
 const CLAIM_KEY = OPTION_ID + 1n;
@@ -157,10 +165,7 @@ function week(cycleNumber: number, friday: string): CycleRow {
     txClose: hex(4),
 
     harvested: true,
-    harvestGross: 0n,
-    fee: 0n,
-    premiumNet: 0n,
-    usdgPerShare: 0n,
+    ...ZERO_HARVEST_TOTALS,
     supplyAtHarvest: SUPPLY,
     harvestedAt: closed,
   };
@@ -170,7 +175,6 @@ function week(cycleNumber: number, friday: string): CycleRow {
 const FILLED: CycleRow = (() => {
   const c = week(7, "2026-08-28");
   const filledAt = ts("2026-09-01T15:10:00Z");
-  const harvestGross = TO_VAULT;
   return {
     ...c,
     status: "closed",
@@ -182,10 +186,8 @@ const FILLED: CycleRow = (() => {
     fillCount: 1,
     firstFillAt: filledAt,
     lastFillAt: filledAt,
-    harvestGross,
-    fee: protocolFee(harvestGross),
-    premiumNet: harvestGross - protocolFee(harvestGross),
-    usdgPerShare: perShare(harvestGross - protocolFee(harvestGross)),
+    // One terminal harvest of the 45.6 premium, nothing assigned, folded by the handler's own code.
+    ...addHarvest(ZERO_HARVEST_TOTALS, harvestEvent(TO_VAULT)),
   };
 })();
 
@@ -198,7 +200,6 @@ const ASSIGNED: CycleRow = (() => {
   const filledAt = ts("2026-09-15T15:10:00Z");
   const assigned = 5n;
   const assignmentUsdg = assigned * STRIKE;
-  const harvestGross = TO_VAULT + assignmentUsdg;
   return {
     ...c,
     status: "assigned",
@@ -216,10 +217,9 @@ const ASSIGNED: CycleRow = (() => {
     contractsAssigned: assigned,
     assignmentUsdg,
     assetsReturned: (CONTRACTS - assigned) * LOT,
-    harvestGross,
-    fee: protocolFee(harvestGross, assignmentUsdg),
-    premiumNet: harvestGross - protocolFee(harvestGross, assignmentUsdg),
-    usdgPerShare: perShare(harvestGross - protocolFee(harvestGross, assignmentUsdg)),
+    // One terminal harvest sweeping the 45.6 premium AND the 950 of strike proceeds, with
+    // RollClose.usdgFromAssignment = 950 passed as the fee-free part, exactly as rollClose does.
+    ...addHarvest(ZERO_HARVEST_TOTALS, harvestEvent(TO_VAULT + assignmentUsdg, assignmentUsdg)),
   };
 })();
 
@@ -286,10 +286,7 @@ const SKIPPED: CycleRow = (() => {
     txClose: null,
 
     harvested: false,
-    harvestGross: 0n,
-    fee: 0n,
-    premiumNet: 0n,
-    usdgPerShare: 0n,
+    ...ZERO_HARVEST_TOTALS,
     supplyAtHarvest: 0n,
     harvestedAt: null,
   };
@@ -336,18 +333,38 @@ describe("cycleJson is the shape in ops/fixtures/api/", () => {
     expect(GROSS).toBe(48_000000n);
     expect(OVERCALL_FEE).toBe(2_400000n);
     expect(TO_VAULT).toBe(45_600000n);
+    // Filled week, by hand: fee = floor(45_600000 × 500 / 10_000) = 2_280000;
+    // premiumNet = 45_600000 − 2_280000 = 43_320000; per share = 43_320000 × 1e18 / 100e18 = 433_200.
+    expect(FILLED.harvestGross).toBe(45_600000n);
+    expect(FILLED.harvestPremiumGross).toBe(45_600000n);
+    expect(FILLED.strikeProceeds).toBe(0n);
     expect(FILLED.fee).toBe(2_280000n);
     expect(FILLED.premiumNet).toBe(43_320000n);
+    expect(FILLED.creditedUsdg).toBe(43_320000n);
+    expect(FILLED.premiumNetPerShare).toBe(433200n);
     expect(FILLED.usdgPerShare).toBe(433200n);
-    // Five contracts assigned at 190 is 950 USDG of strike proceeds on top of the premium.
-    // They are principal, never fee'd: the fee is the same 2.28 as the filled week, charged on
-    // the 45.6 premium alone, and all 950 reach depositors.
+    // Assigned week, by hand. Five contracts assigned at 190: 5 × 190_000000 = 950_000000 of
+    // strike proceeds, swept by the terminal harvest on top of the premium. They are principal,
+    // never fee'd, and never premium:
+    //   harvestGross       = 45_600000 + 950_000000                          = 995_600000
+    //   fee                = floor((995_600000 − 950_000000) × 500 / 10_000) = 2_280000
+    //   creditedUsdg       = 995_600000 − 2_280000                           = 993_320000  (Harvest.netUsdg)
+    //   harvestPremiumGross= 995_600000 − 950_000000                         = 45_600000
+    //   premiumNet         = 45_600000 − 2_280000                            = 43_320000   (same as FILLED)
+    //   premiumNetPerShare = 43_320000 × 1e18 / 100e18                       = 433_200
+    //   usdgPerShare       = 993_320000 × 1e18 / 100e18                      = 9_933_200   (NOT a premium figure)
     expect(ASSIGNED.assignmentUsdg).toBe(950_000000n);
     expect(ASSIGNED.harvestGross).toBe(995_600000n);
+    expect(ASSIGNED.strikeProceeds).toBe(950_000000n);
+    expect(ASSIGNED.harvestPremiumGross).toBe(45_600000n);
     expect(ASSIGNED.fee).toBe(2_280000n);
     expect(ASSIGNED.fee).toBe(FILLED.fee);
-    expect(ASSIGNED.premiumNet).toBe(993_320000n);
-    expect(ASSIGNED.premiumNet - ASSIGNED.assignmentUsdg).toBe(FILLED.premiumNet);
+    expect(ASSIGNED.premiumNet).toBe(43_320000n);
+    expect(ASSIGNED.premiumNet).toBe(FILLED.premiumNet);
+    expect(ASSIGNED.creditedUsdg).toBe(993_320000n);
+    expect(ASSIGNED.creditedUsdg).toBe(ASSIGNED.premiumNet + ASSIGNED.strikeProceeds);
+    expect(ASSIGNED.premiumNetPerShare).toBe(433200n);
+    expect(ASSIGNED.usdgPerShare).toBe(9_933200n);
   });
 });
 
@@ -417,7 +434,7 @@ describe("cycleJson", () => {
     expect(j.harvest.supplyAtHarvest.raw).toBe("0");
   });
 
-  it("marks an assigned week filled AND assigned, with the strike proceeds in the harvest", () => {
+  it("marks an assigned week filled AND assigned, and publishes premium and strike proceeds apart", () => {
     const j = cycleJson(ASSIGNED);
     expect(j.status).toBe("assigned");
     expect(j.filled).toBe(true);
@@ -425,10 +442,132 @@ describe("cycleJson", () => {
     expect(j.settlement.contractsAssigned).toBe("5");
     expect(j.settlement.assignmentUsdg.raw).toBe("950000000");
     expect(j.settlement.assetsReturned.raw).toBe((7n * LOT).toString());
+    // The harvest swept 45.6 of premium and 950 of strike proceeds: 995.6 in all.
     expect(j.harvest.grossUsdg.raw).toBe("995600000");
+    expect(j.harvest.strikeProceedsUsdg.raw).toBe("950000000");
+    expect(j.harvest.premiumGross.raw).toBe("45600000");
     // The fee is on the 45.6 premium alone; the 950 of strike proceeds reach depositors whole.
     expect(j.harvest.fee.raw).toBe("2280000");
-    expect(j.harvest.premiumNet.raw).toBe("993320000");
+    // W-21: the premium figures are premium only (the same 43.32 a filled, unassigned week
+    // earns) and the 993.32 credited to holders is published under its own name.
+    expect(j.harvest.premiumNet.raw).toBe("43320000");
+    expect(j.harvest.premiumNet).toEqual(cycleJson(FILLED).harvest.premiumNet);
+    expect(j.harvest.premiumNetPerShare.raw).toBe("433200");
+    expect(j.harvest.creditedUsdg.raw).toBe("993320000");
+    expect(j.harvest.usdgPerShare.raw).toBe("9933200");
+  });
+
+  it("publishes strike proceeds as an explicit zero on every week that was not assigned", () => {
+    for (const row of [FILLED, UNFILLED, SKIPPED]) {
+      const j = cycleJson(row);
+      expect(j.harvest.strikeProceedsUsdg.raw).toBe("0");
+      expect(j.harvest.premiumNet).toEqual(j.harvest.creditedUsdg);
+      expect(j.harvest.premiumGross).toEqual(j.harvest.grossUsdg);
+    }
+  });
+});
+
+describe("lib/harvest.ts: one Harvest event split into premium and strike proceeds", () => {
+  it("a checkpoint's whole gross is premium", () => {
+    // The handler passes 0 as the fee-free part for a checkpoint.
+    // 30_000000 gross: fee = floor(30_000000 × 500 / 10_000) = 1_500000; net = 28_500000.
+    const s = splitHarvest(harvestEvent(30_000000n));
+    expect(s.strikeProceeds).toBe(0n);
+    expect(s.premiumGross).toBe(30_000000n);
+    expect(s.premiumNet).toBe(28_500000n);
+    expect(s.credited).toBe(28_500000n);
+    // 28_500000 × 1e18 / 100e18 = 285_000
+    expect(s.premiumNetPerShare).toBe(285000n);
+  });
+
+  it("an assigned week with a mid-week deposit: premium-only realized figures, strike proceeds apart", () => {
+    // Tuesday a buyer fills: 30 USDG of premium lands. Wednesday a deposit checkpoints it against
+    // 100 shares, then mints 20 more. Thursday another fill lands 15.6. Friday rollClose redeems
+    // the claim with 5 contracts assigned at 190 (950 USDG back) and sweeps 15.6 + 950 against
+    // 120 shares, passing usdgFromAssignment = 950 as the fee-free part.
+    const checkpoint = harvestEvent(30_000000n, 0n, 100n * 10n ** 18n);
+    const terminal = harvestEvent(15_600000n + 950_000000n, 950_000000n, 120n * 10n ** 18n);
+
+    // Checkpoint, by hand:  fee = floor(30_000000 × 500 / 10_000) = 1_500000
+    //                       net = 30_000000 − 1_500000            = 28_500000
+    expect(checkpoint.feeUsdg).toBe(1_500000n);
+    expect(checkpoint.netUsdg).toBe(28_500000n);
+    // Terminal, by hand:    gross = 15_600000 + 950_000000          = 965_600000
+    //                       fee   = floor(15_600000 × 500 / 10_000) = 780_000
+    //                       net   = 965_600000 − 780_000            = 964_820000
+    expect(terminal.grossUsdg).toBe(965_600000n);
+    expect(terminal.feeUsdg).toBe(780_000n);
+    expect(terminal.netUsdg).toBe(964_820000n);
+
+    const t = splitHarvest(terminal);
+    expect(t.strikeProceeds).toBe(950_000000n);
+    expect(t.premiumGross).toBe(15_600000n); // 965_600000 − 950_000000
+    expect(t.premiumNet).toBe(14_820000n); // 15_600000 − 780_000
+    expect(t.premiumNetPerShare).toBe(123500n); // 14_820000 × 1e18 / 120e18
+    expect(t.creditedPerShare).toBe(8_040166n); // floor(964_820000 × 1e18 / 120e18) = floor(8_040_166.67)
+
+    const week = addHarvest(addHarvest(ZERO_HARVEST_TOTALS, checkpoint), terminal);
+    expect(week.harvestGross).toBe(995_600000n); // 30_000000 + 965_600000
+    expect(week.strikeProceeds).toBe(950_000000n);
+    expect(week.harvestPremiumGross).toBe(45_600000n); // 30_000000 + 15_600000
+    expect(week.fee).toBe(2_280000n); // 1_500000 + 780_000 = 5% of the 45.6 premium
+    expect(week.premiumNet).toBe(43_320000n); // 28_500000 + 14_820000
+    expect(week.creditedUsdg).toBe(993_320000n); // 28_500000 + 964_820000
+    expect(week.creditedUsdg).toBe(week.premiumNet + week.strikeProceeds);
+    // Per share, summed per sweep: 285_000 + 123_500 = 408_500. Not 43_320000 / 120 shares,
+    // because the first 28.5 was indexed against 100, and never 993_320000 over anything.
+    expect(week.premiumNetPerShare).toBe(408500n);
+    expect(week.usdgPerShare).toBe(285000n + 8_040166n);
+  });
+
+  it("clamps: strike proceeds never exceed the sweep, and premium never goes negative", () => {
+    const s = splitHarvest({ grossUsdg: 5n, feeUsdg: 0n, netUsdg: 5n, usdgFromAssignment: 9n, supply: 0n });
+    expect(s.strikeProceeds).toBe(5n);
+    expect(s.premiumGross).toBe(0n);
+    expect(s.premiumNet).toBe(0n);
+    // No supply to index against: zero per share, not a division by zero.
+    expect(s.premiumNetPerShare).toBe(0n);
+  });
+});
+
+describe("harvestJson (/v1/activity, /v1/cycles/:cycle, /v1/vault lastWeek)", () => {
+  it("splits the terminal harvest of an assigned week into premium and strike proceeds", () => {
+    const e = harvestEvent(TO_VAULT + 950_000000n, 950_000000n);
+    const s = splitHarvest(e);
+    const row: HarvestRow = {
+      id: "61295000-7",
+      cycleNumber: 9,
+      filled: true,
+      terminal: true,
+      grossUsdg: e.grossUsdg,
+      feeUsdg: e.feeUsdg,
+      netUsdg: e.netUsdg,
+      premiumGrossUsdg: s.premiumGross,
+      strikeProceedsUsdg: s.strikeProceeds,
+      premiumNetUsdg: s.premiumNet,
+      premiumToVault: TO_VAULT,
+      assignmentUsdg: 950_000000n,
+      contractsSold: CONTRACTS,
+      contractsAssigned: 5n,
+      accUsdgPerShare: 0n,
+      supply: SUPPLY,
+      premiumNetPerShare: s.premiumNetPerShare,
+      usdgPerShare: s.creditedPerShare,
+      timestamp: ASSIGNED.harvestedAt!,
+      blockNumber: ASSIGNED.closedBlock!,
+      txHash: ASSIGNED.txClose!,
+    };
+    const j = harvestJson(row);
+    // The event's own amounts, verbatim: 995.6 gross, 2.28 fee, 993.32 net.
+    expect(j.grossUsdg.raw).toBe("995600000");
+    expect(j.fee.raw).toBe("2280000");
+    expect(j.netUsdg.raw).toBe("993320000");
+    // The split: 950 strike proceeds, 45.6 premium, 43.32 after the fee, 0.4332 per share.
+    expect(j.strikeProceedsUsdg.raw).toBe("950000000");
+    expect(j.premiumGross.raw).toBe("45600000");
+    expect(j.premiumNet.raw).toBe("43320000");
+    expect(j.premiumNetPerShare.raw).toBe("433200");
+    expect(j.usdgPerShare.raw).toBe("9933200");
   });
 });
 

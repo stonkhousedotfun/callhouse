@@ -22,7 +22,7 @@ node ../scripts/copy-lint.mjs        # compliance gate, also runs in CI
 
 | Route | Content |
 |---|---|
-| `/` | one vault card: idle and locked, this week's strike, listed / filled / unfilled / assigned, last week's realized USDG per share |
+| `/` | one vault card: idle and locked, this week's strike, listed / filled / unfilled / assigned, last week's realized net premium per share (and its strike proceeds on their own line if assigned) |
 | `/vault/nvda` | deposit, queue withdraw, complete redeem, claim USDG |
 | `/vault/nvda/cycle` | the five-rung Overcall ladder, our pick, the order hash, explorer links, and the raw Seaport payload so a buyer can fill from here |
 | `/activity` | every harvest, including the unfilled weeks shown as "unfilled, 0" |
@@ -58,7 +58,13 @@ If a forbidden phrase genuinely belongs inside an explicit negation on the docs 
 - Raw balances and the `uiMultiplier`-adjusted "NVDA-eq" figure are both shown, with the adjusted
   one labelled display-only. No internal maths reads the multiplier.
 - USDG is 6 decimals, the asset and the shares are 18. Never format one with the other's scale.
-- The headline weekly figure is net USDG harvested over TVL at harvest. **Never annualize it.**
+- The headline weekly figure is net premium over TVL at harvest. **Never annualize it.**
+- **Strike proceeds are not premium.** On an assigned week the harvest also sweeps the USDG the
+  assigned collateral was sold for at the strike. It is credited to holders, but it is returned
+  principal: every premium figure (gross, net, per share, net / collateral, "Last week
+  realized") reads `CycleRow.premium*` and excludes it, and it is shown on its own line as
+  "Strike proceeds (assignment)". `creditedUsdg` and `harvestGrossUsdg` on the row include it
+  and are never passed to `fmtRealizedWeek` or `usdgPerShare` (W-21).
 - An unfilled week renders as "unfilled, 0". It is the most likely outcome, not an error state.
 - No price chart. No candlesticks on a vault share.
 - Must work at 400px wide.
@@ -97,7 +103,12 @@ a skipped week, with real numbers). `lib/api.test.ts` runs `normaliseCycle` over
 the exact base-unit integers and booleans `/activity` renders; the indexer's own test proves it
 still emits them. The skipped week (`status: "idle"`, `wrote: false`) is the one row nothing on
 chain ever closes, so `normaliseCycle` settles it by the registry's expiry and carries `wrote` so
-a page can say "not written" rather than "unfilled". The flat top-level keys the normaliser also
+a page can say "not written" rather than "unfilled". The `harvest` group publishes premium and
+strike proceeds separately (`premiumGross`, `premiumNet`, `premiumNetPerShare` beside
+`strikeProceedsUsdg` and `creditedUsdg`); `normaliseCycle` reads them, and splits a pre-W-21
+payload, whose `premiumNet` still included strike proceeds, by subtracting
+`settlement.assignmentUsdg`. The `/activity` log fallback (`lib/history.ts`) does the same split
+with the `RollClose.usdgFromAssignment` from the closing harvest's own transaction. The flat top-level keys the normaliser also
 accepts are a courtesy for a hand-rolled payload, not what the indexer sends. If a week you know
 was filled shows as "unfilled, 0" against
 a live `NEXT_PUBLIC_API_URL`, run `pnpm --filter @callhouse/web test` first: that is exactly the

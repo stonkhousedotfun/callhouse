@@ -111,10 +111,23 @@ export function foldVaultLogs(logs: LooseLog[]): ChainDraft[] {
   // paired to its Harvest by transaction hash: `_accrueHarvest` calls `_distributeUsdg`, which
   // emits it, inside the same call that then emits Harvest.
   const supplyByTx = new Map<string, bigint>();
+  // Also pass one: the strike proceeds of each close, by transaction (W-21). `rollClose` emits
+  // `RollClose(…, usdgFromAssignment, …)` and then, in the same transaction, the terminal
+  // `Harvest` whose `grossUsdg` INCLUDES that amount — and whose fee was charged on
+  // `grossUsdg − usdgFromAssignment` alone. So that harvest is split here into premium and
+  // strike proceeds using the RollClose from its own transaction, exactly as the indexer does
+  // (indexer/lib/harvest.ts). A checkpoint Harvest from a deposit shares no transaction with a
+  // RollClose and is premium through and through.
+  const assignmentUsdgByTx = new Map<string, bigint>();
   for (const log of logs) {
-    if (log.eventName !== "UsdgDistributed" || !log.transactionHash) continue;
-    const supply = toBig(arg(log, "totalSupply"));
-    if (supply !== undefined) supplyByTx.set(log.transactionHash, supply);
+    if (!log.transactionHash) continue;
+    if (log.eventName === "UsdgDistributed") {
+      const supply = toBig(arg(log, "totalSupply"));
+      if (supply !== undefined) supplyByTx.set(log.transactionHash, supply);
+    } else if (log.eventName === "RollClose") {
+      const assignment = toBig(arg(log, "usdgFromAssignment"));
+      if (assignment !== undefined) assignmentUsdgByTx.set(log.transactionHash, assignment);
+    }
   }
 
   // Walk in block order so "the cycle currently open" is well defined when we hit a
@@ -173,10 +186,22 @@ export function foldVaultLogs(logs: LooseLog[]): ChainDraft[] {
         // balance. Assigning here made the last event win, and on a paying week with one
         // mid-week deposit the last event is the zero: the week rendered as "unfilled, 0". The
         // indexer sums (indexer/src/vault.ts, "Accumulated, not assigned"); this is the same fold.
-        row.grossUsdg = (row.grossUsdg ?? 0n) + (toBig(arg(log, "grossUsdg")) ?? 0n);
-        row.feeUsdg = (row.feeUsdg ?? 0n) + (toBig(arg(log, "feeUsdg")) ?? 0n);
-        row.netUsdg = (row.netUsdg ?? 0n) + (toBig(arg(log, "netUsdg")) ?? 0n);
-        row.filled = row.grossUsdg > 0n;
+        const gross = toBig(arg(log, "grossUsdg")) ?? 0n;
+        const fee = toBig(arg(log, "feeUsdg")) ?? 0n;
+        const net = toBig(arg(log, "netUsdg")) ?? 0n;
+        // The strike-proceeds part of this sweep: the RollClose in the same transaction, clamped
+        // to what the sweep found; 0 for a checkpoint. What is left of the gross is premium.
+        const assignment = log.transactionHash ? (assignmentUsdgByTx.get(log.transactionHash) ?? 0n) : 0n;
+        const strike = assignment < gross ? assignment : gross;
+        const premiumGross = gross - strike;
+        const premiumNet = premiumGross > fee ? premiumGross - fee : 0n;
+        row.harvestGrossUsdg = (row.harvestGrossUsdg ?? 0n) + gross;
+        row.feeUsdg = (row.feeUsdg ?? 0n) + fee;
+        row.creditedUsdg = (row.creditedUsdg ?? 0n) + net;
+        row.strikeProceedsUsdg = (row.strikeProceedsUsdg ?? 0n) + strike;
+        row.premiumGrossUsdg = (row.premiumGrossUsdg ?? 0n) + premiumGross;
+        row.premiumNetUsdg = (row.premiumNetUsdg ?? 0n) + premiumNet;
+        row.filled = row.harvestGrossUsdg > 0n;
         // UsdgDistributed fires at most twice per Harvest transaction — once from
         // `_accrueHarvest` for the net, and in the terminal `_harvest` once more for any
         // unallocated carry — always with the same supply, so keeping the last per hash loses

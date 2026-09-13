@@ -2,6 +2,7 @@ import { ponder } from "ponder:registry";
 import schema from "ponder:schema";
 
 import { BPS, OVERCALL_FEE_BPS } from "../lib/env";
+import { addHarvest, splitHarvest } from "../lib/harvest";
 import { log } from "../lib/log";
 import { roleName } from "../lib/roles";
 import {
@@ -562,6 +563,11 @@ ponder.on("Vault:AllListingsInvalidated", async ({ event, context }) => {
  * `feeUsdg` on `grossUsdg − RollClose.usdgFromAssignment` only (Vault._accrueHarvest; a deposit
  * checkpoint excludes 0), so `feeUsdg / grossUsdg` is NOT the policy rate there and must never
  * be used as one. `netUsdg == grossUsdg − feeUsdg` always.
+ *
+ * And for the same reason `netUsdg` is NOT premium on an assigned week (W-21): the strike
+ * proceeds in it are returned principal. `lib/harvest.ts` splits every event into premium and
+ * strike proceeds, and every "premium" column here is premium only. The whole credited figure
+ * is kept under its own name (`creditedUsdg`, `usdgPerShare`) so nothing has to be inferred.
  */
 ponder.on("Vault:Harvest", async ({ event, context }) => {
   const { cycleNumber, grossUsdg, feeUsdg, netUsdg } = event.args;
@@ -584,7 +590,18 @@ ponder.on("Vault:Harvest", async ({ event, context }) => {
   // earn the week they sat through. For a checkpoint harvest it is equally deliberate:
   // `_checkpointHarvest()` runs BEFORE `_mint`, which is the whole point of it existing.
   const supply = state.totalShares;
-  const usdgPerShare = supply === 0n ? 0n : (netUsdg * 10n ** 18n) / supply;
+
+  // The fee-free part of this sweep, exactly as the vault passed it to `_accrueHarvest`: the
+  // terminal harvest gets `RollClose.usdgFromAssignment` — which the RollClose handler wrote to
+  // `c.assignmentUsdg` one log earlier in this same transaction — and a checkpoint gets 0.
+  const h = {
+    grossUsdg,
+    feeUsdg,
+    netUsdg,
+    usdgFromAssignment: terminal ? c.assignmentUsdg : 0n,
+    supply,
+  };
+  const split = splitHarvest(h);
 
   await context.db
     .insert(schema.harvest)
@@ -596,13 +613,17 @@ ponder.on("Vault:Harvest", async ({ event, context }) => {
       grossUsdg,
       feeUsdg,
       netUsdg,
+      premiumGrossUsdg: split.premiumGross,
+      strikeProceedsUsdg: split.strikeProceeds,
+      premiumNetUsdg: split.premiumNet,
       premiumToVault: c.premiumToVault,
       assignmentUsdg: c.assignmentUsdg,
       contractsSold: c.contractsSold,
       contractsAssigned: c.contractsAssigned,
       accUsdgPerShare: state.accUsdgPerShare,
       supply,
-      usdgPerShare,
+      premiumNetPerShare: split.premiumNetPerShare,
+      usdgPerShare: split.creditedPerShare,
       timestamp: event.block.timestamp,
       blockNumber: event.block.number,
       txHash: event.transaction.hash,
@@ -617,13 +638,10 @@ ponder.on("Vault:Harvest", async ({ event, context }) => {
   if (touchesCycle) {
     await patchCycle(context.db, cycleNumber, {
       // Accumulated, not assigned: the week's take can be swept in more than one go, and the
-      // published figure is the whole week.
-      harvestGross: c.harvestGross + grossUsdg,
-      fee: c.fee + feeUsdg,
-      premiumNet: c.premiumNet + netUsdg,
-      // Summed the same way, and for the same reason: each sweep is indexed against the
-      // supply at that moment, so the sum is what a share held all week actually earned.
-      usdgPerShare: c.usdgPerShare + usdgPerShare,
+      // published figure is the whole week. Per-share figures are summed the same way, and for
+      // the same reason: each sweep is indexed against the supply at that moment. The
+      // arithmetic, and the premium / strike-proceeds split, is lib/harvest.ts `addHarvest`.
+      ...addHarvest(c, h),
       supplyAtHarvest: supply,
       ...(terminal
         ? { status, harvested: true, harvestedAt: event.block.timestamp }
@@ -633,7 +651,10 @@ ponder.on("Vault:Harvest", async ({ event, context }) => {
 
   await patchState(context.db, {
     lifetimeProtocolFee: state.lifetimeProtocolFee + feeUsdg,
-    lifetimePremiumNet: state.lifetimePremiumNet + netUsdg,
+    // Premium only. The strike proceeds are tallied beside it, never inside it.
+    lifetimePremiumNet: state.lifetimePremiumNet + split.premiumNet,
+    lifetimeStrikeProceeds: state.lifetimeStrikeProceeds + split.strikeProceeds,
+    lifetimeCreditedUsdg: state.lifetimeCreditedUsdg + netUsdg,
     ...(terminal
       ? {
           // `rollClose` returns the vault to Idle right after settling the queue; there is no

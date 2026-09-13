@@ -156,21 +156,43 @@ export type CycleRow = {
   closedAt?: number;
   exerciseTs?: number;
   expiryTs?: number;
-  grossUsdg?: bigint;
+  // THE WEEK'S USDG, SPLIT (W-21). On an assigned week the vault's harvest sweeps premium AND
+  // the strike proceeds from the contracts taken at the strike. The strike proceeds are returned
+  // principal, not yield, so every premium figure a page shows — gross, net, per share, "Last
+  // week realized" — reads the `premium*` fields, and the strike proceeds get their own line.
+  //
+  //   harvestGrossUsdg   = premiumGrossUsdg + strikeProceedsUsdg   (Harvest.grossUsdg, summed)
+  //   creditedUsdg       = premiumNetUsdg   + strikeProceedsUsdg   (Harvest.netUsdg, summed)
+  //   premiumNetUsdg     = premiumGrossUsdg − feeUsdg
+  //
+  // `premium*` is undefined, never guessed, when the week was assigned and nothing says how much
+  // of the harvest was strike proceeds: a dash is honest, a subtraction of zero is not.
+
+  /** Everything the harvests swept: premium plus strike proceeds. NOT a premium figure. */
+  harvestGrossUsdg?: bigint;
+  /** Premium that reached the vault (after Overcall's 5%), strike proceeds excluded. */
+  premiumGrossUsdg?: bigint;
+  /** The protocol fee. Charged on premium only. */
   feeUsdg?: bigint;
-  netUsdg?: bigint;
+  /** Premium after the protocol fee. The only figure that says what the week earned. */
+  premiumNetUsdg?: bigint;
+  /** USDG received for collateral taken at the strike. Returned principal. 0 when not assigned. */
+  strikeProceedsUsdg?: bigint;
+  /** Everything credited to holders: net premium plus strike proceeds. NOT a premium figure. */
+  creditedUsdg?: bigint;
   /** Vault total supply at the moment of harvest — the denominator of USDG/share. */
   sharesAtHarvest?: bigint;
   /**
-   * Net USDG per whole share for the week, in USDG base units, as the indexer sums it per
-   * sweep (indexer/src/vault.ts). On a week with a mid-week deposit this is exact where
-   * `netUsdg / sharesAtHarvest` is not, because each sweep was indexed against the supply of
-   * its own moment. Carried so the pages can prefer it; the log fallback cannot produce it.
+   * Net PREMIUM per whole share for the week, in USDG base units, as the indexer sums it per
+   * sweep (indexer/lib/harvest.ts). On a week with a mid-week deposit this is exact where
+   * `premiumNetUsdg / sharesAtHarvest` is not, because each sweep was indexed against the supply
+   * of its own moment. Pages prefer it (lib/format.ts `premiumPerShare`); the log fallback
+   * cannot produce it.
    */
-  usdgPerShare?: bigint;
+  premiumNetPerShare?: bigint;
   /** Vault assets at the moment of harvest, raw 18-dec. */
   assetsAtHarvest?: bigint;
-  /** Spot per lot in USDG base units at harvest, for the net/TVL figure. */
+  /** Spot per lot in USDG base units at harvest, for the net premium / TVL figure. */
   spotUsdgAtHarvest?: bigint;
   txOpen?: Hex;
   txClose?: Hex;
@@ -238,13 +260,44 @@ export function normaliseCycle(input: unknown, nowSeconds: number = Math.floor(D
   // what buyers paid before Overcall's cut and is deliberately not the figure shown as gross.
   const gross = toBigInt(
     pick(harvest, "grossUsdg") ??
-      pick(r, "grossUsdg", "premiumGross", "premium_gross", "premiumGrossUsdg", "gross"),
+      pick(r, "grossUsdg", "harvestGrossUsdg", "premiumGross", "premium_gross", "premiumGrossUsdg", "gross"),
   );
   const fee = toBigInt(pick(harvest, "fee") ?? pick(r, "feeUsdg", "fee", "protocolFeeUsdg", "premium_fee"));
-  const net = toBigInt(
-    pick(harvest, "premiumNet") ?? pick(r, "netUsdg", "premiumNet", "premium_net", "premiumNetUsdg", "net"),
-  );
   const contractsSold = toBigInt(pick(fill, "contractsSold") ?? pick(r, "contractsSold", "contracts_sold", "sold"));
+  const contractsAssigned = toBigInt(
+    pick(settlement, "contractsAssigned") ?? pick(r, "contractsAssigned", "contracts_assigned", "assigned"),
+  );
+
+  // Premium and strike proceeds, apart (W-21). The indexer publishes both since W-21; the
+  // presence of `harvest.creditedUsdg` is how its current shape is told from the one before,
+  // in which `harvest.premiumNet` meant `grossUsdg − fee` and INCLUDED the strike proceeds. An
+  // older payload is split here by subtraction instead, from the same RollClose figure the
+  // indexer uses (`settlement.assignmentUsdg`).
+  const splitByIndexer = pick(harvest, "creditedUsdg") !== undefined;
+  const strikeReported = toBigInt(
+    pick(harvest, "strikeProceedsUsdg") ??
+      pick(settlement, "assignmentUsdg") ??
+      pick(r, "strikeProceedsUsdg", "assignmentUsdg", "usdgFromAssignment", "strike_proceeds_usdg"),
+  );
+  // Nothing on the row says a contract was assigned, so nothing in the harvest can be strike
+  // proceeds. An assigned week with no strike figure stays unknown: premium is left undefined
+  // and renders as a dash rather than as the whole harvest.
+  const strike =
+    strikeReported ?? (contractsAssigned === undefined || contractsAssigned === 0n ? 0n : undefined);
+  const credited = toBigInt(
+    splitByIndexer
+      ? pick(harvest, "creditedUsdg")
+      : (pick(harvest, "premiumNet") ??
+          pick(r, "creditedUsdg", "netUsdg", "premiumNet", "premium_net", "premiumNetUsdg", "net")),
+  );
+  const minus = (a: bigint | undefined, b: bigint | undefined): bigint | undefined =>
+    a === undefined || b === undefined ? undefined : a > b ? a - b : 0n;
+  const premiumGross = splitByIndexer
+    ? toBigInt(pick(harvest, "premiumGross"))
+    : minus(gross, strike);
+  const premiumNet = splitByIndexer
+    ? toBigInt(pick(harvest, "premiumNet"))
+    : (minus(credited, strike) ?? minus(premiumGross, fee));
   const status = toStr(pick(r, "status"));
   const wrote = typeof r.wrote === "boolean" ? r.wrote : undefined;
   const filledAt = toNumber(pick(fill, "firstFillAt") ?? pick(r, "filledAt", "filled_at"));
@@ -271,7 +324,7 @@ export function normaliseCycle(input: unknown, nowSeconds: number = Math.floor(D
       ? r.filled
       : contractsSold !== undefined
         ? contractsSold > 0n
-        : (gross !== undefined && gross > 0n) || (net !== undefined && net > 0n) || status === "filled";
+        : (gross !== undefined && gross > 0n) || (credited !== undefined && credited > 0n) || status === "filled";
 
   return {
     cycle,
@@ -280,9 +333,7 @@ export function normaliseCycle(input: unknown, nowSeconds: number = Math.floor(D
     strikeUsdg: toBigInt(pick(written, "strikeUsdg") ?? pick(r, "strikeUsdg", "strike", "strike_usdg")),
     contracts: toBigInt(pick(written, "contracts") ?? pick(r, "contracts", "contractsWritten", "contracts_written")),
     contractsSold,
-    contractsAssigned: toBigInt(
-      pick(settlement, "contractsAssigned") ?? pick(r, "contractsAssigned", "contracts_assigned", "assigned"),
-    ),
+    contractsAssigned,
     orderHash: toHex(pick(listing, "orderHash") ?? pick(r, "orderHash", "order_hash")),
     // ISO strings from the indexer, epoch seconds from a flat payload: toNumber reads both.
     openedAt: toNumber(pick(written, "openedAt") ?? pick(r, "openedAt", "opened_at", "listedAt", "listed_at")),
@@ -294,14 +345,19 @@ export function normaliseCycle(input: unknown, nowSeconds: number = Math.floor(D
         pick(r, "exerciseTs", "exercise_ts", "exerciseTimestamp", "exercise_timestamp"),
     ),
     expiryTs,
-    grossUsdg: gross,
+    harvestGrossUsdg: gross,
+    premiumGrossUsdg: premiumGross,
     feeUsdg: fee,
-    netUsdg: net,
+    premiumNetUsdg: premiumNet,
+    strikeProceedsUsdg: strike,
+    creditedUsdg: credited,
     sharesAtHarvest: toBigInt(
       pick(harvest, "supplyAtHarvest") ??
         pick(r, "sharesAtHarvest", "shares_at_harvest", "totalSupplyAtHarvest", "total_supply_at_harvest", "shares"),
     ),
-    usdgPerShare: toBigInt(pick(harvest, "usdgPerShare") ?? pick(r, "usdgPerShare", "usdg_per_share")),
+    // Only the indexer's premium-only per-share figure is read. `harvest.usdgPerShare` is the
+    // credited figure (strike proceeds included) and is deliberately never carried onto the row.
+    premiumNetPerShare: toBigInt(pick(harvest, "premiumNetPerShare") ?? pick(r, "premiumNetPerShare")),
     // The indexer's cycle row carries neither of these; they are flat-payload courtesies only.
     assetsAtHarvest: toBigInt(pick(r, "assetsAtHarvest", "assets_at_harvest", "tvlAssets", "tvl_assets")),
     spotUsdgAtHarvest: toBigInt(pick(r, "spotUsdgAtHarvest", "spot_usdg_at_harvest", "spotUsdg", "spot_usdg")),

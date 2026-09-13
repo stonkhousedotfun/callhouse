@@ -22,10 +22,10 @@ import {
   fmtUsdg,
   fmtUtcDate,
   multiplierIsActive,
+  premiumPerShare,
   shortHash,
   toNvdaEq,
   tvlUsdg,
-  usdgPerShare,
 } from "@/lib/format";
 import { useCycleHistory, lastSettled } from "@/lib/history";
 import { collateralSplit, useVaultSnapshot } from "@/lib/hooks";
@@ -49,8 +49,12 @@ export default function HomePage() {
   // actually locked, not from a hardcoded lot: the registry owns lotSize and can move it.
   const split = collateralSplit(v);
 
-  const lastPerShare = usdgPerShare(last?.netUsdg, last?.sharesAtHarvest);
+  // Premium only. On an assigned week the harvest also carried the strike proceeds, which are
+  // the collateral's sale price at the strike, not earnings; they get their own line below.
+  const lastPerShare = last ? premiumPerShare(last) : undefined;
   const lastTvl = tvlUsdg(last?.assetsAtHarvest, last?.spotUsdgAtHarvest);
+  const lastWasAssigned =
+    last !== undefined && ((last.contractsAssigned ?? 0n) > 0n || (last.strikeProceedsUsdg ?? 0n) > 0n);
 
   return (
     <>
@@ -190,19 +194,25 @@ export default function HomePage() {
                   </span>
                 </div>
                 <div className="row">
-                  <span className="k">USDG per {SHARE_TICKER}</span>
+                  <span className="k">Net premium per {SHARE_TICKER}</span>
                   <span className="v">
                     {lastPerShare === undefined ? "—" : fmtUsdg(lastPerShare, 6)}
                   </span>
                 </div>
                 <div className="row">
-                  <span className="k">Net USDG to depositors</span>
-                  <span className="v">{fmtUsdg(last.netUsdg ?? 0n)}</span>
+                  <span className="k">Net premium to depositors</span>
+                  <span className="v">{fmtUsdg(last.premiumNetUsdg)}</span>
                 </div>
                 <div className="row">
-                  <span className="k">Net / collateral at harvest</span>
-                  <span className="v">{fmtRealizedWeek(last.netUsdg ?? 0n, lastTvl)}</span>
+                  <span className="k">Net premium / collateral at harvest</span>
+                  <span className="v">{fmtRealizedWeek(last.premiumNetUsdg, lastTvl)}</span>
                 </div>
+                {lastWasAssigned ? (
+                  <div className="row" title="USDG received for collateral taken at the strike. Returned principal, not premium.">
+                    <span className="k">Strike proceeds (assignment)</span>
+                    <span className="v">{fmtUsdg(last.strikeProceedsUsdg)}</span>
+                  </div>
+                ) : null}
                 <div className="row">
                   <span className="k">Result</span>
                   <span className="v">

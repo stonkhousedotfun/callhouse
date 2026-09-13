@@ -17,9 +17,9 @@ import {
   fmtRealizedWeek,
   fmtUsdg,
   fmtUtcDate,
+  premiumPerShare,
   toNvdaEq,
   tvlUsdg,
-  usdgPerShare,
 } from "@/lib/format";
 import { lastSettled, useCycleHistory } from "@/lib/history";
 import { collateralSplit, useAccountPosition, useVaultSnapshot } from "@/lib/hooks";
@@ -40,8 +40,12 @@ export default function VaultPage() {
   // registry owns lotSize, so a hardcoded 1e18 would lie the moment Overcall changes it.
   const split = collateralSplit(v);
 
-  const lastPerShare = usdgPerShare(last?.netUsdg, last?.sharesAtHarvest);
+  // Premium only (W-21). On an assigned week the harvest also carried the strike proceeds —
+  // collateral sold at the strike — which are shown on their own line and in no premium figure.
+  const lastPerShare = last ? premiumPerShare(last) : undefined;
   const lastTvl = tvlUsdg(last?.assetsAtHarvest, last?.spotUsdgAtHarvest);
+  const lastWasAssigned =
+    last !== undefined && ((last.contractsAssigned ?? 0n) > 0n || (last.strikeProceedsUsdg ?? 0n) > 0n);
 
   return (
     <>
@@ -165,7 +169,7 @@ export default function VaultPage() {
           {last ? (
             <>
               <div className="stat">
-                <div className="stat-label">USDG per {SHARE_TICKER}</div>
+                <div className="stat-label">Net premium per {SHARE_TICKER}</div>
                 <div className="stat-value">
                   {lastPerShare === undefined ? "—" : fmtUsdg(lastPerShare, 6)}
                 </div>
@@ -177,29 +181,43 @@ export default function VaultPage() {
               <div className="rows" style={{ marginTop: 12 }}>
                 <div className="row">
                   <span className="k">Gross premium</span>
-                  <span className="v">{fmtUsdg(last.grossUsdg ?? 0n)}</span>
+                  <span className="v">{fmtUsdg(last.premiumGrossUsdg)}</span>
                 </div>
                 <div className="row">
                   <span className="k">Protocol fee</span>
                   <span className="v">{fmtUsdg(last.feeUsdg ?? 0n)}</span>
                 </div>
                 <div className="row">
-                  <span className="k">Net to depositors</span>
-                  <span className="v">{fmtUsdg(last.netUsdg ?? 0n)}</span>
+                  <span className="k">Net premium to depositors</span>
+                  <span className="v">{fmtUsdg(last.premiumNetUsdg)}</span>
                 </div>
                 <div className="row">
-                  <span className="k">Net / collateral at harvest</span>
-                  <span className="v">{fmtRealizedWeek(last.netUsdg ?? 0n, lastTvl)}</span>
+                  <span className="k">Net premium / collateral at harvest</span>
+                  <span className="v">{fmtRealizedWeek(last.premiumNetUsdg, lastTvl)}</span>
                 </div>
                 <div className="row">
                   <span className="k">Contracts assigned</span>
                   <span className="v">{(last.contractsAssigned ?? 0n).toString()}</span>
                 </div>
+                {lastWasAssigned ? (
+                  <div className="row" title="USDG received for collateral taken at the strike. Returned principal, not premium.">
+                    <span className="k">Strike proceeds (assignment)</span>
+                    <span className="v">{fmtUsdg(last.strikeProceedsUsdg)}</span>
+                  </div>
+                ) : null}
               </div>
               <p className="tiny faint" style={{ marginTop: 10, marginBottom: 0 }}>
                 One week is one week. This figure is never multiplied out to a longer period
                 anywhere on this site. <Link href="/activity">See every week</Link>.
               </p>
+              {lastWasAssigned ? (
+                <p className="tiny faint" style={{ marginTop: 6, marginBottom: 0 }}>
+                  Strike proceeds are the USDG your {MARKET} was sold for at the strike when the
+                  calls were exercised. They are credited to holders and claimable with the
+                  premium, but they are returned collateral, not earnings, and no premium figure
+                  above includes them.
+                </p>
+              ) : null}
             </>
           ) : (
             <p className="small muted" style={{ marginBottom: 0 }}>

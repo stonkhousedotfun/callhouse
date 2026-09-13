@@ -120,7 +120,9 @@ type HarvestRow = typeof schema.harvest.$inferSelect;
  *
  * Note what is ALWAYS present, even on a week nobody bought: `contractsSold: 0`,
  * `premiumGross: 0`, `premiumNet: 0`, `fee: 0`, `status: "unfilled"`. An unfilled week is the
- * most likely outcome and it is published, not hidden.
+ * most likely outcome and it is published, not hidden. Equally always present, and zero on
+ * every week that was not assigned: `harvest.strikeProceedsUsdg`, so premium and returned
+ * principal never have to be told apart by subtraction on the consumer's side.
  */
 export function cycleJson(c: CycleRow) {
   return {
@@ -189,14 +191,31 @@ export function cycleJson(c: CycleRow) {
       txClose: c.txClose,
     },
 
+    // Premium and strike proceeds are published SEPARATELY (W-21). On an assigned week the
+    // vault's harvest sweeps both, but the strike proceeds are returned principal — collateral
+    // that left at the strike and came back as USDG — and must never be read as yield. Every
+    // field named `premium*` is premium only; `creditedUsdg` and `usdgPerShare` are the whole
+    // amount credited to holders and are NOT a return.
     harvest: {
       harvested: c.harvested,
       // The vault's whole USDG take: premium that filled plus any strike proceeds.
       grossUsdg: usdg(c.harvestGross),
-      // Charged on the premium part only; strike proceeds (settlement.assignmentUsdg) are never
-      // fee'd, so on an assigned week fee / grossUsdg is not the policy rate.
+      // grossUsdg − strikeProceedsUsdg: premium as harvested, AFTER Overcall's 5%. Not
+      // `fill.premiumGross`, which is what buyers paid before Overcall's cut.
+      premiumGross: usdg(c.harvestPremiumGross),
+      // The strike-proceeds part of the terminal harvest (RollClose.usdgFromAssignment).
+      strikeProceedsUsdg: usdg(c.strikeProceeds),
+      // Charged on the premium part only; strike proceeds are never fee'd, so on an assigned
+      // week fee / grossUsdg is not the policy rate. fee / premiumGross is.
       fee: usdg(c.fee),
+      // premiumGross − fee. PREMIUM ONLY. (Until W-21 this was grossUsdg − fee and included
+      // the strike proceeds; that figure is `creditedUsdg`.)
       premiumNet: usdg(c.premiumNet),
+      // premiumNet + strikeProceedsUsdg: everything the Distributor credited to holders.
+      creditedUsdg: usdg(c.creditedUsdg),
+      // premiumNet per whole share, summed per sweep. The per-share premium figure.
+      premiumNetPerShare: usdg(c.premiumNetPerShare),
+      // creditedUsdg per whole share, summed per sweep. Includes strike proceeds; unchanged.
       usdgPerShare: usdg(c.usdgPerShare),
       supplyAtHarvest: asset(c.supplyAtHarvest),
       harvestedAt: iso(c.harvestedAt),
@@ -233,7 +252,7 @@ export function listingJson(l: ListingRow) {
   };
 }
 
-function harvestJson(h: HarvestRow) {
+export function harvestJson(h: HarvestRow) {
   return {
     cycle: h.cycleNumber,
     // true = the end-of-cycle harvest inside `rollClose` (the week's verdict).
@@ -241,13 +260,22 @@ function harvestJson(h: HarvestRow) {
     //         the index before new shares exist. Real money, but not a weekly result.
     terminal: h.terminal,
     filled: h.filled,
+    // The event's three amounts, verbatim. `netUsdg` includes strike proceeds on the terminal
+    // harvest of an assigned week.
     grossUsdg: usdg(h.grossUsdg),
     fee: usdg(h.feeUsdg),
     netUsdg: usdg(h.netUsdg),
+    // This event split (lib/harvest.ts): premium only, and the strike proceeds beside it.
+    premiumGross: usdg(h.premiumGrossUsdg),
+    strikeProceedsUsdg: usdg(h.strikeProceedsUsdg),
+    premiumNet: usdg(h.premiumNetUsdg),
     premiumToVault: usdg(h.premiumToVault),
     assignmentUsdg: usdg(h.assignmentUsdg),
     contractsSold: num(h.contractsSold),
     contractsAssigned: num(h.contractsAssigned),
+    // premiumNet per whole share: the per-share premium figure.
+    premiumNetPerShare: usdg(h.premiumNetPerShare),
+    // netUsdg per whole share. Includes strike proceeds; not a premium figure.
     usdgPerShare: usdg(h.usdgPerShare),
     supply: asset(h.supply),
     accUsdgPerShare: h.accUsdgPerShare.toString(),
@@ -445,7 +473,12 @@ app.get("/v1/vault", cache15s, async (c) => {
         overcallFee: usdg(state?.lifetimeOvercallFee ?? 0n),
         assignmentUsdg: usdg(state?.lifetimeAssignmentUsdg ?? 0n),
         protocolFee: usdg(state?.lifetimeProtocolFee ?? 0n),
+        // Premium after both fees. PREMIUM ONLY since W-21 (it used to include strike proceeds).
         premiumNet: usdg(state?.lifetimePremiumNet ?? 0n),
+        // Strike proceeds swept by terminal harvests: returned principal, not premium.
+        strikeProceedsUsdg: usdg(state?.lifetimeStrikeProceeds ?? 0n),
+        // premiumNet + strikeProceedsUsdg: everything credited to holders.
+        creditedUsdg: usdg(state?.lifetimeCreditedUsdg ?? 0n),
       },
 
       roles: {

@@ -107,6 +107,16 @@
       "decimals": 6,
       "formatted": "45.6"
     },
+    "premiumGross": {
+      "raw": "45600000",
+      "decimals": 6,
+      "formatted": "45.6"
+    },
+    "strikeProceedsUsdg": {
+      "raw": "0",
+      "decimals": 6,
+      "formatted": "0"
+    },
     "fee": {
       "raw": "2280000",
       "decimals": 6,
@@ -116,6 +126,16 @@
       "raw": "43320000",
       "decimals": 6,
       "formatted": "43.32"
+    },
+    "creditedUsdg": {
+      "raw": "43320000",
+      "decimals": 6,
+      "formatted": "43.32"
+    },
+    "premiumNetPerShare": {
+      "raw": "433200",
+      "decimals": 6,
+      "formatted": "0.4332"
     },
     "usdgPerShare": {
       "raw": "433200",

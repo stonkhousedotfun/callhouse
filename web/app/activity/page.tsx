@@ -2,8 +2,20 @@
 
 import { txUrl } from "@/lib/chain";
 import { MARKET, SHARE_TICKER, VAULT } from "@/lib/contracts";
-import { fmtRealizedWeek, fmtUsdg, fmtUtcDate, tvlUsdg, usdgPerShare } from "@/lib/format";
+import type { CycleRow } from "@/lib/api";
+import { fmtRealizedWeek, fmtUsdg, fmtUtcDate, premiumPerShare, tvlUsdg } from "@/lib/format";
 import { useCycleHistory } from "@/lib/history";
+
+/** A column total that is only a number when every row's figure is known; otherwise a dash. */
+function sumKnown(rows: CycleRow[], figure: (row: CycleRow) => bigint | undefined): bigint | undefined {
+  let total = 0n;
+  for (const row of rows) {
+    const v = figure(row);
+    if (v === undefined) return undefined;
+    total += v;
+  }
+  return total;
+}
 
 /**
  * Every week the vault has run, in one table, with the zeros in it.
@@ -17,6 +29,11 @@ import { useCycleHistory } from "@/lib/history";
  * which means one cycle can emit several Harvest events under the same cycle number. Only the
  * terminal one — emitted inside the keeper's rollClose — closes the week; the checkpoints still
  * move real money, so both kinds accumulate onto the same row.
+ *
+ * Premium and strike proceeds are separate columns (W-21). On an assigned week the closing
+ * harvest also sweeps the USDG the assigned collateral was sold for at the strike. That is
+ * returned principal: it is credited to holders, but it is not premium, and no premium column,
+ * total or ratio on this page includes it.
  */
 export default function ActivityPage() {
   const { rows, source, error, isLoading } = useCycleHistory();
@@ -24,9 +41,13 @@ export default function ActivityPage() {
   const settled = rows.filter((r) => r.settled);
   const filled = settled.filter((r) => r.filled);
   const unfilled = settled.filter((r) => !r.filled);
-  const totalNet = settled.reduce((acc, r) => acc + (r.netUsdg ?? 0n), 0n);
+  const totalPremiumNet = sumKnown(settled, (r) => r.premiumNetUsdg ?? (r.filled ? undefined : 0n));
   const totalFee = settled.reduce((acc, r) => acc + (r.feeUsdg ?? 0n), 0n);
   const totalAssigned = settled.reduce((acc, r) => acc + (r.contractsAssigned ?? 0n), 0n);
+  const totalStrike = sumKnown(
+    settled,
+    (r) => r.strikeProceedsUsdg ?? ((r.contractsAssigned ?? 0n) > 0n ? undefined : 0n),
+  );
 
   return (
     <>
@@ -55,14 +76,16 @@ export default function ActivityPage() {
           </div>
         </div>
         <div className="card">
-          <div className="stat-label">Net USDG to depositors</div>
-          <div className="stat-value">{fmtUsdg(totalNet)}</div>
+          <div className="stat-label">Net premium to depositors</div>
+          <div className="stat-value">{fmtUsdg(totalPremiumNet)}</div>
           <div className="stat-sub">after {fmtUsdg(totalFee)} protocol fee</div>
         </div>
         <div className="card">
           <div className="stat-label">Contracts assigned</div>
           <div className="stat-value">{totalAssigned.toString()}</div>
-          <div className="stat-sub">collateral taken at the strike</div>
+          <div className="stat-sub">
+            collateral taken at the strike · {fmtUsdg(totalStrike)} USDG strike proceeds, not premium
+          </div>
         </div>
       </div>
 
@@ -89,11 +112,14 @@ export default function ActivityPage() {
                 <th>Strike</th>
                 <th title="contracts written">Wrote</th>
                 <th>Assigned</th>
-                <th title="gross premium in USDG">Gross</th>
+                <th title="premium received by the vault in USDG, strike proceeds excluded">Premium</th>
                 <th>Fee</th>
-                <th>Net</th>
-                <th title={`net USDG per one ${SHARE_TICKER} share`}>USDG/share</th>
-                <th title="net USDG over collateral valued at the feed spot at harvest">Net/TVL</th>
+                <th title="premium after the protocol fee, strike proceeds excluded">Net premium</th>
+                <th title="Strike proceeds (assignment): USDG received for collateral taken at the strike. Returned principal, not premium.">
+                  Strike proceeds
+                </th>
+                <th title={`net premium in USDG per one ${SHARE_TICKER} share`}>Premium/share</th>
+                <th title="net premium over collateral valued at the feed spot at harvest">Net/TVL</th>
                 <th>Result</th>
                 <th>Tx</th>
               </tr>
@@ -104,7 +130,7 @@ export default function ActivityPage() {
                   {/* Table cells are nowrap so numeric columns stay aligned; the empty-state
                       sentence is prose and must wrap instead of dragging the scroll container
                       hundreds of pixels wide on a phone. */}
-                  <td colSpan={12} className="muted" style={{ whiteSpace: "normal" }}>
+                  <td colSpan={13} className="muted" style={{ whiteSpace: "normal" }}>
                     {!VAULT
                       ? "Set a vault address to load its weekly history."
                       : isLoading
@@ -116,9 +142,10 @@ export default function ActivityPage() {
                 </tr>
               ) : (
                 rows.map((row) => {
-                  const perShare = usdgPerShare(row.netUsdg, row.sharesAtHarvest);
+                  // Premium only; strike proceeds have their own column and are in no ratio.
+                  const perShare = premiumPerShare(row);
                   const tvl = tvlUsdg(row.assetsAtHarvest, row.spotUsdgAtHarvest);
-                  // Kept short so the 12-column table still fits a laptop without a side scroll.
+                  // Kept short so the 13-column table still fits a laptop without a side scroll.
                   // The long form lives in the cell's title attribute.
                   const assigned = row.contractsAssigned ?? 0n;
                   const result = !row.settled
@@ -133,7 +160,7 @@ export default function ActivityPage() {
                     : !row.filled
                       ? "nobody bought the call; the week earned nothing"
                       : assigned > 0n
-                        ? `${assigned.toString()} contracts were exercised; that collateral left at the strike`
+                        ? `${assigned.toString()} contracts were exercised; that collateral left at the strike and came back as the strike proceeds`
                         : "a buyer filled the listing and the call expired out of the money";
                   return (
                     <tr key={row.cycle}>
@@ -142,14 +169,15 @@ export default function ActivityPage() {
                       <td>{row.strikeUsdg === undefined ? "—" : fmtUsdg(row.strikeUsdg)}</td>
                       <td>{(row.contracts ?? 0n).toString()}</td>
                       <td>{assigned.toString()}</td>
-                      <td>{fmtUsdg(row.grossUsdg ?? 0n)}</td>
+                      <td>{fmtUsdg(row.premiumGrossUsdg ?? (row.filled ? undefined : 0n))}</td>
                       <td>{fmtUsdg(row.feeUsdg ?? 0n)}</td>
-                      <td>{fmtUsdg(row.netUsdg ?? 0n)}</td>
+                      <td>{fmtUsdg(row.premiumNetUsdg ?? (row.filled ? undefined : 0n))}</td>
+                      <td>{fmtUsdg(row.strikeProceedsUsdg ?? (assigned > 0n ? undefined : 0n))}</td>
                       <td>{perShare === undefined ? "—" : fmtUsdg(perShare, 6)}</td>
-                      <td>{fmtRealizedWeek(row.netUsdg ?? 0n, tvl)}</td>
+                      <td>{fmtRealizedWeek(row.premiumNetUsdg ?? (row.filled ? undefined : 0n), tvl)}</td>
                       <td title={resultLong}>{result}</td>
                       {/* Prefer the closing tx: it is the one carrying the harvest. Truncated
-                          hard so twelve columns still fit a laptop; the full hash is the title. */}
+                          hard so thirteen columns still fit a laptop; the full hash is the title. */}
                       <td>
                         {(() => {
                           const tx = row.txClose ?? row.txOpen;
@@ -170,10 +198,16 @@ export default function ActivityPage() {
         </div>
 
         <p className="tiny faint" style={{ marginTop: 12, marginBottom: 0 }}>
-          &ldquo;Net / TVL&rdquo; is net USDG harvested divided by the vault&apos;s {MARKET} collateral
+          &ldquo;Net / TVL&rdquo; is net premium divided by the vault&apos;s {MARKET} collateral
           valued at the feed spot recorded at harvest. It describes one week and is never scaled to
           a longer period. A dash means the indexer has not recorded a collateral snapshot for that
           harvest.
+        </p>
+        <p className="tiny faint" style={{ marginTop: 6, marginBottom: 0 }}>
+          &ldquo;Strike proceeds&rdquo; is the USDG received on an assigned week for the collateral
+          taken at the strike. It is credited to holders with the premium, but it is returned
+          collateral, not earnings, so it is left out of the premium, net premium, per-share and
+          Net / TVL columns.
         </p>
       </div>
     </>

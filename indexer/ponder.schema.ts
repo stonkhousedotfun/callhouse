@@ -115,7 +115,16 @@ export const vaultState = onchainTable("vault_state", (t) => ({
    * `lifetimeProtocolFee − totalFeeSwept` is the vault's live `pendingFeeUsdg`.
    */
   totalFeeSwept: t.bigint().notNull().default(0n),
+  /**
+   * Premium after the protocol fee, summed over every `Harvest`: `grossUsdg − strike proceeds −
+   * feeUsdg`. PREMIUM ONLY. Before W-21 this summed `Harvest.netUsdg`, which on an assigned week
+   * includes the strike proceeds; that total now lives in `lifetimeCreditedUsdg`.
+   */
   lifetimePremiumNet: t.bigint().notNull().default(0n),
+  /** The strike-proceeds part of every terminal `Harvest` (`RollClose.usdgFromAssignment`). Returned principal. */
+  lifetimeStrikeProceeds: t.bigint().notNull().default(0n),
+  /** Sum of `Harvest.netUsdg`: everything credited to holders. `lifetimePremiumNet + lifetimeStrikeProceeds`. */
+  lifetimeCreditedUsdg: t.bigint().notNull().default(0n),
   cyclesWritten: t.integer().notNull().default(0),
   cyclesFilled: t.integer().notNull().default(0),
   cyclesUnfilled: t.integer().notNull().default(0),
@@ -234,17 +243,25 @@ export const vaultSnapshot = onchainTable(
  * into it, and it survives with zeros if nobody buys. A week with no buyer is a row of zeros,
  * never a missing row.
  *
- * The three money columns the site quotes, and exactly what each one means:
- *   premiumGross   what buyers paid for our calls, INCLUDING Overcall's 5% cut.
- *   fee            the protocol fee taken at harvest: `protocolFeeBps` (launch 500, 5%) of the
- *                  PREMIUM only, on filled weeks only. Strike proceeds are never fee'd, so on an
- *                  assigned week `fee != harvestGross × bps / 10_000`; it is
- *                  `(harvestGross − assignmentUsdg) × bps / 10_000`, per Harvest event.
- *   premiumNet     what depositors actually received, after Overcall's 5% AND the protocol fee.
- *                  `harvestGross − fee`, so on an assigned week it INCLUDES `assignmentUsdg`
- *                  (principal sold at the strike), not only premium.
- * `premiumToVault`, `overcallFee`, `assignmentUsdg` and `harvestGross` are carried alongside
- * so nothing about the two stacked fees has to be inferred.
+ * The money columns the site quotes, and exactly what each one means:
+ *   premiumGross         what buyers paid for our calls, INCLUDING Overcall's 5% cut.
+ *   harvestGross         the vault's whole USDG take as the Harvest events measured it: premium
+ *                        that reached the vault PLUS, on an assigned week, the strike proceeds.
+ *   harvestPremiumGross  `harvestGross − strikeProceeds`: premium only, after Overcall's 5%.
+ *   strikeProceeds       the strike-proceeds part of the terminal harvest
+ *                        (`RollClose.usdgFromAssignment`). Returned principal — collateral that
+ *                        left at the strike — and NEVER yield.
+ *   fee                  the protocol fee taken at harvest: `protocolFeeBps` (launch 500, 5%) of
+ *                        the PREMIUM only. Strike proceeds are never fee'd, so on an assigned week
+ *                        `fee != harvestGross × bps / 10_000`; it is
+ *                        `(harvestGross − assignmentUsdg) × bps / 10_000`, per Harvest event.
+ *   premiumNet           `harvestPremiumGross − fee`. PREMIUM ONLY: the only figure that says
+ *                        what the week earned. (Before W-21 this column was `harvestGross − fee`
+ *                        and included the strike proceeds; that figure is now `creditedUsdg`.)
+ *   creditedUsdg         `harvestGross − fee` = `premiumNet + strikeProceeds`: everything the
+ *                        Distributor credited to holders. Real money, not a return.
+ * `premiumToVault`, `overcallFee` and `assignmentUsdg` are carried alongside so nothing about
+ * the two stacked fees or the assignment has to be inferred. The split is `lib/harvest.ts`.
  */
 export const cycle = onchainTable(
   "cycle",
@@ -320,11 +337,20 @@ export const cycle = onchainTable(
 
     /*── harvest ──*/
     harvested: t.boolean().notNull().default(false),
-    /** Vault's USDG take this cycle, as the Harvest event measured it. */
+    /** Vault's USDG take this cycle, as the Harvest event measured it. Premium + strike proceeds. */
     harvestGross: t.bigint().notNull().default(0n),
+    /** harvestGross − strikeProceeds. Premium only. */
+    harvestPremiumGross: t.bigint().notNull().default(0n),
+    /** Strike proceeds swept by the terminal harvest. Returned principal, not premium. */
+    strikeProceeds: t.bigint().notNull().default(0n),
     fee: t.bigint().notNull().default(0n),
+    /** harvestPremiumGross − fee. Premium only. */
     premiumNet: t.bigint().notNull().default(0n),
-    /** premiumNet per whole share, USDG base units scaled by 1e18. 0 on an unfilled week. */
+    /** harvestGross − fee = premiumNet + strikeProceeds. Everything credited to holders. */
+    creditedUsdg: t.bigint().notNull().default(0n),
+    /** premiumNet per whole share, USDG base units, summed per sweep. 0 on an unfilled week. */
+    premiumNetPerShare: t.bigint().notNull().default(0n),
+    /** creditedUsdg per whole share, USDG base units, summed per sweep. Includes strike proceeds. */
     usdgPerShare: t.bigint().notNull().default(0n),
     supplyAtHarvest: t.bigint().notNull().default(0n),
     harvestedAt: t.bigint(),
@@ -462,7 +488,17 @@ export const harvest = onchainTable(
     feeUsdg: t.bigint().notNull(),
     netUsdg: t.bigint().notNull(),
 
-    /** Where the gross came from, split out. */
+    /**
+     * THIS event's gross, split (lib/harvest.ts). `strikeProceedsUsdg` is non-zero only on the
+     * terminal harvest of an assigned week; `premiumGrossUsdg = grossUsdg − strikeProceedsUsdg`
+     * and `premiumNetUsdg = premiumGrossUsdg − feeUsdg`. `netUsdg` stays the event's own figure,
+     * which includes the strike proceeds.
+     */
+    premiumGrossUsdg: t.bigint().notNull().default(0n),
+    strikeProceedsUsdg: t.bigint().notNull().default(0n),
+    premiumNetUsdg: t.bigint().notNull().default(0n),
+
+    /** The cycle's figures at the time of this harvest, for context. */
     premiumToVault: t.bigint().notNull().default(0n),
     assignmentUsdg: t.bigint().notNull().default(0n),
     contractsSold: t.bigint().notNull().default(0n),
@@ -471,7 +507,9 @@ export const harvest = onchainTable(
     /** Distributor index after this harvest, and the supply it was spread over. */
     accUsdgPerShare: t.bigint().notNull().default(0n),
     supply: t.bigint().notNull().default(0n),
-    /** netUsdg × 1e18 / supply — USDG base units per whole share. */
+    /** premiumNetUsdg × 1e18 / supply — premium only, USDG base units per whole share. */
+    premiumNetPerShare: t.bigint().notNull().default(0n),
+    /** netUsdg × 1e18 / supply — everything credited, including strike proceeds. */
     usdgPerShare: t.bigint().notNull().default(0n),
 
     timestamp: t.bigint().notNull(),

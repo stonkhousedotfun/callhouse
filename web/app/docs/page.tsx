@@ -131,8 +131,14 @@ export default function DocsPage() {
           earned — and vice versa.
         </li>
         <li>
-          <strong>Last week realized</strong> is net USDG harvested per share, plus that net over
+          <strong>Last week realized</strong> is net premium per share, plus that net premium over
           the collateral valued at the feed spot recorded at harvest.
+        </li>
+        <li>
+          <strong>Strike proceeds are not premium.</strong> On an assigned week the USDG that came
+          back for the collateral taken at the strike is credited to holders and claimable, but it
+          is the collateral&apos;s sale price, not earnings. It is shown on its own line as
+          &ldquo;Strike proceeds (assignment)&rdquo; and is left out of every premium figure.
         </li>
         <li>
           <strong>The uiMultiplier is display only.</strong> The Stock Token uses ERC-8056 to express

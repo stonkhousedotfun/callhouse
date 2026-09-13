@@ -16,7 +16,8 @@ import { useTxRunner } from "./TxToast";
  * USDG is never folded into the share price. Premium accrues as `accUsdgPerShare` and is pulled
  * with `claimUsdg()`, so the cNVDA price is a pure Stock Token number and the USDG is a separate,
  * visible balance. A week with no buyer adds exactly nothing here, and that is the point: if this
- * figure does not move, no premium was earned.
+ * figure does not move, no premium was earned. The converse does not hold: on an assigned week
+ * the strike proceeds are credited through the same index, so a move here is not all premium.
  *
  * The per-share index is also what keeps a mid-week deposit honest: `deposit` runs
  * `_checkpointHarvest()` BEFORE minting, folding everything earned so far into the index, so a
@@ -87,6 +88,12 @@ export function UsdgClaim({
           <span className="v">{fmtUsdg(snapshot.totalUsdgDistributed)} USDG</span>
         </div>
       </div>
+      {/* The Distributor credits strike proceeds through the same index as premium, so these
+          two figures include both. Said here so neither reads as earnings (W-21). */}
+      <p className="tiny faint" style={{ marginTop: 8, marginBottom: 0 }}>
+        Includes strike proceeds from assigned weeks, which are returned collateral rather than
+        premium.
+      </p>
 
       <div style={{ marginTop: 14 }}>
         {!isConnected ? (
