@@ -4,8 +4,8 @@ Callhouse is **not launchable yet**. The contracts and the keeper are proven on 
 Legal, CI, the external audit, deployment and hosting are not done. The full tracker is
 `tasks.md`, and its "Session log" and "Next, in order" sections go deeper than this page.
 
-**Nothing from 2026-09-13 is committed.** `main` on GitHub (`leekzor/callhouse`, private) is still
-`27d502a`. Commit the files listed below first.
+**2026-09-13's work is committed locally as `8ff8bef`, with the DRYRUN.md proofread committed on
+top — not pushed.** `main` on GitHub (`leekzor/callhouse`, private) is still `27d502a`.
 
 ## State of the gates
 
@@ -28,10 +28,12 @@ Legal, CI, the external audit, deployment and hosting are not done. The full tra
   fixes were spot-checked by hand. The second check round was lost to the usage limit.
 - **`ops/safes.md` §4 corrected.** Its grep proof missed the fee transfer, which is a raw `.call`.
 - `keeper/dryrun-out/` added to `.gitignore`.
-- `keeper/DRYRUN.md` was rewritten by an agent that was stopped at the usage limit. All sections
-  are present, but nobody has proofread it against `keeper/dryrun-out/2026-09-13T05-49-32-373Z/report.md`.
+- `keeper/DRYRUN.md` rewritten for the three-cycle run and **proofread against the run report**
+  (`report.md`, `run.json`, `keeper.db` in `keeper/dryrun-out/2026-09-13T05-49-32-373Z/`). Every
+  hash, block, gas figure, amount, address and alert matched; one error found and fixed (the
+  Overcall validator's check count, now R3's 0–12 table), and the run's commit ref added.
 
-Uncommitted files:
+Committed as `8ff8bef`:
 
 ```
 .gitignore  HANDOFF.md  tasks.md  ops/safes.md  docs/AUDIT-SCOPE.md
@@ -51,7 +53,8 @@ keeper/src/roll.ts  keeper/src/abi.ts  keeper/src/roll.test.ts  keeper/src/roll.
 
 ## Next, in order
 
-1. Commit this work, then proofread `keeper/DRYRUN.md` against the run report.
+1. ~~Commit this work, then proofread `keeper/DRYRUN.md` against the run report.~~ Done
+   (2026-09-13): `8ff8bef` locally, proofread commit on top, one error fixed. Still to push.
 2. Fix GitHub billing (L-01) and start legal (L-05). Legal is the longest pole.
 3. Decide the fee question above.
 4. Audit prep: work through the D-05 housekeeping list in `tasks.md`, pin a commit, send

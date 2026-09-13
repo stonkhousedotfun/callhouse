@@ -25,7 +25,7 @@ the harness. The "What was stubbed" section is the list of things this run does 
 | Keeper code | `roll.ts` (`reconcile`, `tick`, `snapshot`, `contractsAssignedAt`, `resolveContractsAssigned`), `state.ts`, `policy.ts`, `seaport.ts`, `overcallApi.ts`, `alerts.ts`, `health.ts`, `clients.ts`, `config.ts`, `abi.ts`, `logger.ts` — all imported unmodified after the harness set the environment |
 | Change under test | `roll.ts`: `contractsAssignedAt` returns `null` plus a warn log on a failed Valorem read instead of a silent 0; new pure, exported `resolveContractsAssigned(receipt, assignedBefore)` publishes the `RollClose` event count when present, falls back to the pre-close Valorem claim read otherwise, and flags a mismatch; `roll_close` alert data gains `contractsAssignedSource` and `contractsAssignedFromClaim`. `abi.ts`: `clearAbi` gains `error TokenNotFound(uint256)`. Keeper unit tests 66/66 on this tree (59 before, plus 3 `resolveContractsAssigned` tests in `roll.test.ts` and 4 `contractsAssignedAt` tests in the new `roll.close.test.ts`) |
 | Not exercised | `index.ts` (the timer loop and SIGTERM handling; the harness calls `tick()` directly) |
-| Commit | uncommitted tree on top of 27d502a, 2026-09-13; the `contracts/out` Vault artifact passed the harness's link check (link references exactly `SeaportOrderLib` and `ValoremLib`, linked at 2 and 3 sites) |
+| Commit | run on the uncommitted tree on top of 27d502a, 2026-09-13; committed as 8ff8bef; the `contracts/out` Vault artifact passed the harness's link check (link references exactly `SeaportOrderLib` and `ValoremLib`, linked at 2 and 3 sites) |
 
 ## Actors and deployments on the fork
 
@@ -283,8 +283,9 @@ components with the keeper's own `localOrderHash`, which the keeper had already 
   `lockBook`, the exercise, `rollClose` or the queue reads spot, and Valorem settles physically
   with no oracle, so the move is the narrative of the week, not its mechanism.
 - **Overcall's listings API is a stub.** It implements the recon-R3 shapes and status codes and
-  the keeper's client ran unmodified against it, but the real validator's nine checks (and its
-  500 on a hash mismatch) were not exercised. That needs a mainnet listing.
+  the keeper's client ran unmodified against it, but the real validator's documented checks
+  (R3's 0–12 validation table, including the 500 on a hash mismatch at check 7) were not
+  exercised. That needs a mainnet listing.
 - **Token balances were written into storage** (NVDA at the ERC-7201 slot
   `0x52c63247…bace00`, USDG at base slot 1), including the buyer's 2025000000 USDG6 for the
   exercise. Nobody here holds real Stock Tokens.

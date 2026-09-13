@@ -59,7 +59,14 @@ Done, each verified by a run rather than by a report:
 - **Found, not yet acted on**: the protocol fee is charged on strike proceeds (open question 3), the
   alert and cycle tape call strike proceeds "harvested" (K-21), and seven places where our own docs
   contradict the code (D-05).
-- `keeper/dryrun-out/` added to `.gitignore`. **Nothing from this session is committed yet.**
+- **`keeper/DRYRUN.md` proofread** against the run artefacts (`report.md`, `run.json`, `keeper.db`
+  in `keeper/dryrun-out/2026-09-13T05-49-32-373Z/`): every transaction hash, block, gas figure,
+  amount, timestamp, address, alert payload (`delivered`, `contractsAssignedSource`/`FromClaim`
+  0/0, 0/0, 9/9), Seaport counter, policy parameter and stub request matched. One error found and
+  fixed: "the real validator's nine checks" → R3's 0–12 validation table (the 500 on a hash
+  mismatch is check 7). The run's commit ref was added.
+- `keeper/dryrun-out/` added to `.gitignore`. **The session's work is committed locally as
+  `8ff8bef` (proofread fixes on top); not pushed — GitHub `main` is still `27d502a`.**
 
 ### Next, in order
 
