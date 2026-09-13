@@ -4,6 +4,7 @@ import { CHAIN_ID, publicClient } from "@/lib/chain";
 import { CLEARINGHOUSE, SEAPORT, USDG, VAULT } from "@/lib/contracts";
 import {
   serveKeeperOrders,
+  shareWhileRunning,
   viemKeeperChainReader,
   type KeeperChainReader,
   type KeeperOrdersBody,
@@ -20,15 +21,18 @@ import {
  *
  * WHAT IT WILL NOT DO: read anything from the request. No query string, no body and no header
  * reaches the upstream call, so the route cannot be pointed at another host. Redirects are not
- * followed. The keeper's answer is capped in bytes and in time (lib/keeperOrders.ts).
+ * followed. The keeper's answer is capped in bytes, in order count and in time, and the chain
+ * reads have their own deadline (lib/keeperOrders.ts), so the route answers well inside the
+ * fifteen seconds the browser waits.
  *
- * WHAT IT DOES NOT BELIEVE: the keeper. Every order is rebuilt from its parameters with Seaport's
- * counter read from the chain, hashed by Seaport, and served only if that hash is the vault's
- * listingHash() and the order is the vault's in every field a fill spends against. The rest are
- * logged here and returned under `rejected`. lib/keeperOrders.ts carries the full list.
+ * WHAT IT DOES NOT BELIEVE: the keeper. Every order that names the vault's listingHash is rebuilt
+ * from its parameters with Seaport's counter read from the chain, hashed locally and by Seaport,
+ * and served only if it is the vault's order in every field a fill spends against. What it
+ * returns under `rejected`, `closed` and `unchecked` is described in lib/keeperOrders.ts.
  *
- * Answers are shared for two seconds, so many open cycle pages cost one keeper request and one
- * chain batch, not one each.
+ * SHARING: one computation serves every request that arrives while it runs, and for two seconds
+ * after it settles, so many open cycle pages cost one keeper request and one chain batch, and a
+ * slow RPC does not stack a new batch on every poll.
  */
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
@@ -36,7 +40,6 @@ export const runtime = "nodejs";
 const SHARE_MS = 2_000;
 
 type Answer = { status: number; body: KeeperOrdersBody };
-let shared: { url: string | undefined; at: number; answer: Promise<Answer> } | null = null;
 
 let reader: KeeperChainReader | null = null;
 function chainReader(): KeeperChainReader {
@@ -45,26 +48,29 @@ function chainReader(): KeeperChainReader {
   return reader;
 }
 
-function answer(): Promise<Answer> {
-  const keeperOrdersUrl = process.env.KEEPER_ORDERS_URL;
-  const now = Date.now();
-  if (shared !== null && shared.url === keeperOrdersUrl && now - shared.at < SHARE_MS) return shared.answer;
-  const fresh = serveKeeperOrders({
-    keeperOrdersUrl,
-    config: { vault: VAULT, usdg: USDG, clearinghouse: CLEARINGHOUSE, seaport: SEAPORT, chainId: CHAIN_ID },
-    chain: {
-      vaultListing: () => chainReader().vaultListing(),
-      getCounter: (offerer) => chainReader().getCounter(offerer),
-      getOrderHash: (components) => chainReader().getOrderHash(components),
-      getOrderStatus: (orderHash) => chainReader().getOrderStatus(orderHash),
-    },
-    nowSeconds: Math.floor(now / 1000),
-  });
-  shared = { url: keeperOrdersUrl, at: now, answer: fresh };
-  return fresh;
-}
+const UNEXPECTED = "The fallback route could not check the keeper's orders.";
+
+// Keyed by the URL, so a changed KEEPER_ORDERS_URL never reuses an answer from the old one.
+const answer = shareWhileRunning(
+  (keeperOrdersUrl): Promise<Answer> =>
+    serveKeeperOrders({
+      keeperOrdersUrl,
+      config: { vault: VAULT, usdg: USDG, clearinghouse: CLEARINGHOUSE, seaport: SEAPORT, chainId: CHAIN_ID },
+      chain: {
+        readState: (query) => chainReader().readState(query),
+        getOrderHashes: (components) => chainReader().getOrderHashes(components),
+      },
+      nowSeconds: Math.floor(Date.now() / 1000),
+    }).catch(
+      (): Answer => ({
+        status: 502,
+        body: { configured: true, orders: [], rejected: [], closed: [], unchecked: [], error: UNEXPECTED },
+      }),
+    ),
+  { shareMs: SHARE_MS },
+);
 
 export async function GET() {
-  const { status, body } = await answer();
+  const { status, body } = await answer(process.env.KEEPER_ORDERS_URL);
   return NextResponse.json(body, { status, headers: { "cache-control": "no-store" } });
 }

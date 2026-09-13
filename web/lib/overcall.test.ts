@@ -8,8 +8,10 @@ import {
   checkListingIsOurs,
   isOrderComponents,
   isOvercallListing,
+  type OrderComponentsJson,
   type OvercallListing,
 } from "./overcall";
+import { componentsHash } from "./seaportOrder";
 
 /**
  * One good listing, then one tampering per test.
@@ -21,16 +23,20 @@ import {
  * — with hex letters in it, so the case-insensitivity test actually varies the case of something.
  *
  * `expected` carries what the vault's multicall returns: the hash and, from the same
- * approveListing() call, listingAmount, listingGrossUsdg and optionId.
+ * approveListing() call, listingAmount, listingGrossUsdg and optionId. HASH is the real Seaport
+ * EIP-712 hash of the fixture's components, because the check hashes them and compares.
  *
  * Each tampering must fail with its own reason string — a check that fails for the wrong
- * reason is a check that is not looking at the field it claims to.
+ * reason is a check that is not looking at the field it claims to. A tampering that edits the
+ * components also moves their hash, so the field checks are run twice where it matters: once as
+ * an attacker would serve it (our hash string kept, so `componentsHash` joins the field's own
+ * reason) and once `resigned`, as if the vault had authorised the edited order, so the field's
+ * reason is shown to stand on its own.
  */
 const VAULT_T = "0xabcdefabcdefabcdefabcdefabcdefabcdefabcd" as const;
 const STRANGER = "0x2222222222222222222222222222222222222222" as const;
 /** The Stock Token: a real ERC-20 on this chain that is not USDG. */
 const OTHER_ERC20 = "0xd0601CE157Db5bdC3162BbaC2a2C8aF5320D9EEC" as const;
-const HASH = "0xa11edb6292fa1789a13419830d5bd1b5a0145954d3e8352bb6ff776ca67de522" as const;
 const OTHER_HASH = "0x0000000000000000000000000000000000000000000000000000000000000abc" as const;
 const ZERO32 = `0x${"0".repeat(64)}` as const;
 const OPTION_ID = "56885395977254369119998982131173877604217583767740146085872832926902011297792";
@@ -38,9 +44,24 @@ const OPTION_ID = "5688539597725436911999898213117387760421758376774014608587283
 const NOW = 1_789_000_000;
 const END = String(NOW + 3600);
 
+function goodComponents(): OrderComponentsJson {
+  return goodListingWithHash("0x" as Hex).components;
+}
+
+const HASH = componentsHash(goodComponents())!;
+
 function goodListing(): OvercallListing {
+  return goodListingWithHash(HASH);
+}
+
+/** The listing with its orderHash re-derived from its (edited) components. */
+function resigned(l: OvercallListing): OvercallListing {
+  return { ...l, orderHash: componentsHash(l.components)! };
+}
+
+function goodListingWithHash(orderHash: Hex): OvercallListing {
   return {
-    orderHash: HASH,
+    orderHash,
     chainId: 4663,
     offerer: VAULT_T,
     optionId: OPTION_ID,
@@ -112,6 +133,12 @@ function reasonsOf(listing: OvercallListing, override: Partial<typeof expected> 
   return result.ok ? [] : result.reasons;
 }
 
+/** Reasons for a listing whose hash the vault is taken to have authorised: the field checks alone. */
+function fieldReasonsOf(listing: OvercallListing, override: Partial<typeof expected> = {}): string[] {
+  const signed = resigned(listing);
+  return reasonsOf(signed, { listingHash: signed.orderHash, ...override });
+}
+
 describe("checkListingIsOurs", () => {
   it("accepts the vault's own listing", () => {
     expect(checkListingIsOurs(goodListing(), expected, NOW)).toEqual({ ok: true });
@@ -170,9 +197,37 @@ describe("checkListingIsOurs", () => {
   });
 
   it("rejects an order hash that is not the vault's authorised one", () => {
+    // A real, self-consistent order: its components hash to its orderHash, which is not ours.
+    const other = goodListing();
+    other.components.salt = "1";
+    expect(reasonsOf(resigned(other))).toEqual([REASONS.hashMismatch]);
+    // A made-up string is both not ours and not what the components hash to.
     const l = goodListing();
     l.orderHash = OTHER_HASH;
-    expect(reasonsOf(l)).toEqual([REASONS.hashMismatch]);
+    expect(reasonsOf(l)).toEqual([REASONS.hashMismatch, REASONS.componentsHash]);
+  });
+
+  it("binds salt, counter, start time and zone hash to the hash: a row cannot keep our hash and edit them", () => {
+    // Every field check passes on each of these, and the hash string is ours. Before the
+    // components were hashed, each one showed a fill button whose fulfilment would revert.
+    const salt = goodListing();
+    salt.components.salt = (BigInt(salt.components.salt) + 1n).toString();
+    const counter = goodListing();
+    counter.components.counter = "7";
+    const start = goodListing();
+    start.components.startTime = "1";
+    const zoneHash = goodListing();
+    zoneHash.components.zoneHash = `0x${"00".repeat(31)}01`;
+    for (const l of [salt, counter, start, zoneHash]) {
+      expect(reasonsOf(l)).toEqual([REASONS.componentsHash]);
+    }
+  });
+
+  it("reports components that cannot be hashed as a reason rather than throwing", () => {
+    const l = goodListing();
+    l.components.offer[0]!.startAmount = "twenty";
+    expect(() => checkListingIsOurs(l, expected, NOW)).not.toThrow();
+    expect(reasonsOf(l)).toContain(REASONS.componentsHash);
   });
 
   it("refuses while the vault's hash is unread or empty", () => {
@@ -211,12 +266,12 @@ describe("checkListingIsOurs", () => {
     l.components.consideration[0]!.endAmount = "76000019";
     l.components.consideration[1]!.startAmount = "4000001";
     l.components.consideration[1]!.endAmount = "4000001";
-    expect(reasonsOf(l, { grossUsdg: 80_000_020n })).toEqual([REASONS.feeSplit]);
+    expect(fieldReasonsOf(l, { grossUsdg: 80_000_020n })).toEqual([REASONS.feeSplit]);
 
     const perContract = goodListing();
     perContract.components.consideration[0]!.startAmount = "76000020";
     perContract.components.consideration[0]!.endAmount = "76000020";
-    expect(reasonsOf(perContract, { grossUsdg: 80_000_020n })).toEqual([]);
+    expect(fieldReasonsOf(perContract, { grossUsdg: 80_000_020n })).toEqual([]);
   });
 
   it("rejects a contract count that is not the vault's listingAmount", () => {
@@ -229,8 +284,9 @@ describe("checkListingIsOurs", () => {
     l.components.consideration[0]!.endAmount = "152000000";
     l.components.consideration[1]!.startAmount = "8000000";
     l.components.consideration[1]!.endAmount = "8000000";
-    expect(reasonsOf(l)).toEqual([REASONS.amountMismatch, REASONS.grossMismatch]);
-    expect(reasonsOf(l, { amount: 40n, grossUsdg: 160_000_000n })).toEqual([]);
+    expect(reasonsOf(l)).toEqual([REASONS.amountMismatch, REASONS.grossMismatch, REASONS.componentsHash]);
+    expect(fieldReasonsOf(l)).toEqual([REASONS.amountMismatch, REASONS.grossMismatch]);
+    expect(fieldReasonsOf(l, { amount: 40n, grossUsdg: 160_000_000n })).toEqual([]);
   });
 
   it("rejects a price that is not the vault's listingGrossUsdg", () => {
@@ -241,13 +297,15 @@ describe("checkListingIsOurs", () => {
     l.components.consideration[0]!.endAmount = "760000000";
     l.components.consideration[1]!.startAmount = "40000000";
     l.components.consideration[1]!.endAmount = "40000000";
-    expect(reasonsOf(l)).toEqual([REASONS.grossMismatch]);
+    expect(reasonsOf(l)).toEqual([REASONS.grossMismatch, REASONS.componentsHash]);
+    expect(fieldReasonsOf(l)).toEqual([REASONS.grossMismatch]);
   });
 
   it("rejects an option id that is not the vault's optionId", () => {
     const l = goodListing();
     l.components.offer[0]!.identifierOrCriteria = "12345";
-    expect(reasonsOf(l)).toEqual([REASONS.optionIdMismatch]);
+    expect(reasonsOf(l)).toEqual([REASONS.optionIdMismatch, REASONS.componentsHash]);
+    expect(fieldReasonsOf(l)).toEqual([REASONS.optionIdMismatch]);
   });
 
   it("falls back to a hash-only check when the caller has no on-chain amounts", () => {
@@ -257,7 +315,11 @@ describe("checkListingIsOurs", () => {
     l.components.consideration[1]!.startAmount = "40000000";
     l.components.consideration[1]!.endAmount = "40000000";
     l.components.offer[0]!.identifierOrCriteria = "12345";
-    expect(reasonsOf(l, { amount: undefined, grossUsdg: undefined, optionId: undefined })).toEqual([]);
+    const noAmounts = { amount: undefined, grossUsdg: undefined, optionId: undefined };
+    expect(fieldReasonsOf(l, noAmounts)).toEqual([]);
+    // Even without the amounts, the hash is now bound to the components: our hash string on
+    // edited components is refused.
+    expect(reasonsOf(l, noAmounts)).toEqual([REASONS.componentsHash]);
   });
 
   it("reports a malformed amount as a reason rather than throwing", () => {
@@ -265,11 +327,11 @@ describe("checkListingIsOurs", () => {
     l.components.consideration[0]!.startAmount = "1e6";
     l.components.consideration[0]!.endAmount = "1e6";
     expect(() => checkListingIsOurs(l, expected, NOW)).not.toThrow();
-    expect(reasonsOf(l)).toEqual([REASONS.malformedAmount]);
+    expect(reasonsOf(l)).toEqual([REASONS.malformedAmount, REASONS.componentsHash]);
 
     const badId = goodListing();
     badId.components.offer[0]!.identifierOrCriteria = "0xabc";
-    expect(reasonsOf(badId)).toEqual([REASONS.malformedAmount]);
+    expect(reasonsOf(badId)).toEqual([REASONS.malformedAmount, REASONS.componentsHash]);
   });
 
   it("rejects a fee leg that skims more than 5%", () => {
@@ -278,7 +340,7 @@ describe("checkListingIsOurs", () => {
     l.components.consideration[0]!.endAmount = "60000000";
     l.components.consideration[1]!.startAmount = "20000000";
     l.components.consideration[1]!.endAmount = "20000000";
-    expect(reasonsOf(l)).toEqual([REASONS.feeSplit]);
+    expect(fieldReasonsOf(l)).toEqual([REASONS.feeSplit]);
   });
 
   it("rejects an amount that drifts between start and end", () => {
@@ -304,7 +366,7 @@ describe("checkListingIsOurs", () => {
     l.offerer = STRANGER;
     l.components.consideration[1]!.recipient = STRANGER;
     l.orderHash = OTHER_HASH;
-    expect(reasonsOf(l)).toEqual([REASONS.seller, REASONS.feeRecipient, REASONS.hashMismatch]);
+    expect(reasonsOf(l)).toEqual([REASONS.seller, REASONS.feeRecipient, REASONS.hashMismatch, REASONS.componentsHash]);
   });
 
   it("rejects a row whose offerer disagrees with the signed components", () => {

@@ -64,6 +64,7 @@ What is pinned, because each of these is a week of premium when it drifts:
 | `roll.relist.test.ts` | a Listed tick with `listingHash == 0` retires every still-offered row of the cycle — Seaport-cancelled, counter-invalidated (never `isCancelled`), or filled before the cancel — tells the book, and leaves `/orders` serving none of them (the defect `dryrun-extended.ts` found) |
 | `alerts.test.ts` | the cooldown clock: a failed webhook delivery retries after five minutes, a successful one suppresses for the full `KEEPER_ALERT_COOLDOWN_MS` |
 | `config.test.ts` | the schema's hard edges: bigint fields reject `-1` loudly (it parses, and would silently switch the low-gas alert off) |
+| `health.test.ts` | the HTTP server listens with no pinned host: it answers on `127.0.0.1` and on `::1`, which is what the web app's fallback needs to reach `/orders` over Railway's IPv6 private network (a pinned `0.0.0.0` fails it) |
 
 ### Dry run against a fork
 

@@ -1,6 +1,7 @@
 import type { Address, Hex } from "viem";
 
 import { OVERCALL_FEE_BPS, OVERCALL_FEE_RECIPIENT, ZERO_ADDRESS, ZERO_HASH } from "./contracts";
+import { componentsHash } from "./seaportOrder";
 
 /**
  * Guards for Overcall's listing JSON, and the check that a listing is OURS before a buyer's
@@ -15,14 +16,18 @@ import { OVERCALL_FEE_BPS, OVERCALL_FEE_RECIPIENT, ZERO_ADDRESS, ZERO_HASH } fro
  * records three more facts about it at approveListing(): `listingAmount` (the contract count),
  * `listingGrossUsdg` (both payment legs summed) and `optionId` (the ERC-1155 id on offer).
  * Everything Overcall serves is checked against all four and against the addresses compiled into
- * contracts.ts. The hash alone is not enough: Overcall's `orderHash` is their string, and a row
- * that keeps our hash but carries components at ten times the price would still be quoted, and
- * approved, at that price before Seaport ever recomputed the hash. Pinning the amounts to the
- * chain closes that. EIP-1271 would reject a tampered hash at fill time, but that backstop has
- * never been exercised against Overcall's live server and the approve() before it has already
- * happened.
+ * contracts.ts. The hash string alone is not enough: Overcall's `orderHash` is their string, and
+ * a row that keeps our hash but carries components at ten times the price would still be quoted,
+ * and approved, at that price before Seaport ever recomputed the hash. Pinning the amounts to the
+ * chain closes that. So does the second half: the components are hashed here, locally, with
+ * Seaport's own EIP-712 derivation (lib/seaportOrder.ts), and must hash to the row's orderHash.
+ * Without it a row could carry our hash and our amounts but a different salt, counter, start time
+ * or zone hash, pass every field check, and revert at fulfilment after the buyer's approve(),
+ * because Seaport would hash the edited components to a hash the vault never authorised. EIP-1271
+ * would reject that at fill time, but that backstop has never been exercised against Overcall's
+ * live server and the approve() before it has already happened.
  *
- * DELIBERATELY ABSENT: React, fetch, Date.now(), zod. Pure functions over `unknown`, so the
+ * DELIBERATELY ABSENT: React, fetch, Date.now(), zod, a chain client. Pure functions over `unknown`, so the
  * proxy route and the component share one definition of "well-formed" and one of "ours", and
  * so the whole thing runs under vitest with fixtures. The keeper carries the same shape in zod
  * (keeper/src/overcallApi.ts, keeper/src/seaport.ts); the field list below mirrors it.
@@ -239,6 +244,8 @@ export const REASONS = {
   hashUnread: "The vault's authorised order hash has not been read yet, so this listing cannot be checked against it.",
   hashNone: "The vault has no listing authorised on chain right now, so nothing on Overcall's book can be ours.",
   hashMismatch: "This listing's order hash is not the one the vault has authorised on chain.",
+  componentsHash:
+    "This listing's signed fields do not hash to its order hash, so a fill would not be the order the vault authorised.",
   expired: "This listing's end time has passed.",
   chain: "This listing is for a different chain.",
   offererMismatch: "The row's offerer does not match the signed order's offerer.",
@@ -388,6 +395,11 @@ export function checkListingIsOurs(
   if (expected.listingHash === undefined) reasons.push(REASONS.hashUnread);
   else if (isZeroHash(expected.listingHash)) reasons.push(REASONS.hashNone);
   else if (!sameHash(listing.orderHash, expected.listingHash)) reasons.push(REASONS.hashMismatch);
+
+  // Component substitution: the hash string above is the row's claim. Seaport hashes the
+  // components the fill sends, so those must hash to that string, or salt, counter, start time
+  // and zone hash (which no field check above looks at) are not tied to the authorised order.
+  if (!sameHash(componentsHash(c), listing.orderHash)) reasons.push(REASONS.componentsHash);
 
   // Stale order: a fill after endTime reverts, but the approve() before it would still stand.
   if (!DECIMAL.test(c.endTime) || BigInt(c.endTime) <= BigInt(Math.floor(nowSeconds))) {

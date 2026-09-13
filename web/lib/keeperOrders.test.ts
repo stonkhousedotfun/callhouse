@@ -2,8 +2,9 @@ import { createServer, type IncomingMessage, type Server, type ServerResponse } 
 import type { AddressInfo } from "node:net";
 
 import { getAddress, type Address, type Hex } from "viem";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
+import { fetchKeeperOrderBook } from "./api";
 import { CLEARINGHOUSE, OVERCALL_FEE_RECIPIENT, SEAPORT, USDG } from "./contracts";
 import {
   KEEPER_MAX_ORDERS,
@@ -17,11 +18,18 @@ import {
   seaportOrderHash,
   serveKeeperOrders,
   verifyKeeperOrders,
+  CHAIN_DEADLINE_MS,
+  KEEPER_TIMEOUT_MS,
+  VAULT_UNREADABLE,
+  chainTimedOut,
+  shareWhileRunning,
   type KeeperChainReader,
   type KeeperCheckConfig,
   type KeeperOrderJson,
   type OrderComponentsStruct,
+  type VaultListingSlot,
 } from "./keeperOrders";
+import type { SeaportFillStatus } from "./seaportOrder";
 import { REASONS, checkListingIsOurs } from "./overcall";
 
 /**
@@ -106,50 +114,80 @@ function keeperEntry(parameters: Parameters = goodParameters(), counter: bigint 
   };
 }
 
-type Slot = Awaited<ReturnType<KeeperChainReader["vaultListing"]>>;
+const AUTHORISED = hashOf(goodParameters(), COUNTER);
+
+/** An entry that names the vault's authorised hash whatever its parameters hash to: the shape a
+ *  tampered or buggy keeper serves. */
+function claimingAuthorised(parameters: Parameters) {
+  return { ...keeperEntry(parameters), orderHash: AUTHORISED };
+}
+
+type ReadStateQuery = { offerers: readonly Address[]; orderHashes: readonly Hex[] };
 
 function fakeChain(overrides: {
-  slot?: Partial<Slot>;
+  slot?: Partial<VaultListingSlot>;
   counters?: Record<string, bigint>;
-  status?: { isCancelled: boolean; totalFilled: bigint; totalSize: bigint };
+  status?: SeaportFillStatus;
   failCounterFor?: Address;
+  failStatus?: boolean;
   failVault?: boolean;
+  failOrderHash?: boolean;
+  /** Seaport's getOrderHash answers something other than the EIP-712 derivation. */
+  skewOrderHash?: boolean;
+  /** readState never answers. */
+  hang?: boolean;
 } = {}) {
-  const calls = { getCounter: [] as Address[], getOrderHash: [] as OrderComponentsStruct[], vaultListing: 0 };
+  const calls = { readState: [] as ReadStateQuery[], getOrderHashes: [] as OrderComponentsStruct[][] };
   const reader: KeeperChainReader = {
-    async vaultListing() {
-      calls.vaultListing += 1;
+    async readState(query) {
+      calls.readState.push({ offerers: [...query.offerers], orderHashes: [...query.orderHashes] });
+      if (overrides.hang) await new Promise(() => {});
       if (overrides.failVault) throw new Error("rpc down");
+      const counters = overrides.counters ?? { [VAULT_T]: COUNTER };
       return {
-        phase: 1,
-        listingHash: hashOf(goodParameters(), COUNTER),
-        listingAmount: 20n,
-        listingGrossUsdg: 80_000_000n,
-        optionId: BigInt(OPTION_ID),
-        ...overrides.slot,
+        vault: {
+          phase: 1,
+          listingHash: AUTHORISED,
+          listingAmount: 20n,
+          listingGrossUsdg: 80_000_000n,
+          optionId: BigInt(OPTION_ID),
+          ...overrides.slot,
+        },
+        counters: query.offerers.map((o) => (o === overrides.failCounterFor ? undefined : (counters[o] ?? 0n))),
+        statuses: query.orderHashes.map(() =>
+          overrides.failStatus ? undefined : (overrides.status ?? { isCancelled: false, totalFilled: 0n, totalSize: 0n }),
+        ),
       };
     },
-    async getCounter(offerer) {
-      calls.getCounter.push(offerer);
-      if (overrides.failCounterFor !== undefined && offerer === overrides.failCounterFor) throw new Error("rpc down");
-      return (overrides.counters ?? { [VAULT_T]: COUNTER })[offerer] ?? 0n;
-    },
-    async getOrderHash(components) {
-      calls.getOrderHash.push(components);
-      return seaportOrderHash(components);
-    },
-    async getOrderStatus() {
-      return overrides.status ?? { isCancelled: false, totalFilled: 0n, totalSize: 0n };
+    async getOrderHashes(components) {
+      calls.getOrderHashes.push([...components]);
+      if (overrides.failOrderHash) throw new Error("rpc down");
+      return components.map((c) => (overrides.skewOrderHash ? ZERO32.replace(/0$/, "1") as Hex : seaportOrderHash(c)));
     },
   };
   return { reader, calls };
 }
 
+async function verifyOne(entry: unknown, chain = fakeChain().reader, now = NOW) {
+  return verifyKeeperOrders([entry], chain, CONFIG, now);
+}
+
 async function reasonsFor(entry: unknown, chain = fakeChain().reader, now = NOW): Promise<string[]> {
-  const { orders, rejected } = await verifyKeeperOrders([entry], chain, CONFIG, now);
+  const { orders, rejected, closed, unchecked } = await verifyOne(entry, chain, now);
   expect(orders).toEqual([]);
+  expect(closed).toEqual([]);
+  expect(unchecked).toEqual([]);
   expect(rejected).toHaveLength(1);
   return rejected[0]!.reasons;
+}
+
+async function stateOf(entry: unknown, chain = fakeChain().reader, now = NOW) {
+  const { orders, rejected, closed, unchecked } = await verifyOne(entry, chain, now);
+  expect(orders).toEqual([]);
+  expect(rejected).toEqual([]);
+  expect(unchecked).toEqual([]);
+  expect(closed).toHaveLength(1);
+  return closed[0]!;
 }
 
 /*//////////////////////////////////////////////////////////////
@@ -159,22 +197,24 @@ async function reasonsFor(entry: unknown, chain = fakeChain().reader, now = NOW)
 describe("verifyKeeperOrders", () => {
   it("accepts the vault's order, restoring Seaport's counter from the chain", async () => {
     const { reader, calls } = fakeChain();
-    const { orders, rejected } = await verifyKeeperOrders([keeperEntry()], reader, CONFIG, NOW);
+    const { orders, rejected, closed, unchecked } = await verifyKeeperOrders([keeperEntry()], reader, CONFIG, NOW);
     expect(rejected).toEqual([]);
+    expect(closed).toEqual([]);
+    expect(unchecked).toEqual([]);
     expect(orders).toHaveLength(1);
     const row = orders[0]!;
 
     // The counter came from Seaport for the offerer, and it is what was hashed.
-    expect(calls.getCounter).toEqual([VAULT_T]);
-    expect(calls.getOrderHash.map((c) => c.counter)).toEqual([COUNTER]);
+    expect(calls.readState).toEqual([{ offerers: [VAULT_T], orderHashes: [AUTHORISED] }]);
+    expect(calls.getOrderHashes.map((batch) => batch.map((c) => c.counter))).toEqual([[COUNTER]]);
     expect(row.components.counter).toBe("7");
     expect(row.counter).toBe("7");
     // Without the restore the hash is a different order: the check would be looking at nothing.
-    expect(hashOf(goodParameters(), 0n)).not.toBe(hashOf(goodParameters(), COUNTER));
-    expect(row.orderHash).toBe(hashOf(goodParameters(), COUNTER).toLowerCase());
+    expect(hashOf(goodParameters(), 0n)).not.toBe(AUTHORISED);
+    expect(row.orderHash).toBe(AUTHORISED);
 
     // The row is a book row the page's own check accepts, with figures from the components.
-    const slot = await reader.vaultListing();
+    const slot = (await reader.readState({ offerers: [], orderHashes: [] })).vault;
     const pageCheck = checkListingIsOurs(
       row,
       {
@@ -230,23 +270,69 @@ describe("verifyKeeperOrders", () => {
     expect(orders[0]).toMatchObject({ remaining: "15", status: "partial", quantity: "20" });
   });
 
-  it("rejects an order whose hash is not the vault's listingHash", async () => {
+  it("reads every stateful fact in one readState call, so from one block", async () => {
+    const stranger = goodParameters();
+    stranger.offerer = STRANGER;
+    const older = goodParameters();
+    older.salt = "1";
+    const { reader, calls } = fakeChain();
+    await verifyKeeperOrders([keeperEntry(), keeperEntry(stranger, 0n), keeperEntry(older)], reader, CONFIG, NOW);
+    expect(calls.readState).toHaveLength(1);
+    expect(calls.readState[0]!.offerers).toEqual([VAULT_T, STRANGER]);
+    expect(calls.readState[0]!.orderHashes).toHaveLength(3);
+    // Only the order that names the authorised hash is hashed by Seaport.
+    expect(calls.getOrderHashes).toHaveLength(1);
+    expect(calls.getOrderHashes[0]).toHaveLength(1);
+  });
+
+  it("reports an order that is not the vault's current listing as closed, not as tampering", async () => {
     // A well-formed, correctly hashed order of the vault's, but not the one it authorised.
     const other = goodParameters();
     other.salt = "1";
-    const reasons = await reasonsFor(keeperEntry(other));
-    expect(reasons).toContain(REASONS.hashMismatch);
-    expect(reasons).not.toContain(KEEPER_REASONS.claimedHash);
+    const { reader, calls } = fakeChain();
+    expect(await stateOf(keeperEntry(other), reader)).toEqual({ orderHash: hashOf(other, COUNTER), state: "notCurrent" });
+    expect(calls.getOrderHashes).toEqual([]);
   });
 
-  it("rejects an order when the vault has nothing authorised", async () => {
-    const reasons = await reasonsFor(keeperEntry(), fakeChain({ slot: { listingHash: ZERO32 } }).reader);
-    expect(reasons).toContain(REASONS.hashNone);
+  it("does not raise a tamper alarm for a listing superseded by a counter bump", async () => {
+    // invalidateAllListings() (or the keeper's own recovery) bumped Seaport's counter from 6 to 7
+    // without cancelling H1, so the keeper still serves H1 until its end time. The vault then
+    // authorised H2. H1 must not be reported with the claimed-hash reason that marks tampering.
+    const h1Parameters = goodParameters();
+    h1Parameters.salt = "42";
+    const h1 = keeperEntry(h1Parameters, 6n);
+    const logged: Array<Record<string, unknown>> = [];
+    handler = (_req, res) => {
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify({ orders: [h1, keeperEntry()] }));
+    };
+    const out = await serveKeeperOrders({
+      keeperOrdersUrl: `${base}/orders`,
+      config: CONFIG,
+      chain: fakeChain().reader,
+      nowSeconds: NOW,
+      log: (e) => logged.push(e),
+    });
+    expect(out.status).toBe(200);
+    expect(out.body.orders.map((o) => o.orderHash)).toEqual([AUTHORISED]);
+    expect(out.body.rejected).toEqual([]);
+    expect(out.body.closed).toEqual([{ orderHash: h1.orderHash, state: "notCurrent" }]);
+    expect(JSON.stringify(out.body)).not.toContain(KEEPER_REASONS.claimedHash);
+    expect(logged.filter((e) => e.level === "warn" || e.level === "error")).toEqual([]);
   });
 
-  it("rejects a hash the keeper names that Seaport does not compute for its parameters", async () => {
-    const entry = { ...keeperEntry(), orderHash: hashOf(goodParameters(), 0n) };
-    expect(await reasonsFor(entry)).toEqual([KEEPER_REASONS.claimedHash]);
+  it("reports every order as not current when the vault has nothing authorised", async () => {
+    const state = await stateOf(keeperEntry(), fakeChain({ slot: { listingHash: ZERO32 } }).reader);
+    expect(state.state).toBe("notCurrent");
+  });
+
+  it("rejects parameters that do not hash to the authorised hash the keeper names", async () => {
+    const other = goodParameters();
+    other.salt = "1";
+    expect(await reasonsFor(claimingAuthorised(other))).toEqual([
+      KEEPER_REASONS.claimedHash,
+      REASONS.hashMismatch,
+    ]);
   });
 
   it("rejects the wrong offerer", async () => {
@@ -256,32 +342,32 @@ describe("verifyKeeperOrders", () => {
     const hash = hashOf(stranger, 0n);
     const { reader, calls } = fakeChain({ slot: { listingHash: hash } });
     const reasons = await reasonsFor(keeperEntry(stranger, 0n), reader);
-    expect(calls.getCounter).toEqual([STRANGER]);
+    expect(calls.readState[0]!.offerers).toEqual([STRANGER]);
     expect(reasons).toContain(REASONS.seller);
   });
 
-  it("rejects an expired order", async () => {
+  it("reports an expired order as closed", async () => {
     const expired = goodParameters();
     expired.endTime = String(NOW);
     const hash = hashOf(expired, COUNTER);
-    const reasons = await reasonsFor(keeperEntry(expired), fakeChain({ slot: { listingHash: hash } }).reader);
-    expect(reasons).toEqual([REASONS.expired]);
+    expect(await stateOf(keeperEntry(expired), fakeChain({ slot: { listingHash: hash } }).reader)).toEqual({
+      orderHash: hash,
+      state: "expired",
+    });
   });
 
   it.each([
     [0, "Idle"],
     [2, "Exercisable"],
     [3, "Settling"],
-  ])("rejects the order when the vault's phase is %i (%s), not Listed", async (phase) => {
-    const reasons = await reasonsFor(keeperEntry(), fakeChain({ slot: { phase } }).reader);
-    expect(reasons).toEqual([KEEPER_REASONS.phase]);
+  ])("reports the order as closed when the vault's phase is %i (%s), not Listed", async (phase) => {
+    expect((await stateOf(keeperEntry(), fakeChain({ slot: { phase } }).reader)).state).toBe("notListed");
   });
 
   it("rejects a swapped premium recipient even when the keeper names the authorised hash", async () => {
     const tampered = goodParameters();
     tampered.consideration[0]!.recipient = STRANGER;
-    const entry = { ...keeperEntry(tampered), orderHash: hashOf(goodParameters(), COUNTER) };
-    const reasons = await reasonsFor(entry);
+    const reasons = await reasonsFor(claimingAuthorised(tampered));
     expect(reasons).toContain(KEEPER_REASONS.claimedHash);
     expect(reasons).toContain(REASONS.hashMismatch);
     expect(reasons).toContain(REASONS.writerRecipient);
@@ -293,8 +379,7 @@ describe("verifyKeeperOrders", () => {
     tampered.consideration[0]!.endAmount = "760000000";
     tampered.consideration[1]!.startAmount = "40000000";
     tampered.consideration[1]!.endAmount = "40000000";
-    const entry = { ...keeperEntry(tampered), orderHash: hashOf(goodParameters(), COUNTER) };
-    const reasons = await reasonsFor(entry);
+    const reasons = await reasonsFor(claimingAuthorised(tampered));
     expect(reasons).toContain(REASONS.hashMismatch);
     expect(reasons).toContain(REASONS.grossMismatch);
   });
@@ -302,25 +387,33 @@ describe("verifyKeeperOrders", () => {
   it("rejects a skimmed fee leg, a third leg, and a mismatched item count", async () => {
     const skim = goodParameters();
     skim.consideration[1]!.recipient = STRANGER;
-    expect(await reasonsFor(keeperEntry(skim))).toContain(REASONS.feeRecipient);
+    expect(await reasonsFor(claimingAuthorised(skim))).toContain(REASONS.feeRecipient);
 
     const extra = goodParameters();
     extra.consideration.push({ ...extra.consideration[1]!, recipient: STRANGER });
     extra.totalOriginalConsiderationItems = "3";
-    expect(await reasonsFor(keeperEntry(extra))).toContain(REASONS.considerationShape);
+    expect(await reasonsFor(claimingAuthorised(extra))).toContain(REASONS.considerationShape);
 
     const miscount = goodParameters();
     miscount.totalOriginalConsiderationItems = "1";
     expect(await reasonsFor(keeperEntry(miscount))).toEqual([KEEPER_REASONS.itemCount]);
   });
 
-  it("rejects a cancelled or sold-out order", async () => {
+  it("reports a cancelled or sold-out order as closed, never as rejected", async () => {
     expect(
-      await reasonsFor(keeperEntry(), fakeChain({ status: { isCancelled: true, totalFilled: 0n, totalSize: 0n } }).reader),
-    ).toEqual([KEEPER_REASONS.cancelled]);
+      await stateOf(keeperEntry(), fakeChain({ status: { isCancelled: true, totalFilled: 0n, totalSize: 0n } }).reader),
+    ).toEqual({ orderHash: AUTHORISED, state: "cancelled" });
+    // Seaport's fraction reduced: 23 of 23 is 1/1.
     expect(
-      await reasonsFor(keeperEntry(), fakeChain({ status: { isCancelled: false, totalFilled: 20n, totalSize: 20n } }).reader),
-    ).toEqual([KEEPER_REASONS.soldOut]);
+      await stateOf(keeperEntry(), fakeChain({ status: { isCancelled: false, totalFilled: 1n, totalSize: 1n } }).reader),
+    ).toEqual({ orderHash: AUTHORISED, state: "soldOut" });
+  });
+
+  it("still rejects a tampered order that is also sold out: integrity outranks lifecycle", async () => {
+    const tampered = goodParameters();
+    tampered.consideration[0]!.recipient = STRANGER;
+    const chain = fakeChain({ status: { isCancelled: false, totalFilled: 20n, totalSize: 20n } }).reader;
+    expect(await reasonsFor(claimingAuthorised(tampered), chain)).toContain(REASONS.writerRecipient);
   });
 
   it("rejects malformed entries without a chain read, and keeps only a well-formed hash", async () => {
@@ -339,28 +432,49 @@ describe("verifyKeeperOrders", () => {
     expect(rejected.map((r) => r.reasons)).toEqual(Array(5).fill([KEEPER_REASONS.malformed]));
     expect(rejected[3]!.orderHash).toBeNull();
     expect(rejected[4]!.orderHash).toBeNull();
-    expect(calls.getCounter).toEqual([]);
+    expect(calls.readState).toEqual([]);
   });
 
-  it("does not check more orders than a vault can have live", async () => {
+  it("refuses more orders than a vault can have live as one item, checking none", async () => {
     const { reader, calls } = fakeChain();
-    const entries = Array.from({ length: KEEPER_MAX_ORDERS + 3 }, () => keeperEntry());
-    const { orders, rejected } = await verifyKeeperOrders(entries, reader, CONFIG, NOW);
-    expect(orders).toHaveLength(KEEPER_MAX_ORDERS);
-    expect(rejected).toHaveLength(3);
-    expect(rejected.every((r) => r.reasons[0] === KEEPER_REASONS.tooMany)).toBe(true);
-    expect(calls.getCounter).toHaveLength(KEEPER_MAX_ORDERS);
+    const entries = Array.from({ length: 32_762 }, () => 0);
+    const { orders, rejected, closed, unchecked } = await verifyKeeperOrders(entries, reader, CONFIG, NOW);
+    expect(orders).toEqual([]);
+    expect(closed).toEqual([]);
+    expect(unchecked).toEqual([]);
+    expect(rejected).toEqual([{ orderHash: null, reasons: [`${KEEPER_REASONS.tooMany} (32762 served)`] }]);
+    expect(calls.readState).toEqual([]);
+
+    const atCap = await verifyKeeperOrders(Array.from({ length: KEEPER_MAX_ORDERS }, () => keeperEntry()), reader, CONFIG, NOW);
+    expect(atCap.orders).toHaveLength(KEEPER_MAX_ORDERS);
   });
 
-  it("rejects one order whose chain reads fail, and throws when the vault cannot be read", async () => {
+  it("puts an order whose chain reads fail under unchecked, and throws when the vault cannot be read", async () => {
     const stranger = goodParameters();
     stranger.offerer = STRANGER;
+    const strangerHash = hashOf(stranger, 0n);
+    // Both claim the authorised hash, so both are checked; only the stranger's counter read fails.
     const { reader } = fakeChain({ failCounterFor: STRANGER });
-    const { orders, rejected } = await verifyKeeperOrders([keeperEntry(), keeperEntry(stranger, 0n)], reader, CONFIG, NOW);
-    expect(orders).toHaveLength(1);
-    expect(rejected).toEqual([{ orderHash: hashOf(stranger, 0n), reasons: [KEEPER_REASONS.unreadable] }]);
+    const out = await verifyKeeperOrders([keeperEntry(), { ...keeperEntry(stranger, 0n), orderHash: AUTHORISED }], reader, CONFIG, NOW);
+    expect(out.orders).toHaveLength(1);
+    expect(out.rejected).toEqual([]);
+    expect(out.unchecked).toEqual([{ orderHash: AUTHORISED, reasons: [KEEPER_REASONS.unreadable] }]);
+    expect(strangerHash).not.toBe(AUTHORISED);
 
+    expect((await verifyOne(keeperEntry(), fakeChain({ failStatus: true }).reader)).unchecked).toEqual([
+      { orderHash: AUTHORISED, reasons: [KEEPER_REASONS.unreadable] },
+    ]);
+    expect((await verifyOne(keeperEntry(), fakeChain({ failOrderHash: true }).reader)).unchecked).toEqual([
+      { orderHash: AUTHORISED, reasons: [KEEPER_REASONS.unreadable] },
+    ]);
     await expect(verifyKeeperOrders([keeperEntry()], fakeChain({ failVault: true }).reader, CONFIG, NOW)).rejects.toThrow();
+  });
+
+  it("does not offer an order when Seaport's hash and the local derivation disagree", async () => {
+    const out = await verifyOne(keeperEntry(), fakeChain({ skewOrderHash: true }).reader);
+    expect(out.orders).toEqual([]);
+    expect(out.rejected).toEqual([]);
+    expect(out.unchecked).toEqual([{ orderHash: AUTHORISED, reasons: [KEEPER_REASONS.hashDerivation] }]);
   });
 
   it("treats address case as meaning nothing, and ignores a counter the keeper sends", async () => {
@@ -548,14 +662,23 @@ describe("parseKeeperOrdersUrl", () => {
   });
 });
 
+const EMPTY = { configured: true, orders: [], rejected: [], closed: [], unchecked: [] };
+
+function serveBody(body: string) {
+  handler = (_req, res) => {
+    res.writeHead(200, { "content-type": "application/json" });
+    res.end(body);
+  };
+}
+
 describe("serveKeeperOrders", () => {
   const good = fakeChain().reader;
 
   it("answers 503, not configured, when KEEPER_ORDERS_URL is unset, without touching the chain", async () => {
     const { reader, calls } = fakeChain();
     const out = await serveKeeperOrders({ keeperOrdersUrl: undefined, config: CONFIG, chain: reader, nowSeconds: NOW });
-    expect(out).toEqual({ status: 503, body: { configured: false, orders: [], rejected: [], error: NOT_CONFIGURED } });
-    expect(calls.vaultListing).toBe(0);
+    expect(out).toEqual({ status: 503, body: { ...EMPTY, configured: false, error: NOT_CONFIGURED } });
+    expect(calls.readState).toEqual([]);
   });
 
   it("answers 503 for a misconfigured URL without echoing it, and logs the problem", async () => {
@@ -588,12 +711,7 @@ describe("serveKeeperOrders", () => {
     });
     expect(big).toEqual({
       status: 502,
-      body: {
-        configured: true,
-        orders: [],
-        rejected: [],
-        error: "The keeper's answer was larger than a book of live orders can be.",
-      },
+      body: { ...EMPTY, error: "The keeper's answer was larger than a book of live orders can be." },
     });
 
     handler = () => {};
@@ -621,14 +739,102 @@ describe("serveKeeperOrders", () => {
       nowSeconds: NOW,
       log: () => {},
     });
-    expect(out.status).toBe(502);
-    expect(out.body.orders).toEqual([]);
+    expect(out).toEqual({ status: 502, body: { ...EMPTY, error: VAULT_UNREADABLE } });
+  });
+
+  it("answers 502 in its own words when the chain reads pass their deadline", async () => {
+    serveBody(JSON.stringify({ orders: [keeperEntry()] }));
+    const logged: Array<Record<string, unknown>> = [];
+    const t0 = Date.now();
+    const out = await serveKeeperOrders({
+      keeperOrdersUrl: `${base}/orders`,
+      config: CONFIG,
+      chain: fakeChain({ hang: true }).reader,
+      nowSeconds: NOW,
+      chainDeadlineMs: 200,
+      log: (e) => logged.push(e),
+    });
+    expect(Date.now() - t0).toBeLessThan(3_000);
+    expect(out).toEqual({ status: 502, body: { ...EMPTY, error: chainTimedOut(200) } });
+    expect(out.body.error).toBe("The chain did not answer within 0.2 seconds, so the keeper's orders cannot be checked yet.");
+    expect(logged).toEqual([expect.objectContaining({ level: "warn", msg: "keeper orders could not be checked: chain reads timed out" })]);
+    // The default deadline plus the keeper's timeout stays under the browser's fifteen seconds.
+    expect(CHAIN_DEADLINE_MS + KEEPER_TIMEOUT_MS).toBeLessThan(15_000);
+  });
+
+  it("refuses a 64 KiB flood of entries in one small answer and one log line", async () => {
+    // Exactly the cap: {"orders":[0,0,...]} is 32,762 entries in 65,536 bytes.
+    const flood = `{"orders":[${Array.from({ length: 32_762 }, () => "0").join(",")}]}`;
+    const padded = flood + " ".repeat(65_536 - flood.length);
+    expect(Buffer.byteLength(padded)).toBe(65_536);
+    serveBody(padded);
+    const logged: Array<Record<string, unknown>> = [];
+    const { reader, calls } = fakeChain();
+    const out = await serveKeeperOrders({
+      keeperOrdersUrl: `${base}/orders`,
+      config: CONFIG,
+      chain: reader,
+      nowSeconds: NOW,
+      log: (e) => logged.push(e),
+    });
+    expect(out).toEqual({ status: 502, body: { ...EMPTY, error: KEEPER_REASONS.tooMany } });
+    expect(JSON.stringify(out.body).length).toBeLessThan(512);
+    expect(logged).toHaveLength(1);
+    expect(logged[0]).toMatchObject({ level: "warn", msg: "keeper served too many orders", count: 32_762 });
+    expect(calls.readState).toEqual([]);
+  });
+
+  it("logs one line for many rejected orders, not one per order", async () => {
+    const tampered = goodParameters();
+    tampered.consideration[0]!.recipient = STRANGER;
+    serveBody(JSON.stringify({ orders: Array.from({ length: KEEPER_MAX_ORDERS }, () => claimingAuthorised(tampered)) }));
+    const logged: Array<Record<string, unknown>> = [];
+    const out = await serveKeeperOrders({
+      keeperOrdersUrl: `${base}/orders`,
+      config: CONFIG,
+      chain: good,
+      nowSeconds: NOW,
+      log: (e) => logged.push(e),
+    });
+    expect(out.body.rejected).toHaveLength(KEEPER_MAX_ORDERS);
+    expect(logged).toHaveLength(1);
+    expect(logged[0]).toMatchObject({ level: "warn", msg: "keeper orders rejected", count: KEEPER_MAX_ORDERS });
+    expect(logged[0]!.orderHashes).toHaveLength(3);
+  });
+
+  it("reports a sold-out order as closed with no warning logged", async () => {
+    serveBody(JSON.stringify({ orders: [keeperEntry()] }));
+    const logged: Array<Record<string, unknown>> = [];
+    const out = await serveKeeperOrders({
+      keeperOrdersUrl: `${base}/orders`,
+      config: CONFIG,
+      chain: fakeChain({ status: { isCancelled: false, totalFilled: 20n, totalSize: 20n } }).reader,
+      nowSeconds: NOW,
+      log: (e) => logged.push(e),
+    });
+    expect(out).toEqual({ status: 200, body: { ...EMPTY, closed: [{ orderHash: AUTHORISED, state: "soldOut" }] } });
+    expect(logged.filter((e) => e.level !== "debug")).toEqual([]);
+  });
+
+  it("puts an order the chain could not be read for under unchecked, not rejected", async () => {
+    serveBody(JSON.stringify({ orders: [keeperEntry()] }));
+    const out = await serveKeeperOrders({
+      keeperOrdersUrl: `${base}/orders`,
+      config: CONFIG,
+      chain: fakeChain({ failStatus: true }).reader,
+      nowSeconds: NOW,
+      log: () => {},
+    });
+    expect(out).toEqual({
+      status: 200,
+      body: { ...EMPTY, unchecked: [{ orderHash: AUTHORISED, reasons: [KEEPER_REASONS.unreadable] }] },
+    });
   });
 
   it("serves the verified order and reports, and logs, the tampered one", async () => {
     const tampered = goodParameters();
     tampered.consideration[0]!.recipient = STRANGER;
-    const bad = { ...keeperEntry(tampered), orderHash: hashOf(goodParameters(), COUNTER) };
+    const bad = claimingAuthorised(tampered);
     handler = (_req, res) => {
       res.writeHead(200, { "content-type": "application/json" });
       res.end(JSON.stringify({ orders: [keeperEntry(), bad] }));
@@ -646,8 +852,67 @@ describe("serveKeeperOrders", () => {
     expect(out.body.rejected).toHaveLength(1);
     expect(out.body.rejected[0]!.reasons).toContain(REASONS.writerRecipient);
     expect(logged).toEqual([
-      expect.objectContaining({ msg: "keeper order rejected", orderHash: bad.orderHash, reasons: out.body.rejected[0]!.reasons }),
+      expect.objectContaining({
+        level: "warn",
+        msg: "keeper orders rejected",
+        count: 1,
+        orderHashes: [bad.orderHash],
+        reasons: out.body.rejected[0]!.reasons,
+      }),
     ]);
+  });
+});
+
+describe("shareWhileRunning", () => {
+  it("shares a computation until it settles and for the window after, not from its start", async () => {
+    let clock = 0;
+    const releases: Array<(value: number) => void> = [];
+    let started = 0;
+    const answer = shareWhileRunning(
+      () => {
+        started += 1;
+        return new Promise<number>((resolve) => releases.push(resolve));
+      },
+      { shareMs: 2_000, now: () => clock },
+    );
+
+    const first = answer("a");
+    clock = 40_000; // a hung RPC: forty seconds and still running
+    expect(answer("a")).toBe(first);
+    expect(started).toBe(1);
+
+    releases[0]!(1);
+    await first;
+    clock = 41_000; // one second after it settled
+    expect(answer("a")).toBe(first);
+    expect(started).toBe(1);
+
+    clock = 42_500; // past the window
+    const second = answer("a");
+    expect(second).not.toBe(first);
+    expect(started).toBe(2);
+
+    // A different key (a changed KEEPER_ORDERS_URL) never reuses an answer.
+    expect(answer("b")).not.toBe(second);
+    expect(started).toBe(3);
+  });
+
+  it("starts the window from a rejection too", async () => {
+    let clock = 0;
+    let started = 0;
+    const answer = shareWhileRunning(
+      () => {
+        started += 1;
+        return Promise.reject(new Error("boom"));
+      },
+      { shareMs: 2_000, now: () => clock },
+    );
+    const first = answer(undefined);
+    await expect(first).rejects.toThrow();
+    clock = 1_000;
+    expect(answer(undefined)).toBe(first);
+    await expect(answer(undefined)).rejects.toThrow();
+    expect(started).toBe(1);
   });
 });
 
@@ -660,9 +925,73 @@ describe("GET /api/keeper/orders", () => {
       const res = await GET();
       expect(res.status).toBe(503);
       expect(res.headers.get("cache-control")).toBe("no-store");
-      expect(await res.json()).toEqual({ configured: false, orders: [], rejected: [], error: NOT_CONFIGURED });
+      expect(await res.json()).toEqual({ ...EMPTY, configured: false, error: NOT_CONFIGURED });
     } finally {
       if (before !== undefined) process.env.KEEPER_ORDERS_URL = before;
     }
+  });
+});
+
+describe("fetchKeeperOrderBook (the browser's client)", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it("maps a timeout or a network failure to its own wording, never the browser's", async () => {
+    for (const failure of [
+      new DOMException("The operation was aborted due to timeout", "TimeoutError"),
+      new TypeError("Failed to fetch"),
+    ]) {
+      vi.stubGlobal("fetch", async () => {
+        throw failure;
+      });
+      const book = await fetchKeeperOrderBook();
+      expect(book).toEqual({
+        configured: true,
+        listings: [],
+        rejected: [],
+        closed: [],
+        unchecked: [],
+        error: "The fallback route did not answer.",
+      });
+      expect(JSON.stringify(book)).not.toMatch(/aborted|Failed to fetch/);
+    }
+  });
+
+  it("reads the four outcomes and bounds each list", async () => {
+    const many = Array.from({ length: 50 }, () => ({ orderHash: AUTHORISED, reasons: ["r"] }));
+    vi.stubGlobal(
+      "fetch",
+      async () =>
+        new Response(
+          JSON.stringify({
+            configured: true,
+            orders: [],
+            rejected: many,
+            unchecked: many,
+            closed: [
+              ...Array.from({ length: 50 }, () => ({ orderHash: AUTHORISED, state: "soldOut" })),
+              { orderHash: AUTHORISED, state: "made-up" },
+            ],
+          }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        ),
+    );
+    const book = await fetchKeeperOrderBook();
+    expect(book.rejected).toHaveLength(KEEPER_MAX_ORDERS + 1);
+    expect(book.unchecked).toHaveLength(KEEPER_MAX_ORDERS + 1);
+    expect(book.closed).toHaveLength(KEEPER_MAX_ORDERS + 1);
+    expect(book.closed.every((c) => c.state === "soldOut")).toBe(true);
+    expect(book.error).toBeUndefined();
+  });
+
+  it("keeps the route's own error on a 502", async () => {
+    vi.stubGlobal(
+      "fetch",
+      async () => new Response(JSON.stringify({ ...EMPTY, error: VAULT_UNREADABLE }), { status: 502 }),
+    );
+    expect((await fetchKeeperOrderBook()).error).toBe(VAULT_UNREADABLE);
+    vi.stubGlobal("fetch", async () => new Response("<html>bad gateway</html>", { status: 502 }));
+    expect((await fetchKeeperOrderBook()).error).toBe("The fallback route answered HTTP 502.");
   });
 });

@@ -18,7 +18,9 @@ import {
 } from "@/lib/contracts";
 import { fmtUsdg, shortAddress, shortHash, splitPremium } from "@/lib/format";
 import { useNow } from "@/lib/hooks";
+import { keeperCardHeading, type BookContext } from "@/lib/cycleNotices";
 import { checkListingIsOurs } from "@/lib/overcall";
+import { fillableContracts, seaportRemaining, type SeaportFillStatus } from "@/lib/seaportOrder";
 import { ConnectButton } from "./ConnectButton";
 import { useNotice, useTxRunner } from "./TxToast";
 
@@ -36,7 +38,9 @@ import { useNotice, useTxRunner } from "./TxToast";
  * shape; the cycle page passes it only when Overcall's book has no verified listing for the
  * vault. The source changes the labels on this card and nothing else: the same
  * checkListingIsOurs() runs on it here, and the same approve + fulfillAdvancedOrder with
- * numerator/denominator sends the fill. Do not add a keeper-only branch to the fill.
+ * numerator/denominator sends the fill. Do not add a keeper-only branch to the fill. A keeper
+ * card also says what Overcall's book shows for the order (`book`), because "the book is not
+ * showing it" is only one of the reasons the page asks the keeper.
  *
  * NOTHING HERE IS TRUSTED UNTIL IT HAS BEEN CHECKED AGAINST THE CHAIN. The listing prop is a
  * row from overcall.finance's database, relayed by our proxy. Every field of it that reaches
@@ -52,9 +56,13 @@ import { useNotice, useTxRunner } from "./TxToast";
  * `orderHash` is their string, and a row that kept it but carried ten-times-the-price
  * components would be quoted and approved at that price before Seaport ever recomputed the
  * hash. So the contract count, the gross price and the option id are compared to the chain's
- * numbers, not merely to each other. The denominator and the quoted price are derived from
- * the signed components (offer[0].startAmount and the two legs), never from the row's
- * convenience fields, so the number the buyer sees is the number the vault authorised.
+ * numbers, not merely to each other, and the components are hashed locally and must hash to the
+ * row's orderHash, so salt, counter and times are bound to the authorised order too. The
+ * denominator and the quoted price are derived from the signed components (offer[0].startAmount
+ * and the two legs), never from the row's convenience fields, so the number the buyer sees is the
+ * number the vault authorised. How many contracts are left comes from Seaport's getOrderStatus
+ * (`seaportStatus`) when the page has it, not from the row: a book that reports `remaining: 0`
+ * for an order Seaport still holds open must not disable the fill.
  *
  * The fill goes through `fulfillAdvancedOrder` with numerator/denominator, because every
  * Overcall listing is orderType 1 (PARTIAL_OPEN) and a buyer may want k of N contracts. That
@@ -75,11 +83,18 @@ export function OrderPayload({
   expectedListingAmount,
   expectedListingGrossUsdg,
   expectedOptionId,
+  seaportStatus,
   source = "overcall",
+  book = { state: "missing" },
 }: {
   listing: OvercallListing;
   /** Where the row came from. Labels only; the check and the fill are identical for both. */
   source?: "overcall" | "keeper";
+  /** For a keeper card: what Overcall's book shows for the same order. Labels only. */
+  book?: BookContext;
+  /** Seaport's getOrderStatus for the vault's listingHash. Used only when this row carries that
+   *  hash; it then decides how many contracts are left, whatever the row says. */
+  seaportStatus?: SeaportFillStatus;
   /** The vault's listingHash() as read from the chain: undefined until read, zero when empty. */
   expectedListingHash: Hex | undefined;
   /** The vault's listingAmount(), listingGrossUsdg() and optionId() from the same read. Each is
@@ -128,20 +143,24 @@ export function OrderPayload({
 
   // Size and price come from the signed components, which the order hash commits to. The row's
   // `quantity`/`unitPrice6` are Overcall's convenience copies and are not used for anything that
-  // reaches a transaction. `remaining` is theirs and only caps the input; Seaport enforces it.
+  // reaches a transaction. How many are left is Seaport's figure when the page has it
+  // (fillableContracts); the row's `remaining` is only the fallback, and Seaport enforces it.
   const total = BigInt(listing.components.offer[0]?.startAmount ?? "0");
   const writerLeg = BigInt(listing.components.consideration[0]?.startAmount ?? "0");
   const feeLeg = BigInt(listing.components.consideration[1]?.startAmount ?? "0");
-  const claimedRemaining = /^[0-9]+$/.test(listing.remaining ?? "") ? BigInt(listing.remaining) : total;
-  const remaining = claimedRemaining > total ? total : claimedRemaining;
+  // Seaport's count, when the page has read it for this very hash, outranks the row's.
+  const remaining = fillableContracts(listing, total, expectedListingHash, seaportStatus);
+  const chainRemaining =
+    expectedListingHash !== undefined && listing.orderHash.toLowerCase() === expectedListingHash.toLowerCase()
+      ? seaportRemaining(total, seaportStatus)
+      : undefined;
   const unitPrice6 = total > 0n ? (writerLeg + feeLeg) / total : 0n;
 
-  const want = useMemo(() => {
-    const n = Number(quantity);
-    if (!Number.isInteger(n) || n <= 0) return 0n;
-    const asBig = BigInt(n);
-    return asBig > remaining ? remaining : asBig;
-  }, [quantity, remaining]);
+  // Plain arithmetic, recomputed per render: `remaining` now comes from a function of the row and
+  // Seaport's status, and a manual memo over it is one the React compiler cannot preserve.
+  const wantedCount = Number(quantity);
+  const wantedBig = Number.isInteger(wantedCount) && wantedCount > 0 ? BigInt(wantedCount) : 0n;
+  const want = wantedBig > remaining ? remaining : wantedBig;
 
   // Cost scales exactly with the fraction: consideration[i] * k / N, and both legs divide
   // cleanly because they were built as perContract * N — the check has already asserted so.
@@ -299,8 +318,11 @@ export function OrderPayload({
 
       {fromKeeper ? (
         <div className="notice" data-tone="info" style={{ marginBottom: 12 }}>
-          <strong>Listed directly by the vault&apos;s keeper; Overcall&apos;s book is not showing it.</strong>
-          This order came from the keeper&apos;s own feed, not from Overcall. Before it reached this
+          <strong>{keeperCardHeading(book)}</strong>
+          {book.state === "notLive" && chainRemaining !== undefined
+            ? `Seaport, which settles every fill, shows ${chainRemaining.toString()} of ${total.toString()} contracts still unsold. `
+            : ""}
+          This copy came from the keeper&apos;s own feed, not from Overcall. Before it reached this
           page, the server restored Seaport&apos;s counter from the chain, had Seaport compute the
           order hash, and matched it to the hash the vault authorised; the page checks it against
           the chain again below. A fill pays the same two legs as a fill on Overcall: the

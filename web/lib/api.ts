@@ -551,15 +551,43 @@ export async function fetchOvercallBook(params: {
 
 /* ------------------------------------------------------------------- the keeper fallback */
 
+export type KeeperOrderIssue = { orderHash: Hex | null; reasons: string[] };
+
+/** Why an order is not offered when nothing is wrong with it (lib/keeperOrders.ts KEEPER_STATES). */
+export type KeeperClosedState = "notCurrent" | "soldOut" | "cancelled" | "notListed" | "expired";
+
 export type KeeperOrderBook = {
   /** False when this deployment has no KEEPER_ORDERS_URL. The page then shows no fallback at all. */
   configured: boolean;
   /** Orders the server checked against the chain, as book rows. Still re-checked by OrderPayload. */
   listings: OvercallListing[];
-  /** Orders the keeper served that did not pass, with the server's reasons. Never fillable. */
-  rejected: Array<{ orderHash: Hex | null; reasons: string[] }>;
+  /** Integrity failures: the keeper served something under the authorised hash that is not that
+   *  order, or that does not parse. Never fillable, and the one outcome that is an alarm. */
+  rejected: KeeperOrderIssue[];
+  /** Lifecycle states: sold out, cancelled, not Listed, expired, or not the current listing. */
+  closed: Array<{ orderHash: Hex | null; state: KeeperClosedState }>;
+  /** Orders the chain could not be read for. Not offered yet; not the keeper's fault. */
+  unchecked: KeeperOrderIssue[];
   error?: string;
 };
+
+/** The route never returns more than KEEPER_MAX_ORDERS items per list (lib/keeperOrders.ts); this
+ *  bound is the page's own, so a surprise from the route cannot become thousands of list items. */
+const KEEPER_LIST_CAP = 9;
+const KEEPER_STATES: readonly KeeperClosedState[] = ["notCurrent", "soldOut", "cancelled", "notListed", "expired"];
+
+function keeperIssues(value: unknown): KeeperOrderIssue[] {
+  if (!Array.isArray(value)) return [];
+  return value.slice(0, KEEPER_LIST_CAP).map((r) => {
+    const row = asRecord(r);
+    return {
+      orderHash: toHex(row.orderHash) ?? null,
+      reasons: Array.isArray(row.reasons)
+        ? row.reasons.filter((x): x is string => typeof x === "string").slice(0, 32)
+        : [],
+    };
+  });
+}
 
 /**
  * Read the vault's listing as the keeper serves it, through app/api/keeper/orders, which checks
@@ -567,31 +595,52 @@ export type KeeperOrderBook = {
  * this only when Overcall's book has no verified listing for the vault.
  *
  * A 503 with `configured: false` is the "not set up here" answer, not an error. Every other
- * failure is reported as `error` in the route's own words.
+ * failure is reported as `error` in the route's own words, or in this function's: the browser's
+ * own abort and network messages are never shown. The route answers inside its own deadline
+ * (about eleven seconds), under the fifteen this waits.
  */
 export async function fetchKeeperOrderBook(): Promise<KeeperOrderBook> {
+  const unanswered: KeeperOrderBook = {
+    configured: true,
+    listings: [],
+    rejected: [],
+    closed: [],
+    unchecked: [],
+    error: "The fallback route did not answer.",
+  };
+  let res: Response;
   try {
-    const res = await fetch("/api/keeper/orders", {
+    res = await fetch("/api/keeper/orders", {
       headers: { accept: "application/json" },
       cache: "no-store",
       signal: AbortSignal.timeout(15_000),
     });
-    const payload = asRecord(await res.json().catch(() => ({})));
-    const configured = payload.configured !== false;
-    const listings = Array.isArray(payload.orders) ? (payload.orders as OvercallListing[]) : [];
-    const rejected = Array.isArray(payload.rejected)
-      ? (payload.rejected as unknown[]).map((r) => {
-          const row = asRecord(r);
-          return {
-            orderHash: toHex(row.orderHash) ?? null,
-            reasons: Array.isArray(row.reasons) ? row.reasons.filter((x): x is string => typeof x === "string") : [],
-          };
-        })
-      : [];
-    const error =
-      typeof payload.error === "string" ? payload.error : res.ok ? undefined : `The fallback route answered HTTP ${res.status}.`;
-    return { configured, listings: res.ok ? listings : [], rejected, error };
-  } catch (err) {
-    return { configured: true, listings: [], rejected: [], error: err instanceof Error ? err.message : "unreachable" };
+  } catch {
+    return unanswered;
   }
+  let payload: Record<string, unknown>;
+  try {
+    payload = asRecord(await res.json());
+  } catch {
+    return { ...unanswered, error: `The fallback route answered HTTP ${res.status}.` };
+  }
+  const configured = payload.configured !== false;
+  const listings = Array.isArray(payload.orders) ? (payload.orders as OvercallListing[]).slice(0, KEEPER_LIST_CAP) : [];
+  const closed = Array.isArray(payload.closed)
+    ? payload.closed.slice(0, KEEPER_LIST_CAP).flatMap((r) => {
+        const row = asRecord(r);
+        const state = KEEPER_STATES.find((s) => s === row.state);
+        return state === undefined ? [] : [{ orderHash: toHex(row.orderHash) ?? null, state }];
+      })
+    : [];
+  const error =
+    typeof payload.error === "string" ? payload.error : res.ok ? undefined : `The fallback route answered HTTP ${res.status}.`;
+  return {
+    configured,
+    listings: res.ok ? listings : [],
+    rejected: keeperIssues(payload.rejected),
+    closed,
+    unchecked: keeperIssues(payload.unchecked),
+    error,
+  };
 }

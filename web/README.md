@@ -42,43 +42,67 @@ book never shows it and nobody can buy the week. The keeper keeps serving the or
 route (`app/api/keeper/orders/route.ts`, logic in `lib/keeperOrders.ts`) fetches the one URL in
 `KEEPER_ORDERS_URL`, a runtime server variable (on Railway,
 `http://keeper.railway.internal:8787/orders`). Nothing from the request reaches that fetch, so the
-route cannot be aimed anywhere else. Redirects are not followed, the answer is capped at 64 KiB
-and 5 s (body included), and error messages are the route's own words. **Unset, the route answers
+route cannot be aimed anywhere else. Redirects are not followed, the answer is capped at 64 KiB,
+5 s (body included) and 8 orders (more is refused whole, as a 502), the chain reads have their own
+6 s deadline, and error messages are the route's own words. The browser waits 15 s and maps its
+own timeout or network failure to "The fallback route did not answer." **Unset, the route answers
 503 `{"configured": false}` and the cycle page shows nothing about the fallback.**
 
 **The keeper is not trusted.** `/orders` serves `OrderParameters` (no `counter`) plus convenience
-fields. The route keeps only the parameters and the signature bytes, and for each order:
+fields. The route keeps only the parameters and the signature bytes. It reads the chain's state in
+one Multicall3 `eth_call` (so one block): the vault's `phase`, `listingHash`, `listingAmount`,
+`listingGrossUsdg` and `optionId`, `Seaport.getCounter` for each offerer and
+`Seaport.getOrderStatus` for each order hash. Then, for each order:
 
-1. restores the counter from `Seaport.getCounter(offerer)` (a counter is not always 0: the vault's
-   `rollClose` bumps it to kill a week's listings);
-2. has Seaport compute the hash with `Seaport.getOrderHash(components)`; the keeper's own
-   `orderHash` must equal it, and the row carries Seaport's value, not the keeper's;
-3. reads the vault once (`phase`, `listingHash`, `listingAmount`, `listingGrossUsdg`, `optionId`)
-   and requires phase Listed, and runs `checkListingIsOurs` (`lib/overcall.ts`, the same check the
-   Overcall rows go through): hash equals `listingHash`, offerer and premium recipient are the
-   vault, the fee leg is Overcall's 5% to Overcall's recipient rounded per contract, amounts
-   match the vault's recorded count, gross and option id, no zone, no conduit, PARTIAL_OPEN, end
-   time not passed;
-4. reads `Seaport.getOrderStatus`: cancelled or fully sold is rejected; otherwise `remaining` and
-   `status` come from Seaport's fill fraction.
+1. an order whose hash is not the vault's `listingHash` is an earlier or superseded listing (a
+   counter bump retires one without cancelling it, and the keeper serves a row until its end
+   time). It goes under `closed` as `notCurrent` and is not checked further: it can never be
+   offered, and it must not read as tampering;
+2. for the order that names `listingHash`: restores the counter from `getCounter(offerer)` (a
+   counter is not always 0: the vault's `rollClose` bumps it to kill a week's listings), hashes
+   the components locally (`lib/seaportOrder.ts`) and with `Seaport.getOrderHash` in a second
+   batch, and requires the two to agree; the keeper's own `orderHash` must equal them;
+3. runs `checkListingIsOurs` (`lib/overcall.ts`, the same check the Overcall rows go through):
+   the components hash to the hash, the hash equals `listingHash`, offerer and premium recipient
+   are the vault, the fee leg is Overcall's 5% to Overcall's recipient rounded per contract,
+   amounts match the vault's recorded count, gross and option id, no zone, no conduit,
+   PARTIAL_OPEN;
+4. only then reads the lifecycle: cancelled, sold out (Seaport's fraction), vault not Listed, or
+   end time passed is `closed` with that state. Otherwise `remaining` and `status` come from
+   Seaport's fill fraction.
 
 Passing orders come back under `orders` in the same row shape `/api/overcall/listings` serves.
-Everything else comes back under `rejected` with its reasons and is logged on the server as one JSON
-line (`"msg":"keeper order rejected"`); it is never fillable. Answers are shared for 2 s.
+An order that fails 2 or 3 comes back under `rejected` with its reasons and is logged as one warning
+line per computation (`"msg":"keeper orders rejected"`, with the count). An order whose chain reads
+failed comes back under `unchecked`. `closed` is not logged as a warning. None of them is fillable.
+One computation serves every request while it runs and for 2 s after it settles.
 
-**Overcall first.** `/vault/nvda/cycle` asks the route only when Overcall's book has answered (or
+**Seaport, then Overcall.** `/vault/nvda/cycle` decides what to say in `lib/cycleNotices.ts`. When
+Seaport reports the vault's order sold out or cancelled, the page says so in a neutral notice and
+does not ask the keeper. Otherwise it asks the route only when Overcall's book has answered (or
 failed) and has no live row for the vault's `listingHash` that passes `checkListingIsOurs`. The
-keeper's order then renders through the same `OrderPayload` card, labelled "Listed directly by the
-vault's keeper; Overcall's book is not showing it.", which runs the same check against the chain
-again and fills through the same `approve(Seaport, cost)` + `fulfillAdvancedOrder` with
-numerator/denominator. There is no keeper-only fill code. Rejected orders render as a notice with
-their reasons and no button; a keeper that does not answer renders as a warning.
+keeper's order then renders through the same `OrderPayload` card, labelled with what the book
+shows for it ("Overcall's book is not showing it.", "did not answer.", "lists this order as
+filled.", or "Overcall's row for this order did not check out against the chain."), which runs
+the same check against the chain again, takes the contracts left from Seaport rather than from
+either row, and fills through the same `approve(Seaport, cost)` + `fulfillAdvancedOrder` with
+numerator/denominator. There is no keeper-only fill code. Rejected orders render as a red notice
+with at most three of them listed and no button; a keeper, route or chain that does not answer
+renders as a warning headed "The keeper fallback is unavailable right now."; a closed order as
+information.
 
-`lib/keeperOrders.test.ts` covers the counter restore, a hash that is not `listingHash`, a hash the
-keeper names that Seaport does not compute, wrong offerer, expired, every non-Listed phase, a
-redirected or inflated payment leg under the authorised hash, cancelled and sold-out orders,
-malformed entries, and, over real local HTTP, an oversized body (declared and streamed), a keeper
-that never answers or stalls mid-body, a redirect, and the route's 503 when unconfigured. The W-13
+`lib/keeperOrders.test.ts` covers the counter restore, a superseded order after a counter bump
+(closed, no warning), a hash the keeper names that its parameters do not hash to, wrong offerer,
+expired, every non-Listed phase, a redirected or inflated payment leg under the authorised hash,
+cancelled and sold-out orders as closed (and a tampered sold-out order still rejected), malformed
+entries, a keeper flooding 64 KiB of entries (one small 502, one log line), chain reads that fail
+(unchecked) or pass their deadline (502 in the route's words), Seaport and the local hash
+disagreeing, the share window measured from settle, the browser client's own wording for a
+timeout, and, over real local HTTP, an oversized body (declared and streamed), a keeper that
+never answers or stalls mid-body, a redirect, and the route's 503 when unconfigured.
+`lib/cycleNotices.test.ts` pins the page's decisions: a sold-out week, a book listing other open
+orders beside the keeper's card, a book that marks the order filled while Seaport has contracts
+left, an unverified Overcall row, and a chain failure that must not be blamed on the keeper. The W-13
 fork acceptance below exercises the route against the real keeper server.
 
 ## Copy rules are a CI gate, not a style preference
@@ -260,9 +284,9 @@ and exact arguments.
 - Overcall's hosted book, their validator accepting the vault's EIP-1271 listing (L-04), or their
   front end. Both upstreams here are local stubs.
 - That the deployed app can reach the deployed keeper. Here both run on 127.0.0.1; on Railway the
-  route goes over private networking to `keeper.railway.internal`, which the keeper's IPv4-only
-  bind may not accept (ops/deploy.md §9 item 14). Verify with `curl …/api/keeper/orders` after
-  deploying.
+  route goes over the IPv6 private network to `keeper.railway.internal`. The keeper binds `::`
+  (`keeper/src/health.test.ts` asserts it answers on `::1`), but the deployed path is a
+  post-deploy check: ops/deploy.md §9 item 14.
 - The route under a hostile network: its timeout, byte cap and redirect refusal are covered by
   `lib/keeperOrders.test.ts` over local HTTP, not by this run.
 - The indexer path (`NEXT_PUBLIC_API_URL` live, X-11), so "Net / collateral at harvest" renders its

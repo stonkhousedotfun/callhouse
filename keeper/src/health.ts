@@ -16,9 +16,13 @@
  *                 `strike_proceeds_usdg6`, so an assigned week's returned principal is not read
  *                 as yield. Both null when the split is not known.
  *
- * Bound to 0.0.0.0 so a container healthcheck can reach it; put it behind your own network
- * boundary. Nothing here is a write endpoint and nothing here needs a secret — which is also
- * why the RPC URLs below are served origin-only: production endpoints routinely embed keys.
+ * No host is passed to listen(): Node then binds `::` where IPv6 exists (which also accepts IPv4)
+ * and `0.0.0.0` where it does not, the same as the relay and the indexer. That covers a container
+ * healthcheck and Railway's IPv6 private network, where the web app's keeper fallback reads
+ * /orders at keeper.railway.internal (ops/deploy.md §3). Pinning `0.0.0.0` would cut that off.
+ * Put it behind your own network boundary. Nothing here is a write endpoint and nothing here
+ * needs a secret — which is also why the RPC URLs below are served origin-only: production
+ * endpoints routinely embed keys.
  */
 import { serve, type ServerType } from '@hono/node-server';
 import { Hono } from 'hono';
@@ -31,8 +35,8 @@ import { toOrderParametersJson, componentsFromJson, type OrderComponentsJson } f
 
 const startedAt = Date.now();
 
-/** Production RPC URLs routinely embed API keys and this server is unauthenticated on
- *  0.0.0.0, so /health reports only origins. */
+/** Production RPC URLs routinely embed API keys and this server is unauthenticated on every
+ *  interface, so /health reports only origins. */
 function originOnly(endpoint: string): string {
   try {
     return new URL(endpoint).origin;
@@ -201,7 +205,8 @@ export function buildApp(): Hono {
 }
 
 export function startHealthServer(): ServerType {
-  const server = serve({ fetch: buildApp().fetch, port: config.KEEPER_PORT, hostname: '0.0.0.0' });
+  // No `hostname`: see the header. A test pins that this answers on ::1 as well as 127.0.0.1.
+  const server = serve({ fetch: buildApp().fetch, port: config.KEEPER_PORT });
   log.health.info({ port: config.KEEPER_PORT }, 'health server listening');
   return server;
 }

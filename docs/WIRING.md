@@ -51,8 +51,8 @@ vault on-chain. Wallet connection is injected-provider only; there is no WalletC
 | From → To | What crosses | Env var (runtime, **not** `NEXT_PUBLIC_`) | Default |
 |---|---|---|---|
 | proxy route → Overcall | `GET /api/orders?offerer=<vault>&status=all&limit=50`, 9 s timeout, 512 KiB cap; every row shape-checked before it reaches the browser | `OVERCALL_API_BASE` | `https://overcall.finance` |
-| fallback route → keeper | `GET /orders` at the one configured URL, 5 s timeout (body included), 64 KiB cap, redirects refused; every order rebuilt and checked against the chain before it reaches the browser (§7) | `KEEPER_ORDERS_URL` | **none** — unset ⇒ 503 `configured:false`, fallback hidden. Railway: `http://keeper.railway.internal:8787/orders` |
-| fallback route → chain RPC | `Seaport.getCounter`, `getOrderHash`, `getOrderStatus`; vault `phase`, `listingHash`, `listingAmount`, `listingGrossUsdg`, `optionId` (one Multicall3 batch) | `NEXT_PUBLIC_RPC_URL`, `NEXT_PUBLIC_RPC_URL_2` (build-time, `lib/chain.ts`) | as above |
+| fallback route → keeper | `GET /orders` at the one configured URL, 5 s timeout (body included), 64 KiB cap, at most 8 orders (more is a 502), redirects refused; every order rebuilt and checked against the chain before it reaches the browser (§7) | `KEEPER_ORDERS_URL` | **none** — unset ⇒ 503 `configured:false`, fallback hidden. Railway: `http://keeper.railway.internal:8787/orders` |
+| fallback route → chain RPC | two Multicall3 `eth_call`s per computation, 6 s deadline for both: first the vault's `phase`, `listingHash`, `listingAmount`, `listingGrossUsdg`, `optionId` with `Seaport.getCounter` per offerer and `getOrderStatus` per order hash (one call, so one block; at most 5 + 8 + 8 reads), then `Seaport.getOrderHash` for each order that names the authorised hash (pure; at most 8). Shared across requests while running and for 2 s after | `NEXT_PUBLIC_RPC_URL`, `NEXT_PUBLIC_RPC_URL_2` (build-time, `lib/chain.ts`) | as above |
 
 Both routes are GET-only and read nothing from the request. Publishing is the keeper's job; the
 web app never POSTs to Overcall and never writes to the keeper.
@@ -176,25 +176,32 @@ Do not "fix" these; they are different models of the same week:
                                                          listingAmount / listingGrossUsdg / optionId
    ```
 
-   The route does not trust the keeper. It keeps only each order's `parameters` and `signature`,
-   **restores Seaport's counter** from `getCounter(offerer)` (`/orders` drops it, and the vault's
-   `rollClose` bumps it, so it is not safely 0), has **Seaport compute the order hash**, and
-   serves the order only if the keeper's claimed hash equals Seaport's, Seaport's equals the
-   vault's `listingHash()`, the offerer is the configured vault, the vault's phase is Listed, the
-   end time has not passed, Seaport does not report it cancelled or sold out, and the payment legs
-   are the vault's leg plus Overcall's 5% to Overcall's recipient at the count and gross the vault
-   recorded (`checkListingIsOurs`, the check Overcall's rows already go through). Anything else is
-   returned under `rejected` and logged on `web` (`"msg":"keeper order rejected"`); it never
-   reaches a fill button. The page labels the order "Listed directly by the vault's keeper;
-   Overcall's book is not showing it." and fills it through the same `OrderPayload` card, which
-   re-runs the check, and the same `fulfillAdvancedOrder` path. Code: `web/lib/keeperOrders.ts`,
-   `web/app/api/keeper/orders/route.ts`; operator notes: `web/README.md` "The keeper fallback",
-   `ops/deploy.md` §3.
+   The route does not trust the keeper. It keeps only each order's `parameters` and `signature`.
+   An order that does not name the vault's `listingHash()` is an earlier or superseded listing
+   and is reported under `closed` as `notCurrent`, never checked further and never an alarm. For
+   the one that does, it **restores Seaport's counter** from `getCounter(offerer)` (`/orders`
+   drops it, and the vault's `rollClose` bumps it, so it is not safely 0), **hashes the order
+   locally and has Seaport hash it** (the two must agree), and serves it only if the keeper's
+   claimed hash equals that hash, the offerer is the configured vault, and the payment legs are
+   the vault's leg plus Overcall's 5% to Overcall's recipient at the count and gross the vault
+   recorded (`checkListingIsOurs`, the check Overcall's rows already go through, which also hashes
+   the components). A failure there is an integrity failure: returned under `rejected` and logged
+   on `web` as one line per computation (`"msg":"keeper orders rejected"`). An order that passes
+   but is sold out, cancelled, past its end time, or whose vault is not in its Listed phase is
+   `closed` with that state. An order the chain could not be read for is `unchecked`. None of
+   those reach a fill button. The page asks Seaport first: a sold-out or cancelled order gets a
+   neutral notice and the keeper is not asked. The keeper's card says what Overcall's book shows
+   for the order (not showing it, did not answer, lists it as not live, or did not check out) and
+   fills through the same `OrderPayload` card, which re-runs the check and takes the contracts
+   left from Seaport, and the same `fulfillAdvancedOrder` path. Code: `web/lib/keeperOrders.ts`,
+   `web/lib/cycleNotices.ts`, `web/app/api/keeper/orders/route.ts`; operator notes:
+   `web/README.md` "The keeper fallback", `ops/deploy.md` §3.
 
    `KEEPER_ORDERS_URL` is a runtime server variable on `web`. Unset, the route answers 503
-   `configured:false` and the page shows no fallback. The keeper needs no public domain. One
-   deployment caveat: the keeper binds `0.0.0.0` (IPv4 only), and a Railway environment whose
-   private network is IPv6-only will not reach it (`ops/deploy.md` §9 item 14).
+   `configured:false` and the page shows no fallback. The keeper needs no public domain. It
+   listens without a pinned host (`::`, IPv4 with it), so Railway's IPv6 private network reaches
+   it; `keeper/src/health.test.ts` asserts it answers on `::1`. Reachability from the deployed
+   `web` service is a post-deploy check (`ops/deploy.md` §9 item 14).
 2. **The indexer's HMAC relay has no caller.** The keeper POSTs to Overcall directly and holds no
    `KEEPER_HMAC_SECRET`. The relay exists so that, if Overcall ever gates its API (auth, IP
    allow-list, rate limits), the credential lives in one managed place instead of on the keeper
@@ -212,7 +219,7 @@ Do not "fix" these; they are different models of the same week:
 | web from a fresh wallet, incl. a fill served from the keeper's `/orders` | W-13 (`pnpm --filter @callhouse/web acceptance:fork`) | **green on a fork** |
 | Overcall's real validator accepting our EIP-1271 listing | L-04 (one real 1-contract listing) | **not run** |
 | keeper → indexer HMAC relay | no caller exists | **unwired** |
-| web → keeper `/orders` fallback (route, counter restore, chain check, tamper refused) | `web/lib/keeperOrders.test.ts`; W-13 fork acceptance through the real route and keeper HTTP server | **green on a fork**; Railway private-network reachability not yet verified |
+| web → keeper `/orders` fallback (route, counter restore, chain check, tamper refused) | `web/lib/keeperOrders.test.ts`, `web/lib/cycleNotices.test.ts`, `keeper/src/health.test.ts` (IPv6 bind); W-13 fork acceptance through the real route and keeper HTTP server | **green on a fork**; Railway private-network reachability is a post-deploy check, not yet run |
 | any production deployment | W-19, W-20, L-08 | **not deployed** |
 
 ## 9. Bring the whole thing up against a fork

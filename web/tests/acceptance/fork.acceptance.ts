@@ -507,6 +507,8 @@ type KeeperRouteBody = {
   configured: boolean;
   orders: OvercallListing[];
   rejected: KeeperOrderBook["rejected"];
+  closed: KeeperOrderBook["closed"];
+  unchecked: KeeperOrderBook["unchecked"];
   error?: string;
 };
 
@@ -1179,6 +1181,7 @@ async function main(): Promise<void> {
         assertEq(body.configured, true, "route: configured");
         assertEq(body.orders.length, 0, "route: the tampered order is not served as fillable");
         assertEq(body.rejected.length, 1, "route: one rejected order");
+        assertEq(body.closed.length + body.unchecked.length, 0, "route: the tampered order is an integrity failure, not a lifecycle state or a chain failure");
         const rejected = body.rejected[0] as KeeperRouteBody["rejected"][number];
         assertEq((rejected.orderHash ?? "").toLowerCase(), listed.order.orderHash.toLowerCase(), "route: the rejection names the keeper's claimed hash");
         for (const reason of [KEEPER_REASONS.claimedHash, REASONS.hashMismatch, REASONS.writerRecipient]) {
@@ -1220,6 +1223,7 @@ async function main(): Promise<void> {
     const pageFill = await step("(b) the route serves the keeper's order with Seaport's counter restored; the cycle page labels it and fills 2 contracts", async () => {
       const body = await keeperRoute(web.url, "restored", (b, status) => status === 200 && b.orders.length === 1);
       assertEq(body.rejected.length, 0, "route: nothing rejected");
+      assertEq(body.closed.length + body.unchecked.length, 0, "route: nothing closed or unchecked (one-block Multicall3 read against the fork)");
       const row = body.orders[0] as OvercallListing;
       assertEq(row.orderHash.toLowerCase(), listed.order.orderHash.toLowerCase(), "route row carries the authorised hash");
       // The counter is the chain's, not a default: it is non-zero on this run.

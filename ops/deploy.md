@@ -152,7 +152,7 @@ build.
 | Variable | Value | Notes |
 |---|---|---|
 | `OVERCALL_API_BASE` | `https://overcall.finance` | **Server-side, read per request** by `app/api/overcall/listings`. It is not a build ARG and must not become one. Change it and **restart** — no rebuild needed. Leave it unset and `route.ts` uses the same default |
-| `KEEPER_ORDERS_URL` | `http://keeper.railway.internal:8787/orders` | **Server-side, read per request** by `app/api/keeper/orders`, the keeper fallback. Railway private networking: the `keeper` service (§10) in the same project and environment, on its `PORT` 8787. No default: **unset, the route answers 503 "not configured" and the cycle page shows no fallback.** Never `NEXT_PUBLIC_`, never a build ARG. Change it and **restart**. Must be http(s) with no credentials in it; the route refuses anything else and never prints the value |
+| `KEEPER_ORDERS_URL` | `http://keeper.railway.internal:8787/orders` | **Server-side, read per request** by `app/api/keeper/orders`, the keeper fallback. Railway private networking: the `keeper` service (§10) in the same project and environment, on its `KEEPER_PORT` (default 8787; keep `PORT` equal to it, §10.2). No default: **unset, the route answers 503 "not configured" and the cycle page shows no fallback.** Never `NEXT_PUBLIC_`, never a build ARG. Change it and **restart**. Must be http(s) with no credentials in it; the route refuses anything else and never prints the value |
 | `PORT` | — | Injected by Railway. `server.js` reads `process.env.PORT`, which wins over the Dockerfile's `ENV PORT=3000`. Do not set it by hand |
 
 That proxy exists because overcall.finance sends no CORS headers, so the browser cannot call it
@@ -162,17 +162,20 @@ from our origin. It is GET-only and takes no auth of any kind.
 refuses it, open question L-04, or their API is down), `/vault/nvda/cycle` asks
 `/api/keeper/orders`, which reads the keeper's `GET /orders` over the private network and serves
 only an order it has checked against the chain: Seaport's counter restored with `getCounter`, the
-hash from Seaport's `getOrderHash` equal to the vault's `listingHash()`, offerer the vault, phase
-Listed, not expired, and the two payment legs the vault's and Overcall's. Everything else is
-logged on the web service (`"msg":"keeper order rejected"`, with reasons) and never offered. The
-browser never talks to the keeper, so the keeper needs **no public domain** for this. Verify after
-setting it:
+hash derived locally and by Seaport's `getOrderHash` equal to the vault's `listingHash()`, offerer
+the vault, phase Listed, not expired, not sold out or cancelled, and the two payment legs the
+vault's and Overcall's. An order that names the authorised hash and is not that order is logged on
+the web service as a warning (`"msg":"keeper orders rejected"`, one line per computation, with the
+count and the first reasons). Sold-out, cancelled and superseded orders are `closed` and not
+logged as warnings; an order the chain could not be read for is `unchecked`
+(`"msg":"keeper orders unchecked: chain read failed"`). None of them is offered. The browser never
+talks to the keeper, so the keeper needs **no public domain** for this. Verify after setting it:
 
 ```bash
 curl -s https://app.callhouse.finance/api/keeper/orders | head -c 300
-# {"configured":true,"orders":[...],"rejected":[]}      wired; orders is [] outside a Listed week
+# {"configured":true,"orders":[...],"rejected":[],"closed":[],"unchecked":[]}   wired; orders is [] outside a Listed week
 # {"configured":false,...}   HTTP 503                    KEEPER_ORDERS_URL is not set on web
-# {"configured":true,...,"error":"The keeper could not be reached."}   HTTP 502   see §9 item on private networking
+# {"configured":true,...,"error":"The keeper could not be reached."}   HTTP 502   see §9 item 14
 ```
 
 ---
@@ -364,15 +367,23 @@ bare COPY error. If you see that message, read the next section.
     `ops/abis`. If a frontend file ever imports across those boundaries, the build fails in Docker
     while working locally — fix the import, do not widen the context.
 
-14. **The keeper fallback needs the keeper reachable on the private network, and the keeper binds
-    `0.0.0.0`.** `keeper/src/health.ts` pins `hostname: '0.0.0.0'`, which is IPv4 only. The relay
-    and indexer deliberately do not pin a host (§11.6 item 5) because a Railway environment whose
-    private network is IPv6-only cannot reach an IPv4-only listener over `*.railway.internal`. If
-    `/api/keeper/orders` answers 502 "The keeper could not be reached." while the keeper's own
-    `/health` is green, this is the first suspect: confirm from the web service's shell
-    (`wget -qO- http://keeper.railway.internal:8787/orders`). The fix is the keeper's
-    (bind `::`), not the web app's; until then the fallback degrades to a warning on the cycle
-    page and the Overcall path is unaffected.
+14. **Post-deploy check, required before launch: `web` reaches the keeper on the private
+    network.** The keeper fallback exists for the week Overcall's book will not show the listing,
+    so it cannot be first tested in that week. The keeper's HTTP server pins no host (it binds
+    `::`, and IPv4 with it), like the relay and the indexer (§11.6 item 5), because Railway's
+    private network is IPv6; `keeper/src/health.test.ts` fails if a pinned `0.0.0.0` comes back.
+    After both services are deployed, from the **web** service's shell:
+
+    ```bash
+    wget -qO- http://keeper.railway.internal:8787/orders     # {"orders":[...]}; must answer
+    wget -qO- http://127.0.0.1:${PORT}/api/keeper/orders      # "configured":true and no "error"
+    ```
+
+    Use the keeper's `KEEPER_PORT` if it is not 8787. A connection refused or a timeout on the
+    first line, while the keeper's own `/health` is green, is the service name, the port, or the
+    two services being in different Railway environments. Until it passes, the fallback shows a
+    warning on the cycle page ("The keeper fallback is unavailable right now.") and the Overcall
+    path is unaffected.
 
 ---
 
@@ -423,7 +434,7 @@ enforcement. If Railway ever offers you a second replica, the answer is no.
 | Settings → Config-as-code path | `keeper/railway.json` |
 | Builder / Dockerfile path | `DOCKERFILE` / `keeper/Dockerfile` (from railway.json) |
 | Replicas | **1** (from railway.json) |
-| Public networking | **not required, and not needed for the fallback.** The healthcheck probes the container's `PORT` privately, and the web app's keeper fallback reads `GET /orders` server-side over the private network (`KEEPER_ORDERS_URL=http://keeper.railway.internal:8787/orders` on `web`, §3). No browser ever calls the keeper. See §9 item 14 on the keeper's IPv4 bind |
+| Public networking | **not required, and not needed for the fallback.** The healthcheck probes the container's `PORT` privately, and the web app's keeper fallback reads `GET /orders` server-side over the private network (`KEEPER_ORDERS_URL=http://keeper.railway.internal:8787/orders` on `web`, §3). No browser ever calls the keeper. §9 item 14 is the post-deploy reachability check |
 | Volume | mount path **`/data`** — see 10.3 |
 | Healthcheck | `GET /health` on `PORT`, timeout 300 s (from railway.json). 503 only when the loop is wedged; `degraded` is a 200 |
 

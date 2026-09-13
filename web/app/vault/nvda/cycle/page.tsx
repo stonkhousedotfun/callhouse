@@ -10,7 +10,32 @@ import { CHAIN_ID, addressUrl } from "@/lib/chain";
 import { CLEARINGHOUSE, MARKET, REGISTRY, SEAPORT, USDG, VAULT } from "@/lib/contracts";
 import { fmtUsdg, fmtUtc, shortHash, splitPremium, unitPriceFromLegs } from "@/lib/format";
 import { useLadder, useNow, useOrderStatus, useVaultSnapshot } from "@/lib/hooks";
+import {
+  bookContext,
+  bookNotice,
+  isLiveStatus,
+  keeperNotice,
+  shouldAskKeeper,
+  type CycleListingState,
+  type Notice,
+} from "@/lib/cycleNotices";
 import { checkListingIsOurs } from "@/lib/overcall";
+
+function NoticeBlock({ notice }: { notice: Notice }) {
+  return (
+    <div className="notice" data-tone={notice.tone}>
+      <strong>{notice.heading}</strong>
+      {notice.body}
+      {notice.items !== undefined ? (
+        <ul style={{ margin: "6px 0 0", paddingLeft: 18 }}>
+          {notice.items.map((item, i) => (
+            <li key={i}>{item}</li>
+          ))}
+        </ul>
+      ) : null}
+    </div>
+  );
+}
 
 export default function CyclePage() {
   const { data: v, isError: chainReadFailed } = useVaultSnapshot();
@@ -31,9 +56,8 @@ export default function CyclePage() {
   });
 
   const allListings = book.data?.listings ?? [];
-  const isLive = (status: string) => status === "open" || status === "partial";
-  const liveListings = allListings.filter((l) => isLive(l.status));
-  const otherListings = allListings.filter((l) => !isLive(l.status));
+  const liveListings = allListings.filter((l) => isLiveStatus(l.status));
+  const otherListings = allListings.filter((l) => !isLiveStatus(l.status));
 
   const hasOnChainListing = v.listingHash !== undefined && !/^0x0+$/.test(v.listingHash);
 
@@ -48,21 +72,20 @@ export default function CyclePage() {
   const ourRow = hasOnChainListing
     ? allListings.find((l) => l.orderHash.toLowerCase() === v.listingHash!.toLowerCase())
     : undefined;
-  const matchingListing = ourRow !== undefined && isLive(ourRow.status) ? ourRow : undefined;
+  const matchingListing = ourRow !== undefined && isLiveStatus(ourRow.status) ? ourRow : undefined;
   const ourRowNotLive = ourRow !== undefined && matchingListing === undefined ? ourRow : undefined;
-  const bookAnswered = book.data !== undefined && !book.data.error;
-  const bookMissesOurHash = hasOnChainListing && bookAnswered && ourRow === undefined;
   const unmatchedLive = liveListings.filter((l) => l !== matchingListing);
 
-  // THE KEEPER FALLBACK. Overcall first: the keeper's /orders is read only when Overcall's book
-  // has answered (or failed to) and has no listing for the vault that passes the same chain check
-  // OrderPayload runs. The book may be missing our row because Overcall's validator refused it
-  // (L-04), may be down, or may carry a row that does not check out; in each case the keeper is
-  // asked. The route (app/api/keeper/orders) rebuilds and checks every order against the chain
-  // and returns only the vault's authorised listing; OrderPayload checks it again. When the
-  // deployment has no KEEPER_ORDERS_URL the route says so and nothing below mentions the keeper.
-  // Nothing is decided before the clock has started: an end time compared against 0 proves
-  // nothing, and a fallback that flickers in for one frame is a false statement about the book.
+  // Seaport's status, in the shape the pure checks take. useOrderStatus fills every field or none.
+  const seaportStatus =
+    orderStatus?.isCancelled !== undefined && orderStatus.totalFilled !== undefined && orderStatus.totalSize !== undefined
+      ? { isCancelled: orderStatus.isCancelled, totalFilled: orderStatus.totalFilled, totalSize: orderStatus.totalSize }
+      : undefined;
+
+  // Overcall's live row for the hash, through the same chain check OrderPayload runs (which hashes
+  // the row's components as well as comparing its fields). Nothing is decided before the clock has
+  // started: an end time compared against 0 proves nothing, and a fallback that flickers in for
+  // one frame is a false statement about the book.
   const overcallVerified =
     matchingListing !== undefined &&
     nowSeconds > 0 &&
@@ -81,8 +104,30 @@ export default function CyclePage() {
       },
       nowSeconds,
     ).ok;
-  const askKeeper =
-    VAULT !== undefined && hasOnChainListing && nowSeconds > 0 && !book.isLoading && !overcallVerified;
+
+  const listingState: CycleListingState = {
+    vaultConfigured: VAULT !== undefined,
+    listingHash: v.listingHash,
+    listingAmount: v.listingAmount,
+    seaportStatus,
+    nowSeconds,
+    book: {
+      loading: book.isLoading,
+      answered: book.data !== undefined && !book.data.error,
+      error: book.data?.error,
+      ourRowStatus: ourRow?.status,
+      liveCount: liveListings.length,
+    },
+    overcallVerified,
+  };
+
+  // THE KEEPER FALLBACK. Seaport first, then Overcall: the keeper's /orders is read only when
+  // Seaport has contracts left and Overcall's book has answered (or failed to) without a verified
+  // live row for the vault's hash (lib/cycleNotices.ts shouldAskKeeper). The route
+  // (app/api/keeper/orders) rebuilds and checks every order against the chain and returns only the
+  // vault's authorised listing; OrderPayload checks it again. When the deployment has no
+  // KEEPER_ORDERS_URL the route says so and nothing below mentions the keeper.
+  const askKeeper = shouldAskKeeper(listingState);
   const keeper = useQuery({
     queryKey: ["keeper-orders", VAULT ?? "none", v.listingHash ?? "none"],
     enabled: askKeeper,
@@ -93,6 +138,8 @@ export default function CyclePage() {
   const keeperListing = keeperBook?.listings.find(
     (l) => l.orderHash.toLowerCase() === v.listingHash?.toLowerCase(),
   );
+  const listingNotice = bookNotice(listingState, keeperListing !== undefined);
+  const fallbackNotice = keeperNotice(listingState, keeperBook, keeperListing !== undefined);
 
   const unitPrice = unitPriceFromLegs(v.listingGrossUsdg ?? 0n, 0n, v.listingAmount ?? 0n);
   const split = splitPremium(unitPrice ?? 0n, v.listingAmount ?? 0n);
@@ -297,86 +344,41 @@ export default function CyclePage() {
       </div>
 
       <div style={{ marginTop: 16 }}>
-        {book.isLoading ? (
+        {listingNotice === "loading" ? (
           <div className="card">
             <span className="small muted">Reading Overcall&apos;s book…</span>
           </div>
-        ) : book.data?.error ? (
-          <div className="notice" data-tone="warn">
-            <strong>Overcall&apos;s book did not answer.</strong>
-            {book.data.error} The on-chain facts above still stand. If the listing exists but their
-            front end does not show it, the signed payload below is everything a buyer needs.
-          </div>
-        ) : ourRowNotLive !== undefined ? (
-          <div className="notice" data-tone="warn">
-            <strong>
-              Overcall&apos;s book lists the vault&apos;s order as {ourRowNotLive.status}.
-            </strong>
-            The vault has authorised {shortHash(v.listingHash)} on chain and the book carries that
-            hash, but not as an open order, so the book&apos;s row cannot be filled from this page.{" "}
-            {keeperListing !== undefined
-              ? "The vault's keeper is serving the same order directly, and it is below, checked against the chain. "
-              : ""}
-            {ourRowNotLive.status === "unfillable"
-              ? "Overcall marks an order unfillable while the offerer's approval or balance is short; it recovers by itself when they return."
-              : ourRowNotLive.status === "filled"
-                ? "Every contract has been bought."
-                : ourRowNotLive.status === "expired"
-                  ? "The order's end time has passed."
-                  : "The row is in the table below."}
-          </div>
-        ) : bookMissesOurHash ? (
-          <div className="notice" data-tone="warn">
-            <strong>Overcall&apos;s book has no listing matching the vault&apos;s current order hash.</strong>
-            The vault has authorised {shortHash(v.listingHash)} on chain, but no row under its
-            address, open or otherwise, carries that hash.{" "}
-            {liveListings.length > 0
-              ? `The ${liveListings.length === 1 ? "order" : `${liveListings.length} orders`} open below ${liveListings.length === 1 ? "is" : "are"} shown for the record and cannot be filled from this page.`
-              : keeperListing !== undefined
-                ? "The vault's keeper is serving that order directly, and it is below, checked against the chain."
-                : "An invisible listing is an unfilled week; this is the thing to escalate."}
-          </div>
-        ) : liveListings.length === 0 ? (
-          <div className="notice" data-tone="info">
-            <strong>Nothing open on Overcall&apos;s book for this vault.</strong>
-            Either the keeper has not listed this cycle yet, the order was filled, or it was
-            cancelled. An invisible listing is an unfilled week, so if the vault has authorised a
-            hash above and nothing appears here, that is the thing to escalate.
-          </div>
+        ) : listingNotice !== null ? (
+          <NoticeBlock notice={listingNotice} />
         ) : null}
       </div>
 
       {/* What the keeper said, when it was asked and nothing from it can be offered. A deployment
-          without KEEPER_ORDERS_URL never reaches this: keeperBook is undefined there. */}
-      {keeperBook !== undefined && keeperListing === undefined ? (
-        keeperBook.rejected.length > 0 ? (
-          <div className="notice" data-tone="bad" style={{ marginTop: 16 }}>
-            <strong>
-              The vault&apos;s keeper served{" "}
-              {keeperBook.rejected.length === 1 ? "an order" : `${keeperBook.rejected.length} orders`} that did
-              not check out against the chain, so nothing from the keeper is offered here.
-            </strong>
-            <ul style={{ margin: "6px 0 0", paddingLeft: 18 }}>
-              {keeperBook.rejected.map((r, i) => (
-                <li key={`${r.orderHash ?? "unnamed"}-${i}`}>
-                  {r.orderHash ? `${shortHash(r.orderHash)}: ` : ""}
-                  {r.reasons.join(" ")}
-                </li>
-              ))}
-            </ul>
-          </div>
-        ) : keeperBook.error ? (
-          <div className="notice" data-tone="warn" style={{ marginTop: 16 }}>
-            <strong>The vault&apos;s keeper could not be read as a fallback.</strong>
-            {keeperBook.error} Nothing from the keeper is offered until it answers and its order
-            checks out against the chain.
-          </div>
-        ) : (
-          <div className="notice" data-tone="info" style={{ marginTop: 16 }}>
-            <strong>The vault&apos;s keeper is not serving a live order for this vault either.</strong>
-            Nothing it served matches the hash the vault has authorised on chain.
-          </div>
-        )
+          without KEEPER_ORDERS_URL never reaches this: keeperBook is undefined there. Only an
+          integrity failure is red (lib/cycleNotices.ts keeperNotice). */}
+      {fallbackNotice !== null ? (
+        <div style={{ marginTop: 16 }}>
+          <NoticeBlock notice={fallbackNotice} />
+        </div>
+      ) : null}
+
+      {/* The keeper's copy of the vault's order, through the same card and the same fill. It is
+          only ever a row whose hash is the vault's listingHash, and only when Overcall's book has
+          no verified row for it; when the book has an unverified row for the hash, this verified
+          card comes first. */}
+      {keeperListing !== undefined ? (
+        <div key={`keeper-${keeperListing.orderHash}`} style={{ marginTop: 16 }}>
+          <OrderPayload
+            source="keeper"
+            book={bookContext(listingState)}
+            listing={keeperListing}
+            seaportStatus={seaportStatus}
+            expectedListingHash={v.listingHash}
+            expectedListingAmount={v.listingAmount}
+            expectedListingGrossUsdg={v.listingGrossUsdg}
+            expectedOptionId={v.optionId}
+          />
+        </div>
       ) : null}
 
       {/* The four expected* props are the vault's own listing slot, read in one multicall:
@@ -386,22 +388,7 @@ export default function CyclePage() {
         <div key={matchingListing.orderHash} style={{ marginTop: 16 }}>
           <OrderPayload
             listing={matchingListing}
-            expectedListingHash={v.listingHash}
-            expectedListingAmount={v.listingAmount}
-            expectedListingGrossUsdg={v.listingGrossUsdg}
-            expectedOptionId={v.optionId}
-          />
-        </div>
-      ) : null}
-
-      {/* The keeper's copy of the same order, through the same card and the same fill. It is
-          only ever a row whose hash is the vault's listingHash, and only when Overcall's book
-          has no verified row for it. */}
-      {keeperListing !== undefined ? (
-        <div key={`keeper-${keeperListing.orderHash}`} style={{ marginTop: 16 }}>
-          <OrderPayload
-            source="keeper"
-            listing={keeperListing}
+            seaportStatus={seaportStatus}
             expectedListingHash={v.listingHash}
             expectedListingAmount={v.listingAmount}
             expectedListingGrossUsdg={v.listingGrossUsdg}

@@ -1,9 +1,20 @@
-import { getAddress, hashStruct, type Abi, type Address, type Hex, type PublicClient } from "viem";
+import type { Abi, Address, Hex, PublicClient } from "viem";
 
 import type { OvercallListing as BookRow, OrderComponentsJson as BookComponents } from "./api";
 import { seaportAbi } from "./abi/seaport";
 import { vaultAbi } from "./abi/vault";
-import { checkListingIsOurs, isOrderComponents } from "./overcall";
+import { REASONS, checkListingIsOurs, isOrderComponents } from "./overcall";
+import {
+  addr,
+  componentsStruct,
+  seaportOrderHash,
+  seaportRemaining,
+  seaportSoldOut,
+  type OrderComponentsStruct,
+  type SeaportFillStatus,
+} from "./seaportOrder";
+
+export { componentsStruct, seaportOrderHash, type OrderComponentsStruct } from "./seaportOrder";
 
 /**
  * The keeper fallback: the vault's own listing, read from the keeper's GET /orders, checked
@@ -20,20 +31,33 @@ import { checkListingIsOurs, isOrderComponents } from "./overcall";
  * says is carried to the page except the Seaport OrderParameters and the signature bytes, and
  * those only after every one of these holds on chain:
  *
+ *   - the order the keeper names is the vault's listingHash(). Any other order it serves is an
+ *     earlier or superseded listing (a counter bump retires one without cancelling it, and the
+ *     keeper serves a row until its end time): reported as `closed`, `notCurrent`, and not
+ *     checked further, because it can never be offered;
  *   - the counter is Seaport.getCounter(offerer), read here. /orders drops it (it serves
  *     OrderParameters, not OrderComponents), so it is RESTORED from the chain, never taken from
  *     the keeper;
- *   - the order hash is Seaport.getOrderHash(rebuilt components), read here. The keeper's own
- *     `orderHash` string must equal it, and the row the page receives carries Seaport's value;
- *   - that hash is the vault's listingHash(), the offerer is the configured vault, the vault's
- *     phase is Listed, the end time has not passed, and the payment legs are exactly the vault
- *     leg plus Overcall's 5% leg at the contract count and gross the vault recorded
- *     (checkListingIsOurs, the same function the page runs on Overcall's rows);
- *   - Seaport does not report the order cancelled or fully sold.
+ *   - the order hash is derived locally (lib/seaportOrder.ts) AND read from Seaport.getOrderHash,
+ *     and the two must agree. The keeper's own `orderHash` string must equal it, and the row the
+ *     page receives carries that value;
+ *   - the offerer is the configured vault, the end time has not passed, and the payment legs are
+ *     exactly the vault leg plus Overcall's 5% leg at the contract count and gross the vault
+ *     recorded (checkListingIsOurs, the same function the page runs on Overcall's rows);
+ *   - the vault's phase is Listed and Seaport does not report the order cancelled or sold out.
  *
- * Anything else is dropped and reported with its reasons: logged on the server, returned under
- * `rejected`, never under `orders`. The page runs checkListingIsOurs again on what it receives,
- * so a bug here still does not produce a fill button on its own.
+ * FOUR OUTCOMES, so an alarm is only raised for what deserves one:
+ *   orders     the vault's live, authorised listing, as a book row.
+ *   rejected   the keeper served something that claims the authorised hash and is not that
+ *              order, or does not parse. An integrity failure: logged as a warning.
+ *   closed     a lifecycle state, not a fault: sold out, cancelled, not Listed, past its end
+ *              time, or not the current listing at all.
+ *   unchecked  the chain could not be read for the order. Not offered, and not the keeper's fault.
+ *
+ * The chain state (the vault's slot, counters, statuses) is read in ONE eth_call, so one block;
+ * Seaport's getOrderHash, a pure function, is a second. The route bounds both with a deadline.
+ * The page runs checkListingIsOurs again on what it receives, so a bug here still does not
+ * produce a fill button on its own.
  *
  * DELIBERATELY ABSENT: any URL from the request, any header or field the keeper sent beyond the
  * parameters and signature, a redirect follower, a clock (`nowSeconds` is passed in), React.
@@ -47,8 +71,14 @@ import { checkListingIsOurs, isOrderComponents } from "./overcall";
 export const KEEPER_TIMEOUT_MS = 5_000;
 /** A live order is about 1.5 KiB and a vault has at most three listings a cycle. */
 export const KEEPER_MAX_BYTES = 64 * 1024;
-/** More live orders than this is not a vault's book; the extras are not checked or served. */
+/** More live orders than this is not a vault's book: the whole answer is refused, none checked. */
 export const KEEPER_MAX_ORDERS = 8;
+/**
+ * Every chain read the check makes, together. With the keeper's five seconds the route answers
+ * within eleven, under the fifteen the browser waits (lib/api.ts fetchKeeperOrderBook), so a hung
+ * RPC is reported in the route's words rather than as the browser's own abort.
+ */
+export const CHAIN_DEADLINE_MS = 6_000;
 /** PHASE_LABELS in lib/hooks.ts: Idle, Listed, Exercisable, Settling. */
 export const PHASE_LISTED = 1;
 
@@ -96,33 +126,6 @@ export function isKeeperOrder(x: unknown): x is KeeperOrderJson {
                          COMPONENTS AND HASH
 //////////////////////////////////////////////////////////////*/
 
-export type OrderComponentsStruct = {
-  offerer: Address;
-  zone: Address;
-  offer: Array<{ itemType: number; token: Address; identifierOrCriteria: bigint; startAmount: bigint; endAmount: bigint }>;
-  consideration: Array<{
-    itemType: number;
-    token: Address;
-    identifierOrCriteria: bigint;
-    startAmount: bigint;
-    endAmount: bigint;
-    recipient: Address;
-  }>;
-  orderType: number;
-  startTime: bigint;
-  endTime: bigint;
-  zoneHash: Hex;
-  salt: bigint;
-  conduitKey: Hex;
-  counter: bigint;
-};
-
-/** Case is not meaning: an address is 20 bytes, and a keeper that mis-checksums one must not make
- *  viem throw mid-check. The bytes are what Seaport hashes. */
-function addr(value: string): Address {
-  return getAddress(value.toLowerCase());
-}
-
 /**
  * OrderParameters from /orders plus the chain's counter → OrderComponents, in the JSON form the
  * page's fill path reads. `totalOriginalConsiderationItems` is dropped: the fill path rebuilds it
@@ -157,95 +160,35 @@ export function restoreComponents(parameters: KeeperOrderJson["parameters"], cou
   };
 }
 
-/** The ABI struct for Seaport.getOrderHash. */
-export function componentsStruct(c: BookComponents): OrderComponentsStruct {
-  return {
-    offerer: addr(c.offerer),
-    zone: addr(c.zone),
-    offer: c.offer.map((item) => ({
-      itemType: item.itemType,
-      token: addr(item.token),
-      identifierOrCriteria: BigInt(item.identifierOrCriteria),
-      startAmount: BigInt(item.startAmount),
-      endAmount: BigInt(item.endAmount),
-    })),
-    consideration: c.consideration.map((item) => ({
-      itemType: item.itemType,
-      token: addr(item.token),
-      identifierOrCriteria: BigInt(item.identifierOrCriteria),
-      startAmount: BigInt(item.startAmount),
-      endAmount: BigInt(item.endAmount),
-      recipient: addr(item.recipient),
-    })),
-    orderType: c.orderType,
-    startTime: BigInt(c.startTime),
-    endTime: BigInt(c.endTime),
-    zoneHash: c.zoneHash,
-    salt: BigInt(c.salt),
-    conduitKey: c.conduitKey,
-    counter: BigInt(c.counter),
-  };
-}
-
-const SEAPORT_TYPES = {
-  OrderComponents: [
-    { name: "offerer", type: "address" },
-    { name: "zone", type: "address" },
-    { name: "offer", type: "OfferItem[]" },
-    { name: "consideration", type: "ConsiderationItem[]" },
-    { name: "orderType", type: "uint8" },
-    { name: "startTime", type: "uint256" },
-    { name: "endTime", type: "uint256" },
-    { name: "zoneHash", type: "bytes32" },
-    { name: "salt", type: "uint256" },
-    { name: "conduitKey", type: "bytes32" },
-    { name: "counter", type: "uint256" },
-  ],
-  OfferItem: [
-    { name: "itemType", type: "uint8" },
-    { name: "token", type: "address" },
-    { name: "identifierOrCriteria", type: "uint256" },
-    { name: "startAmount", type: "uint256" },
-    { name: "endAmount", type: "uint256" },
-  ],
-  ConsiderationItem: [
-    { name: "itemType", type: "uint8" },
-    { name: "token", type: "address" },
-    { name: "identifierOrCriteria", type: "uint256" },
-    { name: "startAmount", type: "uint256" },
-    { name: "endAmount", type: "uint256" },
-    { name: "recipient", type: "address" },
-  ],
-} as const;
-
-/**
- * Seaport's order hash, derived locally: the EIP-712 struct hash of OrderComponents, which is
- * what Seaport.getOrderHash returns and what the vault records as listingHash (keeper
- * localOrderHash is the same derivation). The route asks Seaport itself; this exists so tests
- * can stand in for the chain with the real function rather than a lookup table, and the fork
- * acceptance asserts the two agree.
- */
-export function seaportOrderHash(c: OrderComponentsStruct): Hex {
-  return hashStruct({ data: c, primaryType: "OrderComponents", types: SEAPORT_TYPES });
-}
-
 /*//////////////////////////////////////////////////////////////
                             THE CHECK
 //////////////////////////////////////////////////////////////*/
 
+export type VaultListingSlot = {
+  phase: number;
+  listingHash: Hex;
+  listingAmount: bigint;
+  listingGrossUsdg: bigint;
+  optionId: bigint;
+};
+
 /** Chain reads the check needs. The route builds one from the app's server-side viem client;
  *  tests build one from fixtures. */
 export type KeeperChainReader = {
-  vaultListing(): Promise<{
-    phase: number;
-    listingHash: Hex;
-    listingAmount: bigint;
-    listingGrossUsdg: bigint;
-    optionId: bigint;
+  /**
+   * The chain's state for the check, in ONE eth_call and so one block: the vault's listing slot,
+   * Seaport's counter for each offerer and Seaport's status for each order hash, in the order
+   * asked. Throws when the vault's slot cannot be read; a per-order read that fails is
+   * `undefined` in its place.
+   */
+  readState(query: { offerers: readonly Address[]; orderHashes: readonly Hex[] }): Promise<{
+    vault: VaultListingSlot;
+    counters: ReadonlyArray<bigint | undefined>;
+    statuses: ReadonlyArray<SeaportFillStatus | undefined>;
   }>;
-  getCounter(offerer: Address): Promise<bigint>;
-  getOrderHash(components: OrderComponentsStruct): Promise<Hex>;
-  getOrderStatus(orderHash: Hex): Promise<{ isCancelled: boolean; totalFilled: bigint; totalSize: bigint }>;
+  /** Seaport.getOrderHash for each struct, in one batch. Pure on chain, so no block is pinned.
+   *  A read that fails is `undefined` in its place. */
+  getOrderHashes(components: readonly OrderComponentsStruct[]): Promise<ReadonlyArray<Hex | undefined>>;
 };
 
 export type KeeperCheckConfig = {
@@ -262,29 +205,55 @@ export const KEEPER_REASONS = {
   malformed: "The keeper served an order whose fields do not parse as Seaport order parameters.",
   itemCount: "The keeper's totalOriginalConsiderationItems is not the number of payment legs it served.",
   claimedHash: "The order hash the keeper names is not the hash Seaport computes for the order it served.",
-  phase: "The vault is not in its Listed phase, so no order of its can be filled now.",
-  cancelled: "Seaport reports this order as cancelled.",
-  soldOut: "Seaport reports every contract in this order as sold.",
-  unreadable: "This order could not be checked against the chain, so it is not offered.",
-  tooMany: "The keeper served more orders than a vault can have live; the extras were not checked.",
+  unreadable: "The chain could not be read for this order, so it is not offered yet.",
+  hashDerivation: "Seaport's order hash and this app's own derivation of it disagree, so the order is not offered.",
+  tooMany: "The keeper served more orders than a vault can have live, so none of them are offered.",
 } as const;
 
-export type RejectedKeeperOrder = {
+/** Lifecycle states: why an order is not offered when nothing is wrong with it. */
+export type KeeperOrderState = "notCurrent" | "soldOut" | "cancelled" | "notListed" | "expired";
+
+export const KEEPER_STATES: Record<KeeperOrderState, string> = {
+  notCurrent: "Not the order the vault authorises now; an earlier or superseded listing.",
+  soldOut: "Seaport reports every contract in this order as sold.",
+  cancelled: "Seaport reports this order as cancelled.",
+  notListed: "The vault is not in its Listed phase, so no order of its can be filled now.",
+  expired: "This order's end time has passed.",
+};
+
+export type KeeperOrderIssue = {
   /** The keeper's claimed hash, only when it is at least a well-formed bytes32. */
   orderHash: Hex | null;
   reasons: string[];
 };
 
-export type VerifiedKeeperOrders = { orders: BookRow[]; rejected: RejectedKeeperOrder[] };
+export type ClosedKeeperOrder = { orderHash: Hex; state: KeeperOrderState };
+
+export type VerifiedKeeperOrders = {
+  orders: BookRow[];
+  rejected: KeeperOrderIssue[];
+  closed: ClosedKeeperOrder[];
+  unchecked: KeeperOrderIssue[];
+};
 
 function claimedHash(x: unknown): Hex | null {
-  return isRecord(x) && typeof x.orderHash === "string" && BYTES32.test(x.orderHash) ? (x.orderHash as Hex) : null;
+  return isRecord(x) && typeof x.orderHash === "string" && BYTES32.test(x.orderHash)
+    ? (x.orderHash.toLowerCase() as Hex)
+    : null;
+}
+
+function isZeroHash(h: string): boolean {
+  return /^0x0*$/.test(h);
+}
+
+function unique<T extends string>(values: readonly T[]): T[] {
+  return [...new Set(values)];
 }
 
 /**
- * Check every order the keeper served against the chain and return the ones that are the vault's
- * live, authorised listing, as book rows. Throws only when the vault itself cannot be read; a
- * failed read for one order rejects that order.
+ * Check every order the keeper served against the chain and sort it into one of the four
+ * outcomes. Throws only when the vault itself cannot be read; a failed read for one order puts
+ * that order under `unchecked`.
  */
 export async function verifyKeeperOrders(
   raw: readonly unknown[],
@@ -292,96 +261,137 @@ export async function verifyKeeperOrders(
   config: KeeperCheckConfig,
   nowSeconds: number,
 ): Promise<VerifiedKeeperOrders> {
-  const rejected: RejectedKeeperOrder[] = [];
-  const orders: BookRow[] = [];
+  const out: VerifiedKeeperOrders = { orders: [], rejected: [], closed: [], unchecked: [] };
 
-  const considered = raw.slice(0, KEEPER_MAX_ORDERS);
-  for (const extra of raw.slice(KEEPER_MAX_ORDERS)) {
-    rejected.push({ orderHash: claimedHash(extra), reasons: [KEEPER_REASONS.tooMany] });
+  // A keeper that serves more than a vault can have live is not describing a vault's book. One
+  // item says so; nothing is checked, so the size of the answer bounds nothing downstream.
+  if (raw.length > KEEPER_MAX_ORDERS) {
+    out.rejected.push({ orderHash: null, reasons: [`${KEEPER_REASONS.tooMany} (${raw.length} served)`] });
+    return out;
   }
-  if (considered.length === 0) return { orders, rejected };
 
-  // One read of the vault's slot for every order: there is one authorised hash, not one per order.
-  const vault = await chain.vaultListing();
+  const wellFormed: KeeperOrderJson[] = [];
+  for (const entry of raw) {
+    if (isKeeperOrder(entry)) wellFormed.push(entry);
+    else out.rejected.push({ orderHash: claimedHash(entry), reasons: [KEEPER_REASONS.malformed] });
+  }
+  if (wellFormed.length === 0) return out;
 
-  const results = await Promise.all(
-    considered.map(async (entry): Promise<BookRow | RejectedKeeperOrder> => {
-      if (!isKeeperOrder(entry)) return { orderHash: claimedHash(entry), reasons: [KEEPER_REASONS.malformed] };
-      const p = entry.parameters;
-      const reasons: string[] = [];
-      if (BigInt(p.totalOriginalConsiderationItems) !== BigInt(p.consideration.length)) {
-        reasons.push(KEEPER_REASONS.itemCount);
-      }
+  // One block for every stateful fact: there is one authorised hash, not one per order.
+  const offerers = unique(wellFormed.map((e) => addr(e.parameters.offerer)));
+  const orderHashes = unique(wellFormed.map((e) => e.orderHash.toLowerCase() as Hex));
+  const state = await chain.readState({ offerers, orderHashes });
+  const authorised = state.vault.listingHash.toLowerCase() as Hex;
 
-      let components: BookComponents;
-      let orderHash: Hex;
-      let status: { isCancelled: boolean; totalFilled: bigint; totalSize: bigint };
-      try {
-        const counter = await chain.getCounter(addr(p.offerer));
-        components = restoreComponents(p, counter);
-        orderHash = (await chain.getOrderHash(componentsStruct(components))).toLowerCase() as Hex;
-        status = await chain.getOrderStatus(orderHash);
-      } catch {
-        return { orderHash: entry.orderHash as Hex, reasons: [...reasons, KEEPER_REASONS.unreadable] };
-      }
+  type Candidate = {
+    entry: KeeperOrderJson;
+    claimed: Hex;
+    components: BookComponents;
+    struct: OrderComponentsStruct;
+    localHash: Hex;
+    status: SeaportFillStatus;
+  };
+  const candidates: Candidate[] = [];
+  for (const entry of wellFormed) {
+    const claimed = entry.orderHash.toLowerCase() as Hex;
+    // Not the vault's current listing: never offerable, so not checked. A legitimately
+    // superseded order lands here, and must not read as tampering.
+    if (isZeroHash(authorised) || claimed !== authorised) {
+      out.closed.push({ orderHash: claimed, state: "notCurrent" });
+      continue;
+    }
+    const counter = state.counters[offerers.indexOf(addr(entry.parameters.offerer))];
+    const status = state.statuses[orderHashes.indexOf(claimed)];
+    if (counter === undefined || status === undefined) {
+      out.unchecked.push({ orderHash: claimed, reasons: [KEEPER_REASONS.unreadable] });
+      continue;
+    }
+    const components = restoreComponents(entry.parameters, counter);
+    const struct = componentsStruct(components);
+    candidates.push({ entry, claimed, components, struct, localHash: seaportOrderHash(struct), status });
+  }
+  if (candidates.length === 0) return out;
 
-      // The keeper's string is compared, then discarded: the row carries Seaport's hash, so
-      // everything downstream compares the chain's number with the chain's number.
-      if (entry.orderHash.toLowerCase() !== orderHash) reasons.push(KEEPER_REASONS.claimedHash);
-      if (vault.phase !== PHASE_LISTED) reasons.push(KEEPER_REASONS.phase);
-      if (status.isCancelled) reasons.push(KEEPER_REASONS.cancelled);
+  let seaportHashes: ReadonlyArray<Hex | undefined>;
+  try {
+    seaportHashes = await chain.getOrderHashes(candidates.map((c) => c.struct));
+  } catch {
+    seaportHashes = [];
+  }
 
-      const total = BigInt(components.offer[0]?.startAmount ?? "0");
-      const writerLeg = BigInt(components.consideration[0]?.startAmount ?? "0");
-      const feeLeg = BigInt(components.consideration[1]?.startAmount ?? "0");
-      // Seaport's fraction is totalFilled/totalSize in its own reduced units; 0/0 is untouched.
-      const sold = status.totalSize === 0n || total === 0n ? 0n : (status.totalFilled * total) / status.totalSize;
-      if (total > 0n && sold >= total) reasons.push(KEEPER_REASONS.soldOut);
+  candidates.forEach((candidate, i) => {
+    const { entry, claimed, components, localHash, status } = candidate;
+    const seaportHash = seaportHashes[i]?.toLowerCase() as Hex | undefined;
+    if (seaportHash === undefined) {
+      out.unchecked.push({ orderHash: claimed, reasons: [KEEPER_REASONS.unreadable] });
+      return;
+    }
+    if (seaportHash !== localHash) {
+      out.unchecked.push({ orderHash: claimed, reasons: [KEEPER_REASONS.hashDerivation] });
+      return;
+    }
 
-      const check = checkListingIsOurs(
-        { orderHash, chainId: entry.chainId, offerer: components.offerer, components },
-        {
-          vault: config.vault,
-          usdg: config.usdg,
-          clearinghouse: config.clearinghouse,
-          seaport: config.seaport,
-          listingHash: vault.listingHash,
-          chainId: config.chainId,
-          amount: vault.listingAmount,
-          grossUsdg: vault.listingGrossUsdg,
-          optionId: vault.optionId,
-        },
-        nowSeconds,
-      );
-      if (!check.ok) reasons.push(...check.reasons);
-      if (reasons.length > 0) return { orderHash: entry.orderHash as Hex, reasons };
-
-      const gross = writerLeg + feeLeg;
-      return {
-        orderHash,
+    // Integrity: the keeper claims the authorised hash, so everything it served must be that order.
+    const p = entry.parameters;
+    const reasons: string[] = [];
+    if (BigInt(p.totalOriginalConsiderationItems) !== BigInt(p.consideration.length)) {
+      reasons.push(KEEPER_REASONS.itemCount);
+    }
+    // The keeper's string is compared, then discarded: the row carries the chain's hash.
+    if (claimed !== seaportHash) reasons.push(KEEPER_REASONS.claimedHash);
+    const check = checkListingIsOurs(
+      { orderHash: seaportHash, chainId: entry.chainId, offerer: components.offerer, components },
+      {
+        vault: config.vault,
+        usdg: config.usdg,
+        clearinghouse: config.clearinghouse,
+        seaport: config.seaport,
+        listingHash: state.vault.listingHash,
         chainId: config.chainId,
-        offerer: components.offerer,
-        optionId: components.offer[0]!.identifierOrCriteria,
-        quantity: total.toString(),
-        remaining: (total - sold).toString(),
-        unitPrice6: (gross / total).toString(),
-        totalPrice6: gross.toString(),
-        startTime: components.startTime,
-        endTime: components.endTime,
-        salt: components.salt,
-        counter: components.counter,
-        status: sold === 0n ? "open" : "partial",
-        components,
-        signature: entry.signature.toLowerCase() as Hex,
-      };
-    }),
-  );
+        amount: state.vault.listingAmount,
+        grossUsdg: state.vault.listingGrossUsdg,
+        optionId: state.vault.optionId,
+      },
+      nowSeconds,
+    );
+    const checkReasons = check.ok ? [] : check.reasons;
+    const expired = checkReasons.includes(REASONS.expired);
+    reasons.push(...checkReasons.filter((r) => r !== REASONS.expired));
+    if (reasons.length > 0) {
+      out.rejected.push({ orderHash: claimed, reasons: expired ? [...reasons, REASONS.expired] : reasons });
+      return;
+    }
 
-  for (const result of results) {
-    if ("components" in result) orders.push(result);
-    else rejected.push(result);
-  }
-  return { orders, rejected };
+    // Lifecycle: the right order, and nothing wrong with it, but not fillable now.
+    if (status.isCancelled) return void out.closed.push({ orderHash: claimed, state: "cancelled" });
+    if (seaportSoldOut(status)) return void out.closed.push({ orderHash: claimed, state: "soldOut" });
+    if (state.vault.phase !== PHASE_LISTED) return void out.closed.push({ orderHash: claimed, state: "notListed" });
+    if (expired) return void out.closed.push({ orderHash: claimed, state: "expired" });
+
+    const total = BigInt(components.offer[0]!.startAmount);
+    const remaining = seaportRemaining(total, status) ?? total;
+    if (remaining === 0n) return void out.closed.push({ orderHash: claimed, state: "soldOut" });
+    const gross = BigInt(components.consideration[0]!.startAmount) + BigInt(components.consideration[1]!.startAmount);
+    out.orders.push({
+      orderHash: seaportHash,
+      chainId: config.chainId,
+      offerer: components.offerer,
+      optionId: components.offer[0]!.identifierOrCriteria,
+      quantity: total.toString(),
+      remaining: remaining.toString(),
+      unitPrice6: (gross / total).toString(),
+      totalPrice6: gross.toString(),
+      startTime: components.startTime,
+      endTime: components.endTime,
+      salt: components.salt,
+      counter: components.counter,
+      status: remaining === total ? "open" : "partial",
+      components,
+      signature: entry.signature.toLowerCase() as Hex,
+    });
+  });
+
+  return out;
 }
 
 /*//////////////////////////////////////////////////////////////
@@ -528,7 +538,9 @@ export async function fetchKeeperOrders(
 export type KeeperOrdersBody = {
   configured: boolean;
   orders: BookRow[];
-  rejected: RejectedKeeperOrder[];
+  rejected: KeeperOrderIssue[];
+  closed: ClosedKeeperOrder[];
+  unchecked: KeeperOrderIssue[];
   error?: string;
 };
 
@@ -541,35 +553,92 @@ export type KeeperRouteDeps = {
   fetchImpl?: FetchLike;
   timeoutMs?: number;
   maxBytes?: number;
-  /** Server-side report of what was dropped. Defaults to one JSON line on stderr. */
+  /** Deadline for every chain read together. Defaults to CHAIN_DEADLINE_MS. */
+  chainDeadlineMs?: number;
+  /** Server-side report. Defaults to one JSON line per event on stderr; `debug` is dropped. */
   log?: (event: Record<string, unknown>) => void;
 };
 
 export const NOT_CONFIGURED =
   "The keeper fallback is not configured on this deployment (KEEPER_ORDERS_URL is not set).";
 
+export const VAULT_UNREADABLE = "The vault could not be read from the chain, so the keeper's orders cannot be checked.";
+
+export function chainTimedOut(ms: number): string {
+  return `The chain did not answer within ${ms / 1000} seconds, so the keeper's orders cannot be checked yet.`;
+}
+
+/** How many hashes one log line names. The count is always the full count. */
+const LOG_HASHES = 3;
+
 function defaultLog(event: Record<string, unknown>): void {
-  console.warn(JSON.stringify({ service: "web", route: "/api/keeper/orders", ...event }));
+  if (event.level === "debug") return;
+  const line = JSON.stringify({ service: "web", route: "/api/keeper/orders", ...event });
+  if (event.level === "warn" || event.level === "error") console.warn(line);
+  else console.log(line);
+}
+
+function emptyBody(configured: boolean, error?: string): KeeperOrdersBody {
+  return { configured, orders: [], rejected: [], closed: [], unchecked: [], ...(error === undefined ? {} : { error }) };
+}
+
+const TIMED_OUT = Symbol("timed out");
+
+/** `work`, or TIMED_OUT once `ms` pass. A late rejection is swallowed, not left unhandled. */
+async function withDeadline<T>(work: Promise<T>, ms: number): Promise<T | typeof TIMED_OUT> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const deadline = new Promise<typeof TIMED_OUT>((resolve) => {
+    timer = setTimeout(() => resolve(TIMED_OUT), ms);
+  });
+  work.catch(() => {});
+  try {
+    return await Promise.race([work, deadline]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/** One line per outcome per computation, however many orders: the answer is shared for two
+ *  seconds, and a line per order per share window is what drowns the logs that matter. */
+function logOutcome(log: (event: Record<string, unknown>) => void, v: VerifiedKeeperOrders): void {
+  if (v.rejected.length > 0) {
+    log({
+      level: "warn",
+      msg: "keeper orders rejected",
+      count: v.rejected.length,
+      orderHashes: v.rejected.slice(0, LOG_HASHES).map((r) => r.orderHash),
+      reasons: v.rejected[0]!.reasons,
+    });
+  }
+  if (v.unchecked.length > 0) {
+    log({
+      level: "warn",
+      msg: "keeper orders unchecked: chain read failed",
+      count: v.unchecked.length,
+      orderHashes: v.unchecked.slice(0, LOG_HASHES).map((r) => r.orderHash),
+      reasons: v.unchecked[0]!.reasons,
+    });
+  }
+  if (v.closed.length > 0) {
+    log({
+      level: "debug",
+      msg: "keeper orders not offered",
+      count: v.closed.length,
+      closed: v.closed.slice(0, LOG_HASHES),
+    });
+  }
 }
 
 export async function serveKeeperOrders(deps: KeeperRouteDeps): Promise<{ status: number; body: KeeperOrdersBody }> {
   const log = deps.log ?? defaultLog;
   const target = parseKeeperOrdersUrl(deps.keeperOrdersUrl);
-  if (target.kind === "unset") {
-    return { status: 503, body: { configured: false, orders: [], rejected: [], error: NOT_CONFIGURED } };
-  }
+  if (target.kind === "unset") return { status: 503, body: emptyBody(false, NOT_CONFIGURED) };
   if (target.kind === "invalid") {
     log({ level: "error", msg: "keeper fallback misconfigured", problem: target.problem });
-    return {
-      status: 503,
-      body: { configured: true, orders: [], rejected: [], error: "The keeper fallback is misconfigured on this deployment." },
-    };
+    return { status: 503, body: emptyBody(true, "The keeper fallback is misconfigured on this deployment.") };
   }
   if (deps.config.vault === undefined) {
-    return {
-      status: 503,
-      body: { configured: true, orders: [], rejected: [], error: "This build has no vault address configured, so nothing can be checked." },
-    };
+    return { status: 503, body: emptyBody(true, "This build has no vault address configured, so nothing can be checked.") };
   }
 
   const fetched = await fetchKeeperOrders(target.url, {
@@ -579,72 +648,115 @@ export async function serveKeeperOrders(deps: KeeperRouteDeps): Promise<{ status
   });
   if (!fetched.ok) {
     log({ level: "warn", msg: "keeper orders unavailable", error: fetched.error });
-    return { status: 502, body: { configured: true, orders: [], rejected: [], error: fetched.error } };
+    return { status: 502, body: emptyBody(true, fetched.error) };
+  }
+  if (fetched.orders.length > KEEPER_MAX_ORDERS) {
+    log({ level: "warn", msg: "keeper served too many orders", count: fetched.orders.length, max: KEEPER_MAX_ORDERS });
+    return { status: 502, body: emptyBody(true, KEEPER_REASONS.tooMany) };
   }
 
-  let verified: VerifiedKeeperOrders;
+  const deadlineMs = deps.chainDeadlineMs ?? CHAIN_DEADLINE_MS;
+  let verified: VerifiedKeeperOrders | typeof TIMED_OUT;
   try {
-    verified = await verifyKeeperOrders(fetched.orders, deps.chain, deps.config, deps.nowSeconds);
+    verified = await withDeadline(verifyKeeperOrders(fetched.orders, deps.chain, deps.config, deps.nowSeconds), deadlineMs);
   } catch {
     log({ level: "warn", msg: "keeper orders could not be checked: vault read failed" });
-    return {
-      status: 502,
-      body: {
-        configured: true,
-        orders: [],
-        rejected: [],
-        error: "The vault could not be read from the chain, so the keeper's orders cannot be checked.",
-      },
-    };
+    return { status: 502, body: emptyBody(true, VAULT_UNREADABLE) };
+  }
+  if (verified === TIMED_OUT) {
+    log({ level: "warn", msg: "keeper orders could not be checked: chain reads timed out", deadlineMs });
+    return { status: 502, body: emptyBody(true, chainTimedOut(deadlineMs)) };
   }
 
-  for (const r of verified.rejected) {
-    log({ level: "warn", msg: "keeper order rejected", orderHash: r.orderHash, reasons: r.reasons });
-  }
+  logOutcome(log, verified);
   return { status: 200, body: { configured: true, ...verified } };
+}
+
+/**
+ * One computation per key while it runs and for `shareMs` after it SETTLES. Measured from the
+ * settle, not the start: a computation that takes longer than the window (a slow keeper, an RPC
+ * near its deadline) would otherwise have every poll start another on top of it.
+ */
+export function shareWhileRunning<T>(
+  compute: (key: string | undefined) => Promise<T>,
+  options: { shareMs: number; now?: () => number },
+): (key: string | undefined) => Promise<T> {
+  const now = options.now ?? Date.now;
+  let shared: { key: string | undefined; settledAt: number | null; answer: Promise<T> } | null = null;
+  return (key) => {
+    const current = shared;
+    if (current !== null && current.key === key && (current.settledAt === null || now() - current.settledAt < options.shareMs)) {
+      return current.answer;
+    }
+    const entry: { key: string | undefined; settledAt: number | null; answer: Promise<T> } = {
+      key,
+      settledAt: null,
+      answer: compute(key),
+    };
+    const settle = () => {
+      entry.settledAt = now();
+    };
+    entry.answer.then(settle, settle);
+    shared = entry;
+    return entry.answer;
+  };
 }
 
 /*//////////////////////////////////////////////////////////////
                          THE CHAIN READER
 //////////////////////////////////////////////////////////////*/
 
-/** The production reader: the app's server-side viem client (lib/chain.ts), multicall-batched. */
+type CallResult = { status: "success"; result: unknown } | { status: "failure"; error: unknown };
+
+/**
+ * The production reader: the app's server-side viem client (lib/chain.ts) through Multicall3.
+ * `batchSize: 0` stops viem splitting a large batch into several eth_calls, which could land in
+ * different blocks; readState is one eth_call, so its answers describe one block.
+ */
 export function viemKeeperChainReader(client: PublicClient, addresses: { vault: Address; seaport: Address }): KeeperChainReader {
-  const vault = (functionName: string) =>
-    client.readContract({ address: addresses.vault, abi: vaultAbi as unknown as Abi, functionName });
-  const seaport = (functionName: string, args: readonly unknown[]) =>
-    client.readContract({ address: addresses.seaport, abi: seaportAbi as unknown as Abi, functionName, args });
+  const vault = (functionName: string) => ({ address: addresses.vault, abi: vaultAbi as unknown as Abi, functionName });
+  const seaport = (functionName: string, args: readonly unknown[]) => ({
+    address: addresses.seaport,
+    abi: seaportAbi as unknown as Abi,
+    functionName,
+    args,
+  });
+  const multicall = async (contracts: ReadonlyArray<ReturnType<typeof vault> | ReturnType<typeof seaport>>) =>
+    (await client.multicall({ allowFailure: true, batchSize: 0, contracts: contracts as never })) as unknown as CallResult[];
+  const ok = (r: CallResult | undefined): unknown => (r?.status === "success" ? r.result : undefined);
+
   return {
-    async vaultListing() {
-      const [phase, listingHash, listingAmount, listingGrossUsdg, optionId] = await Promise.all([
+    async readState({ offerers, orderHashes }) {
+      const results = await multicall([
         vault("phase"),
         vault("listingHash"),
         vault("listingAmount"),
         vault("listingGrossUsdg"),
         vault("optionId"),
+        ...offerers.map((o) => seaport("getCounter", [o])),
+        ...orderHashes.map((h) => seaport("getOrderStatus", [h])),
       ]);
+      const slot = results.slice(0, 5);
+      if (slot.some((r) => r.status !== "success")) throw new Error("vault listing slot unreadable");
+      const [phase, listingHash, listingAmount, listingGrossUsdg, optionId] = slot.map(ok);
       return {
-        phase: Number(phase),
-        listingHash: listingHash as Hex,
-        listingAmount: listingAmount as bigint,
-        listingGrossUsdg: listingGrossUsdg as bigint,
-        optionId: optionId as bigint,
+        vault: {
+          phase: Number(phase),
+          listingHash: listingHash as Hex,
+          listingAmount: listingAmount as bigint,
+          listingGrossUsdg: listingGrossUsdg as bigint,
+          optionId: optionId as bigint,
+        },
+        counters: offerers.map((_, i) => ok(results[5 + i]) as bigint | undefined),
+        statuses: orderHashes.map((_, i) => {
+          const tuple = ok(results[5 + offerers.length + i]) as readonly [boolean, boolean, bigint, bigint] | undefined;
+          return tuple === undefined ? undefined : { isCancelled: tuple[1], totalFilled: tuple[2], totalSize: tuple[3] };
+        }),
       };
     },
-    async getCounter(offerer) {
-      return (await seaport("getCounter", [offerer])) as bigint;
-    },
-    async getOrderHash(components) {
-      return (await seaport("getOrderHash", [components])) as Hex;
-    },
-    async getOrderStatus(orderHash) {
-      const [, isCancelled, totalFilled, totalSize] = (await seaport("getOrderStatus", [orderHash])) as readonly [
-        boolean,
-        boolean,
-        bigint,
-        bigint,
-      ];
-      return { isCancelled, totalFilled, totalSize };
+    async getOrderHashes(components) {
+      const results = await multicall(components.map((c) => seaport("getOrderHash", [c])));
+      return components.map((_, i) => ok(results[i]) as Hex | undefined);
     },
   };
 }
