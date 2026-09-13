@@ -49,7 +49,7 @@ const LAUNCH: PolicyParams = {
   maxOtmBps: 1200n,
   minPremiumBps: 40n,
   maxUtilizationBps: 9500n,
-  protocolFeeBps: 1000n,
+  protocolFeeBps: 500n,
   maxContractsCap: 50n,
 };
 

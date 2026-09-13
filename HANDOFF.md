@@ -4,16 +4,19 @@ Callhouse is **not launchable yet**. The contracts and the keeper are proven on 
 Legal, CI, the external audit, deployment and hosting are not done. The full tracker is
 `tasks.md`, and its "Session log" and "Next, in order" sections go deeper than this page.
 
-**2026-09-13's work is committed locally as `8ff8bef`, with the DRYRUN.md proofread committed on
-top — not pushed.** `main` on GitHub (`leekzor/callhouse`, private) is still `27d502a`.
+**Pushed.** `main` on GitHub (`leekzor/callhouse`, private) carries the dry run, audit scope and
+wiring audit (`cb82bf3`) and, on top, the 2026-09-13 protocol fee change (5% of premium only).
+**Next structural step, decided by the user:** split into three private repos — `callhouse-contracts`,
+`callhouse-site`, and this repo as the app (web + keeper + indexer + ops), mounting contracts as a
+git submodule at `contracts/`.
 
 ## State of the gates
 
 | Gate | State |
 |---|---|
-| Contracts | 307 unit+invariant pass, 21 fork tests pass against live chain 4663. Unaudited |
+| Contracts | 310 unit+invariant pass, 21 fork tests pass against live chain 4663. Unaudited. Vault 23,426 B (margin 1,150) |
 | Keeper | typecheck clean, 66/66 tests |
-| Keeper dry run | **passed, three cycles**, fork block 61720714, 27.9 s. Re-run independently after the agents finished |
+| Keeper dry run | **passed, three cycles**; re-run after the fee change at fork block 62142174, 20.9 s (cycle 3 fee 0.953962 USDG) |
 | Indexer / web / site | green locally. Never run against a live cycle |
 | CI on GitHub | dead. Every run ends in `startup_failure`, an account-level billing problem |
 
@@ -43,10 +46,8 @@ keeper/src/roll.ts  keeper/src/abi.ts  keeper/src/roll.test.ts  keeper/src/roll.
 
 ## Decisions only you can make
 
-1. **Protocol fee on strike proceeds.** The vault takes 10% of strike proceeds on assigned weeks,
-   not just of premium. In dry-run cycle 3 that was 202.5 of the 204.4 USDG fee. A test pins this
-   behaviour, but `docs/ACCOUNTING.md` §6 says the opposite. Decide which is intended before the
-   audit commit is pinned.
+1. ~~**Protocol fee on strike proceeds.**~~ **Decided and implemented 2026-09-13:** 5% of premium
+   only, strike proceeds fee-free. See the afternoon session log in `tasks.md`.
 2. **GitHub billing.** Go to leekzor → Settings → Billing and raise the Actions spending limit. Then
    add the `RH_RPC` repo secret.
 3. **Counsel and operating entity** for `site/app/terms` and `privacy`, plus a security.txt contact.
@@ -56,7 +57,7 @@ keeper/src/roll.ts  keeper/src/abi.ts  keeper/src/roll.test.ts  keeper/src/roll.
 1. ~~Commit this work, then proofread `keeper/DRYRUN.md` against the run report.~~ Done
    (2026-09-13): `8ff8bef` locally, proofread commit on top, one error fixed. Still to push.
 2. Fix GitHub billing (L-01) and start legal (L-05). Legal is the longest pole.
-3. Decide the fee question above.
+3. ~~Decide the fee question above.~~ Done. Fix W-21 (assigned-week yield labels) before launch.
 4. Audit prep: work through the D-05 housekeeping list in `tasks.md`, pin a commit, send
    `docs/AUDIT-SCOPE.md`, and engage an auditor (E-06).
 5. Finish the fork rehearsal. The indexer still has to sync against a fork (X-11), and the web app

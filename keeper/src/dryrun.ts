@@ -23,8 +23,10 @@
  *            the book, and the buyer exercises 9 of the 23 contracts on the real Valorem Clear
  *            inside the window. rollClose must redeem the assigned claim (14 NVDA back, 9 x
  *            strike USDG in), publish contracts_assigned = 9, harvest premium + strike proceeds
- *            with the fee on both, and settle the queue; the depositor then completes the
- *            redeem (NVDA plus the escrow's USDG) and claims the rest, to the base unit.
+ *            with the protocol fee on the premium ONLY (the strike proceeds are the assigned
+ *            depositors' principal and are never fee'd), and settle the queue; the depositor
+ *            then completes the redeem (NVDA plus the escrow's USDG) and claims the rest, to
+ *            the base unit.
  *            The keeper's pre-close read, contractsAssignedAt, is also called directly against
  *            the real Clear (9 before the redeem; TokenNotFound -> unknown after) and both
  *            branches of resolveContractsAssigned are driven on the real receipt, because a
@@ -115,6 +117,32 @@ const ZERO_BYTES32 = '0x00000000000000000000000000000000000000000000000000000000
 const ONE_HUNDRED_ETH = 100_000_000_000_000_000_000n;
 const LOT = 1_000_000_000_000_000_000n;
 const BPS = 10_000n;
+
+/**
+ * Policy.launchDefaults(): what the Vault constructor installs, and so what this run's vault
+ * must read back before the keeper sizes its first write. protocolFeeBps is the 2026-09-13
+ * decision: 5% of harvested PREMIUM, never of strike proceeds.
+ */
+const LAUNCH_POLICY = {
+  minOtmBps: 300n,
+  maxOtmBps: 1200n,
+  minPremiumBps: 40n,
+  maxUtilizationBps: 9500n,
+  protocolFeeBps: 500n,
+  maxContractsCap: 50n,
+} as const;
+
+/**
+ * The protocol fee on ONE Harvest event, charged exactly as Vault._accrueHarvest charges it:
+ * floor((grossUsdg - feeFree) x protocolFeeBps / 10000), where `feeFree` is
+ * `RollClose.usdgFromAssignment` for the terminal harvest inside rollClose (same transaction)
+ * and 0 for a deposit/mint checkpoint. `grossUsdg` still includes the strike proceeds; only the
+ * premium part is fee-bearing, and `netUsdg = grossUsdg - feeUsdg` either way.
+ */
+function harvestFee(grossUsdg: bigint, feeFree: bigint, protocolFeeBps: bigint): bigint {
+  const feeBearing = grossUsdg > feeFree ? grossUsdg - feeFree : 0n;
+  return (feeBearing * protocolFeeBps) / BPS;
+}
 
 /*//////////////////////////////////////////////////////////////
                               SETTINGS
@@ -1061,6 +1089,15 @@ async function main(): Promise<void> {
     meta: store.db.prepare('SELECT key, value FROM meta ORDER BY key').all(),
   });
 
+  /** The one event of a kind that a given contract emitted in a receipt. */
+  const only = <T extends { address: Address }>(events: readonly T[], at: Address, what: string): T => {
+    const matching = events.filter((e) => e.address.toLowerCase() === at.toLowerCase());
+    assertEq(matching.length, 1, `exactly one ${what} event from ${at}`);
+    const found = matching[0];
+    assert(found !== undefined, what);
+    return found;
+  };
+
   const stopServers = (): void => {
     healthServer.close();
     stub.stop();
@@ -1122,9 +1159,14 @@ async function main(): Promise<void> {
       assertEq(stub.requests.filter((r) => r.startsWith('POST')).length, 1, 'exactly one POST');
       assertEq(alerts.kinds().join(','), 'roll_open', 'alerts so far');
 
-      const expectedContracts = policy.maxContracts(DEPOSIT, live.lot, {
-        minOtmBps: 300n, maxOtmBps: 1200n, minPremiumBps: 40n, maxUtilizationBps: 9500n, protocolFeeBps: 1000n, maxContractsCap: 50n,
-      });
+      // The vault's policy is whatever its constructor installed. Read it back through the
+      // keeper's own reader and pin every field to Policy.launchDefaults(), rather than
+      // restating the numbers where a stale copy could size the write.
+      const onChainPolicy = await policy.readPolicy();
+      for (const key of Object.keys(LAUNCH_POLICY) as Array<keyof typeof LAUNCH_POLICY>) {
+        assertEq(onChainPolicy[key], LAUNCH_POLICY[key], `vault.policy().${key} = Policy.launchDefaults().${key}`);
+      }
+      const expectedContracts = policy.maxContracts(DEPOSIT, live.lot, onChainPolicy);
       assertEq(BigInt(row.contracts), expectedContracts, 'listed the whole write at 95% utilisation');
       const inventory = await pub.readContract({ address: CLEAR, abi: clearAbi, functionName: 'balanceOf', args: [vault, BigInt(row.option_id)] });
       assertEq(inventory, expectedContracts, 'real Valorem minted the option tokens to the vault');
@@ -1192,8 +1234,16 @@ async function main(): Promise<void> {
       assert(cycle.roll_close_tx !== null, 'roll_close_tx recorded');
       const toVault = BigInt(listed.to_vault6);
       assertEq(cycle.gross_usdg6, toVault.toString(), 'gross harvest = the 95% leg that filled');
-      assertEq(cycle.fee_usdg6, ((toVault * 1000n) / BPS).toString(), 'protocol fee = 10% of harvest');
-      assertEq(cycle.net_usdg6, (toVault - (toVault * 1000n) / BPS).toString(), 'net to depositors');
+      // The fee rule, from the chain: the policy's bps, and the fee-free amount from the
+      // RollClose log in the same transaction (0 on an out-of-the-money week, so the whole
+      // harvest is premium and fee-bearing).
+      const { protocolFeeBps } = await policy.readPolicy();
+      const closeReceipt1 = await pub.getTransactionReceipt({ hash: cycle.roll_close_tx as Hex });
+      const rollClose1 = only(parseEventLogs({ abi: vaultAbi, eventName: 'RollClose', logs: closeReceipt1.logs }), vault, 'RollClose');
+      assertEq(rollClose1.args.usdgFromAssignment, 0n, 'out of the money: RollClose.usdgFromAssignment = 0, nothing is fee-free');
+      const fee1 = harvestFee(toVault, rollClose1.args.usdgFromAssignment, protocolFeeBps);
+      assertEq(cycle.fee_usdg6, fee1.toString(), 'protocol fee = floor(premium x protocolFeeBps / 10000)');
+      assertEq(cycle.net_usdg6, (toVault - fee1).toString(), 'net to depositors = gross - fee');
       assertEq(cycle.contracts_assigned, 0, 'out of the money: nothing assigned');
       assertEq(alerts.kinds().join(','), 'roll_open,roll_close', 'alerts');
       const last = alerts.received[alerts.received.length - 1];
@@ -1307,6 +1357,7 @@ async function main(): Promise<void> {
         assert(cycle !== null, 'cycle row');
         assertEq(cycle.status, 'closed', 'closed');
         assertEq(cycle.gross_usdg6, '0', 'unfilled: 0');
+        assertEq(cycle.fee_usdg6, '0', 'unfilled: 0 fee');
         assertEq(cycle.net_usdg6, '0', 'unfilled: 0 net');
         assertEq(alerts.kinds().join(','), 'roll_open,roll_close,roll_close', 'alerts');
         const last = alerts.received[alerts.received.length - 1];
@@ -1330,14 +1381,6 @@ async function main(): Promise<void> {
         const ACC_PRECISION = 10n ** 27n;
         const V = { address: vault, abi: vaultAbi } as const;
         const Q = { address: vault, abi: vaultQueueAbi } as const;
-        /** The one event of a kind that a given contract emitted in a receipt. */
-        const only = <T extends { address: Address }>(events: readonly T[], at: Address, what: string): T => {
-          const matching = events.filter((e) => e.address.toLowerCase() === at.toLowerCase());
-          assertEq(matching.length, 1, `exactly one ${what} event from ${at}`);
-          const found = matching[0];
-          assert(found !== undefined, what);
-          return found;
-        };
         const strikeOfCycle3 = (): bigint => {
           const row = store.getCycle(3);
           assert(row !== null && row.strike_usdg6 !== null, 'cycle 3 strike on record');
@@ -1687,8 +1730,12 @@ async function main(): Promise<void> {
           const net = hv.args.netUsdg;
           assertEq(hv.args.cycleNumber, 3, 'Harvest.cycleNumber');
           assertEq(gross, toVault + usdgFromAssignment, 'gross = the premium leg that filled + the strike proceeds the claim returned');
-          assertEq(fee, (gross * protocol.protocolFeeBps) / BPS, 'fee = floor(gross x protocolFeeBps / 10000), charged on the strike proceeds too');
-          assertEq(net, gross - fee, 'net = gross - fee');
+          assertEq(protocol.protocolFeeBps, LAUNCH_POLICY.protocolFeeBps, 'policy().protocolFeeBps is still the launch 500 (5% of premium)');
+          // Fee-free = RollClose.usdgFromAssignment from THIS receipt, the amount rollClose hands
+          // _harvest. The gross still carries the strike proceeds; the fee does not touch them.
+          assertEq(fee, harvestFee(gross, usdgFromAssignment, protocol.protocolFeeBps), "fee = floor((gross - RollClose.usdgFromAssignment) x protocolFeeBps / 10000): premium only, strike proceeds never fee'd");
+          assertEq(fee, (toVault * protocol.protocolFeeBps) / BPS, 'fee = floor(premium leg x protocolFeeBps / 10000), the same number from the fill side');
+          assertEq(net, gross - fee, 'net = gross - fee, strike proceeds credited to holders in full');
 
           // The keeper sums every Harvest for the cycle from its own rollOpen block to the close.
           // Re-derived here from the chain; there must be exactly one (no deposit ran a checkpoint).
@@ -1696,6 +1743,17 @@ async function main(): Promise<void> {
           assert(openTx !== null && openTx.block_number !== null, 'the rollOpen block is on record');
           const harvestLogs = await pub.getLogs({ address: vault, event: harvestEvent, args: { cycleNumber: 3 }, fromBlock: BigInt(openTx.block_number), toBlock: receipt.blockNumber });
           assertEq(harvestLogs.length, 1, 'one Harvest event over [rollOpen block, rollClose block]');
+          // Every Harvest over the range obeys the per-event fee rule: the terminal one (in the
+          // rollClose transaction) excludes the strike proceeds, a deposit checkpoint excludes 0.
+          for (const entry of harvestLogs) {
+            const feeFree = entry.transactionHash === receipt.transactionHash ? usdgFromAssignment : 0n;
+            assertEq(
+              entry.args.feeUsdg ?? null,
+              harvestFee(entry.args.grossUsdg ?? 0n, feeFree, protocol.protocolFeeBps),
+              `Harvest in ${String(entry.transactionHash)}: fee on premium only (fee-free ${feeFree})`,
+            );
+            assertEq(entry.args.netUsdg ?? null, (entry.args.grossUsdg ?? 0n) - (entry.args.feeUsdg ?? 0n), `Harvest in ${String(entry.transactionHash)}: net = gross - fee`);
+          }
           const summed = harvestLogs.reduce(
             (acc, entry) => ({ gross: acc.gross + (entry.args.grossUsdg ?? 0n), fee: acc.fee + (entry.args.feeUsdg ?? 0n), net: acc.net + (entry.args.netUsdg ?? 0n) }),
             { gross: 0n, fee: 0n, net: 0n },
@@ -1821,6 +1879,8 @@ async function main(): Promise<void> {
             net: net.toString(),
             premium: toVault.toString(),
             usdgFromAssignment: usdgFromAssignment.toString(),
+            feeBearing: (gross - usdgFromAssignment).toString(),
+            protocolFeeBps: protocol.protocolFeeBps.toString(),
             assetsReturned: assetsReturned.toString(),
             contractsAssigned: cycle.contracts_assigned,
             contractsAssignedSource: data.contractsAssignedSource ?? null,
@@ -1836,7 +1896,7 @@ async function main(): Promise<void> {
           };
           note(
             `harvest gross ${roll.formatUsdg(gross)} USDG (premium ${roll.formatUsdg(toVault)} + strike proceeds ${roll.formatUsdg(usdgFromAssignment)}), ` +
-              `fee ${roll.formatUsdg(fee)}, net ${roll.formatUsdg(net)}; epoch ${epochBefore} reserved ${payoutAssets} NVDA wei + ${roll.formatUsdg(escrowUsdg)} USDG`,
+              `fee ${roll.formatUsdg(fee)} (${protocol.protocolFeeBps} bps of the premium only; the strike proceeds are fee-free), net ${roll.formatUsdg(net)}; epoch ${epochBefore} reserved ${payoutAssets} NVDA wei + ${roll.formatUsdg(escrowUsdg)} USDG`,
           );
           return { gross, fee, net, escrowUsdg, payoutAssets, indexDelta, epoch: epochBefore, vaultNvdaAfter };
         });

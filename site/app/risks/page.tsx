@@ -165,8 +165,8 @@ export default function RisksPage() {
           <p style={{ marginBottom: 0 }}>
             <strong>Costs you:</strong> the week&apos;s premium, which is zero. Your collateral is
             not touched — it was locked in Valorem for the week and returns whole. The protocol fee
-            is a share of what is harvested, so an unfilled week also collects no fee. You lose the
-            time, not the tokens.
+            is a share of the premium harvested, so an unfilled week also collects no fee. You lose
+            the time, not the tokens.
           </p>
         </Risk>
 
@@ -186,9 +186,10 @@ export default function RisksPage() {
         >
           <p>
             Whoever bought the call may exercise it inside the exercise window. Valorem takes the
-            collateral at the strike and leaves the strike proceeds in USDG. The strike is the
-            nearest Overcall rung inside a 3–12% out-of-the-money band, so it takes a move, but not
-            an enormous one.
+            collateral at the strike and leaves the strike proceeds in USDG, which are credited to
+            depositors in full: the protocol fee is charged on premium, never on them. The strike
+            is the nearest Overcall rung inside a 3–12% out-of-the-money band, so it takes a move,
+            but not an enormous one.
           </p>
           <p style={{ marginBottom: 0 }}>
             <strong>Costs you:</strong> every cent of upside above the strike for that week, and
@@ -398,10 +399,10 @@ export default function RisksPage() {
           response={
             <>
               The bounds are enforced on chain, which rules out the worst version — nobody can
-              quietly sell at the money or set the protocol fee to everything. It does not rule out
-              bad settings inside them, and there is no timelock in v1. You are trusting the
-              judgment of a named 2-of-3 multisig, and the deposit cap is the honest size of that
-              trust.
+              quietly sell at the money, set the protocol fee above 20% of premium, or take a fee
+              from strike proceeds. It does not rule out bad settings inside them, and there is no
+              timelock in v1. You are trusting the judgment of a named 2-of-3 multisig, and the
+              deposit cap is the honest size of that trust.
             </>
           }
         >

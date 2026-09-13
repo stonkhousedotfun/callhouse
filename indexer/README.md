@@ -135,13 +135,20 @@ Two sources per token because a log filter **ANDs** its topics: `from == vault` 
   tallies; both accumulate onto the cycle's money columns, because both move real money. Rows
   carry `terminal`, and `/v1/activity` shows terminal rows only unless asked for `include=all`.
 - **Fees stack, and they round per contract.** Overcall takes 5% of gross as
-  `consideration[1]`; the protocol takes 10% of what the vault harvested. The per-contract
+  `consideration[1]`; the protocol takes 5% (`protocolFeeBps` 500) of the premium that reached
+  the vault, never of strike proceeds. The per-contract
   split is `feePerContract = floor(unitPrice × 500 / 10000)`, `writerPerContract = unitPrice −
   feePerContract`, then multiply by N. Rounding on the total produces an order that signs and
   validates and is then refused by Seaport on a partial fill (`InexactFraction`) — and every
   Overcall order is `PARTIAL_OPEN`, so that quietly turns the listing into full-fill-only.
-- **The protocol fee accrues and pays on different events.** It accrues at every positive
-  `Harvest` (`feeUsdg`, tallied in `lifetimeProtocolFee`), but the push inside `rollClose` is
+- **On an assigned week `Harvest.feeUsdg / Harvest.grossUsdg` is not the fee rate.** `grossUsdg`
+  on the close includes the strike proceeds, but the vault charges the fee on
+  `grossUsdg − RollClose.usdgFromAssignment` only (a deposit checkpoint excludes nothing, because
+  strike proceeds cannot be in the balance before `rollClose`). The handler takes all three
+  amounts from the event verbatim and never recomputes the fee. `netUsdg == grossUsdg − feeUsdg`
+  always.
+- **The protocol fee accrues and pays on different events.** It accrues at every
+  `Harvest` with premium in it (`feeUsdg`, tallied in `lifetimeProtocolFee`), but the push inside `rollClose` is
   best-effort — a blocked recipient must not freeze the close — so payment happens whenever it
   can, through `FeeSwept` (tallied in `totalFeeSwept`). The vault's live `pendingFeeUsdg` is
   `lifetimeProtocolFee − totalFeeSwept`.
@@ -202,8 +209,8 @@ The three money columns the site quotes:
 | column | meaning |
 |---|---|
 | `premiumGross` | What buyers paid for our calls, **including** Overcall's 5%. |
-| `fee` | The protocol fee (10%), taken at harvest, on filled weeks only. |
-| `premiumNet` | What depositors actually received, after Overcall's 5% **and** the 10%. |
+| `fee` | The protocol fee: `protocolFeeBps` (launch 500, 5%) of the premium only, taken at harvest, on filled weeks only. Strike proceeds are never fee'd. |
+| `premiumNet` | What depositors actually received, after Overcall's 5% **and** the protocol fee: `harvestGross − fee`. On an assigned week it **includes** `assignmentUsdg`, not only premium. |
 
 `premiumToVault`, `overcallFee`, `assignmentUsdg` and `harvestGross` sit alongside so nothing
 about the two stacked fees has to be inferred. `marketExercised`, `bucketIndex` and
@@ -287,8 +294,8 @@ max-age=15`. Responses carry `x-cache: HIT|MISS`.
 
 What `/v1/cycles` emits for one week — `cycleJson` in `src/api/index.ts` — is pinned by the
 four files under `../ops/fixtures/api/`: a filled, an unfilled, an assigned and a skipped week,
-with real numbers (48 USDG gross, 5% per contract to Overcall, 10% of the harvest to the
-protocol, 5 × 190 of strike proceeds on the assigned one; the skipped one is what
+with real numbers (48 USDG gross, 5% per contract to Overcall, 5% of the 45.6 premium to the
+protocol, 5 × 190 of strike proceeds on the assigned one, fee-free; the skipped one is what
 `Registry:CycleSet` leaves when no `Vault:RollOpen` follows — `idle`, `wrote: false`, and no
 `closedAt` ever). `src/api/index.test.ts` builds those rows as typed
 schema literals, runs `cycleJson`, and deep-equals the result against the files; the dapp's

@@ -556,6 +556,12 @@ ponder.on("Vault:AllListingsInvalidated", async ({ event, context }) => {
  *   assigned  contracts were taken at the strike
  *   closed    filled, expired out of the money — premium and tokens both kept
  *   unfilled  nothing sold. THE MOST LIKELY OUTCOME, published as "unfilled, 0".
+ *
+ * The three amounts are taken from the event verbatim; nothing here recomputes the fee. That
+ * matters on an assigned week: `grossUsdg` includes the strike proceeds, but the vault charges
+ * `feeUsdg` on `grossUsdg − RollClose.usdgFromAssignment` only (Vault._accrueHarvest; a deposit
+ * checkpoint excludes 0), so `feeUsdg / grossUsdg` is NOT the policy rate there and must never
+ * be used as one. `netUsdg == grossUsdg − feeUsdg` always.
  */
 ponder.on("Vault:Harvest", async ({ event, context }) => {
   const { cycleNumber, grossUsdg, feeUsdg, netUsdg } = event.args;
@@ -696,7 +702,7 @@ ponder.on("Vault:ClaimUsdg", async ({ event, context }) => {
 /**
  * The accrued protocol fee actually left the vault for the fee recipient.
  *
- * The fee accrues at every positive harvest (`Harvest.feeUsdg`, counted in
+ * The fee accrues at every harvest with premium in it (`Harvest.feeUsdg`, counted in
  * `lifetimeProtocolFee`), but the push inside `rollClose` is deliberately best-effort — a
  * blocklisted or reverting recipient must not be able to freeze the whole vault over a fee
  * that harms only us — so payment trails accrual by an arbitrary gap and completes via the

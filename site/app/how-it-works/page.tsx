@@ -76,7 +76,7 @@ const POLICY: Array<[string, string]> = [
   ["Max OTM", "12%"],
   ["Min list premium", "0.40% of spot / week"],
   ["Max utilization", `95% of idle ${MARKET}`],
-  ["Protocol fee", "10% of USDG harvested (filled weeks only)"],
+  ["Protocol fee", "5% of premium harvested (filled weeks only; never on strike proceeds)"],
   ["Deposit cap", `20–50 ${MARKET} at launch`],
   ["Max listings signed per cycle", "3"],
 ];
@@ -91,9 +91,9 @@ const FEES: Array<{ who: string; size: string; when: string; note: string }> = [
   },
   {
     who: "Callhouse",
-    size: "10% of harvested USDG",
+    size: "5% of premium",
     when: "On fill",
-    note: "Taken at harvest, on filled weeks only. A week with no buyer collected nothing, so it is charged nothing.",
+    note: "Taken at harvest from the premium that reached the vault, on filled weeks only. Strike proceeds from an assignment are credited to depositors in full, with no fee. A week with no buyer collected nothing, so it is charged nothing.",
   },
   {
     who: "Valorem engine",
@@ -208,8 +208,8 @@ export default function HowItWorksPage() {
           <li className="step">
             <strong>Reclaim, harvest, distribute.</strong> The vault redeems its Valorem claim —
             collateral back, or strike USDG instead where it was assigned — harvests the USDG,
-            takes the protocol fee, credits the remainder per share, settles the redemption queue,
-            and returns to Idle. The keeper may do this at expiry; anyone may do it an hour later.
+            takes the protocol fee on the premium alone, credits the rest per share with any strike
+            USDG in full, settles the redemption queue, and returns to Idle. The keeper may do this at expiry; anyone may do it an hour later.
           </li>
         </ol>
       </div>
@@ -265,8 +265,8 @@ export default function HowItWorksPage() {
             </div>
             <p className="small" style={{ marginBottom: 0 }}>
               Assignment can take the collateral at the strike. Those tokens leave and come back as
-              strike USDG instead. The premium is still kept, and the upside above the strike is
-              gone for that week. v1 does not automatically buy the tokens back.
+              strike USDG instead, with no protocol fee taken from it. The premium is still kept,
+              and the upside above the strike is gone for that week. v1 does not automatically buy the tokens back.
             </p>
           </div>
         </div>
@@ -386,8 +386,10 @@ export default function HowItWorksPage() {
         </ul>
 
         <p className="small muted" style={{ marginBottom: 0 }}>
-          Both live fees are taken out of premium, and premium exists only when a buyer fills. A
-          week with no buyer costs nothing because nothing was collected.
+          Both live fees are taken out of premium, and premium exists only when a buyer fills.
+          Stacked, they come to 9.75% of what the buyer paid: 5% to {VENUE_NAME}, then 5% of the
+          95% that reaches the vault. A week with no buyer costs nothing because nothing was
+          collected.
         </p>
       </div>
 

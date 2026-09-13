@@ -13,7 +13,7 @@ Product in one line: pooled covered-call vault for Robinhood Chain Stock Tokens.
 - ERC-4626-style shares with queued redeem while a call is open.
 - Weekly phase machine `Idle → Listed → Exercisable → Settling → Idle`.
 - Valorem Clear write / redeem adapter. Seaport 1.6 listing with vault as offerer (EIP-1271).
-- 10% protocol fee on harvested USDG, filled weeks only. `accUsdgPerShare` distribution.
+- 5% protocol fee on harvested premium, filled weeks only; strike proceeds from assignment are never fee'd. `accUsdgPerShare` distribution. *(2026-09-13: changed from 10% of all harvested USDG; see docs/ACCOUNTING.md §6.)*
 - Keeper (Node 22) that binds to `registry.cycle()`, picks strike, signs, POSTs to Overcall listings API, closes, harvests.
 - Ponder indexer + small read API.
 - Next.js frontend: deposit, queue withdraw, claim USDG, cycle tape, activity, docs, legal.
@@ -64,7 +64,7 @@ User ──ERC-20 NVDA──► Vault (cNVDA shares)
              Buyer fills: USDG 95% → vault, 5% → Overcall fee recipient
                          │ Saturday 20:00 UTC expiry → clear.redeem(claimKey)
                          ▼
-             idle NVDA + USDG ──► 90% accUsdgPerShare, 10% fee Safe
+             idle NVDA + USDG ──► accUsdgPerShare (strike USDG in full, premium less 5%), 5% of premium → fee Safe
 ```
 
 Invariants that never bend:
@@ -116,7 +116,7 @@ callhouse/
 | `DEFAULT_ADMIN_ROLE` | 2/3 Safe | set keeper, fee recipient, policy inside hard caps, `acceptValoremFee`, unhalt |
 | `KEEPER_ROLE` | hot wallet + backup | `rollOpen`, `approveOrder`, `cancelListing`, `lockBook`, `rollClose`, `harvest` |
 | `GUARDIAN_ROLE` | 1/1 hardware key | `haltWrites`, `cancelListing`, `rollClose` after `expiry + 1h` |
-| fee recipient | Safe | receives 10% USDG |
+| fee recipient | Safe | receives 5% of premium (never strike proceeds) |
 
 No proxy. Bug fix = Vault v2 + migrate.
 
@@ -181,7 +181,7 @@ Hard caps in bytecode:
 | maxOtmBps | 1200 | ceil 2500 |
 | minPremiumBps | 40 | floor 10 |
 | maxUtilizationBps | 9500 | ceil 10000 |
-| protocolFeeBps | 1000 | ceil 2000 |
+| protocolFeeBps | 500 (5% of premium; was 1000 before 2026-09-13) | ceil 2000 |
 | maxContractsCap | 50 | per deploy |
 | maxListingsPerCycle | 3 | const |
 
@@ -212,7 +212,9 @@ Settling    clear.redeem(claimKey); harvest(); settleQueue(); → Idle
 ```
 harvest():
   gross = usdg.balanceOf(this) - usdgReservedForQueue - alreadyDistributed
-  fee   = gross * protocolFeeBps / 10_000      (0 if gross == 0)
+  fee   = (gross - usdgFromAssignment) * protocolFeeBps / 10_000   (0 if that is 0)
+          # 2026-09-13: premium only. usdgFromAssignment is the strike USDG measured from
+          # clear.redeem in the same rollClose; it is credited to holders fee-free.
   net   = gross - fee
   usdg.transfer(feeRecipient, fee)
   accUsdgPerShare += net * 1e18 / totalSupply
@@ -422,7 +424,7 @@ Order is chosen so each phase has real inputs from the previous one. Contracts b
 | Issuer freeze bricks write/settle | Disclosed on `/legal` + `/docs`; keeper alerts on transfer failure; cannot code around |
 | Valorem fee switch | `feesEnabled` gate + explicit `acceptValoremFee` |
 | Partial assignment lottery | Adapter accepts `0..n`; queue payout mixes NVDA + USDG |
-| Fees stacked 5% + 10% | Shown in `/docs`; fee only on filled weeks |
+| Fees stacked 5% + 5% of premium (9.75% of gross) | Shown in `/docs`; fee only on filled weeks, never on strike proceeds |
 | Admin misconfig | Hard caps in bytecode; test 14 |
 | Keeper dies mid-week | Guardian `rollClose` after `expiry + 1h`; documented |
 | Sequencer / API down Friday | Retry with backoff; do not write if cannot list; Overcall exercise window is 24h |

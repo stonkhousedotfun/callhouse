@@ -107,7 +107,8 @@ One transaction does four things, in this order:
 
 1. bumps the Seaport counter if a listing is somehow still live, so nothing can fill into worthless inventory
 2. `clear.redeem(claimKey)` — collateral and any assignment proceeds come back, measured as real balance deltas
-3. `_harvest()` — protocol fee out to the fee Safe, the rest indexed into `accUsdgPerShare`
+3. `_harvest(usdgFromAssignment)` — protocol fee on the **premium only** out to the fee Safe; everything
+   else, assignment proceeds included in full, indexed into `accUsdgPerShare`
 4. `_settleQueue()` — escrowed shares burned, their pro-rata NVDA and USDG reserved into an epoch
 
 then `phase` returns to `Idle`.
@@ -200,8 +201,8 @@ cast logs --address $VAULT $(cast keccak "Harvest(uint32,uint256,uint256,uint256
 ```
 
 > **A cycle can emit more than one `Harvest`, and the close's own event is not the whole week.**
-> `deposit` and `mint` call `_checkpointHarvest()`, which runs the same `_accrueHarvest()` the close
-> does. That exists so a depositor arriving after a fill cannot mint into premium earned before they
+> `deposit` and `mint` call `_checkpointHarvest()`, which runs the same `_accrueHarvest` the close
+> does (with nothing excluded from the fee base, since assignment proceeds only arrive at the close). That exists so a depositor arriving after a fill cannot mint into premium earned before they
 > got here. Consequences you must handle:
 > - The week's totals are the **sum** of `Harvest.grossUsdg` / `feeUsdg` / `netUsdg` over every
 >   `Harvest` carrying this `cycleNumber`, not the values on the close's event. If a fill landed and
@@ -229,15 +230,31 @@ where, per the Overcall fee split:
                                                                    never touched the vault
 ```
 
-**The protocol fee**, per `Harvest` event and therefore also over their sum:
+**The protocol fee** is charged on premium only. Assignment proceeds are in `grossUsdg` but are
+**not** fee'd, so check each `Harvest` event against its own fee base, not `feeUsdg / grossUsdg`:
 
 ```
-feeUsdg == grossUsdg * protocolFeeBps / 10000        # launch: 1000 bps = 10%
+# the close's Harvest — take usdgFromAssignment from the RollClose event in the SAME tx
+# (== ClaimRedeemed.exerciseReceived; 0 if nothing was assigned)
+feeUsdg == floor((grossUsdg - usdgFromAssignment) * protocolFeeBps / 10000)   # launch: 500 bps = 5%
+netUsdg == grossUsdg - feeUsdg
+
+# a checkpoint Harvest (emitted from a deposit/mint, no RollClose in its tx)
+feeUsdg == floor(grossUsdg * protocolFeeBps / 10000)
 netUsdg == grossUsdg - feeUsdg
 ```
 
+Check per event, then sum: flooring per event means the summed fee can be a few base units below
+`floor(sum of fee bases * protocolFeeBps / 10000)`. Worked, assigned week: vault premium 19.000000,
+5 contracts assigned at a 231.000000 strike, so `usdgFromAssignment = 1155000000` and
+`grossUsdg = 1174000000`; `feeUsdg = floor(19000000 * 500 / 10000) = 950000` (0.95 USDG), and
+`netUsdg = 1173050000`. A `feeUsdg` of 58700000 (5% of the whole gross) would mean the fee was
+taken on the strike proceeds, which the deployed contract must not do — check you read
+`protocolFeeBps` and `usdgFromAssignment` from the right cycle, then treat it as wrong bytecode and
+escalate (`ops/runbooks/incident.md`).
+
 An unfilled, unassigned week harvests `0`, and `Policy.splitHarvest` returns `(0, 0)` — **the fee is
-charged only on a positive harvest.** A 0 week costs depositors nothing. Say so in the publish.
+charged only on premium.** A 0 week costs depositors nothing. Say so in the publish.
 
 Confirm the fee actually moved and the rest was indexed:
 
@@ -378,8 +395,8 @@ Numbers to carry across from the steps above:
 | gross premium (buyer paid) | `unitPrice6 * contractsFilled` |
 | Overcall fee (5%) | `feePerContract6 * contractsFilled` — never entered the vault |
 | assignment proceeds | `exerciseReceived` from the vault's `ClaimRedeemed` |
-| harvest gross | sum of `Harvest.grossUsdg` over this cycle's `Harvest` events |
-| protocol fee (10%) | sum of `Harvest.feeUsdg` over the cycle (== the fee Safe's balance delta) |
+| harvest gross | sum of `Harvest.grossUsdg` over this cycle's `Harvest` events (includes assignment proceeds on an assigned week) |
+| protocol fee (5% of premium) | sum of `Harvest.feeUsdg` over the cycle (== the fee Safe's balance delta); never includes a fee on assignment proceeds |
 | net to depositors | sum of `Harvest.netUsdg` over the cycle |
 | net USDG per share | sum over the cycle of `UsdgDistributed.credited / UsdgDistributed.totalSupply`, each event using its own `totalSupply` |
 | assigned or not | step 1 `$ASSIGNED` vs `$WROTE`, cross-checked against `RollClose.contractsAssignedCount` |
@@ -395,7 +412,7 @@ Numbers to carry across from the steps above:
 - [ ] pre-close snapshot captured **before** `rollClose` (optionId, claimKey, wrote, sold, strike, assigned)
 - [ ] `rollClose()` mined; `phase() == 0`; `listingHash()` zero; `claimKey()` zero
 - [ ] `underlyingReturned` + `exerciseReceived` reconcile against contracts written and the strike
-- [ ] every `Harvest` for this `cycleNumber` collected (a mid-cycle deposit emits an extra one); their summed gross/fee/net are consistent; the fee Safe's balance moved by the summed fee; `pendingFeeUsdg()` is back to 0; `accUsdgPerShare` moved (or the week was a clean 0)
+- [ ] every `Harvest` for this `cycleNumber` collected (a mid-cycle deposit emits an extra one); each one's `feeUsdg` matches its own fee base (the close's is `grossUsdg - RollClose.usdgFromAssignment`) and summed gross/fee/net are consistent; the fee Safe's balance moved by the summed fee; `pendingFeeUsdg()` is back to 0; `accUsdgPerShare` moved (or the week was a clean 0)
 - [ ] `QueueSettled` emitted if anyone queued; `queuedShares()` back to 0; epoch reserves recorded
 - [ ] Overcall book shows the listing as `filled` / `expired`, not stuck `open`
 - [ ] keeper gas topped up

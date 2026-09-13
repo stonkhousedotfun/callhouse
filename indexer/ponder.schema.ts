@@ -109,7 +109,7 @@ export const vaultState = onchainTable("vault_state", (t) => ({
   lifetimeAssignmentUsdg: t.bigint().notNull().default(0n),
   lifetimeProtocolFee: t.bigint().notNull().default(0n),
   /**
-   * Protocol fee actually paid out. The fee accrues at every positive harvest (counted in
+   * Protocol fee actually paid out. The fee accrues at every harvest with premium in it (counted in
    * `lifetimeProtocolFee`) but the push is best-effort — a blocked recipient must not freeze
    * `rollClose` — so payment trails accrual and completes via the permissionless `sweepFee`.
    * `lifetimeProtocolFee − totalFeeSwept` is the vault's live `pendingFeeUsdg`.
@@ -236,8 +236,13 @@ export const vaultSnapshot = onchainTable(
  *
  * The three money columns the site quotes, and exactly what each one means:
  *   premiumGross   what buyers paid for our calls, INCLUDING Overcall's 5% cut.
- *   fee            the protocol fee (10%) taken at harvest, on filled weeks only.
- *   premiumNet     what depositors actually received, after Overcall's 5% AND the 10%.
+ *   fee            the protocol fee taken at harvest: `protocolFeeBps` (launch 500, 5%) of the
+ *                  PREMIUM only, on filled weeks only. Strike proceeds are never fee'd, so on an
+ *                  assigned week `fee != harvestGross × bps / 10_000`; it is
+ *                  `(harvestGross − assignmentUsdg) × bps / 10_000`, per Harvest event.
+ *   premiumNet     what depositors actually received, after Overcall's 5% AND the protocol fee.
+ *                  `harvestGross − fee`, so on an assigned week it INCLUDES `assignmentUsdg`
+ *                  (principal sold at the strike), not only premium.
  * `premiumToVault`, `overcallFee`, `assignmentUsdg` and `harvestGross` are carried alongside
  * so nothing about the two stacked fees has to be inferred.
  */

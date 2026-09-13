@@ -22,7 +22,7 @@ An ERC-4626-style vault plus a weekly keeper.
 2. When Overcall opens the weekly cycle, the keeper locks idle NVDA in Valorem, writes `n` calls, and lists the option ERC-1155 on Seaport.
 3. If a buyer fills: vault receives USDG (net of Overcall's 5% premium fee).
 4. After Saturday expiry the keeper reclaims. OTM → NVDA back. ITM and exercised → leftover NVDA + strike USDG.
-5. 10% of harvested USDG goes to the fee Safe. The rest is claimable pro-rata.
+5. 5% of the premium goes to the fee Safe. The rest, including any strike USDG in full, is claimable pro-rata.
 6. Withdrawals while a call is open are queued until reclaim.
 
 That is the whole app.
@@ -67,8 +67,8 @@ User NVDA ──► Vault
           USDG to Overcall (5%)
                 │ Saturday redeem
                 ▼
-     idle NVDA + USDG ──► depositors (90% of harvest)
-                       ──► fee Safe (10% of harvest)
+     idle NVDA + USDG ──► depositors (premium less 5%, strike USDG in full)
+                       ──► fee Safe (5% of premium)
 ```
 
 Settlement never reads a price feed. Chainlink is display + a write-gate only.
@@ -162,7 +162,7 @@ Do not guess the Seaport order shape. It was copied from a real filled Overcall 
 | Max OTM | 12% |
 | Min list premium | 0.40% of spot / week |
 | Max utilization | 95% of idle NVDA |
-| Protocol fee | 10% of USDG harvested (filled weeks only) |
+| Protocol fee | 5% of premium harvested (filled weeks only; never on strike proceeds) |
 | Deposit cap | 20 NVDA at launch |
 | Max listings signed per cycle | 3 |
 
@@ -276,7 +276,7 @@ Valorem was audited by Zellic (2022–2023) under the old name `OptionSettlement
 
 **v1.1** — PFE / SCHD deploys of the same bytecode.
 
-**v2 (not this PR)** — auto-rebuy after assignment, Pare y-leg as deposit asset, protocol token funded only by the 10% fee.
+**v2 (not this PR)** — auto-rebuy after assignment, Pare y-leg as deposit asset, protocol token funded only by the protocol fee.
 
 Token rule: four published weeks first. Depositors keep 100% of net premium after the stated fee. The token never is the yield.
 

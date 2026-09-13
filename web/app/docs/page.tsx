@@ -55,8 +55,9 @@ export default function DocsPage() {
           one call per whole token, and lists the resulting option on Seaport for USDG. If a buyer
           fills, the vault receives 95% of the premium and Overcall receives 5%. After expiry the
           keeper reclaims: an out-of-the-money call returns the collateral, an exercised one returns
-          the strike in USDG instead. 10% of the harvested USDG goes to the protocol fee address and
-          the rest becomes claimable pro rata. There is no protocol token.
+          the strike in USDG instead. 5% of the premium goes to the protocol fee address; the rest
+          of the premium, and any strike USDG in full, becomes claimable pro rata. There is no
+          protocol token.
         </p>
         <p style={{ marginBottom: 0 }}>
           If nobody buys the call, the week earns nothing. That is a normal outcome, not a failure
@@ -105,8 +106,10 @@ export default function DocsPage() {
           consideration item. Charged only when a buyer fills.
         </li>
         <li>
-          <strong>Callhouse: 10% of harvested USDG.</strong> Taken at harvest, on filled weeks only.
-          An unfilled week costs nothing because nothing was collected.
+          <strong>Callhouse: 5% of the premium.</strong> Taken at harvest from the premium that
+          reached the vault, on filled weeks only. Strike proceeds from an assignment carry no fee:
+          they are your collateral sold at the strike, not income. An unfilled week costs nothing
+          because nothing was collected.
         </li>
         <li>
           <strong>Valorem: 15 bps of notional, currently off.</strong> If the switch flips on, the
@@ -201,8 +204,9 @@ export default function DocsPage() {
           <code> feesEnabled</code> plus an explicit admin acceptance.
         </li>
         <li>
-          <strong>Stacked fees.</strong> 5% to Overcall and 10% to the protocol, both on the premium,
-          both only on filled weeks.
+          <strong>Stacked fees.</strong> 5% to Overcall on the gross premium, then 5% to the protocol
+          on the 95% that reaches the vault: 9.75% of what the buyer paid, both only on filled
+          weeks, neither on strike proceeds.
         </li>
         <li>
           <strong>Order book access.</strong> Overcall&apos;s listings API takes no key and has no

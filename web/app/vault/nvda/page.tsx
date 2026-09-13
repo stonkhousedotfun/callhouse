@@ -243,7 +243,7 @@ export default function VaultPage() {
             <span className="v">{v.canRedeemInstantly ? "open" : "queue only"}</span>
           </div>
           <div className="row">
-            <span className="k">Protocol fee on harvested USDG</span>
+            <span className="k">Protocol fee on harvested premium</span>
             <span className="v">
               {v.policy ? `${(v.policy.protocolFeeBps / 100).toFixed(2)}%` : "—"}
             </span>

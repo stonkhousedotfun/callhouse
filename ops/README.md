@@ -161,7 +161,9 @@ Note the other half of the same trap is still live and is **not** a defect: `con
 
 Not a defect either, but it breaks naive reconciliation and it is easy to miss.
 
-`deposit` and `mint` call `_checkpointHarvest()`, which runs the same `_accrueHarvest()` as the close.
+`deposit` and `mint` call `_checkpointHarvest()`, which runs the same `_accrueHarvest` as the close
+(with nothing excluded from the fee base: assignment proceeds cannot be in the balance until `rollClose`
+redeems the claim).
 That exists so a late depositor cannot mint into premium earned before they arrived. The consequence
 for ops: **a cycle can emit more than one `Harvest` event and more than one `UsdgDistributed` event.**
 
@@ -169,6 +171,9 @@ for ops: **a cycle can emit more than one `Harvest` event and more than one `Usd
   only `_harvest()`, which runs from `rollClose` alone, transfers the accumulated total to the fee Safe.
 - So the fee Safe's balance increases by the **sum** of `Harvest.feeUsdg` over the cycle, which may not
   equal the feeUsdg on the close's own `Harvest` — that one can legitimately be `0`.
+- The fee is 5% of premium only. On an assigned week the close's `Harvest.grossUsdg` includes the
+  assignment proceeds but its `feeUsdg` does not: it is `floor((grossUsdg - RollClose.usdgFromAssignment)
+  * protocolFeeBps / 10000)`. Never derive the rate as `feeUsdg / grossUsdg`.
 - Likewise the week's net per share is the sum of `UsdgDistributed.credited` over the cycle, each
   divided by the `totalSupply` in *that* event.
 

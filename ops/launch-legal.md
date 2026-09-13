@@ -65,7 +65,7 @@ sentence may be describing a fact rather than a policy.
 Each item ends with the variable it becomes, or "no variable" when it is a text change.
 
 1. **Entity and jurisdiction.** Which legal person operates the two domains and publishes the
-   interface. Today there is none: the fee Safe receives 10% of every harvest and no legal
+   interface. Today there is none: the fee Safe receives 5% of every week's premium and no legal
    person owns that Safe. Decide the entity and where it is organised.
    → `NEXT_PUBLIC_OPERATOR_LEGAL_NAME`, `NEXT_PUBLIC_OPERATOR_JURISDICTION`
 
@@ -89,7 +89,7 @@ Each item ends with the variable it becomes, or "no variable" when it is a text 
    the page needs a sentence naming them, which is a text change.
    → `NEXT_PUBLIC_PRIVACY_CONTACT_EMAIL`; representative / DPO lines are text changes
 
-5. **The fee Safe's legal owner.** 10% of harvested USDG routes to a Safe (`ops/safes.md`).
+5. **The fee Safe's legal owner.** 5% of harvested premium (never strike proceeds) routes to a Safe (`ops/safes.md`).
    Decide which legal person it belongs to and whether that needs to be said on a page. Today no
    page mentions the Safe's owner because there is nothing true to say.
    → no variable; possibly a text change on `/legal`

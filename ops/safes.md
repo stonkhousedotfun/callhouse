@@ -51,7 +51,9 @@ Holds `DEFAULT_ADMIN_ROLE`. Governance, not operations. It should sign a handful
 - **Move a depositor's NVDA or USDG.** There is no admin-gated transfer anywhere in the vault. See §4.
 - Sell at-the-money calls. `minOtmBps` has a floor of **100 bps** in the bytecode
   (`Policy.MIN_OTM_FLOOR_BPS`); `setPolicy` reverts `MinOtmBelowFloor` below it.
-- Take more than **20%** of a harvest (`PROTOCOL_FEE_CEIL_BPS = 2000`, reverts `ProtocolFeeAboveCeiling`).
+- Take more than **20%** of harvested premium (`PROTOCOL_FEE_CEIL_BPS = 2000`, reverts `ProtocolFeeAboveCeiling`).
+- Take any fee on strike proceeds. `rollClose` excludes the USDG it measures coming out of the
+  Valorem claim from the fee base; that is bytecode, not a `policy` field, so no setting reaches it.
 - List for dust: `minPremiumBps` has a floor of **10 bps** (`MIN_PREMIUM_FLOOR_BPS`).
 - Write more than 100% of idle (`MAX_UTILIZATION_CEIL_BPS = 10000`).
 - Upgrade anything. There is no proxy. A fix is Vault v2 plus a migration.
@@ -62,8 +64,10 @@ Holds `DEFAULT_ADMIN_ROLE`. Governance, not operations. It should sign a handful
 
 An honest threat model names its own worst case:
 
-- It can point `feeRecipient` at itself and raise `protocolFeeBps` to the 2000 bps ceiling, taking
-  **20% of harvested USDG** — of harvest, on filled weeks only, never of principal.
+- It can point `feeRecipient` at itself and raise `protocolFeeBps` from the launch 500 to the 2000 bps
+  ceiling, taking **20% of harvested premium** — on filled weeks only, never of principal. Strike
+  proceeds on an assigned week are outside the fee base, so the ceiling bounds a cut of premium, not
+  of the collateral the assigned depositors sold at the strike.
 - It can grant itself `KEEPER_ROLE` and roll the position. Everything the keeper does is still bounded
   by `Policy`, so this buys it a legal-but-unwatched write, not an extraction.
 - It can grant `DEFAULT_ADMIN_ROLE` to a fourth address. There is **no timelock** on any admin action.
@@ -240,7 +244,7 @@ Run step 1 again with `DEFAULT_ADMIN_ROLE` / `onlyRole(DEFAULT_ADMIN_ROLE)` and 
 step 2. The only intersection is the `_tryPayFee` raw call (`Vault.sol:982`) — and it is indirect:
 admin sets `feeRecipient`, and `rollClose` (via `_harvest`) or anyone (via `sweepFee()`) later sends
 the accrued `pendingFeeUsdg` there. Admin never calls a transfer itself, and the fee is capped at 20%
-of a positive harvest. That is the complete extent of admin's reach into the token flow. Note that
+of harvested premium, with strike proceeds excluded. That is the complete extent of admin's reach into the token flow. Note that
 this is exactly the site the old grep pattern did not match; if you run step 2 with a pattern that
 lacks `IERC20.transfer` / `\.call\(`, step 4 will wrongly conclude that admin has no reach at all.
 
@@ -256,19 +260,19 @@ Compiled into `Policy` and into `Vault`. These are the bytecode, not the configu
 | `Policy.MAX_OTM_CEIL_BPS` | 2500 (25%) | A band so wide it earns nothing |
 | `Policy.MIN_PREMIUM_FLOOR_BPS` | 10 (0.10%) | Listing for dust |
 | `Policy.MAX_UTILIZATION_CEIL_BPS` | 10000 (100%) | Writing more than the vault holds |
-| `Policy.PROTOCOL_FEE_CEIL_BPS` | 2000 (20%) | A fee that eats the product |
+| `Policy.PROTOCOL_FEE_CEIL_BPS` | 2000 (20% of premium) | A fee that eats the product. Strike proceeds are never in the fee base at any setting |
 | `Policy.MAX_LISTINGS_PER_CYCLE` | 3 | A keeper ratcheting the price down all week |
 | `Vault.MIN_PRICE_AGE` | 1 hour | Disabling the staleness check by setting it absurdly tight |
 | `Vault.MAX_PRICE_AGE_CEIL` | 7 days | Turning the staleness check off by setting it absurdly wide |
 
 Launch policy: `minOtmBps 300, maxOtmBps 1200, minPremiumBps 40, maxUtilizationBps 9500,
-protocolFeeBps 1000, maxContractsCap 50`; `maxPriceAge` 4 days; deposit cap 20 NVDA.
+protocolFeeBps 500, maxContractsCap 50`; `maxPriceAge` 4 days; deposit cap 20 NVDA.
 
 ---
 
 ## 6. Fee Safe
 
-Receives the protocol fee on harvested USDG. **Holds no role on the vault**, is not a signer on
+Receives the protocol fee on harvested premium (5% at launch; strike proceeds are never fee'd). **Holds no role on the vault**, is not a signer on
 anything, and cannot call any vault function that a stranger could not.
 
 ```bash
@@ -285,8 +289,11 @@ push is best-effort: if USDG rejects the transfer the fee stays in `pendingFeeUs
 rises later, on whichever `sweepFee()` or `rollClose` first succeeds. Reconciling against the close's own
 `Harvest.feeUsdg` will falsely fail whenever somebody deposited after a fill or a push was deferred.
 
-On an unfilled week the increase is zero — the fee is charged only on a positive harvest, so a 0 week
-is free for depositors.
+On an unfilled week the increase is zero — the fee is charged only on premium, so a 0 week is free for
+depositors. On an assigned week the increase is still only the fee on the premium: the close's
+`Harvest.grossUsdg` includes the strike proceeds, but its `feeUsdg` is
+`floor((grossUsdg - RollClose.usdgFromAssignment) * protocolFeeBps / 10000)`
+(`ops/runbooks/close-week.md` §5, "Check the harvest split").
 
 ```bash
 cast call $VAULT "pendingFeeUsdg()(uint256)" --rpc-url $RH_RPC   # before close: what is owed

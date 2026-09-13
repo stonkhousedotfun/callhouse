@@ -213,10 +213,40 @@ Two fees stack, and both are on the premium only.
 | Fee | Rate | Mechanism | When |
 |---|---|---|---|
 | Overcall | 5% of gross premium | the second Seaport consideration item, in the same fill | only on a fill |
-| Callhouse | 10% of harvested USDG | `pendingFeeUsdg`, pushed best-effort at `rollClose` | only when the harvest is positive |
+| Callhouse | 5% of the premium that reaches the vault (`protocolFeeBps` 500; bytecode ceiling 2000) | `pendingFeeUsdg`, pushed best-effort at `rollClose` | only when harvested premium is positive |
 
-No fee on deposits. No fee on idle collateral. **An unfilled week harvests zero and is therefore
-free** — `Policy.splitHarvest` returns `(0, 0)` on a zero gross.
+Stacked, that is 9.75% of gross premium: Overcall's 5% of gross, then 5% of the 95% that reaches
+the vault. No fee on deposits. No fee on idle collateral. **An unfilled week harvests zero and is
+therefore free** — `Policy.splitHarvest` returns `(0, 0)` on a zero amount.
+
+### Strike proceeds are credited fee-free
+
+On an assigned week `rollClose` redeems the Valorem claim and the strike USDG lands in the vault
+alongside the premium. The harvest still measures everything new (`balance - usdgAccounted`) and
+credits **all** of it, less the fee, to `accUsdgPerShare`. The fee is charged only on the part
+that is not strike proceeds:
+
+```
+gross = usdg.balanceOf(vault) - usdgAccounted
+fee   = floor((gross - usdgFromAssignment) * protocolFeeBps / 10_000)   (saturating at 0)
+net   = gross - fee                                                    all of it to the index
+```
+
+`usdgFromAssignment` is the USDG the claim redemption actually delivered, measured in the same
+`rollClose`. The deposit checkpoint passes `0`, which is correct rather than lenient: strike
+proceeds sit inside the claim until `rollClose` redeems it, so none can be in the balance when a
+deposit runs. The reason for the exclusion: strike proceeds are the assigned depositors' own
+collateral, sold at the strike, not income. A fee on them would be a cut of principal — at the
+old 10%-of-everything rate, an assigned week took more than a hundred times the fee on the
+premium it was meant to be a cut of.
+
+**Reconciling `Harvest` on an assigned week.** The event ABI did not change, so
+`Harvest.grossUsdg` on the close still **includes** the strike proceeds and `feeUsdg / grossUsdg`
+is not the fee rate. Take `usdgFromAssignment` from the `RollClose` event in the same transaction
+(it is emitted immediately before the close's `Harvest`) and check
+`feeUsdg == floor((grossUsdg - usdgFromAssignment) * protocolFeeBps / 10_000)`. On a checkpoint
+`Harvest`, and on any close with `usdgFromAssignment == 0`, that reduces to
+`feeUsdg == floor(grossUsdg * protocolFeeBps / 10_000)`.
 
 ### The push is best-effort, on purpose
 
@@ -291,25 +321,27 @@ gross premium            20.000000 USDG   (2.00 x 10)
 
 harvest at rollClose
   gross                  19.000000
-  -> protocol fee 10%     1.900000        to the fee Safe
-  -> depositors          17.100000        into accUsdgPerShare
+  -> protocol fee 5%      0.950000        floor(19_000_000 * 500 / 10_000) = 950_000, to the fee Safe
+  -> depositors          18.050000        into accUsdgPerShare
 
 expiry out of the money
   collateral returned    10.000000 NVDA   all of it
   totalAssets()          20e18            unchanged
   share price            unchanged        premium is not in the share price
-  claimableUsdg(alice)   17.100000 USDG
+  claimableUsdg(alice)   18.050000 USDG
 ```
 
 The same week, assigned in full instead:
 
 ```
 collateral given up      10.000000 NVDA
-strike proceeds        2310.000000 USDG   (231.00 x 10)
+strike proceeds        2310.000000 USDG   (231.00 x 10)   RollClose.usdgFromAssignment
 totalAssets()            10e18            the vault is now underweight; v1 does not rebuy
-harvested               2329.000000 USDG  (19.00 premium + 2310.00 strike)
-  -> protocol fee         232.900000
-  -> depositors          2096.100000
+harvested (gross)       2329.000000 USDG  (19.00 premium + 2310.00 strike)   Harvest.grossUsdg
+  fee-bearing             19.000000       gross - usdgFromAssignment
+  -> protocol fee          0.950000       floor(19_000_000 * 500 / 10_000); strike proceeds not fee'd
+  -> depositors         2328.050000       2310.00 strike + 18.05 premium net of fee
 ```
 
-Both paths are asserted in `Smoke.t.sol` and `VaultAssignment.t.sol`.
+The protocol fee is the same 0.95 USDG whether or not the week was assigned. Both paths are
+asserted in `Smoke.t.sol` and `VaultAssignment.t.sol`.

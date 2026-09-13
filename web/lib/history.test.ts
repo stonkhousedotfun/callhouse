@@ -55,13 +55,20 @@ const rollClose = (assigned: bigint): LooseLog => ({
   transactionHash: TX_CLOSE,
 });
 
-const harvest = (gross: bigint, hash: `0x${string}`, block: bigint): LooseLog => ({
-  eventName: "Harvest",
-  // 10% protocol fee on whatever was harvested.
-  args: { cycleNumber: CYCLE, grossUsdg: gross, feeUsdg: gross / 10n, netUsdg: gross - gross / 10n },
-  blockNumber: block,
-  transactionHash: hash,
-});
+/**
+ * A Harvest as Vault._accrueHarvest emits it: 5% protocol fee (launch protocolFeeBps 500) on
+ * the PREMIUM only. `feeFree` is RollClose.usdgFromAssignment for the terminal harvest inside
+ * rollClose and 0 for a deposit checkpoint; strike proceeds stay in the gross but are never fee'd.
+ */
+const harvest = (gross: bigint, hash: `0x${string}`, block: bigint, feeFree = 0n): LooseLog => {
+  const fee = ((gross > feeFree ? gross - feeFree : 0n) * 500n) / 10_000n;
+  return {
+    eventName: "Harvest",
+    args: { cycleNumber: CYCLE, grossUsdg: gross, feeUsdg: fee, netUsdg: gross - fee },
+    blockNumber: block,
+    transactionHash: hash,
+  };
+};
 
 /** `_distributeUsdg` emits this inside the same call as its Harvest, with the supply it indexed against. */
 const distributed = (net: bigint, supply: bigint, hash: `0x${string}`, block: bigint): LooseLog => ({
@@ -79,9 +86,9 @@ describe("foldVaultLogs", () => {
     const rows = foldVaultLogs([
       rollOpen,
       listingApproved,
-      distributed(27_000000n, 100n * WAD, TX_DEPOSIT_1, 150n),
+      distributed(28_500000n, 100n * WAD, TX_DEPOSIT_1, 150n),
       harvest(30_000000n, TX_DEPOSIT_1, 150n),
-      distributed(16_200000n, 120n * WAD, TX_DEPOSIT_2, 160n),
+      distributed(17_100000n, 120n * WAD, TX_DEPOSIT_2, 160n),
       harvest(18_000000n, TX_DEPOSIT_2, 160n),
       rollClose(0n),
       harvest(0n, TX_CLOSE, 200n),
@@ -96,8 +103,8 @@ describe("foldVaultLogs", () => {
     expect(row.filled).toBe(true);
 
     expect(row.grossUsdg).toBe(48_000000n);
-    expect(row.feeUsdg).toBe(4_800000n);
-    expect(row.netUsdg).toBe(43_200000n);
+    expect(row.feeUsdg).toBe(2_400000n);
+    expect(row.netUsdg).toBe(45_600000n);
     expect(row.settled).toBe(true);
 
     // The terminal Harvest had no UsdgDistributed; the denominator from the last sweep that
@@ -123,13 +130,14 @@ describe("foldVaultLogs", () => {
       rollOpen,
       listingApproved,
       rollClose(0n),
-      distributed(43_200000n, 100n * WAD, TX_CLOSE, 200n),
+      distributed(45_600000n, 100n * WAD, TX_CLOSE, 200n),
       harvest(48_000000n, TX_CLOSE, 200n),
     ]);
     const row = rows[0]!;
     expect(row.filled).toBe(true);
     expect(row.grossUsdg).toBe(48_000000n);
-    expect(row.netUsdg).toBe(43_200000n);
+    expect(row.feeUsdg).toBe(2_400000n);
+    expect(row.netUsdg).toBe(45_600000n);
     expect(row.sharesAtHarvest).toBe(100n * WAD);
     expect(row.settled).toBe(true);
   });
@@ -155,19 +163,22 @@ describe("foldVaultLogs", () => {
     const rows = foldVaultLogs([
       rollOpen,
       listingApproved,
-      distributed(41_040000n, 100n * WAD, TX_DEPOSIT_1, 150n),
+      distributed(43_320000n, 100n * WAD, TX_DEPOSIT_1, 150n),
       harvest(45_600000n, TX_DEPOSIT_1, 150n),
       rollClose(5n),
-      // 5 × 190 USDG came back with the claim and is swept by the terminal harvest.
-      distributed(855_000000n, 100n * WAD, TX_CLOSE, 200n),
-      harvest(950_000000n, TX_CLOSE, 200n),
+      // 5 × 190 USDG came back with the claim and is swept by the terminal harvest, fee-free:
+      // rollClose passes RollClose.usdgFromAssignment to _harvest, so all 950 is credited.
+      distributed(950_000000n, 100n * WAD, TX_CLOSE, 200n),
+      harvest(950_000000n, TX_CLOSE, 200n, 950_000000n),
     ]);
     const row = rows[0]!;
     expect(row.filled).toBe(true);
     expect(row.settled).toBe(true);
     expect(row.contractsAssigned).toBe(5n);
     expect(row.grossUsdg).toBe(995_600000n);
-    expect(row.netUsdg).toBe(896_040000n);
+    // 5% of the 45.6 premium only; the strike proceeds are never fee'd.
+    expect(row.feeUsdg).toBe(2_280000n);
+    expect(row.netUsdg).toBe(993_320000n);
   });
 
   it("a checkpoint after rollClose does not restate a published unfilled week", () => {
@@ -181,7 +192,7 @@ describe("foldVaultLogs", () => {
       rollOpen,
       rollClose(0n),
       harvest(0n, TX_CLOSE, 200n),
-      distributed(6_300000n, 100n * WAD, TX_LATE_DEPOSIT, 250n),
+      distributed(6_650000n, 100n * WAD, TX_LATE_DEPOSIT, 250n),
       harvest(7_000000n, TX_LATE_DEPOSIT, 250n),
     ]);
     expect(rows).toHaveLength(1);

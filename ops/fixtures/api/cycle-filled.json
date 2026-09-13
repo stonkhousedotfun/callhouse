@@ -108,19 +108,19 @@
       "formatted": "45.6"
     },
     "fee": {
-      "raw": "4560000",
+      "raw": "2280000",
       "decimals": 6,
-      "formatted": "4.56"
+      "formatted": "2.28"
     },
     "premiumNet": {
-      "raw": "41040000",
+      "raw": "43320000",
       "decimals": 6,
-      "formatted": "41.04"
+      "formatted": "43.32"
     },
     "usdgPerShare": {
-      "raw": "410400",
+      "raw": "433200",
       "decimals": 6,
-      "formatted": "0.4104"
+      "formatted": "0.4332"
     },
     "supplyAtHarvest": {
       "raw": "100000000000000000000",

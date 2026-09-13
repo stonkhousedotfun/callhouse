@@ -8,9 +8,9 @@ Each JSON here is one row of `GET /v1/cycles` exactly as `indexer/src/api/index.
 | File | Week | What it pins |
 |---|---|---|
 | `cycle-idle.json` | #6, status `idle` | the registry opened the week and the vault sat it out: `wrote: false`, registry facts only, every vault column at its default, `settlement.closedAt` null. Nothing ever closes a skipped week, so the dapp settles it by the registry's `expiryTimestamp` |
-| `cycle-filled.json` | #7, status `closed` | wrote 12, sold 12 at 4.000000 USDG: 48 gross, 2.4 to Overcall (5% per contract), 45.6 to the vault, 4.56 protocol fee (10%), 41.04 net to depositors over 100 shares |
+| `cycle-filled.json` | #7, status `closed` | wrote 12, sold 12 at 4.000000 USDG: 48 gross, 2.4 to Overcall (5% per contract), 45.6 to the vault, 2.28 protocol fee (5% of the 45.6 premium), 43.32 net to depositors over 100 shares |
 | `cycle-unfilled.json` | #8, status `unfilled` | wrote 12, listed 12, sold 0. Every money field is `0`, and the row is still complete — the most likely outcome, published as "unfilled, 0" |
-| `cycle-assigned.json` | #9, status `assigned` | sold 12, 5 assigned at 190: 950 USDG of strike proceeds on top of the premium, 7 lots returned, 995.6 gross, 99.56 fee, 896.04 net |
+| `cycle-assigned.json` | #9, status `assigned` | sold 12, 5 assigned at 190: 950 USDG of strike proceeds on top of the premium, 7 lots returned, 995.6 gross, 2.28 fee (5% of the 45.6 premium only; the 950 is never fee'd), 993.32 net |
 
 Two tests hold the two ends of the contract to these bytes:
 

@@ -28,7 +28,7 @@ Every field, where it comes from, and how to format it. Source column refers to 
 | Premium received | `writerPerContract6 × contractsFilled` | USDG — what actually landed |
 | Assignment proceeds | `exerciseReceived` from the vault's `ClaimRedeemed` | USDG, `0` if not assigned |
 | Harvest gross | **sum** of `Harvest.grossUsdg` over this cycle's `Harvest` events | USDG = premium received + assignment proceeds |
-| **Protocol fee (10%)** | **sum** of `Harvest.feeUsdg` over the cycle | USDG. `0` on an unfilled week |
+| **Protocol fee (5% of premium)** | **sum** of `Harvest.feeUsdg` over the cycle | USDG. `0` on an unfilled week. Never charged on assignment proceeds |
 | Net to depositors | **sum** of `Harvest.netUsdg` over the cycle | USDG |
 | **Net USDG per share** | **sum** over the cycle of `UsdgDistributed.credited / UsdgDistributed.totalSupply`, each event against its own `totalSupply` | 6 dp, e.g. `0.034200 USDG` |
 | **Assigned or not** | `contractsAssigned()` (snapshot, taken **before** the close) vs `contractsWritten`, agreeing with `RollClose.contractsAssignedCount` | `not assigned` / `n of m assigned` |
@@ -83,7 +83,7 @@ Hard rules. CI lints the site copy for these; the post is held to the same stand
 > - Gross premium: **{GROSS} USDG**
 > - Overcall fee (5%): **{OCFEE} USDG**
 > - Premium received by the vault: **{RECV} USDG**
-> - Protocol fee (10% of harvest): **{PFEE} USDG**
+> - Protocol fee (5% of premium): **{PFEE} USDG**
 > - Net to depositors: **{NET} USDG**
 > - **Net USDG per share: {PPS} USDG**
 > - **Not assigned.** All {W} NVDA came back.
@@ -105,8 +105,8 @@ The one that matters. Use it without apology or hedging.
 > - Asked: **{U} USDG** per contract
 > - Contracts filled: **0**
 > - **Premium: 0 USDG**
-> - **Protocol fee: 0 USDG** — the fee is charged only on a positive harvest, so an unfilled week
->   costs depositors nothing
+> - **Protocol fee: 0 USDG** — the fee is charged only on premium, so an unfilled week costs
+>   depositors nothing
 > - **Net USDG per share: 0.000000 USDG**
 > - **Not assigned.** All {W} NVDA came back.
 >
@@ -125,8 +125,8 @@ The one that matters. Use it without apology or hedging.
 > - Contracts filled: **{F}** at **{U} USDG** per contract
 > - Premium received by the vault: **{RECV} USDG**
 > - Assignment proceeds: **{ASSIGN} USDG** ({A} × {S}.00)
-> - Protocol fee (10% of harvest): **{PFEE} USDG**
-> - Net to depositors: **{NET} USDG**
+> - Protocol fee (5% of premium; none on assignment proceeds): **{PFEE} USDG**
+> - Net to depositors: **{NET} USDG** (premium after fees, plus the assignment proceeds in full)
 > - **Net USDG per share: {PPS} USDG**
 > - NVDA per share is now **{NPS}**, down from {NPS_PRIOR}
 >
@@ -180,7 +180,7 @@ At least one of each per post, or a visible link to a page carrying all four:
 - [ ] Every number traced to a chain read or an event in the close transaction, not to an API field
 - [ ] `gross premium == Overcall fee + premium received`, to the unit
 - [ ] all of this cycle's `Harvest` events collected (filter the indexed `cycleNumber`), and their summed `harvest gross == premium received + assignment proceeds`, to the unit
-- [ ] `protocol fee == harvest gross × 10%` — summed, matching the fee Safe's balance delta — and is **0** if harvest was 0
+- [ ] each `Harvest` event's `feeUsdg == floor((grossUsdg − usdgFromAssignment) × protocolFeeBps / 10000)`, with `usdgFromAssignment` from the `RollClose` in the same transaction (`0` for a checkpoint `Harvest` from a deposit); at launch that is 5% of premium received, never 5% of harvest gross on an assigned week. The summed fee matches the fee Safe's balance delta and is **0** if no premium was received
 - [ ] `net USDG per share == credited / totalSupply` from each `UsdgDistributed` event and summed, not
       recomputed from a post-close `totalSupply()` read
 - [ ] Assignment taken from the pre-close snapshot and agreeing with `RollClose`'s

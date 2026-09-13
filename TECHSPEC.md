@@ -21,7 +21,7 @@ Do not auto-buy the stock back after assignment in v1. Assignment leaves the vau
 One vault = one Stock Token + USDG.
 Depositors own a pro-rata claim on vault assets: idle Stock Token + USDG + Overcall claim NFT + unsold option ERC-1155.
 Yield paid out is USDG only (call premium, and USDG received if assigned).
-Protocol fee: 10% of USDG harvested that week, only if premium > 0. No fee on deposits, no fee on idle stock.
+Protocol fee: 5% of the premium harvested that week, only if premium > 0. USDG received from assignment (strike proceeds) is never fee'd. No fee on deposits, no fee on idle stock. (Changed 2026-09-13 from 10% of all harvested USDG; see docs/ACCOUNTING.md §6.)
 While a call is open, withdrawals are queued until Saturday reclaim.
 If Overcall has no cycle, or Chainlink/oraclePaused() is true on the token, the vault holds spot and writes nothing.
 Unfilled listing = that week’s option yield is 0. UI must say so.
@@ -107,7 +107,7 @@ Stack: Solidity 0.8.28, Foundry, OpenZeppelin 5, Next.js, wagmi/viem, Ponder (or
 | DEFAULT_ADMIN | 2/3 Safe | set keeper, set fee recipient, set policy bounds inside hard caps, pause writes (not withdrawals of idle cash) |
 | KEEPER | hot wallet + backup | rollOpen, list, cancelList, rollClose, harvest |
 | GUARDIAN | 1/1 hardware key | haltWrites(), cancelAllListings(). Cannot move tokens to self |
-| FEE_RECIPIENT | Safe | receives 10% USDG |
+| FEE_RECIPIENT | Safe | receives 5% of premium (never strike proceeds) |
 | Users | — | deposit, queueRedeem, claim, completeRedeem |
 
 No upgradeability on v1. If you need a fix, deploy Vault v2 and let people migrate. Proxy is optional only after audit.
@@ -190,7 +190,7 @@ ceiling — section 10 requires that admin cannot set it to 0 and sell at-the-mo
 | maxOtmBps | 1200 | 2500 |
 | minPremiumBps | 40 (0.40% of spot / week) | 10 |
 | maxUtilization | 95% of idle | 100% |
-| protocolFeeBps | 1000 (10%) | 2000 |
+| protocolFeeBps | 500 (5% of premium) | 2000 (20% of premium) |
 | maxContractsCap | 50 | set per deploy |
 
 If Chainlink is used as a gate only, heartbeat fail ⇒ skip write, stay Idle.
@@ -259,7 +259,7 @@ Post the signed order to Overcall listings API. If you only sign on-chain and ne
 On harvest():
 
 gross = usdg.balanceOf(vault) - usdgReservedForQueuedRedeems
-fee   = gross * protocolFeeBps / 10_000
+fee   = (gross - usdgFromAssignment) * protocolFeeBps / 10_000   # premium only; strike proceeds fee-free
 net   = gross - fee
 usdg.transfer(feeRecipient, fee)
 accUsdgPerShare += net * 1e18 / totalShares
@@ -469,7 +469,7 @@ Empty book (economic)
 Issuer freeze (existential)  
 Valorem fee switch (margin crush)  
 Partial assignment lottery  
-Overcall 5% + your 10% stacked  
+Overcall 5% + your 5% of premium stacked (9.75% of gross premium)  
 Listing API censorship / downtime  
 Admin sets minOtmBps = 0 and sells ATM — cap it
 
@@ -505,7 +505,7 @@ Assigned more than expected: publish “we are underweight NVDA, deposits buy it
 | 1 | Vault live, cap 20 NVDA, keeper is you, no fee or fee to Safe |
 | 2–4 | Publish four Friday reports. Raise cap |
 | 5 | Optional second vault (PFE) — new deploy, same code |
-| n | Token only after four filled-or-honestly-unfilled reports. Token gets the 10% fee buyback. Depositors still get 100% of net premium after that fee |
+| n | Token only after four filled-or-honestly-unfilled reports. Token gets the protocol fee (5% of premium) buyback. Depositors still get 100% of net premium after that fee |
 
 Deposit cap at launch: 20–50 tokens. Not a TVL race.
 

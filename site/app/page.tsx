@@ -195,9 +195,9 @@ export default function HomePage() {
               endings, and they are unpacked below.
             </li>
             <li className="step">
-              <strong>Harvest.</strong> Whatever USDG arrived is collected: 10% to the fee Safe,
-              the rest claimable pro rata by share. A withdrawal requested while the call was open
-              settles here, not before.
+              <strong>Harvest.</strong> Whatever USDG arrived is collected: 5% of the premium to
+              the fee Safe, the rest, including any strike proceeds in full, claimable pro rata by
+              share. A withdrawal requested while the call was open settles here, not before.
             </li>
           </ol>
         </div>
@@ -249,8 +249,8 @@ export default function HomePage() {
               </div>
               <p className="small" style={{ marginBottom: 0 }}>
                 Assignment can take the collateral at the strike. You keep the premium and those
-                tokens come back as strike USDG instead; the upside above the strike is gone for
-                that week. Valorem assigns by bucket, so a week can be assigned in part, and v1
+                tokens come back as strike USDG instead, with no protocol fee taken from it; the
+                upside above the strike is gone for that week. Valorem assigns by bucket, so a week can be assigned in part, and v1
                 does not buy the tokens back.
               </p>
             </div>
@@ -285,7 +285,7 @@ export default function HomePage() {
             <div className="flow-arrow" aria-hidden="true" />
             <div className="flow-node">
               <strong>Saturday settlement</strong>
-              <div className="tiny faint">collateral or strike back · 10% fee, the rest per share</div>
+              <div className="tiny faint">collateral or strike back · 5% fee on premium, the rest per share</div>
             </div>
           </div>
 
@@ -296,7 +296,8 @@ export default function HomePage() {
             and Valorem hands the collateral back whole at expiry. Settlement never reads a price
             feed — whether the vault was assigned is decided by what the option holder did, and the
             Chainlink feed is display and a gate on writing, nothing more. The protocol fee is
-            charged on harvested USDG only, so a week that pays nothing costs nothing.
+            5% of the premium and nothing else: strike proceeds from an assignment carry no fee,
+            and a week that pays nothing costs nothing.
           </p>
         </div>
 

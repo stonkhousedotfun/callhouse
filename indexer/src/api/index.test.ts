@@ -79,8 +79,15 @@ const GROSS = UNIT_PRICE * CONTRACTS; // 48.000000 USDG, what buyers paid
 const OVERCALL_FEE_PER_CONTRACT = (UNIT_PRICE * 500n) / 10_000n; // 0.200000
 const OVERCALL_FEE = OVERCALL_FEE_PER_CONTRACT * CONTRACTS; // 2.400000
 const TO_VAULT = GROSS - OVERCALL_FEE; // 45.600000, the 95% that reached the vault
-/** The protocol's 10% of whatever the vault harvested. */
-const protocolFee = (harvestGross: bigint): bigint => (harvestGross * 1000n) / 10_000n;
+/** Policy.launchDefaults().protocolFeeBps: 5%, charged on harvested PREMIUM only. */
+const PROTOCOL_FEE_BPS = 500n;
+/**
+ * The protocol fee exactly as Vault._accrueHarvest charges it: the strike proceeds that came
+ * back with an assigned claim are principal and fee-free, so only `harvestGross − assignmentUsdg`
+ * is fee-bearing. (One terminal harvest per week here, so the whole assignment is excluded.)
+ */
+const protocolFee = (harvestGross: bigint, assignmentUsdg = 0n): bigint =>
+  ((harvestGross > assignmentUsdg ? harvestGross - assignmentUsdg : 0n) * PROTOCOL_FEE_BPS) / 10_000n;
 /** premiumNet × 1e18 / supply: USDG base units per whole share. */
 const perShare = (net: bigint): bigint => (net * 10n ** 18n) / SUPPLY;
 
@@ -210,9 +217,9 @@ const ASSIGNED: CycleRow = (() => {
     assignmentUsdg,
     assetsReturned: (CONTRACTS - assigned) * LOT,
     harvestGross,
-    fee: protocolFee(harvestGross),
-    premiumNet: harvestGross - protocolFee(harvestGross),
-    usdgPerShare: perShare(harvestGross - protocolFee(harvestGross)),
+    fee: protocolFee(harvestGross, assignmentUsdg),
+    premiumNet: harvestGross - protocolFee(harvestGross, assignmentUsdg),
+    usdgPerShare: perShare(harvestGross - protocolFee(harvestGross, assignmentUsdg)),
   };
 })();
 
@@ -325,18 +332,22 @@ describe("cycleJson is the shape in ops/fixtures/api/", () => {
   }
 
   it("the arithmetic behind the fixtures is the one the contracts use", () => {
-    // 48 gross, 5% to Overcall per contract, 10% of the vault's take to the protocol.
+    // 48 gross, 5% to Overcall per contract, 5% of the vault's PREMIUM to the protocol.
     expect(GROSS).toBe(48_000000n);
     expect(OVERCALL_FEE).toBe(2_400000n);
     expect(TO_VAULT).toBe(45_600000n);
-    expect(FILLED.fee).toBe(4_560000n);
-    expect(FILLED.premiumNet).toBe(41_040000n);
-    expect(FILLED.usdgPerShare).toBe(410400n);
+    expect(FILLED.fee).toBe(2_280000n);
+    expect(FILLED.premiumNet).toBe(43_320000n);
+    expect(FILLED.usdgPerShare).toBe(433200n);
     // Five contracts assigned at 190 is 950 USDG of strike proceeds on top of the premium.
+    // They are principal, never fee'd: the fee is the same 2.28 as the filled week, charged on
+    // the 45.6 premium alone, and all 950 reach depositors.
     expect(ASSIGNED.assignmentUsdg).toBe(950_000000n);
     expect(ASSIGNED.harvestGross).toBe(995_600000n);
-    expect(ASSIGNED.fee).toBe(99_560000n);
-    expect(ASSIGNED.premiumNet).toBe(896_040000n);
+    expect(ASSIGNED.fee).toBe(2_280000n);
+    expect(ASSIGNED.fee).toBe(FILLED.fee);
+    expect(ASSIGNED.premiumNet).toBe(993_320000n);
+    expect(ASSIGNED.premiumNet - ASSIGNED.assignmentUsdg).toBe(FILLED.premiumNet);
   });
 });
 
@@ -347,8 +358,8 @@ describe("cycleJson", () => {
     expect(j.fill.overcallFee).toEqual({ raw: "2400000", decimals: 6, formatted: "2.4" });
     expect(j.fill.premiumToVault.raw).toBe("45600000");
     expect(j.harvest.grossUsdg.raw).toBe("45600000");
-    expect(j.harvest.fee.raw).toBe("4560000");
-    expect(j.harvest.premiumNet.raw).toBe("41040000");
+    expect(j.harvest.fee.raw).toBe("2280000");
+    expect(j.harvest.premiumNet.raw).toBe("43320000");
     // 18 decimals for the asset and the shares, never 6.
     expect(j.harvest.supplyAtHarvest).toEqual({
       raw: "100000000000000000000",
@@ -415,6 +426,9 @@ describe("cycleJson", () => {
     expect(j.settlement.assignmentUsdg.raw).toBe("950000000");
     expect(j.settlement.assetsReturned.raw).toBe((7n * LOT).toString());
     expect(j.harvest.grossUsdg.raw).toBe("995600000");
+    // The fee is on the 45.6 premium alone; the 950 of strike proceeds reach depositors whole.
+    expect(j.harvest.fee.raw).toBe("2280000");
+    expect(j.harvest.premiumNet.raw).toBe("993320000");
   });
 });
 

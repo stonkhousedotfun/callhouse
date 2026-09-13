@@ -131,8 +131,11 @@ What you actually do:
 2. Raise `minPremiumBps` for the **next** cycle, from the Admin Safe, inside the on-chain caps
    (`MIN_PREMIUM_FLOOR_BPS = 10`, i.e. 0.10%):
 ```bash
+# setPolicy replaces all six fields. Read policy() first and copy the other five from it; the
+# tuple below is the launch policy (protocolFeeBps 500 = 5% of premium), not necessarily the live one.
+cast call $VAULT "policy()(uint16,uint16,uint16,uint16,uint16,uint64)" --rpc-url $RH_RPC
 cast send $VAULT "setPolicy((uint16,uint16,uint16,uint16,uint16,uint64))" \
-  "(300,1200,<newMinPremiumBps>,9500,1000,50)" --rpc-url $RH_RPC   # from the Admin Safe
+  "(300,1200,<newMinPremiumBps>,9500,500,50)" --rpc-url $RH_RPC   # from the Admin Safe
 cast call $VAULT "policy()(uint16,uint16,uint16,uint16,uint16,uint64)" --rpc-url $RH_RPC
 ```
 3. Check whether the price was actually below the policy floor. If it was, the incident is a bug in

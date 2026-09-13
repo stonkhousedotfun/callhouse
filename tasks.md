@@ -12,11 +12,11 @@ Milestones: M0 scaffold+recon → **M1 contracts on mocks** → **M2 contracts o
 
 | Gate | State |
 |---|---|
-| Unit + invariant tests | **307 passed, 0 failed, 0 skipped** across 12 suites |
-| Fork tests vs live chain 4663 | **21 passed, 0 failed** (incl. `test_fork_writeAndListForReal`, 1.05M gas — a real write+list through live Valorem) |
-| `Vault` runtime size | 23,142 B (EIP-170 limit 24,576, margin 1,434; two linked libraries) |
+| Unit + invariant tests | **310 passed, 0 failed, 0 skipped** across 12 suites (307 before the 2026-09-13 fee change; +2 fee guards in `VaultAssignment`, +1 invariant `invariant_feeNeverTouchesStrikeProceeds`) |
+| Fork tests vs live chain 4663 | **21 passed, 0 failed** (re-run after the fee change) (incl. `test_fork_writeAndListForReal`, 1.05M gas — a real write+list through live Valorem) |
+| `Vault` runtime size | 23,426 B (EIP-170 limit 24,576, margin 1,150; two linked libraries). 23,142 B before the fee change, measured at `cb82bf3` |
 | keeper | typecheck clean; **66/66 tests** across 8 files (59 on 2026-09-12, +7 for the assignment-count resolver) |
-| Keeper dry run (anvil fork of 4663) | **passed, three cycles** (2026-09-13, fork block 61720714, 27.9 s): filled OTM week, adopted unfilled week, and an ITM week with 9 of 23 exercised on the real Valorem Clear plus a queued redeem. Record: `keeper/DRYRUN.md` |
+| Keeper dry run (anvil fork of 4663) | **passed, three cycles**, re-run after the fee change (2026-09-13T17:42Z, fork block 62142174, 20.9 s; first run fork block 61720714, 27.9 s): filled OTM week, adopted unfilled week, and an ITM week with 9 of 23 exercised on the real Valorem Clear plus a queued redeem. Record: `keeper/DRYRUN.md` |
 | indexer | typecheck clean; API shape pinned to `ops/fixtures/api/` |
 | web | lint clean, build clean (7 routes), tests green |
 | site | typecheck + lint clean, Docker build green |
@@ -37,6 +37,40 @@ state-reconciliation trio: unwitnessed `rollClose`, unservable authorised listin
 `/health` RPC-URL leak; the `.dockerignore` exclusion that kept the keeper image
 unbuildable). `ops/alerts.md` now documents the 13 kinds the keeper actually emits; the old
 36-code vocabulary is retired and mapped. The external audit is still ahead.
+
+### Session log — 2026-09-13 (afternoon): protocol fee decided and implemented
+
+- **Decision (user):** the protocol fee is **5% of premium only**. Strike proceeds from assignment
+  are credited to holders fee-free. Closes open question 3. Before: 10% of every USDG inflow, which
+  on dry-run cycle 3 took 202.5 USDG of returned principal against a 19.08 USDG premium.
+- **Contract:** `Vault._accrueHarvest(uint256 feeFree)`; `rollClose` passes
+  `usdgFromAssignment` (the measured claim redemption) to `_harvest`; deposit checkpoints pass 0.
+  `Policy.launchDefaults().protocolFeeBps` 1000 → 500; `Configure.s.sol` default 500. Event ABI
+  unchanged: on an assigned week `Harvest.grossUsdg` still includes strike proceeds and
+  `feeUsdg = floor((gross − RollClose.usdgFromAssignment) × bps / 10000)`. +284 B runtime.
+- **Tests:** every hardcoded 10% figure re-derived by hand (python integer arithmetic, never pasted
+  from a failing assertion; the contract agreed with every derivation). Inputs changed only where
+  a test's exactness or remainder property would otherwise have gone unexercised
+  (`VaultAssignment` two-redeemer dust test, `VaultQueue` two-epoch test, `VaultDistributor`
+  dust-carry test). New: `test_protocolFeeIsChargedOnPremiumOnlyNeverOnStrikeProceeds` (replaces
+  the test that pinned the old behaviour), `test_maxFeeCeilingOnAnAssignedWeekTakesOnlyPremium`,
+  `test_checkpointedPremiumThenAssignment_feeIsStillPremiumOnly`, and
+  `invariant_feeNeverTouchesStrikeProceeds` (ghost premium measured at each fill; fees paid +
+  pending ≤ premium × bps). With the old rule restored the invariant fails in 7 calls.
+- **Dry run re-run and recorded** (`keeper/DRYRUN.md`, new top section): cycle 3 fee 0.953962
+  (was 204.407925), net 2043.125297, queued redeem 817.250118 USDG, claim 1225.875178. The
+  harness now reads the policy back from the vault and checks every `Harvest` fee against the rule.
+- **Docs and copy** brought in line: `ACCOUNTING.md` §6 (+ reconciliation for assigned weeks),
+  `AUDIT-SCOPE.md` (+ property P-26), `SECURITY.md`, `README.md`, `TECHSPEC.md`, `plan.md`,
+  `ops/safes.md`, `ops/runbooks/close-week.md`, `ops/publish-template.md`, site and web copy,
+  indexer fixtures. **Caught on the way:** `ops/runbooks/incident.md`'s `setPolicy` tuple carried
+  `1000`, so running the incident runbook as written would have silently restored a 10% fee.
+- **Found, not fixed (pre-existing, now more visible):** web "Gross premium" / "Net" on
+  `/vault/nvda` and `/activity`, `fmtRealizedWeek` and `usdgPerShare`, and the indexer's
+  `premiumNet` sum `Harvest` amounts, which on an assigned week include strike proceeds, so
+  returned principal is shown as realized yield. See W-21. The keeper alert has the same gap (K-21).
+- Gates: forge 310/310, fork 21/21, `forge fmt --check`, keeper 66/66 + typecheck, indexer 11/11 +
+  typecheck, web 48/48 + lint + typecheck + build, site lint + typecheck, copy-lint 0 violations.
 
 ### Session log — 2026-09-13
 
@@ -89,8 +123,9 @@ Done, each verified by a run rather than by a report:
    `RH_RPC` secret. Until then no gate runs anywhere but locally.
 2. **Legal, start now** (L-05): counsel on `site/app/terms` + `privacy`, operating-entity constants,
    a security.txt contact. Longest pole.
-3. **Decide the fee-on-strike-proceeds question** (open question 3). It changes the disclosures and
-   `ACCOUNTING.md`, and it should be settled before the audit commit is pinned.
+3. ~~Decide the fee-on-strike-proceeds question~~ **Done 2026-09-13:** 5% of premium only,
+   implemented, tested, dry-run re-run, docs and copy aligned. Fix W-21 (assigned-week labels)
+   before launch.
 4. **Audit prep** (D-05 → E-05 → E-06): do the housekeeping list, pin a commit, send
    `docs/AUDIT-SCOPE.md`, engage the auditor.
 5. **Finish the fork rehearsal** (E-03): indexer sync against a fork (X-11; the indexer already takes
@@ -210,6 +245,7 @@ Evidence lives in `ops/recon/`. Spec repairs are written up in `plan.md` section
 - [x] W-09..10 All components; required disclosures rendered verbatim
 - [x] W-11 copy-lint wired to CI — forbidden terms and required disclosures both enforced
 - [x] W-12 Mobile pass, no charts
+- [ ] W-21 Assigned-week labels overstate yield: `web/app/vault/nvda/page.tsx` "Gross premium" / "Net", `/activity` Gross and Net/TVL, `fmtRealizedWeek(netUsdg, tvl)` and `usdgPerShare(netUsdg, …)` sum `Harvest` amounts, which include strike proceeds on an assigned week; the indexer's `premiumNet`/`usdgPerShare` (`indexer/src/api/index.ts` ~L199–251, L448) do the same. Needs `settlement.assignmentUsdg` read into `web/lib/api.ts` and subtracted for premium figures. Disclosure accuracy, fix before launch
 - [ ] W-13 Acceptance test from a fresh wallet against a fork, **including a fill served from the keeper's own `/orders` payload** — the self-hosted fallback on `/vault/nvda/cycle` is the answer if Overcall's book rejects us, and it has never filled anything end to end
 
 ### Frontend split — two domains, two services (code written, nothing deployed)
@@ -246,12 +282,12 @@ Evidence lives in `ops/recon/`. Spec repairs are written up in `plan.md` section
 - [~] E-05 Audit scope doc: **drafted 2026-09-13 as `docs/AUDIT-SCOPE.md`**. Seven in-scope files (1,190 nSLOC) plus the deploy scripts for configuration review; out-of-scope dependencies with verified links (Zellic's Valorem reports, Seaport audits); 25 falsifiable properties and 6 money invariants to break; ranked areas of concern; prior evidence and what it does not prove; build instructions; severity scale. Checked once for accuracy and completeness, with every blocking/major finding fixed; the second check round did not run (usage limit) and the main session spot-checked the fixes. To finish: pin the engagement commit, then do the Appendix B housekeeping (below, D-05)
 - [~] D-05 Housekeeping before the audit tag, from `docs/AUDIT-SCOPE.md` Appendix A/B. **Done
   2026-09-13:** `contracts/README.md` L117 and `docs/ARCHITECTURE.md` L124 now say halt blocks
-  `rollOpen` **and** `approveListing`; `contracts/README.md` 328 → 307 tests; root README cap
+  `rollOpen` **and** `approveListing`; `contracts/README.md` 328 → 307 tests (now 310); root README cap
   "20–50" → 20; `ops/README.md` testnet paragraph aligned with the R7-R8 refutation. **Remaining:**
-  correct the `writesHalted` NatSpec (`Vault.sol` L115, L995); rewrite the `IValoremClear.sol`
-  header (it names vendored files that do not exist); fix `ACCOUNTING.md` §6 "fees on the premium
-  only" (the fee is also charged on strike proceeds — decide whether that is the intended,
-  disclosed design); `ops/addresses.json` has no `valoremLib` slot; `ACCOUNTING.md` §7 six
+  correct the `writesHalted` NatSpec (`Vault.sol` L115, and the halt function's NatSpec, shifted by
+  the fee change); rewrite the `IValoremClear.sol` header (it names vendored files that do not
+  exist); ~~fix `ACCOUNTING.md` §6~~ (resolved 2026-09-13: the code now matches it, 5% of premium
+  only); `ops/addresses.json` has no `valoremLib` slot; `ACCOUNTING.md` §7 six
   invariants vs seven functions; re-derive line numbers in the scope doc and `ops/safes.md` §4 at
   the tag
 - [ ] E-06 External audit engaged, findings triaged (E-00 was internal, not this)
@@ -317,10 +353,10 @@ regenerated (`web` now has a committed generator, `web/scripts/gen-abis.mjs`).
    re-reads spot when authorising. A single upward oracle tick between the two reads reverts
    `PremiumBelowMinimum`. It self-heals on the next tick, but it will make Friday-night noise on
    the first live cycle. Decide whether to add a margin.
-3. **Protocol fee on strike proceeds.** The fee is charged on the whole USDG inflow, so an
-   assigned week pays 10% of the strike proceeds too (dry-run cycle 3: 202.5 of the 204.4 USDG
-   fee came from assignment). The code and a test pin it; `ACCOUNTING.md` §6 says the opposite.
-   Decide whether it is intended, then make the docs and the disclosures say so.
+3. ~~**Protocol fee on strike proceeds.**~~ **Settled 2026-09-13:** 5% of premium only; strike
+   proceeds are fee-free (`Vault._accrueHarvest(feeFree)`), pinned by three unit tests and
+   `invariant_feeNeverTouchesStrikeProceeds`. The old rule took 202.5 of dry-run cycle 3's 204.4
+   USDG fee from returned principal.
 4. **Deposit-time harvest cost.** Checkpointing the harvest on every deposit is correct but adds
    gas to the deposit path. Measure it on the first live week.
 
@@ -328,7 +364,8 @@ regenerated (`web` now has a committed generator, `web/scripts/gen-abis.mjs`).
 
 ## Build constraints worth knowing before you touch the contracts
 
-- **`Vault` has ~1.4 KB of headroom** under the EIP-170 24,576-byte runtime limit (23,142 B used).
+- **`Vault` has ~1.15 KB of headroom** under the EIP-170 24,576-byte runtime limit (23,426 B used
+  since the 2026-09-13 fee change, which cost 284 B).
   via-IR is on and both `SeaportOrderLib` and `ValoremLib` are already factored out as linked
   public libraries — the second extraction paid for the 2026-09-12 review's deposit-gate and
   cycle-window checks. Anything more than a small addition will need a third extraction, not

@@ -99,7 +99,7 @@ What it does, in order — every step is an assertion, and a failure exits 1 nam
    the 65-byte placeholder signature — so the vault's EIP-1271 answer and the fallback book are
    both proven. `tick()` sees the fill.
 8. Warp to `exerciseTimestamp`; `tick()` → `lockBook`. Warp to `expiryTimestamp`; `tick()` →
-   `rollClose`. Asserts the harvest (95% leg, 10% fee, net), that the collateral came back, and
+   `rollClose`. Asserts the harvest (95% leg, 5% protocol fee on the premium, net), that the collateral came back, and
    that the depositor can claim exactly the net.
 9. **Cycle 2:** five fresh option types are created on the real Clear, the mock registry moves
    to cycle 2, and the vault is `rollOpen`ed by the harness with the keeper's key and **no
@@ -115,7 +115,8 @@ What it does, in order — every step is an assertion, and a failure exits 1 nam
     closing tick the keeper's own `contractsAssignedAt` is called directly on the keeper's own
     snapshot and must answer `9n` from the real Clear. `rollClose`
     must redeem the assigned claim — `RollClose(3, 14e18, 9 × strike, 9)` — harvest premium
-    **plus** strike proceeds with the 10% fee on both, store `contracts_assigned = 9` with the
+    **plus** strike proceeds with the 5% fee on the premium only (the strike proceeds are credited
+    fee-free: `feeUsdg == floor((grossUsdg − usdgFromAssignment) × 500 / 10000)`), store `contracts_assigned = 9` with the
     alert's `contractsAssignedSource = RollClose` and `contractsAssignedFromClaim = 9` (the value
     the keeper's pre-read returned inside the tick), and
     settle the queue (`QueueSettled(1, 10e18, 6.4e18, escrow)`, the escrow's USDG being its

@@ -13,6 +13,41 @@ the harness. The "What was stubbed" section is the list of things this run does 
 
 ---
 
+## Re-run after the fee change — 2026-09-13T17:42:14Z (supersedes every fee figure below)
+
+The protocol fee became **5% of premium only** (`Policy.launchDefaults().protocolFeeBps` 500;
+`Vault._harvest(usdgFromAssignment)` credits strike proceeds fee-free). The harness was updated
+to derive every fee from that rule and to read the launch policy back from the deployed vault,
+then re-run on a fresh fork: **passed**, all three cycles, fork block **62142174**, 20.9 s, on the
+uncommitted tree on top of `cb82bf3`. Raw artefacts: `dryrun-out/2026-09-13T17-42-14-160Z/`.
+
+The rest of this file is the 05:49 run under the old rule (10% of every USDG inflow, launch policy
+`protocolFeeBps 1000`). Its transaction hashes, blocks and gas figures belong to that run; its
+non-USDG facts were compared against the new report and match: 23 contracts at strike 226 then
+225, 9 assigned, queued-redeem payout 6.4 NVDA, state.db rows `{cycles 3, listings 3, txs 11,
+alerts 5, meta 4}`, and the same five alerts in the same order (amounts aside). The USDG figures
+that changed:
+
+| | old run (10% of everything) | this run (5% of premium) |
+|---|---|---|
+| launch policy `protocolFeeBps` | 1000 | **500** |
+| cycle 1 `Harvest` gross / fee / net | 19.079259 / 1.907925 / 17.171334 | 19.079259 / **0.953962** / **18.125297** |
+| cycle 1 depositor `claimUsdg` | 17.171334 | **18.125297** |
+| cycle 2 | 0 / 0 / 0 | 0 / 0 / 0 |
+| cycle 3 `Harvest` gross / fee / net | 2044.079259 / 204.407925 / 1839.671334 | 2044.079259 / **0.953962** / **2043.125297** |
+| cycle 3 fee basis | gross, strike proceeds included | premium 19.079259 only; `RollClose.usdgFromAssignment` 2025 fee-free |
+| cycle 3 `QueueSettled` / `completeRedeem` USDG | 735.868533 | **817.250118** (floor(2/5 of net)) |
+| cycle 3 `claimUsdg` (15e18 shares) | 1103.8028 | **1225.875178** |
+| where cycle 3's gross went | 735868533 + 1103802800 + 204407925 + 0 + 1 | 817250118 + 1225875178 + 953962 + 0 + 1 = 2044079259 |
+| `roll_close` alerts | "…17.171334 to depositors", "…1839.671334 to depositors" | "…18.125297 to depositors", "…2043.125297 to depositors" |
+| rollClose txs (new run) | — | c1 `0xaecf51ed…` (62142191, 261,114 gas), c2 `0xf8177554…` (62142205, 143,095), c3 `0x2174b4ba…` (62142225, 359,410) |
+
+New harness assertions in this run: the vault's stored policy equals `launchDefaults` field by
+field; every `Harvest` log's fee equals floor((gross − feeFree) × bps / 10000) with feeFree =
+`RollClose.usdgFromAssignment` in the close transaction and 0 elsewhere; cycle 3's fee equals the
+fee on its premium leg alone. The keeper alert still says "2044.079259 USDG harvested" on the
+assigned week (K-21), so fee/gross read from keeper output looks like 0.047%, not 5%.
+
 ## Result
 
 | | |

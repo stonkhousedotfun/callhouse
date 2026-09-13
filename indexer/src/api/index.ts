@@ -193,6 +193,8 @@ export function cycleJson(c: CycleRow) {
       harvested: c.harvested,
       // The vault's whole USDG take: premium that filled plus any strike proceeds.
       grossUsdg: usdg(c.harvestGross),
+      // Charged on the premium part only; strike proceeds (settlement.assignmentUsdg) are never
+      // fee'd, so on an assigned week fee / grossUsdg is not the policy rate.
       fee: usdg(c.fee),
       premiumNet: usdg(c.premiumNet),
       usdgPerShare: usdg(c.usdgPerShare),

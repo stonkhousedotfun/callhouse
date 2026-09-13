@@ -45,14 +45,14 @@ describe("normaliseCycle reads the indexer's nested shape (ops/fixtures/api/)", 
 
     // USDG figures are 6-decimal base units, read from `raw`, never from `formatted`.
     expect(r.grossUsdg).toBe(45_600000n); // the vault's take: 48 gross less Overcall's 5%
-    expect(r.feeUsdg).toBe(4_560000n); // 10% of the harvest
-    expect(r.netUsdg).toBe(41_040000n); // what depositors received
+    expect(r.feeUsdg).toBe(2_280000n); // the protocol's 5% of the premium
+    expect(r.netUsdg).toBe(43_320000n); // what depositors received
     expect(r.strikeUsdg).toBe(190_000000n);
 
     // Shares are 18 decimals: 100 whole shares.
     expect(r.sharesAtHarvest).toBe(100n * WAD);
-    // 41.04 USDG over 100 shares: 0.410400 USDG per share, in USDG base units.
-    expect(r.usdgPerShare).toBe(410400n);
+    // 43.32 USDG over 100 shares: 0.433200 USDG per share, in USDG base units.
+    expect(r.usdgPerShare).toBe(433200n);
 
     expect(r.contracts).toBe(12n);
     expect(r.contractsSold).toBe(12n);
@@ -105,10 +105,11 @@ describe("normaliseCycle reads the indexer's nested shape (ops/fixtures/api/)", 
 
     expect(r.contractsSold).toBe(12n);
     expect(r.contractsAssigned).toBe(5n);
-    // 45.6 premium to the vault + 5 × 190 at the strike = 995.6 gross; 10% off; 896.04 net.
+    // 45.6 premium to the vault + 5 × 190 at the strike = 995.6 gross. The protocol fee is 5%
+    // of the 45.6 premium only (2.28); the 950 of strike proceeds are never fee'd. 993.32 net.
     expect(r.grossUsdg).toBe(995_600000n);
-    expect(r.feeUsdg).toBe(99_560000n);
-    expect(r.netUsdg).toBe(896_040000n);
+    expect(r.feeUsdg).toBe(2_280000n);
+    expect(r.netUsdg).toBe(993_320000n);
     expect(r.sharesAtHarvest).toBe(100n * WAD);
     expect(r.closedAt).toBe(secs("2026-09-18T21:00:30Z"));
     expect(r.txClose).toBe("0x0000000000000000000000000000000000000000000000000000000000000094");
@@ -205,8 +206,8 @@ describe("normaliseCycle still accepts the old flat shape", () => {
       cycle: 3,
       status: "closed",
       grossUsdg: "48000000",
-      feeUsdg: 4800000,
-      netUsdg: "43200000",
+      feeUsdg: 2400000,
+      netUsdg: "45600000",
       contracts: 12,
       contractsSold: "12",
       contractsAssigned: "0",
@@ -219,8 +220,8 @@ describe("normaliseCycle still accepts the old flat shape", () => {
     expect(r.filled).toBe(true);
     expect(r.settled).toBe(true);
     expect(r.grossUsdg).toBe(48_000000n);
-    expect(r.feeUsdg).toBe(4_800000n);
-    expect(r.netUsdg).toBe(43_200000n);
+    expect(r.feeUsdg).toBe(2_400000n);
+    expect(r.netUsdg).toBe(45_600000n);
     expect(r.contracts).toBe(12n);
     expect(r.contractsSold).toBe(12n);
     expect(r.strikeUsdg).toBe(190_000000n);
