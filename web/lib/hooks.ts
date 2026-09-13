@@ -114,8 +114,8 @@ export type FillState =
   | "filled" // every written contract sold
   | "locked" // past book close, no more listing
   | "settling" // past expiry, reclaiming
-  | "assigned" // closed, and a buyer exercised
-  | "unfilled"; // closed with nothing sold — a 0 week
+  | "assigned" // past book close, and part of the claim has been assigned
+  | "unfilled"; // past book close with nothing sold: no premium (it can still be assigned)
 
 export const FILL_STATE_COPY: Record<FillState, string> = {
   unknown: "State unavailable",
@@ -126,7 +126,7 @@ export const FILL_STATE_COPY: Record<FillState, string> = {
   locked: "Book closed",
   settling: "Settling",
   assigned: "Assigned",
-  unfilled: "Unfilled, 0",
+  unfilled: "Book closed, unsold",
 };
 
 function deriveFillState(v: {
@@ -146,14 +146,16 @@ function deriveFillState(v: {
       if (sold === 0n) return "listed";
       return sold >= written && written > 0n ? "filled" : "partial";
     case 2:
-      return "locked";
+      // Exercisable: the claim is still open, so assignment is readable here and only here.
+      // rollClose zeroes contractsWritten and the claim key, which makes every Idle read "flat";
+      // the closed week's result comes from history (the "Result" row), never from this badge.
+      if (assigned > 0n) return "assigned";
+      return sold === 0n ? "unfilled" : "locked";
     case 3:
       return "settling";
     case 0:
     default:
-      if (assigned > 0n) return "assigned";
-      if (written === 0n && sold === 0n) return "flat";
-      return sold === 0n ? "unfilled" : "filled";
+      return "flat";
   }
 }
 
@@ -705,7 +707,11 @@ export function collateralSplit(v: VaultSnapshot): {
   const written = v.contractsWritten ?? 0n;
   const locked = v.lockedAssets ?? 0n;
   const registryLot = v.registryLotSize !== undefined && v.registryLotSize > 0n ? v.registryLotSize : LOT_SIZE;
-  const perContract = written > 0n && locked > 0n ? locked / written : registryLot;
+  // lockedAssets already excludes assigned lots, so divide by the contracts still behind the
+  // claim. Dividing by `written` after an exercise under-reports every lot (11e18 / 14, not 1e18).
+  const assignedCount = v.contractsAssigned ?? 0n;
+  const unassigned = written > assignedCount ? written - assignedCount : 0n;
+  const perContract = unassigned > 0n && locked > 0n ? locked / unassigned : registryLot;
 
   const soldRaw = (v.contractsSold ?? 0n) * perContract;
   // Clamp: contractsSold is derived from the ERC-1155 balance and locked collateral is the

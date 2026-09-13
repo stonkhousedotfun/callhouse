@@ -5,7 +5,7 @@ import type { Abi } from "viem";
 import { useAccount, useWriteContract } from "wagmi";
 
 import { SHARE_TICKER, VAULT, vaultAbi } from "@/lib/contracts";
-import { fmtUsdg, usdgPerShare } from "@/lib/format";
+import { fmtUsdg } from "@/lib/format";
 import type { AccountPosition, VaultSnapshot } from "@/lib/hooks";
 import { ConnectButton } from "./ConnectButton";
 import { useTxRunner } from "./TxToast";
@@ -41,9 +41,12 @@ export function UsdgClaim({
 
   const claimable = position.claimableUsdg ?? 0n;
 
-  // accUsdgPerShare is scaled by 1e18 against 18-decimal shares, so this is USDG per one whole
-  // share over the vault's entire life — not a weekly figure and never presented as one.
-  const lifetimePerShare = usdgPerShare(snapshot.totalUsdgDistributed, snapshot.totalSupply);
+  // The distributor's own index: USDG base units x 1e27 per share base unit, so / 1e9 is USDG base
+  // units per one whole (1e18) share over the vault's entire life. Lifetime total / CURRENT supply
+  // is wrong as soon as shares were burned (a settled queue) or minted after a distribution.
+  // Includes strike proceeds; not a weekly figure and never presented as one.
+  const lifetimePerShare =
+    snapshot.accUsdgPerShare === undefined ? undefined : snapshot.accUsdgPerShare / 1_000_000_000n;
 
   async function claim() {
     if (!VAULT || !address) return;
@@ -70,7 +73,7 @@ export function UsdgClaim({
     <div className="card">
       <div className="card-head">
         <span className="card-title">USDG</span>
-        <span className="tiny faint mono">paid only on filled weeks</span>
+        <span className="tiny faint mono">premium on filled weeks, strike proceeds on assigned weeks</span>
       </div>
 
       <div className="stat">
@@ -79,7 +82,7 @@ export function UsdgClaim({
       </div>
 
       <div className="rows" style={{ marginTop: 12 }}>
-        <div className="row">
+        <div className="row" title="Everything credited to one share since launch: premium net of fees plus strike proceeds from assignment. Not a return.">
           <span className="k">Distributed to date, per {SHARE_TICKER}</span>
           <span className="v">{lifetimePerShare === undefined ? "—" : `${fmtUsdg(lifetimePerShare, 6)} USDG`}</span>
         </div>

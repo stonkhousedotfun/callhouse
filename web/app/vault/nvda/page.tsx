@@ -111,7 +111,7 @@ export default function VaultPage() {
               <div className="stat">
                 <div className="stat-label">Claimable USDG</div>
                 <div className="stat-value">{fmtUsdg(position.claimableUsdg)}</div>
-                <div className="stat-sub">filled weeks only</div>
+                <div className="stat-sub">premium on filled weeks, strike proceeds on assigned weeks</div>
               </div>
               <div className="stat">
                 <div className="stat-label">Queued shares</div>
