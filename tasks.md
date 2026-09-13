@@ -22,10 +22,10 @@ Milestones: M0 scaffold+recon → **M1 contracts on mocks** → **M2 contracts o
 | Unit + invariant tests | **319 passed, 0 failed** across 14 suites (310 after the fee change; +5 `VaultLotSize`, +3 and a fuzz in `VaultQueueFairness` for the two 2026-09-13 contract fixes) |
 | Fork tests vs live chain 4663 | **21 passed, 0 failed** (re-run after the fee change) (incl. `test_fork_writeAndListForReal`, 1.05M gas — a real write+list through live Valorem) |
 | `Vault` runtime size | 23,618 B (EIP-170 limit 24,576, margin 958; two linked libraries, both CREATE2) |
-| keeper | typecheck clean; **89/89 tests** |
+| keeper | typecheck clean; **90/90 tests** |
 | Keeper dry run (anvil fork of 4663) | **passed**: three cycles at default and non-default deposit, plus the K-22 extended harness (`EXTENDED DRY RUN PASSED`), all on merged `main` 2026-09-13. Record: `keeper/DRYRUN.md` |
 | indexer | typecheck clean; API shape pinned to `ops/fixtures/api/`; **X-11 fork sync passes** (1452 assertions); Dockerfile + `railway.json` |
-| web | lint, typecheck, build, 54 tests, copy-lint; **W-13 fork acceptance passes** |
+| web | lint, typecheck, build, 129 tests, copy-lint; **W-13 fork acceptance passes** (incl. the keeper `/orders` fallback) |
 | site | **live on `callhouse.finance`** (Railway, push-to-deploy from `leekzor/callhouse-site`) |
 | Docker | **all three images build** (`callhouse-web`, `callhouse-site`, `callhouse-keeper` — incl. the better-sqlite3 load assertion) |
 | copy-lint (compliance) | 43 files in `web`, 20 in `site`, 0 violations; **7-case self-test runs on every invocation**; wrapped forbidden phrases caught by a full-buffer pass |

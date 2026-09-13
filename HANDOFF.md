@@ -21,9 +21,9 @@ Clone with `git clone --recurse-submodules`.
 | Gate | State |
 |---|---|
 | Contracts | 319 unit+invariant (14 suites), 21 fork tests vs live 4663. Vault 23,618 B (margin 958). Deploy rehearsal with real Safes passes (`script/rehearse-deploy.sh`) |
-| Keeper | 89/89 tests; `dryrun` and `dryrun:extended` pass on merged `main` (`keeper/DRYRUN.md`) |
+| Keeper | 90/90 tests; `dryrun` and `dryrun:extended` pass on merged `main` (`keeper/DRYRUN.md`) |
 | Indexer | typecheck, fixtures, X-11 fork sync (1452 assertions) |
-| Web | lint, typecheck, build, 54 tests, copy-lint; W-13 fork acceptance |
+| Web | lint, typecheck, build, 129 tests, copy-lint; W-13 fork acceptance incl. the keeper `/orders` fallback and a refused tampered order |
 | Relay | 38 tests |
 | CI on GitHub | green in app, contracts and site. `RH_RPC` repo secret not set |
 
