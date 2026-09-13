@@ -1669,7 +1669,9 @@ async function doRollClose(snap: ChainSnapshot): Promise<void> {
   // `claimKey` and makes Valorem's `claim()` revert `TokenNotFound` from then on — so the
   // same read taken afterwards answers 0 and every assigned week would be published as
   // unassigned. The vault has the identical comment at Vault.rollClose for the identical
-  // reason; it also emits the number in `RollClose`, which we prefer when it is there.
+  // reason; it also emits the number in `RollClose`, which is what gets published. This read is
+  // the fallback for a receipt without one and the cross-check for a receipt with one — see
+  // resolveContractsAssigned. A failed read is null ("unknown"), never a silent 0.
   const assignedBefore = await contractsAssignedAt(snap);
 
   const sim = await guardedSimulate('rollClose', () =>
@@ -1683,7 +1685,27 @@ async function doRollClose(snap: ChainSnapshot): Promise<void> {
   if (!receipt) return;
 
   const harvest = await harvestForCycle(snap.vaultCycleNumber, receipt);
-  const assigned = Number(decodeRollClose(receipt)?.contractsAssignedCount ?? assignedBefore);
+  const resolved = resolveContractsAssigned(receipt, assignedBefore);
+  if (resolved.source !== 'RollClose') {
+    log.roll.warn(
+      { cycleNumber: snap.vaultCycleNumber, source: resolved.source, assigned: resolved.assigned, tx: receipt.transactionHash },
+      resolved.source === 'claim-preread'
+        ? 'no RollClose event from the vault in the rollClose receipt; contracts_assigned published from the pre-close Valorem claim read'
+        : 'no RollClose event from the vault in the rollClose receipt and the pre-close Valorem claim read failed; contracts_assigned published as 0',
+    );
+  }
+  if (resolved.mismatch) {
+    log.roll.warn(
+      {
+        cycleNumber: snap.vaultCycleNumber,
+        fromEvent: String(resolved.fromEvent),
+        fromClaim: String(resolved.fromClaim),
+        tx: receipt.transactionHash,
+      },
+      'the RollClose count and the pre-close Valorem claim read disagree; the event is published',
+    );
+  }
+  const assigned = resolved.assigned;
 
   // Whatever was still live is dead now: `rollClose` bumps the Seaport counter, which makes
   // the order unfillable without ever setting `isCancelled`, so nothing else would retire
@@ -1720,11 +1742,21 @@ async function doRollClose(snap: ChainSnapshot): Promise<void> {
       feeUsdg: formatUsdg(harvest.fee),
       netUsdg: formatUsdg(harvest.net),
       contractsAssigned: assigned,
+      contractsAssignedSource: resolved.source,
+      contractsAssignedFromClaim: resolved.fromClaim === null ? null : Number(resolved.fromClaim),
       tx: receipt.transactionHash,
     },
     { force: true },
   );
-  log.roll.info({ cycleNumber: snap.vaultCycleNumber, grossUsdg6: gross.toString() }, 'cycle closed');
+  log.roll.info(
+    {
+      cycleNumber: snap.vaultCycleNumber,
+      grossUsdg6: gross.toString(),
+      contractsAssigned: assigned,
+      contractsAssignedSource: resolved.source,
+    },
+    'cycle closed',
+  );
 }
 
 /** Read the Harvest event out of the rollClose receipt. An unfilled week emits Harvest(0,0,0),
@@ -1742,6 +1774,54 @@ function decodeRollClose(receipt: TransactionReceipt): { contractsAssignedCount:
   const found = events.find((event) => event.address.toLowerCase() === config.VAULT.toLowerCase());
   if (!found) return null;
   return { contractsAssignedCount: found.args.contractsAssignedCount };
+}
+
+export type ContractsAssignedSource = 'RollClose' | 'claim-preread' | 'unknown';
+
+export interface ContractsAssignedResolution {
+  /** What is published: the cycle row, /cycles and the roll_close alert. */
+  assigned: number;
+  source: ContractsAssignedSource;
+  /** `RollClose.contractsAssignedCount` from the vault, or null when the receipt has no such log. */
+  fromEvent: bigint | null;
+  /** The pre-close Valorem claim read (`contractsAssignedAt`), or null when that read failed. */
+  fromClaim: bigint | null;
+  /** Both numbers are known and they differ. The event is published; the caller logs. */
+  mismatch: boolean;
+}
+
+/**
+ * Which assignment count to publish for the cycle, and where it came from.
+ *
+ * The vault reads `contractsAssigned()` immediately before `_redeemClaim` and emits it in
+ * `RollClose` (Vault.sol:797-801, unconditionally), so with the deployed bytecode the event is
+ * always in the receipt and is the number published. An event count of 0 is a real unfilled or
+ * out-of-the-money week, never a reason to fall through. The keeper's own pre-close read stands
+ * in only when the receipt carries no `RollClose` from the vault (a receipt decoded against a
+ * mismatched ABI) and is a cross-check when it does: both come from the same Valorem claim across
+ * a window in which no exercise can land — the exercise window closes at expiry and rollClose is
+ * only sent from expiry — so a disagreement is a keeper or vault defect, not a race.
+ *
+ * Pure. roll.test.ts pins every branch; dryrun.ts drives both on a real assigned receipt.
+ */
+export function resolveContractsAssigned(
+  receipt: TransactionReceipt,
+  assignedBefore: bigint | null,
+): ContractsAssignedResolution {
+  const fromEvent = decodeRollClose(receipt)?.contractsAssignedCount ?? null;
+  if (fromEvent !== null) {
+    return {
+      assigned: Number(fromEvent),
+      source: 'RollClose',
+      fromEvent,
+      fromClaim: assignedBefore,
+      mismatch: assignedBefore !== null && assignedBefore !== fromEvent,
+    };
+  }
+  if (assignedBefore !== null) {
+    return { assigned: Number(assignedBefore), source: 'claim-preread', fromEvent: null, fromClaim: assignedBefore, mismatch: false };
+  }
+  return { assigned: 0, source: 'unknown', fromEvent: null, fromClaim: null, mismatch: false };
 }
 
 /**
@@ -1811,11 +1891,19 @@ async function harvestForCycle(
   }
 }
 
-/** Valorem's `claim().amountExercised` is a 1e18-SCALED SCALAR, not a contract count, so it is
- *  divided back down — the vault's own `contractsAssigned()` does exactly this. Call this only
- *  BEFORE `rollClose`: redeeming the claim zeroes `claimKey` and Valorem then reverts
- *  `TokenNotFound`, which the catch below turns into a silent, wrong 0. */
-async function contractsAssignedAt(snap: ChainSnapshot): Promise<bigint> {
+/**
+ * Contracts assigned against the vault's open claim, read from Valorem: the keeper's twin of
+ * ValoremLib.contractsAssigned (ValoremLib.sol:146-151), which is what `vault.contractsAssigned()`
+ * returns. `claim().amountExercised` is a 1e18-SCALED SCALAR, not a contract count, so it is
+ * divided back down; getting that wrong reports a 9-contract assignment as 9e18. A zero
+ * `claimKey` is "nothing written this cycle", answered without a read.
+ *
+ * Call this only BEFORE `rollClose`: `_redeemClaim` zeroes `claimKey` (AdapterValorem.sol:148)
+ * and Valorem reverts `TokenNotFound` for the burned claim from then on. Where the vault's
+ * library answers 0 to a revert (a view must not revert), the keeper answers null — "unknown" —
+ * and logs it, so a failed read can never publish an assigned week as unassigned by accident.
+ */
+export async function contractsAssignedAt(snap: Pick<ChainSnapshot, 'vaultClaimKey'>): Promise<bigint | null> {
   if (snap.vaultClaimKey === 0n) return 0n;
   try {
     const claim = await publicClient.readContract({
@@ -1825,8 +1913,12 @@ async function contractsAssignedAt(snap: ChainSnapshot): Promise<bigint> {
       args: [snap.vaultClaimKey],
     });
     return claim.amountExercised / 1_000_000_000_000_000_000n;
-  } catch {
-    return 0n;
+  } catch (error) {
+    log.roll.warn(
+      { claimKey: snap.vaultClaimKey.toString(), err: describeError(error) },
+      'could not read the Valorem claim before rollClose; contracts assigned is unknown',
+    );
+    return null;
   }
 }
 

@@ -169,16 +169,16 @@ grep -n "GUARDIAN_ROLE" src/Vault.sol
 ```
 
 Expect exactly six lines: the constant declaration, and the role check inside **three** functions.
-Verified against `Vault.sol` as of this writing — **the line numbers move whenever the contract is
-edited, so match on the function names, not on the numbers**:
+Re-run against `Vault.sol` at commit `27d502a` on 2026-09-12 — **the line numbers move whenever
+the contract is edited, so match on the function names, not on the numbers**:
 
 ```
  47:    bytes32 public constant GUARDIAN_ROLE = keccak256("GUARDIAN_ROLE");
-613:        if (!hasRole(KEEPER_ROLE, msg.sender) && !hasRole(GUARDIAN_ROLE, msg.sender)) {   <- cancelListing
-623:        if (!hasRole(KEEPER_ROLE, msg.sender) && !hasRole(GUARDIAN_ROLE, msg.sender)) {   <- invalidateAllListings
-624:            revert AccessControlUnauthorizedAccount(msg.sender, GUARDIAN_ROLE);
-792:        if (!hasRole(GUARDIAN_ROLE, msg.sender) && !hasRole(DEFAULT_ADMIN_ROLE, msg.sender)) {  <- haltWrites
-793:            revert AccessControlUnauthorizedAccount(msg.sender, GUARDIAN_ROLE);
+748:        if (!hasRole(KEEPER_ROLE, msg.sender) && !hasRole(GUARDIAN_ROLE, msg.sender)) {   <- cancelListing
+758:        if (!hasRole(KEEPER_ROLE, msg.sender) && !hasRole(GUARDIAN_ROLE, msg.sender)) {   <- invalidateAllListings
+759:            revert AccessControlUnauthorizedAccount(msg.sender, GUARDIAN_ROLE);
+997:        if (!hasRole(GUARDIAN_ROLE, msg.sender) && !hasRole(DEFAULT_ADMIN_ROLE, msg.sender)) {  <- haltWrites
+998:            revert AccessControlUnauthorizedAccount(msg.sender, GUARDIAN_ROLE);
 ```
 
 Resolve each hit to its enclosing function rather than trusting the annotations above:
@@ -186,7 +186,7 @@ Resolve each hit to its enclosing function rather than trusting the annotations 
 ```bash
 # POSIX awk: [ \t]* rather than \s, so this works with macOS awk as well as gawk
 awk 'BEGIN{f="?"} /^[ \t]*function [A-Za-z_]/{match($0,/function [A-Za-z_][A-Za-z0-9_]*/); f=substr($0,RSTART+9,RLENGTH-9)} /GUARDIAN_ROLE/{print NR": "f}' src/Vault.sol
-# 47: ?   (the constant itself)   613: cancelListing   623/624: invalidateAllListings   792/793: haltWrites
+# 47: ?   (the constant itself)   748: cancelListing   758/759: invalidateAllListings   997/998: haltWrites
 ```
 
 So the guardian's entire reachable surface is `cancelListing`, `invalidateAllListings`, `haltWrites`.
@@ -195,26 +195,32 @@ So the guardian's entire reachable surface is `cancelListing`, `invalidateAllLis
 ### Step 2 — enumerate every place the vault moves a token
 
 ```bash
-grep -rn "safeTransfer\|safeTransferFrom(\|forceApprove\|setApprovalForAll\|\.transfer(" \
+grep -rnE "safeTransfer|safeTransferFrom\(|forceApprove|setApprovalForAll|\.transfer\(|IERC20\.transfer|\.call\(|\.call\{" \
   src/Vault.sol src/Distributor.sol src/AdapterValorem.sol src/AdapterSeaport.sol src/lib/SeaportOrderLib.sol src/lib/ValoremLib.sol
 ```
 
-Expect exactly these, and check the enclosing function of each:
-
-Expect exactly twelve hits (eleven transfer/approve sites plus one comment line in
-`AdapterValorem.sol`). Again: match the enclosing function, not the line number.
+The pattern deliberately includes `IERC20.transfer` and `.call(`/`.call{`: since the best-effort
+fee change (SECURITY.md §4, defect 12) the fee leg is a **raw call**, not a `safeTransfer`, and the
+older five-alternative pattern misses it entirely. Expect exactly **twelve hits: eleven
+transfer/approve sites plus one comment line** (`ValoremLib.sol:81`, which merely mentions
+`forceApprove`). With the old pattern you get eleven and silently lose the fee leg. Re-run against
+`27d502a` on 2026-09-12. Again: match the enclosing function, not the line number.
 
 | Site | Enclosing function | Reachable by |
 |---|---|---|
-| `Vault.sol:393` `asset.safeTransferFrom(msg.sender, …)` | `deposit` | anyone — pulls IN |
-| `Vault.sol:412` `asset.safeTransferFrom(msg.sender, …)` | `mint` | anyone — pulls IN |
-| `Vault.sol:439` `asset.safeTransfer(receiver, assets)` | `redeem` | anyone, burns **their own** shares |
-| `Vault.sol:454` `asset.safeTransfer(receiver, assets)` | `withdraw` | anyone, burns **their own** shares |
-| `Vault.sol:526/527` `asset` / `usdg` `.safeTransfer(receiver, …)` | `_completeRedeem` | requires `queuedSharesOf[msg.sender] != 0` |
-| `Vault.sol:715` `usdg.safeTransfer(feeRecipient, fee)` | `_harvest`, called only from `rollClose` | sends `pendingFeeUsdg` to the admin-set `feeRecipient`, never to `msg.sender` |
-| `Distributor.sol:163` `usdg.safeTransfer(to, amount)` | `_claimUsdg` | pays the caller's own accrued balance, which is a function of their share balance |
-| `AdapterValorem.sol:171/175` `asset.forceApprove(clear, …)` | `_writeCalls`, called only from `rollOpen` | KEEPER only; approval is set and reset to 0 in the same call |
+| `Vault.sol:443` `asset.safeTransferFrom(msg.sender, …)` | `deposit` | anyone — pulls IN |
+| `Vault.sol:462` `asset.safeTransferFrom(msg.sender, …)` | `mint` | anyone — pulls IN |
+| `Vault.sol:516` `asset.safeTransfer(receiver, assets)` | `redeem` | anyone, burns **their own** shares |
+| `Vault.sol:531` `asset.safeTransfer(receiver, assets)` | `withdraw` | anyone, burns **their own** shares |
+| `Vault.sol:646/649` `asset` / `usdg` `.safeTransfer(receiver, …)` | `_payoutOwed`, reached from `completeRedeem` → `_completeRedeem(msg.sender, receiver)` | pays only `owedAssets[msg.sender]` / `owedQueueUsdg[msg.sender]`, i.e. the caller's own settled queue entry |
+| `Vault.sol:982` `address(usdg).call(abi.encodeCall(IERC20.transfer, (feeRecipient, fee)))` | `_tryPayFee`, reached from `_harvest` (only from `rollClose`) and from the permissionless `sweepFee()` | best-effort, clamped to balance; always the admin-set `feeRecipient`, never `msg.sender`; failure leaves `pendingFeeUsdg` untouched |
+| `Distributor.sol:190` `usdg.safeTransfer(to, amount)` | `_claimUsdg` | pays the caller's own accrued balance, which is a function of their share balance |
+| `ValoremLib.sol:85/88` `asset.forceApprove(address(clear), …)` | `writeCalls` (a `public` library reached by DELEGATECALL from `AdapterValorem._writeCalls`, only from `rollOpen`) | KEEPER only; approval is set and reset to 0 in the same call |
 | `AdapterSeaport.sol:240` `setApprovalForAll(transferApprovalTarget, true)` | `_approveOptionTransfers` | **constructor only** |
+
+`ValoremLib.sol:81` is the comment hit. There is no other `.call(`, `.call{`, `delegatecall`-by-hand
+or `IERC20.transfer` in these six files; `SeaportOrderLib.sol` contributes no hit at all (it moves
+no token: `validate`, `cancel` and `getOrderHash` only).
 
 ### Step 3 — confirm the intersection is empty
 
@@ -231,10 +237,12 @@ no proxy there is no way to add one without deploying a new vault.
 ### Step 4 — the same check for admin
 
 Run step 1 again with `DEFAULT_ADMIN_ROLE` / `onlyRole(DEFAULT_ADMIN_ROLE)` and cross-reference against
-step 2. The only intersection is the `_harvest` fee transfer — and it is indirect: admin sets
-`feeRecipient`, and `rollClose` later sends the accrued `pendingFeeUsdg` there. Admin never calls a
-transfer itself, and the fee is capped at 20% of a positive harvest. That is the complete extent of
-admin's reach into the token flow.
+step 2. The only intersection is the `_tryPayFee` raw call (`Vault.sol:982`) — and it is indirect:
+admin sets `feeRecipient`, and `rollClose` (via `_harvest`) or anyone (via `sweepFee()`) later sends
+the accrued `pendingFeeUsdg` there. Admin never calls a transfer itself, and the fee is capped at 20%
+of a positive harvest. That is the complete extent of admin's reach into the token flow. Note that
+this is exactly the site the old grep pattern did not match; if you run step 2 with a pattern that
+lacks `IERC20.transfer` / `\.call\(`, step 4 will wrongly conclude that admin has no reach at all.
 
 ---
 
@@ -271,9 +279,11 @@ cast call $USDG  "balanceOf(address)(uint256)" $SAFE_FEE --rpc-url $RH_RPC
 Its balance should increase, on each `rollClose`, by exactly the **sum** of `Harvest.feeUsdg` over
 every `Harvest` event carrying that `cycleNumber` — equivalently, by `pendingFeeUsdg()` read
 immediately before the close. It is a sum and not a single event because `deposit`/`mint` run
-`_checkpointHarvest()`, which accrues fee into `pendingFeeUsdg` without paying it out; only `_harvest`,
-reached only from `rollClose`, transfers. Reconciling against the close's own `Harvest.feeUsdg` will
-falsely fail whenever somebody deposited after a fill.
+`_checkpointHarvest()`, which accrues fee into `pendingFeeUsdg` without paying it out; only `_tryPayFee`,
+reached from `_harvest` (only from `rollClose`) and from the permissionless `sweepFee()`, transfers. The
+push is best-effort: if USDG rejects the transfer the fee stays in `pendingFeeUsdg` and the Safe's balance
+rises later, on whichever `sweepFee()` or `rollClose` first succeeds. Reconciling against the close's own
+`Harvest.feeUsdg` will falsely fail whenever somebody deposited after a fill or a push was deferred.
 
 On an unfilled week the increase is zero — the fee is charged only on a positive harvest, so a 0 week
 is free for depositors.

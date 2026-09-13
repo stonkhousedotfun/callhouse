@@ -16,3 +16,6 @@ lcov.info
 *.db
 *.db-journal
 *.sqlite
+
+# keeper dry-run artefacts (report.md, run.json, keeper.db per run) — recorded in keeper/DRYRUN.md, not tracked
+keeper/dryrun-out/

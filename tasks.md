@@ -1,6 +1,6 @@
 # Callhouse — Tasks & Progress
 
-Companion to `plan.md`. Progress as of **2026-09-12**.
+Companion to `plan.md`. Progress as of **2026-09-13**.
 
 Legend: `[x]` done · `[~]` in progress · `[ ]` todo · `[!]` blocked
 
@@ -15,7 +15,8 @@ Milestones: M0 scaffold+recon → **M1 contracts on mocks** → **M2 contracts o
 | Unit + invariant tests | **307 passed, 0 failed, 0 skipped** across 12 suites |
 | Fork tests vs live chain 4663 | **21 passed, 0 failed** (incl. `test_fork_writeAndListForReal`, 1.05M gas — a real write+list through live Valorem) |
 | `Vault` runtime size | 23,142 B (EIP-170 limit 24,576, margin 1,434; two linked libraries) |
-| keeper | typecheck clean; **59/59 tests** across 7 suites (the glob previously matched zero files) |
+| keeper | typecheck clean; **66/66 tests** across 8 files (59 on 2026-09-12, +7 for the assignment-count resolver) |
+| Keeper dry run (anvil fork of 4663) | **passed, three cycles** (2026-09-13, fork block 61720714, 27.9 s): filled OTM week, adopted unfilled week, and an ITM week with 9 of 23 exercised on the real Valorem Clear plus a queued redeem. Record: `keeper/DRYRUN.md` |
 | indexer | typecheck clean; API shape pinned to `ops/fixtures/api/` |
 | web | lint clean, build clean (7 routes), tests green |
 | site | typecheck + lint clean, Docker build green |
@@ -23,10 +24,12 @@ Milestones: M0 scaffold+recon → **M1 contracts on mocks** → **M2 contracts o
 | copy-lint (compliance) | 43 files in `web`, 20 in `site`, 0 violations; **7-case self-test runs on every invocation**; wrapped forbidden phrases caught by a full-buffer pass |
 | Recon unknowns resolved | 9 of 9 |
 | Real defects found and fixed | 13 in the first review + **18 in the second sweep** (keeper-focused, 2026-09-12; 38 raw findings, cross-confirmed, incl. the `.dockerignore` exclusion that kept the keeper image unbuildable) |
-| Subagents run | 42 across the build workflows + 85 across the review + 4 in the second sweep |
+| Audit scope | `docs/AUDIT-SCOPE.md` drafted and fact-checked (E-05); needs a pinned commit and the Appendix B housekeeping |
+| Subagents run | 42 across the build workflows + 85 across the review + 4 in the second sweep + 29 on 2026-09-13 (dry-run cycle 3, audit scope, recording) |
 
-M0, M1 and M2 are complete. M3–M5 are built and green in CI terms but have not yet been
-exercised against a live cycle, which is what M6 is for. Two adversarial passes are done:
+M0, M1 and M2 are complete. M3 is complete: the keeper's production modules have run three
+whole cycles on a mainnet fork, including a real assignment and a queued redeem (2026-09-13).
+M4–M5 are built and green locally but have not been exercised against a live cycle. Two adversarial passes are done:
 the internal review (see `SECURITY.md`) and a keeper-focused second sweep the same day —
 three independent auditors, 38 raw findings, 18 real defects fixed and re-verified (the
 state-reconciliation trio: unwitnessed `rollClose`, unservable authorised listing, missing
@@ -34,6 +37,51 @@ state-reconciliation trio: unwitnessed `rollClose`, unservable authorised listin
 `/health` RPC-URL leak; the `.dockerignore` exclusion that kept the keeper image
 unbuildable). `ops/alerts.md` now documents the 13 kinds the keeper actually emits; the old
 36-code vocabulary is retired and mapped. The external audit is still ahead.
+
+### Session log — 2026-09-13
+
+Done, each verified by a run rather than by a report:
+
+- **Keeper dry run executed, then extended to three cycles** (K-19). Re-run by the main session on a
+  fresh fork after the build and review agents: `DRY RUN PASSED`, fork block 61720714, 27.9 s. Cycle 3
+  is the first time anything in this repo exercised an option on the **real** Valorem Clear: 9 of 23
+  assigned, a queued redeem settled through the same close, every amount asserted exactly against
+  chain state, receipts, the keeper database, its HTTP output and the captured alerts.
+- **One keeper defect fixed** (K-20): a failed pre-close Valorem read was silently published as
+  "0 assigned". Now "unknown" with a warning, plus 7 unit tests (keeper 66/66).
+- **Audit scope written** (E-05, `docs/AUDIT-SCOPE.md`): in scope, out of scope with verified
+  third-party audit links, properties to break, ranked concerns, evidence and its limits, build
+  steps, severity scale. One accuracy and completeness round; every blocking/major finding fixed,
+  the fixes spot-checked against the repo and chain 4663 (the USDG timelock is 24 h, the admin
+  hand-over 3 h).
+- **`ops/safes.md` §4 corrected**: its grep proof that no role reaches a token missed the fee leg,
+  which became a raw `.call` in defect 12. Pattern, count (12 hits) and every line number re-derived.
+- **Found, not yet acted on**: the protocol fee is charged on strike proceeds (open question 3), the
+  alert and cycle tape call strike proceeds "harvested" (K-21), and seven places where our own docs
+  contradict the code (D-05).
+- `keeper/dryrun-out/` added to `.gitignore`. **Nothing from this session is committed yet.**
+
+### Next, in order
+
+1. **You, GitHub UI** (L-01): leekzor → Settings → Billing → Actions spending limit, then set the
+   `RH_RPC` secret. Until then no gate runs anywhere but locally.
+2. **Legal, start now** (L-05): counsel on `site/app/terms` + `privacy`, operating-entity constants,
+   a security.txt contact. Longest pole.
+3. **Decide the fee-on-strike-proceeds question** (open question 3). It changes the disclosures and
+   `ACCOUNTING.md`, and it should be settled before the audit commit is pinned.
+4. **Audit prep** (D-05 → E-05 → E-06): do the housekeeping list, pin a commit, send
+   `docs/AUDIT-SCOPE.md`, engage the auditor.
+5. **Finish the fork rehearsal** (E-03): indexer sync against a fork (X-11; the indexer already takes
+   address overrides, runs on PGlite without `DATABASE_URL`, and `END_BLOCK` bounds a replay), then
+   the web acceptance test from a fresh wallet including a fill from the keeper's `/orders` (W-13).
+6. **Keeper follow-ups** (K-21, K-22): persist `assetsReturned` / `usdgFromAssignment` and word the
+   assigned-week alert; cover `index.ts`, multi-exerciser assignment and guardian `rollClose`.
+7. **Keys, then deploy** (L-02, L-03, L-06, L-07): Admin Safe 2/3, guardian key on separate hardware,
+   mainnet deploy per `ops/deploy.md`, cap 20 NVDA.
+8. **Hosting and alerting** (W-19, W-20, L-08, L-09): four Railway services, apex DNS, two uptime
+   monitors, the `ALERT_WEBHOOK` relay.
+9. **L-04**: one real 1-contract Overcall listing to settle EIP-1271 against their validator, then
+   four published weeks (L-10..13).
 
 ---
 
@@ -118,7 +166,10 @@ Evidence lives in `ops/recon/`. Spec repairs are written up in `plan.md` section
 - [x] K-15..16 Dockerfile, systemd unit, keeper-dead runbook
 - [x] K-17 Second-sweep hardening (2026-09-12): boot reconciliation now closes a cycle someone else closed (sums Harvest from logs, fires `roll_close`), recovers an authorised-but-unservable listing via `invalidateAllListings` + relist, backfills `roll_open_tx` from the tx table and the `RollOpen` log; relists price at `max(previous, live policy floor)`; the last-fill lift is clamped at 3× floor; book-reported `filled`/`unfillable` no longer latch against chain evidence; `/health` serves RPC origins only and stays 200 during a slow close; failed webhook deliveries retry in 5 min instead of burning the hour; `railway.json` `startCommand` deleted so SIGTERM reaches node
 - [x] K-18 First real keeper tests: 59/59 across 7 suites (`alerts`, `config`, `overcallApi`, `policy`, `roll`, `seaport`, `state`) — the package previously had a test script whose glob matched zero files
-- [ ] Run `dryrun.ts` end to end and record the output (anvil fork; the honest gate for M3, and a launch prerequisite — the keeper has never executed a live cycle)
+- [x] K-19 Dry run executed and recorded (2026-09-13, `keeper/DRYRUN.md`). Three cycles on an anvil fork: (1) live series, filled, expired OTM, harvest claimed; (2) rolled while the keeper was asleep, adopted, unfilled, published 0; (3) **the keeper wrote and listed itself, the listing filled, the depositor queued 10 of 25 shares, the buyer exercised 9 of 23 on the real Valorem Clear**, `rollClose` emitted `RollClose(3, 14e18, 2025 USDG, 9)`, harvest 2044.079259 gross / 204.407925 fee / 1839.671334 net, `completeRedeem` paid 6.4 NVDA + 735.868533 USDG exactly, `claimUsdg` paid 1103.8028. Built by one implementer, attacked by an honesty auditor, a math reviewer and an independent runner, then re-run independently by the main session on a fresh fork
+- [x] K-20 Assignment-count hardening, found by that review: `contractsAssignedAt` swallowed a failed Valorem read into `0n`, indistinguishable from a real zero. It now returns null and warns; `resolveContractsAssigned` publishes the `RollClose` count, falls back to the pre-read only without the event, and flags a mismatch; the `roll_close` alert carries `contractsAssignedSource`. 7 new unit tests (`roll.test.ts`, new `roll.close.test.ts`). The published number is unchanged whenever the vault emits `RollClose`, which the deployed bytecode always does
+- [ ] K-21 Observability gap, not a wrong number: on an assigned week the `roll_close` alert and the cycle row call strike proceeds "harvested" (cycle 3 published 2044 USDG with no assignment wording), and `RollClose.assetsReturned` / `usdgFromAssignment` are decoded but not persisted, so `/cycles` cannot separate premium from returned principal. Needs two columns, alert wording and the `/cycles` shape
+- [ ] K-22 Dry-run gaps still open: `index.ts` (poll loop, SIGTERM), multiple exercisers or exercise across several txs, the Valorem exercise-fee branch (fees are off on the live chain), guardian `rollClose`, cancel / partial fill / relist budget, and a non-default `DRYRUN_DEPOSIT` (cycle 3's index and dust expectations assume no carried `usdgDust`)
 
 ---
 
@@ -166,11 +217,12 @@ Evidence lives in `ops/recon/`. Spec repairs are written up in `plan.md` section
 
 - [x] E-00 Internal adversarial review (2026-09-12): 72 findings across 13 surfaces, 51 confirmed after refutation; 1 critical + 2 high + 2 medium fixed with regression tests, hardening (events, ABIs, decoder coverage) landed alongside. Write-up: `SECURITY.md`
 - [x] E-00b Second sweep, keeper-focused (2026-09-12): three auditors (correctness / adversarial / operator), 38 raw findings, 18 real defects fixed and re-verified — see K-17 and the status table. Also: copy-lint gained its self-test and a full-buffer pass, and `ops/alerts.md` was rewritten to match the emitted kinds
-- [ ] E-01 Full cycle on an anvil fork: deposit → open → fill → expire OTM → close → claim → queue redeem
-- [ ] E-02 ITM variant with partial assignment
-- [ ] E-03 Two rehearsal weeks on a **mainnet fork with a mock registry** (the only way to time-warp a week into minutes)
+- [x] E-01 Full cycle on an anvil fork: deposit → open → fill → expire OTM → close → claim → queue redeem. Covered by the keeper dry run (K-19), with a mock registry and a mock feed seeded from the real ones
+- [x] E-02 ITM variant with partial assignment: dry-run cycle 3, 9 of 23 exercised on the real clearinghouse (single exerciser, one tx; see K-22 for what that does not cover)
+- [~] E-03 Two rehearsal weeks on a **mainnet fork with a mock registry** (the only way to time-warp a week into minutes). The keeper side is done (three weeks in K-19). Still missing: the indexer syncing the same fork (X-11) and the web app reading it (W-13)
 - [ ] E-04 One full cycle on **testnet 46630** — real Valorem + Seaport, Overcall's NVDA registry once their operator sets a fresh cycle (or our own MockRegistry deployed there), mock-NVDA collateral, self-filled listing. Needs: testnet deploy config, a stand-in price feed (no Chainlink RHNVDA on 46630), funded key from the faucet. Covers everything except Overcall's production listings API
-- [ ] E-05 Audit scope doc: Vault, adapters, `SeaportOrderLib`, `ValoremLib`, Distributor. Link Zellic's Valorem reports; do not re-audit Valorem
+- [~] E-05 Audit scope doc: **drafted 2026-09-13 as `docs/AUDIT-SCOPE.md`**. Seven in-scope files (1,190 nSLOC) plus the deploy scripts for configuration review; out-of-scope dependencies with verified links (Zellic's Valorem reports, Seaport audits); 25 falsifiable properties and 6 money invariants to break; ranked areas of concern; prior evidence and what it does not prove; build instructions; severity scale. Checked once for accuracy and completeness, with every blocking/major finding fixed; the second check round did not run (usage limit) and the main session spot-checked the fixes. To finish: pin the engagement commit, then do the Appendix B housekeeping (below, D-05)
+- [ ] D-05 Housekeeping before the audit tag, from `docs/AUDIT-SCOPE.md` Appendix A/B: correct the `writesHalted` NatSpec (`Vault.sol` L115, L995) and `contracts/README.md` L117 to say halt blocks `rollOpen` **and** `approveListing`; rewrite the `IValoremClear.sol` header (it names vendored files that do not exist); fix `ACCOUNTING.md` §6 "fees on the premium only" (the fee is also charged on strike proceeds — decide whether that is the intended, disclosed design); `contracts/README.md` 328 → 307 tests; README cap "20–50" vs 20; `ops/addresses.json` has no `valoremLib` slot; `ACCOUNTING.md` §7 six invariants vs seven functions; re-derive line numbers in the scope doc and `ops/safes.md` §4 at the tag
 - [ ] E-06 External audit engaged, findings triaged (E-00 was internal, not this)
 - [ ] E-07 Bug bounty drafted, opens mainnet week 2
 
@@ -234,7 +286,11 @@ regenerated (`web` now has a committed generator, `web/scripts/gen-abis.mjs`).
    re-reads spot when authorising. A single upward oracle tick between the two reads reverts
    `PremiumBelowMinimum`. It self-heals on the next tick, but it will make Friday-night noise on
    the first live cycle. Decide whether to add a margin.
-3. **Deposit-time harvest cost.** Checkpointing the harvest on every deposit is correct but adds
+3. **Protocol fee on strike proceeds.** The fee is charged on the whole USDG inflow, so an
+   assigned week pays 10% of the strike proceeds too (dry-run cycle 3: 202.5 of the 204.4 USDG
+   fee came from assignment). The code and a test pin it; `ACCOUNTING.md` §6 says the opposite.
+   Decide whether it is intended, then make the docs and the disclosures say so.
+4. **Deposit-time harvest cost.** Checkpointing the harvest on every deposit is correct but adds
    gas to the deposit path. Measure it on the first live week.
 
 ---

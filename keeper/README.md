@@ -70,7 +70,7 @@ There is no usable testnet for the whole week. Testnet 46630 has no Chainlink RH
 cycles are hand-set by Overcall's operator, so a **mainnet fork** is the only place to compress a
 week into seconds. `src/dryrun.ts` drives the **production keeper** — `reconcile()` and `tick()`
 from roll.ts, with state.ts, policy.ts, seaport.ts, overcallApi.ts, alerts.ts and health.ts all
-running unmodified — through two cycles against a fork. `DRYRUN.md` is the recorded run.
+running unmodified — through three cycles against a fork. `DRYRUN.md` is the recorded run.
 
 ```bash
 # 1. build the artifacts the dry run deploys (Vault + both linked libraries + the two mocks)
@@ -79,7 +79,7 @@ running unmodified — through two cycles against a fork. `DRYRUN.md` is the rec
 # 2. fork mainnet, keeping chain id 4663, and RUN STEP 3 WITHIN A FEW MINUTES — see the trap below
 anvil --fork-url https://rpc.mainnet.chain.robinhood.com --chain-id 4663 --port 8545
 
-# 3. drive both cycles. No .env is needed or read; every keeper variable is set by the harness.
+# 3. drive all three cycles. No .env is needed or read; every keeper variable is set by the harness.
 pnpm --filter @callhouse/keeper dryrun
 # report: keeper/dryrun-out/<utc>/report.md, run.json, keeper.db   (DRYRUN_OUT overrides)
 ```
@@ -106,12 +106,36 @@ What it does, in order — every step is an assertion, and a failure exits 1 nam
    database row** — the "rolled while asleep" case. `reconcile()` must adopt it, `tick()` must
    list from the policy floor, nobody fills, `lockBook` must retire the listing row and tell the
    book, and `rollClose` must publish **unfilled, 0**.
-10. Closes the store, reopens the same file, and checks every row is still there.
+10. **Cycle 3, in the money:** five more fresh option types on the real Clear, the mock registry
+    moves to cycle 3, and this time the **keeper** writes and lists from Idle (a second
+    `roll_open`, force-sent past the alert cooldown). A buyer fills, the depositor queues 10 of
+    the 25 shares while the call is live, the feed is moved above the strike, `lockBook` runs
+    (the filled row stays `filled`, no DELETE), and the buyer exercises **9 of 23** on the real
+    Clear (the debit is exactly `9 × strike`; the Clear's fee switch is read live). Before the
+    closing tick the keeper's own `contractsAssignedAt` is called directly on the keeper's own
+    snapshot and must answer `9n` from the real Clear. `rollClose`
+    must redeem the assigned claim — `RollClose(3, 14e18, 9 × strike, 9)` — harvest premium
+    **plus** strike proceeds with the 10% fee on both, store `contracts_assigned = 9` with the
+    alert's `contractsAssignedSource = RollClose` and `contractsAssignedFromClaim = 9` (the value
+    the keeper's pre-read returned inside the tick), and
+    settle the queue (`QueueSettled(1, 10e18, 6.4e18, escrow)`, the escrow's USDG being its
+    own share of the index move). The depositor then `completeRedeem`s exactly the preview and
+    `claimUsdg`s the rest; every base unit of the gross is accounted for, down to the single
+    unit of MasterChef floor loss left inside `usdgAccounted`. After the close the keeper's
+    `contractsAssignedAt` answers `0n` on the zeroed `claimKey` without a read, and `null` on the
+    burned claim key, where the real Clear reverts `TokenNotFound` — the reason the read is
+    taken first, pinned on the real revert.
+11. Closes the store, reopens the same file, and checks every row is still there
+    (`{cycles:3, listings:3, txs:11, alerts:5, meta:4}` after all three cycles).
 
 Options: `DRYRUN_FEED=real` keeps the real Chainlink feed (cycle 1 only — after a one-week warp
-the real feed is stale, which is the vault's `StalePrice` gate working); `DRYRUN_SKIP_CYCLE2=1`;
-`DRYRUN_DEPOSIT`, `DRYRUN_RPC`, `DRYRUN_OUT`, `DRYRUN_ARTIFACTS` (where the compiled contracts
-come from; default `../contracts/out`), `DRYRUN_HEALTH_PORT`, `DRYRUN_KEEPER_PK`.
+the real feed is stale, which is the vault's `StalePrice` gate working); `DRYRUN_SKIP_CYCLE2=1`
+(cycle 1 only); `DRYRUN_SKIP_CYCLE3=1` (cycles 1 and 2, no assignment); `DRYRUN_DEPOSIT` (the
+closed-form USDG checks in cycle 3 — 6.4 NVDA out, zero dust, floor(2/5) and floor(3/5) of net —
+assume the default 25e18, which divides the 1e27 index precision exactly; any other supply is
+still checked with the same floor formulas), `DRYRUN_RPC`, `DRYRUN_OUT`, `DRYRUN_ARTIFACTS`
+(where the compiled contracts come from; default `../contracts/out`), `DRYRUN_HEALTH_PORT`,
+`DRYRUN_KEEPER_PK`.
 
 Three traps, each of which cost an afternoon:
 
@@ -119,7 +143,7 @@ Three traps, each of which cost an afternoon:
   upstream for every account and slot it has not seen yet, at the fork block. Roughly 4,000–8,000
   blocks after you start anvil (fifteen to thirty minutes on a 250 ms chain) the upstream starts
   answering `metadata is not found, <block>` and every fresh lookup fails. Start anvil, run the
-  dry run immediately, and if you see that message, restart anvil. The whole run takes ~20 s.
+  dry run immediately, and if you see that message, restart anvil. The whole run takes ~30 s.
 - **anvil's default accounts are not empty on chain 4663.** Every one of them carries 23 bytes of
   code — an EIP-7702 delegation designator. A fork inherits it, so the EVM treats those addresses
   as contracts, Valorem's ERC-1155 calls `onERC1155Received` on them, the delegate reverts, and
@@ -267,8 +291,19 @@ the vault to `Idle`. Two numbers come out of it and both are easy to get wrong:
 which zeroes `claimKey`, and Valorem's `claim()` then reverts `TokenNotFound` — so the same read
 taken afterwards answers `0` and every assigned week would be published as unassigned. The vault
 has the same comment at the same place for the same reason, and it also emits the number in
-`RollClose(cycleNumber, assetsReturned, usdgFromAssignment, contractsAssignedCount)`; the keeper
-prefers the event and falls back to its own pre-close read.
+`RollClose(cycleNumber, assetsReturned, usdgFromAssignment, contractsAssignedCount)`. The keeper
+publishes the event (`resolveContractsAssigned` in roll.ts) and keeps its own pre-close read as
+the fallback for a receipt with no `RollClose` and as a cross-check when there is one — the two
+come from the same Valorem claim across a window in which no exercise can land, so a
+disagreement is a defect and is logged at warn, as is a fallback. A pre-close read that fails is
+`null`, "unknown", never a silent 0. The `roll_close` alert's `data` carries `contractsAssigned`,
+`contractsAssignedSource` (`RollClose` | `claim-preread` | `unknown`) and
+`contractsAssignedFromClaim`. Because the deployed vault always emits the event, a tick can only
+ever exercise the event path: `roll.test.ts` pins every branch of the resolver on synthetic
+receipts, `roll.close.test.ts` pins `contractsAssignedAt` (the divisor, the contract read, and
+null on a revert) with the keeper's client stubbed, and the dry run's cycle 3 calls
+`contractsAssignedAt` directly against the real Clear (9 before the redeem, `TokenNotFound` →
+unknown after) and drives both resolver branches on the real receipt.
 
 **The harvest is summed over the whole cycle, not read off the `rollClose` receipt.** The vault
 calls `_checkpointHarvest()` inside `deposit()` and `mint()`, and deposits are open during
@@ -471,7 +506,7 @@ it picks the listing back up from `seaport.getOrderStatus` and carries on.
 | `health.ts` | `/health`, `/state`, `/orders`, `/cycles`. |
 | `alerts.ts` | Webhook alerting with per-kind cooldown. |
 | `index.ts` | Wiring, the poll loop, graceful shutdown. |
-| `dryrun.ts` | The production keeper driven through two cycles against an anvil fork, with assertions. `DRYRUN.md` is the recorded run. |
-| `*.test.ts` | Unit tests, next to the module each one pins. `pnpm test`. |
+| `dryrun.ts` | The production keeper driven through three cycles against an anvil fork (filled OTM, rolled-while-asleep unfilled, in-the-money with a queued redeem and 9 of 23 assigned), with assertions. `DRYRUN.md` is the recorded run. |
+| `*.test.ts` | Unit tests, next to the module each one pins (`roll.close.test.ts` pins the rollClose count path with the keeper's client stubbed). `pnpm test`. |
 | `Dockerfile`, `railway.json` | The container, built from the repo root, and the Railway config-as-code. Runbook: `ops/deploy.md`. |
 | `deploy/callhouse-keeper.service` | The systemd alternative. |

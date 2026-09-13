@@ -736,6 +736,10 @@ export const clearAbi = [
       { name: 'underlyingAmountRedeemed', type: 'uint256', indexed: false },
     ],
   },
+  // What `claim()` reverts for a burned (redeemed) claim — the one revert the keeper expects to
+  // see, and only if it ever reads the claim AFTER rollClose (IValoremClear.sol:319). Here so the
+  // warn line names it instead of printing the bare selector 0x6caeb130.
+  { type: 'error', name: 'TokenNotFound', inputs: [{ name: 'token', type: 'uint256' }] },
 ] as const;
 
 /*//////////////////////////////////////////////////////////////
