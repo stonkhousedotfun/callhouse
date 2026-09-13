@@ -30,6 +30,14 @@ import { useNotice, useTxRunner } from "./TxToast";
  * which is everything a buyer needs to call Seaport themselves — and offers to send the fill
  * from this page.
  *
+ * TWO SOURCES, ONE FILL PATH. `source="overcall"` (the default) is a row from Overcall's book.
+ * `source="keeper"` is the vault's own listing as the keeper serves it at /orders, rebuilt and
+ * checked against the chain by app/api/keeper/orders (lib/keeperOrders.ts) into the same row
+ * shape; the cycle page passes it only when Overcall's book has no verified listing for the
+ * vault. The source changes the labels on this card and nothing else: the same
+ * checkListingIsOurs() runs on it here, and the same approve + fulfillAdvancedOrder with
+ * numerator/denominator sends the fill. Do not add a keeper-only branch to the fill.
+ *
  * NOTHING HERE IS TRUSTED UNTIL IT HAS BEEN CHECKED AGAINST THE CHAIN. The listing prop is a
  * row from overcall.finance's database, relayed by our proxy. Every field of it that reaches
  * writeContractAsync — offerer, zone, conduit, both tokens, both recipients, both amounts, the
@@ -67,8 +75,11 @@ export function OrderPayload({
   expectedListingAmount,
   expectedListingGrossUsdg,
   expectedOptionId,
+  source = "overcall",
 }: {
   listing: OvercallListing;
+  /** Where the row came from. Labels only; the check and the fill are identical for both. */
+  source?: "overcall" | "keeper";
   /** The vault's listingHash() as read from the chain: undefined until read, zero when empty. */
   expectedListingHash: Hex | undefined;
   /** The vault's listingAmount(), listingGrossUsdg() and optionId() from the same read. Each is
@@ -111,6 +122,9 @@ export function OrderPayload({
   );
   const checking = check.ok && nowSeconds === 0;
   const verified = check.ok && nowSeconds > 0;
+  const fromKeeper = source === "keeper";
+  const origin = fromKeeper ? "the vault's keeper" : "Overcall";
+  const originCard = fromKeeper ? "Order from the vault's keeper" : "Order on Overcall's book";
 
   // Size and price come from the signed components, which the order hash commits to. The row's
   // `quantity`/`unitPrice6` are Overcall's convenience copies and are not used for anything that
@@ -275,11 +289,24 @@ export function OrderPayload({
           {verified
             ? "Signed order · fill from here"
             : checking
-              ? "Order on Overcall's book · checking against the chain"
-              : "Order on Overcall's book · unverified"}
+              ? `${originCard} · checking against the chain`
+              : `${originCard} · unverified`}
         </span>
-        <span className="tiny faint mono">status {listing.status}</span>
+        <span className="tiny faint mono">
+          {fromKeeper ? "keeper · " : ""}status {listing.status}
+        </span>
       </div>
+
+      {fromKeeper ? (
+        <div className="notice" data-tone="info" style={{ marginBottom: 12 }}>
+          <strong>Listed directly by the vault&apos;s keeper; Overcall&apos;s book is not showing it.</strong>
+          This order came from the keeper&apos;s own feed, not from Overcall. Before it reached this
+          page, the server restored Seaport&apos;s counter from the chain, had Seaport compute the
+          order hash, and matched it to the hash the vault authorised; the page checks it against
+          the chain again below. A fill pays the same two legs as a fill on Overcall: the
+          vault&apos;s premium and Overcall&apos;s 5% fee.
+        </div>
+      ) : null}
 
       {!check.ok ? (
         <div className="notice" data-tone="bad" style={{ marginBottom: 12 }}>
@@ -410,7 +437,7 @@ export function OrderPayload({
         </p>
       ) : (
         <p className="tiny faint" style={{ marginTop: 12 }}>
-          Nothing on this card sends a transaction. The payload below is shown as Overcall served
+          Nothing on this card sends a transaction. The payload below is shown as {origin} served
           it, for the record; it has not been verified against the vault and should not be filled.
         </p>
       )}
@@ -420,8 +447,8 @@ export function OrderPayload({
           {verified
             ? "Raw signed order payload"
             : checking
-              ? "Raw payload from Overcall"
-              : "Raw payload from Overcall (unverified)"}
+              ? `Raw payload from ${origin}`
+              : `Raw payload from ${origin} (unverified)`}
         </summary>
         <pre className="payload" style={{ marginTop: 10 }}>
           {payloadJson}

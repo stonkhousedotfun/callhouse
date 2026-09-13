@@ -18,7 +18,8 @@
 #     and build-base to compile a database driver into a web image would be absurd, so the
 #     install is filtered to this package and its dependencies instead. Every workspace
 #     member's package.json is still copied in — see the manifest block below for why.
-#   - No OVERCALL_API_BASE build ARG. It is server-side and read per request. See the runner.
+#   - No OVERCALL_API_BASE or KEEPER_ORDERS_URL build ARG. Both are server-side and read per
+#     request. See the runner.
 #   - No `next start`. The standalone output ships its own server; `next start` would need the
 #     full node_modules tree this image deliberately does not carry.
 #   - No HEALTHCHECK instruction. Railway owns the healthcheck (web/railway.json).
@@ -183,6 +184,10 @@ ENV PORT=3000
 # per request on the server, so it is a Railway RUNTIME variable: change it and restart, no
 # rebuild. It is left unset on purpose — route.ts already defaults to https://overcall.finance,
 # and a second copy of that URL is a second thing to get wrong.
+#
+# KEEPER_ORDERS_URL is the same kind of variable, read per request by app/api/keeper/orders. It
+# has no default at all: unset, the keeper fallback answers 503 "not configured" and the cycle page
+# shows none of it. On Railway it is http://keeper.railway.internal:8787/orders (ops/deploy.md §3).
 
 RUN addgroup -g 1001 -S nodejs && adduser -u 1001 -S nextjs -G nodejs
 

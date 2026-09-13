@@ -8,8 +8,8 @@ should be fixed.
 Two facts frame everything below:
 
 - **The keeper and the indexer never talk to each other.** Both read the same chain
-  independently. The web app reads the chain and the indexer. There is no message bus and no
-  shared database.
+  independently. The web app reads the chain and the indexer, and its server reads the keeper's
+  `/orders` for one fallback (§7). There is no message bus and no shared database.
 - **The only hop that moves money is the user's own wallet**, signing against chain 4663
   (deposit, queue, claim, and the Seaport fill on the cycle page). Every other hop is read-only
   JSON or an operator transaction.
@@ -39,6 +39,7 @@ deploys it.
 | browser → chain RPC (archive) | `eth_getLogs` history fallback; **primary only** — the backup refuses archive ranges | `NEXT_PUBLIC_RPC_URL` | as above |
 | browser → indexer | `GET /v1/cycles?limit=N` for `/`, `/vault/nvda`, `/activity` | `NEXT_PUBLIC_API_URL` | `http://localhost:42069` |
 | browser → same-origin proxy | `GET /api/overcall/listings` (the cycle page's order book) | — | — |
+| browser → same-origin route | `GET /api/keeper/orders` (the keeper fallback; only when the book has no verified listing for the vault) | — | — |
 
 The indexer client (`web/lib/api.ts`) is deliberately fail-soft: any error returns `null` and
 history pages fall back to `eth_getLogs` against the archive RPC. `fetchVaultSummary`,
@@ -50,8 +51,11 @@ vault on-chain. Wallet connection is injected-provider only; there is no WalletC
 | From → To | What crosses | Env var (runtime, **not** `NEXT_PUBLIC_`) | Default |
 |---|---|---|---|
 | proxy route → Overcall | `GET /api/orders?offerer=<vault>&status=all&limit=50`, 9 s timeout, 512 KiB cap; every row shape-checked before it reaches the browser | `OVERCALL_API_BASE` | `https://overcall.finance` |
+| fallback route → keeper | `GET /orders` at the one configured URL, 5 s timeout (body included), 64 KiB cap, redirects refused; every order rebuilt and checked against the chain before it reaches the browser (§7) | `KEEPER_ORDERS_URL` | **none** — unset ⇒ 503 `configured:false`, fallback hidden. Railway: `http://keeper.railway.internal:8787/orders` |
+| fallback route → chain RPC | `Seaport.getCounter`, `getOrderHash`, `getOrderStatus`; vault `phase`, `listingHash`, `listingAmount`, `listingGrossUsdg`, `optionId` (one Multicall3 batch) | `NEXT_PUBLIC_RPC_URL`, `NEXT_PUBLIC_RPC_URL_2` (build-time, `lib/chain.ts`) | as above |
 
-The proxy is GET-only. Publishing is the keeper's job; the web app never POSTs to Overcall.
+Both routes are GET-only and read nothing from the request. Publishing is the keeper's job; the
+web app never POSTs to Overcall and never writes to the keeper.
 
 ### keeper, outbound
 
@@ -73,7 +77,7 @@ a mispointed keeper exits noisily instead of driving the wrong contract.
 | `/health` | loop-wedged 503; degraded-on-200 for gas/RPC lag | uptime monitor (L-08) |
 | `/state` | last snapshot + raw SQLite rows (snake_case) | operator debugging |
 | `/cycles` | last 26 cycle rows, snake_case | operator debugging |
-| `/orders` | live listings as `{parameters, signature}` fill payloads | **nothing yet** — see §7 |
+| `/orders` | live listings as `{parameters, signature}` fill payloads | `web`'s `/api/keeper/orders`, server-side over private networking — see §7 |
 
 ### indexer, outbound and inbound
 
@@ -155,14 +159,42 @@ Do not "fix" these; they are different models of the same week:
 - JSON style — indexer: camelCase, bigints as decimal strings, money as `{raw, decimals,
   formatted}`; keeper `/state` and `/cycles`: raw SQLite rows in snake_case.
 
-## 7. Two paths that exist but carry no traffic today
+## 7. The keeper fallback, and a path with no traffic
 
-1. **The web app never calls the keeper.** The cycle page's buy fallback reads Overcall's public
-   book through the web proxy, not the keeper's `/orders`. If Overcall's validator rejects the
-   vault's listings (open question L-04), Overcall's book will be empty of our rows and the page
-   will find nothing — the designed answer is the keeper's own `/orders` (W-13), which the dry
-   run proved a real Seaport fill can settle against. Wiring it in means a new env var on `web`
-   and a public URL for the keeper, neither of which exists yet.
+1. **The web app reads the keeper's `/orders` when Overcall's book does not show the listing.**
+   The vault authorises one Seaport order by hash (EIP-1271). If Overcall's validator rejects it
+   (open question L-04) or their API is down, the book has no row for it and nobody can buy the
+   week. The cycle page reads Overcall first; only when the book has answered (or failed) with no
+   live row for the vault's `listingHash` that passes `checkListingIsOurs` does it call
+   `GET /api/keeper/orders` on its own origin.
+
+   ```
+   browser ──GET /api/keeper/orders──▶ web server ──GET KEEPER_ORDERS_URL──▶ keeper :8787/orders
+                                          │  (private network, 5 s, 64 KiB, no redirects)
+                                          └──eth_call──▶ chain: Seaport getCounter / getOrderHash /
+                                                         getOrderStatus, vault phase / listingHash /
+                                                         listingAmount / listingGrossUsdg / optionId
+   ```
+
+   The route does not trust the keeper. It keeps only each order's `parameters` and `signature`,
+   **restores Seaport's counter** from `getCounter(offerer)` (`/orders` drops it, and the vault's
+   `rollClose` bumps it, so it is not safely 0), has **Seaport compute the order hash**, and
+   serves the order only if the keeper's claimed hash equals Seaport's, Seaport's equals the
+   vault's `listingHash()`, the offerer is the configured vault, the vault's phase is Listed, the
+   end time has not passed, Seaport does not report it cancelled or sold out, and the payment legs
+   are the vault's leg plus Overcall's 5% to Overcall's recipient at the count and gross the vault
+   recorded (`checkListingIsOurs`, the check Overcall's rows already go through). Anything else is
+   returned under `rejected` and logged on `web` (`"msg":"keeper order rejected"`); it never
+   reaches a fill button. The page labels the order "Listed directly by the vault's keeper;
+   Overcall's book is not showing it." and fills it through the same `OrderPayload` card, which
+   re-runs the check, and the same `fulfillAdvancedOrder` path. Code: `web/lib/keeperOrders.ts`,
+   `web/app/api/keeper/orders/route.ts`; operator notes: `web/README.md` "The keeper fallback",
+   `ops/deploy.md` §3.
+
+   `KEEPER_ORDERS_URL` is a runtime server variable on `web`. Unset, the route answers 503
+   `configured:false` and the page shows no fallback. The keeper needs no public domain. One
+   deployment caveat: the keeper binds `0.0.0.0` (IPv4 only), and a Railway environment whose
+   private network is IPv6-only will not reach it (`ops/deploy.md` §9 item 14).
 2. **The indexer's HMAC relay has no caller.** The keeper POSTs to Overcall directly and holds no
    `KEEPER_HMAC_SECRET`. The relay exists so that, if Overcall ever gates its API (auth, IP
    allow-list, rate limits), the credential lives in one managed place instead of on the keeper
@@ -177,10 +209,10 @@ Do not "fix" these; they are different models of the same week:
 | web builds, renders, lints, unit tests | `pnpm --filter @callhouse/web build/test` | **green** |
 | keeper boot config cross-check vs the vault | dry run + 66 unit tests | **green** |
 | indexer syncing a real week of events | X-11 (fork sync) | **not run** |
-| web from a fresh wallet, incl. a fill served from the keeper's `/orders` | W-13 | **not run** |
+| web from a fresh wallet, incl. a fill served from the keeper's `/orders` | W-13 (`pnpm --filter @callhouse/web acceptance:fork`) | **green on a fork** |
 | Overcall's real validator accepting our EIP-1271 listing | L-04 (one real 1-contract listing) | **not run** |
 | keeper → indexer HMAC relay | no caller exists | **unwired** |
-| web → keeper `/orders` fallback | no env var, no public keeper URL | **unwired** |
+| web → keeper `/orders` fallback (route, counter restore, chain check, tamper refused) | `web/lib/keeperOrders.test.ts`; W-13 fork acceptance through the real route and keeper HTTP server | **green on a fork**; Railway private-network reachability not yet verified |
 | any production deployment | W-19, W-20, L-08 | **not deployed** |
 
 ## 9. Bring the whole thing up against a fork
@@ -196,6 +228,7 @@ END_BLOCK=<head> pnpm --filter @callhouse/indexer dev          # http://localhos
 # web — .env.local:
 NEXT_PUBLIC_RPC_URL=http://127.0.0.1:8545 NEXT_PUBLIC_VAULT=<dry-run vault> \
 NEXT_PUBLIC_API_URL=http://localhost:42069 pnpm --filter @callhouse/web dev   # http://localhost:3000
+# optional, with a keeper running against the same vault: KEEPER_ORDERS_URL=http://127.0.0.1:8787/orders
 ```
 
 X-11 and W-13 turn this sketch into the scripted rehearsal; the package READMEs own the details.

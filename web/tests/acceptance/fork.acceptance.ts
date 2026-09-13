@@ -21,18 +21,22 @@
  *
  * THE SCENARIO IS THE FALLBACK: Overcall's book refuses the vault's listing (open question L-04).
  * The stub the keeper posts to answers 400, so the keeper marks the listing `post_failed` and
- * keeps serving it from its own GET /orders. The web proxy's upstream (OVERCALL_API_BASE) first
- * answers like the real book would in that case, with no row for the vault, and the cycle page
- * is asserted to say so and offer no fill. Then the same upstream relays the keeper's /orders
- * payload, re-shaped into a book row, and a second fresh wallet fills 2 contracts from the
- * cycle page's own verified fill button. A raw Seaport client then fills 3 more straight from the
- * /orders JSON, with no web code at all. The web app itself has no route to the keeper today
- * (docs/WIRING.md §7); the relay below is the stand-in for that missing wiring and the one
- * piece of glue a real fallback needs (Seaport's counter, which /orders drops).
+ * keeps serving it from its own GET /orders. The web proxy's upstream (OVERCALL_API_BASE) answers
+ * like the real book would in that case, with no row for the vault, for the whole run. The web
+ * app's own fallback route, app/api/keeper/orders, reads the keeper's real HTTP server through
+ * KEEPER_ORDERS_URL, restores Seaport's counter, has Seaport hash each order and serves only the
+ * one the vault authorised. Seaport's counter for the vault is set non-zero before the keeper
+ * lists, so a route that assumed 0 would hash a different order and fail here. First the keeper
+ * is made to serve the order with its premium leg redirected (its SQLite row is edited, so its
+ * HTTP server serves the tampered parameters under the authorised hash): the route rejects it and
+ * the cycle page offers no fill. Then the row is restored, and a second fresh wallet fills 2
+ * contracts from the cycle page's own verified fill button, labelled as the keeper's listing. A
+ * raw Seaport client then fills 3 more straight from the /orders JSON, with no web code at all.
  *
  * FLOWS, each asserted to the base unit on chain and on the rendered page:
  *   (a) depositor: approve + deposit 25 NVDA from /vault/nvda; shares and their NAV render.
- *   (b) buyer: fill 2 of 23 from /vault/nvda/cycle using the keeper's /orders payload; the
+ *   (b) buyer: a tampered keeper order is refused by the route and not offered; then fill 2 of 23
+ *       from /vault/nvda/cycle through the route's verified copy of the keeper's /orders; the
  *       writer leg lands on the vault; then 3 more from the raw payload.
  *   (c) depositor: queue 10 shares while the vault is Listed.
  *   (d) warp to exercise and expiry, keeper ticks lockBook and rollClose; the depositor
@@ -91,8 +95,10 @@ import {
   USDG,
   ZERO_CONDUIT_KEY,
 } from "../../lib/contracts";
+import type { KeeperOrderBook, OvercallListing } from "../../lib/api";
 import { fmtAsset, fmtUsdg, fmtUtcDate, premiumPerShare, shortAddress, splitPremium } from "../../lib/format";
-import { checkListingIsOurs, isOvercallListing, type OvercallListing } from "../../lib/overcall";
+import { KEEPER_REASONS, componentsStruct, seaportOrderHash } from "../../lib/keeperOrders";
+import { REASONS, checkListingIsOurs } from "../../lib/overcall";
 import type { CycleRow, ListingRow } from "../../../keeper/src/state.js";
 
 /*//////////////////////////////////////////////////////////////
@@ -150,6 +156,10 @@ const KEEPER_PK = keccak256(toHex("callhouse-w13:keeper"));
 const KEEPER = privateKeyToAccount(KEEPER_PK);
 const ADMIN = operator("admin");
 const FEE_SAFE = operator("fee-safe");
+/** Where the tampered keeper order sends the vault's premium. Never funded, never signs. */
+const ATTACKER = operator("attacker");
+/** Seaport's counter for the vault during the run. Non-zero, so the counter restore is observable. */
+const SEAPORT_COUNTER = 7n;
 const DEPOSITOR = privateKeyToAccount(generatePrivateKey());
 const BUYER = privateKeyToAccount(generatePrivateKey());
 
@@ -282,6 +292,23 @@ async function deal(token: Address, holder: Address, amount: bigint): Promise<vo
     await rpc("anvil_setStorageAt", [token, slot, previous]);
   }
   throw new Error(`could not find the balances slot of ${token}`);
+}
+
+/**
+ * Write Seaport's counter for an offerer (`mapping(address => uint256) _counters`), probing for
+ * the mapping's slot the way `deal` probes a token's, and restoring each wrong guess. Done before
+ * the keeper lists, so the keeper reads it, Seaport's validate() inside approveListing hashes with
+ * it, and everything after is consistent with a vault whose counter is not zero.
+ */
+async function setSeaportCounter(offerer: Address, counter: bigint): Promise<void> {
+  for (let base = 0n; base < 64n; base += 1n) {
+    const slot = keccak256(encodeAbiParameters([{ type: "address" }, { type: "uint256" }], [offerer, base]));
+    const previous = await rpc<Hex>("eth_getStorageAt", [SEAPORT, slot, "latest"]);
+    await rpc("anvil_setStorageAt", [SEAPORT, slot, pad(toHex(counter), { size: 32 })]);
+    if ((await read<bigint>(SEAPORT, seaportAbi, "getCounter", [offerer])) === counter) return;
+    await rpc("anvil_setStorageAt", [SEAPORT, slot, previous]);
+  }
+  throw new Error("could not find Seaport's counters slot");
 }
 
 /*//////////////////////////////////////////////////////////////
@@ -475,49 +502,32 @@ async function getJson<T>(url: string): Promise<T> {
   return (await response.json()) as T;
 }
 
+/** What the web app's GET /api/keeper/orders answers (app/api/keeper/orders/route.ts). */
+type KeeperRouteBody = {
+  configured: boolean;
+  orders: OvercallListing[];
+  rejected: KeeperOrderBook["rejected"];
+  error?: string;
+};
+
 /**
- * The relay from the keeper's GET /orders to the row shape the web proxy and OrderPayload read.
- *
- * The only thing it has to ADD is `counter`: /orders serves OrderParameters, which carry
- * totalOriginalConsiderationItems in place of the counter, while the page's shape gate
- * (isOrderComponents) and Seaport's order hash need OrderComponents. The counter is read from
- * Seaport for the offerer. Everything else is copied, and the hash of the rebuilt components is
- * checked against Seaport's own getOrderHash before the row is served, so the relay cannot
- * quietly serve a different order.
+ * GET the web app's keeper fallback route until `until` holds. The route shares an answer for two
+ * seconds, so a change on the keeper side reaches it within that window, not instantly.
  */
-async function bookRowsFromKeeperOrders(keeperUrl: string): Promise<OvercallListing[]> {
-  const { orders } = await getJson<{ orders: KeeperOrder[] }>(`${keeperUrl}/orders`);
-  const rows: OvercallListing[] = [];
-  for (const order of orders) {
-    const { totalOriginalConsiderationItems, ...parameters } = order.parameters;
-    assertEq(totalOriginalConsiderationItems, String(parameters.consideration.length), "/orders totalOriginalConsiderationItems");
-    const offerer = getAddress(parameters.offerer);
-    const counter = await read<bigint>(SEAPORT, seaportAbi, "getCounter", [offerer]);
-    const components = { ...parameters, counter: counter.toString() };
-    const [, , totalFilled, totalSize] = await read<readonly [boolean, boolean, bigint, bigint]>(SEAPORT, seaportAbi, "getOrderStatus", [order.orderHash]);
-    const total = BigInt(parameters.offer[0]?.startAmount ?? "0");
-    const filled = totalSize === 0n ? 0n : (totalFilled * total) / totalSize;
-    const row: OvercallListing = {
-      orderHash: order.orderHash,
-      chainId: order.chainId,
-      offerer,
-      optionId: order.optionId,
-      quantity: total.toString(),
-      remaining: (total - filled).toString(),
-      unitPrice6: order.unitPrice6,
-      totalPrice6: order.grossUsdg6,
-      startTime: parameters.startTime,
-      endTime: parameters.endTime,
-      salt: parameters.salt,
-      counter: counter.toString(),
-      status: filled === 0n ? "open" : filled < total ? "partial" : "filled",
-      signature: order.signature,
-      components,
-    };
-    assert(isOvercallListing(row), "the relayed row passes the web proxy's shape gate (isOvercallListing)");
-    rows.push(row);
+async function keeperRoute(webUrl: string, label: string, until: (body: KeeperRouteBody, status: number) => boolean): Promise<KeeperRouteBody> {
+  const deadline = Date.now() + 20_000;
+  let last = "";
+  while (Date.now() < deadline) {
+    const response = await fetch(`${webUrl}/api/keeper/orders`, { headers: { accept: "application/json" } });
+    const body = (await response.json()) as KeeperRouteBody;
+    last = `${response.status} ${JSON.stringify(body)}`;
+    if (until(body, response.status)) {
+      record.pages.push(`${label}: /api/keeper/orders ${response.status}`);
+      return body;
+    }
+    await sleep(500);
   }
-  return rows;
+  throw new Error(`ASSERTION FAILED (${currentStep}): ${label}: /api/keeper/orders never matched; last answer ${last}`);
 }
 
 /*//////////////////////////////////////////////////////////////
@@ -917,15 +927,13 @@ async function main(): Promise<void> {
 
     const keeperPort = await freePort();
     const keeperUrl = `http://127.0.0.1:${keeperPort}`;
-    let bookMode: "overcall-rejected" | "keeper-relay" = "overcall-rejected";
-    const webBook = await listen(async (req, res) => {
+    // The book as the web proxy sees it when Overcall has refused the listing: no row for the
+    // vault, for the whole run. The page's fill comes from the keeper route, not from here.
+    const webBook = await listen((req, res) => {
       const url = new URL(req.url ?? "/", "http://book");
-      record.stubRequests.push(`web proxy (${bookMode}) -> ${req.method ?? "GET"} ${url.pathname}${url.search}`);
+      record.stubRequests.push(`web proxy -> ${req.method ?? "GET"} ${url.pathname}${url.search}`);
       if (req.method !== "GET" || url.pathname !== "/api/orders") return reply(res, 404, { error: "not found" });
-      if (bookMode === "overcall-rejected") return reply(res, 200, { listings: [] });
-      const offerer = url.searchParams.get("offerer")?.toLowerCase();
-      const rows = (await bookRowsFromKeeperOrders(keeperUrl)).filter((row) => row.offerer?.toLowerCase() === offerer);
-      return reply(res, 200, { listings: rows });
+      return reply(res, 200, { listings: [] });
     });
     cleanups.push(() => void webBook.server.close());
 
@@ -949,9 +957,12 @@ async function main(): Promise<void> {
         NEXT_PUBLIC_API_URL: unreachableIndexer,
         NEXT_PUBLIC_APP_URL: "http://127.0.0.1",
       };
-      Object.assign(record.web, publicEnv, { OVERCALL_API_BASE: webBook.url });
+      // Runtime server variables: the proxy's upstream, and the keeper's real HTTP server (started
+      // below, on the port chosen above) for the fallback route.
+      const serverEnv = { OVERCALL_API_BASE: webBook.url, KEEPER_ORDERS_URL: `${keeperUrl}/orders` };
+      Object.assign(record.web, publicEnv, serverEnv);
       const nextBin = join(WEB_DIR, "node_modules", ".bin", "next");
-      const env = webEnv({ ...publicEnv, OVERCALL_API_BASE: webBook.url });
+      const env = webEnv({ ...publicEnv, ...serverEnv });
       const t0 = Date.now();
       await runToEnd("next build", nextBin, ["build"], env, join(OUT, "next-build.log"));
       note(`next build ok in ${((Date.now() - t0) / 1000).toFixed(0)}s`);
@@ -1098,6 +1109,8 @@ async function main(): Promise<void> {
     /* ---------- the keeper writes and lists; Overcall rejects ---------- */
 
     const listed = await step("keeper tick: rollOpen + approveListing; Overcall's book rejects the POST; /orders serves the order", async () => {
+      await setSeaportCounter(vault, SEAPORT_COUNTER);
+      note(`Seaport getCounter(vault) = ${SEAPORT_COUNTER} before the keeper lists`);
       await roll.tick();
       assertEq(await read<number>(vault, vaultAbi, "phase"), roll.Phase.Listed, "vault phase after the tick");
       const cycle = store.getCycle(1);
@@ -1106,6 +1119,7 @@ async function main(): Promise<void> {
       assertEq(rows.length, 1, "one listing row");
       const row = rows[0] as ListingRow;
       assertEq(row.status, "post_failed", "the keeper recorded the book's refusal");
+      assertEq(row.counter, SEAPORT_COUNTER.toString(), "the keeper built the order with Seaport's live counter");
       assert(stubRequests.some((r) => r.startsWith("POST /api/orders")), "the keeper did POST to the book");
       assert(alerts.some((a) => a.kind === "api_reject" && a.message.includes("/orders")), "api_reject alert names the /orders fallback");
       assertEq(cycle.option_id, series.ids[0]?.toString() ?? "", "wrote the nearest in-band rung");
@@ -1143,31 +1157,87 @@ async function main(): Promise<void> {
       return { order, contracts, split, strike: BigInt(cycle.strike_usdg6 ?? "0") };
     });
 
-    /* ---------- (b) the fill from the keeper's /orders ---------- */
+    /* ---------- (b) the fill from the keeper's /orders, through the web app's own route ---------- */
 
-    await step("(b) cycle page with Overcall's book empty of our row: it says so and offers no fill", async () => {
-      const page = buyerPage;
-      await page.goto(`${web.url}/vault/nvda/cycle`);
-      const onChain = card(page, exactly("Our listing, on chain"));
-      await expectText("cycle: Seaport order hash", rowValue(onChain, /^Seaport order hash$/), listed.order.orderHash);
-      await expectText("cycle: Contracts listed", rowValue(onChain, /^Contracts listed$/), listed.contracts.toString());
-      await expectText("cycle: Seaport validated", rowValue(onChain, /^Seaport validated$/), "validated");
-      await expectText(
-        "cycle: book notice",
-        page.locator(".notice strong", { hasText: "Overcall's book has no listing matching" }),
-        "Overcall's book has no listing matching the vault's current order hash.",
-      );
-      await expectAbsent("cycle: a fillable order card", card(page, /^Signed order · fill from here$/));
+    await step("(b) tamper: the keeper serves the order with its premium leg redirected; the route rejects it and the cycle page offers no fill", async () => {
+      const row = store.getListing(listed.order.orderHash);
+      assert(row !== null, "keeper listing row");
+      const original = row.components_json;
+      const tampered = JSON.parse(original) as { consideration: Array<{ recipient: string }> };
+      assert(tampered.consideration[0] !== undefined, "the stored order has a premium leg");
+      tampered.consideration[0].recipient = ATTACKER.address;
+      store.db.prepare("UPDATE listings SET components_json = ? WHERE order_hash = ?").run(JSON.stringify(tampered), row.order_hash);
+      try {
+        // The keeper's real HTTP server now serves the redirected leg under the authorised hash.
+        const { orders } = await getJson<{ orders: KeeperOrder[] }>(`${keeperUrl}/orders`);
+        assertEq(orders.length, 1, "the keeper serves one order");
+        const served = orders[0] as KeeperOrder;
+        assertEq(getAddress(served.parameters.consideration[0]?.recipient ?? ""), ATTACKER.address, "keeper /orders serves the tampered premium recipient");
+        assertEq(served.orderHash.toLowerCase(), listed.order.orderHash.toLowerCase(), "keeper /orders still names the authorised hash");
+
+        const body = await keeperRoute(web.url, "tampered", (b, status) => status === 200 && b.rejected.length > 0);
+        assertEq(body.configured, true, "route: configured");
+        assertEq(body.orders.length, 0, "route: the tampered order is not served as fillable");
+        assertEq(body.rejected.length, 1, "route: one rejected order");
+        const rejected = body.rejected[0] as KeeperRouteBody["rejected"][number];
+        assertEq((rejected.orderHash ?? "").toLowerCase(), listed.order.orderHash.toLowerCase(), "route: the rejection names the keeper's claimed hash");
+        for (const reason of [KEEPER_REASONS.claimedHash, REASONS.hashMismatch, REASONS.writerRecipient]) {
+          assert(rejected.reasons.includes(reason), `route rejection reasons include "${reason}" (got ${JSON.stringify(rejected.reasons)})`);
+        }
+        note(`route rejected the tampered order: ${rejected.reasons.join(" | ")}`);
+
+        const page = buyerPage;
+        await page.goto(`${web.url}/vault/nvda/cycle`);
+        const onChain = card(page, exactly("Our listing, on chain"));
+        await expectText("cycle: Seaport order hash", rowValue(onChain, /^Seaport order hash$/), listed.order.orderHash);
+        await expectText("cycle: Contracts listed", rowValue(onChain, /^Contracts listed$/), listed.contracts.toString());
+        await expectText("cycle: Seaport validated", rowValue(onChain, /^Seaport validated$/), "validated");
+        await expectText(
+          "cycle: book notice",
+          page.locator(".notice strong", { hasText: "Overcall's book has no listing matching" }),
+          "Overcall's book has no listing matching the vault's current order hash.",
+        );
+        await expectText(
+          "cycle: keeper rejection notice",
+          page.locator(".notice strong", { hasText: "The vault's keeper served" }),
+          "The vault's keeper served an order that did not check out against the chain, so nothing from the keeper is offered here.",
+        );
+        await expectText(
+          "cycle: keeper rejection names the redirected premium leg",
+          page.locator(".notice", { hasText: "The vault's keeper served" }).locator("li").first(),
+          new RegExp(REASONS.writerRecipient.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")),
+        );
+        await expectAbsent("cycle: a fillable order card", card(page, /^Signed order · fill from here$/));
+        await expectAbsent("cycle: a keeper order card", card(page, /^Order from the vault's keeper/));
+        await expectAbsent("cycle: a contracts input", page.locator("#fill-qty"));
+      } finally {
+        store.db.prepare("UPDATE listings SET components_json = ? WHERE order_hash = ?").run(original, row.order_hash);
+      }
+      const { orders } = await getJson<{ orders: KeeperOrder[] }>(`${keeperUrl}/orders`);
+      assertEq(getAddress(orders[0]?.parameters.consideration[0]?.recipient ?? ""), vault, "keeper row restored: the premium leg pays the vault again");
     });
 
-    const pageFill = await step("(b) the keeper's /orders payload relayed to the cycle page: verified, then 2 contracts filled from the page", async () => {
-      const rows = await bookRowsFromKeeperOrders(keeperUrl);
-      assertEq(rows.length, 1, "one relayed row");
-      const row = rows[0] as OvercallListing;
-      // The relay is lossless: Seaport hashes the rebuilt components to the authorised hash.
+    const pageFill = await step("(b) the route serves the keeper's order with Seaport's counter restored; the cycle page labels it and fills 2 contracts", async () => {
+      const body = await keeperRoute(web.url, "restored", (b, status) => status === 200 && b.orders.length === 1);
+      assertEq(body.rejected.length, 0, "route: nothing rejected");
+      const row = body.orders[0] as OvercallListing;
+      assertEq(row.orderHash.toLowerCase(), listed.order.orderHash.toLowerCase(), "route row carries the authorised hash");
+      // The counter is the chain's, not a default: it is non-zero on this run.
+      const counter = await read<bigint>(SEAPORT, seaportAbi, "getCounter", [vault]);
+      assertEq(counter, SEAPORT_COUNTER, "Seaport getCounter(vault)");
+      assertEq(row.components.counter, counter.toString(), "route restored components.counter from Seaport");
+      assertEq(row.counter, counter.toString(), "route row counter");
+      // Seaport hashes the route's components to the authorised hash, and so does the web lib.
       const onChainHash = await read<Hex>(SEAPORT, seaportAbi, "getOrderHash", [seaport.componentsFromJson(row.components as never)]);
-      assertEq(onChainHash.toLowerCase(), listed.order.orderHash.toLowerCase(), "seaport.getOrderHash(relayed components) = the vault's listingHash");
+      assertEq(onChainHash.toLowerCase(), listed.order.orderHash.toLowerCase(), "seaport.getOrderHash(route components) = the vault's listingHash");
+      assertEq(seaportOrderHash(componentsStruct(row.components)).toLowerCase(), onChainHash.toLowerCase(), "web lib seaportOrderHash agrees with Seaport");
       assertEq(seaport.localOrderHash(seaport.componentsFromJson(row.components as never)).toLowerCase(), onChainHash.toLowerCase(), "the keeper's local EIP-712 hash agrees");
+      // Nothing the keeper served beyond parameters and signature is passed through.
+      for (const key of ["seaport", "contracts", "grossUsdg6", "bookStatus", "parameters"]) {
+        assert(!(key in (row as Record<string, unknown>)), `route row does not carry the keeper's "${key}"`);
+      }
+      assertEq(row.status, "open", "route row status from Seaport's fill fraction");
+      assertEq(row.remaining, listed.contracts.toString(), "route row remaining");
       // The same check the page runs, from web/lib/overcall.ts, against the vault's own slots.
       const check = checkListingIsOurs(
         row,
@@ -1184,7 +1254,7 @@ async function main(): Promise<void> {
         },
         Math.floor(Date.now() / 1000),
       );
-      assert(check.ok, `checkListingIsOurs on the relayed row: ${check.ok ? "" : check.reasons.join("; ")}`);
+      assert(check.ok, `checkListingIsOurs on the route's row: ${check.ok ? "" : check.reasons.join("; ")}`);
 
       const cost = listed.split.unitPrice6 * FILL_FROM_PAGE;
       const usdgForBoth = listed.split.unitPrice6 * (FILL_FROM_PAGE + FILL_FROM_RAW_PAYLOAD);
@@ -1196,11 +1266,22 @@ async function main(): Promise<void> {
         buyer: await erc20Balance(USDG, BUYER.address),
       };
 
-      bookMode = "keeper-relay";
       const page = buyerPage;
       await page.reload();
       const orderCard = card(page, /^Signed order · fill from here$/);
       await expectText("fill card: title", orderCard.locator(".card-title"), "Signed order · fill from here");
+      await expectText(
+        "fill card: source label",
+        orderCard.locator(".notice strong").first(),
+        "Listed directly by the vault's keeper; Overcall's book is not showing it.",
+      );
+      await expectText("fill card: source and status", orderCard.locator(".card-head .mono"), "keeper · status open");
+      await expectText(
+        "cycle: book notice points at the keeper's order",
+        page.locator(".notice", { hasText: "Overcall's book has no listing matching" }),
+        /The vault's keeper is serving that order directly, and it is below, checked against the chain\.$/,
+      );
+      await expectAbsent("cycle: keeper rejection notice", page.locator(".notice", { hasText: "The vault's keeper served" }));
       await expectText("fill card: Contracts", rowValue(orderCard, /^Contracts$/), `${listed.contracts} left of ${listed.contracts}`);
       await expectText("fill card: Unit price", rowValue(orderCard, /^Unit price$/), `${fmtUsdg(listed.split.unitPrice6)} USDG per contract`);
       await connectWallet(page, BUYER.address);
@@ -1266,7 +1347,7 @@ async function main(): Promise<void> {
         conduitKey: p.conduitKey as Hex,
         totalOriginalConsiderationItems: BigInt(p.totalOriginalConsiderationItems),
       };
-      // The page rebuilt OrderParameters from the relayed components; a raw client takes them
+      // The page rebuilt OrderParameters from the route's components; a raw client takes them
       // from /orders as served. They must be the same struct, field for field.
       assertEq(jsonish(pageFill.parameters), jsonish(parameters), "the parameters the page sent = the /orders parameters as served");
       const cost = listed.split.unitPrice6 * FILL_FROM_RAW_PAYLOAD;

@@ -548,3 +548,50 @@ export async function fetchOvercallBook(params: {
     return { listings: [], error: err instanceof Error ? err.message : "unreachable" };
   }
 }
+
+/* ------------------------------------------------------------------- the keeper fallback */
+
+export type KeeperOrderBook = {
+  /** False when this deployment has no KEEPER_ORDERS_URL. The page then shows no fallback at all. */
+  configured: boolean;
+  /** Orders the server checked against the chain, as book rows. Still re-checked by OrderPayload. */
+  listings: OvercallListing[];
+  /** Orders the keeper served that did not pass, with the server's reasons. Never fillable. */
+  rejected: Array<{ orderHash: Hex | null; reasons: string[] }>;
+  error?: string;
+};
+
+/**
+ * Read the vault's listing as the keeper serves it, through app/api/keeper/orders, which checks
+ * every order against the chain before returning it (lib/keeperOrders.ts). The cycle page calls
+ * this only when Overcall's book has no verified listing for the vault.
+ *
+ * A 503 with `configured: false` is the "not set up here" answer, not an error. Every other
+ * failure is reported as `error` in the route's own words.
+ */
+export async function fetchKeeperOrderBook(): Promise<KeeperOrderBook> {
+  try {
+    const res = await fetch("/api/keeper/orders", {
+      headers: { accept: "application/json" },
+      cache: "no-store",
+      signal: AbortSignal.timeout(15_000),
+    });
+    const payload = asRecord(await res.json().catch(() => ({})));
+    const configured = payload.configured !== false;
+    const listings = Array.isArray(payload.orders) ? (payload.orders as OvercallListing[]) : [];
+    const rejected = Array.isArray(payload.rejected)
+      ? (payload.rejected as unknown[]).map((r) => {
+          const row = asRecord(r);
+          return {
+            orderHash: toHex(row.orderHash) ?? null,
+            reasons: Array.isArray(row.reasons) ? row.reasons.filter((x): x is string => typeof x === "string") : [],
+          };
+        })
+      : [];
+    const error =
+      typeof payload.error === "string" ? payload.error : res.ok ? undefined : `The fallback route answered HTTP ${res.status}.`;
+    return { configured, listings: res.ok ? listings : [], rejected, error };
+  } catch (err) {
+    return { configured: true, listings: [], rejected: [], error: err instanceof Error ? err.message : "unreachable" };
+  }
+}
