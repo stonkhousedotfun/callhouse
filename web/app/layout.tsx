@@ -5,7 +5,7 @@ import Link from "next/link";
 
 import { EXPLORER_URL, addressUrl } from "@/lib/chain";
 import { MARKET, SHARE_TICKER, VAULT } from "@/lib/contracts";
-import { APP_URL, PRIVACY_URL, SITE_URL, TERMS_URL } from "@/lib/site";
+import { APP_URL, DOCS_URL, PRIVACY_URL, SITE_URL, TERMS_URL } from "@/lib/site";
 import { Providers } from "./providers";
 import "./globals.css";
 
@@ -89,6 +89,10 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
                 ·{" "}
                 <a href={EXPLORER_URL} target="_blank" rel="noreferrer noopener">
                   Explorer ↗
+                </a>{" "}
+                ·{" "}
+                <a href={DOCS_URL} target="_blank" rel="noreferrer noopener">
+                  docs.callhouse.finance ↗
                 </a>{" "}
                 ·{" "}
                 <a href={SITE_URL} target="_blank" rel="noreferrer noopener">

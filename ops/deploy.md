@@ -137,6 +137,7 @@ to it identically.
 | `NEXT_PUBLIC_VAULT_FROM_BLOCK` | the vault's deploy block | Falls back to `0`. Only makes `/activity`'s fallback scan cheaper |
 | `NEXT_PUBLIC_SITE_URL` | `https://callhouse.finance` | ARG default, same value |
 | `NEXT_PUBLIC_APP_URL` | `https://app.callhouse.finance` | ARG default, same value. Used as `metadataBase` |
+| `NEXT_PUBLIC_DOCS_URL` | `https://docs.callhouse.finance` | ARG default, same value. Footer link to the GitBook docs |
 
 The five address variables are left blank on purpose. `lib/contracts.ts` owns those values,
 `ops/addresses.json` carries the evidence for each one, and a second copy in the Railway UI is a

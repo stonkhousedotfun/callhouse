@@ -24,6 +24,9 @@ function clean(value: string | undefined, fallback: string): string {
 /** Marketing site. Landing, /how-it-works, /risks, /legal, /terms, /privacy. Canonical for the disclosures. */
 export const SITE_URL = clean(process.env.NEXT_PUBLIC_SITE_URL, "https://callhouse.finance");
 
+/** The full documentation (GitBook, synced from leekzor/callhouse-docs). Linked from the footer. */
+export const DOCS_URL = clean(process.env.NEXT_PUBLIC_DOCS_URL, "https://docs.callhouse.finance");
+
 /** This app. Used as the metadata base; the dapp is reached by link from SITE_URL. */
 export const APP_URL = clean(process.env.NEXT_PUBLIC_APP_URL, "https://app.callhouse.finance");
 

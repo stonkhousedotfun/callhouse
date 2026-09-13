@@ -132,6 +132,8 @@ ENV NEXT_PUBLIC_VAULT_FROM_BLOCK=$NEXT_PUBLIC_VAULT_FROM_BLOCK
 #      site. Never for chain access (lib/site.ts says so). ----
 ARG NEXT_PUBLIC_SITE_URL="https://callhouse.finance"
 ENV NEXT_PUBLIC_SITE_URL=$NEXT_PUBLIC_SITE_URL
+ARG NEXT_PUBLIC_DOCS_URL="https://docs.callhouse.finance"
+ENV NEXT_PUBLIC_DOCS_URL=$NEXT_PUBLIC_DOCS_URL
 ARG NEXT_PUBLIC_APP_URL="https://app.callhouse.finance"
 ENV NEXT_PUBLIC_APP_URL=$NEXT_PUBLIC_APP_URL
 
