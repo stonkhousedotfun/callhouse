@@ -174,7 +174,12 @@ export default function VaultPage() {
                   {lastPerShare === undefined ? "—" : fmtUsdg(lastPerShare, 6)}
                 </div>
                 <div className="stat-sub">
-                  {last.filled ? "a buyer filled the listing" : "unfilled, 0"} ·{" "}
+                  {last.filled
+                    ? "a buyer filled the listing"
+                    : lastWasAssigned
+                      ? `unfilled, assigned ${(last.contractsAssigned ?? 0n).toString()}`
+                      : "unfilled, 0"}{" "}
+                  ·{" "}
                   {fmtUtcDate(last.closedAt)}
                 </div>
               </div>

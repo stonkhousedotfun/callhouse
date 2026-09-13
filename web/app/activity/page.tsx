@@ -56,7 +56,8 @@ export default function ActivityPage() {
         <h1>Every week, including the zeros</h1>
         <p className="lede">
           One row per cycle. Filled weeks show what actually landed; weeks where nobody bought the
-          call show <strong>unfilled, 0</strong>. No week is ever extrapolated to a longer period.
+          call show <strong>unfilled, 0</strong>, or <strong>unfilled, assigned</strong> when Valorem
+          assigned the vault&apos;s contracts anyway. No week is ever extrapolated to a longer period.
         </p>
       </div>
 
@@ -151,16 +152,20 @@ export default function ActivityPage() {
                   const result = !row.settled
                     ? "open"
                     : !row.filled
-                      ? "unfilled, 0"
+                      ? assigned > 0n
+                        ? `unfilled, assigned ${assigned.toString()}`
+                        : "unfilled, 0"
                       : assigned > 0n
                         ? `assigned ${assigned.toString()}`
                         : "filled";
                   const resultLong = !row.settled
                     ? "the week is still running"
                     : !row.filled
-                      ? "nobody bought the call; the week earned nothing"
+                      ? assigned > 0n
+                        ? `nobody bought the vault's call, so it earned no premium, but Valorem assigned ${assigned.toString()} of its contracts (assignment is spread across every writer of the series); that collateral left at the strike and came back as the strike proceeds`
+                        : "nobody bought the call; the week earned nothing"
                       : assigned > 0n
-                        ? `${assigned.toString()} contracts were exercised; that collateral left at the strike and came back as the strike proceeds`
+                        ? `${assigned.toString()} contracts were assigned to the vault; that collateral left at the strike and came back as the strike proceeds`
                         : "a buyer filled the listing and the call expired out of the money";
                   return (
                     <tr key={row.cycle}>

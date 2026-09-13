@@ -220,7 +220,9 @@ export default function HomePage() {
                       ? (last.contractsAssigned ?? 0n) > 0n
                         ? `assigned ${(last.contractsAssigned ?? 0n).toString()}`
                         : "filled, expired worthless"
-                      : "unfilled, 0"}
+                      : (last.contractsAssigned ?? 0n) > 0n
+                        ? `unfilled, assigned ${(last.contractsAssigned ?? 0n).toString()}`
+                        : "unfilled, 0"}
                   </span>
                 </div>
               </div>
