@@ -1,10 +1,10 @@
 # web
 
-`app.callhouse.xyz` — the Callhouse dapp. Next.js App Router, React 19, wagmi 3, viem. No custody,
+`app.callhouse.finance` — the Callhouse dapp. Next.js App Router, React 19, wagmi 3, viem. No custody,
 no private keys, no server-side signing.
 
 The marketing landing is a separate repository, `leekzor/callhouse-site`, served at
-`callhouse.xyz`. It carries no wallet code at all and it is not a copy of anything here; the two
+`callhouse.finance`. It carries no wallet code at all and it is not a copy of anything here; the two
 domains share a palette, nothing else at runtime.
 
 **This package is `noindex`.** That is deliberate: the disclosures should have one canonical
@@ -70,7 +70,7 @@ copied verbatim into `app/globals.css` in `leekzor/callhouse-site`. It is duplic
 imported because the landing has to build and deploy with no dependency on this package: two
 Railway services, two containers, two repositories. **Change a token in one and change it in the
 other in paired commits to both repos.** Otherwise the two domains drift and a reader sees the
-seam on the click through from `callhouse.xyz`.
+seam on the click through from `callhouse.finance`.
 
 ## Environment
 
@@ -79,8 +79,8 @@ authoritative list and the root `../.env.example` carries the shared defaults. A
 `NEXT_PUBLIC_VAULT` points the whole UI at a different contract, so treat the build env as
 production configuration and check it against `../ops/addresses.json`.
 
-`NEXT_PUBLIC_SITE_URL` (`https://callhouse.xyz`) and `NEXT_PUBLIC_APP_URL`
-(`https://app.callhouse.xyz`) are the two domains, read only by `lib/site.ts`. `APP_URL` is Next's
+`NEXT_PUBLIC_SITE_URL` (`https://callhouse.finance`) and `NEXT_PUBLIC_APP_URL`
+(`https://app.callhouse.finance`) are the two domains, read only by `lib/site.ts`. `APP_URL` is Next's
 `metadataBase`; `SITE_URL` is where this app links back to. Neither is ever used to reach a node —
 RPCs and addresses live in `lib/chain.ts` and `lib/contracts.ts`. Both have the production values
 compiled in as defaults, so a missing variable cannot produce a link to `undefined`; override them

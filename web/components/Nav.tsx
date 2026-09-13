@@ -4,7 +4,7 @@
  * Site chrome. The link order is the depositor's journey: land on the vault, deposit, watch the
  * cycle, audit the tape, then read the docs and the legal text.
  *
- * One link leaves the app entirely: callhouse.xyz, the marketing site. It is LAST, and it is
+ * One link leaves the app entirely: callhouse.finance, the marketing site. It is LAST, and it is
  * deliberately not part of LINKS — it is a plain <a>, not next/link, because next/link is for
  * routes this app owns and prefetching another origin is meaningless. It is also never
  * "active": there is no pathname in this app that corresponds to it, so the exact-match test
@@ -31,7 +31,7 @@ export function Nav() {
     <header className="topbar">
       <div className="topbar-inner">
         {/* The brand still points at "/". Inside the app, home is the vault — not the
-            marketing site. Someone who wants callhouse.xyz uses the last nav link. */}
+            marketing site. Someone who wants callhouse.finance uses the last nav link. */}
         <Link href="/" className="brand">
           call<span>house</span>
         </Link>
@@ -63,7 +63,7 @@ export function Nav() {
               borderRadius: 0,
             }}
           >
-            callhouse.xyz ↗
+            callhouse.finance ↗
           </a>
         </nav>
         <ConnectButton />

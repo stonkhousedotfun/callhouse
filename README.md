@@ -40,12 +40,12 @@ That is the whole app.
 
 ## Domains
 
-Two frontends, two domains, two repositories. `callhouse.xyz` is the public landing: static, no wallet code, no chain reads, indexed. `app.callhouse.xyz` is the dapp, `noindex`, reached by link from the landing. Each is a separate Railway service: the dapp deploys from this repository (runbook: [`ops/deploy.md`](ops/deploy.md)), the landing from `leekzor/callhouse-site` (runbook: that repository's README).
+Two frontends, two domains, two repositories. `callhouse.finance` is the public landing: static, no wallet code, no chain reads, indexed. `app.callhouse.finance` is the dapp, `noindex`, reached by link from the landing. Each is a separate Railway service: the dapp deploys from this repository (runbook: [`ops/deploy.md`](ops/deploy.md)), the landing from `leekzor/callhouse-site` (runbook: that repository's README).
 
 | Domain | Code | What it is |
 |---|---|---|
-| `callhouse.xyz` | `leekzor/callhouse-site` | explains the product. No wallet, no live numbers. Indexed |
-| `app.callhouse.xyz` | `/web` (this repo) | deposit, cycle tape, claim USDG. Noindex, reached by link |
+| `callhouse.finance` | `leekzor/callhouse-site` | explains the product. No wallet, no live numbers. Indexed |
+| `app.callhouse.finance` | `/web` (this repo) | deposit, cycle tape, claim USDG. Noindex, reached by link |
 
 ---
 
@@ -57,7 +57,7 @@ Callhouse is three private repositories, split out of one on 2026-09-13:
 |---|---|
 | `leekzor/callhouse` (this one) | the app: `web/`, `keeper/`, `indexer/`, `ops/`, `docs/ARCHITECTURE.md`, `docs/WIRING.md`, the spec, plan and task list. Railway `web` and `keeper` (and later `indexer`) deploy from here |
 | `leekzor/callhouse-contracts` | the Foundry project, plus `docs/AUDIT-SCOPE.md`, `docs/ACCOUNTING.md` and `SECURITY.md` (the full threat model and the 2026-09-12 review). Solidity CI runs there |
-| `leekzor/callhouse-site` | the marketing landing at `callhouse.xyz`: its own Dockerfile, `railway.json`, lockfile, copy-lint twin, and the Railway + apex DNS notes in its README |
+| `leekzor/callhouse-site` | the marketing landing at `callhouse.finance`: its own Dockerfile, `railway.json`, lockfile, copy-lint twin, and the Railway + apex DNS notes in its README |
 
 The contracts repository is mounted here as a git submodule at `contracts/`, so every `contracts/...` path in these docs resolves inside a full checkout. Clone with it:
 
@@ -104,12 +104,12 @@ Lot size is 1.0000 Stock Token per contract. USDG has 6 decimals. Stock Tokens h
 /contracts    git submodule → leekzor/callhouse-contracts. Foundry — Vault, Policy, Valorem + Seaport adapters, Distributor
 /keeper       Node 22 — weekly roll state machine
 /indexer      Ponder — vault / Valorem / Seaport / registry events
-/web          Next.js — the dapp at app.callhouse.xyz: deposit, cycle tape, claim USDG
+/web          Next.js — the dapp at app.callhouse.finance: deposit, cycle tape, claim USDG
 /ops          runbooks, ABIs, Safe addresses, on-chain recon evidence
 /docs         architecture and runtime wiring references
 ```
 
-The landing at `callhouse.xyz` is not in this tree; it is `leekzor/callhouse-site`.
+The landing at `callhouse.finance` is not in this tree; it is `leekzor/callhouse-site`.
 
 | Read this | For |
 |---|---|
@@ -214,13 +214,13 @@ pnpm --filter @callhouse/keeper dev
 # indexer
 pnpm --filter @callhouse/indexer dev
 
-# web — the dapp, app.callhouse.xyz
+# web — the dapp, app.callhouse.finance
 pnpm --filter @callhouse/web dev
 ```
 
 The two frontends run side by side: web on port 3000 from this checkout, the landing on 3001 from
 a checkout of `leekzor/callhouse-site`. Nothing is shared between them at runtime, so a CTA on the
-landing is an absolute link to `app.callhouse.xyz`, not a route.
+landing is an absolute link to `app.callhouse.finance`, not a route.
 
 `SeaportOrderLib` and `ValoremLib` are linked public libraries: without them the vault exceeds
 the 24 KB runtime limit. Foundry deploys and links them automatically in tests and scripts.
@@ -274,7 +274,7 @@ Not allowed on the marketing surface: APY, “10% weekly,” projected yield, �
 
 Required disclosures: Stock Token legal form, assignment, empty-book weeks, geographic restrictions.
 
-`scripts/copy-lint.mjs` enforces both lists on **both** frontends — `web/` here, and the landing through its twin copy in `leekzor/callhouse-site` — with no per-package exemption, and it fails CI in each repository. The forbidden list must stay identical in both copies: change it in paired commits to both repos. The landing at `callhouse.xyz` is the surface these rules were written for: it is the page a stranger reads before they have connected anything, so the rules are tighter there, not looser.
+`scripts/copy-lint.mjs` enforces both lists on **both** frontends — `web/` here, and the landing through its twin copy in `leekzor/callhouse-site` — with no per-package exemption, and it fails CI in each repository. The forbidden list must stay identical in both copies: change it in paired commits to both repos. The landing at `callhouse.finance` is the surface these rules were written for: it is the page a stranger reads before they have connected anything, so the rules are tighter there, not looser.
 
 ---
 

@@ -53,11 +53,11 @@ placeholder.
 
 | Thing | State | Where |
 |---|---|---|
-| Terms of Use | adopted v1-2026-09-13 by owner decision, no counsel; gap sentences still render | `callhouse.xyz/terms` |
-| Privacy notice | adopted v1-2026-09-13, same basis | `callhouse.xyz/privacy` |
-| Perimeter disclosure | live since before this runbook; now links the terms instead of "the terms you accept here" | `callhouse.xyz/legal`, `app.callhouse.xyz/legal` |
-| Vulnerability reporting | section exists, address unset | `callhouse.xyz/legal#reporting` |
-| `security.txt` | route exists, returns **404** with a one-line explanation until the contact is set | `callhouse.xyz/.well-known/security.txt` |
+| Terms of Use | adopted v1-2026-09-13 by owner decision, no counsel; gap sentences still render | `callhouse.finance/terms` |
+| Privacy notice | adopted v1-2026-09-13, same basis | `callhouse.finance/privacy` |
+| Perimeter disclosure | live since before this runbook; now links the terms instead of "the terms you accept here" | `callhouse.finance/legal`, `app.callhouse.finance/legal` |
+| Vulnerability reporting | section exists, address unset | `callhouse.finance/legal#reporting` |
+| `security.txt` | route exists, returns **404** with a one-line explanation until the contact is set | `callhouse.finance/.well-known/security.txt` |
 | Operator constants | six, all `undefined` | `lib/legal.ts` (site repo) |
 | Document version | `v1-2026-09-13` | `LEGAL_DOCS_VERSION` in `lib/legal.ts` (site repo) |
 | Accept flow | none. Use is acceptance; the pages say so | — |
@@ -185,10 +185,10 @@ Do these in order. Step 1 is the long one and it is not ours.
 
    ```bash
    # The operator gap is closed (the draft marker is gone since adoption, §2 item 9):
-   curl -s https://callhouse.xyz/terms   | grep -c 'not yet designated'     # 0
-   curl -s https://callhouse.xyz/privacy | grep -c 'not yet designated'     # 0
-   curl -s https://callhouse.xyz/terms   | grep -c 'No operating entity'    # 0
-   curl -s https://callhouse.xyz/legal   | grep -c 'not yet designated'     # 0
+   curl -s https://callhouse.finance/terms   | grep -c 'not yet designated'     # 0
+   curl -s https://callhouse.finance/privacy | grep -c 'not yet designated'     # 0
+   curl -s https://callhouse.finance/terms   | grep -c 'No operating entity'    # 0
+   curl -s https://callhouse.finance/legal   | grep -c 'not yet designated'     # 0
    ```
 
    A non-zero count means the variable did not reach the build: check the `ARG` from step 2,
@@ -197,13 +197,13 @@ Do these in order. Step 1 is the long one and it is not ours.
 6. **Verify `security.txt` returns 200** and has a real contact line.
 
    ```bash
-   curl -s -o /dev/null -w '%{http_code}\n' https://callhouse.xyz/.well-known/security.txt   # 200
-   curl -s https://callhouse.xyz/.well-known/security.txt
+   curl -s -o /dev/null -w '%{http_code}\n' https://callhouse.finance/.well-known/security.txt   # 200
+   curl -s https://callhouse.finance/.well-known/security.txt
    # Contact: mailto:<the address>
    # Expires: <LEGAL_DOCS_VERSION date + 1 year>
    # Preferred-Languages: en
-   # Canonical: https://callhouse.xyz/.well-known/security.txt
-   # Policy: https://callhouse.xyz/legal#reporting
+   # Canonical: https://callhouse.finance/.well-known/security.txt
+   # Policy: https://callhouse.finance/legal#reporting
    ```
 
    The `Expires:` line is one year after the date in `LEGAL_DOCS_VERSION`. When the documents
@@ -228,7 +228,7 @@ Do these in order. Step 1 is the long one and it is not ours.
   points at the mailbox until that exists, then at whatever replaces it.
 - The Stock Token issuer's terms. They govern whether a visitor may hold the collateral, and
   nothing on our pages widens or waives them (`/legal`).
-- Anything on `app.callhouse.xyz` beyond the links. The dapp carries the perimeter disclosure
+- Anything on `app.callhouse.finance` beyond the links. The dapp carries the perimeter disclosure
   and links out; every operator fact renders on the site once.
 
 ## Related

@@ -8,9 +8,9 @@ Legal, CI, the external audit, deployment and hosting are not done. The full tra
 
 | Repo | Holds | Deploys |
 |---|---|---|
-| `leekzor/callhouse` (this) | `web/`, `keeper/`, `indexer/`, `ops/`, `docs/`, trackers; `contracts/` is a git submodule | app.callhouse.xyz, keeper, indexer on Railway |
+| `leekzor/callhouse` (this) | `web/`, `keeper/`, `indexer/`, `ops/`, `docs/`, trackers; `contracts/` is a git submodule | app.callhouse.finance, keeper, indexer on Railway |
 | `leekzor/callhouse-contracts` | the Foundry project, `docs/AUDIT-SCOPE.md`, `docs/ACCOUNTING.md`, `SECURITY.md` | the vault (not deployed) |
-| `leekzor/callhouse-site` | the landing, standalone | callhouse.xyz on Railway |
+| `leekzor/callhouse-site` | the landing, standalone | callhouse.finance on Railway |
 
 Clone with `git clone --recurse-submodules`. The 2026-09-13 protocol fee change (5% of premium
 only) landed before the split, so all three start from the same tree.

@@ -20,8 +20,8 @@ Two facts frame everything below:
 
 | Process | Package | Default port | Public name | What it is |
 |---|---|---|---|---|
-| `site` | `leekzor/callhouse-site` (separate repo) | 3001 | `callhouse.xyz` | static marketing; **no fetches, no wallet, no chain reads, ever** |
-| `web` | `web/` | 3000 | `app.callhouse.xyz` | the dapp; Next.js SSR + browser wagmi |
+| `site` | `leekzor/callhouse-site` (separate repo) | 3001 | `callhouse.finance` | static marketing; **no fetches, no wallet, no chain reads, ever** |
+| `web` | `web/` | 3000 | `app.callhouse.finance` | the dapp; Next.js SSR + browser wagmi |
 | indexer | `indexer/` | 42069 | not yet chosen (W-19) | Ponder: event indexer + the `/v1/*` read API |
 | keeper | `keeper/` | 8787 | none (operator-only) | the roll bot; serves `/health` `/state` `/cycles` `/orders` |
 | — | `contracts/` (git submodule → `leekzor/callhouse-contracts`) | — | — | the Vault on chain 4663; not deployed yet |

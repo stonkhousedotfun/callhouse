@@ -1,8 +1,8 @@
 # Runbook — Deploy the frontend
 
-**What this is.** How the dapp (`app.callhouse.xyz`) gets onto Railway, what every setting means,
+**What this is.** How the dapp (`app.callhouse.finance`) gets onto Railway, what every setting means,
 and the three things that go wrong. Contracts, keeper and indexer are not covered here. The
-landing (`callhouse.xyz`) deploys from its own repository, `leekzor/callhouse-site`, and that
+landing (`callhouse.finance`) deploys from its own repository, `leekzor/callhouse-site`, and that
 repository's README is its runbook.
 
 **Who runs it.** Anyone with write access to the Railway project. Nothing in this runbook touches
@@ -17,10 +17,10 @@ redeploy.
 ## 0. The shape of it
 
 ```
-callhouse.xyz          ->  Railway service "site"  ->  leekzor/callhouse-site (its own repo,
+callhouse.finance          ->  Railway service "site"  ->  leekzor/callhouse-site (its own repo,
                            its own Dockerfile and build context). Not covered here.
 
-app.callhouse.xyz      ->  Railway service "web"   ->  web/Dockerfile   ->  web/server.js
+app.callhouse.finance      ->  Railway service "web"   ->  web/Dockerfile   ->  web/server.js
                            The dapp, every route unchanged. wagmi + viem, one server route
                            (/api/overcall/listings).
 ```
@@ -31,8 +31,8 @@ it installs, because the lockfile is workspace-wide. This is why the Root Direct
 is not negotiable.
 
 Nothing is shared between the two domains at runtime. No cookie, no session, no CORS grant, no
-shared origin. Every "go and do something" control on `callhouse.xyz` is a plain absolute link to
-`https://app.callhouse.xyz/...`, which is the whole reason the split is cheap.
+shared origin. Every "go and do something" control on `callhouse.finance` is a plain absolute link to
+`https://app.callhouse.finance/...`, which is the whole reason the split is cheap.
 
 `web/railway.json` carries no comments — JSON has none. This file is its documentation. If you
 change that file, change this one.
@@ -134,8 +134,8 @@ to it identically.
 | `NEXT_PUBLIC_CLEARINGHOUSE` | leave unset | as above |
 | `NEXT_PUBLIC_SEAPORT` | leave unset | as above |
 | `NEXT_PUBLIC_VAULT_FROM_BLOCK` | the vault's deploy block | Falls back to `0`. Only makes `/activity`'s fallback scan cheaper |
-| `NEXT_PUBLIC_SITE_URL` | `https://callhouse.xyz` | ARG default, same value |
-| `NEXT_PUBLIC_APP_URL` | `https://app.callhouse.xyz` | ARG default, same value. Used as `metadataBase` |
+| `NEXT_PUBLIC_SITE_URL` | `https://callhouse.finance` | ARG default, same value |
+| `NEXT_PUBLIC_APP_URL` | `https://app.callhouse.finance` | ARG default, same value. Used as `metadataBase` |
 
 The five address variables are left blank on purpose. `lib/contracts.ts` owns those values,
 `ops/addresses.json` carries the evidence for each one, and a second copy in the Railway UI is a
@@ -162,7 +162,7 @@ from our origin. It is GET-only and takes no auth of any kind.
 Attach in Railway → service → Settings → Networking → Custom Domain. Railway gives you a target
 hostname of the form `<something>.up.railway.app`. Then create the DNS records.
 
-### `app.callhouse.xyz` — the easy one
+### `app.callhouse.finance` — the easy one
 
 A subdomain. Plain `CNAME`, works at every registrar.
 
@@ -173,13 +173,13 @@ CNAME  app    <target>.up.railway.app
 
 TLS is issued by Railway automatically once the record resolves. Expect a few minutes.
 
-### `callhouse.xyz` and `www` — the landing's records, documented with the landing
+### `callhouse.finance` and `www` — the landing's records, documented with the landing
 
 The apex and `www` attach to the `site` service, and the full step is in the
 `leekzor/callhouse-site` README. Two facts are repeated here because they live in the same DNS
 zone as the record above: **a `CNAME` at the apex is not valid DNS**, so the apex needs
 `ALIAS`/`ANAME` or Cloudflare's CNAME flattening, never an A record pinned to an IP you resolved
-yourself; and `www.callhouse.xyz` redirects to the apex, 301, at the DNS/CDN layer.
+yourself; and `www.callhouse.finance` redirects to the apex, 301, at the DNS/CDN layer.
 
 ---
 
@@ -205,13 +205,13 @@ The second cause is a `PORT` mismatch: Railway injects `$PORT` and probes it, an
 
 ```bash
 # 1. The host answers.
-curl -sI https://app.callhouse.xyz/        | head -1     # HTTP/2 200
+curl -sI https://app.callhouse.finance/        | head -1     # HTTP/2 200
 
 # 2-4. The landing's checks (no wallet code, absolute CTAs into the app, its four routes)
 #      moved with the landing to the leekzor/callhouse-site README.
 
 # 5. THE ONE THAT MATTERS: which vault did this image get baked with?
-curl -s https://app.callhouse.xyz/vault/nvda | grep -oiE '0x[0-9a-f]{40}' | sort -u
+curl -s https://app.callhouse.finance/vault/nvda | grep -oiE '0x[0-9a-f]{40}' | sort -u
 ```
 
 Take the addresses from step 5 and diff them against `ops/addresses.json`. If the vault address is
@@ -253,7 +253,7 @@ The corollary: reverting the commit alone does **not** undo a variable change. T
 on the service, and the next build will pick it up again. Fix the variable, then rebuild.
 
 Rolling back `web` does not affect the landing. They share nothing, not even a repository, so
-`callhouse.xyz` can sit on last week's build while `app.callhouse.xyz` ships.
+`callhouse.finance` can sit on last week's build while `app.callhouse.finance` ships.
 
 ---
 
@@ -281,7 +281,7 @@ bare COPY error. If you see that message, read the next section.
    only failure here that is silent. The container starts, the healthcheck passes, the page serves
    the wrong vault. Rebuild, never restart, and verify with §5 step 5.
 
-2. **A `CNAME` at the apex is invalid DNS.** `callhouse.xyz` needs `ALIAS`/`ANAME` or Cloudflare's
+2. **A `CNAME` at the apex is invalid DNS.** `callhouse.finance` needs `ALIAS`/`ANAME` or Cloudflare's
    CNAME flattening. Do not pin an A record to an IP you resolved yourself. (The landing's record;
    the full step is in the `leekzor/callhouse-site` README, §4 here has the summary.)
 

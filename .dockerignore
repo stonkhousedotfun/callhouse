@@ -2,11 +2,11 @@
 # Build-context filter for the repo root.
 #
 # WHY THIS FILE EXISTS: both deployable images in this repository — web/Dockerfile
-# (app.callhouse.xyz) and keeper/Dockerfile (the weekly roll) — are built with the
+# (app.callhouse.finance) and keeper/Dockerfile (the weekly roll) — are built with the
 # REPO ROOT as the build context, because pnpm-lock.yaml and pnpm-workspace.yaml live here and
 # the install has to be workspace-aware. Without this file the daemon uploads node_modules,
 # every .next cache and the contracts/ submodule (with its own Foundry submodules) on every
-# deploy — hundreds of megabytes, to produce the same image. The landing (callhouse.xyz) builds
+# deploy — hundreds of megabytes, to produce the same image. The landing (callhouse.finance) builds
 # from its own repository, leekzor/callhouse-site, since the 2026-09-13 split.
 #
 # WHAT MUST STAY IN, and why:

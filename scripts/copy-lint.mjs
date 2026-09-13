@@ -3,10 +3,10 @@
  * copy-lint — enforces the frontend copy rules from README "Frontend copy" and
  * TECHSPEC 7.3. These are compliance rules, not style rules. They fail CI.
  *
- * Scanned here: web/ → app.callhouse.xyz, the dapp. The directory must exist and
+ * Scanned here: web/ → app.callhouse.finance, the dapp. The directory must exist and
  * must yield files; a package that has vanished is a hard failure, not a silent pass.
  *
- * TWIN FILE. The marketing landing (callhouse.xyz) moved to its own repository,
+ * TWIN FILE. The marketing landing (callhouse.finance) moved to its own repository,
  * leekzor/callhouse-site, on 2026-09-13 and carries its own copy of this script with
  * the site/ disclosure table. FORBIDDEN below must stay IDENTICAL in both copies:
  * change it in paired commits to both repos. Before the split this was one file
@@ -277,8 +277,8 @@ if (errors.length) {
   console.error(`\ncopy-lint FAILED — ${errors.length} violation(s) across ${tally}:\n`);
   for (const e of errors) console.error("  " + e);
   console.error("\nThese are compliance rules from README 'Frontend copy' and TECHSPEC 7.3.");
-  console.error("web/ (app.callhouse.xyz, the dapp) is scanned and is not exempt. The landing,");
-  console.error("callhouse.xyz, is linted by the same rules in leekzor/callhouse-site.");
+  console.error("web/ (app.callhouse.finance, the dapp) is scanned and is not exempt. The landing,");
+  console.error("callhouse.finance, is linted by the same rules in leekzor/callhouse-site.");
   console.error("If a hit is inside an explicit negation, add a `copy-lint-allow` comment on that line.\n");
   process.exit(1);
 }

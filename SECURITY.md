@@ -7,7 +7,7 @@ mounted here as a git submodule at `contracts/`). Run `git submodule update --in
 if that link is empty.
 
 This repository holds the off-chain half: the keeper (one hot key that can propose a roll but can
-never move a token), the indexer, and the dapp at `app.callhouse.xyz`. Read
+never move a token), the indexer, and the dapp at `app.callhouse.finance`. Read
 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) §2 for the trust boundaries,
 [`contracts/docs/ACCOUNTING.md`](contracts/docs/ACCOUNTING.md) for the money maths, and
 `ops/alerts.md` for the per-alert response runbooks.
@@ -15,8 +15,8 @@ never move a token), the indexer, and the dapp at `app.callhouse.xyz`. Read
 ## Reporting
 
 If you believe you have found a vulnerability, do not open a public issue. The disclosure
-address is published at `https://callhouse.xyz/.well-known/security.txt` (RFC 9116) and on
-`https://callhouse.xyz/legal#reporting`. Both read `NEXT_PUBLIC_SECURITY_CONTACT_EMAIL` from
+address is published at `https://callhouse.finance/.well-known/security.txt` (RFC 9116) and on
+`https://callhouse.finance/legal#reporting`. Both read `NEXT_PUBLIC_SECURITY_CONTACT_EMAIL` from
 `lib/legal.ts` in the landing repository, `leekzor/callhouse-site`; until that variable is
 configured and the site rebuilt, no address is designated, `security.txt` returns 404 on purpose,
 and the legal page says so in words. Setting it is a launch step in `ops/launch-legal.md`.

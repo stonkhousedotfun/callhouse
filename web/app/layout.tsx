@@ -10,13 +10,13 @@ import { Providers } from "./providers";
 import "./globals.css";
 
 /**
- * `metadataBase` is app.callhouse.xyz because that is where this package is served. Relative
+ * `metadataBase` is app.callhouse.finance because that is where this package is served. Relative
  * canonicals and Open Graph URLs resolve against it; without it Next warns and falls back to
  * localhost in a production build.
  *
  * THE robots DECISION — the app is NOT indexed, and that is on purpose. Two reasons, both real:
  *
- *   1. The marketing site at callhouse.xyz carries the canonical /legal and /how-it-works copy.
+ *   1. The marketing site at callhouse.finance carries the canonical /legal and /how-it-works copy.
  *      Serving the same disclosures from two domains is duplicate content, and duplicate
  *      content splits which of the two a search engine decides to show. The disclosures should
  *      have one address.
@@ -26,7 +26,7 @@ import "./globals.css";
  *
  * `follow: true` because the links out of here (explorer, the marketing site) are still worth
  * following; it is indexing this domain that we decline. The app is reached by link from
- * callhouse.xyz, not by search. app/robots.ts states the same thing as a served robots.txt —
+ * callhouse.finance, not by search. app/robots.ts states the same thing as a served robots.txt —
  * the two must be changed together.
  */
 export const metadata: Metadata = {
@@ -74,7 +74,7 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
                   </>
                 ) : null}
               </div>
-              {/* Second row of links. callhouse.xyz sits last because it leaves the app: the
+              {/* Second row of links. callhouse.finance sits last because it leaves the app: the
                   in-app destinations come first, then the external ones. Terms and Privacy are
                   external too — the documents live on the marketing site only (lib/site.ts). */}
               <div>
@@ -92,7 +92,7 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
                 </a>{" "}
                 ·{" "}
                 <a href={SITE_URL} target="_blank" rel="noreferrer noopener">
-                  callhouse.xyz ↗
+                  callhouse.finance ↗
                 </a>
               </div>
             </div>
