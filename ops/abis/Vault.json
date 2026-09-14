@@ -28,11 +28,6 @@
       "internalType": "contract ISeaport"
      },
      {
-      "name": "registry",
-      "type": "address",
-      "internalType": "contract IOvercallRegistry"
-     },
-     {
       "name": "priceFeed",
       "type": "address",
       "internalType": "contract IChainlinkFeed"
@@ -43,19 +38,9 @@
       "internalType": "uint32"
      },
      {
-      "name": "overcallFeeRecipient",
-      "type": "address",
-      "internalType": "address"
-     },
-     {
       "name": "conduitKey",
       "type": "bytes32",
       "internalType": "bytes32"
-     },
-     {
-      "name": "seaportZone",
-      "type": "address",
-      "internalType": "address"
      },
      {
       "name": "admin",
@@ -341,6 +326,126 @@
    }
   ],
   "stateMutability": "view"
+ },
+ {
+  "type": "function",
+  "name": "authorizeOrder",
+  "inputs": [
+   {
+    "name": "zp",
+    "type": "tuple",
+    "internalType": "struct ZoneParameters",
+    "components": [
+     {
+      "name": "orderHash",
+      "type": "bytes32",
+      "internalType": "bytes32"
+     },
+     {
+      "name": "fulfiller",
+      "type": "address",
+      "internalType": "address"
+     },
+     {
+      "name": "offerer",
+      "type": "address",
+      "internalType": "address"
+     },
+     {
+      "name": "offer",
+      "type": "tuple[]",
+      "internalType": "struct SpentItem[]",
+      "components": [
+       {
+        "name": "itemType",
+        "type": "uint8",
+        "internalType": "enum ItemType"
+       },
+       {
+        "name": "token",
+        "type": "address",
+        "internalType": "address"
+       },
+       {
+        "name": "identifier",
+        "type": "uint256",
+        "internalType": "uint256"
+       },
+       {
+        "name": "amount",
+        "type": "uint256",
+        "internalType": "uint256"
+       }
+      ]
+     },
+     {
+      "name": "consideration",
+      "type": "tuple[]",
+      "internalType": "struct ReceivedItem[]",
+      "components": [
+       {
+        "name": "itemType",
+        "type": "uint8",
+        "internalType": "enum ItemType"
+       },
+       {
+        "name": "token",
+        "type": "address",
+        "internalType": "address"
+       },
+       {
+        "name": "identifier",
+        "type": "uint256",
+        "internalType": "uint256"
+       },
+       {
+        "name": "amount",
+        "type": "uint256",
+        "internalType": "uint256"
+       },
+       {
+        "name": "recipient",
+        "type": "address",
+        "internalType": "address payable"
+       }
+      ]
+     },
+     {
+      "name": "extraData",
+      "type": "bytes",
+      "internalType": "bytes"
+     },
+     {
+      "name": "orderHashes",
+      "type": "bytes32[]",
+      "internalType": "bytes32[]"
+     },
+     {
+      "name": "startTime",
+      "type": "uint256",
+      "internalType": "uint256"
+     },
+     {
+      "name": "endTime",
+      "type": "uint256",
+      "internalType": "uint256"
+     },
+     {
+      "name": "zoneHash",
+      "type": "bytes32",
+      "internalType": "bytes32"
+     }
+    ]
+   }
+  ],
+  "outputs": [
+   {
+    "name": "",
+    "type": "bytes4",
+    "internalType": "bytes4"
+   }
+  ],
+  "stateMutability": "nonpayable"
  },
  {
   "type": "function",
@@ -645,32 +750,6 @@
  },
  {
   "type": "function",
-  "name": "contractsRemaining",
-  "inputs": [],
-  "outputs": [
-   {
-    "name": "",
-    "type": "uint256",
-    "internalType": "uint256"
-   }
-  ],
-  "stateMutability": "view"
- },
- {
-  "type": "function",
-  "name": "contractsSold",
-  "inputs": [],
-  "outputs": [
-   {
-    "name": "",
-    "type": "uint256",
-    "internalType": "uint256"
-   }
-  ],
-  "stateMutability": "view"
- },
- {
-  "type": "function",
   "name": "contractsWritten",
   "inputs": [],
   "outputs": [
@@ -837,6 +916,44 @@
  },
  {
   "type": "function",
+  "name": "epochStrandGen",
+  "inputs": [
+   {
+    "name": "",
+    "type": "uint256",
+    "internalType": "uint256"
+   }
+  ],
+  "outputs": [
+   {
+    "name": "",
+    "type": "uint256",
+    "internalType": "uint256"
+   }
+  ],
+  "stateMutability": "view"
+ },
+ {
+  "type": "function",
+  "name": "epochStrandWad",
+  "inputs": [
+   {
+    "name": "",
+    "type": "uint256",
+    "internalType": "uint256"
+   }
+  ],
+  "outputs": [
+   {
+    "name": "",
+    "type": "uint256",
+    "internalType": "uint256"
+   }
+  ],
+  "stateMutability": "view"
+ },
+ {
+  "type": "function",
   "name": "epochs",
   "inputs": [
    {
@@ -967,24 +1084,26 @@
  },
  {
   "type": "function",
-  "name": "isValidSignature",
-  "inputs": [
-   {
-    "name": "digest",
-    "type": "bytes32",
-    "internalType": "bytes32"
-   },
-   {
-    "name": "",
-    "type": "bytes",
-    "internalType": "bytes"
-   }
-  ],
+  "name": "isStranded",
+  "inputs": [],
   "outputs": [
    {
     "name": "",
-    "type": "bytes4",
-    "internalType": "bytes4"
+    "type": "bool",
+    "internalType": "bool"
+   }
+  ],
+  "stateMutability": "view"
+ },
+ {
+  "type": "function",
+  "name": "lastResolvedGen",
+  "inputs": [],
+  "outputs": [
+   {
+    "name": "",
+    "type": "uint256",
+    "internalType": "uint256"
    }
   ],
   "stateMutability": "view"
@@ -1159,7 +1278,7 @@
     "internalType": "address"
    },
    {
-    "name": "",
+    "name": "from",
     "type": "address",
     "internalType": "address"
    },
@@ -1198,7 +1317,7 @@
     "internalType": "address"
    },
    {
-    "name": "",
+    "name": "from",
     "type": "address",
     "internalType": "address"
    },
@@ -1242,19 +1361,6 @@
  },
  {
   "type": "function",
-  "name": "overcallFeeRecipient",
-  "inputs": [],
-  "outputs": [
-   {
-    "name": "",
-    "type": "address",
-    "internalType": "address"
-   }
-  ],
-  "stateMutability": "view"
- },
- {
-  "type": "function",
   "name": "owedAssets",
   "inputs": [
    {
@@ -1275,6 +1381,44 @@
  {
   "type": "function",
   "name": "owedQueueUsdg",
+  "inputs": [
+   {
+    "name": "",
+    "type": "address",
+    "internalType": "address"
+   }
+  ],
+  "outputs": [
+   {
+    "name": "",
+    "type": "uint256",
+    "internalType": "uint256"
+   }
+  ],
+  "stateMutability": "view"
+ },
+ {
+  "type": "function",
+  "name": "owedStrandGen",
+  "inputs": [
+   {
+    "name": "",
+    "type": "address",
+    "internalType": "address"
+   }
+  ],
+  "outputs": [
+   {
+    "name": "",
+    "type": "uint256",
+    "internalType": "uint256"
+   }
+  ],
+  "stateMutability": "view"
+ },
+ {
+  "type": "function",
+  "name": "owedStrandWad",
   "inputs": [
    {
     "name": "",
@@ -1569,19 +1713,6 @@
  },
  {
   "type": "function",
-  "name": "registry",
-  "inputs": [],
-  "outputs": [
-   {
-    "name": "",
-    "type": "address",
-    "internalType": "contract IOvercallRegistry"
-   }
-  ],
-  "stateMutability": "view"
- },
- {
-  "type": "function",
   "name": "renounceRole",
   "inputs": [
    {
@@ -1610,6 +1741,13 @@
    }
   ],
   "stateMutability": "view"
+ },
+ {
+  "type": "function",
+  "name": "retryStrandedClaim",
+  "inputs": [],
+  "outputs": [],
+  "stateMutability": "nonpayable"
  },
  {
   "type": "function",
@@ -1644,11 +1782,6 @@
     "name": "optionId_",
     "type": "uint256",
     "internalType": "uint256"
-   },
-   {
-    "name": "contractsCount",
-    "type": "uint112",
-    "internalType": "uint112"
    }
   ],
   "outputs": [],
@@ -1766,11 +1899,83 @@
  },
  {
   "type": "function",
+  "name": "settleQueue",
+  "inputs": [],
+  "outputs": [],
+  "stateMutability": "nonpayable"
+ },
+ {
+  "type": "function",
   "name": "spotUsdg",
   "inputs": [],
   "outputs": [
    {
     "name": "",
+    "type": "uint256",
+    "internalType": "uint256"
+   }
+  ],
+  "stateMutability": "view"
+ },
+ {
+  "type": "function",
+  "name": "strandGen",
+  "inputs": [],
+  "outputs": [
+   {
+    "name": "",
+    "type": "uint256",
+    "internalType": "uint256"
+   }
+  ],
+  "stateMutability": "view"
+ },
+ {
+  "type": "function",
+  "name": "strandedRemainingWad",
+  "inputs": [],
+  "outputs": [
+   {
+    "name": "",
+    "type": "uint256",
+    "internalType": "uint256"
+   }
+  ],
+  "stateMutability": "view"
+ },
+ {
+  "type": "function",
+  "name": "strands",
+  "inputs": [
+   {
+    "name": "",
+    "type": "uint256",
+    "internalType": "uint256"
+   }
+  ],
+  "outputs": [
+   {
+    "name": "assetsIn",
+    "type": "uint256",
+    "internalType": "uint256"
+   },
+   {
+    "name": "usdgIn",
+    "type": "uint256",
+    "internalType": "uint256"
+   },
+   {
+    "name": "wadLeft",
+    "type": "uint256",
+    "internalType": "uint256"
+   },
+   {
+    "name": "assetsLeft",
+    "type": "uint256",
+    "internalType": "uint256"
+   },
+   {
+    "name": "usdgLeft",
     "type": "uint256",
     "internalType": "uint256"
    }
@@ -2040,6 +2245,126 @@
  },
  {
   "type": "function",
+  "name": "validateOrder",
+  "inputs": [
+   {
+    "name": "",
+    "type": "tuple",
+    "internalType": "struct ZoneParameters",
+    "components": [
+     {
+      "name": "orderHash",
+      "type": "bytes32",
+      "internalType": "bytes32"
+     },
+     {
+      "name": "fulfiller",
+      "type": "address",
+      "internalType": "address"
+     },
+     {
+      "name": "offerer",
+      "type": "address",
+      "internalType": "address"
+     },
+     {
+      "name": "offer",
+      "type": "tuple[]",
+      "internalType": "struct SpentItem[]",
+      "components": [
+       {
+        "name": "itemType",
+        "type": "uint8",
+        "internalType": "enum ItemType"
+       },
+       {
+        "name": "token",
+        "type": "address",
+        "internalType": "address"
+       },
+       {
+        "name": "identifier",
+        "type": "uint256",
+        "internalType": "uint256"
+       },
+       {
+        "name": "amount",
+        "type": "uint256",
+        "internalType": "uint256"
+       }
+      ]
+     },
+     {
+      "name": "consideration",
+      "type": "tuple[]",
+      "internalType": "struct ReceivedItem[]",
+      "components": [
+       {
+        "name": "itemType",
+        "type": "uint8",
+        "internalType": "enum ItemType"
+       },
+       {
+        "name": "token",
+        "type": "address",
+        "internalType": "address"
+       },
+       {
+        "name": "identifier",
+        "type": "uint256",
+        "internalType": "uint256"
+       },
+       {
+        "name": "amount",
+        "type": "uint256",
+        "internalType": "uint256"
+       },
+       {
+        "name": "recipient",
+        "type": "address",
+        "internalType": "address payable"
+       }
+      ]
+     },
+     {
+      "name": "extraData",
+      "type": "bytes",
+      "internalType": "bytes"
+     },
+     {
+      "name": "orderHashes",
+      "type": "bytes32[]",
+      "internalType": "bytes32[]"
+     },
+     {
+      "name": "startTime",
+      "type": "uint256",
+      "internalType": "uint256"
+     },
+     {
+      "name": "endTime",
+      "type": "uint256",
+      "internalType": "uint256"
+     },
+     {
+      "name": "zoneHash",
+      "type": "bytes32",
+      "internalType": "bytes32"
+     }
+    ]
+   }
+  ],
+  "outputs": [
+   {
+    "name": "",
+    "type": "bytes4",
+    "internalType": "bytes4"
+   }
+  ],
+  "stateMutability": "view"
+ },
+ {
+  "type": "function",
   "name": "valoremFeeAccepted",
   "inputs": [],
   "outputs": [
@@ -2202,6 +2527,31 @@
  },
  {
   "type": "event",
+  "name": "ClaimStranded",
+  "inputs": [
+   {
+    "name": "cycleNumber",
+    "type": "uint32",
+    "indexed": true,
+    "internalType": "uint32"
+   },
+   {
+    "name": "claimKey",
+    "type": "uint256",
+    "indexed": true,
+    "internalType": "uint256"
+   },
+   {
+    "name": "gen",
+    "type": "uint256",
+    "indexed": false,
+    "internalType": "uint256"
+   }
+  ],
+  "anonymous": false
+ },
+ {
+  "type": "event",
   "name": "ClaimUsdg",
   "inputs": [
    {
@@ -2299,6 +2649,31 @@
   "inputs": [
    {
     "name": "cap",
+    "type": "uint256",
+    "indexed": false,
+    "internalType": "uint256"
+   }
+  ],
+  "anonymous": false
+ },
+ {
+  "type": "event",
+  "name": "EpochStrandShare",
+  "inputs": [
+   {
+    "name": "epochId",
+    "type": "uint256",
+    "indexed": true,
+    "internalType": "uint256"
+   },
+   {
+    "name": "gen",
+    "type": "uint256",
+    "indexed": false,
+    "internalType": "uint256"
+   },
+   {
+    "name": "wad",
     "type": "uint256",
     "indexed": false,
     "internalType": "uint256"
@@ -2572,6 +2947,31 @@
  },
  {
   "type": "event",
+  "name": "ReserveHaircut",
+  "inputs": [
+   {
+    "name": "owner",
+    "type": "address",
+    "indexed": true,
+    "internalType": "address"
+   },
+   {
+    "name": "booked",
+    "type": "uint256",
+    "indexed": false,
+    "internalType": "uint256"
+   },
+   {
+    "name": "paid",
+    "type": "uint256",
+    "indexed": false,
+    "internalType": "uint256"
+   }
+  ],
+  "anonymous": false
+ },
+ {
+  "type": "event",
   "name": "RoleAdminChanged",
   "inputs": [
    {
@@ -2709,6 +3109,74 @@
  },
  {
   "type": "event",
+  "name": "StrandShareSettled",
+  "inputs": [
+   {
+    "name": "owner",
+    "type": "address",
+    "indexed": true,
+    "internalType": "address"
+   },
+   {
+    "name": "gen",
+    "type": "uint256",
+    "indexed": true,
+    "internalType": "uint256"
+   },
+   {
+    "name": "wad",
+    "type": "uint256",
+    "indexed": false,
+    "internalType": "uint256"
+   },
+   {
+    "name": "assets",
+    "type": "uint256",
+    "indexed": false,
+    "internalType": "uint256"
+   },
+   {
+    "name": "usdgOut",
+    "type": "uint256",
+    "indexed": false,
+    "internalType": "uint256"
+   }
+  ],
+  "anonymous": false
+ },
+ {
+  "type": "event",
+  "name": "StrandedClaimRecovered",
+  "inputs": [
+   {
+    "name": "gen",
+    "type": "uint256",
+    "indexed": true,
+    "internalType": "uint256"
+   },
+   {
+    "name": "assets",
+    "type": "uint256",
+    "indexed": false,
+    "internalType": "uint256"
+   },
+   {
+    "name": "usdgOut",
+    "type": "uint256",
+    "indexed": false,
+    "internalType": "uint256"
+   },
+   {
+    "name": "queueWad",
+    "type": "uint256",
+    "indexed": false,
+    "internalType": "uint256"
+   }
+  ],
+  "anonymous": false
+ },
+ {
+  "type": "event",
   "name": "Transfer",
   "inputs": [
    {
@@ -2750,6 +3218,31 @@
    },
    {
     "name": "totalSupply",
+    "type": "uint256",
+    "indexed": false,
+    "internalType": "uint256"
+   }
+  ],
+  "anonymous": false
+ },
+ {
+  "type": "event",
+  "name": "UsdgLegDeferred",
+  "inputs": [
+   {
+    "name": "owner",
+    "type": "address",
+    "indexed": true,
+    "internalType": "address"
+   },
+   {
+    "name": "receiver",
+    "type": "address",
+    "indexed": true,
+    "internalType": "address"
+   },
+   {
+    "name": "usdgOwed",
     "type": "uint256",
     "indexed": false,
     "internalType": "uint256"
@@ -2878,44 +3371,7 @@
  },
  {
   "type": "error",
-  "name": "ContractsAboveCap",
-  "inputs": [
-   {
-    "name": "contractsRequested",
-    "type": "uint256",
-    "internalType": "uint256"
-   },
-   {
-    "name": "cap",
-    "type": "uint256",
-    "internalType": "uint256"
-   }
-  ]
- },
- {
-  "type": "error",
-  "name": "ContractsAboveUtilization",
-  "inputs": [
-   {
-    "name": "contractsRequested",
-    "type": "uint256",
-    "internalType": "uint256"
-   },
-   {
-    "name": "maxByUtilization",
-    "type": "uint256",
-    "internalType": "uint256"
-   }
-  ]
- },
- {
-  "type": "error",
   "name": "ContractsCapZero",
-  "inputs": []
- },
- {
-  "type": "error",
-  "name": "ContractsZero",
   "inputs": []
  },
  {
@@ -2936,14 +3392,8 @@
  },
  {
   "type": "error",
-  "name": "DepositsClosedForCycle",
-  "inputs": [
-   {
-    "name": "exerciseTs",
-    "type": "uint40",
-    "internalType": "uint40"
-   }
-  ]
+  "name": "DepositsClosed",
+  "inputs": []
  },
  {
   "type": "error",
@@ -3049,6 +3499,22 @@
  },
  {
   "type": "error",
+  "name": "ExerciseTooSoon",
+  "inputs": [
+   {
+    "name": "exerciseTs",
+    "type": "uint40",
+    "internalType": "uint40"
+   },
+   {
+    "name": "earliest",
+    "type": "uint40",
+    "internalType": "uint40"
+   }
+  ]
+ },
+ {
+  "type": "error",
   "name": "GuardianTooEarly",
   "inputs": [
    {
@@ -3069,6 +3535,22 @@
    },
    {
     "name": "requested",
+    "type": "uint256",
+    "internalType": "uint256"
+   }
+  ]
+ },
+ {
+  "type": "error",
+  "name": "InventoryLeftBehind",
+  "inputs": [
+   {
+    "name": "balance",
+    "type": "uint256",
+    "internalType": "uint256"
+   },
+   {
+    "name": "baseline",
     "type": "uint256",
     "internalType": "uint256"
    }
@@ -3124,17 +3606,44 @@
  },
  {
   "type": "error",
-  "name": "NoCycle",
-  "inputs": []
- },
- {
-  "type": "error",
   "name": "NoLiveListing",
   "inputs": []
  },
  {
   "type": "error",
   "name": "NoOpenClaim",
+  "inputs": []
+ },
+ {
+  "type": "error",
+  "name": "NotAnOptionType",
+  "inputs": [
+   {
+    "name": "tokenId",
+    "type": "uint256",
+    "internalType": "uint256"
+   }
+  ]
+ },
+ {
+  "type": "error",
+  "name": "NotLiveListing",
+  "inputs": [
+   {
+    "name": "orderHash",
+    "type": "bytes32",
+    "internalType": "bytes32"
+   }
+  ]
+ },
+ {
+  "type": "error",
+  "name": "NotSeaport",
+  "inputs": []
+ },
+ {
+  "type": "error",
+  "name": "NotStranded",
   "inputs": []
  },
  {
@@ -3171,38 +3680,6 @@
  },
  {
   "type": "error",
-  "name": "OptionNotApproved",
-  "inputs": [
-   {
-    "name": "optionId",
-    "type": "uint256",
-    "internalType": "uint256"
-   }
-  ]
- },
- {
-  "type": "error",
-  "name": "OptionNotInCurrentCycle",
-  "inputs": [
-   {
-    "name": "optionId",
-    "type": "uint256",
-    "internalType": "uint256"
-   },
-   {
-    "name": "optionCycle",
-    "type": "uint32",
-    "internalType": "uint32"
-   },
-   {
-    "name": "currentCycle",
-    "type": "uint32",
-    "internalType": "uint32"
-   }
-  ]
- },
- {
-  "type": "error",
   "name": "OraclePaused",
   "inputs": []
  },
@@ -3219,6 +3696,22 @@
     "name": "maxOtmBps",
     "type": "uint16",
     "internalType": "uint16"
+   }
+  ]
+ },
+ {
+  "type": "error",
+  "name": "PremiumBelowFloorAtFill",
+  "inputs": [
+   {
+    "name": "grossUsdg",
+    "type": "uint256",
+    "internalType": "uint256"
+   },
+   {
+    "name": "floorUsdg",
+    "type": "uint256",
+    "internalType": "uint256"
    }
   ]
  },
@@ -3293,17 +3786,17 @@
  },
  {
   "type": "error",
-  "name": "RegistryAssetMismatch",
+  "name": "ReserveBreached",
   "inputs": [
    {
-    "name": "expected",
-    "type": "address",
-    "internalType": "address"
+    "name": "balance",
+    "type": "uint256",
+    "internalType": "uint256"
    },
    {
-    "name": "got",
-    "type": "address",
-    "internalType": "address"
+    "name": "reserved",
+    "type": "uint256",
+    "internalType": "uint256"
    }
   ]
  },
@@ -3341,19 +3834,8 @@
  },
  {
   "type": "error",
-  "name": "StrikeAboveBand",
-  "inputs": [
-   {
-    "name": "strikeUsdg",
-    "type": "uint256",
-    "internalType": "uint256"
-   },
-   {
-    "name": "maxStrikeUsdg",
-    "type": "uint256",
-    "internalType": "uint256"
-   }
-  ]
+  "name": "StillStranded",
+  "inputs": []
  },
  {
   "type": "error",
@@ -3384,6 +3866,17 @@
     "name": "max",
     "type": "uint8",
     "internalType": "uint8"
+   }
+  ]
+ },
+ {
+  "type": "error",
+  "name": "UsdgLegBlocked",
+  "inputs": [
+   {
+    "name": "usdgOwed",
+    "type": "uint256",
+    "internalType": "uint256"
    }
   ]
  },
@@ -3421,12 +3914,18 @@
  },
  {
   "type": "error",
-  "name": "WritesAreHalted",
-  "inputs": []
+  "name": "WriteWindowClosed",
+  "inputs": [
+   {
+    "name": "exerciseTs",
+    "type": "uint40",
+    "internalType": "uint40"
+   }
+  ]
  },
  {
   "type": "error",
-  "name": "WritingNotOpen",
+  "name": "WritesAreHalted",
   "inputs": []
  },
  {

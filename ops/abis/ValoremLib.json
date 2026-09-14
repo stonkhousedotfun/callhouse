@@ -1,0 +1,497 @@
+[
+ {
+  "type": "function",
+  "name": "claimedExerciseProceeds",
+  "inputs": [
+   {
+    "name": "clear",
+    "type": "IValoremClear",
+    "internalType": "contract IValoremClear"
+   },
+   {
+    "name": "claimKey",
+    "type": "uint256",
+    "internalType": "uint256"
+   }
+  ],
+  "outputs": [
+   {
+    "name": "",
+    "type": "uint256",
+    "internalType": "uint256"
+   }
+  ],
+  "stateMutability": "view"
+ },
+ {
+  "type": "function",
+  "name": "contractsAssigned",
+  "inputs": [
+   {
+    "name": "clear",
+    "type": "IValoremClear",
+    "internalType": "contract IValoremClear"
+   },
+   {
+    "name": "claimKey",
+    "type": "uint256",
+    "internalType": "uint256"
+   }
+  ],
+  "outputs": [
+   {
+    "name": "",
+    "type": "uint256",
+    "internalType": "uint256"
+   }
+  ],
+  "stateMutability": "view"
+ },
+ {
+  "type": "function",
+  "name": "lockedAssets",
+  "inputs": [
+   {
+    "name": "clear",
+    "type": "IValoremClear",
+    "internalType": "contract IValoremClear"
+   },
+   {
+    "name": "claimKey",
+    "type": "uint256",
+    "internalType": "uint256"
+   }
+  ],
+  "outputs": [
+   {
+    "name": "",
+    "type": "uint256",
+    "internalType": "uint256"
+   }
+  ],
+  "stateMutability": "view"
+ },
+ {
+  "type": "function",
+  "name": "open",
+  "inputs": [
+   {
+    "name": "clear",
+    "type": "IValoremClear",
+    "internalType": "contract IValoremClear"
+   },
+   {
+    "name": "w",
+    "type": "tuple",
+    "internalType": "struct ValoremLib.Open",
+    "components": [
+     {
+      "name": "feed",
+      "type": "IChainlinkFeed",
+      "internalType": "contract IChainlinkFeed"
+     },
+     {
+      "name": "asset",
+      "type": "IERC20",
+      "internalType": "contract IERC20"
+     },
+     {
+      "name": "exerciseAsset",
+      "type": "address",
+      "internalType": "address"
+     },
+     {
+      "name": "optionId",
+      "type": "uint256",
+      "internalType": "uint256"
+     },
+     {
+      "name": "maxPriceAge",
+      "type": "uint32",
+      "internalType": "uint32"
+     },
+     {
+      "name": "feeAccepted",
+      "type": "bool",
+      "internalType": "bool"
+     }
+    ]
+   },
+   {
+    "name": "p",
+    "type": "tuple",
+    "internalType": "struct PolicyParams",
+    "components": [
+     {
+      "name": "minOtmBps",
+      "type": "uint16",
+      "internalType": "uint16"
+     },
+     {
+      "name": "maxOtmBps",
+      "type": "uint16",
+      "internalType": "uint16"
+     },
+     {
+      "name": "minPremiumBps",
+      "type": "uint16",
+      "internalType": "uint16"
+     },
+     {
+      "name": "maxUtilizationBps",
+      "type": "uint16",
+      "internalType": "uint16"
+     },
+     {
+      "name": "protocolFeeBps",
+      "type": "uint16",
+      "internalType": "uint16"
+     },
+     {
+      "name": "maxContractsCap",
+      "type": "uint64",
+      "internalType": "uint64"
+     }
+    ]
+   }
+  ],
+  "outputs": [
+   {
+    "name": "strikeUsdg",
+    "type": "uint256",
+    "internalType": "uint256"
+   },
+   {
+    "name": "exerciseTs",
+    "type": "uint40",
+    "internalType": "uint40"
+   },
+   {
+    "name": "expiryTs",
+    "type": "uint40",
+    "internalType": "uint40"
+   }
+  ],
+  "stateMutability": "view"
+ },
+ {
+  "type": "function",
+  "name": "oraclePaused",
+  "inputs": [
+   {
+    "name": "asset",
+    "type": "IERC20",
+    "internalType": "contract IERC20"
+   }
+  ],
+  "outputs": [
+   {
+    "name": "",
+    "type": "bool",
+    "internalType": "bool"
+   }
+  ],
+  "stateMutability": "view"
+ },
+ {
+  "type": "function",
+  "name": "spotUsdg",
+  "inputs": [
+   {
+    "name": "feed",
+    "type": "IChainlinkFeed",
+    "internalType": "contract IChainlinkFeed"
+   },
+   {
+    "name": "maxAge",
+    "type": "uint32",
+    "internalType": "uint32"
+   }
+  ],
+  "outputs": [
+   {
+    "name": "",
+    "type": "uint256",
+    "internalType": "uint256"
+   }
+  ],
+  "stateMutability": "view"
+ },
+ {
+  "type": "error",
+  "name": "BadCycleWindow",
+  "inputs": [
+   {
+    "name": "exerciseTs",
+    "type": "uint40",
+    "internalType": "uint40"
+   },
+   {
+    "name": "expiryTs",
+    "type": "uint40",
+    "internalType": "uint40"
+   }
+  ]
+ },
+ {
+  "type": "error",
+  "name": "ContractsAboveCap",
+  "inputs": [
+   {
+    "name": "contractsRequested",
+    "type": "uint256",
+    "internalType": "uint256"
+   },
+   {
+    "name": "cap",
+    "type": "uint256",
+    "internalType": "uint256"
+   }
+  ]
+ },
+ {
+  "type": "error",
+  "name": "ContractsAboveUtilization",
+  "inputs": [
+   {
+    "name": "contractsRequested",
+    "type": "uint256",
+    "internalType": "uint256"
+   },
+   {
+    "name": "maxByUtilization",
+    "type": "uint256",
+    "internalType": "uint256"
+   }
+  ]
+ },
+ {
+  "type": "error",
+  "name": "ContractsZero",
+  "inputs": []
+ },
+ {
+  "type": "error",
+  "name": "ExerciseTooSoon",
+  "inputs": [
+   {
+    "name": "exerciseTs",
+    "type": "uint40",
+    "internalType": "uint40"
+   },
+   {
+    "name": "earliest",
+    "type": "uint40",
+    "internalType": "uint40"
+   }
+  ]
+ },
+ {
+  "type": "error",
+  "name": "NotAnOptionType",
+  "inputs": [
+   {
+    "name": "tokenId",
+    "type": "uint256",
+    "internalType": "uint256"
+   }
+  ]
+ },
+ {
+  "type": "error",
+  "name": "OptionAssetMismatch",
+  "inputs": [
+   {
+    "name": "expectedUnderlying",
+    "type": "address",
+    "internalType": "address"
+   },
+   {
+    "name": "gotUnderlying",
+    "type": "address",
+    "internalType": "address"
+   }
+  ]
+ },
+ {
+  "type": "error",
+  "name": "OptionExerciseAssetMismatch",
+  "inputs": [
+   {
+    "name": "expectedExercise",
+    "type": "address",
+    "internalType": "address"
+   },
+   {
+    "name": "gotExercise",
+    "type": "address",
+    "internalType": "address"
+   }
+  ]
+ },
+ {
+  "type": "error",
+  "name": "OraclePaused",
+  "inputs": []
+ },
+ {
+  "type": "error",
+  "name": "PremiumBelowFloorAtFill",
+  "inputs": [
+   {
+    "name": "grossUsdg",
+    "type": "uint256",
+    "internalType": "uint256"
+   },
+   {
+    "name": "floorUsdg",
+    "type": "uint256",
+    "internalType": "uint256"
+   }
+  ]
+ },
+ {
+  "type": "error",
+  "name": "RedeemOutOfGas",
+  "inputs": []
+ },
+ {
+  "type": "error",
+  "name": "ReserveBreached",
+  "inputs": [
+   {
+    "name": "balance",
+    "type": "uint256",
+    "internalType": "uint256"
+   },
+   {
+    "name": "reserved",
+    "type": "uint256",
+    "internalType": "uint256"
+   }
+  ]
+ },
+ {
+  "type": "error",
+  "name": "SafeERC20FailedOperation",
+  "inputs": [
+   {
+    "name": "token",
+    "type": "address",
+    "internalType": "address"
+   }
+  ]
+ },
+ {
+  "type": "error",
+  "name": "SpotZero",
+  "inputs": []
+ },
+ {
+  "type": "error",
+  "name": "StalePrice",
+  "inputs": [
+   {
+    "name": "updatedAt",
+    "type": "uint256",
+    "internalType": "uint256"
+   },
+   {
+    "name": "maxAge",
+    "type": "uint256",
+    "internalType": "uint256"
+   }
+  ]
+ },
+ {
+  "type": "error",
+  "name": "StrikeAboveBand",
+  "inputs": [
+   {
+    "name": "strikeUsdg",
+    "type": "uint256",
+    "internalType": "uint256"
+   },
+   {
+    "name": "maxStrikeUsdg",
+    "type": "uint256",
+    "internalType": "uint256"
+   }
+  ]
+ },
+ {
+  "type": "error",
+  "name": "StrikeBelowBand",
+  "inputs": [
+   {
+    "name": "strikeUsdg",
+    "type": "uint256",
+    "internalType": "uint256"
+   },
+   {
+    "name": "minStrikeUsdg",
+    "type": "uint256",
+    "internalType": "uint256"
+   }
+  ]
+ },
+ {
+  "type": "error",
+  "name": "UnexpectedLotSize",
+  "inputs": [
+   {
+    "name": "expected",
+    "type": "uint96",
+    "internalType": "uint96"
+   },
+   {
+    "name": "got",
+    "type": "uint96",
+    "internalType": "uint96"
+   }
+  ]
+ },
+ {
+  "type": "error",
+  "name": "ValoremFeeNotAccepted",
+  "inputs": [
+   {
+    "name": "feeBps",
+    "type": "uint8",
+    "internalType": "uint8"
+   }
+  ]
+ },
+ {
+  "type": "error",
+  "name": "WriteReturnedNoClaim",
+  "inputs": []
+ },
+ {
+  "type": "error",
+  "name": "WriteReturnedWrongClaim",
+  "inputs": [
+   {
+    "name": "expected",
+    "type": "uint256",
+    "internalType": "uint256"
+   },
+   {
+    "name": "got",
+    "type": "uint256",
+    "internalType": "uint256"
+   }
+  ]
+ },
+ {
+  "type": "error",
+  "name": "WriteWindowClosed",
+  "inputs": [
+   {
+    "name": "exerciseTs",
+    "type": "uint40",
+    "internalType": "uint40"
+   }
+  ]
+ }
+]

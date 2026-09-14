@@ -1,11 +1,15 @@
-// GENERATED from ops/abis/Vault.json (the compiled artifact) by scripts/gen-abis.mjs —
+// GENERATED from ops/abis/Vault.json (the compiled artifact) and the error fragments of
+// ops/abis/ValoremLib.json, ops/abis/SeaportOrderLib.json, ops/abis/Policy.json by scripts/gen-abis.mjs —
 // do not hand-edit.
 //
-// This is the read + user-write surface only. Keeper and admin entry points (rollOpen,
-// approveListing, setPolicy, ...) are deliberately absent: the frontend must never be able to
-// encode a call it has no business making, and their OrderComponents tuples are enormous.
-// Every event and every custom error IS kept, so viem can name a revert instead of printing
-// a bare 4-byte selector at the user.
+// This is the read + user-write surface plus the two Seaport zone hooks. Keeper and admin
+// entry points (rollOpen, approveListing, setPolicy, ...) are deliberately absent: the frontend
+// must never be able to encode a call it has no business making, and their OrderComponents
+// tuples are enormous. `authorizeOrder` / `validateOrder` are here because Seaport calls them
+// during every fill of the vault's own listing and the fill page's pre-flight must name what
+// they refuse with. Every event and every custom error IS kept — including the 36 raised
+// inside the linked libraries, which Vault.json omits — so viem can name a revert instead of
+// printing a bare 4-byte selector at the user.
 
 export const vaultAbi = [
   {
@@ -31,6 +35,87 @@ export const vaultAbi = [
   },
   {
     "type": "error",
+    "name": "BadConduitKey",
+    "inputs": [
+      {
+        "name": "expected",
+        "type": "bytes32",
+        "internalType": "bytes32"
+      },
+      {
+        "name": "got",
+        "type": "bytes32",
+        "internalType": "bytes32"
+      }
+    ]
+  },
+  {
+    "type": "error",
+    "name": "BadConsiderationIdentifier",
+    "inputs": [
+      {
+        "name": "got",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ]
+  },
+  {
+    "type": "error",
+    "name": "BadConsiderationItemType",
+    "inputs": [
+      {
+        "name": "got",
+        "type": "uint8",
+        "internalType": "enum ItemType"
+      }
+    ]
+  },
+  {
+    "type": "error",
+    "name": "BadConsiderationLength",
+    "inputs": [
+      {
+        "name": "got",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ]
+  },
+  {
+    "type": "error",
+    "name": "BadConsiderationToken",
+    "inputs": [
+      {
+        "name": "expected",
+        "type": "address",
+        "internalType": "address"
+      },
+      {
+        "name": "got",
+        "type": "address",
+        "internalType": "address"
+      }
+    ]
+  },
+  {
+    "type": "error",
+    "name": "BadCounter",
+    "inputs": [
+      {
+        "name": "expected",
+        "type": "uint256",
+        "internalType": "uint256"
+      },
+      {
+        "name": "got",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ]
+  },
+  {
+    "type": "error",
     "name": "BadCycleWindow",
     "inputs": [
       {
@@ -42,6 +127,125 @@ export const vaultAbi = [
         "name": "expiryTs",
         "type": "uint40",
         "internalType": "uint40"
+      }
+    ]
+  },
+  {
+    "type": "error",
+    "name": "BadOfferIdentifier",
+    "inputs": [
+      {
+        "name": "expected",
+        "type": "uint256",
+        "internalType": "uint256"
+      },
+      {
+        "name": "got",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ]
+  },
+  {
+    "type": "error",
+    "name": "BadOfferItemType",
+    "inputs": [
+      {
+        "name": "got",
+        "type": "uint8",
+        "internalType": "enum ItemType"
+      }
+    ]
+  },
+  {
+    "type": "error",
+    "name": "BadOfferLength",
+    "inputs": [
+      {
+        "name": "got",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ]
+  },
+  {
+    "type": "error",
+    "name": "BadOfferToken",
+    "inputs": [
+      {
+        "name": "expected",
+        "type": "address",
+        "internalType": "address"
+      },
+      {
+        "name": "got",
+        "type": "address",
+        "internalType": "address"
+      }
+    ]
+  },
+  {
+    "type": "error",
+    "name": "BadOfferer",
+    "inputs": [
+      {
+        "name": "got",
+        "type": "address",
+        "internalType": "address"
+      }
+    ]
+  },
+  {
+    "type": "error",
+    "name": "BadOrderType",
+    "inputs": [
+      {
+        "name": "got",
+        "type": "uint8",
+        "internalType": "enum OrderType"
+      }
+    ]
+  },
+  {
+    "type": "error",
+    "name": "BadVaultRecipient",
+    "inputs": [
+      {
+        "name": "expected",
+        "type": "address",
+        "internalType": "address"
+      },
+      {
+        "name": "got",
+        "type": "address",
+        "internalType": "address"
+      }
+    ]
+  },
+  {
+    "type": "error",
+    "name": "BadZone",
+    "inputs": [
+      {
+        "name": "expected",
+        "type": "address",
+        "internalType": "address"
+      },
+      {
+        "name": "got",
+        "type": "address",
+        "internalType": "address"
+      }
+    ]
+  },
+  {
+    "type": "error",
+    "name": "BadZoneHash",
+    "inputs": [
+      {
+        "name": "got",
+        "type": "bytes32",
+        "internalType": "bytes32"
       }
     ]
   },
@@ -105,14 +309,13 @@ export const vaultAbi = [
   },
   {
     "type": "error",
-    "name": "DepositsClosedForCycle",
-    "inputs": [
-      {
-        "name": "exerciseTs",
-        "type": "uint40",
-        "internalType": "uint40"
-      }
-    ]
+    "name": "DepositsClosed",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "DutchAuctionNotAllowed",
+    "inputs": []
   },
   {
     "type": "error",
@@ -218,6 +421,22 @@ export const vaultAbi = [
   },
   {
     "type": "error",
+    "name": "ExerciseTooSoon",
+    "inputs": [
+      {
+        "name": "exerciseTs",
+        "type": "uint40",
+        "internalType": "uint40"
+      },
+      {
+        "name": "earliest",
+        "type": "uint40",
+        "internalType": "uint40"
+      }
+    ]
+  },
+  {
+    "type": "error",
     "name": "GuardianTooEarly",
     "inputs": [
       {
@@ -238,6 +457,60 @@ export const vaultAbi = [
       },
       {
         "name": "requested",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ]
+  },
+  {
+    "type": "error",
+    "name": "InventoryLeftBehind",
+    "inputs": [
+      {
+        "name": "balance",
+        "type": "uint256",
+        "internalType": "uint256"
+      },
+      {
+        "name": "baseline",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ]
+  },
+  {
+    "type": "error",
+    "name": "ListingAlreadyEnded",
+    "inputs": [
+      {
+        "name": "endTime",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ]
+  },
+  {
+    "type": "error",
+    "name": "ListingOutlivesExercise",
+    "inputs": [
+      {
+        "name": "endTime",
+        "type": "uint256",
+        "internalType": "uint256"
+      },
+      {
+        "name": "exerciseTimestamp",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ]
+  },
+  {
+    "type": "error",
+    "name": "ListingStartsInFuture",
+    "inputs": [
+      {
+        "name": "startTime",
         "type": "uint256",
         "internalType": "uint256"
       }
@@ -293,17 +566,44 @@ export const vaultAbi = [
   },
   {
     "type": "error",
-    "name": "NoCycle",
-    "inputs": []
-  },
-  {
-    "type": "error",
     "name": "NoLiveListing",
     "inputs": []
   },
   {
     "type": "error",
     "name": "NoOpenClaim",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "NotAnOptionType",
+    "inputs": [
+      {
+        "name": "tokenId",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ]
+  },
+  {
+    "type": "error",
+    "name": "NotLiveListing",
+    "inputs": [
+      {
+        "name": "orderHash",
+        "type": "bytes32",
+        "internalType": "bytes32"
+      }
+    ]
+  },
+  {
+    "type": "error",
+    "name": "NotSeaport",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "NotStranded",
     "inputs": []
   },
   {
@@ -340,10 +640,20 @@ export const vaultAbi = [
   },
   {
     "type": "error",
-    "name": "OptionNotApproved",
+    "name": "OfferAmountZero",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "OfferExceedsCapacity",
     "inputs": [
       {
-        "name": "optionId",
+        "name": "requested",
+        "type": "uint256",
+        "internalType": "uint256"
+      },
+      {
+        "name": "capacity",
         "type": "uint256",
         "internalType": "uint256"
       }
@@ -351,22 +661,33 @@ export const vaultAbi = [
   },
   {
     "type": "error",
-    "name": "OptionNotInCurrentCycle",
+    "name": "OptionAssetMismatch",
     "inputs": [
       {
-        "name": "optionId",
-        "type": "uint256",
-        "internalType": "uint256"
+        "name": "expectedUnderlying",
+        "type": "address",
+        "internalType": "address"
       },
       {
-        "name": "optionCycle",
-        "type": "uint32",
-        "internalType": "uint32"
+        "name": "gotUnderlying",
+        "type": "address",
+        "internalType": "address"
+      }
+    ]
+  },
+  {
+    "type": "error",
+    "name": "OptionExerciseAssetMismatch",
+    "inputs": [
+      {
+        "name": "expectedExercise",
+        "type": "address",
+        "internalType": "address"
       },
       {
-        "name": "currentCycle",
-        "type": "uint32",
-        "internalType": "uint32"
+        "name": "gotExercise",
+        "type": "address",
+        "internalType": "address"
       }
     ]
   },
@@ -374,6 +695,22 @@ export const vaultAbi = [
     "type": "error",
     "name": "OraclePaused",
     "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "OrderHashMismatch",
+    "inputs": [
+      {
+        "name": "expected",
+        "type": "bytes32",
+        "internalType": "bytes32"
+      },
+      {
+        "name": "got",
+        "type": "bytes32",
+        "internalType": "bytes32"
+      }
+    ]
   },
   {
     "type": "error",
@@ -393,6 +730,22 @@ export const vaultAbi = [
   },
   {
     "type": "error",
+    "name": "PremiumBelowFloorAtFill",
+    "inputs": [
+      {
+        "name": "grossUsdg",
+        "type": "uint256",
+        "internalType": "uint256"
+      },
+      {
+        "name": "floorUsdg",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ]
+  },
+  {
+    "type": "error",
     "name": "PremiumBelowMinimum",
     "inputs": [
       {
@@ -402,6 +755,22 @@ export const vaultAbi = [
       },
       {
         "name": "minPremiumUsdg",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ]
+  },
+  {
+    "type": "error",
+    "name": "PremiumNotDivisibleByOrderSize",
+    "inputs": [
+      {
+        "name": "grossUsdg",
+        "type": "uint256",
+        "internalType": "uint256"
+      },
+      {
+        "name": "amount",
         "type": "uint256",
         "internalType": "uint256"
       }
@@ -457,22 +826,27 @@ export const vaultAbi = [
   },
   {
     "type": "error",
+    "name": "RedeemOutOfGas",
+    "inputs": []
+  },
+  {
+    "type": "error",
     "name": "ReentrancyGuardReentrantCall",
     "inputs": []
   },
   {
     "type": "error",
-    "name": "RegistryAssetMismatch",
+    "name": "ReserveBreached",
     "inputs": [
       {
-        "name": "expected",
-        "type": "address",
-        "internalType": "address"
+        "name": "balance",
+        "type": "uint256",
+        "internalType": "uint256"
       },
       {
-        "name": "got",
-        "type": "address",
-        "internalType": "address"
+        "name": "reserved",
+        "type": "uint256",
+        "internalType": "uint256"
       }
     ]
   },
@@ -486,6 +860,16 @@ export const vaultAbi = [
         "internalType": "address"
       }
     ]
+  },
+  {
+    "type": "error",
+    "name": "SeaportCancelFailed",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "SeaportValidateFailed",
+    "inputs": []
   },
   {
     "type": "error",
@@ -507,6 +891,11 @@ export const vaultAbi = [
         "internalType": "uint256"
       }
     ]
+  },
+  {
+    "type": "error",
+    "name": "StillStranded",
+    "inputs": []
   },
   {
     "type": "error",
@@ -558,6 +947,49 @@ export const vaultAbi = [
   },
   {
     "type": "error",
+    "name": "UnexpectedLotSize",
+    "inputs": [
+      {
+        "name": "expected",
+        "type": "uint96",
+        "internalType": "uint96"
+      },
+      {
+        "name": "got",
+        "type": "uint96",
+        "internalType": "uint96"
+      }
+    ]
+  },
+  {
+    "type": "error",
+    "name": "UnitPriceExceedsStrike",
+    "inputs": [
+      {
+        "name": "unitPriceUsdg",
+        "type": "uint256",
+        "internalType": "uint256"
+      },
+      {
+        "name": "strikeUsdg",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ]
+  },
+  {
+    "type": "error",
+    "name": "UsdgLegBlocked",
+    "inputs": [
+      {
+        "name": "usdgOwed",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ]
+  },
+  {
+    "type": "error",
     "name": "UseQueue",
     "inputs": []
   },
@@ -590,12 +1022,39 @@ export const vaultAbi = [
   },
   {
     "type": "error",
-    "name": "WritesAreHalted",
+    "name": "WriteReturnedNoClaim",
     "inputs": []
   },
   {
     "type": "error",
-    "name": "WritingNotOpen",
+    "name": "WriteReturnedWrongClaim",
+    "inputs": [
+      {
+        "name": "expected",
+        "type": "uint256",
+        "internalType": "uint256"
+      },
+      {
+        "name": "got",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ]
+  },
+  {
+    "type": "error",
+    "name": "WriteWindowClosed",
+    "inputs": [
+      {
+        "name": "exerciseTs",
+        "type": "uint40",
+        "internalType": "uint40"
+      }
+    ]
+  },
+  {
+    "type": "error",
+    "name": "WritesAreHalted",
     "inputs": []
   },
   {
@@ -743,6 +1202,31 @@ export const vaultAbi = [
   },
   {
     "type": "event",
+    "name": "ClaimStranded",
+    "inputs": [
+      {
+        "name": "cycleNumber",
+        "type": "uint32",
+        "indexed": true,
+        "internalType": "uint32"
+      },
+      {
+        "name": "claimKey",
+        "type": "uint256",
+        "indexed": true,
+        "internalType": "uint256"
+      },
+      {
+        "name": "gen",
+        "type": "uint256",
+        "indexed": false,
+        "internalType": "uint256"
+      }
+    ],
+    "anonymous": false
+  },
+  {
+    "type": "event",
     "name": "ClaimUsdg",
     "inputs": [
       {
@@ -840,6 +1324,31 @@ export const vaultAbi = [
     "inputs": [
       {
         "name": "cap",
+        "type": "uint256",
+        "indexed": false,
+        "internalType": "uint256"
+      }
+    ],
+    "anonymous": false
+  },
+  {
+    "type": "event",
+    "name": "EpochStrandShare",
+    "inputs": [
+      {
+        "name": "epochId",
+        "type": "uint256",
+        "indexed": true,
+        "internalType": "uint256"
+      },
+      {
+        "name": "gen",
+        "type": "uint256",
+        "indexed": false,
+        "internalType": "uint256"
+      },
+      {
+        "name": "wad",
         "type": "uint256",
         "indexed": false,
         "internalType": "uint256"
@@ -1113,6 +1622,31 @@ export const vaultAbi = [
   },
   {
     "type": "event",
+    "name": "ReserveHaircut",
+    "inputs": [
+      {
+        "name": "owner",
+        "type": "address",
+        "indexed": true,
+        "internalType": "address"
+      },
+      {
+        "name": "booked",
+        "type": "uint256",
+        "indexed": false,
+        "internalType": "uint256"
+      },
+      {
+        "name": "paid",
+        "type": "uint256",
+        "indexed": false,
+        "internalType": "uint256"
+      }
+    ],
+    "anonymous": false
+  },
+  {
+    "type": "event",
     "name": "RoleAdminChanged",
     "inputs": [
       {
@@ -1250,6 +1784,74 @@ export const vaultAbi = [
   },
   {
     "type": "event",
+    "name": "StrandShareSettled",
+    "inputs": [
+      {
+        "name": "owner",
+        "type": "address",
+        "indexed": true,
+        "internalType": "address"
+      },
+      {
+        "name": "gen",
+        "type": "uint256",
+        "indexed": true,
+        "internalType": "uint256"
+      },
+      {
+        "name": "wad",
+        "type": "uint256",
+        "indexed": false,
+        "internalType": "uint256"
+      },
+      {
+        "name": "assets",
+        "type": "uint256",
+        "indexed": false,
+        "internalType": "uint256"
+      },
+      {
+        "name": "usdgOut",
+        "type": "uint256",
+        "indexed": false,
+        "internalType": "uint256"
+      }
+    ],
+    "anonymous": false
+  },
+  {
+    "type": "event",
+    "name": "StrandedClaimRecovered",
+    "inputs": [
+      {
+        "name": "gen",
+        "type": "uint256",
+        "indexed": true,
+        "internalType": "uint256"
+      },
+      {
+        "name": "assets",
+        "type": "uint256",
+        "indexed": false,
+        "internalType": "uint256"
+      },
+      {
+        "name": "usdgOut",
+        "type": "uint256",
+        "indexed": false,
+        "internalType": "uint256"
+      },
+      {
+        "name": "queueWad",
+        "type": "uint256",
+        "indexed": false,
+        "internalType": "uint256"
+      }
+    ],
+    "anonymous": false
+  },
+  {
+    "type": "event",
     "name": "Transfer",
     "inputs": [
       {
@@ -1291,6 +1893,31 @@ export const vaultAbi = [
       },
       {
         "name": "totalSupply",
+        "type": "uint256",
+        "indexed": false,
+        "internalType": "uint256"
+      }
+    ],
+    "anonymous": false
+  },
+  {
+    "type": "event",
+    "name": "UsdgLegDeferred",
+    "inputs": [
+      {
+        "name": "owner",
+        "type": "address",
+        "indexed": true,
+        "internalType": "address"
+      },
+      {
+        "name": "receiver",
+        "type": "address",
+        "indexed": true,
+        "internalType": "address"
+      },
+      {
+        "name": "usdgOwed",
         "type": "uint256",
         "indexed": false,
         "internalType": "uint256"
@@ -1495,6 +2122,126 @@ export const vaultAbi = [
   },
   {
     "type": "function",
+    "name": "authorizeOrder",
+    "inputs": [
+      {
+        "name": "zp",
+        "type": "tuple",
+        "internalType": "struct ZoneParameters",
+        "components": [
+          {
+            "name": "orderHash",
+            "type": "bytes32",
+            "internalType": "bytes32"
+          },
+          {
+            "name": "fulfiller",
+            "type": "address",
+            "internalType": "address"
+          },
+          {
+            "name": "offerer",
+            "type": "address",
+            "internalType": "address"
+          },
+          {
+            "name": "offer",
+            "type": "tuple[]",
+            "internalType": "struct SpentItem[]",
+            "components": [
+              {
+                "name": "itemType",
+                "type": "uint8",
+                "internalType": "enum ItemType"
+              },
+              {
+                "name": "token",
+                "type": "address",
+                "internalType": "address"
+              },
+              {
+                "name": "identifier",
+                "type": "uint256",
+                "internalType": "uint256"
+              },
+              {
+                "name": "amount",
+                "type": "uint256",
+                "internalType": "uint256"
+              }
+            ]
+          },
+          {
+            "name": "consideration",
+            "type": "tuple[]",
+            "internalType": "struct ReceivedItem[]",
+            "components": [
+              {
+                "name": "itemType",
+                "type": "uint8",
+                "internalType": "enum ItemType"
+              },
+              {
+                "name": "token",
+                "type": "address",
+                "internalType": "address"
+              },
+              {
+                "name": "identifier",
+                "type": "uint256",
+                "internalType": "uint256"
+              },
+              {
+                "name": "amount",
+                "type": "uint256",
+                "internalType": "uint256"
+              },
+              {
+                "name": "recipient",
+                "type": "address",
+                "internalType": "address payable"
+              }
+            ]
+          },
+          {
+            "name": "extraData",
+            "type": "bytes",
+            "internalType": "bytes"
+          },
+          {
+            "name": "orderHashes",
+            "type": "bytes32[]",
+            "internalType": "bytes32[]"
+          },
+          {
+            "name": "startTime",
+            "type": "uint256",
+            "internalType": "uint256"
+          },
+          {
+            "name": "endTime",
+            "type": "uint256",
+            "internalType": "uint256"
+          },
+          {
+            "name": "zoneHash",
+            "type": "bytes32",
+            "internalType": "bytes32"
+          }
+        ]
+      }
+    ],
+    "outputs": [
+      {
+        "name": "",
+        "type": "bytes4",
+        "internalType": "bytes4"
+      }
+    ],
+    "stateMutability": "nonpayable"
+  },
+  {
+    "type": "function",
     "name": "balanceOf",
     "inputs": [
       {
@@ -1655,32 +2402,6 @@ export const vaultAbi = [
   {
     "type": "function",
     "name": "contractsAssigned",
-    "inputs": [],
-    "outputs": [
-      {
-        "name": "",
-        "type": "uint256",
-        "internalType": "uint256"
-      }
-    ],
-    "stateMutability": "view"
-  },
-  {
-    "type": "function",
-    "name": "contractsRemaining",
-    "inputs": [],
-    "outputs": [
-      {
-        "name": "",
-        "type": "uint256",
-        "internalType": "uint256"
-      }
-    ],
-    "stateMutability": "view"
-  },
-  {
-    "type": "function",
-    "name": "contractsSold",
     "inputs": [],
     "outputs": [
       {
@@ -1859,6 +2580,44 @@ export const vaultAbi = [
   },
   {
     "type": "function",
+    "name": "epochStrandGen",
+    "inputs": [
+      {
+        "name": "",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ],
+    "outputs": [
+      {
+        "name": "",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "epochStrandWad",
+    "inputs": [
+      {
+        "name": "",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ],
+    "outputs": [
+      {
+        "name": "",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
     "name": "epochs",
     "inputs": [
       {
@@ -1957,24 +2716,26 @@ export const vaultAbi = [
   },
   {
     "type": "function",
-    "name": "isValidSignature",
-    "inputs": [
-      {
-        "name": "digest",
-        "type": "bytes32",
-        "internalType": "bytes32"
-      },
-      {
-        "name": "",
-        "type": "bytes",
-        "internalType": "bytes"
-      }
-    ],
+    "name": "isStranded",
+    "inputs": [],
     "outputs": [
       {
         "name": "",
-        "type": "bytes4",
-        "internalType": "bytes4"
+        "type": "bool",
+        "internalType": "bool"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "lastResolvedGen",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "uint256",
+        "internalType": "uint256"
       }
     ],
     "stateMutability": "view"
@@ -2142,7 +2903,7 @@ export const vaultAbi = [
         "internalType": "address"
       },
       {
-        "name": "",
+        "name": "from",
         "type": "address",
         "internalType": "address"
       },
@@ -2181,7 +2942,7 @@ export const vaultAbi = [
         "internalType": "address"
       },
       {
-        "name": "",
+        "name": "from",
         "type": "address",
         "internalType": "address"
       },
@@ -2225,19 +2986,6 @@ export const vaultAbi = [
   },
   {
     "type": "function",
-    "name": "overcallFeeRecipient",
-    "inputs": [],
-    "outputs": [
-      {
-        "name": "",
-        "type": "address",
-        "internalType": "address"
-      }
-    ],
-    "stateMutability": "view"
-  },
-  {
-    "type": "function",
     "name": "owedAssets",
     "inputs": [
       {
@@ -2258,6 +3006,44 @@ export const vaultAbi = [
   {
     "type": "function",
     "name": "owedQueueUsdg",
+    "inputs": [
+      {
+        "name": "",
+        "type": "address",
+        "internalType": "address"
+      }
+    ],
+    "outputs": [
+      {
+        "name": "",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "owedStrandGen",
+    "inputs": [
+      {
+        "name": "",
+        "type": "address",
+        "internalType": "address"
+      }
+    ],
+    "outputs": [
+      {
+        "name": "",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "owedStrandWad",
     "inputs": [
       {
         "name": "",
@@ -2552,19 +3338,6 @@ export const vaultAbi = [
   },
   {
     "type": "function",
-    "name": "registry",
-    "inputs": [],
-    "outputs": [
-      {
-        "name": "",
-        "type": "address",
-        "internalType": "contract IOvercallRegistry"
-      }
-    ],
-    "stateMutability": "view"
-  },
-  {
-    "type": "function",
     "name": "reservedAssets",
     "inputs": [],
     "outputs": [
@@ -2575,6 +3348,13 @@ export const vaultAbi = [
       }
     ],
     "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "retryStrandedClaim",
+    "inputs": [],
+    "outputs": [],
+    "stateMutability": "nonpayable"
   },
   {
     "type": "function",
@@ -2604,11 +3384,83 @@ export const vaultAbi = [
   },
   {
     "type": "function",
+    "name": "settleQueue",
+    "inputs": [],
+    "outputs": [],
+    "stateMutability": "nonpayable"
+  },
+  {
+    "type": "function",
     "name": "spotUsdg",
     "inputs": [],
     "outputs": [
       {
         "name": "",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "strandGen",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "strandedRemainingWad",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "strands",
+    "inputs": [
+      {
+        "name": "",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ],
+    "outputs": [
+      {
+        "name": "assetsIn",
+        "type": "uint256",
+        "internalType": "uint256"
+      },
+      {
+        "name": "usdgIn",
+        "type": "uint256",
+        "internalType": "uint256"
+      },
+      {
+        "name": "wadLeft",
+        "type": "uint256",
+        "internalType": "uint256"
+      },
+      {
+        "name": "assetsLeft",
+        "type": "uint256",
+        "internalType": "uint256"
+      },
+      {
+        "name": "usdgLeft",
         "type": "uint256",
         "internalType": "uint256"
       }
@@ -2836,6 +3688,126 @@ export const vaultAbi = [
         "name": "",
         "type": "uint256",
         "internalType": "uint256"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "validateOrder",
+    "inputs": [
+      {
+        "name": "",
+        "type": "tuple",
+        "internalType": "struct ZoneParameters",
+        "components": [
+          {
+            "name": "orderHash",
+            "type": "bytes32",
+            "internalType": "bytes32"
+          },
+          {
+            "name": "fulfiller",
+            "type": "address",
+            "internalType": "address"
+          },
+          {
+            "name": "offerer",
+            "type": "address",
+            "internalType": "address"
+          },
+          {
+            "name": "offer",
+            "type": "tuple[]",
+            "internalType": "struct SpentItem[]",
+            "components": [
+              {
+                "name": "itemType",
+                "type": "uint8",
+                "internalType": "enum ItemType"
+              },
+              {
+                "name": "token",
+                "type": "address",
+                "internalType": "address"
+              },
+              {
+                "name": "identifier",
+                "type": "uint256",
+                "internalType": "uint256"
+              },
+              {
+                "name": "amount",
+                "type": "uint256",
+                "internalType": "uint256"
+              }
+            ]
+          },
+          {
+            "name": "consideration",
+            "type": "tuple[]",
+            "internalType": "struct ReceivedItem[]",
+            "components": [
+              {
+                "name": "itemType",
+                "type": "uint8",
+                "internalType": "enum ItemType"
+              },
+              {
+                "name": "token",
+                "type": "address",
+                "internalType": "address"
+              },
+              {
+                "name": "identifier",
+                "type": "uint256",
+                "internalType": "uint256"
+              },
+              {
+                "name": "amount",
+                "type": "uint256",
+                "internalType": "uint256"
+              },
+              {
+                "name": "recipient",
+                "type": "address",
+                "internalType": "address payable"
+              }
+            ]
+          },
+          {
+            "name": "extraData",
+            "type": "bytes",
+            "internalType": "bytes"
+          },
+          {
+            "name": "orderHashes",
+            "type": "bytes32[]",
+            "internalType": "bytes32[]"
+          },
+          {
+            "name": "startTime",
+            "type": "uint256",
+            "internalType": "uint256"
+          },
+          {
+            "name": "endTime",
+            "type": "uint256",
+            "internalType": "uint256"
+          },
+          {
+            "name": "zoneHash",
+            "type": "bytes32",
+            "internalType": "bytes32"
+          }
+        ]
+      }
+    ],
+    "outputs": [
+      {
+        "name": "",
+        "type": "bytes4",
+        "internalType": "bytes4"
       }
     ],
     "stateMutability": "view"

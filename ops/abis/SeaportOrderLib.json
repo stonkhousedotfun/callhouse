@@ -333,32 +333,6 @@
  },
  {
   "type": "error",
-  "name": "BadFeeSplit",
-  "inputs": [
-   {
-    "name": "expectedToVault",
-    "type": "uint256",
-    "internalType": "uint256"
-   },
-   {
-    "name": "gotToVault",
-    "type": "uint256",
-    "internalType": "uint256"
-   },
-   {
-    "name": "expectedToOvercall",
-    "type": "uint256",
-    "internalType": "uint256"
-   },
-   {
-    "name": "gotToOvercall",
-    "type": "uint256",
-    "internalType": "uint256"
-   }
-  ]
- },
- {
-  "type": "error",
   "name": "BadOfferIdentifier",
   "inputs": [
    {
@@ -430,22 +404,6 @@
     "name": "got",
     "type": "uint8",
     "internalType": "enum OrderType"
-   }
-  ]
- },
- {
-  "type": "error",
-  "name": "BadOvercallRecipient",
-  "inputs": [
-   {
-    "name": "expected",
-    "type": "address",
-    "internalType": "address"
-   },
-   {
-    "name": "got",
-    "type": "address",
-    "internalType": "address"
    }
   ]
  },
@@ -542,7 +500,7 @@
  },
  {
   "type": "error",
-  "name": "OfferExceedsInventory",
+  "name": "OfferExceedsCapacity",
   "inputs": [
    {
     "name": "requested",
@@ -550,7 +508,7 @@
     "internalType": "uint256"
    },
    {
-    "name": "available",
+    "name": "capacity",
     "type": "uint256",
     "internalType": "uint256"
    }
@@ -569,22 +527,6 @@
     "name": "got",
     "type": "bytes32",
     "internalType": "bytes32"
-   }
-  ]
- },
- {
-  "type": "error",
-  "name": "OvercallFeeRoundsToZero",
-  "inputs": [
-   {
-    "name": "unitPriceUsdg",
-    "type": "uint256",
-    "internalType": "uint256"
-   },
-   {
-    "name": "minimum",
-    "type": "uint256",
-    "internalType": "uint256"
    }
   ]
  },
