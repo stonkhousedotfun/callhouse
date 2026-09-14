@@ -5,8 +5,19 @@ import type { Abi, Address } from "viem";
 import { useAccount, useReadContract, useWriteContract } from "wagmi";
 
 import { ASSET, ASSET_DECIMALS, MARKET, SHARE_TICKER, VAULT, stockTokenAbi, vaultAbi } from "@/lib/contracts";
-import { fmtAsset, fmtShares, multiplierIsActive, parseAmount, toNvdaEq } from "@/lib/format";
-import type { AccountPosition, VaultSnapshot } from "@/lib/hooks";
+import {
+  depositsClosedReason,
+  fmtAsset,
+  fmtShares,
+  fmtUsdg,
+  fmtUtc,
+  listedDepositRisk,
+  multiplierIsActive,
+  parseAmount,
+  toNvdaEq,
+  type DepositsClosedReason,
+} from "@/lib/format";
+import { useNow, type AccountPosition, type VaultSnapshot } from "@/lib/hooks";
 import { ConnectButton } from "./ConnectButton";
 import { useTxRunner } from "./TxToast";
 
@@ -19,19 +30,24 @@ import { useTxRunner } from "./TxToast";
  *  - hide the cap. maxDeposit() is the vault's own headroom and a deposit past it reverts with
  *    DepositCapExceeded, so the number is on screen before the button is pressed.
  *
- * Deposits are allowed in Idle and Listed. New money lands in idle collateral and is NOT added
- * to a call that is already open, so a late depositor cannot be assigned against a week they had
- * no part in writing.
+ * ONE GATE. The vault has a single `DepositsClosed` error and `maxDeposit()` returns 0 on exactly
+ * the same conditions (Vault._depositRefused): not Idle or Listed; Listed and past this week's
+ * exercise time, whether or not anyone called lockBook (W-2); a contract assigned and its claim
+ * not yet redeemed; a stranded claim; the reserve unbacked after an issuer burn; a dead book. So
+ * `maxDeposit() == 0` is the chain's word that deposits are closed, and this form treats it as
+ * such for the connected account and, through the snapshot's zero-address read, for everyone.
+ * `depositsClosedReason` names the reason beside it from what the page has read.
  *
- * The window closes at the cycle's exerciseTimestamp — Friday book close — whether or not anyone
- * has called lockBook. That was a security fix: once the exercise window opens, assignment can
- * take collateral at the strike, and minting fresh shares against a crashed NAV must be
- * impossible. maxDeposit() therefore returns 0 from that instant, and this form must show the
- * closed window honestly instead of quoting headroom that would only revert.
+ * Deposits are allowed in Idle and Listed (decision D8). A deposit in Listed buys into the open
+ * short: shares are priced on totalAssets(), which values the short call at zero, so if the week
+ * ends assigned the loss reaches every share through the share price, a late one included, and
+ * every later fill this week is sized against a balance that includes the new deposit. What a
+ * late depositor does not get is premium indexed before their shares existed. The form says so on
+ * screen whenever the vault is Listed (listedDepositRisk).
  *
  * The cap is measured on totalAssets() — idle plus collateral already locked in Valorem, minus
  * what settled redeemers are owed — not on the raw token balance. A balance-based cap would
- * quietly re-open the moment the keeper wrote a call.
+ * quietly re-open the moment a fill wrote a call.
  */
 export function DepositForm({
   snapshot,
@@ -45,6 +61,7 @@ export function DepositForm({
   const { address, isConnected } = useAccount();
   const { writeContractAsync } = useWriteContract();
   const run = useTxRunner();
+  const nowSeconds = useNow();
   const [raw, setRaw] = useState("");
   const [busy, setBusy] = useState(false);
 
@@ -66,14 +83,26 @@ export function DepositForm({
   });
   const previewShares = typeof preview.data === "bigint" ? preview.data : undefined;
 
-  // Deposits are blocked in Exercisable and Settling: the vault is mid-settlement and a new
-  // share issued against a half-reclaimed balance would price wrong.
-  // Unknown phase (no vault configured, or the read has not landed) is not "closed" — the
-  //  button is disabled by other means, and a false "we are settling" notice would be a lie.
-  const phaseAllows = snapshot.phase === undefined || snapshot.phase === 0 || snapshot.phase === 1;
+  // Closed by the chain's own word (maxDeposit == 0 for the account, or for anyone), or by a
+  // reason the snapshot can name. An unknown phase (no vault configured, or the read has not
+  // landed) is not "closed": the button is disabled by other means, and a false "we are
+  // settling" notice would be a lie.
+  const reason = depositsClosedReason(snapshot, nowSeconds);
+  const chainSaysClosed =
+    snapshot.depositsOpen === false || (position.ready && headroom !== undefined && headroom === 0n && snapshot.phase !== undefined);
+  const closed = reason !== undefined || chainSaysClosed;
+
+  const risk = closed
+    ? "none"
+    : listedDepositRisk({
+        phase: snapshot.phase,
+        cycleStrikeUsdg: snapshot.cycleStrikeUsdg,
+        spotUsdg: snapshot.spotUsdg,
+        minOtmBps: snapshot.policy?.minOtmBps,
+      });
 
   const disabled =
-    busy || !isConnected || !VAULT || amount === null || amount === 0n || overBalance || overCap || !phaseAllows;
+    busy || !isConnected || !VAULT || amount === null || amount === 0n || overBalance || overCap || closed;
 
   async function submit() {
     if (!VAULT || !address || amount === null || amount === 0n) return;
@@ -121,7 +150,7 @@ export function DepositForm({
       <div className="card-head">
         <span className="card-title">Deposit</span>
         <span className="tiny faint mono">
-          cap headroom {headroom === undefined ? "—" : `${fmtAsset(headroom)} ${MARKET}`}
+          {closed ? "closed" : `cap headroom ${headroom === undefined ? "—" : `${fmtAsset(headroom)} ${MARKET}`}`}
         </span>
       </div>
 
@@ -184,10 +213,33 @@ export function DepositForm({
         </div>
       </div>
 
-      {!phaseAllows ? (
+      {closed ? (
         <div className="notice" data-tone="warn" style={{ marginTop: 12 }}>
-          Deposits are closed while the vault settles the week. They reopen when the vault returns
-          to Idle.
+          <strong>Deposits are closed right now.</strong> {closedCopy(reason, snapshot)}
+        </div>
+      ) : null}
+      {risk !== "none" ? (
+        <div className="notice" data-tone={risk === "near" ? "bad" : "warn"} style={{ marginTop: 12 }}>
+          {risk === "near" ? (
+            <>
+              <strong>{MARKET} is at or near this week&apos;s strike.</strong> Spot is {fmtUsdg(snapshot.spotUsdg)} USDG
+              against a strike of {fmtUsdg(snapshot.cycleStrikeUsdg)} USDG. If it finishes above the strike, the calls
+              sold are exercised and part of the vault&apos;s {MARKET} is swapped for USDG at the strike. A deposit made
+              now shares that outcome in full.{" "}
+            </>
+          ) : (
+            <>
+              A call is armed this week
+              {snapshot.cycleStrikeUsdg ? <> at a strike of {fmtUsdg(snapshot.cycleStrikeUsdg)} USDG</> : null}
+              {(snapshot.contractsWritten ?? 0n) > 0n ? <>, and {snapshot.contractsWritten!.toString()} contracts have been sold</> : null}. If{" "}
+              {MARKET} finishes above the strike, part of the vault&apos;s {MARKET} is sold at the strike, and a deposit
+              made now shares that outcome.{" "}
+            </>
+          )}
+          Shares are priced as if the open call were worth nothing, so the loss is spread over every share, including
+          new ones, and every later fill this week is sized against a balance that includes your deposit. Premium
+          already paid into the vault before your deposit is not shared with you. A deposit made while the vault is
+          Idle enters before the week&apos;s call is armed.
         </div>
       ) : null}
       {overBalance ? (
@@ -195,7 +247,7 @@ export function DepositForm({
           That is more than the wallet holds.
         </div>
       ) : null}
-      {overCap && !overBalance ? (
+      {overCap && !overBalance && !closed ? (
         <div className="notice" data-tone="bad" style={{ marginTop: 12 }}>
           That is past the vault&apos;s deposit cap. The cap is deliberately small at launch.
         </div>
@@ -206,12 +258,30 @@ export function DepositForm({
           <ConnectButton />
         ) : (
           <button data-variant="primary" style={{ width: "100%" }} disabled={disabled} onClick={submit}>
-            {busy ? "Working…" : needsApproval ? `Approve and deposit` : "Deposit"}
+            {busy ? "Working…" : closed ? "Deposits closed" : needsApproval ? `Approve and deposit` : "Deposit"}
           </button>
         )}
       </div>
     </div>
   );
+}
+
+/** The reason deposits are shut, in the vault's own terms (Vault._depositRefused). */
+function closedCopy(reason: DepositsClosedReason | undefined, snapshot: VaultSnapshot): string {
+  switch (reason) {
+    case "phase":
+      return "The vault is settling the week (past its sale window). Deposits reopen when it returns to Idle.";
+    case "window":
+      return `This week's sale window closed at ${fmtUtc(snapshot.cycleExerciseTs)}: the exercise window is open and assignment can take collateral at the strike, so no new shares are minted against it. Deposits reopen after the keeper closes the week.`;
+    case "assignmentPending":
+      return "Contracts have been assigned and the claim has not been redeemed yet, so the collateral has left while the strike USDG is still inside Valorem. Deposits reopen once the week is closed.";
+    case "stranded":
+      return "The last close could not redeem its Valorem claim (see the stranded-claim notice). Deposits reopen once the claim is redeemed with Retry claim.";
+    case "reserveUnbacked":
+      return "The vault's token balance is below what settled redeemers are owed, which only an issuer burn produces. Deposits reopen once the reserve is collected or refilled.";
+    default:
+      return "The vault's maxDeposit() is zero: it is past its sale window, settling, holding a stranded claim, its reserve is unbacked, or the book is worth too little per share to sell new shares. Deposits reopen by themselves when the reason clears.";
+  }
 }
 
 /** Full-precision decimal string for the max button — never a rounded display value. */

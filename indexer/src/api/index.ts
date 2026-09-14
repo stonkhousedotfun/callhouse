@@ -5,37 +5,17 @@ import { logger as honoLogger } from "hono/logger";
 import { and, desc, eq, graphql, sql } from "ponder";
 import { getAddress, isAddress, type Address } from "viem";
 
-import {
-  ACC_PRECISION,
-  ASSET,
-  CHAIN_ID,
-  CHAIN_NAME,
-  CLEARINGHOUSE,
-  KEEPER_HMAC_SECRET,
-  OVERCALL_FEE_RECIPIENT,
-  REGISTRY,
-  SEAPORT,
-  USDG,
-  VAULT,
-} from "../../lib/env";
+import { ACC_PRECISION, ASSET, CHAIN_ID, CHAIN_NAME, CLEARINGHOUSE, SEAPORT, USDG, VAULT, WAD } from "../../lib/env";
+import { capacity } from "../../lib/lifecycle";
 import { ROLE_DEFAULT_ADMIN, ROLE_GUARDIAN, ROLE_KEEPER } from "../../lib/roles";
 import { cache15s } from "./cache";
-import {
-  readAccountLive,
-  readChainHead,
-  readCycleLive,
-  readOraclePaused,
-  readVaultLive,
-} from "./chain";
-import { verifyKeeperHmac } from "./hmac";
-import { forwardToOvercall, validateRelayBody } from "./overcall";
+import { readAccountLive, readChainHead, readOraclePaused, readVaultLive } from "./chain";
 import { asset, iso, num, toJson, usdg } from "./serialize";
-import { log } from "../../lib/log";
 
 const app = new Hono();
 
-// One line per request: method, path, status, milliseconds. The HMAC that gates
-// /v1/overcall/list travels in headers, so paths are safe to log verbatim.
+// One line per request: method, path, status, milliseconds. Every route is a public GET, so
+// paths are safe to log verbatim.
 app.use(honoLogger());
 
 /*//////////////////////////////////////////////////////////////
@@ -44,27 +24,18 @@ app.use(honoLogger());
 
 const PHASE_NAMES = ["Idle", "Listed", "Exercisable", "Settling"] as const;
 
-const CYCLE_STATUSES = [
-  "idle",
-  "listed",
-  "filled",
-  "unfilled",
-  "assigned",
-  "closed",
-] as const;
+const CYCLE_STATUSES = ["listed", "filled", "unfilled", "assigned", "closed", "stranded"] as const;
 type CycleStatus = (typeof CYCLE_STATUSES)[number];
 
-const LISTING_STATUSES = [
-  "approved",
-  "partially_filled",
-  "filled",
-  "cancelled",
-  "invalidated",
-  "expired",
-] as const;
+const LISTING_STATUSES = ["approved", "partially_filled", "filled", "cancelled"] as const;
 type ListingStatus = (typeof LISTING_STATUSES)[number];
 
 const ONE = 10n ** 18n;
+const ZERO_HASH = `0x${"0".repeat(64)}`;
+
+/** X-1: the vault's `listingHash()` is `bytes32(0)` when nothing is live; the wire says null, never a zero hash. */
+const hashOrNull = (h: `0x${string}` | null | undefined): `0x${string}` | null =>
+  h === null || h === undefined || h.toLowerCase() === ZERO_HASH ? null : h;
 
 const clampLimit = (raw: string | undefined, fallback: number, max: number): number => {
   const n = raw === undefined ? fallback : Number(raw);
@@ -83,10 +54,8 @@ const ADDRESSES = {
   vault: VAULT,
   asset: ASSET,
   usdg: USDG,
-  registry: REGISTRY,
   clearinghouse: CLEARINGHOUSE,
   seaport: SEAPORT,
-  overcallFeeRecipient: OVERCALL_FEE_RECIPIENT,
 } as const;
 
 /**
@@ -114,6 +83,7 @@ async function loadState() {
 type CycleRow = typeof schema.cycle.$inferSelect;
 type ListingRow = typeof schema.listing.$inferSelect;
 type HarvestRow = typeof schema.harvest.$inferSelect;
+type StrandRow = typeof schema.strand.$inferSelect;
 
 /**
  * The public shape of a week.
@@ -123,35 +93,38 @@ type HarvestRow = typeof schema.harvest.$inferSelect;
  * most likely outcome and it is published, not hidden. Equally always present, and zero on
  * every week that was not assigned: `harvest.strikeProceedsUsdg`, so premium and returned
  * principal never have to be told apart by subtraction on the consumer's side.
+ *
+ * The `option` group replaced the pre-redesign `registry` group: the window comes from the
+ * armed Valorem option type, read from the vault at `RollOpen`, and there are no rungs, no lot
+ * size and no announcement. A week the vault never armed has no row at all.
  */
 export function cycleJson(c: CycleRow) {
   return {
     cycle: c.cycleNumber,
     status: c.status,
-    wrote: c.wrote,
     filled: c.contractsSold > 0n,
     assigned: c.contractsAssigned > 0n,
+    stranded: c.stranded,
 
-    registry: {
-      optionIds: c.optionIds ?? [],
-      strikeCount: c.strikeCount,
-      lotSize: c.lotSize === null ? null : asset(c.lotSize),
+    option: {
       exerciseTimestamp: num(c.exerciseTimestamp),
       exerciseAt: iso(c.exerciseTimestamp),
       expiryTimestamp: num(c.expiryTimestamp),
       expiryAt: iso(c.expiryTimestamp),
-      setAt: iso(c.setAt),
-      setTx: c.setTx,
     },
 
     written: {
       optionId: c.optionId === null ? null : c.optionId.toString(),
       claimKey: c.claimKey === null ? null : c.claimKey.toString(),
       strikeUsdg: usdg(c.strikeUsdg),
+      // The sum of every fill's `CallsWritten`. Under write on fill this equals `fill.contractsSold`.
       contracts: num(c.contractsWritten),
       collateral: asset(c.collateral),
+      writeCount: c.writeCount,
       openedAt: iso(c.openedAt),
       txOpen: c.txOpen,
+      firstWriteAt: iso(c.firstWriteAt),
+      lastWriteAt: iso(c.lastWriteAt),
     },
 
     listing: {
@@ -164,14 +137,11 @@ export function cycleJson(c: CycleRow) {
     },
 
     fill: {
+      // Seaport's count. The cross-check of `written.contracts`; equal by construction.
       contractsSold: num(c.contractsSold),
       fillCount: c.fillCount,
-      // What buyers paid, INCLUDING Overcall's 5%.
+      // What buyers paid, which is what reached the vault: one consideration item, no venue cut.
       premiumGross: usdg(c.premiumGross),
-      // The 95% that reached the vault.
-      premiumToVault: usdg(c.premiumToVault),
-      // The 5% that went to Overcall.
-      overcallFee: usdg(c.overcallFee),
       unitPriceUsdg: usdg(c.fillUnitPriceUsdg),
       firstFillAt: iso(c.firstFillAt),
       lastFillAt: iso(c.lastFillAt),
@@ -180,15 +150,27 @@ export function cycleJson(c: CycleRow) {
     settlement: {
       lockedAt: iso(c.lockedAt),
       contractsAssigned: num(c.contractsAssigned),
+      // The whole strike USDG the claim returned. 0 while stranded; set at recovery.
       assignmentUsdg: usdg(c.assignmentUsdg),
       assetsReturned: asset(c.assetsReturned),
       // Market-wide exercise against this option type. Our assignment is a bucket lottery,
-      // resolved only at redeem, so this is a signal and not a claim about us.
+      // resolved only at the close, so this is a signal and not a claim about us.
       marketExercised: num(c.marketExercised),
       bucketIndex: c.bucketIndex === null ? null : c.bucketIndex.toString(),
       bucketAssigned: num(c.bucketAssigned),
       closedAt: iso(c.closedAt),
       txClose: c.txClose,
+      // The stranded close (AF-02): the claim could not be redeemed at `rollClose`. Null on
+      // every week that closed normally; `recoveredAt` null while the claim is still stranded.
+      strand:
+        c.strandGen === null
+          ? null
+          : {
+              gen: c.strandGen.toString(),
+              recovered: c.recoveredAt !== null,
+              recoveredAt: iso(c.recoveredAt),
+              recoveredTx: c.recoveredTx,
+            },
     },
 
     // Premium and strike proceeds are published SEPARATELY (W-21). On an assigned week the
@@ -200,22 +182,24 @@ export function cycleJson(c: CycleRow) {
       harvested: c.harvested,
       // The vault's whole USDG take: premium that filled plus any strike proceeds.
       grossUsdg: usdg(c.harvestGross),
-      // grossUsdg − strikeProceedsUsdg: premium as harvested, AFTER Overcall's 5%. Not
-      // `fill.premiumGross`, which is what buyers paid before Overcall's cut.
+      // grossUsdg − strikeProceedsUsdg: premium as harvested. Equals `fill.premiumGross` once
+      // every fill's USDG has been swept (there is no venue cut between the two).
       premiumGross: usdg(c.harvestPremiumGross),
-      // The strike-proceeds part of the terminal harvest (RollClose.usdgFromAssignment).
+      // The strike-proceeds part of the harvests: `RollClose.usdgFromAssignment`, plus the live
+      // shares' part of a recovered stranded claim. The queue's part of a recovered claim is
+      // reserved directly and never passes through a harvest, so after a strand this can sit
+      // below `settlement.assignmentUsdg`.
       strikeProceedsUsdg: usdg(c.strikeProceeds),
       // Charged on the premium part only; strike proceeds are never fee'd, so on an assigned
       // week fee / grossUsdg is not the policy rate. fee / premiumGross is.
       fee: usdg(c.fee),
-      // premiumGross − fee. PREMIUM ONLY. (Until W-21 this was grossUsdg − fee and included
-      // the strike proceeds; that figure is `creditedUsdg`.)
+      // premiumGross − fee. PREMIUM ONLY.
       premiumNet: usdg(c.premiumNet),
       // premiumNet + strikeProceedsUsdg: everything the Distributor credited to holders.
       creditedUsdg: usdg(c.creditedUsdg),
       // premiumNet per whole share, summed per sweep. The per-share premium figure.
       premiumNetPerShare: usdg(c.premiumNetPerShare),
-      // creditedUsdg per whole share, summed per sweep. Includes strike proceeds; unchanged.
+      // creditedUsdg per whole share, summed per sweep. Includes strike proceeds.
       usdgPerShare: usdg(c.usdgPerShare),
       supplyAtHarvest: asset(c.supplyAtHarvest),
       harvestedAt: iso(c.harvestedAt),
@@ -231,16 +215,13 @@ export function listingJson(l: ListingRow) {
     status: l.status,
     optionId: l.optionId.toString(),
     contracts: num(l.amount),
+    // The one consideration item: USDG to the vault, an exact multiple of `contracts`.
     grossUsdg: usdg(l.grossUsdg),
     unitPriceUsdg: usdg(l.unitPriceUsdg),
-    // The per-contract 95/5 split, recomputed exactly as Policy.splitPremium does it.
-    writerUsdg: usdg(l.writerUsdg),
-    overcallFeeUsdg: usdg(l.overcallFeeUsdg),
     fill: {
       contractsFilled: num(l.contractsFilled),
       fillCount: l.fillCount,
       proceedsUsdg: usdg(l.proceedsUsdg),
-      feePaidUsdg: usdg(l.feePaidUsdg),
       lastFillAt: iso(l.lastFillAt),
       lastFillTx: l.lastFillTx,
     },
@@ -256,12 +237,12 @@ export function harvestJson(h: HarvestRow) {
   return {
     cycle: h.cycleNumber,
     // true = the end-of-cycle harvest inside `rollClose` (the week's verdict).
-    // false = a mid-week `_checkpointHarvest()` fired by a deposit, which sweeps premium into
-    //         the index before new shares exist. Real money, but not a weekly result.
+    // false = a checkpoint (deposit, mint, settleQueue) or the retry of a stranded claim.
     terminal: h.terminal,
+    origin: h.origin,
     filled: h.filled,
     // The event's three amounts, verbatim. `netUsdg` includes strike proceeds on the terminal
-    // harvest of an assigned week.
+    // harvest of an assigned week and on a retry harvest.
     grossUsdg: usdg(h.grossUsdg),
     fee: usdg(h.feeUsdg),
     netUsdg: usdg(h.netUsdg),
@@ -269,7 +250,6 @@ export function harvestJson(h: HarvestRow) {
     premiumGross: usdg(h.premiumGrossUsdg),
     strikeProceedsUsdg: usdg(h.strikeProceedsUsdg),
     premiumNet: usdg(h.premiumNetUsdg),
-    premiumToVault: usdg(h.premiumToVault),
     assignmentUsdg: usdg(h.assignmentUsdg),
     contractsSold: num(h.contractsSold),
     contractsAssigned: num(h.contractsAssigned),
@@ -284,25 +264,45 @@ export function harvestJson(h: HarvestRow) {
   };
 }
 
+export function strandJson(s: StrandRow) {
+  return {
+    gen: s.gen.toString(),
+    cycle: s.cycleNumber,
+    claimKey: s.claimKey.toString(),
+    strandedAt: iso(s.strandedAt),
+    strandedTx: s.strandedTx,
+    // WAD (of 1e18) of the claim owned by settled queue epochs, and how many took a share.
+    epochWad: s.epochWad.toString(),
+    epochCount: s.epochCount,
+    recovered: s.recovered,
+    recoveredAt: iso(s.recoveredAt),
+    recoveredTx: s.recoveredTx,
+    // What the redeem returned, and the queue's part of it still to be collected.
+    assetsIn: asset(s.assetsIn),
+    usdgIn: usdg(s.usdgIn),
+    queueWad: s.queueWad.toString(),
+    wadLeft: s.wadLeft.toString(),
+    assetsLeft: asset(s.assetsLeft),
+    usdgLeft: usdg(s.usdgLeft),
+    settledCount: s.settledCount,
+  };
+}
+
 /*//////////////////////////////////////////////////////////////
                           GET /v1/vault
 //////////////////////////////////////////////////////////////*/
 
 /**
- * TVL, phase, and this week: strike, listing, fill.
+ * TVL, phase, and this week: strike, listing, fill, capacity, the stranded-claim state.
  *
  * Indexed state is the base; a live read is layered on top for the few facts events cannot
- * carry (Valorem's mid-week position, the oracle, the registry's ladder). If the RPC is down
+ * carry (Valorem's live position, the oracle, the deposit gate, capacity). If the RPC is down
  * the route still answers from the index with `live: false` rather than failing.
  */
 app.get("/v1/vault", cache15s, async (c) => {
   const state = await loadState();
 
-  const [live, liveCycle, oraclePaused] = await Promise.all([
-    readVaultLive(),
-    readCycleLive(),
-    readOraclePaused(),
-  ]);
+  const [live, oraclePaused] = await Promise.all([readVaultLive(), readOraclePaused()]);
 
   const indexedIdle =
     state === null
@@ -319,9 +319,7 @@ app.get("/v1/vault", cache15s, async (c) => {
   const pricePerShare = totalShares === 0n ? ONE : (totalAssets * ONE) / totalShares;
 
   const thisCycleNumber =
-    state !== null && state.cycleNumber !== 0
-      ? state.cycleNumber
-      : (liveCycle.cycleNumber ?? 0);
+    state !== null && state.cycleNumber !== 0 ? state.cycleNumber : (live.cycleNumber ?? 0);
 
   const thisCycle =
     thisCycleNumber === 0
@@ -333,13 +331,23 @@ app.get("/v1/vault", cache15s, async (c) => {
           .limit(1)
           .then((r) => r[0] ?? null);
 
-  // The last WEEK, so the last terminal harvest. A mid-week checkpoint harvest (fired by a
-  // deposit while the cycle is still live) is not a result and must never be shown as one.
+  // The last terminal harvest: one `rollClose`'s sweep. A checkpoint or a retry is not a
+  // result and must never be shown as one. (X-3: this used to be called `lastWeek`, which it
+  // is not when a week was swept in more than one go — the week's total is the cycle row.)
   const lastHarvest = await db
     .select()
     .from(schema.harvest)
     .where(eq(schema.harvest.terminal, true))
     .orderBy(desc(schema.harvest.blockNumber))
+    .limit(1)
+    .then((r) => r[0] ?? null);
+
+  // The last CLOSED week, whole: every sweep summed, and the verdict.
+  const lastClosedCycle = await db
+    .select()
+    .from(schema.cycle)
+    .where(eq(schema.cycle.harvested, true))
+    .orderBy(desc(schema.cycle.cycleNumber))
     .limit(1)
     .then((r) => r[0] ?? null);
 
@@ -356,6 +364,26 @@ app.get("/v1/vault", cache15s, async (c) => {
       .map((r) => r.account);
 
   const phaseCode = live.phase ?? state?.phase ?? 0;
+  const stranded = live.isStranded ?? state?.stranded ?? false;
+  const contractsWritten = live.contractsWritten ?? state?.contractsWritten ?? 0n;
+  const queuedShares = live.queuedShares ?? state?.queuedShares ?? 0n;
+
+  // Capacity: `Policy.maxContracts(totalAssets) − contractsWritten`. There is no inventory and no
+  // `contractsRemaining` view under write on fill; this is what the next listing may offer and
+  // what the fill gate would still admit (re-sized at every fill against NAV then).
+  const cap =
+    live.policy === null ? null : capacity(live.policy, totalAssets, contractsWritten);
+
+  const stateStrand =
+    state !== null && state.strandedCycleNumber !== null
+      ? await db
+          .select()
+          .from(schema.strand)
+          .where(eq(schema.strand.cycleNumber, state.strandedCycleNumber))
+          .orderBy(desc(schema.strand.gen))
+          .limit(1)
+          .then((r) => r[0] ?? null)
+      : null;
 
   return sendJson(
     c,
@@ -369,10 +397,13 @@ app.get("/v1/vault", cache15s, async (c) => {
         name: PHASE_NAMES[phaseCode] ?? "Unknown",
         writesHalted: live.writesHalted ?? state?.writesHalted ?? false,
         canRedeemInstantly: live.canRedeemInstantly,
+        // `maxDeposit() == 0` is the whole deposit gate in one bit: phase, exercise window,
+        // unclaimed assignment, stranded claim, unbacked reserve, share-price floor.
+        depositsOpen: live.maxDeposit === null ? null : live.maxDeposit > 0n,
         valoremFeeAccepted: live.valoremFeeAccepted ?? state?.valoremFeeAccepted ?? false,
-        // The issuer's two levers. A paused oracle makes `rollOpen` revert — no price, no
-        // write. A transfer pause freezes the token itself and stops deposits, redemptions
-        // and settlement alike; nothing in this system can route around that.
+        // The issuer's two levers. A paused oracle makes `rollOpen` and every fill revert — no
+        // price, no write. A transfer pause freezes the token itself and stops deposits,
+        // redemptions and settlement alike; nothing in this system can route around that.
         oraclePaused: oraclePaused ?? state?.oraclePaused ?? false,
         tokenPaused: state?.tokenPaused ?? false,
         // Seconds. Days, not hours, on purpose: the NVDA/USD feed only moves while the US
@@ -380,10 +411,28 @@ app.get("/v1/vault", cache15s, async (c) => {
         maxPriceAgeSeconds: state?.maxPriceAge ?? 0,
       },
 
+      // The stranded-claim state machine (AF-02). While `stranded`, deposits and instant
+      // redemption are shut, `rollOpen` refuses, the queue still settles on the idle balance,
+      // and anyone may call `retryStrandedClaim()`.
+      stranded: {
+        stranded,
+        gen: (live.strandGen ?? state?.strandGen ?? 0n).toString(),
+        lastResolvedGen: (live.lastResolvedGen ?? state?.lastResolvedGen ?? 0n).toString(),
+        // The part of the claim live shares still own, of 1e18. NAV counts the locked
+        // collateral scaled by this.
+        remainingWad: (live.strandedRemainingWad ?? state?.strandedRemainingWad ?? 0n).toString(),
+        wad: WAD.toString(),
+        cycle: state?.strandedCycleNumber ?? null,
+        claimKey: stateStrand === null ? null : stateStrand.claimKey.toString(),
+        since: stateStrand === null ? null : iso(stateStrand.strandedAt),
+        // Locked collateral the claim still holds, raw (`lockedAssets()`), while stranded.
+        lockedAssets: stranded ? asset(live.lockedAssets ?? state?.lockedCollateral ?? 0n) : null,
+      },
+
       tvl: {
         totalAssets: asset(totalAssets),
         idleAssets: asset(live.idleAssets ?? indexedIdle),
-        // Live reads Valorem's position, so this falls as buyers are assigned mid-week.
+        // Live reads Valorem's position, so this falls as buyers are assigned after exercise.
         lockedAssets: asset(live.lockedAssets ?? state?.lockedCollateral ?? 0n),
         reservedAssets: asset(state?.reservedAssets ?? 0n),
         totalShares: asset(totalShares),
@@ -411,43 +460,37 @@ app.get("/v1/vault", cache15s, async (c) => {
         // than left to be guessed: usdg owed to a holder = shares × acc / precision.
         accUsdgPerShare: (state?.accUsdgPerShare ?? 0n).toString(),
         accUsdgPerSharePrecision: ACC_PRECISION.toString(),
-        protocolFeeBps: state?.protocolFeeBps ?? 0,
+        protocolFeeBps: live.policy?.protocolFeeBps ?? state?.protocolFeeBps ?? 0,
         feeRecipient: state?.feeRecipient ?? null,
       },
 
       queue: {
-        queuedShares: asset(live.queuedShares ?? state?.queuedShares ?? 0n),
+        queuedShares: asset(queuedShares),
         epochId: (state?.epochId ?? 1n).toString(),
+        // `settleQueue()` is permissionless while Idle with shares queued: the flat exit, and
+        // the only exit while a claim is stranded.
+        canSettle: phaseCode === 0 && queuedShares > 0n,
       },
 
       week: {
         cycle: thisCycle === null ? null : cycleJson(thisCycle),
-        // The registry is the clock. `isWritingOpen` is the keeper's only trigger; the wall
-        // clock is never consulted. The ladder is whatever rungs Overcall approved this week.
-        registry: {
-          live: liveCycle.live,
-          cycleNumber: liveCycle.cycleNumber,
-          isWritingOpen: liveCycle.isWritingOpen,
-          isCycleLive: liveCycle.isCycleLive,
-          writeDeadline: num(liveCycle.writeDeadline),
-          writeDeadlineAt: iso(liveCycle.writeDeadline),
-          exerciseAt: iso(liveCycle.exerciseTimestamp),
-          expiryAt: iso(liveCycle.expiryTimestamp),
-          lotSize: liveCycle.lotSize === null ? null : asset(liveCycle.lotSize),
-          rungs: liveCycle.rungs.map((r) => ({
-            optionId: r.optionId.toString(),
-            strikeUsdg: r.strikeUsdg === null ? null : usdg(r.strikeUsdg),
-            approved: r.approved,
-            // Which rung we actually wrote, if any.
-            ours: thisCycle !== null && thisCycle.optionId === r.optionId,
-          })),
+        // The armed option, as the vault holds it. The vault is the clock: fills stop and
+        // `lockBook` opens at `exerciseAt`, `rollClose` at `expiryAt`. No registry.
+        option: {
+          optionId: (live.optionId ?? thisCycle?.optionId ?? null)?.toString() ?? null,
+          claimKey: (live.claimKey ?? thisCycle?.claimKey ?? null)?.toString() ?? null,
+          strikeUsdg: usdg(live.cycleStrikeUsdg ?? state?.strikeUsdg ?? 0n),
+          exerciseTimestamp: num(live.cycleExerciseTs ?? state?.exerciseTimestamp ?? 0n),
+          exerciseAt: iso(live.cycleExerciseTs ?? state?.exerciseTimestamp ?? 0n),
+          expiryTimestamp: num(live.cycleExpiryTs ?? state?.expiryTimestamp ?? 0n),
+          expiryAt: iso(live.cycleExpiryTs ?? state?.expiryTimestamp ?? 0n),
         },
         // Index-first, like everything else here: the live read is preferred because a
         // listing can be cancelled without the vault emitting anything the indexer has yet
         // processed, but a dead RPC falls back to the cycle row rather than reporting zeros
         // for a listing that is demonstrably on the book.
         listing: {
-          hash: live.listingHash ?? state?.listingHash ?? null,
+          hash: live.listingHash !== null ? hashOrNull(live.listingHash) : hashOrNull(state?.listingHash),
           contracts: num(live.listingAmount ?? thisCycle?.listedContracts ?? 0n),
           grossUsdg: usdg(live.listingGrossUsdg ?? thisCycle?.listedGrossUsdg ?? 0n),
           listingsThisCycle: live.listingsThisCycle ?? state?.listingsThisCycle ?? 0,
@@ -456,29 +499,37 @@ app.get("/v1/vault", cache15s, async (c) => {
         assignmentLive: {
           // Straight from `clear.claim().amountExercised / 1e18`, so it is a contract count.
           contractsAssigned: num(live.contractsAssigned ?? 0n),
-          contractsRemaining: num(live.contractsRemaining ?? 0n),
-          contractsWritten: num(live.contractsWritten ?? 0n),
+          // Written == sold. The sum of this cycle's fills.
+          contractsWritten: num(contractsWritten),
+          // `Policy.maxContracts(totalAssets) − contractsWritten`: what a listing may still
+          // offer. Null when the policy could not be read live.
+          capacity: cap === null ? null : num(cap),
         },
       },
 
-      lastWeek: lastHarvest === null ? null : harvestJson(lastHarvest),
+      lastHarvest: lastHarvest === null ? null : harvestJson(lastHarvest),
+      lastClosedCycle: lastClosedCycle === null ? null : cycleJson(lastClosedCycle),
 
       lifetime: {
-        cyclesWritten: state?.cyclesWritten ?? 0,
+        // Cycles ARMED. Nothing is written at arm, so this counts weeks the keeper opened.
+        cyclesArmed: state?.cyclesWritten ?? 0,
         cyclesFilled: state?.cyclesFilled ?? 0,
         cyclesUnfilled: state?.cyclesUnfilled ?? 0,
         cyclesAssigned: state?.cyclesAssigned ?? 0,
+        cyclesStranded: state?.cyclesStranded ?? 0,
+        // What buyers paid on every fill; one consideration item, so it is what the vault got.
         premiumGross: usdg(state?.lifetimePremiumGross ?? 0n),
-        premiumToVault: usdg(state?.lifetimePremiumToVault ?? 0n),
-        overcallFee: usdg(state?.lifetimeOvercallFee ?? 0n),
+        // Strike USDG the claims returned, stranded recoveries included.
         assignmentUsdg: usdg(state?.lifetimeAssignmentUsdg ?? 0n),
         protocolFee: usdg(state?.lifetimeProtocolFee ?? 0n),
-        // Premium after both fees. PREMIUM ONLY since W-21 (it used to include strike proceeds).
+        // Premium after the protocol fee. PREMIUM ONLY (W-21).
         premiumNet: usdg(state?.lifetimePremiumNet ?? 0n),
-        // Strike proceeds swept by terminal harvests: returned principal, not premium.
+        // Strike proceeds swept by harvests: returned principal, not premium.
         strikeProceedsUsdg: usdg(state?.lifetimeStrikeProceeds ?? 0n),
         // premiumNet + strikeProceedsUsdg: everything credited to holders.
         creditedUsdg: usdg(state?.lifetimeCreditedUsdg ?? 0n),
+        // Asset base units settled redeemers were booked and not paid (AF-05 haircuts).
+        haircutAssets: asset(state?.lifetimeHaircutAssets ?? 0n),
       },
 
       roles: {
@@ -503,9 +554,9 @@ app.get("/v1/vault", cache15s, async (c) => {
 /**
  * The full tape, newest first.
  *
- * Every week the registry ever opened is here, including the ones the vault sat out
- * (`status: "idle"`) and the ones it wrote into and nobody bought (`status: "unfilled"`,
- * every money field 0). That is the point of the route.
+ * Every week the vault ever armed is here, including the ones it armed and nobody bought
+ * (`status: "unfilled"`, every money field 0) and the ones whose close stranded the claim
+ * (`status: "stranded"` until the retry lands). That is the point of the route.
  */
 app.get("/v1/cycles", cache15s, async (c) => {
   const limit = clampLimit(c.req.query("limit"), 52, 500);
@@ -539,10 +590,11 @@ app.get("/v1/cycles", cache15s, async (c) => {
       limit,
       offset,
       totals: {
-        written: state?.cyclesWritten ?? 0,
+        armed: state?.cyclesWritten ?? 0,
         filled: state?.cyclesFilled ?? 0,
         unfilled: state?.cyclesUnfilled ?? 0,
         assigned: state?.cyclesAssigned ?? 0,
+        stranded: state?.cyclesStranded ?? 0,
       },
       cycles: rows.map(cycleJson),
     }),
@@ -577,6 +629,12 @@ app.get("/v1/cycles/:cycle", cache15s, async (c) => {
     .where(eq(schema.harvest.cycleNumber, n))
     .orderBy(desc(schema.harvest.blockNumber));
 
+  const strands = await db
+    .select()
+    .from(schema.strand)
+    .where(eq(schema.strand.cycleNumber, n))
+    .orderBy(desc(schema.strand.gen));
+
   return sendJson(
     c,
     toJson({
@@ -584,6 +642,7 @@ app.get("/v1/cycles/:cycle", cache15s, async (c) => {
       cycle: cycleJson(row),
       listings: listings.map(listingJson),
       harvests: harvests.map(harvestJson),
+      strands: strands.map(strandJson),
     }),
   );
 });
@@ -597,8 +656,9 @@ app.get("/v1/cycles/:cycle", cache15s, async (c) => {
  *
  * Terminal harvests only by default: those are the one-per-`rollClose` rows that say what a
  * week did, and an unfilled week is always among them with `filled: false` and every money
- * field 0. `?include=all` adds the mid-week `_checkpointHarvest()` rows (`terminal: false`),
- * which are premium swept into the index ahead of a deposit rather than a week's result.
+ * field 0. `?include=all` adds the checkpoint rows (`origin: "checkpoint"`: premium swept into
+ * the index ahead of a deposit or a flat queue settlement) and the retry rows (`origin:
+ * "retry"`: a stranded claim's strike USDG arriving late), which are money but not results.
  */
 app.get("/v1/activity", cache15s, async (c) => {
   const limit = clampLimit(c.req.query("limit"), 52, 500);
@@ -636,7 +696,7 @@ app.get("/v1/activity", cache15s, async (c) => {
 //////////////////////////////////////////////////////////////*/
 
 /**
- * Shares, claimable USDG, queued position.
+ * Shares, claimable USDG, queued position, and any share of a stranded claim.
  *
  * `claimableUsdg` is read live because it cannot be derived from logs: the Distributor keeps a
  * per-account snapshot of the index, and no event exposes it. Everything else is indexed and
@@ -673,6 +733,23 @@ app.get("/v1/account/:addr", cache15s, async (c) => {
 
   const currentEpoch = state?.epochId ?? 1n;
 
+  // A share of a stranded claim, staged when the owner's epoch settled while the claim was
+  // stranded (or still waiting inside the epoch). It becomes assets and USDG only once the
+  // generation is redeemed; until then `previewCompleteRedeem` quotes it as nothing.
+  const strandWad = live.strandWad ?? indexed?.strandWad ?? 0n;
+  const strandGen = live.strandGen ?? indexed?.strandGen ?? null;
+  const epochStrandWad = epoch === null || epoch.strandGen === null ? 0n : epoch.strandWad - epoch.strandWadClaimed;
+  const pendingGen = strandWad > 0n ? strandGen : epoch?.strandGen ?? null;
+  const strandRow =
+    pendingGen === null || pendingGen === 0n
+      ? null
+      : await db
+          .select()
+          .from(schema.strand)
+          .where(eq(schema.strand.gen, pendingGen))
+          .limit(1)
+          .then((r) => r[0] ?? null);
+
   return sendJson(
     c,
     toJson({
@@ -694,10 +771,28 @@ app.get("/v1/account/:addr", cache15s, async (c) => {
         // An epoch only pays once the cycle it sat through has closed and settled.
         settled: epoch !== null && epoch.status === "settled",
         claimable: epochId !== null && epochId !== 0n && epochId < currentEpoch,
+        // What `completeRedeem` pays now: haircut applied, recovered strand shares folded in.
         previewAssets: asset(live.previewAssets ?? 0n),
         previewUsdg: usdg(live.previewUsdg ?? 0n),
         epochSettledAt: epoch === null ? null : iso(epoch.settledAt),
+        // USDG booked to this owner that a payout could not move (AF-03). Still owed.
+        deferredUsdg: usdg(indexed?.deferredUsdg ?? 0n),
       },
+
+      // The owner's pending share of a stranded claim (AF-02), if any: staged against the owner
+      // (`wad`) or still inside the epoch they queued into (`epochWad`, drawn on settlement).
+      strand:
+        strandWad === 0n && epochStrandWad === 0n
+          ? null
+          : {
+              gen: pendingGen === null ? null : pendingGen.toString(),
+              wad: strandWad.toString(),
+              epochWad: epochStrandWad.toString(),
+              // Redeemed: the share is worth `assetsIn × wad / 1e18` and `usdgIn × wad / 1e18`
+              // and `queue.preview*` already include it. Not yet: it is quoted as nothing.
+              recovered: strandRow?.recovered ?? false,
+              strand: strandRow === null ? null : strandJson(strandRow),
+            },
 
       lifetime: {
         deposited: asset(indexed?.depositedAssets ?? 0n),
@@ -705,6 +800,8 @@ app.get("/v1/account/:addr", cache15s, async (c) => {
         redeemedAssets: asset(indexed?.redeemedAssets ?? 0n),
         redeemedUsdg: usdg(indexed?.redeemedUsdg ?? 0n),
         claimedUsdg: usdg(indexed?.claimedUsdg ?? 0n),
+        // Booked and not paid because the reserve was unbacked (AF-05). Permanent.
+        haircutAssets: asset(indexed?.haircutAssets ?? 0n),
         depositCount: indexed?.depositCount ?? 0,
         firstSeenAt: iso(indexed?.firstSeenAt ?? null),
         lastActivityAt: iso(indexed?.lastActivityAt ?? null),
@@ -760,7 +857,7 @@ app.get("/v1/listings", cache15s, async (c) => {
     c,
     toJson({
       addresses: ADDRESSES,
-      liveHash: state?.listingHash ?? null,
+      liveHash: hashOrNull(state?.listingHash),
       seaportCounter: (state?.seaportCounter ?? 0n).toString(),
       count: rows.length,
       limit,
@@ -786,6 +883,37 @@ app.get("/v1/listings/:hash", cache15s, async (c) => {
 
   if (row === null) return c.json({ error: "No such listing." }, 404);
   return sendJson(c, toJson({ listing: listingJson(row) }));
+});
+
+/*//////////////////////////////////////////////////////////////
+                        GET /v1/strands
+//////////////////////////////////////////////////////////////*/
+
+/** Every stranded claim, newest first: when it stranded, who owns what of it, whether it recovered. */
+app.get("/v1/strands", cache15s, async (c) => {
+  const limit = clampLimit(c.req.query("limit"), 50, 500);
+  const offset = clampOffset(c.req.query("offset"));
+
+  const rows = await db
+    .select()
+    .from(schema.strand)
+    .orderBy(desc(schema.strand.gen))
+    .limit(limit)
+    .offset(offset);
+
+  const state = await loadState();
+
+  return sendJson(
+    c,
+    toJson({
+      addresses: ADDRESSES,
+      stranded: state?.stranded ?? false,
+      count: rows.length,
+      limit,
+      offset,
+      strands: rows.map(strandJson),
+    }),
+  );
 });
 
 /*//////////////////////////////////////////////////////////////
@@ -818,6 +946,7 @@ app.get("/v1/snapshots", cache15s, async (c) => {
         phaseName: PHASE_NAMES[s.phase] ?? "Unknown",
         cycle: s.cycleNumber,
         writesHalted: s.writesHalted,
+        stranded: s.stranded,
         idleAssets: asset(s.idleAssets),
         lockedCollateral: asset(s.lockedCollateral),
         totalAssets: asset(s.totalAssets),
@@ -933,111 +1062,16 @@ app.get("/v1/health", async (c) => {
         phaseName: state === null ? null : (PHASE_NAMES[state.phase] ?? "Unknown"),
         cycle: state?.cycleNumber ?? 0,
         writesHalted: state?.writesHalted ?? null,
+        // STRANDED_CLAIM from the relay's alert list: the one state that needs a human to know.
+        stranded: state?.stranded ?? null,
         // The last block in which this vault did anything. Not the keeper's own heartbeat —
         // the keeper runs its own /health; this is the on-chain evidence it is alive.
         lastActivityBlock: (state?.lastBlock ?? 0n).toString(),
         lastActivityAt: iso(state?.lastTimestamp ?? null),
       },
-      // The relay is only usable when a shared secret is configured; without one
-      // POST /v1/overcall/list answers 503, so reporting `true` unconditionally would be a lie
-      // to whatever is watching this endpoint.
-      relay: { keeperAuthConfigured: KEEPER_HMAC_SECRET !== undefined },
     }),
     status === "degraded" ? 503 : 200,
   );
-});
-
-/*//////////////////////////////////////////////////////////////
-                   POST /v1/overcall/list
-//////////////////////////////////////////////////////////////*/
-
-/**
- * Keeper-only relay into Overcall's order book.
- *
- * Why it exists at all: the keeper could POST to Overcall directly, and in a pinch it does.
- * Routing through here means the publish is logged next to the indexed listing, the relay can
- * be rate-limited in one place, and the keeper box never needs an outbound allowlist entry
- * for a third-party domain it does not otherwise talk to.
- *
- * Authentication is HMAC-SHA256 over `${timestamp}.${rawBody}`, compared in constant time.
- * See lib hmac.ts. The body must offer from OUR vault; this is not an open proxy.
- *
- * The response is Overcall's own, verbatim — status and body — because their 409/422 text is
- * exactly what the keeper needs to decide whether to retry, re-read the counter, or give up.
- */
-app.post("/v1/overcall/list", async (c) => {
-  const rawBody = await c.req.text();
-
-  const auth = verifyKeeperHmac(c.req.raw.headers, rawBody);
-  if (!auth.ok) {
-    // A bad signature on the one mutating route is worth a record — it is either a
-    // misconfigured keeper or somebody probing. The 5xx case is just "relay disabled".
-    if (auth.status !== 503) {
-      log.warn({ status: auth.status, reason: auth.error }, "overcall relay rejected a bad signature");
-    }
-    return c.json({ error: auth.error }, auth.status);
-  }
-
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(rawBody);
-  } catch {
-    return c.json({ error: "Body is not valid JSON." }, 400);
-  }
-
-  const validation = validateRelayBody(parsed);
-  if (!validation.ok) {
-    return c.json({ error: validation.error }, 400);
-  }
-
-  try {
-    const result = await forwardToOvercall(validation.body);
-
-    if (!result.ok) {
-      // OVERCALL_POST_REJECTED from ops/alerts.md — their `error` string is the useful part
-      // and it is returned verbatim below; the log keeps it after the retry storm has passed.
-      const upstreamError =
-        typeof result.body === "object" && result.body !== null && "error" in result.body
-          ? String((result.body as { error: unknown }).error)
-          : undefined;
-      log.warn(
-        { upstreamStatus: result.status, upstreamError },
-        "overcall refused a relayed listing",
-      );
-    }
-
-    // Overcall answers `{"listing": {...}}`; unwrap it so the keeper reads `listing.orderHash`
-    // at the same depth it would from a direct POST.
-    const upstream =
-      typeof result.body === "object" && result.body !== null && "listing" in result.body
-        ? (result.body as { listing: unknown }).listing
-        : result.body;
-
-    return sendJson(
-      c,
-      {
-        forwardedTo: result.url,
-        // 201 on insert, 200 on a repeat of the same order hash — Overcall is idempotent by
-        // order hash, so a keeper retry after a timeout is safe.
-        upstreamStatus: result.status,
-        listing: result.ok ? upstream : null,
-        error: result.ok ? null : upstream,
-      },
-      result.ok ? 200 : 502,
-    );
-  } catch (err) {
-    log.warn(
-      { err: err instanceof Error ? err.message : String(err) },
-      "overcall unreachable from the relay",
-    );
-    return c.json(
-      {
-        error: "Could not reach Overcall.",
-        detail: err instanceof Error ? err.message : String(err),
-      },
-      504,
-    );
-  }
 });
 
 /*//////////////////////////////////////////////////////////////
@@ -1061,9 +1095,9 @@ app.get("/", (c) =>
       "GET  /v1/account/:addr",
       "GET  /v1/listings",
       "GET  /v1/listings/:hash",
+      "GET  /v1/strands",
       "GET  /v1/snapshots",
       "GET  /v1/health",
-      "POST /v1/overcall/list",
       "POST /graphql",
     ],
   }),

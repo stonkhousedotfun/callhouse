@@ -1,26 +1,31 @@
 /**
- * Seaport order construction, in exactly the shape Overcall uses.
+ * Seaport order construction, in exactly the shape the vault authorises.
  *
- * The shape below is not a design; it is a transcription. It was decoded from the one real
- * filled order on chain 4663 (tx 0x013cd30b..., orderHash 0xa11edb62...) and cross-checked
- * against Overcall's live API and their client bundle's `buildListing`. See
- * ops/recon/R2-R9-seaport-order-shape.md and ops/recon/sample-overcall-order.json.
+ * The shape is dictated by contracts/src/lib/SeaportOrderLib.sol, which checks every field at
+ * `approveListing` and reverts on any other:
  *
- *   zone       0x0 | zoneHash 0x0 | orderType 1 (PARTIAL_OPEN) | startTime 0
- *   endTime    the option's exerciseTimestamp — Friday book close, NOT Saturday expiry
- *   salt       a full random 256-bit value, no domain prefix
- *   conduitKey 0x0 — Seaport pulls the ERC-1155 itself, so the approval goes to SEAPORT
- *   counter    read live from seaport.getCounter(vault)
- *   offer[0]          ERC1155, Valorem Clear, identifier = optionId, amount = contracts
- *   consideration[0]  ERC20 USDG, writer's leg, recipient = the vault (the offerer)
- *   consideration[1]  ERC20 USDG, Overcall's 5%, recipient = OVERCALL_FEE_RECIPIENT
+ *   offerer    the vault
+ *   zone       the vault — Seaport 1.6 calls the zone's `authorizeOrder` before it moves anything,
+ *              and that hook is where the vault writes the filled contracts into Valorem
+ *   zoneHash   0x0 | conduitKey vault.conduitKey() (0x0: Seaport pulls the ERC-1155 itself)
+ *   orderType  3 (PARTIAL_RESTRICTED): restricted so every fill runs the hooks, partial so a
+ *              buyer takes what they want and the rest stays offered
+ *   startTime  0 | endTime the cycle's exerciseTimestamp (Friday close, NOT Saturday expiry)
+ *   salt       a full random 256-bit value
+ *   counter    read live from seaport.getCounter(vault); every kill bumps it quasi-randomly
+ *   offer[0]          ERC1155, Valorem Clear, identifier = optionId, amount = N (≤ capacity),
+ *                     tokens the vault does NOT yet hold — they are minted inside the fill
+ *   consideration[0]  ERC20 USDG, N × unitPrice6, recipient = the vault. The ONLY item: no
+ *                     venue fee, nobody else is paid.
  *
- * Do not invent a variant. A second shape is an order Overcall's book will not show.
+ * And the signature is EMPTY. The vault has no signing key and no EIP-1271 hook; `approveListing`
+ * calls `seaport.validate()` and Seaport skips signature verification for a validated order on
+ * every fill. /orders serves `"0x"` and any Seaport client fills with it.
  */
 import { randomBytes } from 'node:crypto';
 import { getAddress, hashStruct, hashTypedData, keccak256, concatHex, type Address, type Hex } from 'viem';
 import { seaportAbi, vaultAbi } from './abi.js';
-import { BPS, config } from './config.js';
+import { config } from './config.js';
 import { publicClient } from './clients.js';
 import { log } from './logger.js';
 
@@ -30,41 +35,14 @@ import { log } from './logger.js';
 
 export const ITEM_TYPE_ERC20 = 1;
 export const ITEM_TYPE_ERC1155 = 3;
-/** PARTIAL_OPEN. Overcall's schema hard-requires this literal; every listing is partially
- *  fillable, which is why the fee rounding below matters so much. */
-export const ORDER_TYPE_PARTIAL_OPEN = 1;
+/** Seaport OrderType: FULL_OPEN 0, PARTIAL_OPEN 1, FULL_RESTRICTED 2, PARTIAL_RESTRICTED 3.
+ *  The vault accepts 3 and nothing else (SeaportOrderLib `BadOrderType`). */
+export const ORDER_TYPE_PARTIAL_RESTRICTED = 3;
 export const ZERO_ADDRESS = '0x0000000000000000000000000000000000000000' as const;
 export const ZERO_BYTES32 = '0x0000000000000000000000000000000000000000000000000000000000000000' as const;
 
-/** Overcall's cut, in bps. Sourced from their bundle: NEXT_PUBLIC_FEE_BPS = "500", ceiling 1000. */
-export const OVERCALL_FEE_BPS = 500n;
-
-/**
- * The smallest per-contract ask whose 5% does not floor to zero. 10000/500 = 20 USDG base
- * units. Below this, `feePerContract6` is 0, Overcall's schema rejects the zero-amount
- * consideration item, and the listing never reaches a buyer.
- */
-export const MIN_LISTABLE_UNIT_PRICE_6 = BPS / OVERCALL_FEE_BPS;
-
-/**
- * A 65-byte placeholder signature.
- *
- * WHY A PLACEHOLDER IS THE CORRECT ANSWER HERE, not a shortcut:
- *
- * The vault is the Seaport offerer and authorises an order by HASH, on chain, inside
- * `approveListing()` — which calls `seaport.validate()` and records `listingHash`. Its
- * `isValidSignature(digest, bytes)` deliberately ignores the signature bytes and answers
- * `0x1626ba7e` for the authorised hash (and for its EIP-712 digest). There is no key that
- * signs anything; the keeper never holds the option tokens and cannot produce an ECDSA
- * signature that recovers to the vault, because the vault is a contract.
- *
- * But Overcall's zod schema still demands `/^0x([0-9a-f]{128}|[0-9a-f]{130})$/` — exactly 64
- * or 65 bytes — before any on-chain check runs, and their validator's step 8 verifies the
- * signature "for offerer (EOA or ERC-1271)", which for us routes into `isValidSignature`.
- * So the field must be present and well-formed, and its contents are irrelevant. This is a
- * well-formed 65-byte value with v = 0x1b so nothing chokes parsing it as (r, s, v).
- */
-export const PLACEHOLDER_SIGNATURE: Hex = `0x${'11'.repeat(32)}${'22'.repeat(32)}1b`;
+/** The signature every listing ships with. The vault pre-validates on Seaport; there is no key. */
+export const EMPTY_SIGNATURE: Hex = '0x';
 
 /*//////////////////////////////////////////////////////////////
                               TYPES
@@ -96,9 +74,8 @@ export interface OrderComponentsStruct {
   counter: bigint;
 }
 
-/** The wire form Overcall accepts: every uint as a decimal string, and NO
- *  `totalOriginalConsiderationItems` (that field lives in OrderParameters, not
- *  OrderComponents). Mirrors their `componentsToJson`. */
+/** The wire form: every uint as a decimal string, and NO `totalOriginalConsiderationItems`
+ *  (that field lives in OrderParameters, not OrderComponents). */
 export interface OrderComponentsJson {
   offerer: string;
   zone: string;
@@ -126,99 +103,45 @@ export interface OrderComponentsJson {
   counter: string;
 }
 
-export interface PremiumSplit {
-  /** consideration[0].startAmount — the vault's leg. */
-  toVault6: bigint;
-  /** consideration[1].startAmount — Overcall's 5%. */
-  toOvercall6: bigint;
-  /** What a full fill costs the buyer. Always exactly unitPrice6 * contracts. */
-  gross6: bigint;
-  feePerContract6: bigint;
-  writerPerContract6: bigint;
-}
-
-/*//////////////////////////////////////////////////////////////
-                        THE FEE ROUNDING
-//////////////////////////////////////////////////////////////*/
-
-/**
- * Split a per-contract ask into the two consideration amounts.
- *
- * *** ROUND PER CONTRACT, THEN MULTIPLY. THIS IS NOT A STYLE CHOICE. ***
- *
- *   feePerContract6    = floor(unitPrice6 * 500 / 10000)
- *   writerPerContract6 = unitPrice6 - feePerContract6
- *   consideration[1]   = feePerContract6    * N
- *   consideration[0]   = writerPerContract6 * N
- *
- * Rounding on the total instead produces an order that signs, passes Overcall's schema, and
- * passes `seaport.validate()` — and that Seaport then refuses to partially fill with
- * `InexactFraction`, because it scales every consideration item by the fill fraction and each
- * amount must divide evenly by the order size. Since every Overcall listing is PARTIAL_OPEN,
- * a total-rounded fee quietly turns the listing into full-fill-only, which on a 20-contract
- * listing means nobody fills it at all.
- *
- * contracts/src/Policy.sol `splitPremium()` implements exactly this, and
- * SeaportOrderLib re-derives it on chain and reverts `BadFeeSplit` on any disagreement, so a
- * mismatch here fails loudly at `approveListing` rather than silently on Friday.
- */
-export function splitPremium(unitPrice6: bigint, contracts: bigint): PremiumSplit {
-  if (unitPrice6 <= 0n) throw new Error('unitPrice6 must be positive');
-  if (contracts <= 0n) throw new Error('contracts must be positive');
-
-  const feePerContract6 = (unitPrice6 * OVERCALL_FEE_BPS) / BPS;
-  if (feePerContract6 === 0n) {
-    throw new Error(
-      `unitPrice6 ${unitPrice6} is below ${MIN_LISTABLE_UNIT_PRICE_6}: the 5% fee floors to zero ` +
-        "and Overcall's schema rejects a zero-amount consideration item",
-    );
-  }
-  const writerPerContract6 = unitPrice6 - feePerContract6;
-
-  return {
-    feePerContract6,
-    writerPerContract6,
-    toOvercall6: feePerContract6 * contracts,
-    toVault6: writerPerContract6 * contracts,
-    gross6: unitPrice6 * contracts,
-  };
-}
-
 /*//////////////////////////////////////////////////////////////
                          ORDER BUILDING
 //////////////////////////////////////////////////////////////*/
 
-/** A full random 256-bit salt. Overcall's client uses 32 crypto-random bytes with no domain
- *  prefix; Seaport's optional salt-prefix convention is not used on this chain. */
+/** A full random 256-bit salt. Seaport's optional salt-prefix convention is not used here. */
 export function randomSalt(): bigint {
   return BigInt(`0x${randomBytes(32).toString('hex')}`);
 }
 
 export interface BuildOrderInput {
-  /** The vault. Offerer and consideration[0] recipient — Overcall's schema refines that the
-   *  premium is paid to the offerer. */
-  offerer: Address;
+  /** The vault. Offerer, zone and consideration recipient, all three. */
+  vault: Address;
   optionId: bigint;
+  /** The offer size. At most the vault's remaining capacity, or approveListing reverts
+   *  `OfferExceedsCapacity`. */
   contracts: bigint;
+  /** Per contract, USDG base units. The gross is `unitPrice6 × contracts`, so it divides by
+   *  the size exactly and a partial fill of k pays k × unitPrice6 (`PremiumNotDivisibleByOrderSize`
+   *  is impossible by construction). */
   unitPrice6: bigint;
-  /** The option's exerciseTimestamp, read from the registry. Friday 20:00 UTC. */
+  /** The cycle's exerciseTimestamp. */
   endTime: bigint;
-  /** seaport.getCounter(offerer), read live. A cancel-all bumps it by a quasi-random amount. */
+  /** seaport.getCounter(vault), read live. */
   counter: bigint;
   salt?: bigint;
 }
 
 export function buildOrderComponents(input: BuildOrderInput): OrderComponentsStruct {
-  const { toVault6, toOvercall6, feePerContract6 } = splitPremium(input.unitPrice6, input.contracts);
+  if (input.unitPrice6 <= 0n) throw new Error('unitPrice6 must be positive');
+  if (input.contracts <= 0n) throw new Error('contracts must be positive');
+  const vault = getAddress(input.vault);
+  const gross6 = input.unitPrice6 * input.contracts;
 
   log.seaport.debug(
     {
       optionId: input.optionId.toString(),
       contracts: input.contracts.toString(),
       unitPrice6: input.unitPrice6.toString(),
-      feePerContract6: feePerContract6.toString(),
-      toVault6: toVault6.toString(),
-      toOvercall6: toOvercall6.toString(),
+      gross6: gross6.toString(),
       counter: input.counter.toString(),
       endTime: input.endTime.toString(),
     },
@@ -226,8 +149,8 @@ export function buildOrderComponents(input: BuildOrderInput): OrderComponentsStr
   );
 
   return {
-    offerer: getAddress(input.offerer),
-    zone: config.SEAPORT_ZONE,
+    offerer: vault,
+    zone: vault,
     offer: [
       {
         itemType: ITEM_TYPE_ERC1155,
@@ -242,20 +165,12 @@ export function buildOrderComponents(input: BuildOrderInput): OrderComponentsStr
         itemType: ITEM_TYPE_ERC20,
         token: config.USDG,
         identifierOrCriteria: 0n,
-        startAmount: toVault6,
-        endAmount: toVault6,
-        recipient: getAddress(input.offerer),
-      },
-      {
-        itemType: ITEM_TYPE_ERC20,
-        token: config.USDG,
-        identifierOrCriteria: 0n,
-        startAmount: toOvercall6,
-        endAmount: toOvercall6,
-        recipient: config.OVERCALL_FEE_RECIPIENT,
+        startAmount: gross6,
+        endAmount: gross6,
+        recipient: vault,
       },
     ],
-    orderType: ORDER_TYPE_PARTIAL_OPEN,
+    orderType: ORDER_TYPE_PARTIAL_RESTRICTED,
     startTime: 0n,
     endTime: input.endTime,
     zoneHash: ZERO_BYTES32,
@@ -298,7 +213,7 @@ export function componentsToJson(c: OrderComponentsStruct): OrderComponentsJson 
   };
 }
 
-/** Rehydrate components persisted in SQLite, for a restart-safe cancel or repost. */
+/** Rehydrate components persisted in SQLite, for a restart-safe cancel or a served order. */
 export function componentsFromJson(json: OrderComponentsJson): OrderComponentsStruct {
   return {
     offerer: getAddress(json.offerer),
@@ -329,9 +244,9 @@ export function componentsFromJson(json: OrderComponentsJson): OrderComponentsSt
 }
 
 /**
- * OrderParameters for the self-hosted fallback buy page: the same fields with the counter
- * dropped and `totalOriginalConsiderationItems` appended. This is what a buyer passes to
- * `fulfillOrder` / `fulfillAdvancedOrder` straight from our UI when Overcall's book is down.
+ * OrderParameters for the fill page: the same fields with the counter dropped and
+ * `totalOriginalConsiderationItems` appended. This is what a buyer passes to `fulfillOrder` /
+ * `fulfillAdvancedOrder`, with `signature: "0x"`. The web page re-reads the counter from Seaport.
  */
 export function toOrderParametersJson(c: OrderComponentsStruct): Omit<OrderComponentsJson, 'counter'> & {
   totalOriginalConsiderationItems: string;
@@ -394,6 +309,17 @@ export async function readOrderStatus(orderHash: Hex): Promise<SeaportOrderStatu
     totalSize,
     isFullyFilled: totalSize > 0n && totalFilled >= totalSize,
   };
+}
+
+/**
+ * Contracts of a listing Seaport has filled so far: `contracts × totalFilled / totalSize`.
+ * Seaport records the fill as a fraction of the order (a full `fulfillOrder` is 1/1, a
+ * `fulfillAdvancedOrder` of 7 of 28 is 7/28 or its reduced form), so the count is the fraction
+ * applied to the size. Exact for our orders: every fill of k moves k whole contracts.
+ */
+export function filledContracts(contracts: bigint, status: Pick<SeaportOrderStatus, 'totalFilled' | 'totalSize'>): bigint {
+  if (status.totalSize === 0n) return 0n;
+  return (contracts * status.totalFilled) / status.totalSize;
 }
 
 /** Seaport's EIP-712 domain separator, read live rather than derived. */
@@ -464,25 +390,22 @@ function messageOf(c: OrderComponentsStruct) {
  * IMPORTANT AND EASY TO GET WRONG: Seaport's `getOrderHash` returns the EIP-712 STRUCT HASH,
  * not the signing digest. The digest is `keccak256(0x1901 ‖ domainSeparator ‖ structHash)` and
  * is what `hashTypedData` produces — feeding that to a comparison against `getOrderHash` looks
- * plausible and is always false. Verified against the real filled order on chain 4663:
+ * plausible and is always false. Verified against a real filled order on chain 4663:
  *   struct hash  0xa11edb6292fa1789a13419830d5bd1b5a0145954d3e8352bb6ff776ca67de522  <- this
  *   digest       0x82a7ecd0f5f5e41573f4ae76a957201ccc49465979da780585b259b011e82150
  *
- * Used as a cross-check against `readOrderHash`. If the two disagree, our struct encoding is
- * wrong and the order must not be published: Overcall's validator does the same comparison at
- * their step 7 and answers 500. Catching it here costs one keccak instead of a wasted
- * `approveListing` transaction.
+ * Used as a cross-check against `readOrderHash` before spending gas on `approveListing`: if the
+ * two disagree our struct encoding is wrong and the web fill page (which derives the same hash)
+ * would refuse the order too.
  */
 export function localOrderHash(c: OrderComponentsStruct): Hex {
   return hashStruct({ data: messageOf(c), primaryType: 'OrderComponents', types: SEAPORT_TYPES });
 }
 
 /**
- * The EIP-712 digest a filler's signature check would be run against.
- *
- * The vault's `isValidSignature` answers for BOTH the raw order hash and this digest, so
- * nothing in the keeper depends on it — it exists so the dry run and an operator debugging a
- * rejected listing can compute the same number Seaport does.
+ * The EIP-712 digest a signature would be made over. Nothing in the keeper depends on it — the
+ * vault signs nothing — it exists so an operator debugging a refused fill can compute the same
+ * number Seaport does.
  */
 export function localOrderDigest(c: OrderComponentsStruct): Hex {
   return hashTypedData({

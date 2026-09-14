@@ -6,11 +6,11 @@
  *                 tick currently in flight — because a 503 reader restarts the process. Real
  *                 problems a restart cannot fix (low gas, a lagging RPC) are `status:
  *                 "degraded"` on a 200, and page through the alert webhook instead.
- *   GET /state    the keeper's full view of the current cycle, for a human or a dashboard.
- *   GET /orders   the signed, on-chain-authorised Seaport payloads for every live listing.
- *                 This is the censorship/downtime fallback: if Overcall's book never shows our
- *                 listing, our own /vault/nvda/cycle page serves these and a buyer fills
- *                 directly against Seaport. An invisible listing is an unfilled week.
+ *   GET /state    the keeper's full view of the current cycle, for a human or a dashboard:
+ *                 the vault, the next week it would arm, capacity, the stranded claim if any.
+ *   GET /orders   the vault's live, on-chain-authorised Seaport order(s), with OrderParameters
+ *                 and the EMPTY signature. This is the book: the web fill page reads it, and any
+ *                 Seaport 1.6 client can fill it directly. There is no other venue.
  *   GET /cycles   the last few cycles as the keeper recorded them, unfilled weeks included. Each
  *                 row also carries `premium_gross_usdg6` (gross minus strike proceeds) and
  *                 `strike_proceeds_usdg6`, so an assigned week's returned principal is not read
@@ -18,8 +18,8 @@
  *
  * No host is passed to listen(): Node then binds `::` where IPv6 exists (which also accepts IPv4)
  * and `0.0.0.0` where it does not, the same as the relay and the indexer. That covers a container
- * healthcheck and Railway's IPv6 private network, where the web app's keeper fallback reads
- * /orders at keeper.railway.internal (ops/deploy.md §3). Pinning `0.0.0.0` would cut that off.
+ * healthcheck and Railway's IPv6 private network, where the web app reads /orders at
+ * keeper.railway.internal (ops/deploy.md §3). Pinning `0.0.0.0` would cut that off.
  * Put it behind your own network boundary. Nothing here is a write endpoint and nothing here
  * needs a secret — which is also why the RPC URLs below are served origin-only: production
  * endpoints routinely embed keys.
@@ -27,9 +27,11 @@
 import { serve, type ServerType } from '@hono/node-server';
 import { Hono } from 'hono';
 import { account, rpcEndpoints } from './clients.js';
+import { describeInstant } from './calendar.js';
 import { config } from './config.js';
 import { log } from './logger.js';
-import { PHASE_NAMES, getLastSnapshot, getTickStartedAt } from './roll.js';
+import { MAX_LISTINGS_PER_CYCLE } from './policy.js';
+import { PHASE_NAMES, getLastSnapshot, getTickStartedAt, listingFilled, nextWindow, snapshotCapacity } from './roll.js';
 import { cycleTapeRow, store } from './state.js';
 import { toOrderParametersJson, componentsFromJson, type OrderComponentsJson } from './seaport.js';
 
@@ -102,7 +104,7 @@ export function buildApp(): Hono {
           address: config.VAULT,
           phase: snap ? PHASE_NAMES[snap.phase] : null,
           cycleNumber: snap ? snap.vaultCycleNumber : null,
-          registryCycleNumber: snap ? snap.registryCycle.number : null,
+          stranded: snap ? snap.isStranded : null,
           writesHalted: snap ? snap.writesHalted : null,
           listingHash: snap ? snap.listingHash : null,
         },
@@ -124,20 +126,17 @@ export function buildApp(): Hono {
 
     const cycle = store.getCycle(snap.vaultCycleNumber) ?? store.latestCycle();
     const listings = cycle ? store.listingsForCycle(cycle.cycle_number) : [];
+    let week: Record<string, unknown> | null = null;
+    try {
+      const w = nextWindow(snap);
+      week = { ...w, exercise: describeInstant(w.exerciseTs), expiry: describeInstant(w.expiryTs) };
+    } catch {
+      week = null;
+    }
 
     return c.json({
       observedAt: new Date(snap.at).toISOString(),
       phase: PHASE_NAMES[snap.phase],
-      registry: {
-        address: config.REGISTRY,
-        cycleNumber: snap.registryCycle.number,
-        isWritingOpen: snap.isWritingOpen,
-        isCycleLive: snap.isCycleLive,
-        exerciseTimestamp: Number(snap.registryCycle.exerciseTimestamp),
-        expiryTimestamp: Number(snap.registryCycle.expiryTimestamp),
-        lotSize: snap.registryCycle.lotSize.toString(),
-        optionIds: snap.registryCycle.optionIds.map((id) => id.toString()),
-      },
       vault: {
         address: config.VAULT,
         cycleNumber: snap.vaultCycleNumber,
@@ -145,45 +144,66 @@ export function buildApp(): Hono {
         claimKey: snap.vaultClaimKey.toString(),
         strikeUsdg6: snap.vaultStrikeUsdg6.toString(),
         contractsWritten: snap.contractsWritten.toString(),
-        optionInventory: snap.optionInventory.toString(),
+        capacity: snapshotCapacity(snap).toString(),
         idleAssets: snap.idleAssets.toString(),
         totalAssets: snap.totalAssets.toString(),
         lockedAssets: snap.lockedAssets.toString(),
         listingHash: snap.listingHash,
+        listingAmount: snap.listingAmount.toString(),
+        listingGrossUsdg6: snap.listingGrossUsdg6.toString(),
         listingsThisCycle: snap.listingsThisCycle,
+        maxListingsPerCycle: MAX_LISTINGS_PER_CYCLE,
         exerciseTimestamp: Number(snap.vaultExerciseTs),
         expiryTimestamp: Number(snap.vaultExpiryTs),
         writesHalted: snap.writesHalted,
         valoremFeesEnabled: snap.valoremFeesEnabled,
         valoremFeeAccepted: snap.valoremFeeAccepted,
         oraclePaused: snap.oraclePaused,
+        spotUsdg6: snap.spotUsdg6 === null ? null : snap.spotUsdg6.toString(),
+        spotError: snap.spotError,
+        queuedShares: snap.queuedShares.toString(),
+        stranded: snap.isStranded,
+        strandGen: snap.strandGen.toString(),
       },
+      policy: {
+        minOtmBps: snap.policy.minOtmBps.toString(),
+        maxOtmBps: snap.policy.maxOtmBps.toString(),
+        minPremiumBps: snap.policy.minPremiumBps.toString(),
+        maxUtilizationBps: snap.policy.maxUtilizationBps.toString(),
+        protocolFeeBps: snap.policy.protocolFeeBps.toString(),
+        maxContractsCap: snap.policy.maxContractsCap.toString(),
+      },
+      nextWeek: week,
       keeperView: cycle,
       listings,
     });
   });
 
   /**
-   * The fallback book. Everything a buyer needs to fill our listing without Overcall:
-   * OrderParameters (components plus totalOriginalConsiderationItems, counter dropped), the
-   * signature field, and the order hash. The order is authorised on chain via
-   * `seaport.validate()`, so it is fillable with an empty signature too.
+   * The book. Everything a buyer needs to fill our listing: OrderParameters (components plus
+   * totalOriginalConsiderationItems, counter dropped — the fill page re-reads it from Seaport),
+   * the EMPTY signature, and the order hash. The order is authorised on chain via
+   * `seaport.validate()`, and the vault is its zone: every fill runs the vault's hooks, which
+   * write exactly what is bought. `remainingContracts` is the size less Seaport's fill fraction.
    */
   app.get('/orders', (c) => {
     const rows = store.openListings();
     const orders = rows.map((row) => {
       const components = componentsFromJson(JSON.parse(row.components_json) as OrderComponentsJson);
+      const filled = listingFilled(row);
       return {
         orderHash: row.order_hash,
         chainId: config.CHAIN_ID,
         seaport: config.SEAPORT,
+        vault: config.VAULT,
         optionId: row.option_id,
         contracts: row.contracts,
+        filledContracts: filled.toString(),
+        remainingContracts: (BigInt(row.contracts) - filled).toString(),
         unitPrice6: row.unit_price6,
         grossUsdg6: row.gross_usdg6,
         endTime: row.end_time,
         status: row.status,
-        bookStatus: row.api_status,
         parameters: toOrderParametersJson(components),
         signature: row.signature,
       };

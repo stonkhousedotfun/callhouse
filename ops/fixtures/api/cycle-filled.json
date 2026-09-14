@@ -1,26 +1,14 @@
 {
   "cycle": 7,
   "status": "closed",
-  "wrote": true,
   "filled": true,
   "assigned": false,
-  "registry": {
-    "optionIds": [
-      "64784291936308156455260294574860754954874527136357427096671392398063507079168",
-      "64784291936308156455260294574860754954874527136436655259185656735657051029504"
-    ],
-    "strikeCount": 2,
-    "lotSize": {
-      "raw": "1000000000000000000",
-      "decimals": 18,
-      "formatted": "1"
-    },
+  "stranded": false,
+  "option": {
     "exerciseTimestamp": "1788552000",
     "exerciseAt": "2026-09-04T20:00:00.000Z",
     "expiryTimestamp": "1788555600",
-    "expiryAt": "2026-09-04T21:00:00.000Z",
-    "setAt": "2026-08-28T20:05:00.000Z",
-    "setTx": "0x0000000000000000000000000000000000000000000000000000000000000071"
+    "expiryAt": "2026-09-04T21:00:00.000Z"
   },
   "written": {
     "optionId": "64784291936308156455260294574860754954874527136357427096671392398063507079168",
@@ -36,8 +24,11 @@
       "decimals": 18,
       "formatted": "12"
     },
+    "writeCount": 1,
     "openedAt": "2026-08-31T14:35:00.000Z",
-    "txOpen": "0x0000000000000000000000000000000000000000000000000000000000000072"
+    "txOpen": "0x0000000000000000000000000000000000000000000000000000000000000072",
+    "firstWriteAt": "2026-09-01T15:10:00.000Z",
+    "lastWriteAt": "2026-09-01T15:10:00.000Z"
   },
   "listing": {
     "count": 1,
@@ -62,16 +53,6 @@
       "raw": "48000000",
       "decimals": 6,
       "formatted": "48"
-    },
-    "premiumToVault": {
-      "raw": "45600000",
-      "decimals": 6,
-      "formatted": "45.6"
-    },
-    "overcallFee": {
-      "raw": "2400000",
-      "decimals": 6,
-      "formatted": "2.4"
     },
     "unitPriceUsdg": {
       "raw": "4000000",
@@ -98,19 +79,20 @@
     "bucketIndex": "0",
     "bucketAssigned": "0",
     "closedAt": "2026-09-04T21:00:30.000Z",
-    "txClose": "0x0000000000000000000000000000000000000000000000000000000000000074"
+    "txClose": "0x0000000000000000000000000000000000000000000000000000000000000074",
+    "strand": null
   },
   "harvest": {
     "harvested": true,
     "grossUsdg": {
-      "raw": "45600000",
+      "raw": "48000000",
       "decimals": 6,
-      "formatted": "45.6"
+      "formatted": "48"
     },
     "premiumGross": {
-      "raw": "45600000",
+      "raw": "48000000",
       "decimals": 6,
-      "formatted": "45.6"
+      "formatted": "48"
     },
     "strikeProceedsUsdg": {
       "raw": "0",
@@ -118,29 +100,29 @@
       "formatted": "0"
     },
     "fee": {
-      "raw": "2280000",
+      "raw": "2400000",
       "decimals": 6,
-      "formatted": "2.28"
+      "formatted": "2.4"
     },
     "premiumNet": {
-      "raw": "43320000",
+      "raw": "45600000",
       "decimals": 6,
-      "formatted": "43.32"
+      "formatted": "45.6"
     },
     "creditedUsdg": {
-      "raw": "43320000",
+      "raw": "45600000",
       "decimals": 6,
-      "formatted": "43.32"
+      "formatted": "45.6"
     },
     "premiumNetPerShare": {
-      "raw": "433200",
+      "raw": "456000",
       "decimals": 6,
-      "formatted": "0.4332"
+      "formatted": "0.456"
     },
     "usdgPerShare": {
-      "raw": "433200",
+      "raw": "456000",
       "decimals": 6,
-      "formatted": "0.4332"
+      "formatted": "0.456"
     },
     "supplyAtHarvest": {
       "raw": "100000000000000000000",

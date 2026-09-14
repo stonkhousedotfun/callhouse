@@ -48,7 +48,7 @@ async function main(): Promise<void> {
   log.boot.info(
     {
       vault: config.VAULT,
-      registry: config.REGISTRY,
+      clearinghouse: config.CLEARINGHOUSE,
       keeper: account.address,
       chainId: config.CHAIN_ID,
       pollIntervalMs: config.POLL_INTERVAL_MS,

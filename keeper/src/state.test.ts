@@ -22,14 +22,13 @@ import Database from 'better-sqlite3';
 const scratch = mkdtempSync(join(tmpdir(), 'callhouse-keeper-state-'));
 process.env.KEEPER_ENV_FILE = '/dev/null';
 process.env.RH_RPC = 'http://127.0.0.1:9';
-process.env.REGISTRY = '0x8E973cE1A6884E28Ad3E377d5f670Bc0b463f4EA';
 process.env.VAULT = '0x1111111111111111111111111111111111111111';
 process.env.KEEPER_PK = `0x${'11'.repeat(32)}`;
 process.env.KEEPER_DB_PATH = join(scratch, 'default', 'keeper.db');
 process.env.KEEPER_LOG_LEVEL = 'fatal';
 
 const { KeeperStore, bigintReplacer, cycleTapeRow, splitGross, store } = await import('./state.js');
-const { PLACEHOLDER_SIGNATURE, buildOrderComponents, componentsFromJson, componentsToJson, localOrderHash } =
+const { EMPTY_SIGNATURE, buildOrderComponents, componentsFromJson, componentsToJson, localOrderHash } =
   await import('./seaport.js');
 type ListingRow = import('./state.js').ListingRow;
 type CycleRow = import('./state.js').CycleRow;
@@ -47,7 +46,7 @@ const SALT = 9594199277757666073988857836182782605080248469767010058680048059843
 const COUNTER = 645105783290196256915466989660461880n;
 
 const components = buildOrderComponents({
-  offerer: VAULT,
+  vault: VAULT,
   optionId: OPTION_ID,
   contracts: 23n,
   unitPrice6: 873_192n,
@@ -66,13 +65,13 @@ function listingRow(overrides: Partial<ListingRow> = {}): Omit<ListingRow, 'crea
     contracts: '23',
     unit_price6: '873192',
     gross_usdg6: (873_192n * 23n).toString(),
-    to_vault6: (829_533n * 23n).toString(),
-    to_overcall6: (43_659n * 23n).toString(),
+    to_vault6: (873_192n * 23n).toString(),
+    to_overcall6: '0',
     end_time: 1789761600,
     counter: COUNTER.toString(),
     salt: SALT.toString(),
     components_json: JSON.stringify(componentsToJson(components)),
-    signature: PLACEHOLDER_SIGNATURE,
+    signature: EMPTY_SIGNATURE,
     approve_tx: `0x${'aa'.repeat(32)}`,
     cancel_tx: null,
     status: 'approved',
@@ -130,14 +129,15 @@ test('cycles: ensureCycle never clobbers, updateCycle touches only allowed colum
     assert.equal(db.getCycle(99), null);
 
     // A second ensureCycle with a different status returns the existing row untouched.
-    const again = db.ensureCycle(7, 'skipped');
+    const again = db.ensureCycle(7, 'closed');
     assert.equal(again.status, 'open');
 
-    db.ensureCycle(8, 'skipped');
-    db.updateCycle(8, { skip_reason: 'no-rung-in-band' });
+    db.ensureCycle(8, 'stranded');
+    db.updateCycle(8, { strand_gen: '1', retry_tx: null });
     assert.equal(db.latestCycle()?.cycle_number, 8);
     assert.deepEqual(db.recentCycles(5).map((c) => c.cycle_number), [8, 7]);
-    assert.equal(db.getCycle(8)?.skip_reason, 'no-rung-in-band');
+    assert.equal(db.getCycle(8)?.strand_gen, '1');
+    assert.equal(db.getCycle(8)?.status, 'stranded');
 
     // An empty patch is a no-op, not a SQL error.
     db.updateCycle(7, {});
@@ -206,10 +206,10 @@ test('listings: updateListing writes only allowlisted columns and normalises big
   }
 });
 
-test('listings: openListings hides rows past their endTime; liveListingsForCycle hides terminal ones', () => {
+test('listings: openListings hides rows past their endTime and terminal ones', () => {
   const db = new KeeperStore(join(scratch, 'listings-open.db'));
   try {
-    const hashes = ['approved', 'posted', 'visible', 'post_failed', 'partial', 'filled', 'cancelled', 'expired', 'unfillable'].map(
+    const hashes = ['approved', 'partial', 'filled', 'cancelled', 'expired'].map(
       (status, i) => {
         const hash = `0x${i.toString(16).padStart(64, '0')}`;
         db.insertListing(listingRow({ order_hash: hash, seq: i + 1, status: status as ListingRow['status'] }));
@@ -219,20 +219,14 @@ test('listings: openListings hides rows past their endTime; liveListingsForCycle
     const before = 1789761600 - 1;
     const after = 1789761600;
 
-    // Before endTime: the five states a buyer can still act on are offered from /orders.
-    assert.deepEqual(
-      db.openListings(before).map((l) => l.status).sort(),
-      ['approved', 'partial', 'post_failed', 'posted', 'visible'],
-    );
+    // Before endTime: the two states a buyer can still act on are offered from /orders.
+    assert.deepEqual(db.openListings(before).map((l) => l.status).sort(), ['approved', 'partial']);
     // At or past endTime Seaport rejects the fill, so nothing is offered.
     assert.deepEqual(db.openListings(after), []);
 
-    // Live-for-the-cycle is stricter still: a partial is not relisted, it is still selling.
-    assert.deepEqual(
-      db.liveListingsForCycle(1).map((l) => l.status),
-      ['approved', 'posted', 'visible', 'post_failed'],
-    );
-    assert.equal(hashes.length, 9);
+    // Live-for-the-cycle is the same set, per cycle: what lockBook and rollClose retire.
+    assert.deepEqual(db.liveListingsForCycle(1).map((l) => l.status), ['approved', 'partial']);
+    assert.equal(hashes.length, 5);
   } finally {
     db.close();
   }
@@ -307,7 +301,7 @@ test('restart safety: close the file, reopen it, every row is still there', () =
   const first = new KeeperStore(path);
   first.ensureCycle(1, 'open');
   first.updateCycle(1, { option_id: OPTION_ID.toString(), roll_open_tx: `0x${'01'.repeat(32)}` });
-  first.insertListing(listingRow({ status: 'posted', posted_at: 1 }));
+  first.insertListing(listingRow({ status: 'partial', seaport_total_filled: '7', seaport_total_size: '23' }));
   first.recordTxSubmitted(`0x${'01'.repeat(32)}`, 'rollOpen', 1);
   first.recordTxResult(`0x${'01'.repeat(32)}`, 'success', 1n, 1n, null);
   first.recordAlert('roll_open', 'info', 'x', {}, true);
@@ -323,7 +317,7 @@ test('restart safety: close the file, reopen it, every row is still there', () =
     assert.equal(second.lastHeartbeat(), 42);
     const row = second.getListing(orderHash);
     assert.ok(row);
-    assert.equal(row.status, 'posted');
+    assert.equal(row.status, 'partial');
     const back = componentsFromJson(JSON.parse(row.components_json) as OrderComponentsJson);
     assert.deepEqual(back, components);
     assert.equal(second.getTx(`0x${'01'.repeat(32)}`)?.status, 'success');
@@ -368,12 +362,13 @@ function columnsOf(db: Database.Database): string[] {
   return (db.prepare('PRAGMA table_info(cycles)').all() as Array<{ name: string }>).map((c) => c.name).sort();
 }
 
-test('migration: a database from the previous keeper opens, gains both columns as NULL, and keeps every row', () => {
+test('migration: a database from the previous keeper opens, gains the four columns as NULL, and keeps every row', () => {
   const path = join(scratch, 'pre-k21', 'keeper.db');
   const fresh = new KeeperStore(join(scratch, 'post-k21.db'));
   const freshColumns = columnsOf(fresh.db);
   fresh.close();
   assert.ok(freshColumns.includes('assets_returned') && freshColumns.includes('usdg_from_assignment'), 'a fresh database has them from SCHEMA');
+  assert.ok(freshColumns.includes('strand_gen') && freshColumns.includes('retry_tx'), 'and the stranded-claim columns');
 
   // Build the old file by hand, with a closed week recorded the old way.
   mkdirSync(join(scratch, 'pre-k21'), { recursive: true });
@@ -396,6 +391,8 @@ test('migration: a database from the previous keeper opens, gains both columns a
     assert.equal(row.contracts_assigned, 9);
     assert.equal(row.assets_returned, null, 'not recorded before the column existed: NULL, not 0');
     assert.equal(row.usdg_from_assignment, null);
+    assert.equal(row.strand_gen, null);
+    assert.equal(row.retry_tx, null);
     const tape = cycleTapeRow(row);
     assert.equal(tape.premium_gross_usdg6, null, 'an unknown split is not published as all-premium');
     assert.equal(tape.strike_proceeds_usdg6, null);
@@ -437,7 +434,7 @@ test('cycleTapeRow / splitGross: premium = gross - strike proceeds, null whereve
   assert.equal(unfilled.premium_gross_usdg6, '0');
   assert.equal(unfilled.strike_proceeds_usdg6, '0');
 
-  const skipped = cycleTapeRow({ ...base, status: 'skipped', gross_usdg6: null, usdg_from_assignment: null });
+  const skipped = cycleTapeRow({ ...base, status: 'stranded', gross_usdg6: null, usdg_from_assignment: null });
   assert.equal(skipped.premium_gross_usdg6, null);
   assert.equal(skipped.strike_proceeds_usdg6, null);
 

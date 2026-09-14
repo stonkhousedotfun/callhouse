@@ -5,21 +5,13 @@ import { useQuery } from "@tanstack/react-query";
 import { CycleTape } from "@/components/CycleTape";
 import { OrderPayload } from "@/components/OrderPayload";
 import { GuardBadges, PhaseBadge } from "@/components/PhaseBadge";
-import { fetchKeeperOrderBook, fetchOvercallBook } from "@/lib/api";
-import { CHAIN_ID, addressUrl } from "@/lib/chain";
-import { CLEARINGHOUSE, MARKET, REGISTRY, SEAPORT, USDG, VAULT } from "@/lib/contracts";
-import { fmtUsdg, fmtUtc, shortHash, splitPremium, unitPriceFromLegs } from "@/lib/format";
-import { useLadder, useNow, useOrderStatus, useVaultSnapshot } from "@/lib/hooks";
-import {
-  bookContext,
-  bookNotice,
-  isLiveStatus,
-  keeperNotice,
-  shouldAskKeeper,
-  type CycleListingState,
-  type Notice,
-} from "@/lib/cycleNotices";
-import { checkListingIsOurs } from "@/lib/overcall";
+import { StrandedBanner } from "@/components/StrandedBanner";
+import { fetchKeeperOrderBook } from "@/lib/api";
+import { addressUrl } from "@/lib/chain";
+import { CLEARINGHOUSE, MARKET, MAX_LISTINGS_PER_CYCLE, SEAPORT, VAULT } from "@/lib/contracts";
+import { feedNotice, listingNotice, shouldAskFeed, type CycleListingState, type Notice } from "@/lib/cycleNotices";
+import { fmtUsdg, fmtUtc, maxContracts, shortHash, unitPriceUsdg } from "@/lib/format";
+import { useCycleOption, useNow, useOrderStatus, useVaultSnapshot } from "@/lib/hooks";
 
 function NoticeBlock({ notice }: { notice: Notice }) {
   return (
@@ -37,44 +29,28 @@ function NoticeBlock({ notice }: { notice: Notice }) {
   );
 }
 
+/**
+ * The fill page: this week's option type, the vault's authorised order, and the one place the
+ * calls are sold.
+ *
+ * THE VENUE. Under write on fill the vault lists a PARTIAL_RESTRICTED Seaport order whose zone is
+ * the vault itself. Seaport calls the vault's `authorizeOrder` before it moves anything; that
+ * hook writes exactly the contracts being bought into Valorem, so nothing exists before a fill and
+ * nothing unsold ever sits in the vault. The order's parameters live with the keeper that built
+ * it, served at its GET /orders and checked against the chain by app/api/keeper/orders before
+ * they reach this page (lib/keeperOrders.ts); the card checks them again and simulates the fill.
+ *
+ * SEAPORT FIRST. The vault's `listingHash()` is the one authoritative statement of which order is
+ * ours, and Seaport's `getOrderStatus` for it says what is left. A sold-out or cancelled order is
+ * a neutral notice and the feed is not asked (lib/cycleNotices.ts).
+ */
 export default function CyclePage() {
   const { data: v, isError: chainReadFailed } = useVaultSnapshot();
-  const { rungs, isLoading: ladderLoading } = useLadder(v);
+  const { data: option, isLoading: optionLoading } = useCycleOption(v);
   const { data: orderStatus } = useOrderStatus(v.listingHash);
   const nowSeconds = useNow();
 
-  // Overcall's book, through our own server-side proxy (their API sends no CORS headers).
-  // `status=all` is only legal together with `offerer`, which is exactly the query we want:
-  // every order this vault has ever posted, in whatever state. The proxy builds that query
-  // from its own compiled-in vault address and ignores whatever the browser sends; the params
-  // here state the intent and give the query its cache key, nothing more.
-  const book = useQuery({
-    queryKey: ["overcall-book", VAULT ?? "none"],
-    enabled: VAULT !== undefined,
-    refetchInterval: 30_000,
-    queryFn: () => fetchOvercallBook({ offerer: VAULT!, status: "all", limit: 20 }),
-  });
-
-  const allListings = book.data?.listings ?? [];
-  const liveListings = allListings.filter((l) => isLiveStatus(l.status));
-  const otherListings = allListings.filter((l) => !isLiveStatus(l.status));
-
   const hasOnChainListing = v.listingHash !== undefined && !/^0x0+$/.test(v.listingHash);
-
-  // The vault's listingHash() is the one authoritative statement of which order is ours. The
-  // row carrying that hash is looked for across the WHOLE book first, in whatever status: a row
-  // that is on the book as `unfillable` (transient — recovers when approval or balance return),
-  // `expired` or `filled` is still our row, and saying "the book has no listing matching" while
-  // it sits in the table below would be false. Only when no row at all carries the hash is that
-  // sentence used — it then means the keeper authorised a listing the book does not show, which
-  // is an unfilled week in the making. Of the live rows, the matching one is the one a buyer may
-  // fill from here; every other row is shown but cannot be filled, and OrderPayload says why.
-  const ourRow = hasOnChainListing
-    ? allListings.find((l) => l.orderHash.toLowerCase() === v.listingHash!.toLowerCase())
-    : undefined;
-  const matchingListing = ourRow !== undefined && isLiveStatus(ourRow.status) ? ourRow : undefined;
-  const ourRowNotLive = ourRow !== undefined && matchingListing === undefined ? ourRow : undefined;
-  const unmatchedLive = liveListings.filter((l) => l !== matchingListing);
 
   // Seaport's status, in the shape the pure checks take. useOrderStatus fills every field or none.
   const seaportStatus =
@@ -82,79 +58,47 @@ export default function CyclePage() {
       ? { isCancelled: orderStatus.isCancelled, totalFilled: orderStatus.totalFilled, totalSize: orderStatus.totalSize }
       : undefined;
 
-  // Overcall's live row for the hash, through the same chain check OrderPayload runs (which hashes
-  // the row's components as well as comparing its fields). Nothing is decided before the clock has
-  // started: an end time compared against 0 proves nothing, and a fallback that flickers in for
-  // one frame is a false statement about the book.
-  const overcallVerified =
-    matchingListing !== undefined &&
-    nowSeconds > 0 &&
-    checkListingIsOurs(
-      matchingListing,
-      {
-        vault: VAULT,
-        usdg: USDG,
-        clearinghouse: CLEARINGHOUSE,
-        seaport: SEAPORT,
-        listingHash: v.listingHash,
-        chainId: CHAIN_ID,
-        amount: v.listingAmount,
-        grossUsdg: v.listingGrossUsdg,
-        optionId: v.optionId,
-      },
-      nowSeconds,
-    ).ok;
-
   const listingState: CycleListingState = {
     vaultConfigured: VAULT !== undefined,
+    phase: v.phase,
     listingHash: v.listingHash,
     listingAmount: v.listingAmount,
     seaportStatus,
+    cycleExerciseTs: v.cycleExerciseTs,
     nowSeconds,
-    book: {
-      loading: book.isLoading,
-      answered: book.data !== undefined && !book.data.error,
-      error: book.data?.error,
-      ourRowStatus: ourRow?.status,
-      liveCount: liveListings.length,
-    },
-    overcallVerified,
   };
 
-  // THE KEEPER FALLBACK. Seaport first, then Overcall: the keeper's /orders is read only when
-  // Seaport has contracts left and Overcall's book has answered (or failed to) without a verified
-  // live row for the vault's hash (lib/cycleNotices.ts shouldAskKeeper). The route
-  // (app/api/keeper/orders) rebuilds and checks every order against the chain and returns only the
-  // vault's authorised listing; OrderPayload checks it again. When the deployment has no
-  // KEEPER_ORDERS_URL the route says so and nothing below mentions the keeper.
-  const askKeeper = shouldAskKeeper(listingState);
-  const keeper = useQuery({
+  // THE ORDER FEED. Read only when the vault has a live hash and Seaport has contracts left. The
+  // route rebuilds and checks every order against the chain and returns only the vault's
+  // authorised listing; OrderPayload checks it again. When the deployment has no
+  // KEEPER_ORDERS_URL the route says so and the page says the feed is not wired.
+  const askFeed = shouldAskFeed(listingState);
+  const feed = useQuery({
     queryKey: ["keeper-orders", VAULT ?? "none", v.listingHash ?? "none"],
-    enabled: askKeeper,
+    enabled: askFeed,
     refetchInterval: 30_000,
     queryFn: fetchKeeperOrderBook,
   });
-  const keeperBook = askKeeper && keeper.data?.configured ? keeper.data : undefined;
-  const keeperListing = keeperBook?.listings.find(
-    (l) => l.orderHash.toLowerCase() === v.listingHash?.toLowerCase(),
-  );
-  const listingNotice = bookNotice(listingState, keeperListing !== undefined);
-  const fallbackNotice = keeperNotice(listingState, keeperBook, keeperListing !== undefined);
+  const feedBook = askFeed ? feed.data : undefined;
+  const feedListing = feedBook?.listings.find((l) => l.orderHash.toLowerCase() === v.listingHash?.toLowerCase());
+  const chainNotice = listingNotice(listingState);
+  const orderFeedNotice = feedNotice(listingState, askFeed && feed.isLoading ? "loading" : feedBook, feedListing !== undefined);
 
-  const unitPrice = unitPriceFromLegs(v.listingGrossUsdg ?? 0n, 0n, v.listingAmount ?? 0n);
-  const split = splitPremium(unitPrice ?? 0n, v.listingAmount ?? 0n);
+  const unitPrice = unitPriceUsdg(v.listingGrossUsdg, v.listingAmount);
+  const cap = maxContracts(v.totalAssets, v.policy);
+  const tupleMismatch = option?.agreesWithVault === false;
 
   return (
     <>
       <div className="page-head">
         <div className="eyebrow">Cycle · {MARKET}</div>
-        <h1>This week&apos;s ladder and listing</h1>
+        <h1>This week&apos;s call, and where to buy it</h1>
         <p className="lede">
-          Overcall publishes up to five strikes per cycle. The vault writes exactly one of them —
-          the nearest rung inside its own out-of-the-money band — and lists the resulting option
-          for USDG on Seaport. Everything below is read from the chain and from Overcall&apos;s own
-          book, and, when that book does not show the vault&apos;s listing, from the vault&apos;s
-          keeper, checked against the chain first.
+          Each week the keeper creates one out-of-the-money option type on the clearinghouse and the vault arms it after
+          checking the strike, the lot and the window itself. The vault then authorises one Seaport order for it; this
+          page is where that order is filled. Nothing is written until you buy: the fill itself writes exactly the
+          contracts you take, so the vault never holds an unsold call. Everything below is read from the chain, and
+          the order&apos;s parameters from the vault&apos;s keeper, checked against the chain first.
         </p>
       </div>
 
@@ -164,104 +108,115 @@ export default function CyclePage() {
       {chainReadFailed ? (
         <div className="notice" data-tone="warn">
           <strong>Chain reads are failing right now.</strong>
-          The vault and registry could not be read from the RPC, so the figures below are missing
-          rather than zero. They fill in by themselves when the node answers again.
+          The vault could not be read from the RPC, so the figures below are missing rather than zero. They fill in by
+          themselves when the node answers again.
         </div>
       ) : null}
 
-      <CycleTape snapshot={v} />
+      <StrandedBanner snapshot={v} compact />
 
-      <div className="card" style={{ marginTop: 16 }}>
-        <div className="card-head">
-          <span className="card-title">Overcall ladder · registry cycle #{v.registryCycleNumber ?? "—"}</span>
-          <PhaseBadge phase={v.phase} fillState={v.fillState} />
-        </div>
-
-        <div className="table-wrap">
-          <table>
-            <thead>
-              <tr>
-                <th>Rung</th>
-                <th>Strike (USDG)</th>
-                <th>vs spot</th>
-                <th>In band</th>
-                <th>Approved</th>
-                <th>Option id</th>
-              </tr>
-            </thead>
-            <tbody>
-              {rungs.length === 0 ? (
-                <tr>
-                  <td colSpan={6} className="muted" style={{ whiteSpace: "normal" }}>
-                    {/* "No live cycle" is a claim about the registry. Do not make it before the
-                        registry has actually answered — an unread contract is not an empty one. */}
-                    {!v.ready || ladderLoading || v.registryOptionIds === undefined
-                      ? "Reading the registry…"
-                      : "No live cycle on the registry right now."}
-                  </td>
-                </tr>
-              ) : (
-                rungs.map((rung, i) => (
-                  <tr key={rung.optionId.toString()} data-picked={rung.picked}>
-                    <td>
-                      {rung.picked ? "▶ " : ""}
-                      {i + 1}
-                      {rung.picked ? " · written" : ""}
-                    </td>
-                    <td>{fmtUsdg(rung.strikeUsdg)}</td>
-                    <td>
-                      {rung.otmBps === undefined
-                        ? "—"
-                        : `${rung.otmBps >= 0 ? "+" : ""}${(rung.otmBps / 100).toFixed(2)}%`}
-                    </td>
-                    <td>{rung.inBand === undefined ? "—" : rung.inBand ? "yes" : "no"}</td>
-                    <td>{rung.approved === undefined ? "—" : rung.approved ? "yes" : "no"}</td>
-                    <td title={rung.optionId.toString()}>
-                      {shortHash(`0x${rung.optionId.toString(16).padStart(64, "0")}`)}
-                    </td>
-                  </tr>
-                ))
-              )}
-            </tbody>
-          </table>
-        </div>
-
-        <div className="rows" style={{ marginTop: 14 }}>
-          <div className="row">
-            <span className="k">Feed spot, one lot</span>
-            <span className="v">
-              {v.spotStale ? "stale — the vault will not write" : `${fmtUsdg(v.spotUsdg)} USDG`}
-            </span>
-          </div>
-          <div className="row">
-            <span className="k">Policy band</span>
-            <span className="v">
-              {v.policy
-                ? `+${(v.policy.minOtmBps / 100).toFixed(2)}% to +${(v.policy.maxOtmBps / 100).toFixed(2)}%`
-                : "—"}
-            </span>
-          </div>
-          <div className="row">
-            <span className="k">Registry</span>
-            <span className="v">
-              <a href={addressUrl(REGISTRY)} target="_blank" rel="noreferrer noopener">
-                {REGISTRY}
-              </a>
-            </span>
-          </div>
-        </div>
-
-        <p className="tiny faint" style={{ marginTop: 10, marginBottom: 0 }}>
-          Strikes come from the registry&apos;s strikePerContract() and are cross-checked against
-          ValoremClear.option().exerciseAmount. Settlement never reads a price feed — the spot
-          above is a write gate and a display number only.
-        </p>
+      <div style={{ marginTop: v.isStranded ? 16 : 0 }}>
+        <CycleTape snapshot={v} />
       </div>
 
       <div className="card" style={{ marginTop: 16 }}>
         <div className="card-head">
-          <span className="card-title">Our listing, on chain</span>
-          <GuardBadges writesHalted={v.writesHalted} oraclePaused={v.oraclePaused} spotStale={v.spotStale} />
+          <span className="card-title">This week&apos;s option · vault cycle #{v.cycleNumber ?? "—"}</span>
+          <PhaseBadge phase={v.phase} fillState={v.fillState} sold={v.contractsWritten} />
+        </div>
+
+        {v.phase === 0 || v.optionId === undefined || v.optionId === 0n ? (
+          <p className="small muted" style={{ marginBottom: 0 }}>
+            {!v.ready
+              ? "Reading the vault…"
+              : "Nothing is armed right now. The keeper arms the week's option type with rollOpen; the strike, exercise time and expiry appear here when it does."}
+          </p>
+        ) : (
+          <>
+            <div className="rows">
+              <div className="row">
+                <span className="k">Strike, per contract</span>
+                <span className="v">
+                  {fmtUsdg(v.cycleStrikeUsdg)} USDG
+                  {option?.otmBps !== undefined
+                    ? ` · ${option.otmBps >= 0 ? "+" : ""}${(option.otmBps / 100).toFixed(2)}% vs spot`
+                    : ""}
+                </span>
+              </div>
+              <div className="row" title="The band the vault applies at today's spot. Both bounds are checked when a cycle is armed; the floor is re-checked at every fill, so a rally can make the vault refuse a sale until the keeper reprices.">
+                <span className="k">Band at today&apos;s spot</span>
+                <span className="v">
+                  {v.band
+                    ? `${fmtUsdg(v.band.min)} – ${fmtUsdg(v.band.max)} USDG${
+                        v.cycleStrikeUsdg !== undefined && v.cycleStrikeUsdg < v.band.min ? " · strike now below the floor" : ""
+                      }`
+                    : v.spotStale
+                      ? "spot stale — the vault will not sell"
+                      : "—"}
+                </span>
+              </div>
+              <div className="row">
+                <span className="k">Sale window closes · expiry</span>
+                <span className="v">
+                  {fmtUtc(v.cycleExerciseTs)} · {fmtUtc(v.cycleExpiryTs)}
+                </span>
+              </div>
+              <div className="row">
+                <span className="k">Lot</span>
+                <span className="v">
+                  {option?.underlyingAmount === undefined
+                    ? optionLoading
+                      ? "reading the clearinghouse…"
+                      : "—"
+                    : `${option.underlyingAmount === 10n ** 18n ? "1.0000" : option.underlyingAmount.toString()} ${MARKET} per contract`}
+                </span>
+              </div>
+              <div className="row" title="contractsWritten(): every contract was written inside the fill that sold it, so this is also the number sold.">
+                <span className="k">Calls sold this week</span>
+                <span className="v">
+                  {v.contractsWritten === undefined ? "—" : v.contractsWritten.toString()}
+                  {cap !== undefined ? ` of at most ${cap.toString()}` : ""}
+                </span>
+              </div>
+              <div className="row" title="Policy.maxContracts(totalAssets) − contractsWritten. The hook re-sizes every fill against NAV, so a listing approved at capacity can still be refused at the margin if NAV fell.">
+                <span className="k">Capacity remaining</span>
+                <span className="v">{v.capacity === undefined ? "—" : `${v.capacity.toString()} contracts`}</span>
+              </div>
+              <div className="row">
+                <span className="k">Feed spot, one lot</span>
+                <span className="v">{v.spotStale ? "stale — the vault will not sell" : `${fmtUsdg(v.spotUsdg)} USDG`}</span>
+              </div>
+              <div className="row">
+                <span className="k">Option id</span>
+                <span className="v mono" title={v.optionId.toString()}>
+                  {shortHash(`0x${v.optionId.toString(16).padStart(64, "0")}`)}
+                </span>
+              </div>
+            </div>
+
+            {tupleMismatch ? (
+              <div className="notice" data-tone="bad" style={{ marginTop: 12 }}>
+                <strong>The clearinghouse&apos;s tuple for this option id does not match the vault&apos;s snapshot.</strong>
+                Strike, exercise or expiry differ between clearinghouse.option() and the vault&apos;s cycle. That
+                should be impossible (the tuple is immutable and the vault read it at rollOpen); do not buy until it
+                is understood.
+              </div>
+            ) : null}
+
+            <p className="tiny faint" style={{ marginTop: 10, marginBottom: 0 }}>
+              The strike, window and lot are read back from the clearinghouse&apos;s own tuple for this id and
+              cross-checked against the vault&apos;s snapshot. There is no registry: the vault validates the type
+              itself at rollOpen. Settlement never reads a price feed — the spot above is a gate and a display
+              number only.
+            </p>
+          </>
+        )}
+      </div>
+
+      <div className="card" style={{ marginTop: 16 }}>
+        <div className="card-head">
+          <span className="card-title">The vault&apos;s order, on chain</span>
+          <GuardBadges writesHalted={v.writesHalted} oraclePaused={v.oraclePaused} spotStale={v.spotStale} stranded={v.isStranded} />
         </div>
 
         {hasOnChainListing ? (
@@ -270,25 +225,17 @@ export default function CyclePage() {
               <span className="k">Seaport order hash</span>
               <span className="v kv-mono">{v.listingHash}</span>
             </div>
-            <div className="row">
-              <span className="k">Contracts listed</span>
+            <div className="row" title="listingAmount(): the whole offer. At approval it was at most the vault's capacity.">
+              <span className="k">Contracts offered</span>
               <span className="v">{(v.listingAmount ?? 0n).toString()}</span>
             </div>
             <div className="row">
               <span className="k">Gross premium asked</span>
-              <span className="v">{fmtUsdg(v.listingGrossUsdg)} USDG</span>
+              <span className="v">{fmtUsdg(v.listingGrossUsdg)} USDG · one leg, to the vault</span>
             </div>
             <div className="row">
               <span className="k">Per contract</span>
-              <span className="v">
-                {unitPrice === undefined ? "—" : `${fmtUsdg(unitPrice, 6)} USDG`}
-              </span>
-            </div>
-            <div className="row">
-              <span className="k">Split per contract</span>
-              <span className="v">
-                {fmtUsdg(split.writerPerContract6, 6)} vault + {fmtUsdg(split.feePerContract6, 6)} Overcall
-              </span>
+              <span className="v">{unitPrice === undefined ? "—" : `${fmtUsdg(unitPrice, 6)} USDG`}</span>
             </div>
             <div className="row">
               <span className="k">Seaport validated</span>
@@ -298,7 +245,7 @@ export default function CyclePage() {
                   : orderStatus.isCancelled
                     ? "cancelled"
                     : orderStatus.isValidated
-                      ? "validated"
+                      ? "validated (empty signature fills)"
                       : "not validated"}
               </span>
             </div>
@@ -310,9 +257,11 @@ export default function CyclePage() {
                   : "0 / 0"}
               </span>
             </div>
-            <div className="row">
-              <span className="k">Listings signed this cycle</span>
-              <span className="v">{v.listingsThisCycle ?? 0} / 3</span>
+            <div className="row" title="approveListing calls this cycle, cancelled or not. A relist is a reprice.">
+              <span className="k">Listings authorised this cycle</span>
+              <span className="v">
+                {v.listingsThisCycle ?? 0} / {MAX_LISTINGS_PER_CYCLE}
+              </span>
             </div>
           </div>
         ) : (
@@ -321,7 +270,7 @@ export default function CyclePage() {
                 listing". They are different claims and only the second one is ours to make. */}
             {v.listingHash === undefined
               ? "The vault's listing slot has not been read yet."
-              : "No listing is authorised on chain right now. The vault authorises an order by hash with approveListing() before the keeper posts it, so an empty hash here means nothing has been listed for this cycle yet."}
+              : "No listing is authorised on chain right now. The vault authorises an order by hash with approveListing() after arming a cycle, so an empty hash here means nothing has been listed yet."}
           </p>
         )}
 
@@ -334,121 +283,85 @@ export default function CyclePage() {
           <a href={addressUrl(SEAPORT)} target="_blank" rel="noreferrer noopener">
             {SEAPORT}
           </a>
-          {v.optionId !== undefined && v.optionId !== 0n ? (
+          {VAULT ? (
             <>
               {" "}
-              · option id <span className="mono">{v.optionId.toString()}</span>
+              · zone = the vault{" "}
+              <a href={addressUrl(VAULT)} target="_blank" rel="noreferrer noopener">
+                {shortHash(VAULT)}
+              </a>
             </>
           ) : null}
         </p>
       </div>
 
-      <div style={{ marginTop: 16 }}>
-        {listingNotice === "loading" ? (
-          <div className="card">
-            <span className="small muted">Reading Overcall&apos;s book…</span>
-          </div>
-        ) : listingNotice !== null ? (
-          <NoticeBlock notice={listingNotice} />
-        ) : null}
-      </div>
-
-      {/* What the keeper said, when it was asked and nothing from it can be offered. A deployment
-          without KEEPER_ORDERS_URL never reaches this: keeperBook is undefined there. Only an
-          integrity failure is red (lib/cycleNotices.ts keeperNotice). */}
-      {fallbackNotice !== null ? (
+      {chainNotice !== null ? (
         <div style={{ marginTop: 16 }}>
-          <NoticeBlock notice={fallbackNotice} />
+          <NoticeBlock notice={chainNotice} />
         </div>
       ) : null}
 
-      {/* The keeper's copy of the vault's order, through the same card and the same fill. It is
-          only ever a row whose hash is the vault's listingHash, and only when Overcall's book has
-          no verified row for it; when the book has an unverified row for the hash, this verified
-          card comes first. */}
-      {keeperListing !== undefined ? (
-        <div key={`keeper-${keeperListing.orderHash}`} style={{ marginTop: 16 }}>
-          <OrderPayload
-            source="keeper"
-            book={bookContext(listingState)}
-            listing={keeperListing}
-            seaportStatus={seaportStatus}
-            expectedListingHash={v.listingHash}
-            expectedListingAmount={v.listingAmount}
-            expectedListingGrossUsdg={v.listingGrossUsdg}
-            expectedOptionId={v.optionId}
-          />
+      {orderFeedNotice === "loading" ? (
+        <div className="card" style={{ marginTop: 16 }}>
+          <span className="small muted">Reading the order from the keeper…</span>
+        </div>
+      ) : orderFeedNotice !== null ? (
+        <div style={{ marginTop: 16 }}>
+          <NoticeBlock notice={orderFeedNotice} />
         </div>
       ) : null}
 
-      {/* The four expected* props are the vault's own listing slot, read in one multicall:
-          hash, contract count, gross price and option id. OrderPayload refuses to render a
-          fill button until the row matches every one of them. */}
-      {matchingListing !== undefined ? (
-        <div key={matchingListing.orderHash} style={{ marginTop: 16 }}>
-          <OrderPayload
-            listing={matchingListing}
-            seaportStatus={seaportStatus}
-            expectedListingHash={v.listingHash}
-            expectedListingAmount={v.listingAmount}
-            expectedListingGrossUsdg={v.listingGrossUsdg}
-            expectedOptionId={v.optionId}
-          />
+      {/* The vault's order, through the one fill path. It is only ever a row whose hash is the
+          vault's listingHash, and OrderPayload refuses to render a fill button until the row
+          matches every value in the vault's own slot and a simulated fill passes. */}
+      {feedListing !== undefined ? (
+        <div key={`order-${feedListing.orderHash}`} style={{ marginTop: 16 }}>
+          <OrderPayload listing={feedListing} snapshot={v} seaportStatus={seaportStatus} />
         </div>
       ) : null}
 
-      {unmatchedLive.map((listing) => (
-        <div key={listing.orderHash} style={{ marginTop: 16 }}>
-          <OrderPayload
-            listing={listing}
-            expectedListingHash={v.listingHash}
-            expectedListingAmount={v.listingAmount}
-            expectedListingGrossUsdg={v.listingGrossUsdg}
-            expectedOptionId={v.optionId}
-          />
-        </div>
-      ))}
-
-      {otherListings.length > 0 ? (
+      {feedBook !== undefined && feedBook.closed.some((c) => c.state === "notCurrent") ? (
         <div className="card" style={{ marginTop: 16 }}>
           <div className="card-head">
-            {/* "Earlier" is only true when the current cycle's row is not among them. */}
-            <span className="card-title">
-              {ourRowNotLive !== undefined
-                ? "Orders from this vault that are not open"
-                : "Earlier orders from this vault"}
-            </span>
-            <span className="tiny faint mono">{otherListings.length}</span>
+            <span className="card-title">Earlier orders the keeper still serves</span>
+            <span className="tiny faint mono">{feedBook.closed.filter((c) => c.state === "notCurrent").length}</span>
           </div>
           <div className="table-wrap">
             <table>
               <thead>
                 <tr>
                   <th>Order hash</th>
-                  <th>Status</th>
-                  <th>Qty</th>
-                  <th>Unit (USDG)</th>
-                  <th>Ends</th>
+                  <th>State</th>
                 </tr>
               </thead>
               <tbody>
-                {otherListings.map((l) => (
-                  <tr key={l.orderHash} data-picked={l === ourRowNotLive}>
-                    <td title={l.orderHash}>
-                      {shortHash(l.orderHash)}
-                      {l === ourRowNotLive ? " · current on chain" : ""}
-                    </td>
-                    <td>{l.status}</td>
-                    <td>{l.quantity}</td>
-                    <td>{fmtUsdg(BigInt(l.unitPrice6 || "0"))}</td>
-                    <td>{fmtUtc(Number(l.endTime))}</td>
-                  </tr>
-                ))}
+                {feedBook.closed
+                  .filter((c) => c.state === "notCurrent")
+                  .map((c, i) => (
+                    <tr key={c.orderHash ?? i}>
+                      <td title={c.orderHash ?? undefined}>{shortHash(c.orderHash)}</td>
+                      <td style={{ whiteSpace: "normal" }}>superseded: not the order the vault authorises now</td>
+                    </tr>
+                  ))}
               </tbody>
             </table>
           </div>
         </div>
       ) : null}
+
+      <div className="card" style={{ marginTop: 16 }}>
+        <div className="card-title">How a fill works here</div>
+        <p className="small muted" style={{ marginTop: 8, marginBottom: 0 }}>
+          The order is a PARTIAL_RESTRICTED Seaport 1.6 order whose zone is the vault. When you fill k of N, Seaport
+          calls the vault before moving anything; the vault re-checks its gate at today&apos;s spot (the strike is
+          still above its floor, the premium clears its floor, the size fits its capacity, the window is open, the
+          oracle is live, writes are not halted) and writes exactly k contracts into Valorem inside your transaction.
+          Seaport then moves them to you and pulls k × the unit price in USDG to the vault, and the vault confirms
+          nothing stayed behind. So a fill can be refused after a rally, and this page simulates yours before the
+          button is live. The order is validated on chain, so the signature is empty; any Seaport 1.6 client can fill
+          it from the raw JSON on the card.
+        </p>
+      </div>
     </>
   );
 }

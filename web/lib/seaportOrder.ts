@@ -1,19 +1,21 @@
 import { getAddress, hashStruct, type Address, type Hex } from "viem";
 
-import type { OrderComponentsJson } from "./overcall";
+import type { OrderComponentsJson } from "./listing";
 
 /**
  * Seaport facts derived locally and purely: the EIP-712 order hash of a set of OrderComponents,
- * and what a Seaport getOrderStatus reading means for a listing of N contracts.
+ * the AdvancedOrder a fill of k out of N sends, and what a Seaport getOrderStatus reading means
+ * for a listing of N contracts.
  *
- * WHY THIS FILE EXISTS: an order hash string from a book row or from the keeper is only a claim.
- * The hash the vault authorised (listingHash) is bound to the order a buyer's fill will send only
- * if the components themselves hash to it. checkListingIsOurs (lib/overcall.ts) runs that
- * derivation on every row, from either source, before a fill button exists; the keeper route
- * (lib/keeperOrders.ts) runs it too and then asks Seaport for the same hash as a cross-check.
+ * WHY THIS FILE EXISTS: an order hash string from the keeper's feed is only a claim. The hash the
+ * vault authorised (listingHash) is bound to the order a buyer's fill will send only if the
+ * components themselves hash to it. checkListingIsOurs (lib/listing.ts) runs that derivation on
+ * every row before a fill button exists; the route (lib/keeperOrders.ts) runs it too and then
+ * asks Seaport for the same hash as a cross-check. And the struct the fill sends is built HERE,
+ * once, so the pre-flight simulation and the real transaction cannot drift apart.
  *
  * DELIBERATELY ABSENT: React, fetch, a clock, a chain client. Imports only types from
- * lib/overcall.ts, so overcall.ts can import this file without a cycle at runtime.
+ * lib/listing.ts, so listing.ts can import this file without a cycle at runtime.
  */
 
 export type OrderComponentsStruct = {
@@ -35,6 +37,18 @@ export type OrderComponentsStruct = {
   salt: bigint;
   conduitKey: Hex;
   counter: bigint;
+};
+
+/** OrderParameters: OrderComponents with the consideration count where the counter was. */
+export type OrderParametersStruct = Omit<OrderComponentsStruct, "counter"> & { totalOriginalConsiderationItems: bigint };
+
+/** The `advancedOrder` argument of Seaport.fulfillAdvancedOrder. */
+export type AdvancedOrderStruct = {
+  parameters: OrderParametersStruct;
+  numerator: bigint;
+  denominator: bigint;
+  signature: Hex;
+  extraData: Hex;
 };
 
 /** Case is not meaning: an address is 20 bytes, and a row that mis-checksums one must not make
@@ -74,6 +88,35 @@ export function componentsStruct(c: OrderComponentsJson): OrderComponentsStruct 
   };
 }
 
+/**
+ * OrderComponents → OrderParameters. `totalOriginalConsiderationItems` is the consideration
+ * length (SeaportOrderLib.toParameters does the same); a different value makes Seaport derive a
+ * different order hash and refuse the fill.
+ */
+export function toOrderParameters(c: OrderComponentsStruct): OrderParametersStruct {
+  const { counter: _counter, ...rest } = c;
+  return { ...rest, totalOriginalConsiderationItems: BigInt(c.consideration.length) };
+}
+
+/**
+ * The fill of `numerator` out of `denominator` contracts, as Seaport.fulfillAdvancedOrder takes it.
+ *
+ * The signature is ALWAYS empty. The vault has no signing key: it authorises the order by
+ * `seaport.validate()` inside approveListing, and Seaport skips signature verification for a
+ * validated order (OrderValidator.sol). Whatever bytes a feed carries in its `signature` field are
+ * meaningless and are not sent. `extraData` is empty too: the vault's zone hooks read nothing
+ * from it.
+ */
+export function advancedOrderFor(c: OrderComponentsJson, numerator: bigint, denominator: bigint): AdvancedOrderStruct {
+  return {
+    parameters: toOrderParameters(componentsStruct(c)),
+    numerator,
+    denominator,
+    signature: "0x",
+    extraData: "0x",
+  };
+}
+
 const SEAPORT_TYPES = {
   OrderComponents: [
     { name: "offerer", type: "address" },
@@ -107,7 +150,7 @@ const SEAPORT_TYPES = {
 
 /**
  * Seaport's order hash, derived locally: the EIP-712 struct hash of OrderComponents, which is
- * what Seaport.getOrderHash returns and what the vault records as listingHash (keeper
+ * what Seaport.getOrderHash returns and what the vault records as listingHash (the keeper's
  * localOrderHash is the same derivation). The fork acceptance asserts the three agree on chain.
  * Lowercase, so it compares with `===` against other lowercased hashes.
  */
@@ -155,10 +198,10 @@ export function seaportRemaining(total: bigint | undefined, status: SeaportFillS
 
 /**
  * How many contracts a fill card may offer. Seaport's count wins whenever the card's row carries
- * the hash Seaport's status was read for: a book row that says `remaining: "0"` (a stale indexer
- * is enough) for an order Seaport still holds open must not disable the only fill button on the
+ * the hash Seaport's status was read for: a row that says `remaining: "0"` (a stale feed is
+ * enough) for an order Seaport still holds open must not disable the only fill button on the
  * page, and a row claiming more than Seaport has left must not be quoted. Without a reading for
- * this hash, the row's own figure is used, capped at the signed total.
+ * this hash, the row's own figure is used, capped at the total.
  */
 export function fillableContracts(
   row: { orderHash: string; remaining?: string },

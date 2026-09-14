@@ -8,9 +8,9 @@
  * files: ops/ sits outside this package's tsconfig `rootDir`, and a plain JSON import loses the
  * literal types that make viem's inference work.
  *
- * Only what the keeper touches is here. Nothing is guessed. `overcallApi.test.ts` re-derives the
- * error vocabulary from `contracts/out` when the artefacts are present and fails when a fragment
- * here has drifted from the Solidity.
+ * Only what the keeper touches is here. Nothing is guessed. `abi.test.ts` re-derives the error
+ * vocabulary from `contracts/out` when the artefacts are present and fails when a fragment here
+ * has drifted from the Solidity.
  *
  * Write on fill (contracts redesign of 2026-09-13): `rollOpen(optionId)` ARMS an option type and
  * writes nothing; every Seaport fill of the vault's PARTIAL_RESTRICTED listing writes exactly the
@@ -686,96 +686,6 @@ export const vaultAbi = [
 ] as const;
 
 /*//////////////////////////////////////////////////////////////
-              OVERCALL REGISTRY — TO DELETE WITH THE KEEPER PORT
-//////////////////////////////////////////////////////////////*/
-
-/**
- * @deprecated The redesigned vault has NO registry: `rollOpen` reads the option tuple from the
- * clearinghouse and numbers its own cycles, and `vault.registry()` no longer exists. These
- * fragments describe the Overcall per-market registry the OLD keeper polled (`isWritingOpen`,
- * `isCycleLive`, rungs). They stay only so `roll.ts`, `policy.ts` and the dry runs still load
- * until the write-on-fill port deletes their last registry read; delete this block with it.
- *
- * NOTE: the Cycle struct has NO status field. TECHSPEC guessed one; it does not exist on chain.
- */
-const CYCLE_STRUCT = {
-  type: 'tuple',
-  components: [
-    { name: 'number', type: 'uint32' },
-    { name: 'exerciseTimestamp', type: 'uint40' },
-    { name: 'expiryTimestamp', type: 'uint40' },
-    { name: 'lotSize', type: 'uint96' },
-    { name: 'optionIds', type: 'uint256[]' },
-  ],
-} as const;
-
-/** @deprecated see the block comment above. */
-export const registryAbi = [
-  { type: 'function', name: 'cycle', inputs: [], outputs: [CYCLE_STRUCT], stateMutability: 'view' },
-  {
-    type: 'function',
-    name: 'cycleAt',
-    inputs: [{ name: 'index', type: 'uint256' }],
-    outputs: [CYCLE_STRUCT],
-    stateMutability: 'view',
-  },
-  { type: 'function', name: 'activeOptionIds', inputs: [], outputs: [{ type: 'uint256[]' }], stateMutability: 'view' },
-  { type: 'function', name: 'isWritingOpen', inputs: [], outputs: [{ type: 'bool' }], stateMutability: 'view' },
-  { type: 'function', name: 'isCycleLive', inputs: [], outputs: [{ type: 'bool' }], stateMutability: 'view' },
-  { type: 'function', name: 'canReplaceCycle', inputs: [], outputs: [{ type: 'bool' }], stateMutability: 'view' },
-  { type: 'function', name: 'writeDeadline', inputs: [], outputs: [{ type: 'uint40' }], stateMutability: 'view' },
-  {
-    type: 'function',
-    name: 'isApproved',
-    inputs: [{ name: 'optionId', type: 'uint256' }],
-    outputs: [{ type: 'bool' }],
-    stateMutability: 'view',
-  },
-  {
-    type: 'function',
-    name: 'cycleOf',
-    inputs: [{ name: 'optionId', type: 'uint256' }],
-    outputs: [{ type: 'uint32' }],
-    stateMutability: 'view',
-  },
-  {
-    type: 'function',
-    name: 'strikePerContract',
-    inputs: [{ name: 'optionId', type: 'uint256' }],
-    outputs: [{ name: 'strike', type: 'uint96' }],
-    stateMutability: 'view',
-  },
-  { type: 'function', name: 'collateralToken', inputs: [], outputs: [{ type: 'address' }], stateMutability: 'view' },
-  { type: 'function', name: 'exerciseToken', inputs: [], outputs: [{ type: 'address' }], stateMutability: 'view' },
-  { type: 'function', name: 'clearinghouse', inputs: [], outputs: [{ type: 'address' }], stateMutability: 'view' },
-  { type: 'function', name: 'lotSize', inputs: [], outputs: [{ type: 'uint96' }], stateMutability: 'view' },
-  { type: 'function', name: 'cycleLotSize', inputs: [], outputs: [{ type: 'uint96' }], stateMutability: 'view' },
-  { type: 'function', name: 'cycleNumber', inputs: [], outputs: [{ type: 'uint32' }], stateMutability: 'view' },
-  { type: 'function', name: 'cycleCount', inputs: [], outputs: [{ type: 'uint256' }], stateMutability: 'view' },
-  { type: 'function', name: 'exerciseTimestamp', inputs: [], outputs: [{ type: 'uint40' }], stateMutability: 'view' },
-  { type: 'function', name: 'expiryTimestamp', inputs: [], outputs: [{ type: 'uint40' }], stateMutability: 'view' },
-  { type: 'function', name: 'MAX_STRIKES', inputs: [], outputs: [{ type: 'uint256' }], stateMutability: 'view' },
-  {
-    type: 'function',
-    name: 'MIN_EXERCISE_WINDOW',
-    inputs: [],
-    outputs: [{ type: 'uint256' }],
-    stateMutability: 'view',
-  },
-  {
-    type: 'event',
-    name: 'CycleSet',
-    inputs: [
-      { name: 'number', type: 'uint32', indexed: true },
-      { name: 'optionIds', type: 'uint256[]', indexed: false },
-      { name: 'exerciseAt', type: 'uint40', indexed: false },
-      { name: 'expireAt', type: 'uint40', indexed: false },
-      { name: 'lotSize', type: 'uint96', indexed: false },
-    ],
-  },
-] as const;
-
-/*//////////////////////////////////////////////////////////////
                           VALOREM CLEAR
 //////////////////////////////////////////////////////////////*/
 
@@ -977,6 +887,16 @@ export const clearAbi = [
   { type: 'error', name: 'TokenNotFound', inputs: [{ name: 'token', type: 'uint256' }] },
   // What `newOptionType` reverts when the tuple already exists (the id is the tuple's hash).
   { type: 'error', name: 'OptionsTypeExists', inputs: [{ name: 'optionId', type: 'uint256' }] },
+  // The fee switch moving. The keeper alerts `fee_switch` on either edge; on, the vault refuses
+  // to arm and to fill until an admin has accepted the fee.
+  {
+    type: 'event',
+    name: 'FeeSwitchUpdated',
+    inputs: [
+      { name: 'feeTo', type: 'address', indexed: false },
+      { name: 'enabled', type: 'bool', indexed: false },
+    ],
+  },
 ] as const;
 
 /*//////////////////////////////////////////////////////////////

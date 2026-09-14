@@ -1,11 +1,11 @@
 import { ponder } from "ponder:registry";
 import schema from "ponder:schema";
 
-import { CLEARINGHOUSE, OVERCALL_FEE_RECIPIENT, USDG, VAULT } from "../lib/env";
+import { CLEARINGHOUSE, USDG, VAULT } from "../lib/env";
 import { getCycle, getState, patchCycle, patchState, safeDiv } from "../lib/indexing";
 import { log } from "../lib/log";
 
-/** Seaport ItemType. Only these two ever appear in an Overcall listing. */
+/** Seaport ItemType. Only these two ever appear in a vault listing. */
 const ITEM_ERC20 = 1;
 const ITEM_ERC1155 = 3;
 
@@ -14,19 +14,21 @@ const eq = (a: string, b: string) => a.toLowerCase() === b.toLowerCase();
 /**
  * A buyer filled one of our listings.
  *
- * THIS IS THE ONLY SOURCE OF TRUTH FOR WHAT WE SOLD AND WHAT WE GOT.
- * `AdapterValorem.contractsSold` is declared on the vault but never written on chain, and the
- * vault emits no fill event of its own — Seaport moves the ERC-1155 straight out of the vault
- * with no callback. So both the contract count and the realised price come from here.
+ * THE FILL IS THE WRITE. The listing is a PARTIAL_RESTRICTED order whose zone is the vault, so
+ * Seaport calls the vault's `authorizeOrder` before moving anything: the vault writes exactly
+ * `offer[0].amount` contracts into Valorem (its own `CallsWritten`, earlier in this same
+ * transaction, carries the count and the collateral), Seaport moves the freshly minted tokens to
+ * the buyer, and `validateOrder` asserts none stayed behind. So the contract count here and the
+ * count in `CallsWritten` are the same number seen from two sides, and the realised price is
+ * this event's consideration.
  *
- * The order is PARTIAL_OPEN, so a fill may be partial and there may be several of them. Every
+ * The order is partial, so a fill may be partial and there may be several of them. Every
  * amount below is therefore accumulated, never assigned.
  *
- * The consideration is read by recipient rather than by position: item 0 pays the vault (95%
- * of gross) and item 1 pays Overcall (5%), but reading them positionally would silently
- * mis-attribute money if the shape ever changed. Seaport scales both items by the fill
- * fraction, which is exactly why the vault's listing check forces the fee to be rounded per
- * contract — an unevenly divisible item makes a partial fill revert with InexactFraction.
+ * ONE CONSIDERATION ITEM: USDG to the vault. There is no venue fee item, so what the buyer paid
+ * is what reached the vault. The item is still read by recipient rather than by position, and
+ * anything else in the consideration is logged: the vault's approval rejects any other shape,
+ * so a second item would mean the tape is reading an order the vault never authorised.
  */
 ponder.on("Seaport:OrderFulfilled", async ({ event, context }) => {
   const { orderHash, offerer, offer, consideration } = event.args;
@@ -42,13 +44,16 @@ ponder.on("Seaport:OrderFulfilled", async ({ event, context }) => {
   }
 
   let toVault = 0n;
-  let toOvercall = 0n;
+  let elsewhere = 0n;
   for (const item of consideration) {
     if (item.itemType !== ITEM_ERC20 || !eq(item.token, USDG)) continue;
     if (eq(item.recipient, VAULT)) toVault += item.amount;
-    else if (eq(item.recipient, OVERCALL_FEE_RECIPIENT)) toOvercall += item.amount;
+    else elsewhere += item.amount;
   }
-  const gross = toVault + toOvercall;
+  if (elsewhere !== 0n) {
+    log.warn({ orderHash, elsewhere, txHash: event.transaction.hash }, "fill paid USDG to a recipient other than the vault");
+  }
+  const gross = toVault;
 
   const listingRow = await context.db.find(schema.listing, { orderHash });
   const state = await getState(context.db);
@@ -64,7 +69,6 @@ ponder.on("Seaport:OrderFulfilled", async ({ event, context }) => {
     await context.db.update(schema.listing, { orderHash }).set({
       contractsFilled: filledSoFar,
       proceedsUsdg: listingRow.proceedsUsdg + toVault,
-      feePaidUsdg: listingRow.feePaidUsdg + toOvercall,
       fillCount: listingRow.fillCount + 1,
       status: complete ? "filled" : "partially_filled",
       lastFillAt: event.block.timestamp,
@@ -81,11 +85,9 @@ ponder.on("Seaport:OrderFulfilled", async ({ event, context }) => {
     const premiumGross = c.premiumGross + gross;
     await patchCycle(context.db, cycleNumber, {
       // `filled` only ever moves the cycle forward; a later rollClose decides the final word.
-      status: c.status === "idle" || c.status === "listed" ? "filled" : c.status,
+      status: c.status === "listed" ? "filled" : c.status,
       contractsSold,
       premiumGross,
-      premiumToVault: c.premiumToVault + toVault,
-      overcallFee: c.overcallFee + toOvercall,
       fillUnitPriceUsdg: safeDiv(premiumGross, contractsSold),
       fillCount: c.fillCount + 1,
       firstFillAt: c.firstFillAt ?? event.block.timestamp,
@@ -94,10 +96,7 @@ ponder.on("Seaport:OrderFulfilled", async ({ event, context }) => {
   }
 
   await patchState(context.db, {
-    contractsSold: state.contractsSold + contracts,
     lifetimePremiumGross: state.lifetimePremiumGross + gross,
-    lifetimePremiumToVault: state.lifetimePremiumToVault + toVault,
-    lifetimeOvercallFee: state.lifetimeOvercallFee + toOvercall,
     lastBlock: event.block.number,
     lastTimestamp: event.block.timestamp,
   });
@@ -109,7 +108,6 @@ ponder.on("Seaport:OrderFulfilled", async ({ event, context }) => {
       cycleNumber,
       contracts,
       toVault,
-      toOvercall,
       complete: listingRow !== null ? listingRow.contractsFilled + contracts >= listingRow.amount : null,
       txHash: event.transaction.hash,
     },

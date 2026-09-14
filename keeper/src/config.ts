@@ -7,11 +7,16 @@
  * has already lost the week. A keeper that refuses to start gets noticed in seconds.
  *
  * Keys mirror keeper/.env.example. Anything with a sane, chain-wide constant answer has a default;
- * anything deployment-specific (vault, registry, key) does not and must be supplied.
+ * anything deployment-specific (vault, key) does not and must be supplied.
+ *
+ * There is no registry and no Overcall API under write on fill: the vault reads the option
+ * tuple from the clearinghouse, the keeper creates that tuple itself, and the only venue is the
+ * keeper's own /orders plus any Seaport client. Nothing here points at overcall.finance.
  */
 import { config as loadDotenv } from 'dotenv';
 import { getAddress, isAddress, type Address, type Hex } from 'viem';
 import { z } from 'zod';
+import { parseHolidays, VAULT_MIN_LEAD_SECONDS } from './calendar.js';
 
 loadDotenv({ path: process.env.KEEPER_ENV_FILE, quiet: true });
 
@@ -19,8 +24,7 @@ loadDotenv({ path: process.env.KEEPER_ENV_FILE, quiet: true });
                           FIELD TYPES
 //////////////////////////////////////////////////////////////*/
 
-/** An EIP-55 checksummed address. Overcall's zod schema calls `getAddress` on every address it
- *  receives, so we normalise on the way in and never have to think about casing again. */
+/** An EIP-55 checksummed address, normalised on the way in so casing never matters again. */
 const addressField = z.string().transform((raw, ctx): Address => {
   if (!isAddress(raw, { strict: false })) {
     ctx.addIssue({ code: z.ZodIssueCode.custom, message: `not a 20-byte hex address: ${raw}` });
@@ -65,8 +69,7 @@ const httpUrlField = z.string().transform((raw, ctx): string => {
   return parsed.toString().replace(/\/$/, '');
 });
 
-const intField = (min: number, max: number) =>
-  z.coerce.number().int().min(min).max(max);
+const intField = (min: number, max: number) => z.coerce.number().int().min(min).max(max);
 
 const bigintField = z.string().transform((raw, ctx): bigint => {
   let value: bigint;
@@ -85,11 +88,20 @@ const bigintField = z.string().transform((raw, ctx): bigint => {
   return value;
 });
 
+/** "YYYY-MM-DD,YYYY-MM-DD" -> the holiday table; empty means the built-in 2026–2027 one. */
+const holidaysField = z.string().transform((raw, ctx): readonly string[] => {
+  try {
+    return parseHolidays(raw);
+  } catch (error) {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, message: error instanceof Error ? error.message : String(error) });
+    return z.NEVER;
+  }
+});
+
 /*//////////////////////////////////////////////////////////////
                             SCHEMA
 //////////////////////////////////////////////////////////////*/
 
-const ZERO_ADDRESS = '0x0000000000000000000000000000000000000000';
 const ZERO_BYTES32 = '0x0000000000000000000000000000000000000000000000000000000000000000';
 
 const schema = z.object({
@@ -104,21 +116,15 @@ const schema = z.object({
   MULTICALL3: addressField.default('0xcA11bde05977b3631167028862bE2a173976CA11'),
 
   /* ---- protocol addresses (chain 4663, eth_getCode-confirmed, see ops/recon) ---- */
+  /** The clearinghouse the vault was CONSTRUCTED with. Overcall's Valorem instance by default;
+   *  a vault deployed against our own (contracts/script/DeployClear.s.sol) needs that address.
+   *  Cross-checked against `vault.clear()` at boot either way. */
   CLEARINGHOUSE: addressField.default('0x9a7b40e5c1dB1Af822ef091c990b58b02C78C0C0'),
   SEAPORT: addressField.default('0x0000000000000068F116a894984e2DB1123eB395'),
   USDG: addressField.default('0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168'),
   ASSET: addressField.default('0xd0601CE157Db5bdC3162BbaC2a2C8aF5320D9EEC'),
-
-  /** Per-market Overcall registry. NVDA is 0x8E973cE1A6884E28Ad3E377d5f670Bc0b463f4EA.
-   *  NOT the top-level `registry` key in Overcall's frontend config (0x65dD4079...), which is
-   *  the JUGGERNAUT market. There is no default here on purpose: picking the wrong one writes
-   *  calls against the wrong book. */
-  REGISTRY: addressField,
+  /** Zero: Seaport pulls the ERC-1155 itself. Must equal `vault.conduitKey()`. */
   SEAPORT_CONDUIT_KEY: bytes32Field.default(ZERO_BYTES32),
-  SEAPORT_ZONE: addressField.default(ZERO_ADDRESS),
-  /** Receives consideration[1], Overcall's 5%. Wrong value => the order is valid Seaport but
-   *  Overcall will not surface it, and the vault's on-chain check rejects it first. */
-  OVERCALL_FEE_RECIPIENT: addressField.default('0xdAe7e82A2E7D566C67E87C164B05a1C560190782'),
 
   /* ---- our deployment ---- */
   VAULT: addressField,
@@ -132,43 +138,47 @@ const schema = z.object({
   KEEPER_MIN_GAS_WEI: bigintField.default('10000000000000000'),
   /** Alert when the head block's timestamp trails the wall clock by more than this. */
   KEEPER_RPC_LAG_ALERT_MS: intField(10_000, 86_400_000).default(300_000),
-  /** A listing that is not visible in Overcall's book this long after a 201 is an alert:
-   *  an invisible listing is an unfilled week. */
-  KEEPER_LISTING_VISIBLE_MS: intField(60_000, 86_400_000).default(900_000),
-  /** How often to ask Overcall's API about the live listing. Seaport's own getOrderStatus is
-   *  polled every tick because it is a single eth_call; the HTTP book is polled hourly. */
-  KEEPER_FILL_POLL_MS: intField(60_000, 86_400_000).default(3_600_000),
-  /** Relists allowed after a cancel/invalid. The vault caps total listings per cycle at 3
-   *  regardless; this is the keeper's own, tighter budget. */
-  KEEPER_MAX_RELISTS: intField(0, 2).default(1),
   /** Repeat suppression window per alert kind. */
   KEEPER_ALERT_COOLDOWN_MS: intField(0, 86_400_000).default(3_600_000),
-  /** Optional manual override for the per-contract ask, in USDG base units. Set this only to
-   *  override the policy/last-fill price for one cycle; leave unset in normal operation. */
-  KEEPER_UNIT_PRICE_USDG6: bigintField.optional(),
-  /** Basis points added on top of the policy premium floor when the keeper prices a listing:
-   *  unit = ceil(floor * (10000 + margin) / 10000). The vault re-reads spot at approveListing,
-   *  so a listing priced exactly at the floor reverts PremiumBelowMinimum on one upward oracle
-   *  tick between the keeper's read and the vault's. A margin absorbs a spot move of up to
-   *  margin/100 percent, at the cost of a slightly higher ask. 0 (default) prices at the floor
-   *  exactly, as before. Capped at 1000 (10%). Not applied to KEEPER_UNIT_PRICE_USDG6. */
-  PREMIUM_MARGIN_BPS: intField(0, 1000).default(0),
-  /** Directory to mirror signed order payloads into, for the self-hosted fallback buy page.
-   *  The payload is always kept in SQLite and served from /orders; this is belt and braces. */
-  KEEPER_FALLBACK_DIR: z.string().min(1).optional(),
   /** Seconds a transaction receipt is waited for before the tick gives up and alerts. */
   KEEPER_TX_TIMEOUT_MS: intField(10_000, 600_000).default(180_000),
 
-  /* ---- Overcall listings API ---- */
-  OVERCALL_ORDERS_URL: httpUrlField.default('https://overcall.finance/api/orders'),
-  /** The market query parameter. Overcall derives optionId and maker server-side, but the
-   *  client always sends ?market=<symbol> and we do the same rather than rely on a default. */
-  OVERCALL_MARKET: z.string().min(1).default('NVDA'),
-  /** There is NO auth on Overcall's API (recon R3 section 7: no key, no bearer, no cookie).
-   *  The key exists in .env.example only so the field is there if they ever add one; when set
-   *  it is sent as `authorization: Bearer <key>`. */
-  OVERCALL_API_KEY: z.string().min(1).optional(),
-  OVERCALL_MAX_ATTEMPTS: intField(1, 10).default(5),
+  /* ---- the week ---- */
+  /** How far above spot the strike sits, in basis points, before rounding to a whole USDG.
+   *  Default 500 (5%). Must land inside the vault's policy band (launch: 3%–12%) at the spot of
+   *  the arm; a target outside it is refused before any gas is spent. */
+  KEEPER_STRIKE_OTM_BPS: intField(0, 5_000).default(500),
+  /** The keeper's own minimum distance to the Friday close when it arms, in seconds. At least
+   *  the vault's MIN_LEAD (3600); the default is six hours, because arming an hour before the
+   *  close sells one hour of calls against a week of collateral lock. Too close means the
+   *  following Friday. */
+  KEEPER_ARM_LEAD_S: intField(VAULT_MIN_LEAD_SECONDS, 6 * 86_400).default(6 * 3_600),
+  /** Full-day NYSE closures as YYYY-MM-DD, comma-separated. Unset: the built-in 2026–2027 table
+   *  (calendar.ts). Set it once that table runs out, or when the exchange adds a closure. */
+  KEEPER_NYSE_HOLIDAYS: holidaysField.default(''),
+
+  /* ---- pricing ---- */
+  /** Optional manual override for the per-contract ask, in USDG base units. For one unusual
+   *  cycle; leave unset in normal operation. Still floored at the live fill floor and capped at
+   *  the strike, because the vault enforces both. */
+  KEEPER_UNIT_PRICE_USDG6: bigintField.optional(),
+  /** Basis points added to the vault's FILL-TIME premium floor when the keeper prices a listing:
+   *  unit = ceil(floor × (10000 + margin) / 10000). The fill gate re-derives the floor from the
+   *  spot of the FILL, not of the listing (PremiumBelowFloorAtFill), so a listing priced exactly
+   *  at today's floor is refused by the first buyer after any uptick. A margin of m bps absorbs
+   *  a spot rise of up to m bps before the keeper has to reprice (each reprice spends one of the
+   *  vault's three listings a week). Trade-off: higher margin, fewer reprices, slightly higher
+   *  ask. Default 100 (1%). Capped at 1000. Not applied to KEEPER_UNIT_PRICE_USDG6. */
+  KEEPER_PREMIUM_MARGIN_BPS: intField(0, 1_000).default(100),
+  /** Directory to mirror each authorised order payload into, for the self-hosted fill page.
+   *  The payload is always kept in SQLite and served from /orders; this is belt and braces. */
+  KEEPER_FALLBACK_DIR: z.string().min(1).optional(),
+
+  /* ---- stranded claims ---- */
+  /** How often `retryStrandedClaim()` is attempted while the vault is stranded. Permissionless
+   *  and harmless while the freeze holds (the simulation reverts StillStranded and nothing is
+   *  sent), so hourly by default; the floor is a second so a fork rehearsal can drive it. */
+  KEEPER_RETRY_STRANDED_MS: intField(1_000, 86_400_000).default(3_600_000),
 
   /* ---- alerting ---- */
   /** Generic JSON webhook. Unset means alerts are still logged at their own severity and
@@ -191,7 +201,7 @@ export type KeeperConfig = z.infer<typeof schema>;
 /** Parse process.env. Throws with every problem listed, not just the first. */
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): KeeperConfig {
   // Empty strings in a .env file are "unset", not "the empty value". `.env.example` ships with
-  // `REGISTRY=` and friends blank, so without this every blank line becomes a confusing
+  // `VAULT=` and friends blank, so without this every blank line becomes a confusing
   // "expected string, received string" instead of "Required".
   const cleaned: Record<string, string> = {};
   for (const [key, value] of Object.entries(env)) {
@@ -229,8 +239,7 @@ function loadOrDie(): KeeperConfig {
 
 export const config: KeeperConfig = loadOrDie();
 
-/** Convenience: the option lot. Overcall's lot size is 1e18 on every market, but the value the
- *  keeper actually writes against is always read from `registry.cycle().lotSize`. */
+/** One lot: exactly one Stock Token. `Policy.LOT`; the only `underlyingAmount` the vault arms. */
 export const ONE_LOT = 1_000_000_000_000_000_000n;
 
 /** USDG base units in one USDG. */

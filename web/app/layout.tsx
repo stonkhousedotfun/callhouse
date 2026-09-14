@@ -33,13 +33,13 @@ export const metadata: Metadata = {
   metadataBase: new URL(APP_URL),
   title: "Callhouse — pooled covered calls on Robinhood Chain",
   description:
-    "Deposit one tokenised stock, receive vault shares. Each week a keeper writes an Overcall call against it and pays depositors whatever premium actually fills.",
+    "Deposit one tokenised stock, receive vault shares. Each week the vault sells one call against it and pays depositors whatever premium actually fills.",
   // Per-page canonicals override this where a route sets one; the default is the app root.
   alternates: { canonical: "/" },
   openGraph: {
     title: "Callhouse — pooled covered calls on Robinhood Chain",
     description:
-      "Deposit one tokenised stock, receive vault shares. Each week a keeper writes an Overcall call against it and pays depositors whatever premium actually fills.",
+      "Deposit one tokenised stock, receive vault shares. Each week the vault sells one call against it and pays depositors whatever premium actually fills.",
     url: APP_URL,
     siteName: "Callhouse",
     type: "website",
@@ -102,8 +102,8 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
             </div>
             <div className="footer-inner" style={{ marginTop: 10 }}>
               <div>
-                Not affiliated with Robinhood Markets, Robinhood Assets (Jersey) Limited, Overcall
-                or Valorem. Nothing here is financial advice or an offer of securities.
+                Not affiliated with Robinhood Markets, Robinhood Assets (Jersey) Limited or Valorem.
+                Unaudited. Nothing here is financial advice or an offer of securities.
               </div>
             </div>
           </footer>

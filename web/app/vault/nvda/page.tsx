@@ -8,6 +8,7 @@ import { DepositForm } from "@/components/DepositForm";
 import { GuardBadges, PhaseBadge } from "@/components/PhaseBadge";
 import { PositionSplit } from "@/components/PositionSplit";
 import { RedeemQueue } from "@/components/RedeemQueue";
+import { StrandedBanner } from "@/components/StrandedBanner";
 import { UsdgClaim } from "@/components/UsdgClaim";
 import { addressUrl } from "@/lib/chain";
 import { ASSET, MARKET, SHARE_TICKER, VAULT } from "@/lib/contracts";
@@ -17,6 +18,7 @@ import {
   fmtRealizedWeek,
   fmtUsdg,
   fmtUtcDate,
+  maxContracts,
   premiumPerShare,
   toNvdaEq,
   tvlUsdg,
@@ -36,9 +38,10 @@ export default function VaultPage() {
     void refetchPosition();
   };
 
-  // Per-contract collateral is derived from what the vault locked (see collateralSplit): the
-  // registry owns lotSize, so a hardcoded 1e18 would lie the moment Overcall changes it.
+  // Locked collateral is sold collateral: under write on fill nothing is written until a buyer
+  // pays for it, so the split has no "listed, unsold" slice (see collateralSplit).
   const split = collateralSplit(v);
+  const cap = maxContracts(v.totalAssets, v.policy);
 
   // Premium only (W-21). On an assigned week the harvest also carried the strike proceeds —
   // collateral sold at the strike — which are shown on their own line and in no premium figure.
@@ -63,12 +66,12 @@ export default function VaultPage() {
       {/* The three disclosures below are required, verbatim, by scripts/copy-lint.mjs. They are
           compliance text from README "Frontend copy" and TECHSPEC 7.3 — do not reword them. */}
       <div className="notice" data-tone="warn">
-        <strong>Premium is paid only if a buyer fills the Overcall listing.</strong>
-        An empty book means zero for the week. Assignment can take your tokens at the strike, and
-        the upside above it is gone for that week. Stock Tokens are debt securities issued by
-        Robinhood Assets (Jersey) Limited, not equity in the underlying company: no vote, no claim
-        on the company, and the issuer can freeze transfers. See <Link href="/legal">Legal</Link>{" "}
-        and <Link href="/docs">Docs</Link> for the full risk list.
+        <strong>Premium is paid only if a buyer fills the vault&apos;s listing.</strong>
+        Nothing is written until someone buys, so an empty week means zero for the week. Assignment can take your
+        tokens at the strike, and the upside above it is gone for that week. Stock Tokens are debt securities issued
+        by Robinhood Assets (Jersey) Limited, not equity in the underlying company: no vote, no claim on the company,
+        and the issuer can freeze transfers. The vault is unaudited. See <Link href="/legal">Legal</Link> and{" "}
+        <Link href="/docs">Docs</Link> for the full risk list.
       </div>
 
       {!VAULT ? (
@@ -86,10 +89,12 @@ export default function VaultPage() {
         </div>
       ) : null}
 
+      <StrandedBanner snapshot={v} position={position} onDone={refresh} />
+
       <div className="card" style={{ marginTop: 16 }}>
         <div className="card-head">
           <span className="card-title">Your position</span>
-          <PhaseBadge phase={v.phase} fillState={v.fillState} />
+          <PhaseBadge phase={v.phase} fillState={v.fillState} sold={v.contractsWritten} />
         </div>
 
         {!address ? (
@@ -175,16 +180,16 @@ export default function VaultPage() {
                 </div>
                 <div className="stat-sub">
                   {last.filled
-                    ? "a buyer filled the listing"
+                    ? `${(last.contractsSold ?? last.contracts ?? 0n).toString()} calls sold`
                     : lastWasAssigned
                       ? `unfilled, assigned ${(last.contractsAssigned ?? 0n).toString()}`
-                      : "unfilled, 0"}{" "}
-                  ·{" "}
+                      : "unfilled, 0"}
+                  {last.stranded ? " · claim stranded at the close" : ""} ·{" "}
                   {fmtUtcDate(last.closedAt)}
                 </div>
               </div>
               <div className="rows" style={{ marginTop: 12 }}>
-                <div className="row" title="USDG the vault received from buyers after Overcall's 5%, before the protocol fee. Strike proceeds excluded.">
+                <div className="row" title="USDG buyers paid the vault for this week's calls, before the protocol fee. Strike proceeds excluded.">
                   <span className="k">Premium received</span>
                   <span className="v">{fmtUsdg(last.premiumGrossUsdg)}</span>
                 </div>
@@ -245,10 +250,22 @@ export default function VaultPage() {
             oraclePaused={v.oraclePaused}
             spotStale={v.spotStale}
             valoremFeeAccepted={v.valoremFeeAccepted}
+            stranded={v.isStranded}
           />
         </div>
-        <PositionSplit idle={split.idle} listed={split.listed} sold={split.sold} assigned={split.assigned} />
+        <PositionSplit idle={split.idle} sold={split.sold} assigned={split.assigned} />
         <div className="rows" style={{ marginTop: 14 }}>
+          <div className="row" title="Contracts written this cycle. Every one was sold in the transaction that wrote it.">
+            <span className="k">Calls sold this week</span>
+            <span className="v">
+              {v.contractsWritten === undefined ? "—" : v.contractsWritten.toString()}
+              {cap !== undefined ? ` of at most ${cap.toString()}` : ""}
+            </span>
+          </div>
+          <div className="row" title="Policy.maxContracts(totalAssets) − contractsWritten: what the vault can still write this cycle. Re-sized at every fill.">
+            <span className="k">Capacity remaining</span>
+            <span className="v">{v.capacity === undefined ? "—" : `${v.capacity.toString()} contracts`}</span>
+          </div>
           <div className="row">
             <span className="k">Deposit cap</span>
             <span className="v">
@@ -264,6 +281,10 @@ export default function VaultPage() {
           <div className="row">
             <span className="k">Instant redemption</span>
             <span className="v">{v.canRedeemInstantly ? "open" : "queue only"}</span>
+          </div>
+          <div className="row">
+            <span className="k">Deposits</span>
+            <span className="v">{v.depositsOpen === undefined ? "—" : v.depositsOpen ? "open" : "closed"}</span>
           </div>
           <div className="row">
             <span className="k">Protocol fee on harvested premium</span>

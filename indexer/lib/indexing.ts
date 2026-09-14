@@ -3,7 +3,7 @@ import schema from "ponder:schema";
 import type { Address, Hex } from "viem";
 
 import { stockTokenAbi } from "../abis/stockToken";
-import { ASSET, LOT, VAULT } from "./env";
+import { ASSET, VAULT } from "./env";
 
 /** The writable database handle handed to every indexing function. */
 export type DB = Context["db"];
@@ -20,8 +20,8 @@ export type EventMeta = {
 
 export const ZERO_ADDRESS: Address = "0x0000000000000000000000000000000000000000";
 
-/** Vault.Phase, mirrored. There is no phase-change event, so it is derived from the rolls. */
-export const PHASE = { Idle: 0, Listed: 1, Exercisable: 2, Settling: 3 } as const;
+/** Vault.Phase, mirrored. Defined in ./lifecycle (no Ponder import, so it is unit-testable). */
+export { PHASE } from "./lifecycle";
 
 /** Stable, monotonic id for an append-only row. */
 export const eventId = (event: EventMeta): string =>
@@ -108,6 +108,7 @@ export async function snapshot(
       phase: s.phase,
       cycleNumber: s.cycleNumber,
       writesHalted: s.writesHalted,
+      stranded: s.stranded,
       assetBalance: s.assetBalance,
       idleAssets: idle,
       lockedCollateral: s.lockedCollateral,
@@ -170,11 +171,11 @@ export async function getUser(db: DB, address: Address, event: EventMeta) {
 //////////////////////////////////////////////////////////////*/
 
 /**
- * Read a cycle row, creating a bare one if the registry's `CycleSet` has not been indexed.
+ * Read a cycle row, creating a bare one if `RollOpen` has not been indexed.
  *
- * That happens when REGISTRY_START_BLOCK is later than the cycle that is being written into.
- * The row is still created so the week appears in the tape; the registry columns stay null
- * and the README says how to backfill them.
+ * With START_BLOCK at the vault's deploy block every cycle's `RollOpen` is indexed and this
+ * never creates anything; the bare row exists so a replay bounded inside a week still
+ * attributes its fills and its close to a row rather than dropping them.
  */
 export async function getCycle(db: DB, cycleNumber: number) {
   const existing = await db.find(schema.cycle, { cycleNumber });
@@ -189,25 +190,6 @@ type CyclePatch = Partial<Omit<CycleRow, "cycleNumber">>;
 export async function patchCycle(db: DB, cycleNumber: number, values: CyclePatch) {
   await getCycle(db, cycleNumber);
   return await db.update(schema.cycle, { cycleNumber }).set(values);
-}
-
-/**
- * Contracts assigned, from the collateral that did NOT come back.
- *
- * Valorem assigns exercise by bucket, so a vault that wrote N contracts settles anywhere from
- * 0 to N assigned. The difference between what was locked and what the claim returned is the
- * exact assignment, in asset base units; dividing by the lot size turns it into contracts.
- * `lotSize` falls back to 1e18 because that is Overcall's fixed lot and the vault refuses to
- * write against any option whose `underlyingAmount` differs from the registry's lot size.
- */
-export function assignedContracts(
-  collateral: bigint,
-  underlyingReturned: bigint,
-  lotSize: bigint | null,
-): bigint {
-  const lot = lotSize !== null && lotSize > 0n ? lotSize : LOT;
-  if (collateral <= underlyingReturned) return 0n;
-  return (collateral - underlyingReturned) / lot;
 }
 
 /*//////////////////////////////////////////////////////////////
@@ -230,6 +212,19 @@ type EpochPatch = Partial<Omit<EpochRow, "epochId">>;
 export async function patchEpoch(db: DB, epochId: bigint, values: EpochPatch) {
   await getEpoch(db, epochId);
   return await db.update(schema.queueEpoch, { epochId }).set(values);
+}
+
+/*//////////////////////////////////////////////////////////////
+                        STRANDED CLAIMS
+//////////////////////////////////////////////////////////////*/
+
+export type StrandRow = typeof schema.strand.$inferSelect;
+
+type StrandPatch = Partial<Omit<StrandRow, "gen">>;
+
+/** Patch a strand row. Unlike the other tables there is no bare insert: `ClaimStranded` always creates the row first. */
+export async function patchStrand(db: DB, gen: bigint, values: StrandPatch) {
+  return await db.update(schema.strand, { gen }).set(values);
 }
 
 /*//////////////////////////////////////////////////////////////

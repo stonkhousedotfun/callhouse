@@ -9,7 +9,7 @@
  * silent 0. Those three properties are pinned here; the same function is called against the real
  * Clear before and after a real redeem in dryrun.ts cycle 3.
  *
- * It also drives BOTH close paths end to end through `tick()` (K-21): the keeper's own
+ * It also drives BOTH close paths end to end through `tick()`: the keeper's own
  * `rollClose` (phase Exercisable past expiry) and the reconstruction of a close it never
  * witnessed (phase Idle, from RollClose/RollOpen/Harvest logs). Each must record
  * `assets_returned` and `usdg_from_assignment` on the cycle row, word the `roll_close` alert with
@@ -31,7 +31,6 @@ import { mock, test } from 'node:test';
 const scratch = mkdtempSync(join(tmpdir(), 'callhouse-keeper-roll-close-'));
 process.env.KEEPER_ENV_FILE = '/dev/null';
 process.env.RH_RPC = 'http://127.0.0.1:9';
-process.env.REGISTRY = '0x8E973cE1A6884E28Ad3E377d5f670Bc0b463f4EA';
 process.env.VAULT = '0x1111111111111111111111111111111111111111';
 process.env.KEEPER_PK = `0x${'11'.repeat(32)}`;
 process.env.KEEPER_DB_PATH = join(scratch, 'keeper.db');
@@ -156,7 +155,7 @@ function encodedLog(eventName: 'RollClose' | 'Harvest', w: Week, logIndex: numbe
 
 interface LogQuery {
   event: { name: string };
-  args: { cycleNumber: number };
+  args: { cycleNumber?: number; optionId?: bigint };
 }
 
 /** Every chain call a tick makes, answered for one week in one phase. Returns the restorer. */
@@ -176,17 +175,22 @@ function stubChain(w: Week, phase: 'Exercisable' | 'Idle'): () => void {
     claimKey: live ? CLAIM_KEY : 0n,
     contractsWritten: live ? WRITTEN : 0n,
     listingHash: ZERO32,
+    listingGrossUsdg: 0n,
+    listingAmount: 0n,
     listingsThisCycle: 1,
     idleAssets: 0n,
+    // No collateral: the Idle tick stops at 'no-capacity' after reconciling the close, and
+    // arms nothing (no newOptionType, no rollOpen simulation).
     totalAssets: 0n,
     lockedAssets: 0n,
+    isStranded: false,
+    strandGen: 0n,
+    queuedShares: 0n,
     KEEPER_ROLE: ZERO32,
+    policy: [300, 1200, 40, 9500, 500, 50n],
+    spotUsdg: 218_297_934n,
     feesEnabled: false,
     feeBps: 0,
-    // The registry is already on this cycle, so the Idle tick stops after reconciling the close.
-    cycle: { number: w.cycleNumber, exerciseTimestamp: expiry - 86_400n, expiryTimestamp: expiry, lotSize: LOT, optionIds: [] },
-    isWritingOpen: false,
-    isCycleLive: false,
     hasRole: true,
     balanceOf: 0n,
     oraclePaused: false,
@@ -212,7 +216,7 @@ function stubChain(w: Week, phase: 'Exercisable' | 'Idle'): () => void {
       logs: [encodedLog('Harvest', w, 0), encodedLog('RollClose', w, 1)],
     })),
     mock.method(logClient, 'getLogs', async (query: LogQuery) => {
-      assert.equal(query.args.cycleNumber, w.cycleNumber, 'log queries filter on the indexed cycle number');
+      if (query.event.name !== 'CallsWritten') assert.equal(query.args.cycleNumber, w.cycleNumber, 'log queries filter on the indexed cycle number');
       const args = { cycleNumber: w.cycleNumber };
       if (query.event.name === 'Harvest') {
         return [{ ...encodedLog('Harvest', w, 0), args: { ...args, grossUsdg: w.gross, feeUsdg: w.fee, netUsdg: w.net } }];
@@ -222,8 +226,16 @@ function stubChain(w: Week, phase: 'Exercisable' | 'Idle'): () => void {
         return [{ ...encodedLog('RollClose', w, 1), args: { ...args, ...amounts } }];
       }
       if (query.event.name === 'RollOpen') {
-        return [{ blockNumber: 900n, transactionHash: `0x${'0f'.repeat(32)}`, args: { ...args, optionId: OPTION_ID, contractsCount: WRITTEN, strikeUsdg: STRIKE } }];
+        return [{ blockNumber: 900n, transactionHash: `0x${'0f'.repeat(32)}`, args: { ...args, optionId: OPTION_ID, contractsCount: 0n, strikeUsdg: STRIKE } }];
       }
+      // Write on fill: the sold count is the sum of CallsWritten, one per fill; here two fills.
+      if (query.event.name === 'CallsWritten') {
+        return [
+          { blockNumber: 910n, args: { optionId: OPTION_ID, claimKey: CLAIM_KEY, contractsCount: 20n, collateral: 20n * LOT } },
+          { blockNumber: 920n, args: { optionId: OPTION_ID, claimKey: CLAIM_KEY, contractsCount: 3n, collateral: 3n * LOT } },
+        ];
+      }
+      if (query.event.name === 'ClaimStranded' || query.event.name === 'StrandedClaimRecovered') return [];
       throw new Error(`unstubbed getLogs ${query.event.name}`);
     }),
   ];
@@ -330,7 +342,8 @@ test('a close this keeper never witnessed is reconstructed from logs WITH the sp
   assert.equal(row.contracts_assigned, 9);
   assert.equal(row.assets_returned, (14n * LOT).toString());
   assert.equal(row.usdg_from_assignment, '2025000000');
-  assert.equal(row.strike_usdg6, STRIKE.toString(), 'write details still adopted from the RollOpen log');
+  assert.equal(row.strike_usdg6, STRIKE.toString(), 'the arm details still adopted from the RollOpen log');
+  assert.equal(row.contracts, 23, 'RollOpen.contractsCount is 0 under write on fill: the sold count is the CallsWritten sum');
   const { message, data } = lastRollClose();
   assert.equal(message, `cycle 5 closed: ${ASSIGNED_MESSAGE}${UNWITNESSED}`);
   assert.equal(data.premiumUsdg, '19.079259');

@@ -18,8 +18,9 @@
  * redeems it.
  *
  * The event carries no split, so the caller supplies `usdgFromAssignment`: `RollClose`'s own
- * argument for the terminal harvest (emitted one log earlier in the same transaction), 0 for a
- * checkpoint. Nothing here recomputes the fee; the fee is the event's.
+ * argument for the terminal harvest (emitted one log earlier in the same transaction), the live
+ * shares' part of a recovered stranded claim's USDG for the retry's harvest (lib/lifecycle.ts
+ * `strandRecovery`), 0 for a checkpoint. Nothing here recomputes the fee; the fee is the event's.
  */
 
 export const SHARE_SCALE = 10n ** 18n;
@@ -38,7 +39,7 @@ export type HarvestEvent = {
 export type HarvestSplit = {
   /** The part of `grossUsdg` that is strike proceeds. Never more than `grossUsdg`. */
   strikeProceeds: bigint;
-  /** `grossUsdg − strikeProceeds`: premium that reached the vault, after Overcall's 5%. */
+  /** `grossUsdg − strikeProceeds`: premium that reached the vault (one consideration item, no venue cut). */
   premiumGross: bigint;
   /** `premiumGross − feeUsdg`: premium after the protocol fee. The only "earned" figure. */
   premiumNet: bigint;

@@ -1,19 +1,27 @@
 /**
- * The weekly roll state machine.
+ * The weekly roll state machine, write-on-fill edition.
  *
- * Every decision binds to two things and nothing else: the Overcall registry's own gates
- * (`isWritingOpen()`, the cycle's `exerciseTimestamp` / `expiryTimestamp`) and the vault's own
- * `phase()`. Never the wall clock, never "it is Friday". The registry can move a cycle and the
- * vault can be rolled by a guardian while the keeper is asleep; both cases have to come out
- * right on the next tick.
+ * Every decision binds to the vault's own `phase()` and the head block's timestamp, never the
+ * wall clock and never a third party's registry. The vault reads the option tuple from the
+ * clearinghouse and numbers its own cycles; the keeper's job is to hand it a tuple worth arming,
+ * a listing worth authorising, and to close the week.
  *
- *   phase Idle + isWritingOpen + a cycle we have not handled
- *     -> pick strike -> rollOpen -> build order -> approveListing -> POST -> verify visible
+ *   phase Idle, flat
+ *     -> next NYSE Friday close -> strike = spot + KEEPER_STRIKE_OTM_BPS (whole USDG) -> the
+ *        option id is precomputed; created on Clear if it does not exist -> rollOpen(id)
+ *        (ARMS ONLY, writes nothing) -> approveListing(PARTIAL_RESTRICTED, zone = vault, one
+ *        USDG item, amount = capacity) -> served from /orders with an empty signature
+ *   phase Idle, `queuedShares > 0`  -> settleQueue()            (permissionless)
+ *   phase Idle, `isStranded()`      -> no arm; retryStrandedClaim() on a timer; alert
  *   phase Listed, each tick
- *     -> Seaport getOrderStatus; hourly, Overcall's book. Fully filled: stop. Cancelled or
- *        invalid: relist once, never past the vault's 3-listings-per-cycle cap.
- *   now >= cycleExerciseTs -> no new listings, call lockBook()
- *   now >= cycleExpiryTs   -> rollClose()
+ *     -> fills: every Seaport fill runs the vault's authorizeOrder, which WRITES the filled
+ *        contracts (CallsWritten per fill; contractsWritten == sold). The keeper reads the count
+ *        and Seaport's fill fraction. The fill gate re-prices the floor at the spot of the FILL,
+ *        so the keeper mirrors that check and reprices (cancel + approve, three approvals a week)
+ *        when a rally would make the live listing unfillable. A fully filled listing with
+ *        capacity left (deposits grew NAV) is replaced by a fresh one for the remainder.
+ *   now >= cycleExerciseTs -> no new listings, lockBook()
+ *   now >= cycleExpiryTs   -> rollClose(); a ClaimStranded in the receipt is the stranded path
  *
  * Every transaction is simulated, then sent, then waited on, then written to SQLite. Nothing
  * is fired and forgotten, and nothing is re-done after a restart.
@@ -28,36 +36,37 @@ import {
   type Hex,
   type TransactionReceipt,
 } from 'viem';
-import { clearAbi, harvestEvent, registryAbi, rollCloseEvent, rollOpenEvent, stockTokenAbi, vaultAbi } from './abi.js';
+import {
+  callsWrittenEvent,
+  claimStrandedEvent,
+  clearAbi,
+  harvestEvent,
+  rollCloseEvent,
+  rollOpenEvent,
+  stockTokenAbi,
+  vaultAbi,
+} from './abi.js';
 import { alert, clearAlert } from './alerts.js';
+import { describeInstant, nextWeekWindow, type WeekWindow } from './calendar.js';
 import { account, logClient, publicClient, walletClient } from './clients.js';
 import { config } from './config.js';
 import { log } from './logger.js';
-import {
-  OvercallApiError,
-  fetchListing,
-  fetchListings,
-  lastFilledUnitPrice6,
-  publishListing,
-  recordCancellation,
-} from './overcallApi.js';
+import { TOKEN_TYPE_OPTION, optionIdFor, weeklyTuple, type OptionTuple } from './optionType.js';
 import {
   MAX_LISTINGS_PER_CYCLE,
-  liftedUnitPrice6,
-  minUnitPrice6,
-  pickWrite,
-  readCycle,
+  capacity as capacityOf,
+  fillVerdict,
+  planWeek,
+  priceListing,
   readPolicy,
-  readRungs,
-  relistUnitPrice6,
-  type CycleView,
-  type Rung,
+  type PolicyParams,
 } from './policy.js';
 import {
-  PLACEHOLDER_SIGNATURE,
+  EMPTY_SIGNATURE,
   buildOrderComponents,
   componentsFromJson,
   componentsToJson,
+  filledContracts,
   localOrderHash,
   readCounter,
   readOrderHash,
@@ -67,7 +76,7 @@ import {
   type OrderComponentsStruct,
   type SeaportOrderStatus,
 } from './seaport.js';
-import { splitGross, store, type CycleRow, type ListingRow, type ListingStatus, type TxKind } from './state.js';
+import { splitGross, store, type CycleRow, type ListingStatus, type TxKind } from './state.js';
 
 /*//////////////////////////////////////////////////////////////
                               TYPES
@@ -101,6 +110,9 @@ export interface ChainSnapshot {
   valoremFeeBps: number;
   /** null when the Stock Token has no `oraclePaused()` at all (older implementations). */
   oraclePaused: boolean | null;
+  /** `vault.spotUsdg()`, or null when the read reverted (a stale feed: the vault's own gate). */
+  spotUsdg6: bigint | null;
+  spotError: string | null;
 
   vaultCycleNumber: number;
   vaultExerciseTs: bigint;
@@ -108,29 +120,26 @@ export interface ChainSnapshot {
   vaultStrikeUsdg6: bigint;
   vaultOptionId: bigint;
   vaultClaimKey: bigint;
+  /** == sold: the sum of CallsWritten over the cycle's claim. */
   contractsWritten: bigint;
-  /** clear.balanceOf(vault, optionId): the only honest count of what is still sellable. */
-  optionInventory: bigint;
   listingHash: Hex;
+  listingGrossUsdg6: bigint;
+  listingAmount: bigint;
   listingsThisCycle: number;
   idleAssets: bigint;
   totalAssets: bigint;
   lockedAssets: bigint;
-
-  registryCycle: CycleView;
-  isWritingOpen: boolean;
-  isCycleLive: boolean;
+  /** `phase == Idle && claimKey != 0`: rollClose could not redeem the claim. */
+  isStranded: boolean;
+  strandGen: bigint;
+  queuedShares: bigint;
+  policy: PolicyParams;
 
   keeperBalanceWei: bigint;
   hasKeeperRole: boolean;
 }
 
 const ZERO_HASH = '0x0000000000000000000000000000000000000000000000000000000000000000' as const;
-
-/** How often to re-POST a listing Overcall has not accepted. Ten minutes: often enough that a
- *  transient outage costs minutes rather than the week, rare enough not to spend the per-IP
- *  token bucket on an order the server keeps refusing. */
-const POST_RETRY_INTERVAL_MS = 600_000;
 
 let lastSnapshot: ChainSnapshot | null = null;
 
@@ -171,10 +180,15 @@ export async function snapshot(): Promise<ChainSnapshot> {
     vaultClaimKey,
     contractsWritten,
     listingHash,
+    listingGrossUsdg6,
+    listingAmount,
     listingsThisCycle,
     idleAssets,
     totalAssets,
     lockedAssets,
+    isStranded,
+    strandGen,
+    queuedShares,
     keeperRole,
   ] = await Promise.all([
     publicClient.readContract({ address: config.VAULT, abi: vaultAbi, functionName: 'phase' }),
@@ -188,27 +202,21 @@ export async function snapshot(): Promise<ChainSnapshot> {
     publicClient.readContract({ address: config.VAULT, abi: vaultAbi, functionName: 'claimKey' }),
     publicClient.readContract({ address: config.VAULT, abi: vaultAbi, functionName: 'contractsWritten' }),
     publicClient.readContract({ address: config.VAULT, abi: vaultAbi, functionName: 'listingHash' }),
+    publicClient.readContract({ address: config.VAULT, abi: vaultAbi, functionName: 'listingGrossUsdg' }),
+    publicClient.readContract({ address: config.VAULT, abi: vaultAbi, functionName: 'listingAmount' }),
     publicClient.readContract({ address: config.VAULT, abi: vaultAbi, functionName: 'listingsThisCycle' }),
     publicClient.readContract({ address: config.VAULT, abi: vaultAbi, functionName: 'idleAssets' }),
     publicClient.readContract({ address: config.VAULT, abi: vaultAbi, functionName: 'totalAssets' }),
     publicClient.readContract({ address: config.VAULT, abi: vaultAbi, functionName: 'lockedAssets' }),
+    publicClient.readContract({ address: config.VAULT, abi: vaultAbi, functionName: 'isStranded' }),
+    publicClient.readContract({ address: config.VAULT, abi: vaultAbi, functionName: 'strandGen' }),
+    publicClient.readContract({ address: config.VAULT, abi: vaultAbi, functionName: 'queuedShares' }),
     publicClient.readContract({ address: config.VAULT, abi: vaultAbi, functionName: 'KEEPER_ROLE' }),
   ]);
 
-  const [
-    valoremFeesEnabled,
-    valoremFeeBps,
-    registryCycle,
-    isWritingOpen,
-    isCycleLive,
-    keeperBalanceWei,
-    hasKeeperRole,
-  ] = await Promise.all([
+  const [valoremFeesEnabled, valoremFeeBps, keeperBalanceWei, hasKeeperRole, policy] = await Promise.all([
     publicClient.readContract({ address: config.CLEARINGHOUSE, abi: clearAbi, functionName: 'feesEnabled' }),
     publicClient.readContract({ address: config.CLEARINGHOUSE, abi: clearAbi, functionName: 'feeBps' }),
-    readCycle(),
-    publicClient.readContract({ address: config.REGISTRY, abi: registryAbi, functionName: 'isWritingOpen' }),
-    publicClient.readContract({ address: config.REGISTRY, abi: registryAbi, functionName: 'isCycleLive' }),
     publicClient.getBalance({ address: account.address }),
     publicClient.readContract({
       address: config.VAULT,
@@ -216,17 +224,10 @@ export async function snapshot(): Promise<ChainSnapshot> {
       functionName: 'hasRole',
       args: [keeperRole, account.address],
     }),
+    readPolicy(),
   ]);
 
-  const optionInventory =
-    vaultOptionId === 0n
-      ? 0n
-      : await publicClient.readContract({
-          address: config.CLEARINGHOUSE,
-          abi: clearAbi,
-          functionName: 'balanceOf',
-          args: [config.VAULT, vaultOptionId],
-        });
+  const spot = await readSpot();
 
   const snap: ChainSnapshot = {
     at: Date.now(),
@@ -239,6 +240,8 @@ export async function snapshot(): Promise<ChainSnapshot> {
     valoremFeesEnabled,
     valoremFeeBps,
     oraclePaused: await readOraclePaused(),
+    spotUsdg6: spot.value,
+    spotError: spot.error,
     vaultCycleNumber,
     vaultExerciseTs: BigInt(vaultExerciseTs),
     vaultExpiryTs: BigInt(vaultExpiryTs),
@@ -246,15 +249,17 @@ export async function snapshot(): Promise<ChainSnapshot> {
     vaultOptionId,
     vaultClaimKey,
     contractsWritten: BigInt(contractsWritten),
-    optionInventory,
     listingHash,
+    listingGrossUsdg6,
+    listingAmount,
     listingsThisCycle,
     idleAssets,
     totalAssets,
     lockedAssets,
-    registryCycle,
-    isWritingOpen,
-    isCycleLive,
+    isStranded,
+    strandGen,
+    queuedShares,
+    policy,
     keeperBalanceWei,
     hasKeeperRole,
   };
@@ -275,6 +280,23 @@ async function readOraclePaused(): Promise<boolean | null> {
   } catch {
     return null;
   }
+}
+
+/** `spotUsdg()` reverts `StalePrice` on a stale feed. That is the vault's own gate — it refuses
+ *  to arm, approve or fill for the same reason — so the revert is a fact of the snapshot, not
+ *  a failure of it. */
+async function readSpot(): Promise<{ value: bigint | null; error: string | null }> {
+  try {
+    const value = await publicClient.readContract({ address: config.VAULT, abi: vaultAbi, functionName: 'spotUsdg' });
+    return { value, error: null };
+  } catch (error) {
+    return { value: null, error: describeError(error) };
+  }
+}
+
+/** The vault's remaining capacity at this snapshot: what the next listing may offer. */
+export function snapshotCapacity(snap: Pick<ChainSnapshot, 'totalAssets' | 'contractsWritten' | 'policy'>): bigint {
+  return capacityOf(snap.totalAssets, snap.contractsWritten, snap.policy);
 }
 
 /*//////////////////////////////////////////////////////////////
@@ -299,8 +321,8 @@ export function describeError(error: unknown): string {
  * sit in `.data`. Before this, every `tx_revert` alert said "reverted" and nothing else — and
  * the alert is what an operator reads at 20:00 UTC on a Friday. Every error the vault and its
  * two linked libraries can throw is in abi.ts, so a revert through `simulateContract` decodes
- * here; overcallApi.test.ts pins that list against the compiled artifacts. An undecodable
- * revert is reported by selector rather than swallowed.
+ * here; abi.test.ts pins that list against the compiled artifacts. An undecodable revert is
+ * reported by selector rather than swallowed.
  */
 function describeRevert(error: BaseError): string {
   const revert = error.walk((candidate) => candidate instanceof ContractFunctionRevertedError);
@@ -313,8 +335,15 @@ function describeRevert(error: BaseError): string {
   return '';
 }
 
+/** The decoded custom error's NAME, if any — for branching on `StillStranded` and friends. */
+export function revertName(error: unknown): string | null {
+  if (!(error instanceof BaseError)) return null;
+  const revert = error.walk((candidate) => candidate instanceof ContractFunctionRevertedError);
+  return revert instanceof ContractFunctionRevertedError ? revert.data?.errorName ?? null : null;
+}
+
 /** Simulate first, always. A revert here costs nothing; a revert on chain costs gas, a nonce,
- *  and — during the write window — time we may not get back. */
+ *  and — during the selling window — time we may not get back. */
 async function guardedSimulate<T>(kind: TxKind, run: () => Promise<T>): Promise<T | null> {
   try {
     return await run();
@@ -396,7 +425,7 @@ export async function reconcile(): Promise<void> {
     {
       phase: PHASE_NAMES[snap.phase],
       vaultCycle: snap.vaultCycleNumber,
-      registryCycle: snap.registryCycle.number,
+      stranded: snap.isStranded,
       listingHash: snap.listingHash,
       rows: store.counts(),
     },
@@ -407,19 +436,17 @@ export async function reconcile(): Promise<void> {
 /**
  * Refuse to run against a vault that is not the one this config describes.
  *
- * The specific accident this prevents: Overcall publishes eleven per-market registries and
- * their frontend config has a top-level `registry` key that is the JUGGERNAUT market, not NVDA.
- * Pointing the keeper at the wrong registry would have it write calls against the wrong book
- * and only find out at `rollOpen`. The vault knows its own registry; we compare.
+ * The vault knows its own asset, USDG, clearinghouse, Seaport and conduit key, and it is its own
+ * Seaport zone; every one is compared with the environment. The clearinghouse matters most:
+ * with no registry the keeper creates option types on `CLEARINGHOUSE`, and a type created on a
+ * different Clear than the vault's would arm nothing but burn gas.
  */
 async function assertWiring(): Promise<void> {
-  const [asset, usdg, clear, seaport, registry, feeRecipient, conduitKey, zone, transferTarget] = await Promise.all([
+  const [asset, usdg, clear, seaport, conduitKey, zone, transferTarget] = await Promise.all([
     publicClient.readContract({ address: config.VAULT, abi: vaultAbi, functionName: 'asset' }),
     publicClient.readContract({ address: config.VAULT, abi: vaultAbi, functionName: 'usdg' }),
     publicClient.readContract({ address: config.VAULT, abi: vaultAbi, functionName: 'clear' }),
     publicClient.readContract({ address: config.VAULT, abi: vaultAbi, functionName: 'seaport' }),
-    publicClient.readContract({ address: config.VAULT, abi: vaultAbi, functionName: 'registry' }),
-    publicClient.readContract({ address: config.VAULT, abi: vaultAbi, functionName: 'overcallFeeRecipient' }),
     publicClient.readContract({ address: config.VAULT, abi: vaultAbi, functionName: 'conduitKey' }),
     publicClient.readContract({ address: config.VAULT, abi: vaultAbi, functionName: 'seaportZone' }),
     publicClient.readContract({ address: config.VAULT, abi: vaultAbi, functionName: 'transferApprovalTarget' }),
@@ -435,21 +462,18 @@ async function assertWiring(): Promise<void> {
   check('usdg', usdg, config.USDG);
   check('clearinghouse', clear, config.CLEARINGHOUSE);
   check('seaport', seaport, config.SEAPORT);
-  check('registry', registry, config.REGISTRY);
-  check('overcallFeeRecipient', feeRecipient, config.OVERCALL_FEE_RECIPIENT);
   check('conduitKey', conduitKey, config.SEAPORT_CONDUIT_KEY);
-  check('seaportZone', zone, config.SEAPORT_ZONE);
+  check('seaportZone', zone, config.VAULT);
 
   if (mismatches.length > 0) {
     throw new Error(
       `Keeper config does not match the deployed vault at ${config.VAULT}:\n  ${mismatches.join('\n  ')}\n` +
-        'Fix the environment. Writing against the wrong registry or fee recipient produces ' +
-        'listings Overcall will never show.',
+        'Fix the environment. Creating option types on the wrong clearinghouse arms nothing.',
     );
   }
 
-  // Seaport pulls the ERC-1155 straight out of the vault on fill. Without this approval,
-  // Overcall's check 9 answers 422 and the listing flips to "unfillable" in their UI.
+  // Seaport pulls the freshly minted ERC-1155 straight out of the vault inside every fill.
+  // Without this approval every fill reverts in the transfer step, after the write.
   const approved = await publicClient.readContract({
     address: config.CLEARINGHOUSE,
     abi: clearAbi,
@@ -458,10 +482,10 @@ async function assertWiring(): Promise<void> {
   });
   if (!approved) {
     await alert(
-      'api_reject',
+      'listing_unfillable',
       `vault has not approved ${transferTarget} to move its option tokens; every fill will fail`,
       { transferTarget },
-      { force: true },
+      { force: true, severity: 'error' },
     );
   }
 
@@ -477,8 +501,9 @@ async function assertWiring(): Promise<void> {
     args: [keeperRole, account.address],
   });
   if (!hasRole) {
-    // Not fatal. lockBook is permissionless and rollClose opens to anyone an hour after expiry,
-    // so a keeper without the role is still useful — it just cannot open a new cycle.
+    // Not fatal. lockBook, settleQueue and retryStrandedClaim are permissionless and rollClose
+    // opens to anyone an hour after expiry, so a keeper without the role is still useful — it
+    // just cannot arm a new cycle or authorise a listing.
     await alert(
       'boot',
       `keeper ${account.address} does not hold KEEPER_ROLE on ${config.VAULT}; it can close but not open`,
@@ -519,7 +544,7 @@ async function adoptOpenCycle(snap: ChainSnapshot): Promise<void> {
     contracts: Number(snap.contractsWritten),
     exercise_ts: Number(snap.vaultExerciseTs),
     expiry_ts: Number(snap.vaultExpiryTs),
-    lot_size: snap.registryCycle.lotSize.toString(),
+    lot_size: '1000000000000000000',
     opened_at: Date.now(),
   });
   // The row is created without its rollOpen hash; recover it from the txs table when the
@@ -535,19 +560,19 @@ async function adoptOpenCycle(snap: ChainSnapshot): Promise<void> {
  * Close out, from the chain's own logs, a cycle the chain says is already closed.
  *
  * phase Idle with a nonzero `cycleNumber` and an expiry still on the vault means rollClose
- * already ran for the last cycle the vault wrote: rollOpen is the only way in and rollClose
+ * already ran for the last cycle the vault armed: rollOpen is the only way in and rollClose
  * the only way back. Two triggers land here — the keeper down through expiry while someone
  * called the permissionless `rollClose()`, or our own rollClose receipt timing out as the tx
  * landed — and a third, rarer one: another operator running the entire week while this keeper
  * was down. Without this the row sits 'open'/'locked' forever: harvest never summed, listings
- * never retired, no roll_close alert — or worse, the week gets written "skipped — unfilled, 0"
- * when the vault in fact ran it. Never throws: a log-query failure degrades to a warn and a
- * retry next tick, never a boot failure.
+ * never retired, no roll_close alert. A close that STRANDED the claim (ClaimStranded in the same
+ * receipt) is recorded as such, not as closed. Never throws: a log-query failure degrades to a
+ * warn and a retry next tick, never a boot failure.
  */
 async function closeUnwitnessedCycle(snap: ChainSnapshot): Promise<void> {
   if (snap.phase !== Phase.Idle || snap.vaultCycleNumber === 0 || snap.vaultExpiryTs === 0n) return;
   const recorded = store.getCycle(snap.vaultCycleNumber);
-  if (recorded !== null && recorded.status === 'closed') return;
+  if (recorded !== null && (recorded.status === 'closed' || recorded.status === 'stranded')) return;
   try {
     await closeCycleFromLogs(snap.vaultCycleNumber, snap);
   } catch (error) {
@@ -605,6 +630,21 @@ async function closeCycleFromLogs(cycleNumber: number, snap: ChainSnapshot): Pro
     net += entry.args.netUsdg ?? 0n;
   }
 
+  // The week's sold count: RollOpen.contractsCount is always 0, so it is the sum of CallsWritten
+  // over the armed option id between the arm and the close.
+  const optionId = openLog?.args.optionId ?? (snap.vaultOptionId !== 0n ? snap.vaultOptionId : null);
+  const written = optionId === null ? null : await sumCallsWritten(optionId, fromBlock, closeLog.blockNumber);
+
+  // A ClaimStranded in the same transaction means the claim is still open in Valorem.
+  const strandedLogs = await logClient.getLogs({
+    address: config.VAULT,
+    event: claimStrandedEvent,
+    args: { cycleNumber },
+    fromBlock: closeLog.blockNumber,
+    toBlock: closeLog.blockNumber,
+  });
+  const stranded = strandedLogs.find((entry) => entry.transactionHash === closeLog.transactionHash) ?? null;
+
   const assigned = Number(closeLog.args.contractsAssignedCount ?? 0n);
   // Both straight from the RollClose log. A log that somehow lacks them reads null ("unknown"),
   // never 0: a 0 here would publish an assigned week's strike proceeds as premium.
@@ -612,17 +652,16 @@ async function closeCycleFromLogs(cycleNumber: number, snap: ChainSnapshot): Pro
   const usdgFromAssignment = closeLog.args.usdgFromAssignment ?? null;
 
   // Same retirement as doRollClose: the close bumped the Seaport counter, which kills every
-  // still-live order without setting isCancelled — and tell the book, best-effort, or its row
-  // lingers until Overcall's lazy expiry sweep.
+  // still-live order without setting isCancelled.
   for (const live of store.liveListingsForCycle(cycleNumber)) {
     store.updateListing(live.order_hash, { status: 'expired' });
-    await recordCancellation(live.order_hash);
   }
 
   const existing = store.getCycle(cycleNumber);
-  store.ensureCycle(cycleNumber, 'closed');
+  const status = stranded ? 'stranded' : 'closed';
+  store.ensureCycle(cycleNumber, status);
   const patch: Partial<CycleRow> = {
-    status: 'closed',
+    status,
     roll_close_tx: closeLog.transactionHash,
     closed_at: Date.now(),
     gross_usdg6: gross.toString(),
@@ -631,17 +670,17 @@ async function closeCycleFromLogs(cycleNumber: number, snap: ChainSnapshot): Pro
     contracts_assigned: assigned,
     assets_returned: assetsReturned === null ? null : assetsReturned.toString(),
     usdg_from_assignment: usdgFromAssignment === null ? null : usdgFromAssignment.toString(),
+    strand_gen: stranded ? (stranded.args.gen ?? 0n).toString() : null,
   };
+  if (written !== null) patch.contracts = Number(written);
   if (existing === null) {
-    // A week another operator ran end to end. The vault zeroed optionId and contractsWritten
-    // at redeem, so the write details come from the RollOpen log; the cycle timestamps survive
-    // the close and still read from the vault.
+    // A week another operator ran end to end. The vault zeroed optionId at the redeem, so the
+    // arm details come from the RollOpen log; the cycle timestamps survive the close.
     patch.exercise_ts = Number(snap.vaultExerciseTs);
     patch.expiry_ts = Number(snap.vaultExpiryTs);
-    patch.lot_size = snap.registryCycle.lotSize.toString();
+    patch.lot_size = '1000000000000000000';
     if (openLog) {
       patch.option_id = openLog.args.optionId?.toString() ?? null;
-      patch.contracts = Number(openLog.args.contractsCount ?? 0n);
       patch.strike_usdg6 = openLog.args.strikeUsdg?.toString() ?? null;
     }
   }
@@ -657,6 +696,7 @@ async function closeCycleFromLogs(cycleNumber: number, snap: ChainSnapshot): Pro
     assetsReturned,
     contractsAssigned: assigned,
     witnessedLive: false,
+    stranded: stranded !== null,
   };
   await alert(
     'roll_close',
@@ -664,16 +704,17 @@ async function closeCycleFromLogs(cycleNumber: number, snap: ChainSnapshot): Pro
     { ...rollCloseAlertData(summary), tx: closeLog.transactionHash, witnessedLive: false },
     { force: true },
   );
+  if (stranded) await alertStranded(cycleNumber, stranded.args.gen ?? 0n, snap.vaultClaimKey, closeLog.transactionHash);
   log.boot.warn(
-    { cycleNumber, closeTx: closeLog.transactionHash, grossUsdg6: gross.toString() },
+    { cycleNumber, closeTx: closeLog.transactionHash, grossUsdg6: gross.toString(), stranded: stranded !== null },
     'closed a cycle from chain logs that this keeper never witnessed',
   );
 }
 
 /**
- * The RollOpen log for a cycle, or null. Its block is where the harvest sum starts; its args
- * carry the write details (optionId, contracts, strike) that the vault itself has zeroed by the
- * time a close is being reconstructed.
+ * The RollOpen log for a cycle, or null. Its block is where the harvest and CallsWritten sums
+ * start; its args carry the option id and strike, which the vault zeroes by the time a close is
+ * being reconstructed.
  */
 async function findRollOpenLog(cycleNumber: number, toBlock: bigint) {
   const logs = await logClient.getLogs({
@@ -684,6 +725,20 @@ async function findRollOpenLog(cycleNumber: number, toBlock: bigint) {
     toBlock,
   });
   return logs[0] ?? null;
+}
+
+/** Sum of CallsWritten.contractsCount for an option id over a block range: the contracts sold. */
+async function sumCallsWritten(optionId: bigint, fromBlock: bigint, toBlock: bigint): Promise<bigint> {
+  const logs = await logClient.getLogs({
+    address: config.VAULT,
+    event: callsWrittenEvent,
+    args: { optionId },
+    fromBlock,
+    toBlock,
+  });
+  let sum = 0n;
+  for (const entry of logs) sum += BigInt(entry.args.contractsCount ?? 0n);
+  return sum;
 }
 
 /**
@@ -730,41 +785,22 @@ async function refreshListings(): Promise<void> {
 }
 
 /**
- * What Seaport's own order status says the lifecycle is. The chain outranks the book, so this
- * may DOWNGRADE a status the book reported — a wrong or malicious API row must never latch a
- * listing `filled` and censor it from the keeper's own /orders fallback. `cancelled` is the one
- * latch: Seaport counters only move forward, so a cancelled order never comes back.
- *
- * The revive branch requires a chain-VALID state: a counter bump (invalidateAllListings,
- * lockBook, rollClose) kills an order without ever setting `isCancelled`, and that must not
- * bring a dead order back to /orders.
+ * What Seaport's own order status says the lifecycle is. `cancelled` and `expired` are latches:
+ * Seaport counters only move forward and a cancelled order never comes back. A counter bump
+ * (invalidateAllListings, lockBook, rollClose) kills an order WITHOUT setting `isCancelled`, so
+ * the vault's `listingHash` going to zero is what retires those rows (retireUnauthorisedListings),
+ * not this verdict.
  */
 export function seaportVerdict(current: ListingStatus, status: SeaportOrderStatus): ListingStatus {
+  if (current === 'cancelled' || current === 'expired') return current;
   if (status.isFullyFilled) return 'filled';
   if (status.isCancelled) return 'cancelled';
   if (status.totalFilled > 0n) return 'partial';
-  if (status.isValidated && (current === 'filled' || current === 'partial' || current === 'unfillable')) return 'visible';
-  return current;
-}
-
-/**
- * The row status to record after a POST to Overcall.
- *
- * WHY: `status` carries two facts — how far Seaport has filled the order, and whether Overcall's
- * book accepted it. Seaport is the authority on the first, so a POST outcome must never overwrite
- * `partial`/`filled`/`cancelled`/`expired`. Before this, a partly filled listing whose repost the
- * book kept refusing flipped `partial` → `post_failed` → (next poll) `partial` → … every retry,
- * which read as churn in /state and /orders (found by the W-13 fork acceptance). The POST result
- * still lands in `api_status`/`api_error`, which is what `isPostRetryable` keys on for a partial.
- */
-export function postOutcomeStatus(current: ListingStatus | undefined, outcome: 'posted' | 'post_failed'): ListingStatus {
-  if (current === 'partial' || current === 'filled' || current === 'cancelled' || current === 'expired') return current;
-  return outcome;
+  return current === 'filled' ? 'partial' : current;
 }
 
 function applySeaportStatus(orderHash: string, current: ListingStatus, status: SeaportOrderStatus): ListingStatus {
   const next = seaportVerdict(current, status);
-
   store.updateListing(orderHash, {
     status: next,
     seaport_total_filled: status.totalFilled.toString(),
@@ -777,6 +813,8 @@ function applySeaportStatus(orderHash: string, current: ListingStatus, status: S
 /*//////////////////////////////////////////////////////////////
                           HEALTH ALERTS
 //////////////////////////////////////////////////////////////*/
+
+const FEES_ENABLED_KEY = 'clear_fees_enabled';
 
 async function raiseHealthAlerts(snap: ChainSnapshot): Promise<void> {
   if (snap.rpcLagSeconds * 1000 > config.KEEPER_RPC_LAG_ALERT_MS) {
@@ -798,12 +836,26 @@ async function raiseHealthAlerts(snap: ChainSnapshot): Promise<void> {
     clearAlert('low_gas');
   }
 
+  // The fee switch moving in either direction is a state change worth a line: on, it changes
+  // what every fill must pay; off again, the vault's accepted flag is now moot.
+  const seenFees = store.getMeta(FEES_ENABLED_KEY);
+  const nowFees = snap.valoremFeesEnabled ? '1' : '0';
+  if (seenFees !== null && seenFees !== nowFees) {
+    await alert(
+      'fee_switch',
+      `Valorem's engine fee switch is now ${snap.valoremFeesEnabled ? 'ON' : 'OFF'} (${snap.valoremFeeBps} bps of notional)`,
+      { feesEnabled: snap.valoremFeesEnabled, feeBps: snap.valoremFeeBps, feeAccepted: snap.valoremFeeAccepted },
+      { force: true },
+    );
+  }
+  if (seenFees !== nowFees) store.setMeta(FEES_ENABLED_KEY, nowFees);
+
   // Valorem's engine fee is 15 bps of NOTIONAL, which on a weekly OTM call eats most of the
-  // premium. The vault refuses to write while it is on unless governance has accepted it.
+  // premium. The vault refuses to arm and to fill while it is on unless governance has accepted it.
   if (snap.valoremFeesEnabled && !snap.valoremFeeAccepted) {
     await alert(
       'valorem_fees_enabled',
-      `Valorem turned its engine fee on (${snap.valoremFeeBps} bps). The vault will not write ` +
+      `Valorem's engine fee is on (${snap.valoremFeeBps} bps). The vault will not arm or fill ` +
         'until an admin calls acceptValoremFee(true).',
       { feeBps: snap.valoremFeeBps },
     );
@@ -812,7 +864,7 @@ async function raiseHealthAlerts(snap: ChainSnapshot): Promise<void> {
   }
 
   if (snap.oraclePaused === true) {
-    await alert('oracle_paused', 'the Stock Token has paused its oracle; the vault will refuse to write', {});
+    await alert('oracle_paused', 'the Stock Token has paused its oracle; the vault will refuse to arm or fill', {});
   } else {
     clearAlert('oracle_paused');
   }
@@ -858,11 +910,11 @@ export async function tick(): Promise<void> {
     log.roll.debug(
       {
         phase: PHASE_NAMES[snap.phase],
-        registryCycle: snap.registryCycle.number,
         vaultCycle: snap.vaultCycleNumber,
-        writingOpen: snap.isWritingOpen,
+        stranded: snap.isStranded,
         listingHash: snap.listingHash,
-        idleAssets: snap.idleAssets.toString(),
+        contractsWritten: snap.contractsWritten.toString(),
+        totalAssets: snap.totalAssets.toString(),
       },
       'tick',
     );
@@ -899,166 +951,434 @@ export async function tick(): Promise<void> {
                              IDLE
 //////////////////////////////////////////////////////////////*/
 
-const SKIP_REASON_KEY = (cycleNumber: number) => `skip_reason:${cycleNumber}`;
+const SKIP_REASON_KEY = (exerciseTs: number) => `skip_reason:${exerciseTs}`;
+const WEEK_TARGET_KEY = 'week_target_ts';
+const WEEK_ARMED_KEY = 'week_armed_ts';
+
+/** The week the keeper would arm next, from the head block's clock. Exported for /state. */
+export function nextWindow(snap: Pick<ChainSnapshot, 'blockTimestamp'>): WeekWindow {
+  return nextWeekWindow(Number(snap.blockTimestamp), config.KEEPER_ARM_LEAD_S, config.KEEPER_NYSE_HOLIDAYS);
+}
 
 async function onIdle(snap: ChainSnapshot): Promise<void> {
-  const cycleNumber = snap.registryCycle.number;
-  if (cycleNumber === 0) {
-    log.roll.debug({}, 'registry has no cycle yet');
-    return;
-  }
-
   // A close we never witnessed. phase Idle with a nonzero cycle number and an expiry still on
-  // the vault means rollClose already ran for the last cycle the vault wrote — rollOpen is the
-  // only way in and rollClose the only way back. A permissionless close while we were down, or
-  // our own receipt timing out as the tx landed, both land here. Close the row out from chain
-  // logs; the skip path below must never record such a week as "skipped — unfilled, 0", because
-  // the chain says it ran.
+  // the vault means rollClose already ran for the last cycle the vault armed. Close the row out
+  // from chain logs before anything else is decided.
   if (snap.vaultCycleNumber !== 0 && snap.vaultExpiryTs > 0n) {
     await closeUnwitnessedCycle(snap);
-    if (snap.vaultCycleNumber === cycleNumber) return;
+    await reconcileRecoveredStrand(snap);
   }
 
-  // Already decided, one way or the other. Restart-safe: a row exists only because we wrote or
-  // deliberately skipped, and neither is revisited.
-  if (store.isCycleHandled(cycleNumber)) return;
+  // The queue settles while flat, permissionlessly. Stranded or not: while stranded it is the
+  // queuers' only exit (their idle slice now, their claim share at the retry).
+  if (snap.queuedShares > 0n) {
+    await doSettleQueue(snap);
+  }
 
-  if (!snap.isWritingOpen) {
-    // The window closed and we never wrote. That is a real, publishable outcome: unfilled, 0.
-    const reason = store.getMeta(SKIP_REASON_KEY(cycleNumber)) ?? 'writing-window-closed';
-    store.ensureCycle(cycleNumber, 'skipped');
-    store.updateCycle(cycleNumber, {
-      status: 'skipped',
-      skip_reason: reason,
-      exercise_ts: Number(snap.registryCycle.exerciseTimestamp),
-      expiry_ts: Number(snap.registryCycle.expiryTimestamp),
-      lot_size: snap.registryCycle.lotSize.toString(),
-    });
-    await alert(
-      'no_rung',
-      `cycle ${cycleNumber} closed without a write (${reason}). This week is unfilled, 0.`,
-      { cycleNumber, reason },
-      { dedupeKey: String(cycleNumber), force: true },
-    );
-    log.roll.warn({ cycleNumber, reason }, 'write window closed with no write');
+  if (snap.isStranded) {
+    await handleStranded(snap);
     return;
   }
 
+  const window = nextWindow(snap);
+  await noteWeekRollover(window);
+
   if (snap.writesHalted) {
-    await remember(cycleNumber, 'writes-halted');
-    log.roll.warn({ cycleNumber }, 'writes are halted; not writing');
+    await remember(window, 'writes-halted');
+    log.roll.warn({ exerciseTs: window.exerciseTs }, 'writes are halted; not arming');
     return;
   }
   if (!snap.hasKeeperRole) {
-    await remember(cycleNumber, 'no-keeper-role');
+    await remember(window, 'no-keeper-role');
     return;
   }
   if (snap.valoremFeesEnabled && !snap.valoremFeeAccepted) {
-    await remember(cycleNumber, 'valorem-fees-enabled');
+    await remember(window, 'valorem-fees-enabled');
     return;
   }
   if (snap.oraclePaused === true) {
-    await remember(cycleNumber, 'oracle-paused');
+    await remember(window, 'oracle-paused');
+    return;
+  }
+  if (snap.spotUsdg6 === null) {
+    // `spotUsdg()` reverts on a stale feed. That is the vault's own gate and it will reject
+    // `rollOpen` for the same reason, so stop here rather than burn a simulation.
+    await remember(window, `stale-oracle: ${snap.spotError ?? 'unknown'}`);
     return;
   }
 
-  const policy = await readPolicy();
-  let spotUsdg6: bigint;
-  try {
-    spotUsdg6 = await publicClient.readContract({ address: config.VAULT, abi: vaultAbi, functionName: 'spotUsdg' });
-  } catch (error) {
-    // `spotUsdg()` reverts on a stale feed. That is the vault's own write gate and it will
-    // reject `rollOpen` for the same reason, so stop here rather than burn a simulation.
-    await remember(cycleNumber, `stale-oracle: ${describeError(error)}`);
-    return;
-  }
-
-  const rungs: Rung[] = await readRungs(snap.registryCycle);
-  const plan = await pickWrite({
-    cycle: snap.registryCycle,
-    rungs,
-    policy,
-    idleAssets: snap.idleAssets,
-    spotUsdg6,
+  const plan = planWeek({
+    policy: snap.policy,
+    spotUsdg6: snap.spotUsdg6,
+    totalAssets: snap.totalAssets,
+    contractsWritten: snap.contractsWritten,
+    feesEnabled: snap.valoremFeesEnabled,
+    feeBps: snap.valoremFeeBps,
   });
-
   if (!plan.ok) {
-    await remember(cycleNumber, plan.reason);
-    log.roll.info({ cycleNumber, reason: plan.reason, ...plan.detail }, 'no write this tick');
+    await remember(window, plan.reason);
+    log.roll.info({ exerciseTs: window.exerciseTs, reason: plan.reason, ...plan.detail }, 'not arming this tick');
     return;
   }
 
-  /* ---- rollOpen ---- */
+  /* ---- the option type ---- */
+
+  const tuple = weeklyTuple(config.ASSET, config.USDG, plan.strikeUsdg6, window.exerciseTs, window.expiryTs);
+  const optionId = await ensureOptionType(tuple);
+  if (optionId === null) {
+    await remember(window, 'option-type-failed');
+    return;
+  }
+
+  /* ---- rollOpen: arm only ---- */
 
   const sim = await guardedSimulate('rollOpen', () =>
     publicClient.simulateContract({
       address: config.VAULT,
       abi: vaultAbi,
       functionName: 'rollOpen',
-      args: [plan.optionId, plan.contracts],
+      args: [optionId],
       account,
     }),
   );
-  if (!sim) return;
+  if (!sim) {
+    await remember(window, 'rollOpen-would-revert');
+    return;
+  }
 
-  const receipt = await sendAndConfirm('rollOpen', cycleNumber, () => walletClient.writeContract(sim.request));
+  // The cycle number is the vault's: read it from the RollOpen log rather than guessing +1.
+  const receipt = await sendAndConfirm('rollOpen', null, () => walletClient.writeContract(sim.request));
   if (!receipt) return;
+  const opened = parseEventLogs({ abi: vaultAbi, eventName: 'RollOpen', logs: receipt.logs }).find(
+    (event) => event.address.toLowerCase() === config.VAULT.toLowerCase(),
+  );
+  const cycleNumber = opened ? Number(opened.args.cycleNumber) : snap.vaultCycleNumber + 1;
+  // The submission was recorded without a cycle; attach it now that the number is known.
+  store.db.prepare('UPDATE txs SET cycle_number = ? WHERE hash = ?').run(cycleNumber, receipt.transactionHash);
 
   store.ensureCycle(cycleNumber, 'open');
   store.updateCycle(cycleNumber, {
     status: 'open',
-    option_id: plan.optionId.toString(),
+    option_id: optionId.toString(),
     strike_usdg6: plan.strikeUsdg6.toString(),
-    contracts: Number(plan.contracts),
-    exercise_ts: Number(snap.registryCycle.exerciseTimestamp),
-    expiry_ts: Number(snap.registryCycle.expiryTimestamp),
-    lot_size: snap.registryCycle.lotSize.toString(),
+    contracts: 0,
+    exercise_ts: window.exerciseTs,
+    expiry_ts: window.expiryTs,
+    lot_size: tuple.underlyingAmount.toString(),
     roll_open_tx: receipt.transactionHash,
     opened_at: Date.now(),
   });
+  store.setMeta(WEEK_ARMED_KEY, String(window.exerciseTs));
 
   await alert(
     'roll_open',
-    `cycle ${cycleNumber}: wrote ${plan.contracts} contracts at strike ${formatUsdg(plan.strikeUsdg6)} USDG`,
+    `cycle ${cycleNumber}: armed strike ${formatUsdg(plan.strikeUsdg6)} USDG for the ${window.friday} close ` +
+      `(${describeInstant(window.exerciseTs)}); capacity ${plan.contracts} contracts, nothing written yet`,
     {
       cycleNumber,
-      optionId: plan.optionId.toString(),
-      contracts: plan.contracts.toString(),
+      optionId: optionId.toString(),
       strikeUsdg: formatUsdg(plan.strikeUsdg6),
-      unitPriceUsdg: formatUsdg(plan.unitPrice6),
+      capacity: plan.contracts.toString(),
+      exerciseTs: window.exerciseTs,
+      expiryTs: window.expiryTs,
+      closeDay: window.closeDay,
+      spotUsdg: formatUsdg(plan.spotUsdg6),
       tx: receipt.transactionHash,
     },
     { force: true },
   );
 
-  // List in the same tick. The write deadline is the same timestamp as the listing's endTime,
-  // so every minute between writing and listing is a minute the inventory cannot be sold.
+  // List in the same tick: every minute between arming and listing is a minute nothing can sell.
   const after = await snapshot();
-  await createListing(after, plan.unitPrice6);
+  await createListing(after);
 }
 
-/** Remember why we did not write, so the end-of-window skip row carries an honest reason. */
-async function remember(cycleNumber: number, reason: string): Promise<void> {
-  store.setMeta(SKIP_REASON_KEY(cycleNumber), reason);
-  if (reason === 'no-rung-in-band' || reason === 'premium-above-strike') {
-    await alert('no_rung', `cycle ${cycleNumber}: ${reason}; holding spot and writing nothing`, {
-      cycleNumber,
-      reason,
-    });
-    return;
+/**
+ * The option id for the tuple, creating the type on Clear when it does not exist yet.
+ *
+ * The id is a pure function of the tuple, so `tokenType(id)` decides: Option means it exists
+ * (created by anyone, or by us on a tick whose receipt was lost) and is reused; None means
+ * `newOptionType`, permissionless and paid from the keeper's gas. The NewOptionType log in the
+ * receipt is the confirmation, and it must carry the precomputed id — a disagreement would mean
+ * the derivation is wrong and the vault would be armed on nothing.
+ */
+async function ensureOptionType(tuple: OptionTuple): Promise<bigint | null> {
+  const expected = optionIdFor(tuple);
+  const kind = await publicClient.readContract({
+    address: config.CLEARINGHOUSE,
+    abi: clearAbi,
+    functionName: 'tokenType',
+    args: [expected],
+  });
+  if (kind === TOKEN_TYPE_OPTION) {
+    log.roll.info({ optionId: expected.toString(), strikeUsdg6: tuple.exerciseAmount.toString() }, 'option type already exists; reusing it');
+    return expected;
   }
-  if (reason.startsWith('stale-oracle')) {
-    // A stale feed silently blocks every write for as long as it lasts. Surfacing it only as an
-    // info no_rung when the window closes means hearing about it once the week is already lost,
-    // so it warns while there is still time to chase the feed. (oracle-paused gets no such line:
-    // the snapshot-level oracle_paused alert already covers it.)
+
+  const sim = await guardedSimulate('newOptionType', () =>
+    publicClient.simulateContract({
+      address: config.CLEARINGHOUSE,
+      abi: clearAbi,
+      functionName: 'newOptionType',
+      args: [
+        tuple.underlyingAsset,
+        tuple.underlyingAmount,
+        tuple.exerciseAsset,
+        tuple.exerciseAmount,
+        tuple.exerciseTimestamp,
+        tuple.expiryTimestamp,
+      ],
+      account,
+    }),
+  );
+  if (!sim) {
+    await alert('option_type_failed', 'clear.newOptionType would revert; the week cannot be armed', {
+      strikeUsdg6: tuple.exerciseAmount.toString(),
+      exerciseTs: tuple.exerciseTimestamp,
+    });
+    return null;
+  }
+  if (sim.result !== expected) {
     await alert(
-      'no_rung',
-      `cycle ${cycleNumber}: ${reason}; the vault refuses to write while the feed is stale`,
-      { cycleNumber, reason },
-      { severity: 'warn', dedupeKey: `${cycleNumber}:stale-oracle` },
+      'option_type_failed',
+      `clear.newOptionType would return ${sim.result} but the keeper derived ${expected}; refusing to arm on a mismatch`,
+      { expected: expected.toString(), got: sim.result.toString() },
+      { force: true },
+    );
+    return null;
+  }
+
+  const receipt = await sendAndConfirm('newOptionType', null, () => walletClient.writeContract(sim.request));
+  if (!receipt) {
+    await alert('option_type_failed', 'clear.newOptionType did not confirm; the week cannot be armed', {
+      strikeUsdg6: tuple.exerciseAmount.toString(),
+    });
+    return null;
+  }
+  const created = parseEventLogs({ abi: clearAbi, eventName: 'NewOptionType', logs: receipt.logs }).find(
+    (event) => event.address.toLowerCase() === config.CLEARINGHOUSE.toLowerCase(),
+  );
+  if (!created || created.args.optionId !== expected) {
+    await alert(
+      'option_type_failed',
+      `newOptionType confirmed but its NewOptionType log ${created ? `names ${created.args.optionId}` : 'is missing'}; expected ${expected}`,
+      { tx: receipt.transactionHash, expected: expected.toString() },
+      { force: true },
+    );
+    return null;
+  }
+  log.roll.info(
+    { optionId: expected.toString(), strikeUsdg6: tuple.exerciseAmount.toString(), tx: receipt.transactionHash },
+    'created the week’s option type on Clear',
+  );
+  return expected;
+}
+
+/**
+ * Remember why we did not arm, so the week's alert carries an honest reason. Keyed by the
+ * exercise timestamp the arm would have used: there is no cycle number for a week that was
+ * never armed.
+ */
+async function remember(window: WeekWindow, reason: string): Promise<void> {
+  store.setMeta(SKIP_REASON_KEY(window.exerciseTs), reason);
+  if (reason.startsWith('stale-oracle')) {
+    // A stale feed silently blocks every arm for as long as it lasts. Surfacing it only when the
+    // week rolls by means hearing about it once the week is already lost, so it warns while
+    // there is still time to chase the feed. (oracle-paused gets no such line: the
+    // snapshot-level oracle_paused alert already covers it.)
+    await alert(
+      'cycle_not_created',
+      `week of ${window.friday}: ${reason}; the vault refuses to arm while the feed is stale`,
+      { exerciseTs: window.exerciseTs, reason },
+      { dedupeKey: `${window.exerciseTs}:stale-oracle` },
     );
   }
+}
+
+/**
+ * A Friday went by without the vault being armed for it. Published once, when the next window
+ * first differs from the last one the keeper was aiming at, with the last reason it recorded.
+ * A week that WAS armed (week_armed_ts) is not a missed week, whatever happened to it after.
+ */
+async function noteWeekRollover(window: WeekWindow): Promise<void> {
+  const previous = store.getMetaNumber(WEEK_TARGET_KEY);
+  if (previous !== null && previous < window.exerciseTs) {
+    const armed = store.getMetaNumber(WEEK_ARMED_KEY);
+    if (armed !== previous) {
+      const reason = store.getMeta(SKIP_REASON_KEY(previous)) ?? 'unknown';
+      await alert(
+        'cycle_not_created',
+        `the week closing ${describeInstant(previous)} passed without a cycle (${reason}). Published as unfilled, 0.`,
+        { exerciseTs: previous, reason },
+        { dedupeKey: String(previous), force: true },
+      );
+    }
+  }
+  if (previous !== window.exerciseTs) store.setMeta(WEEK_TARGET_KEY, String(window.exerciseTs));
+}
+
+/*//////////////////////////////////////////////////////////////
+                      STRANDED CLAIM (AF-02)
+//////////////////////////////////////////////////////////////*/
+
+const STRAND_ALERTED_KEY = (gen: bigint) => `strand_alerted:${gen}`;
+const STRAND_RETRY_KEY = 'strand_retry_ms';
+
+async function alertStranded(cycleNumber: number, gen: bigint, claimKey: bigint, tx: string): Promise<void> {
+  if (store.getMeta(STRAND_ALERTED_KEY(gen)) !== null) return;
+  store.setMeta(STRAND_ALERTED_KEY(gen), tx);
+  await alert(
+    'stranded',
+    `cycle ${cycleNumber}: rollClose could not redeem the Valorem claim (strand generation ${gen}). The vault is Idle ` +
+      'with the claim kept; deposits and instant redemption are shut, the queue still settles, and the keeper will ' +
+      `retry retryStrandedClaim() every ${Math.round(config.KEEPER_RETRY_STRANDED_MS / 60_000)} minutes. ` +
+      'Check USDG (pause / freeze of the vault or of Clear) and the Stock Token blocklist.',
+    { cycleNumber, gen: gen.toString(), claimKey: claimKey.toString(), tx },
+    { force: true },
+  );
+}
+
+/**
+ * Idle with a claim the close could not redeem. Nothing is armed over it (`rollOpen` reverts
+ * `StillStranded`); the permissionless retry is attempted on a timer, simulated first so a
+ * freeze that still holds costs no gas.
+ */
+async function handleStranded(snap: ChainSnapshot): Promise<void> {
+  const cycleNumber = snap.vaultCycleNumber;
+  await alertStranded(cycleNumber, snap.strandGen, snap.vaultClaimKey, store.getCycle(cycleNumber)?.roll_close_tx ?? '');
+
+  const last = store.getMetaNumber(STRAND_RETRY_KEY) ?? 0;
+  if (Date.now() - last < config.KEEPER_RETRY_STRANDED_MS) {
+    log.roll.debug({ cycleNumber, gen: snap.strandGen.toString() }, 'stranded; retry timer has not elapsed');
+    return;
+  }
+  store.setMeta(STRAND_RETRY_KEY, String(Date.now()));
+
+  // Simulated by hand rather than through guardedSimulate: `StillStranded` is the expected
+  // answer while the freeze holds and earns a `retry_failed` line, not a `tx_revert` page.
+  const sim = await (async () => {
+    try {
+      return await publicClient.simulateContract({ address: config.VAULT, abi: vaultAbi, functionName: 'retryStrandedClaim', account });
+    } catch (error) {
+      const name = revertName(error);
+      const reason = describeError(error);
+      await alert(
+        'retry_failed',
+        `cycle ${cycleNumber}: retryStrandedClaim still reverts (${name ?? reason}); the cause has not cleared`,
+        { cycleNumber, gen: snap.strandGen.toString(), reason },
+        { dedupeKey: snap.strandGen.toString() },
+      );
+      log.roll.warn({ cycleNumber, reason }, 'stranded claim retry would revert');
+      return null;
+    }
+  })();
+  if (sim === null) return;
+
+  const receipt = await sendAndConfirm('retryStrandedClaim', cycleNumber, () => walletClient.writeContract(sim.request));
+  if (!receipt) return;
+  await recordRecovery(cycleNumber, snap.strandGen, receipt, true);
+}
+
+/** The vault is no longer stranded but our row still says so: someone else ran the retry. */
+async function reconcileRecoveredStrand(snap: ChainSnapshot): Promise<void> {
+  const row = store.getCycle(snap.vaultCycleNumber);
+  if (row === null || row.status !== 'stranded' || snap.isStranded) return;
+  const gen = row.strand_gen === null ? snap.strandGen : BigInt(row.strand_gen);
+  try {
+    const logs = await logClient.getLogs({
+      address: config.VAULT,
+      event: {
+        type: 'event',
+        name: 'StrandedClaimRecovered',
+        inputs: [
+          { name: 'gen', type: 'uint256', indexed: true },
+          { name: 'assets', type: 'uint256', indexed: false },
+          { name: 'usdgOut', type: 'uint256', indexed: false },
+          { name: 'queueWad', type: 'uint256', indexed: false },
+        ],
+      } as const,
+      args: { gen },
+      fromBlock: 0n,
+      toBlock: snap.blockNumber,
+    });
+    const recovered = logs[logs.length - 1];
+    if (!recovered) {
+      log.roll.warn({ cycleNumber: snap.vaultCycleNumber, gen: gen.toString() }, 'the strand is resolved on chain but no StrandedClaimRecovered log is findable');
+      return;
+    }
+    const receipt = await publicClient.getTransactionReceipt({ hash: recovered.transactionHash });
+    await recordRecovery(snap.vaultCycleNumber, gen, receipt, false);
+  } catch (error) {
+    log.roll.warn({ err: describeError(error) }, 'could not reconcile the recovered strand; will retry');
+  }
+}
+
+async function recordRecovery(cycleNumber: number, gen: bigint, receipt: TransactionReceipt, witnessedLive: boolean): Promise<void> {
+  const recovered = parseEventLogs({ abi: vaultAbi, eventName: 'StrandedClaimRecovered', logs: receipt.logs }).find(
+    (event) => event.address.toLowerCase() === config.VAULT.toLowerCase(),
+  );
+  // The retry's Harvest carries the stranded cycle's number, so the cycle sum now includes it.
+  const harvest = await harvestForCycle(cycleNumber, receipt);
+  store.ensureCycle(cycleNumber, 'closed');
+  store.updateCycle(cycleNumber, {
+    status: 'closed',
+    retry_tx: receipt.transactionHash,
+    strand_gen: gen.toString(),
+    gross_usdg6: harvest.gross.toString(),
+    fee_usdg6: harvest.fee.toString(),
+    net_usdg6: harvest.net.toString(),
+    assets_returned: recovered ? recovered.args.assets.toString() : null,
+    usdg_from_assignment: recovered ? recovered.args.usdgOut.toString() : null,
+  });
+  clearAlert('retry_failed', gen.toString());
+  await alert(
+    'stranded_recovered',
+    `cycle ${cycleNumber}: the stranded claim (generation ${gen}) was redeemed` +
+      (recovered ? `: ${recovered.args.assets} asset wei and ${formatUsdg(recovered.args.usdgOut)} USDG came home` : '') +
+      `; ${formatUsdg(harvest.net)} USDG to depositors over the cycle.` +
+      (witnessedLive ? '' : ' The retry ran without this keeper; reconstructed from chain logs.'),
+    {
+      cycleNumber,
+      gen: gen.toString(),
+      assets: recovered ? recovered.args.assets.toString() : null,
+      usdgOut: recovered ? formatUsdg(recovered.args.usdgOut) : null,
+      queueWad: recovered ? recovered.args.queueWad.toString() : null,
+      tx: receipt.transactionHash,
+      witnessedLive,
+    },
+    { force: true },
+  );
+}
+
+/*//////////////////////////////////////////////////////////////
+                           SETTLE QUEUE
+//////////////////////////////////////////////////////////////*/
+
+/** Permissionless: settle a redeem queue joined while the vault is flat (Idle). */
+async function doSettleQueue(snap: ChainSnapshot): Promise<void> {
+  const sim = await guardedSimulate('settleQueue', () =>
+    publicClient.simulateContract({ address: config.VAULT, abi: vaultAbi, functionName: 'settleQueue', account }),
+  );
+  if (!sim) return;
+  const receipt = await sendAndConfirm('settleQueue', snap.vaultCycleNumber || null, () => walletClient.writeContract(sim.request));
+  if (!receipt) return;
+  const settled = parseEventLogs({ abi: vaultAbi, eventName: 'QueueSettled', logs: receipt.logs }).find(
+    (event) => event.address.toLowerCase() === config.VAULT.toLowerCase(),
+  );
+  await alert(
+    'queue_settled',
+    settled
+      ? `settled redeem epoch ${settled.args.epochId}: ${settled.args.shares} shares for ${settled.args.assets} asset wei and ${formatUsdg(settled.args.usdgOut)} USDG`
+      : 'settleQueue confirmed',
+    {
+      epochId: settled ? settled.args.epochId.toString() : null,
+      shares: settled ? settled.args.shares.toString() : null,
+      assets: settled ? settled.args.assets.toString() : null,
+      usdgOut: settled ? formatUsdg(settled.args.usdgOut) : null,
+      tx: receipt.transactionHash,
+    },
+    { force: true },
+  );
 }
 
 /*//////////////////////////////////////////////////////////////
@@ -1080,218 +1400,152 @@ async function onListed(snap: ChainSnapshot): Promise<void> {
     return;
   }
 
+  await syncFills(snap);
+
   if (snap.listingHash === ZERO_HASH) {
-    await maybeRelist(snap);
+    await retireUnauthorisedListings(snap);
+    await createListing(snap);
     return;
   }
 
   await pollLiveListing(snap);
 }
 
-/** Rows worth an idempotent repost to Overcall. `partial` with a null api_status is a listing
- *  the book never accepted that then caught a direct fill through our own /orders fallback —
- *  applySeaportStatus flips it to 'partial' on the first fill, and an API outage at listing
- *  time must not permanently stop the repost that gets the rest of the inventory onto the book. */
-export function isPostRetryable(row: Pick<ListingRow, 'status' | 'api_status'>): boolean {
-  return (
-    row.status === 'approved' || row.status === 'post_failed' || (row.status === 'partial' && row.api_status === null)
-  );
+/**
+ * Fills happen without the keeper: a buyer's Seaport transaction runs the vault's hooks, which
+ * write and emit CallsWritten. The keeper learns of them from `contractsWritten` (== sold) and
+ * publishes each increase; the listing row's fill fraction comes from Seaport in pollLiveListing.
+ */
+async function syncFills(snap: ChainSnapshot): Promise<void> {
+  const row = store.getCycle(snap.vaultCycleNumber);
+  if (row === null) return;
+  const known = BigInt(row.contracts ?? 0);
+  const sold = snap.contractsWritten;
+  if (sold === known) return;
+  store.updateCycle(snap.vaultCycleNumber, { contracts: Number(sold) });
+  if (sold > known) {
+    await alert(
+      'fill',
+      `cycle ${snap.vaultCycleNumber}: ${sold - known} contract${sold - known === 1n ? '' : 's'} filled; ${sold} sold so far, ` +
+        `${snapshotCapacity(snap)} of capacity left`,
+      {
+        cycleNumber: snap.vaultCycleNumber,
+        filled: (sold - known).toString(),
+        sold: sold.toString(),
+        capacity: snapshotCapacity(snap).toString(),
+        lockedAssets: snap.lockedAssets.toString(),
+      },
+      { force: true },
+    );
+  } else {
+    log.roll.warn({ cycleNumber: snap.vaultCycleNumber, known: known.toString(), sold: sold.toString() }, 'contractsWritten fell; a fill was reverted?');
+  }
 }
 
 async function pollLiveListing(snap: ChainSnapshot): Promise<void> {
   const row = store.getListing(snap.listingHash);
   const status = await readOrderStatus(snap.listingHash);
 
-  if (row) {
-    const next = applySeaportStatus(row.order_hash, row.status, status);
-    if (next === 'filled') {
-      log.roll.info({ orderHash: row.order_hash }, 'listing fully filled; nothing more to sell this cycle');
-      return;
-    }
-  } else {
+  if (!row) {
     // The vault has authorised a hash we have no record of: another operator's keeper, or a
     // database restored from an older backup. Without the row we do not have the salt, so this
-    // order can never be served from /orders or reposted — the recovery is to invalidate it on
-    // chain and let maybeRelist build a listing we CAN serve, next tick.
+    // order can never be served from /orders — the recovery is to invalidate it on chain and
+    // let the next tick build a listing we CAN serve.
     log.roll.warn({ orderHash: snap.listingHash }, 'vault has a listing this keeper did not create');
     await alert(
-      'api_reject',
+      'listing_unfillable',
       `the vault has a listing (${snap.listingHash}) this keeper cannot serve: there is no local row for it. ` +
         'Recovering by invalidating it on chain and relisting from our own records.',
       { listingHash: snap.listingHash },
       { dedupeKey: snap.listingHash },
     );
     if (snap.hasKeeperRole && !invalidatedUnservable.has(snap.listingHash)) {
-      // At most one invalidation attempt per hash per boot; if the tx reverts, the alert's
-      // hourly cooldown above is the backstop.
       invalidatedUnservable.add(snap.listingHash);
       const sim = await guardedSimulate('invalidateAllListings', () =>
-        publicClient.simulateContract({
-          address: config.VAULT,
-          abi: vaultAbi,
-          functionName: 'invalidateAllListings',
-          account,
-        }),
+        publicClient.simulateContract({ address: config.VAULT, abi: vaultAbi, functionName: 'invalidateAllListings', account }),
       );
-      if (sim) {
-        await sendAndConfirm('invalidateAllListings', snap.vaultCycleNumber, () =>
-          walletClient.writeContract(sim.request),
-        );
-      }
-      return;
+      if (sim) await sendAndConfirm('invalidateAllListings', snap.vaultCycleNumber, () => walletClient.writeContract(sim.request));
     }
+    return;
+  }
+
+  const next = applySeaportStatus(row.order_hash, row.status, status);
+  const remainingCapacity = snapshotCapacity(snap);
+
+  if (next === 'filled') {
+    // Sold out. If NAV grew since (deposits are open while Listed) there is capacity left that
+    // nothing offers; free the slot so the next tick lists it, within the vault's three.
+    if (remainingCapacity > 0n && snap.listingsThisCycle < MAX_LISTINGS_PER_CYCLE) {
+      log.roll.info({ orderHash: row.order_hash, capacity: remainingCapacity.toString() }, 'listing sold out with capacity left; replacing it');
+      await cancelLiveListing(snap, row.order_hash, 'sold out with capacity left');
+    } else {
+      log.roll.info({ orderHash: row.order_hash }, 'listing fully filled; nothing more to sell this cycle');
+    }
+    return;
   }
 
   if (status.isCancelled) {
-    await clearVaultListing(snap, 'seaport reports the order cancelled');
+    // Unreachable with this vault (cancelListing clears listingHash in the same transaction),
+    // kept so a foreign cancel could never leave a dead hash live in our book.
+    store.updateListing(row.order_hash, { status: 'cancelled' });
     return;
   }
 
-  // Retry a POST that never landed. The endpoint is idempotent on order hash, so a repost is
-  // safe — it answers 200 with the existing row — and it is the difference between an
-  // invisible listing and a sold week. Throttled so a rejection we cannot fix does not sit in
-  // Overcall's per-IP token bucket all week.
-  if (row && isPostRetryable(row)) {
-    const retryKey = `post_retry_ms:${row.order_hash}`;
-    const lastTry = store.getMetaNumber(retryKey) ?? 0;
-    if (Date.now() - lastTry >= POST_RETRY_INTERVAL_MS) {
-      store.setMeta(retryKey, String(Date.now()));
-      await postToOvercall(
-        row.order_hash as Hex,
-        JSON.parse(row.components_json) as OrderComponentsJson,
-        row.cycle_number,
-      );
-    }
-  }
-
-  await maybeCheckBook(row?.order_hash ?? snap.listingHash);
-}
-
-/** Hourly: ask Overcall's book what it thinks, and alert if our listing is not in it. */
-async function maybeCheckBook(orderHash: string): Promise<void> {
-  const key = `book_poll_ms:${orderHash}`;
-  const last = store.getMetaNumber(key) ?? 0;
-  if (Date.now() - last < config.KEEPER_FILL_POLL_MS) {
-    await checkVisibility(orderHash);
-    return;
-  }
-  store.setMeta(key, String(Date.now()));
-
-  try {
-    const listing = await fetchListing(orderHash);
-    if (listing === null) {
-      // Not by hash — try the offerer index, which is how the book is actually browsed and
-      // therefore the honest test of "can a buyer see this". The limit is generous on purpose:
-      // 3 listings per cycle (the vault's own cap) means 200 rows is ~1.5 years of cycles, and
-      // the old limit of 20 would start false-reporting "missing" once the vault had more
-      // history than that.
-      const mine = await fetchListings({ offerer: config.VAULT, status: 'all', limit: 200 });
-      const found = mine.find((entry) => entry.orderHash.toLowerCase() === orderHash.toLowerCase());
-      if (!found) {
-        store.updateListing(orderHash, { api_status: 'missing' });
-        await checkVisibility(orderHash);
-        return;
-      }
-      await applyBookStatus(
-        orderHash,
-        found.status ?? null,
-        found.filledNumerator ?? null,
-        found.filledDenominator ?? null,
-      );
-      return;
-    }
-    await applyBookStatus(
-      orderHash,
-      listing.status ?? null,
-      listing.filledNumerator ?? null,
-      listing.filledDenominator ?? null,
-    );
-  } catch (error) {
-    log.roll.warn({ orderHash, err: describeError(error) }, 'could not read the book');
-  }
-}
-
-/**
- * The lifecycle verdict of a book report — or undefined when the report should not move the
- * lifecycle. The book is Overcall's OPINION; the chain outranks it. `filled` is believed only
- * when the row's own Seaport fields agree (the every-tick getOrderStatus poll stamps them): a
- * wrong or malicious API row must never censor a still-fillable order from /orders. And nothing
- * here downgrades a chain-confirmed `filled`.
- */
-export function bookVerdict(
-  current: ListingStatus,
-  apiStatus: string | null,
-  seaportFilled: bigint,
-  seaportSize: bigint,
-): ListingStatus | undefined {
-  if (current === 'filled') return undefined;
-  if (apiStatus === 'filled') {
-    return seaportSize > 0n && seaportFilled >= seaportSize ? 'filled' : undefined;
-  }
-  if (apiStatus === 'partial') return 'partial';
-  if (apiStatus === 'unfillable') return 'unfillable';
-  // An 'open' (re-)report — or a row with no status at all — confirms a fresh post, and revives
-  // a row the book itself had buried: `unfillable` recovers on its own once the tokens and the
-  // approval are both true again, so it is a warning, not a death certificate.
-  if (current === 'posted' || current === 'post_failed' || current === 'unfillable') return 'visible';
-  return undefined;
-}
-
-async function applyBookStatus(
-  orderHash: string,
-  apiStatus: string | null,
-  filledNumerator: string | null,
-  filledDenominator: string | null,
-): Promise<void> {
-  // Being in the book at all is what "visible" means, so stamp it the first time we see it.
-  const existing = store.getListing(orderHash);
-  const patch: Partial<ListingRow> = {
-    api_status: apiStatus,
-    filled_numerator: filledNumerator,
-    filled_denominator: filledDenominator,
-    visible_at: existing?.visible_at ?? Date.now(),
-  };
-  // Only overwrite our own lifecycle status when the book has a verdict on it; a
-  // `status: undefined` in the patch would write a NULL and lose the listing's state.
-  const verdict =
-    existing === null
-      ? undefined
-      : bookVerdict(
-          existing.status,
-          apiStatus,
-          BigInt(existing.seaport_total_filled ?? '0'),
-          BigInt(existing.seaport_total_size ?? '0'),
-        );
-  if (verdict !== undefined) patch.status = verdict;
-  store.updateListing(orderHash, patch);
-
-  if (apiStatus === 'unfillable') {
+  // Would the next buyer be refused? The fill gate re-prices at the spot of the fill.
+  if (snap.spotUsdg6 === null) {
     await alert(
-      'api_reject',
-      `Overcall marked ${orderHash} unfillable: the vault is missing the option tokens or the ` +
-        'Seaport approval. It recovers on its own once both are true again.',
-      { orderHash },
-      { dedupeKey: orderHash },
+      'listing_unfillable',
+      `listing ${row.order_hash}: the oracle is stale (${snap.spotError ?? 'unknown'}); every fill reverts until the feed prints`,
+      { orderHash: row.order_hash, reason: 'stale-oracle' },
+      { dedupeKey: `${row.order_hash}:stale` },
     );
+    return;
   }
-}
-
-/** An accepted listing that nobody can see is an unfilled week. Say so after 15 minutes. */
-async function checkVisibility(orderHash: string): Promise<void> {
-  const row = store.getListing(orderHash);
-  if (!row || row.visible_at !== null) return;
-  const since = row.posted_at ?? row.created_at;
-  if (Date.now() - since < config.KEEPER_LISTING_VISIBLE_MS) return;
-
-  await alert(
-    'listing_invisible',
-    `listing ${orderHash} still is not visible in Overcall's book ${Math.round(
-      (Date.now() - since) / 60_000,
-    )} minutes after publishing. The signed payload is being served from /orders so a buyer ` +
-      'can still fill it directly.',
-    { orderHash, postedAt: new Date(since).toISOString() },
-    { dedupeKey: orderHash },
+  const verdict = fillVerdict(
+    snap.spotUsdg6,
+    { grossUsdg6: snap.listingGrossUsdg6, amount: snap.listingAmount, strikeUsdg6: snap.vaultStrikeUsdg6 },
+    snap.policy,
+    snap.valoremFeesEnabled,
+    snap.valoremFeeBps,
   );
+  if (verdict.fillable) {
+    clearAlert('listing_unfillable', `${row.order_hash}:strike-below-band`);
+    return;
+  }
+
+  if (verdict.reason === 'strike-below-band') {
+    // A rally pulled the strike inside the band floor. No price fixes that; the listing
+    // revives on its own if spot falls back, and cancelling it would only spend a slot.
+    await alert(
+      'listing_unfillable',
+      `listing ${row.order_hash}: strike ${formatUsdg(snap.vaultStrikeUsdg6)} is below the band floor ` +
+        `${formatUsdg(BigInt(verdict.detail.bandLowUsdg6 ?? '0'))} at spot ${formatUsdg(snap.spotUsdg6)}; every fill reverts StrikeBelowBand until spot falls back`,
+      { orderHash: row.order_hash, reason: verdict.reason, ...verdict.detail },
+      { dedupeKey: `${row.order_hash}:strike-below-band` },
+    );
+    return;
+  }
+
+  // premium-below-floor: a reprice fixes it, if a slot is left.
+  if (snap.listingsThisCycle >= MAX_LISTINGS_PER_CYCLE) {
+    await alert(
+      'listing_unfillable',
+      `listing ${row.order_hash}: ask ${formatUsdg(BigInt(verdict.detail.unitPrice6 ?? '0'))} is under the fill floor ` +
+        `${formatUsdg(verdict.floorUnit6)} at spot ${formatUsdg(snap.spotUsdg6)}, and the vault's ${MAX_LISTINGS_PER_CYCLE} listings are spent; ` +
+        'it stays unfillable until spot falls back',
+      { orderHash: row.order_hash, reason: verdict.reason, ...verdict.detail },
+      { dedupeKey: `${row.order_hash}:budget` },
+    );
+    return;
+  }
+  log.roll.warn(
+    { orderHash: row.order_hash, ...verdict.detail, floorUnit6: verdict.floorUnit6.toString() },
+    'the live listing would be refused at the fill floor; repricing',
+  );
+  const cancelled = await cancelLiveListing(snap, row.order_hash, 'repricing after a spot move');
+  if (!cancelled) return;
+  const after = await snapshot();
+  await createListing(after);
 }
 
 /*//////////////////////////////////////////////////////////////
@@ -1299,61 +1553,70 @@ async function checkVisibility(orderHash: string): Promise<void> {
 //////////////////////////////////////////////////////////////*/
 
 /**
- * Build, authorise on chain, and publish one listing.
+ * Build, authorise on chain, and serve one listing.
  *
- * The order of the three steps is fixed and it matters:
- *   1. build the components off chain (fee split per contract, counter read live)
- *   2. vault.approveListing(components) — the vault re-derives every field, records the hash,
- *      and calls seaport.validate() so the order fills with an empty signature
- *   3. POST to Overcall with the 65-byte placeholder
- * Publishing before authorising would put an order in their book that the vault has not
- * agreed to and that their check 8 would reject.
+ *   1. size = the vault's remaining capacity (Policy.maxContracts(totalAssets) − contractsWritten)
+ *   2. price = the fill floor per contract at this spot (fee valued at spot when the switch is
+ *      on) lifted by KEEPER_PREMIUM_MARGIN_BPS, never above the strike
+ *   3. components: PARTIAL_RESTRICTED, zone = vault, one USDG item, counter read live
+ *   4. cross-check our hash against seaport.getOrderHash, simulate, send approveListing
+ *   5. the row is what /orders serves, with an empty signature
  */
-async function createListing(snap: ChainSnapshot, unitPrice6: bigint): Promise<boolean> {
+async function createListing(snap: ChainSnapshot): Promise<boolean> {
   const cycleNumber = snap.vaultCycleNumber;
-  const inventory = snap.optionInventory;
-
-  if (inventory === 0n) {
-    log.roll.info({ cycleNumber }, 'no option inventory to list');
-    return false;
-  }
-  if (snap.listingsThisCycle >= MAX_LISTINGS_PER_CYCLE) {
-    await alert(
-      'api_reject',
-      `cycle ${cycleNumber} has used all ${MAX_LISTINGS_PER_CYCLE} of the vault's listings; not relisting`,
-      { cycleNumber },
-      { dedupeKey: String(cycleNumber) },
-    );
-    return false;
-  }
+  if (snap.phase !== Phase.Listed || snap.blockTimestamp >= snap.vaultExerciseTs) return false;
   if (snap.listingHash !== ZERO_HASH) {
-    // The vault refuses a new approval while one is live. Cancel first, next tick relists.
     log.roll.info({ listingHash: snap.listingHash }, 'a listing is already live; not creating another');
     return false;
   }
+  if (snap.writesHalted || !snap.hasKeeperRole) return false;
+  if (snap.listingsThisCycle >= MAX_LISTINGS_PER_CYCLE) {
+    log.roll.info({ cycleNumber }, 'the vault’s listings for this cycle are spent; nothing more can be offered');
+    return false;
+  }
+  const contracts = snapshotCapacity(snap);
+  if (contracts === 0n) {
+    log.roll.info({ cycleNumber, totalAssets: snap.totalAssets.toString(), sold: snap.contractsWritten.toString() }, 'no capacity left to list');
+    return false;
+  }
+  if (snap.spotUsdg6 === null) {
+    log.roll.warn({ cycleNumber, err: snap.spotError }, 'cannot price a listing without spot; the feed is stale');
+    return false;
+  }
+  const priced = priceListing({
+    policy: snap.policy,
+    spotUsdg6: snap.spotUsdg6,
+    strikeUsdg6: snap.vaultStrikeUsdg6,
+    contracts,
+    feesEnabled: snap.valoremFeesEnabled,
+    feeBps: snap.valoremFeeBps,
+  });
+  if (!priced.ok) {
+    log.roll.warn({ cycleNumber, reason: priced.reason, ...priced.detail }, 'cannot price a listing');
+    return false;
+  }
+  const unitPrice6 = priced.unitPrice6;
 
   const counter = await readCounter(config.VAULT);
   const components = buildOrderComponents({
-    offerer: config.VAULT,
+    vault: config.VAULT,
     optionId: snap.vaultOptionId,
-    contracts: inventory,
+    contracts,
     unitPrice6,
     endTime: snap.vaultExerciseTs,
     counter,
   });
 
-  // Cross-check our encoding against Seaport itself before spending gas. Overcall's validator
-  // does the same comparison at step 7 and answers 500; catching it here costs one keccak. No
-  // force on the alert: this path retries on every tick, and the hourly per-hash cooldown is
-  // the right cadence for a mismatch that will not fix itself between two ticks.
+  // Cross-check our encoding against Seaport itself before spending gas. The web fill page
+  // derives the same hash and refuses an order whose hash it cannot reproduce.
   const onChainHash = await readOrderHash(components);
   const offChainHash = localOrderHash(components);
   if (onChainHash.toLowerCase() !== offChainHash.toLowerCase()) {
     await alert(
-      'api_reject',
-      'locally derived order hash disagrees with seaport.getOrderHash; refusing to publish',
+      'listing_unfillable',
+      'locally derived order hash disagrees with seaport.getOrderHash; refusing to authorise',
       { onChainHash, offChainHash },
-      { dedupeKey: onChainHash },
+      { dedupeKey: onChainHash, severity: 'error' },
     );
     return false;
   }
@@ -1374,26 +1637,23 @@ async function createListing(snap: ChainSnapshot, unitPrice6: bigint): Promise<b
 
   const json = componentsToJson(components);
   const seq = snap.listingsThisCycle + 1;
-  const offerItem = components.offer[0];
-  const vaultLeg = components.consideration[0];
-  const overcallLeg = components.consideration[1];
-  if (!offerItem || !vaultLeg || !overcallLeg) throw new Error('order builder produced an incomplete order');
+  const gross6 = unitPrice6 * contracts;
 
   store.insertListing({
     order_hash: onChainHash,
     cycle_number: cycleNumber,
     seq,
     option_id: snap.vaultOptionId.toString(),
-    contracts: inventory.toString(),
+    contracts: contracts.toString(),
     unit_price6: unitPrice6.toString(),
-    gross_usdg6: (vaultLeg.startAmount + overcallLeg.startAmount).toString(),
-    to_vault6: vaultLeg.startAmount.toString(),
-    to_overcall6: overcallLeg.startAmount.toString(),
+    gross_usdg6: gross6.toString(),
+    to_vault6: gross6.toString(),
+    to_overcall6: '0',
     end_time: Number(components.endTime),
     counter: counter.toString(),
     salt: components.salt.toString(),
     components_json: JSON.stringify(json),
-    signature: PLACEHOLDER_SIGNATURE,
+    signature: EMPTY_SIGNATURE,
     approve_tx: receipt.transactionHash,
     cancel_tx: null,
     status: 'approved',
@@ -1407,70 +1667,33 @@ async function createListing(snap: ChainSnapshot, unitPrice6: bigint): Promise<b
     seaport_total_size: null,
     seaport_cancelled: null,
   });
-
+  if (seq > 1) {
+    const row = store.getCycle(cycleNumber);
+    store.updateCycle(cycleNumber, { relists_used: (row?.relists_used ?? 0) + 1 });
+  }
   mirrorFallbackPayload(onChainHash, components);
-  await postToOvercall(onChainHash, json, cycleNumber);
+
+  await alert(
+    'listing',
+    `cycle ${cycleNumber}: listing ${seq}/${MAX_LISTINGS_PER_CYCLE} authorised: ${contracts} contracts at ` +
+      `${formatUsdg(unitPrice6)} USDG each (floor ${formatUsdg(priced.floorUnit6)} at spot ${formatUsdg(snap.spotUsdg6)}, ${priced.priceSource}); served from /orders`,
+    {
+      cycleNumber,
+      orderHash: onChainHash,
+      seq,
+      contracts: contracts.toString(),
+      unitPriceUsdg: formatUsdg(unitPrice6),
+      floorUnitUsdg: formatUsdg(priced.floorUnit6),
+      spotUsdg: formatUsdg(snap.spotUsdg6),
+      priceSource: priced.priceSource,
+      tx: receipt.transactionHash,
+    },
+    { force: true },
+  );
   return true;
 }
 
-/**
- * POST to Overcall, and treat failure as survivable.
- *
- * A 200 is an idempotent repost and counts as success. On a persistent failure the listing is
- * marked `post_failed`, an alert goes out, and the signed payload stays available from the
- * keeper's own /orders endpoint for our UI's fallback buy page. The order is a valid, on-chain
- * authorised Seaport order either way — anyone holding a copy can fill it.
- */
-async function postToOvercall(orderHash: Hex, json: OrderComponentsJson, cycleNumber: number): Promise<void> {
-  try {
-    const result = await publishListing(json, PLACEHOLDER_SIGNATURE);
-    // Recon R3 (verification C2): Overcall's idempotent-replay short-circuit runs BEFORE
-    // validation, so a 200 can carry a row that is not the order we sent. An answer naming a
-    // different order hash is a reject, not a success.
-    const returnedHash = result.listing?.orderHash;
-    if (returnedHash !== undefined && returnedHash.toLowerCase() !== orderHash.toLowerCase()) {
-      store.updateListing(orderHash, {
-        status: postOutcomeStatus(store.getListing(orderHash)?.status, 'post_failed'),
-        api_error: `book answered the POST with a different orderHash: ${returnedHash}`,
-      });
-      await alert(
-        'api_reject',
-        `Overcall answered the POST for ${orderHash} with a different orderHash (${returnedHash}); ` +
-          'treating it as a reject. The order is authorised on chain and is being served from /orders.',
-        { orderHash, returnedHash, cycleNumber },
-        { dedupeKey: orderHash },
-      );
-      return;
-    }
-    store.updateListing(orderHash, {
-      status: postOutcomeStatus(store.getListing(orderHash)?.status, 'posted'),
-      posted_at: Date.now(),
-      api_status: result.listing?.status ?? null,
-      api_error: null,
-    });
-    log.roll.info(
-      { orderHash, httpStatus: result.httpStatus, idempotent: result.idempotent, cycleNumber },
-      'listing published to Overcall',
-    );
-    clearAlert('api_reject', orderHash);
-  } catch (error) {
-    const serverMessage = error instanceof OvercallApiError ? error.serverMessage : null;
-    const status = error instanceof OvercallApiError ? error.status : 0;
-    store.updateListing(orderHash, {
-      status: postOutcomeStatus(store.getListing(orderHash)?.status, 'post_failed'),
-      api_error: serverMessage ?? describeError(error),
-    });
-    await alert(
-      'api_reject',
-      `Overcall refused the listing (${status}): ${serverMessage ?? describeError(error)}. ` +
-        'The order is authorised on chain and is being served from /orders for our own buy page.',
-      { orderHash, status, serverMessage, cycleNumber },
-      { dedupeKey: orderHash },
-    );
-  }
-}
-
-/** Mirror the fillable payload to disk for the fallback buy page, if configured. */
+/** Mirror the fillable payload to disk for the fill page, if configured. */
 function mirrorFallbackPayload(orderHash: Hex, components: OrderComponentsStruct): void {
   if (!config.KEEPER_FALLBACK_DIR) return;
   try {
@@ -1480,7 +1703,7 @@ function mirrorFallbackPayload(orderHash: Hex, components: OrderComponentsStruct
       chainId: config.CHAIN_ID,
       // OrderParameters, i.e. what a buyer hands to fulfillOrder / fulfillAdvancedOrder.
       parameters: toOrderParametersJson(components),
-      signature: PLACEHOLDER_SIGNATURE,
+      signature: EMPTY_SIGNATURE,
     };
     writeFileSync(join(config.KEEPER_FALLBACK_DIR, `${orderHash}.json`), JSON.stringify(payload, null, 2));
   } catch (error) {
@@ -1489,68 +1712,11 @@ function mirrorFallbackPayload(orderHash: Hex, components: OrderComponentsStruct
 }
 
 /*//////////////////////////////////////////////////////////////
-                            RELISTING
+                        CANCEL AND RETIRE
 //////////////////////////////////////////////////////////////*/
 
-/**
- * Put the inventory back on the book after a cancel or an invalidation.
- *
- * Bounded twice: by the keeper's own KEEPER_MAX_RELISTS (1 by default, per plan.md 5.1) and by
- * the vault's hard cap of 3 listings per cycle, which is read from chain rather than counted
- * locally so a restart cannot lose track of it.
- */
-async function maybeRelist(snap: ChainSnapshot): Promise<void> {
-  const cycleNumber = snap.vaultCycleNumber;
-  const row = store.getCycle(cycleNumber);
-
-  // Before anything else, and whether or not a relist follows: nothing this cycle is authorised.
-  await retireUnauthorisedListings(snap);
-
-  if (snap.optionInventory === 0n) {
-    log.roll.debug({ cycleNumber }, 'nothing left to list');
-    return;
-  }
-
-  const isFirstListing = snap.listingsThisCycle === 0;
-  const used = row?.relists_used ?? 0;
-  if (!isFirstListing) {
-    if (used >= config.KEEPER_MAX_RELISTS) {
-      log.roll.info({ cycleNumber, used }, 'relist budget spent; leaving the inventory unlisted');
-      return;
-    }
-    if (snap.listingsThisCycle >= MAX_LISTINGS_PER_CYCLE) return;
-  }
-
-  // Price the replacement the same way the first listing was priced. Re-running the picker
-  // would also re-pick the strike, which must not change mid-cycle: the vault is already
-  // written into one option id.
-  const previous = store.latestListingForCycle(cycleNumber);
-  let unitPrice6: bigint;
-  if (previous) {
-    // But never below the floor the chain re-derives from LIVE spot at approveListing
-    // (Vault.approveListing -> Policy.checkPremium), plus PREMIUM_MARGIN_BPS: our memory of the
-    // earlier price is not a floor, and after a spot uptick it would revert PremiumBelowMinimum
-    // on every retry. On a read failure keep the old price; the simulation gate catches a
-    // genuinely bad one.
-    const floor = await liveFloorUnit6();
-    unitPrice6 = relistUnitPrice6(BigInt(previous.unit_price6), floor, config.PREMIUM_MARGIN_BPS);
-  } else {
-    unitPrice6 = await repriceFromPolicy(snap);
-  }
-  if (unitPrice6 === 0n) return;
-
-  const listed = await createListing(snap, unitPrice6);
-
-  // The budget is spent only by a relist that actually reached the chain. Charging it up
-  // front meant one simulation failure — a transient stale oracle, say — burned the whole
-  // week's allowance and left saleable inventory sitting unlisted until Friday.
-  if (listed && !isFirstListing) {
-    store.updateCycle(cycleNumber, { relists_used: used + 1 });
-  }
-}
-
 /** Row statuses that still offer an order: /orders serves them (openListings) until endTime. */
-const OFFERED_STATUSES: ReadonlySet<ListingStatus> = new Set(['approved', 'posted', 'visible', 'post_failed', 'partial']);
+const OFFERED_STATUSES: ReadonlySet<ListingStatus> = new Set(['approved', 'partial']);
 
 /**
  * Retire every row of this cycle that still offers an order, when the vault authorises none.
@@ -1558,16 +1724,11 @@ const OFFERED_STATUSES: ReadonlySet<ListingStatus> = new Set(['approved', 'poste
  * Called with the vault Listed and `listingHash` zero. The vault authorises one order at a time
  * and clears `listingHash` only in `cancelListing` (which sets Seaport's isCancelled) and
  * `invalidateAllListings` (which bumps the Seaport counter and sets nothing on the order), so
- * every earlier listing of the cycle is dead. When the guardian — or anyone holding the keeper key
- * outside this process — does either, no other path notices: pollLiveListing only reads the
- * vault's live hash, refreshListings runs only at boot, lockBook skips `partial` rows, and a
- * counter bump never sets isCancelled. The dead row then stays `visible`/`partial` and GET /orders
- * keeps serving it beside the relist until endTime, so the fallback buy page offers an order
- * Seaport rejects (dryrun-extended.ts, cycle 1, found it on the fork).
- *
- * A row Seaport reports fully filled becomes `filled` (the fill landed before the cancel);
- * anything else becomes `cancelled` and the book is told, best-effort. A failed status read
- * leaves the row for the next tick.
+ * every earlier listing of the cycle is dead. When the guardian does either, no other path
+ * notices: pollLiveListing only reads the vault's live hash, refreshListings runs only at boot,
+ * and a counter bump never sets isCancelled. The dead row would then stay `approved`/`partial`
+ * and GET /orders would keep serving it beside the relist until endTime — an order Seaport
+ * rejects. A row Seaport reports fully filled becomes `filled`; anything else `cancelled`.
  */
 async function retireUnauthorisedListings(snap: ChainSnapshot): Promise<void> {
   if (snap.listingHash !== ZERO_HASH) return;
@@ -1587,7 +1748,6 @@ async function retireUnauthorisedListings(snap: ChainSnapshot): Promise<void> {
       seaport_total_size: status.totalSize.toString(),
       seaport_cancelled: status.isCancelled ? 1 : 0,
     });
-    if (next === 'cancelled') await recordCancellation(listing.order_hash);
     log.roll.warn(
       { orderHash: listing.order_hash, was: listing.status, now: next, seaportCancelled: status.isCancelled },
       'the vault no longer authorises this listing; retired it',
@@ -1595,51 +1755,16 @@ async function retireUnauthorisedListings(snap: ChainSnapshot): Promise<void> {
   }
 }
 
-/** The premium floor approveListing will enforce, derived the way the vault derives it: LIVE
- *  spot and LIVE policy. null when the read fails — the caller falls back and lets the
- *  simulation gate be the judge. */
-async function liveFloorUnit6(): Promise<bigint | null> {
-  try {
-    const [policy, spot] = await Promise.all([
-      readPolicy(),
-      publicClient.readContract({ address: config.VAULT, abi: vaultAbi, functionName: 'spotUsdg' }),
-    ]);
-    return minUnitPrice6(spot, policy);
-  } catch (error) {
-    log.roll.warn({ err: describeError(error) }, 'could not read the live premium floor');
-    return null;
-  }
-}
-
-/** Price a listing when no earlier one exists for this cycle: the policy floor plus
- *  PREMIUM_MARGIN_BPS, lifted to the last observed fill if the book has one. The strike is NOT
- *  re-picked — the vault is already written into one option id and that cannot change mid-cycle. */
-async function repriceFromPolicy(snap: ChainSnapshot): Promise<bigint> {
-  const floor = await liveFloorUnit6();
-  if (floor === null) {
-    log.roll.warn({}, 'could not reprice; leaving the inventory unlisted');
-    return 0n;
-  }
-  const lastFill = await lastFilledUnitPrice6([snap.vaultOptionId]);
-  // The same margin and clamp pickWrite applies (see liftedUnitPrice6 in policy.ts): a
-  // self-fill is a cheap way to shout a fake price, so the signal is honoured only to a
-  // multiple of the floor. A zero floor anchors nothing — skip the lift.
-  const { unitPrice6: price } = liftedUnitPrice6(floor, config.PREMIUM_MARGIN_BPS, lastFill);
-  if (price > snap.vaultStrikeUsdg6 && snap.vaultStrikeUsdg6 > 0n) return 0n;
-  return price;
-}
-
 /**
- * Clear the vault's live listing so a replacement can be authorised.
+ * Cancel the vault's live listing so a replacement can be authorised.
  *
- * `cancelListing(components)` is the surgical path and needs the exact components back, which
- * is why they are persisted. When they are not available — a wiped database, a listing another
- * operator authorised — `invalidateAllListings()` bumps the Seaport counter and kills
- * everything at once. That is the guardian's tool and it works with no order data at all.
+ * `cancelListing(components)` needs the exact components back, which is why they are persisted.
+ * When they are not available `invalidateAllListings()` bumps the Seaport counter and kills
+ * everything at once. Either way the vault clears `listingHash` in the same transaction.
  */
-async function clearVaultListing(snap: ChainSnapshot, why: string): Promise<void> {
-  const row = store.getListing(snap.listingHash);
-  log.roll.warn({ listingHash: snap.listingHash, why }, 'clearing the vault listing');
+async function cancelLiveListing(snap: ChainSnapshot, orderHash: string, why: string): Promise<boolean> {
+  const row = store.getListing(orderHash);
+  log.roll.warn({ listingHash: orderHash, why }, 'cancelling the vault listing');
 
   if (row) {
     const components = componentsFromJson(JSON.parse(row.components_json) as OrderComponentsJson);
@@ -1653,33 +1778,30 @@ async function clearVaultListing(snap: ChainSnapshot, why: string): Promise<void
       }),
     );
     if (sim) {
-      const receipt = await sendAndConfirm('cancelListing', snap.vaultCycleNumber, () =>
-        walletClient.writeContract(sim.request),
-      );
+      const receipt = await sendAndConfirm('cancelListing', snap.vaultCycleNumber, () => walletClient.writeContract(sim.request));
       if (receipt) {
-        store.updateListing(row.order_hash, { status: 'cancelled', cancel_tx: receipt.transactionHash });
-        await recordCancellation(row.order_hash);
-        return;
+        const status = await readOrderStatus(orderHash as Hex).catch(() => null);
+        store.updateListing(row.order_hash, {
+          status: status?.isFullyFilled ? 'filled' : 'cancelled',
+          cancel_tx: receipt.transactionHash,
+          seaport_total_filled: status ? status.totalFilled.toString() : row.seaport_total_filled,
+          seaport_total_size: status ? status.totalSize.toString() : row.seaport_total_size,
+          seaport_cancelled: 1,
+        });
+        return true;
       }
     }
   }
 
   const sim = await guardedSimulate('invalidateAllListings', () =>
-    publicClient.simulateContract({
-      address: config.VAULT,
-      abi: vaultAbi,
-      functionName: 'invalidateAllListings',
-      account,
-    }),
+    publicClient.simulateContract({ address: config.VAULT, abi: vaultAbi, functionName: 'invalidateAllListings', account }),
   );
-  if (!sim) return;
-  const receipt = await sendAndConfirm('invalidateAllListings', snap.vaultCycleNumber, () =>
-    walletClient.writeContract(sim.request),
-  );
+  if (!sim) return false;
+  const receipt = await sendAndConfirm('invalidateAllListings', snap.vaultCycleNumber, () => walletClient.writeContract(sim.request));
   if (receipt && row) {
     store.updateListing(row.order_hash, { status: 'cancelled', cancel_tx: receipt.transactionHash });
-    await recordCancellation(row.order_hash);
   }
+  return receipt !== null;
 }
 
 /*//////////////////////////////////////////////////////////////
@@ -1701,16 +1823,21 @@ async function doLockBook(snap: ChainSnapshot): Promise<void> {
   backfillOpenTx(snap.vaultCycleNumber);
   store.updateCycle(snap.vaultCycleNumber, {
     status: 'locked',
+    contracts: Number(snap.contractsWritten),
     lock_tx: receipt.transactionHash,
     locked_at: Date.now(),
   });
-  // Every still-live listing for this cycle, not just the last one: `lockBook` invalidates
-  // them all, and an earlier relist left unretired would keep being offered from /orders.
+  // Every still-live listing for this cycle: `lockBook` invalidates them all, and a row left
+  // unretired would keep being offered from /orders.
   for (const live of store.liveListingsForCycle(snap.vaultCycleNumber)) {
-    store.updateListing(live.order_hash, { status: 'expired' });
-    await recordCancellation(live.order_hash);
+    const status = await readOrderStatus(live.order_hash as Hex).catch(() => null);
+    store.updateListing(live.order_hash, {
+      status: status?.isFullyFilled ? 'filled' : 'expired',
+      seaport_total_filled: status ? status.totalFilled.toString() : live.seaport_total_filled,
+      seaport_total_size: status ? status.totalSize.toString() : live.seaport_total_size,
+    });
   }
-  log.roll.info({ cycleNumber: snap.vaultCycleNumber }, 'book locked');
+  log.roll.info({ cycleNumber: snap.vaultCycleNumber, sold: snap.contractsWritten.toString() }, 'book locked');
 }
 
 async function onExercisable(snap: ChainSnapshot): Promise<void> {
@@ -1728,16 +1855,16 @@ async function onExercisable(snap: ChainSnapshot): Promise<void> {
  * Redeem the claim, harvest, settle the queue, return to Idle — one transaction.
  *
  * Callable by the keeper from expiry and by ANYONE an hour later. That is the promise the
- * product makes: depositors are never trapped behind a dead hot key.
+ * product makes: depositors are never trapped behind a dead hot key. A redeem the token issuers
+ * refuse (USDG paused/frozen, NVDA blocklist) does not fail the close: the vault reaches Idle
+ * with the claim STRANDED (ClaimStranded in the receipt), and handleStranded takes it from there.
  */
 async function doRollClose(snap: ChainSnapshot): Promise<void> {
   // MUST be read before the transaction. `rollClose` redeems the claim, which zeroes
   // `claimKey` and makes Valorem's `claim()` revert `TokenNotFound` from then on — so the
   // same read taken afterwards answers 0 and every assigned week would be published as
-  // unassigned. The vault has the identical comment at Vault.rollClose for the identical
-  // reason; it also emits the number in `RollClose`, which is what gets published. This read is
-  // the fallback for a receipt without one and the cross-check for a receipt with one — see
-  // resolveContractsAssigned. A failed read is null ("unknown"), never a silent 0.
+  // unassigned. The vault emits the number in `RollClose`, which is what gets published; this
+  // read is the fallback for a receipt without one and the cross-check for a receipt with one.
   const assignedBefore = await contractsAssignedAt(snap);
 
   const sim = await guardedSimulate('rollClose', () =>
@@ -1745,9 +1872,7 @@ async function doRollClose(snap: ChainSnapshot): Promise<void> {
   );
   if (!sim) return;
 
-  const receipt = await sendAndConfirm('rollClose', snap.vaultCycleNumber, () =>
-    walletClient.writeContract(sim.request),
-  );
+  const receipt = await sendAndConfirm('rollClose', snap.vaultCycleNumber, () => walletClient.writeContract(sim.request));
   if (!receipt) return;
 
   const harvest = await harvestForCycle(snap.vaultCycleNumber, receipt);
@@ -1762,34 +1887,27 @@ async function doRollClose(snap: ChainSnapshot): Promise<void> {
   }
   if (resolved.mismatch) {
     log.roll.warn(
-      {
-        cycleNumber: snap.vaultCycleNumber,
-        fromEvent: String(resolved.fromEvent),
-        fromClaim: String(resolved.fromClaim),
-        tx: receipt.transactionHash,
-      },
+      { cycleNumber: snap.vaultCycleNumber, fromEvent: String(resolved.fromEvent), fromClaim: String(resolved.fromClaim), tx: receipt.transactionHash },
       'the RollClose count and the pre-close Valorem claim read disagree; the event is published',
     );
   }
   const assigned = resolved.assigned;
-  // The amounts ride in the same RollClose log as the count. No log (the claim-preread and
-  // unknown branches above) means unknown: stored NULL and published without a split, never 0.
   const closed = decodeRollClose(receipt);
+  const stranded = decodeClaimStranded(receipt);
 
   // Whatever was still live is dead now: `rollClose` bumps the Seaport counter, which makes
   // the order unfillable without ever setting `isCancelled`, so nothing else would retire
-  // these rows and /orders would keep offering a buyer an order Seaport now rejects. Tell the
-  // book too — the same best-effort recordCancellation doLockBook sends — or Overcall's row
-  // lingers on the book until their lazy expiry sweep.
+  // these rows and /orders would keep offering a buyer an order Seaport now rejects.
   for (const live of store.liveListingsForCycle(snap.vaultCycleNumber)) {
     store.updateListing(live.order_hash, { status: 'expired' });
-    await recordCancellation(live.order_hash);
   }
 
-  store.ensureCycle(snap.vaultCycleNumber, 'closed');
+  const status = stranded ? 'stranded' : 'closed';
+  store.ensureCycle(snap.vaultCycleNumber, status);
   backfillOpenTx(snap.vaultCycleNumber);
   store.updateCycle(snap.vaultCycleNumber, {
-    status: 'closed',
+    status,
+    contracts: Number(snap.contractsWritten),
     roll_close_tx: receipt.transactionHash,
     closed_at: Date.now(),
     gross_usdg6: harvest.gross.toString(),
@@ -1798,36 +1916,41 @@ async function doRollClose(snap: ChainSnapshot): Promise<void> {
     contracts_assigned: assigned,
     assets_returned: closed === null ? null : closed.assetsReturned.toString(),
     usdg_from_assignment: closed === null ? null : closed.usdgFromAssignment.toString(),
+    strand_gen: stranded ? stranded.gen.toString() : null,
   });
 
-  const gross = harvest.gross;
   const summary: RollCloseSummary = {
     cycleNumber: snap.vaultCycleNumber,
-    gross,
+    gross: harvest.gross,
     fee: harvest.fee,
     net: harvest.net,
     usdgFromAssignment: closed?.usdgFromAssignment ?? null,
     assetsReturned: closed?.assetsReturned ?? null,
     contractsAssigned: assigned,
     witnessedLive: true,
+    stranded: stranded !== null,
   };
   await alert(
     'roll_close',
     rollCloseMessage(summary),
     {
       ...rollCloseAlertData(summary),
+      contractsSold: snap.contractsWritten.toString(),
       contractsAssignedSource: resolved.source,
       contractsAssignedFromClaim: resolved.fromClaim === null ? null : Number(resolved.fromClaim),
       tx: receipt.transactionHash,
     },
     { force: true },
   );
+  if (stranded) await alertStranded(snap.vaultCycleNumber, stranded.gen, stranded.claimKey, receipt.transactionHash);
   log.roll.info(
     {
       cycleNumber: snap.vaultCycleNumber,
-      grossUsdg6: gross.toString(),
+      grossUsdg6: harvest.gross.toString(),
+      sold: snap.contractsWritten.toString(),
       contractsAssigned: assigned,
       contractsAssignedSource: resolved.source,
+      stranded: stranded !== null,
     },
     'cycle closed',
   );
@@ -1863,6 +1986,14 @@ export function decodeRollClose(receipt: TransactionReceipt): RollCloseAmounts |
   };
 }
 
+/** The vault's `ClaimStranded` in a rollClose receipt, or null when the claim redeemed. */
+export function decodeClaimStranded(receipt: TransactionReceipt): { cycleNumber: number; claimKey: bigint; gen: bigint } | null {
+  const events = parseEventLogs({ abi: vaultAbi, eventName: 'ClaimStranded', logs: receipt.logs });
+  const found = events.find((event) => event.address.toLowerCase() === config.VAULT.toLowerCase());
+  if (!found) return null;
+  return { cycleNumber: Number(found.args.cycleNumber), claimKey: found.args.claimKey, gen: found.args.gen };
+}
+
 /** Everything the `roll_close` alert says, from either close path. */
 export interface RollCloseSummary {
   cycleNumber: number;
@@ -1877,24 +2008,26 @@ export interface RollCloseSummary {
   contractsAssigned: number;
   /** false for a close reconstructed from logs at boot. */
   witnessedLive: boolean;
+  /** true when the close left the claim stranded (zero legs reported; the retry pays them). */
+  stranded?: boolean;
 }
 
 const UNWITNESSED_SUFFIX = ' The close ran without this keeper witnessing it; reconstructed from chain logs.';
+const STRANDED_SUFFIX = ' The claim could NOT be redeemed and is stranded: its legs are paid by retryStrandedClaim.';
 
 /**
  * The `roll_close` message. Pure; roll.test.ts pins every wording.
  *
  * On an assigned week the gross includes the strike proceeds, which are returned principal and
  * carry no fee, so the message names premium and strike proceeds separately instead of calling
- * the whole gross "harvested" (K-21):
+ * the whole gross "harvested":
  *   cycle 3 closed: premium 19.079259 USDG (fee 0.953962), strike proceeds 2025 USDG from 9
  *   contracts assigned; 2043.125297 USDG to depositors.
- * Unfilled and unassigned weeks keep their original wording. An assignment whose proceeds are
- * unknown (no RollClose from the vault — unreachable with the deployed bytecode) says so rather
- * than calling the gross premium.
+ * Unfilled and unassigned weeks keep their wording. An assignment whose proceeds are unknown
+ * says so rather than calling the gross premium. A stranded close says so on the end.
  */
 export function rollCloseMessage(s: RollCloseSummary): string {
-  const suffix = s.witnessedLive ? '' : UNWITNESSED_SUFFIX;
+  const suffix = (s.stranded ? STRANDED_SUFFIX : '') + (s.witnessedLive ? '' : UNWITNESSED_SUFFIX);
   if (s.gross === 0n) return `cycle ${s.cycleNumber} closed unfilled: 0 USDG harvested.${suffix}`;
   const { premium, strikeProceeds } = splitGross(s.gross, s.usdgFromAssignment);
   if (premium !== null && strikeProceeds !== null && strikeProceeds > 0n) {
@@ -1934,6 +2067,7 @@ export function rollCloseAlertData(s: RollCloseSummary): Record<string, unknown>
     strikeProceedsUsdg: strikeProceeds === null ? null : formatUsdg(strikeProceeds),
     assetsReturned: s.assetsReturned === null ? null : s.assetsReturned.toString(),
     contractsAssigned: s.contractsAssigned,
+    stranded: s.stranded === true,
   };
 }
 
@@ -1954,16 +2088,14 @@ export interface ContractsAssignedResolution {
 /**
  * Which assignment count to publish for the cycle, and where it came from.
  *
- * The vault reads `contractsAssigned()` immediately before `_redeemClaim` and emits it in
- * `RollClose` (Vault.sol:797-801, unconditionally), so with the deployed bytecode the event is
- * always in the receipt and is the number published. An event count of 0 is a real unfilled or
- * out-of-the-money week, never a reason to fall through. The keeper's own pre-close read stands
- * in only when the receipt carries no `RollClose` from the vault (a receipt decoded against a
- * mismatched ABI) and is a cross-check when it does: both come from the same Valorem claim across
- * a window in which no exercise can land — the exercise window closes at expiry and rollClose is
- * only sent from expiry — so a disagreement is a keeper or vault defect, not a race.
- *
- * Pure. roll.test.ts pins every branch; dryrun.ts drives both on a real assigned receipt.
+ * The vault reads `contractsAssigned()` immediately before `_tryRedeemClaim` and emits it in
+ * `RollClose` unconditionally, so with the deployed bytecode the event is always in the receipt
+ * and is the number published. An event count of 0 is a real unfilled or out-of-the-money week,
+ * never a reason to fall through. The keeper's own pre-close read stands in only when the
+ * receipt carries no `RollClose` from the vault (a receipt decoded against a mismatched ABI) and
+ * is a cross-check when it does: both come from the same Valorem claim across a window in which
+ * no exercise can land — the exercise window closes at expiry and rollClose is only sent from
+ * expiry — so a disagreement is a keeper or vault defect, not a race.
  */
 export function resolveContractsAssigned(
   receipt: TransactionReceipt,
@@ -1986,7 +2118,7 @@ export function resolveContractsAssigned(
 }
 
 /**
- * The WHOLE week's harvest, not just the slice that happened to land in the rollClose receipt.
+ * The WHOLE week's harvest, not just the slice that happened to land in one receipt.
  *
  * WHY THIS IS NOT JUST `decodeHarvest(receipt)`: the vault calls `_checkpointHarvest()` inside
  * `deposit()` and `mint()`, and deposits are open during `Listed`. So a buyer fills on Tuesday,
@@ -1994,8 +2126,8 @@ export function resolveContractsAssigned(
  * `Harvest(cycle, gross, fee, net)` right then — and Friday's `rollClose` receipt carries
  * `Harvest(cycle, 0, 0, 0)` because there is nothing left to sweep. Reading only the receipt
  * would record a SOLD week as "unfilled, 0", which is precisely the number the product promises
- * to publish honestly. Every Harvest is tagged with the indexed cycle number, so summing the
- * cycle's logs from the rollOpen block to the rollClose block is exact.
+ * to publish honestly. Every Harvest is tagged with the indexed cycle number (a stranded cycle's
+ * retry included), so summing the cycle's logs from the rollOpen block to this receipt is exact.
  *
  * Log queries go over `logClient`, pinned to the primary archive RPC — the backup rejects
  * archive ranges. If the range cannot be resolved or the query fails, fall back to the receipt:
@@ -2014,9 +2146,7 @@ async function harvestForCycle(
     log.roll.warn({ cycleNumber, err: describeError(error) }, 'could not resolve the rollOpen block');
   }
   if (openBlock === null) {
-    // No rollOpen block anywhere: an adopted cycle whose transaction predates this database,
-    // and the chain query failed too. The receipt is all we can honestly claim.
-    log.roll.warn({ cycleNumber }, 'no rollOpen block on record; harvest read from the rollClose receipt alone');
+    log.roll.warn({ cycleNumber }, 'no rollOpen block on record; harvest read from the receipt alone');
     return fromReceipt;
   }
 
@@ -2039,14 +2169,14 @@ async function harvestForCycle(
     if (logs.length > 1) {
       log.roll.info(
         { cycleNumber, harvestEvents: logs.length, grossUsdg6: gross.toString() },
-        'summed several Harvest events for this cycle (a deposit checkpointed the premium early)',
+        'summed several Harvest events for this cycle (a deposit checkpointed the premium early, or a stranded claim was recovered)',
       );
     }
     return { gross, fee, net };
   } catch (error) {
     log.roll.warn(
       { cycleNumber, err: describeError(error) },
-      'could not read the cycle Harvest logs; falling back to the rollClose receipt',
+      'could not read the cycle Harvest logs; falling back to the receipt',
     );
     return fromReceipt;
   }
@@ -2054,15 +2184,15 @@ async function harvestForCycle(
 
 /**
  * Contracts assigned against the vault's open claim, read from Valorem: the keeper's twin of
- * ValoremLib.contractsAssigned (ValoremLib.sol:146-151), which is what `vault.contractsAssigned()`
- * returns. `claim().amountExercised` is a 1e18-SCALED SCALAR, not a contract count, so it is
- * divided back down; getting that wrong reports a 9-contract assignment as 9e18. A zero
- * `claimKey` is "nothing written this cycle", answered without a read.
+ * ValoremLib.contractsAssigned, which is what `vault.contractsAssigned()` returns.
+ * `claim().amountExercised` is a 1e18-SCALED SCALAR, not a contract count, so it is divided back
+ * down; getting that wrong reports a 9-contract assignment as 9e18. A zero `claimKey` is
+ * "nothing sold this cycle", answered without a read.
  *
- * Call this only BEFORE `rollClose`: `_redeemClaim` zeroes `claimKey` (AdapterValorem.sol:148)
- * and Valorem reverts `TokenNotFound` for the burned claim from then on. Where the vault's
- * library answers 0 to a revert (a view must not revert), the keeper answers null — "unknown" —
- * and logs it, so a failed read can never publish an assigned week as unassigned by accident.
+ * Call this only BEFORE `rollClose`: a successful redeem zeroes `claimKey` and Valorem reverts
+ * `TokenNotFound` for the burned claim from then on. Where the vault's library answers 0 to a
+ * revert (a view must not revert), the keeper answers null — "unknown" — and logs it, so a
+ * failed read can never publish an assigned week as unassigned by accident.
  */
 export async function contractsAssignedAt(snap: Pick<ChainSnapshot, 'vaultClaimKey'>): Promise<bigint | null> {
   if (snap.vaultClaimKey === 0n) return 0n;
@@ -2086,6 +2216,14 @@ export async function contractsAssignedAt(snap: Pick<ChainSnapshot, 'vaultClaimK
 /*//////////////////////////////////////////////////////////////
                             HELPERS
 //////////////////////////////////////////////////////////////*/
+
+/** Contracts a listing row has sold, from the Seaport fraction stamped on it. */
+export function listingFilled(row: { contracts: string; seaport_total_filled: string | null; seaport_total_size: string | null }): bigint {
+  return filledContracts(BigInt(row.contracts), {
+    totalFilled: BigInt(row.seaport_total_filled ?? '0'),
+    totalSize: BigInt(row.seaport_total_size ?? '0'),
+  });
+}
 
 /** USDG base units -> a human "123.456789" string. Display only. */
 export function formatUsdg(value: bigint): string {

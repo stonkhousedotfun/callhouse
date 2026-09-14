@@ -1,43 +1,34 @@
 {
   "cycle": 8,
   "status": "unfilled",
-  "wrote": true,
   "filled": false,
   "assigned": false,
-  "registry": {
-    "optionIds": [
-      "64784291936308156455260294574860754954874527136357427096671392398063507079168",
-      "64784291936308156455260294574860754954874527136436655259185656735657051029504"
-    ],
-    "strikeCount": 2,
-    "lotSize": {
-      "raw": "1000000000000000000",
-      "decimals": 18,
-      "formatted": "1"
-    },
+  "stranded": false,
+  "option": {
     "exerciseTimestamp": "1789156800",
     "exerciseAt": "2026-09-11T20:00:00.000Z",
     "expiryTimestamp": "1789160400",
-    "expiryAt": "2026-09-11T21:00:00.000Z",
-    "setAt": "2026-09-04T20:05:00.000Z",
-    "setTx": "0x0000000000000000000000000000000000000000000000000000000000000081"
+    "expiryAt": "2026-09-11T21:00:00.000Z"
   },
   "written": {
     "optionId": "64784291936308156455260294574860754954874527136357427096671392398063507079168",
-    "claimKey": "64784291936308156455260294574860754954874527136357427096671392398063507079169",
+    "claimKey": null,
     "strikeUsdg": {
       "raw": "190000000",
       "decimals": 6,
       "formatted": "190"
     },
-    "contracts": "12",
+    "contracts": "0",
     "collateral": {
-      "raw": "12000000000000000000",
+      "raw": "0",
       "decimals": 18,
-      "formatted": "12"
+      "formatted": "0"
     },
+    "writeCount": 0,
     "openedAt": "2026-09-07T14:35:00.000Z",
-    "txOpen": "0x0000000000000000000000000000000000000000000000000000000000000082"
+    "txOpen": "0x0000000000000000000000000000000000000000000000000000000000000082",
+    "firstWriteAt": null,
+    "lastWriteAt": null
   },
   "listing": {
     "count": 1,
@@ -63,16 +54,6 @@
       "decimals": 6,
       "formatted": "0"
     },
-    "premiumToVault": {
-      "raw": "0",
-      "decimals": 6,
-      "formatted": "0"
-    },
-    "overcallFee": {
-      "raw": "0",
-      "decimals": 6,
-      "formatted": "0"
-    },
     "unitPriceUsdg": {
       "raw": "0",
       "decimals": 6,
@@ -90,15 +71,16 @@
       "formatted": "0"
     },
     "assetsReturned": {
-      "raw": "12000000000000000000",
+      "raw": "0",
       "decimals": 18,
-      "formatted": "12"
+      "formatted": "0"
     },
     "marketExercised": "0",
-    "bucketIndex": "0",
+    "bucketIndex": null,
     "bucketAssigned": "0",
     "closedAt": "2026-09-11T21:00:30.000Z",
-    "txClose": "0x0000000000000000000000000000000000000000000000000000000000000084"
+    "txClose": "0x0000000000000000000000000000000000000000000000000000000000000084",
+    "strand": null
   },
   "harvest": {
     "harvested": true,

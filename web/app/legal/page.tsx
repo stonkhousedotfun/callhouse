@@ -92,7 +92,7 @@ export default function LegalPage() {
         <li>
           {SHARE_TICKER} is a vault share. It represents a pro-rata claim on the {MARKET} Stock
           Tokens the vault holds, plus separately accrued USDG. It is not itself a Stock Token, not a
-          deposit, and not a claim on Callhouse, Overcall, Valorem or any Robinhood entity.
+          deposit, and not a claim on Callhouse, Valorem or any Robinhood entity.
         </li>
         <li>
           There is no protocol token, no points programme and no airdrop attached to this vault.
@@ -125,9 +125,9 @@ export default function LegalPage() {
       <h2>No affiliation</h2>
       <p>
         Callhouse is an independent project. It is not affiliated with, endorsed by, or operated by
-        Robinhood Markets, Inc., Robinhood Assets (Jersey) Limited, Overcall, Valorem, or the issuers
-        of USDG or Seaport. Those names appear here only to identify the third-party contracts and
-        services this vault interacts with.
+        Robinhood Markets, Inc., Robinhood Assets (Jersey) Limited, Valorem, or the issuers of USDG or
+        Seaport. Those names appear here only to identify the third-party contracts and services this
+        vault interacts with.
       </p>
     </div>
   );

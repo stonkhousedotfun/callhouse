@@ -1,6 +1,6 @@
 /**
- * Typed client for the Callhouse indexer (Ponder + Hono, plan §6) and for our own server-side
- * proxy to Overcall's public order book.
+ * Typed client for the Callhouse indexer (Ponder + Hono, plan §6) and for this app's own
+ * server-side order feed (app/api/keeper/orders).
  *
  * Two rules shape this file.
  *
@@ -9,11 +9,11 @@
  *    So every call here fails soft, returns `null`, and the page says "history unavailable"
  *    rather than blanking. /activity additionally falls back to a direct log scan.
  *
- * 2. The indexer's NESTED shape is the contract. `/v1/cycles` groups a week into `registry`,
- *    `written`, `listing`, `fill`, `settlement` and `harvest`, and every money figure inside
- *    them is `{raw, decimals, formatted}` with `raw` in base units. That shape is pinned by the
- *    three files under ops/fixtures/api/: the indexer's own test proves it still emits them and
- *    web/lib/api.test.ts proves this file still reads them. The flat top-level spellings
+ * 2. The indexer's NESTED shape is the contract. `/v1/cycles` groups a week into `written`,
+ *    `listing`, `fill`, `settlement` and `harvest` (plus the cycle's own clock), and every money
+ *    figure inside them is `{raw, decimals, formatted}` with `raw` in base units. That shape is
+ *    pinned by the files under ops/fixtures/api/: the indexer's own test proves it still emits
+ *    them and web/lib/api.test.ts proves this file still reads them. The flat top-level spellings
  *    (`grossUsdg`, `contractsSold`, ...) are a courtesy for a hand-rolled payload and are read
  *    only when the nested group is absent; the indexer does not send them. The readiness audit
  *    found this file reading only the flat keys, so every paying week arrived with every figure
@@ -21,8 +21,15 @@
  *    A bigint is accepted as a string, a number, a bigint or a money object (its `raw`, never
  *    its `formatted`). The tolerance is deliberate: an indexer rename should degrade one figure,
  *    not crash the vault page.
+ *
+ * UNDER WRITE ON FILL the vault writes nothing at rollOpen: `RollOpen.contractsCount` is always 0
+ * and every fill writes exactly what it sold (`CallsWritten` per fill), so contracts written and
+ * contracts sold are one number. `contracts` on a row is that number; `contractsSold` is kept as
+ * a field because the indexer publishes it and older payloads carry it, and the two agree.
  */
 import type { Address, Hex } from "viem";
+
+import type { ListingRow } from "./listing";
 
 const RAW_API_BASE = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:42069";
 export const API_BASE = RAW_API_BASE.replace(/\/+$/, "");
@@ -131,21 +138,21 @@ export type VaultSummary = {
 };
 
 /**
- * One weekly cycle. An UNFILLED week is a first-class row: `contracts` written, `filled` false,
+ * One weekly cycle. An UNFILLED week is a first-class row: a call was armed, `filled` false,
  * every premium field 0. It is the most likely outcome and the product publishes it as such.
  */
 export type CycleRow = {
   cycle: number;
   /**
-   * False for a week the registry opened and the vault sat out (no rung in the OTM band, writes
-   * halted, nothing idle to write against). Such a week is a published outcome, not "unfilled":
-   * "unfilled" says a call was written and nobody bought it, which is not what happened.
-   * The indexer sends it; the log fallback sets it true, since every row there starts from a
-   * vault event.
+   * False for a week the vault sat out (no option type armed: writes halted, a strike outside the
+   * band, a stale feed). Such a week is a published outcome, not "unfilled": "unfilled" says a
+   * call was armed and nobody bought it, which is not what happened. The indexer sends it; the
+   * log fallback sets it true, since every row there starts from a vault event.
    */
   wrote?: boolean;
   optionId?: bigint;
   strikeUsdg?: bigint;
+  /** Contracts written this week. Under write on fill this equals contracts sold. */
   contracts?: bigint;
   contractsSold?: bigint;
   contractsAssigned?: bigint;
@@ -156,6 +163,13 @@ export type CycleRow = {
   closedAt?: number;
   exerciseTs?: number;
   expiryTs?: number;
+  /**
+   * True when `rollClose` could not redeem the week's Valorem claim and left it stranded
+   * (ClaimStranded). The week is closed and its premium harvested; the strike USDG inside the
+   * claim arrives when `retryStrandedClaim` succeeds, through a later Harvest carrying this
+   * cycle's number. False or absent for an ordinary week.
+   */
+  stranded?: boolean;
   // THE WEEK'S USDG, SPLIT (W-21). On an assigned week the vault's harvest sweeps premium AND
   // the strike proceeds from the contracts taken at the strike. The strike proceeds are returned
   // principal, not yield, so every premium figure a page shows — gross, net, per share, "Last
@@ -170,7 +184,7 @@ export type CycleRow = {
 
   /** Everything the harvests swept: premium plus strike proceeds. NOT a premium figure. */
   harvestGrossUsdg?: bigint;
-  /** Premium that reached the vault (after Overcall's 5%), strike proceeds excluded. */
+  /** Premium that reached the vault (what buyers paid: there is no third-party fee leg), strike proceeds excluded. */
   premiumGrossUsdg?: bigint;
   /** The protocol fee. Charged on premium only. */
   feeUsdg?: bigint;
@@ -222,16 +236,18 @@ export type HealthRow = {
 
 /**
  * The statuses under which the indexer considers a week over (indexer/ponder.schema.ts,
- * `cycleStatus`), plus the generic "settled" a hand-rolled payload might use.
+ * `cycleStatus`), plus the generic "settled" a hand-rolled payload might use. A week whose close
+ * stranded its claim is closed too: the harvest ran, the queue settled, only the claim's USDG is
+ * still to come.
  *
  * `idle` is not here because on its own it is ambiguous. The indexer uses it both for the
- * current week before Monday's rollOpen (not over) and for a week the vault sat out (over, and
+ * current week before the next rollOpen (not over) and for a week the vault sat out (over, and
  * a published outcome — the schema calls it "terminal for a skipped week"). Only RollClose ever
  * stamps `closedAt`, so a skipped week never gets one. The two are told apart below by the
- * registry's own clock: an idle week the vault never wrote into is settled once its expiry has
- * passed. Leaving idle out entirely made every skipped week render as "still running" forever.
+ * week's own clock: an idle week the vault never armed is settled once its expiry has passed.
+ * Leaving idle out entirely made every skipped week render as "still running" forever.
  */
-const CLOSED_STATUSES = new Set(["unfilled", "closed", "assigned", "settled"]);
+const CLOSED_STATUSES = new Set(["unfilled", "closed", "assigned", "settled", "stranded"]);
 
 /**
  * One `/v1/cycles` row → one `CycleRow`. Exported for web/lib/api.test.ts, which runs it over
@@ -246,9 +262,11 @@ export function normaliseCycle(input: unknown, nowSeconds: number = Math.floor(D
   const cycle = toNumber(pick(r, "cycle", "cycleNumber", "cycle_number", "number"));
   if (cycle === undefined) return null;
 
-  // The indexer's six groups. On a flat payload each is `{}`, so every `pick` below falls
-  // through to the top-level spelling on its right.
-  const registry = asRecord(r.registry);
+  // The indexer's groups. On a flat payload each is `{}`, so every `pick` below falls through
+  // to the top-level spelling on its right. The week's clock (exercise, expiry) lived under
+  // `registry` before the redesign and is read from a `cycle`/`option` group as well, so either
+  // spelling of the indexer's works.
+  const clock = { ...asRecord(r.registry), ...asRecord(r.option), ...asRecord(r.cycle) };
   const written = asRecord(r.written);
   const listing = asRecord(r.listing);
   const fill = asRecord(r.fill);
@@ -256,14 +274,19 @@ export function normaliseCycle(input: unknown, nowSeconds: number = Math.floor(D
   const harvest = asRecord(r.harvest);
 
   // `harvest.grossUsdg` is the vault's whole USDG take for the week — premium that reached the
-  // vault plus any strike proceeds — as the Harvest events measured it. `fill.premiumGross` is
-  // what buyers paid before Overcall's cut and is deliberately not the figure shown as gross.
+  // vault plus any strike proceeds — as the Harvest events measured it.
   const gross = toBigInt(
     pick(harvest, "grossUsdg") ??
       pick(r, "grossUsdg", "harvestGrossUsdg", "premiumGross", "premium_gross", "premiumGrossUsdg", "gross"),
   );
   const fee = toBigInt(pick(harvest, "fee") ?? pick(r, "feeUsdg", "fee", "protocolFeeUsdg", "premium_fee"));
-  const contractsSold = toBigInt(pick(fill, "contractsSold") ?? pick(r, "contractsSold", "contracts_sold", "sold"));
+  const contractsWritten = toBigInt(
+    pick(written, "contracts") ?? pick(r, "contracts", "contractsWritten", "contracts_written"),
+  );
+  // Written and sold are one figure under write on fill; a payload that carries only one of the
+  // two spellings still yields both.
+  const contractsSold =
+    toBigInt(pick(fill, "contractsSold") ?? pick(r, "contractsSold", "contracts_sold", "sold")) ?? contractsWritten;
   const contractsAssigned = toBigInt(
     pick(settlement, "contractsAssigned") ?? pick(r, "contractsAssigned", "contracts_assigned", "assigned"),
   );
@@ -299,26 +322,33 @@ export function normaliseCycle(input: unknown, nowSeconds: number = Math.floor(D
     ? toBigInt(pick(harvest, "premiumNet"))
     : (minus(credited, strike) ?? minus(premiumGross, fee));
   const status = toStr(pick(r, "status"));
-  const wrote = typeof r.wrote === "boolean" ? r.wrote : undefined;
+  // `wrote` (the pre-redesign name) or `armed`: did the vault open a cycle on an option type.
+  const wroteRaw = pick(r, "wrote", "armed");
+  const wrote = typeof wroteRaw === "boolean" ? wroteRaw : undefined;
+  const strandedRaw = pick(settlement, "stranded") ?? pick(r, "stranded");
+  const stranded = typeof strandedRaw === "boolean" ? strandedRaw : status === "stranded" ? true : undefined;
   const filledAt = toNumber(pick(fill, "firstFillAt") ?? pick(r, "filledAt", "filled_at"));
   const closedAt = toNumber(
     pick(settlement, "closedAt") ?? pick(r, "closedAt", "closed_at", "settledAt", "settled_at"),
   );
   const expiryTs = toNumber(
-    pick(registry, "expiryTimestamp") ?? pick(r, "expiryTs", "expiry_ts", "expiryTimestamp", "expiry_timestamp"),
+    pick(clock, "expiryTimestamp", "expiryTs") ??
+      pick(written, "expiryTimestamp", "expiryTs") ??
+      pick(r, "expiryTs", "expiry_ts", "expiryTimestamp", "expiry_timestamp"),
   );
 
-  // A skipped week. The vault wrote nothing, so nothing can close it; the registry's expiry is
-  // the moment its outcome became final. `wrote` must be the indexer's own false: a flat payload
+  // A skipped week. The vault armed nothing, so nothing can close it; the week's expiry is the
+  // moment its outcome became final. `wrote` must be the indexer's own false: a flat payload
   // that says only `status: "idle"` has not said whether the vault sat the week out, and is
   // left open rather than guessed at.
   const skippedAndOver =
     status === "idle" && wrote === false && expiryTs !== undefined && expiryTs < nowSeconds;
 
   // "Filled" means a buyer paid. The indexer says so itself (`filled` is `contractsSold > 0`
-  // on its side, and Seaport's OrderFulfilled is the only source of truth for that), so its
-  // boolean wins when present. Without it, contracts sold is the fact; and without even that,
-  // USDG having arrived is the best a flat payload can say. A status string alone is a label.
+  // on its side, and Seaport's OrderFulfilled plus the vault's CallsWritten are the only source
+  // of truth for that), so its boolean wins when present. Without it, contracts sold is the
+  // fact; and without even that, USDG having arrived is the best a flat payload can say. A
+  // status string alone is a label.
   const filled =
     typeof r.filled === "boolean"
       ? r.filled
@@ -331,7 +361,7 @@ export function normaliseCycle(input: unknown, nowSeconds: number = Math.floor(D
     wrote,
     optionId: toBigInt(pick(written, "optionId") ?? pick(r, "optionId", "option_id")),
     strikeUsdg: toBigInt(pick(written, "strikeUsdg") ?? pick(r, "strikeUsdg", "strike", "strike_usdg")),
-    contracts: toBigInt(pick(written, "contracts") ?? pick(r, "contracts", "contractsWritten", "contracts_written")),
+    contracts: contractsWritten ?? contractsSold,
     contractsSold,
     contractsAssigned,
     orderHash: toHex(pick(listing, "orderHash") ?? pick(r, "orderHash", "order_hash")),
@@ -341,10 +371,12 @@ export function normaliseCycle(input: unknown, nowSeconds: number = Math.floor(D
     filledAt,
     closedAt,
     exerciseTs: toNumber(
-      pick(registry, "exerciseTimestamp") ??
+      pick(clock, "exerciseTimestamp", "exerciseTs") ??
+        pick(written, "exerciseTimestamp", "exerciseTs") ??
         pick(r, "exerciseTs", "exercise_ts", "exerciseTimestamp", "exercise_timestamp"),
     ),
     expiryTs,
+    stranded,
     harvestGrossUsdg: gross,
     premiumGrossUsdg: premiumGross,
     feeUsdg: fee,
@@ -366,7 +398,7 @@ export function normaliseCycle(input: unknown, nowSeconds: number = Math.floor(D
     status,
     filled,
     // Over when the indexer says so, when a close is on record, or when a skipped week's
-    // registry expiry has passed. An ASSIGNED week has a `closedAt` and a status in the set;
+    // expiry has passed. An ASSIGNED week has a `closedAt` and a status in the set;
     // before this read the nested `closedAt` it fell through to "open".
     settled:
       closedAt !== undefined || (status !== undefined && CLOSED_STATUSES.has(status)) || skippedAndOver,
@@ -458,98 +490,7 @@ export async function fetchHealth(): Promise<HealthRow> {
   }
 }
 
-/* ------------------------------------------------------------------- Overcall order book */
-
-/** A Seaport OrderComponents object exactly as Overcall stores and returns it: decimal strings. */
-export type OrderComponentsJson = {
-  offerer: Address;
-  zone: Address;
-  offer: Array<{
-    itemType: number;
-    token: Address;
-    identifierOrCriteria: string;
-    startAmount: string;
-    endAmount: string;
-  }>;
-  consideration: Array<{
-    itemType: number;
-    token: Address;
-    identifierOrCriteria: string;
-    startAmount: string;
-    endAmount: string;
-    recipient: Address;
-  }>;
-  orderType: number;
-  startTime: string;
-  endTime: string;
-  zoneHash: Hex;
-  salt: string;
-  conduitKey: Hex;
-  counter: string;
-};
-
-/**
- * A row from Overcall's book. Field list confirmed live in ops/recon/R3-overcall-api.md §7.
- * `status` is one of open | partial | filled | cancelled | expired | unfillable.
- */
-export type OvercallListing = {
-  orderHash: Hex;
-  chainId: number;
-  offerer: Address;
-  optionId: string;
-  quantity: string;
-  remaining: string;
-  unitPrice6: string;
-  totalPrice6: string;
-  realisedPremium6?: string;
-  startTime: string;
-  endTime: string;
-  salt: string;
-  counter: string;
-  status: string;
-  filledNumerator?: string;
-  filledDenominator?: string;
-  components: OrderComponentsJson;
-  signature: Hex;
-  createdAt?: string;
-  checkedAt?: string;
-};
-
-export type OvercallBook = {
-  listings: OvercallListing[];
-  /** Set when the proxy could not reach Overcall. The page still shows our on-chain payload. */
-  error?: string;
-};
-
-/**
- * Read Overcall's book through our own route handler.
- *
- * WHY a proxy: overcall.finance returns no Access-Control-Allow-Origin (recon R3 §5.2), so a
- * browser on our domain cannot call it directly. The handler in app/api/overcall/listings is a
- * read-only passthrough; nothing in this app ever POSTs an order from the browser.
- */
-export async function fetchOvercallBook(params: {
-  offerer?: Address;
-  optionId?: string;
-  status?: string;
-  limit?: number;
-}): Promise<OvercallBook> {
-  const q = new URLSearchParams();
-  if (params.offerer) q.set("offerer", params.offerer);
-  if (params.optionId) q.set("optionId", params.optionId);
-  if (params.status) q.set("status", params.status);
-  if (params.limit !== undefined) q.set("limit", String(params.limit));
-  try {
-    const payload = asRecord(await getJson(`/api/overcall/listings?${q.toString()}`, 10_000));
-    const listings = Array.isArray(payload.listings) ? (payload.listings as OvercallListing[]) : [];
-    const error = typeof payload.error === "string" ? payload.error : undefined;
-    return { listings, error };
-  } catch (err) {
-    return { listings: [], error: err instanceof Error ? err.message : "unreachable" };
-  }
-}
-
-/* ------------------------------------------------------------------- the keeper fallback */
+/* ---------------------------------------------------------------------- the order feed */
 
 export type KeeperOrderIssue = { orderHash: Hex | null; reasons: string[] };
 
@@ -557,10 +498,10 @@ export type KeeperOrderIssue = { orderHash: Hex | null; reasons: string[] };
 export type KeeperClosedState = "notCurrent" | "soldOut" | "cancelled" | "notListed" | "expired";
 
 export type KeeperOrderBook = {
-  /** False when this deployment has no KEEPER_ORDERS_URL. The page then shows no fallback at all. */
+  /** False when this deployment has no KEEPER_ORDERS_URL. The page then says the feed is not wired. */
   configured: boolean;
-  /** Orders the server checked against the chain, as book rows. Still re-checked by OrderPayload. */
-  listings: OvercallListing[];
+  /** Orders the server checked against the chain, as listing rows. Still re-checked by OrderPayload. */
+  listings: ListingRow[];
   /** Integrity failures: the keeper served something under the authorised hash that is not that
    *  order, or that does not parse. Never fillable, and the one outcome that is an alarm. */
   rejected: KeeperOrderIssue[];
@@ -591,8 +532,9 @@ function keeperIssues(value: unknown): KeeperOrderIssue[] {
 
 /**
  * Read the vault's listing as the keeper serves it, through app/api/keeper/orders, which checks
- * every order against the chain before returning it (lib/keeperOrders.ts). The cycle page calls
- * this only when Overcall's book has no verified listing for the vault.
+ * every order against the chain before returning it (lib/keeperOrders.ts). This is the fill
+ * page's only source of an order's parameters: the on-chain slot carries the hash, the count,
+ * the gross and the option id, but not the salt, times or counter a fill must send.
  *
  * A 503 with `configured: false` is the "not set up here" answer, not an error. Every other
  * failure is reported as `error` in the route's own words, or in this function's: the browser's
@@ -606,7 +548,7 @@ export async function fetchKeeperOrderBook(): Promise<KeeperOrderBook> {
     rejected: [],
     closed: [],
     unchecked: [],
-    error: "The fallback route did not answer.",
+    error: "The order feed route did not answer.",
   };
   let res: Response;
   try {
@@ -622,10 +564,10 @@ export async function fetchKeeperOrderBook(): Promise<KeeperOrderBook> {
   try {
     payload = asRecord(await res.json());
   } catch {
-    return { ...unanswered, error: `The fallback route answered HTTP ${res.status}.` };
+    return { ...unanswered, error: `The order feed route answered HTTP ${res.status}.` };
   }
   const configured = payload.configured !== false;
-  const listings = Array.isArray(payload.orders) ? (payload.orders as OvercallListing[]).slice(0, KEEPER_LIST_CAP) : [];
+  const listings = Array.isArray(payload.orders) ? (payload.orders as ListingRow[]).slice(0, KEEPER_LIST_CAP) : [];
   const closed = Array.isArray(payload.closed)
     ? payload.closed.slice(0, KEEPER_LIST_CAP).flatMap((r) => {
         const row = asRecord(r);
@@ -634,7 +576,7 @@ export async function fetchKeeperOrderBook(): Promise<KeeperOrderBook> {
       })
     : [];
   const error =
-    typeof payload.error === "string" ? payload.error : res.ok ? undefined : `The fallback route answered HTTP ${res.status}.`;
+    typeof payload.error === "string" ? payload.error : res.ok ? undefined : `The order feed route answered HTTP ${res.status}.`;
   return {
     configured,
     listings: res.ok ? listings : [],

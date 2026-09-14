@@ -2,11 +2,10 @@ import { getAddress, isAddress, type Address } from "viem";
 
 import { valoremClearAbi } from "./abi/clear";
 import { erc20Abi, stockTokenAbi } from "./abi/erc20";
-import { overcallRegistryAbi } from "./abi/registry";
 import { seaportAbi } from "./abi/seaport";
 import { vaultAbi } from "./abi/vault";
 
-export { valoremClearAbi, erc20Abi, stockTokenAbi, overcallRegistryAbi, seaportAbi, vaultAbi };
+export { valoremClearAbi, erc20Abi, stockTokenAbi, seaportAbi, vaultAbi };
 
 /**
  * Addresses.
@@ -18,6 +17,11 @@ export { valoremClearAbi, erc20Abi, stockTokenAbi, overcallRegistryAbi, seaportA
  *
  * The vault has NO default. It does not exist until we deploy it, and inventing an address
  * would be worse than rendering "not configured".
+ *
+ * There is no registry and no third-party fee recipient any more. The vault reads the weekly
+ * option type from the clearinghouse itself, numbers its own cycles, and every listing pays ONE
+ * USDG leg to the vault (contracts/README.md "No registry"). The clearinghouse is a deploy-time
+ * choice: `vault.clear()` is the authority, and NEXT_PUBLIC_CLEARINGHOUSE must agree with it.
  */
 function fromEnv(name: string, value: string | undefined, fallback?: Address): Address | undefined {
   const raw = value?.trim();
@@ -49,53 +53,47 @@ export const USDG = fromEnv(
 )!;
 
 /**
- * OvercallRegistry for the NVDA market.
- *
- * TRAP: Overcall's own frontend config carries a top-level `registry` key of 0x65dD4079… —
- * that is the JUGGERNAUT market, not NVDA. There are 11 per-market registries. This one, and
- * only this one, is NVDA's. Every countdown, every rung and every write gate in this app is
- * bound to it rather than to a wall clock.
+ * The Valorem clearinghouse the vault was constructed with. Holds the option ERC-1155s and the
+ * vault's claim NFT; the vault reads each week's option tuple (strike, exercise, expiry, lot)
+ * from it. The default is the upstream ValoremOptionsClearinghouse build on 4663 (solc 0.8.16);
+ * a deploy on our own Clear (contracts/script/DeployClear.s.sol) overrides it.
  */
-export const REGISTRY = fromEnv(
-  "NEXT_PUBLIC_REGISTRY",
-  process.env.NEXT_PUBLIC_REGISTRY,
-  getAddress("0x8E973cE1A6884E28Ad3E377d5f670Bc0b463f4EA"),
-)!;
-
-/** ValoremOptionsClearinghouse — exact upstream build, solc 0.8.16. Holds the option ERC-1155s. */
 export const CLEARINGHOUSE = fromEnv(
   "NEXT_PUBLIC_CLEARINGHOUSE",
   process.env.NEXT_PUBLIC_CLEARINGHOUSE,
   getAddress("0x9a7b40e5c1dB1Af822ef091c990b58b02C78C0C0"),
 )!;
 
-/** Seaport 1.6. The vault is the offerer; Seaport pulls directly (conduitKey is zero). */
+/** Seaport 1.6. The vault is the offerer AND the zone of its own listing; Seaport pulls directly. */
 export const SEAPORT = fromEnv(
   "NEXT_PUBLIC_SEAPORT",
   process.env.NEXT_PUBLIC_SEAPORT,
   getAddress("0x0000000000000068F116a894984e2DB1123eB395"),
 )!;
 
-/** Overcall's 5% premium fee recipient — consideration[1] on every listing. */
-export const OVERCALL_FEE_RECIPIENT = getAddress("0xdAe7e82A2E7D566C67E87C164B05a1C560190782");
-
-/** Seaport's zero conduit key. Overcall uses no conduit: approvals go to Seaport itself. */
+/**
+ * Seaport's zero conduit key. The vault is deployed with `conduitKey == 0` (approvals go to
+ * Seaport itself), and `vault.conduitKey()` is read live to confirm it before any fill.
+ */
 export const ZERO_CONDUIT_KEY = "0x0000000000000000000000000000000000000000000000000000000000000000" as const;
 export const ZERO_HASH = ZERO_CONDUIT_KEY;
 export const ZERO_ADDRESS = "0x0000000000000000000000000000000000000000" as const;
-
-/** Overcall's premium fee, in basis points. Fixed by their order shape, not by us. */
-export const OVERCALL_FEE_BPS = 500n;
 
 /** Decimals. USDG is 6, the Stock Token is 18, and vault shares follow the asset at 18. */
 export const USDG_DECIMALS = 6;
 export const ASSET_DECIMALS = 18;
 export const SHARE_DECIMALS = 18;
 
-/** One contract = one lot = 1.0 Stock Token. registry.lotSize() is read live to confirm it. */
+/**
+ * One contract = one lot = 1.0 Stock Token. Compiled into the vault (Policy.LOT); the arm gate
+ * refuses any option type whose `underlyingAmount` differs, so this is a fact, not a default.
+ */
 export const LOT_SIZE = 10n ** 18n;
 
-/** Market label used in URLs, the Overcall `market` query param and page copy. */
+/** At most this many `approveListing` calls per cycle (Policy.MAX_LISTINGS_PER_CYCLE). */
+export const MAX_LISTINGS_PER_CYCLE = 3;
+
+/** Market label used in URLs and page copy. */
 export const MARKET = "NVDA";
 export const SHARE_TICKER = "cNVDA";
 

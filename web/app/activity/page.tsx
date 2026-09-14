@@ -24,11 +24,17 @@ function sumKnown(rows: CycleRow[], figure: (row: CycleRow) => bigint | undefine
  * filtered-out result. On a thin book that is the most likely week, and the product's promise is
  * to publish it as plainly as a paid one.
  *
+ * The "Sold" column is the week's `CallsWritten` summed: under write on fill every contract is
+ * written inside the fill that bought it, so written and sold are one number and there is no
+ * "wrote 12, sold 3" row any more.
+ *
  * The USDG figures are summed per cycle, not read from a single event. A mid-week deposit
  * checkpoints the harvest so a late depositor cannot claim premium earned before they arrived,
  * which means one cycle can emit several Harvest events under the same cycle number. Only the
  * terminal one — emitted inside the keeper's rollClose — closes the week; the checkpoints still
- * move real money, so both kinds accumulate onto the same row.
+ * move real money, so both kinds accumulate onto the same row. A close whose Valorem redeem
+ * reverted strands the claim: the row is closed and marked, and the strike USDG arrives through a
+ * later Harvest when the claim is retried.
  *
  * Premium and strike proceeds are separate columns (W-21). On an assigned week the closing
  * harvest also sweeps the USDG the assigned collateral was sold for at the strike. That is
@@ -111,9 +117,9 @@ export default function ActivityPage() {
                 <th>Cycle</th>
                 <th>Closed</th>
                 <th>Strike</th>
-                <th title="contracts written">Wrote</th>
+                <th title="contracts sold, each written inside the fill that bought it (the sum of the week's CallsWritten)">Sold</th>
                 <th>Assigned</th>
-                <th title="premium received by the vault in USDG, strike proceeds excluded">Premium</th>
+                <th title="premium buyers paid the vault in USDG, strike proceeds excluded">Premium</th>
                 <th>Fee</th>
                 <th title="premium after the protocol fee, strike proceeds excluded">Net premium</th>
                 <th title="Strike proceeds (assignment): USDG received for collateral taken at the strike. Returned principal, not premium.">
@@ -149,30 +155,35 @@ export default function ActivityPage() {
                   // Kept short so the 13-column table still fits a laptop without a side scroll.
                   // The long form lives in the cell's title attribute.
                   const assigned = row.contractsAssigned ?? 0n;
+                  const sold = row.contractsSold ?? row.contracts ?? 0n;
                   const result = !row.settled
                     ? "open"
-                    : !row.filled
-                      ? assigned > 0n
-                        ? `unfilled, assigned ${assigned.toString()}`
-                        : "unfilled, 0"
-                      : assigned > 0n
-                        ? `assigned ${assigned.toString()}`
-                        : "filled";
+                    : row.stranded
+                      ? "closed, claim stranded"
+                      : !row.filled
+                        ? assigned > 0n
+                          ? `unfilled, assigned ${assigned.toString()}`
+                          : "unfilled, 0"
+                        : assigned > 0n
+                          ? `assigned ${assigned.toString()}`
+                          : "filled";
                   const resultLong = !row.settled
                     ? "the week is still running"
-                    : !row.filled
-                      ? assigned > 0n
-                        ? `nobody bought the vault's call, so it earned no premium, but Valorem assigned ${assigned.toString()} of its contracts (assignment is spread across every writer of the series); that collateral left at the strike and came back as the strike proceeds`
-                        : "nobody bought the call; the week earned nothing"
-                      : assigned > 0n
-                        ? `${assigned.toString()} contracts were assigned to the vault; that collateral left at the strike and came back as the strike proceeds`
-                        : "a buyer filled the listing and the call expired out of the money";
+                    : row.stranded
+                      ? "the week closed and its premium was harvested, but Valorem could not return the claim's collateral (a USDG pause or freeze, or a Stock Token blocklist); the strike USDG arrives when the claim is retried"
+                      : !row.filled
+                        ? assigned > 0n
+                          ? `nobody bought the vault's call, so it earned no premium, but Valorem assigned ${assigned.toString()} of its contracts; that collateral left at the strike and came back as the strike proceeds`
+                          : "nobody bought the call; nothing was written and the week earned nothing"
+                        : assigned > 0n
+                          ? `${assigned.toString()} of the ${sold.toString()} contracts sold were assigned to the vault; that collateral left at the strike and came back as the strike proceeds`
+                          : `buyers filled ${sold.toString()} contracts and the calls expired out of the money`;
                   return (
                     <tr key={row.cycle}>
                       <td>#{row.cycle}</td>
                       <td>{fmtUtcDate(row.closedAt)}</td>
                       <td>{row.strikeUsdg === undefined ? "—" : fmtUsdg(row.strikeUsdg)}</td>
-                      <td>{(row.contracts ?? 0n).toString()}</td>
+                      <td>{sold.toString()}</td>
                       <td>{assigned.toString()}</td>
                       <td>{fmtUsdg(row.premiumGrossUsdg ?? (row.filled ? undefined : 0n))}</td>
                       <td>{fmtUsdg(row.feeUsdg ?? 0n)}</td>
@@ -213,6 +224,10 @@ export default function ActivityPage() {
           taken at the strike. It is credited to holders with the premium, but it is returned
           collateral, not earnings, so it is left out of the premium, net premium, per-share and
           Net / TVL columns.
+        </p>
+        <p className="tiny faint" style={{ marginTop: 6, marginBottom: 0 }}>
+          &ldquo;Sold&rdquo; is also the number written: each fill writes exactly the contracts it buys, so the
+          vault is never assigned on more than it sold.
         </p>
       </div>
     </>

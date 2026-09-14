@@ -3,10 +3,10 @@
 /**
  * Toasts, and the one runner every form sends its transactions through.
  *
- * A revert is surfaced by name on purpose: the vault ABI carries every custom error, so viem
- * decodes `UseQueue()` or `DepositCapExceeded(...)` instead of leaving a bare selector on
- * screen. Those names are the product rules, and EXPLAINED below translates the ones a
- * depositor can actually hit.
+ * A revert is surfaced by name on purpose: the vault ABI carries every custom error, including
+ * the ones raised inside its linked libraries, so viem decodes `UseQueue()` or
+ * `PremiumBelowFloorAtFill(...)` instead of leaving a bare selector on screen. Those names are the
+ * product rules, and lib/revert.ts translates the ones a depositor or a buyer can actually hit.
  */
 import { createContext, useCallback, useContext, useMemo, useRef, useState } from "react";
 import { BaseError, ContractFunctionRevertedError, UserRejectedRequestError, type Hex } from "viem";
@@ -15,6 +15,7 @@ import { waitForTransactionReceipt } from "wagmi/actions";
 
 import { txUrl } from "@/lib/chain";
 import { shortHash } from "@/lib/format";
+import { decodeRevertData, explainRevert } from "@/lib/revert";
 
 export type ToastTone = "pending" | "success" | "error";
 
@@ -38,10 +39,9 @@ const ToastContext = createContext<ToastContextValue | null>(null);
 /**
  * Turn any failure into a sentence a human can act on.
  *
- * The vault's custom errors are all in the ABI (lib/abi/vault.ts keeps every one), so viem
- * decodes `UseQueue()` or `DepositCapExceeded(...)` by name instead of leaving a bare selector on
- * screen. Those names are the actual product rules — "a redemption while a call is open goes
- * through the queue" — so showing them is the honest thing, not a leak of internals.
+ * viem decodes a revert against the ABI the call was made with; a vault error surfacing through a
+ * Seaport call (the fill hooks) is not in Seaport's ABI, so the raw data is decoded again here
+ * against the vault's merged ABI (lib/revert.ts) before falling back to viem's own message.
  */
 export function describeError(err: unknown): string {
   if (err instanceof BaseError) {
@@ -49,11 +49,9 @@ export function describeError(err: unknown): string {
     const reverted = err.walk((e) => e instanceof ContractFunctionRevertedError);
     if (reverted instanceof ContractFunctionRevertedError) {
       const name = reverted.data?.errorName;
-      if (name) {
-        const args = reverted.data?.args;
-        const detail = args && args.length > 0 ? ` (${args.map((a) => String(a)).join(", ")})` : "";
-        return `${EXPLAINED[name] ?? `Reverted: ${name}`}${detail}`;
-      }
+      if (name) return explainRevert(name, (reverted.data?.args ?? []) as readonly unknown[]);
+      const decoded = decodeRevertData(reverted.raw);
+      if (decoded?.name) return decoded.text;
       return reverted.shortMessage || "Reverted.";
     }
     return err.shortMessage || err.message;
@@ -61,25 +59,6 @@ export function describeError(err: unknown): string {
   if (err instanceof Error) return err.message;
   return String(err);
 }
-
-/** Plain-English versions of the reverts a normal depositor can actually hit. */
-const EXPLAINED: Record<string, string> = {
-  UseQueue: "A call is open, so this redemption has to go through the queue.",
-  DepositCapExceeded: "That would take the vault past its deposit cap.",
-  NothingToClaim: "There is no USDG to claim yet.",
-  NothingQueued: "Nothing is queued for this address.",
-  EpochNotSettled: "This queued redemption settles after the keeper closes the week.",
-  InsufficientFreeShares: "Some of those shares are already queued.",
-  ZeroAssets: "Enter an amount above zero.",
-  ZeroShares: "Enter an amount above zero.",
-  WritesAreHalted: "Writes are halted by the guardian.",
-  // Vault.deposit/mint revert with WrongPhase outside Idle and Listed, i.e. between book close
-  // and the keeper's close of the week. The form already hides the button then; this covers the
-  // race where the phase moves while the wallet is open.
-  WrongPhase: "The vault is settling the week. Deposits reopen when it returns to Idle.",
-  ERC20InsufficientAllowance: "Approve the vault to move your tokens first.",
-  ERC20InsufficientBalance: "Not enough tokens in the wallet.",
-};
 
 export function ToastProvider({ children }: { children: React.ReactNode }) {
   const [toasts, setToasts] = useState<Toast[]>([]);

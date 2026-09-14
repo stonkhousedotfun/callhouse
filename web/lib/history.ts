@@ -82,6 +82,8 @@ function toNum(value: unknown): number | undefined {
   return undefined;
 }
 
+const WAD = 10n ** 18n;
+
 /** A row with the blocks that opened and closed it, before those are turned into timestamps. */
 export type ChainDraft = CycleRow & { openBlock?: bigint; closeBlock?: bigint };
 
@@ -92,13 +94,25 @@ export type ChainDraft = CycleRow & { openBlock?: bigint; closeBlock?: bigint };
  * block, done by the caller). It is exported so web/lib/history.test.ts can feed it the exact
  * event sequence a paying week with a mid-week deposit produces; the page itself only ever
  * goes through `useCycleHistory`.
+ *
+ * WRITE ON FILL. `RollOpen.contractsCount` is always 0: the vault arms an option type and writes
+ * nothing. Every Seaport fill then emits one `CallsWritten` from inside `authorizeOrder` with the
+ * contracts that fill sold, so the week's size is the SUM of its `CallsWritten`, and written
+ * equals sold by construction (contracts/README.md "Write on fill").
+ *
+ * A STRANDED CLOSE. `rollClose` whose Valorem redeem reverts emits `ClaimStranded` beside a
+ * `RollClose` with zero legs; the week is closed and harvested (premium only) but the claim's
+ * strike USDG is still inside Valorem. `retryStrandedClaim` later emits `StrandedClaimRecovered`
+ * and a `Harvest` carrying the stranded cycle's number, in its own transaction. That Harvest is
+ * fee-free on the recovered USDG (`_harvest(usdgReturned − queueUsdg)`), so it is folded onto the
+ * closed row as strike proceeds, never as premium.
  */
 export function foldVaultLogs(logs: LooseLog[]): ChainDraft[] {
   const rows = new Map<number, ChainDraft>();
   const ensure = (cycle: number): ChainDraft => {
     let row = rows.get(cycle);
     if (!row) {
-      // Every row here starts from one of the vault's own events, so the vault wrote into it.
+      // Every row here starts from one of the vault's own events, so the vault armed it.
       // The weeks it sat out leave no vault log and are known only to the indexer.
       row = { cycle, wrote: true, filled: false, settled: false };
       rows.set(cycle, row);
@@ -119,6 +133,10 @@ export function foldVaultLogs(logs: LooseLog[]): ChainDraft[] {
   // (indexer/lib/harvest.ts). A checkpoint Harvest from a deposit shares no transaction with a
   // RollClose and is premium through and through.
   const assignmentUsdgByTx = new Map<string, bigint>();
+  // And the recoveries: `StrandedClaimRecovered(gen, assets, usdgOut, queueWad)` shares its
+  // transaction with a `Harvest` whose fee-free part is `usdgOut − usdgOut × queueWad / 1e18`
+  // (the queue's slice goes to the settled epochs, not through the harvest).
+  const recoveredUsdgByTx = new Map<string, bigint>();
   for (const log of logs) {
     if (!log.transactionHash) continue;
     if (log.eventName === "UsdgDistributed") {
@@ -127,12 +145,18 @@ export function foldVaultLogs(logs: LooseLog[]): ChainDraft[] {
     } else if (log.eventName === "RollClose") {
       const assignment = toBig(arg(log, "usdgFromAssignment"));
       if (assignment !== undefined) assignmentUsdgByTx.set(log.transactionHash, assignment);
+    } else if (log.eventName === "StrandedClaimRecovered") {
+      const usdgOut = toBig(arg(log, "usdgOut"));
+      const queueWad = toBig(arg(log, "queueWad")) ?? 0n;
+      if (usdgOut !== undefined) recoveredUsdgByTx.set(log.transactionHash, usdgOut - (usdgOut * queueWad) / WAD);
     }
   }
 
   // Walk in block order so "the cycle currently open" is well defined when we hit a
-  // ListingApproved, which carries an optionId but no cycle number.
+  // ListingApproved or a CallsWritten, which carry an optionId or a claimKey but no cycle number.
   let currentCycle: number | undefined;
+  // The cycle whose claim is stranded, if any: the recovery's Harvest folds onto it.
+  let strandedCycle: number | undefined;
 
   for (const log of logs) {
     switch (log.eventName) {
@@ -142,10 +166,28 @@ export function foldVaultLogs(logs: LooseLog[]): ChainDraft[] {
         currentCycle = cycle;
         const row = ensure(cycle);
         row.optionId = toBig(arg(log, "optionId"));
-        row.contracts = toBig(arg(log, "contractsCount"));
+        // Always 0 under write on fill; kept as the starting point of the CallsWritten sum so a
+        // pre-redesign log (the opening write) still folds correctly.
+        row.contracts = toBig(arg(log, "contractsCount")) ?? 0n;
+        row.contractsSold = row.contracts;
         row.strikeUsdg = toBig(arg(log, "strikeUsdg"));
         row.txOpen = log.transactionHash ?? undefined;
         row.openBlock = log.blockNumber;
+        break;
+      }
+      case "CallsWritten": {
+        // One per FILL, from inside authorizeOrder. Summed onto the open cycle: written == sold.
+        // The pre-redesign opening write preceded RollOpen in the same transaction while
+        // `currentCycle` still named the closed week; that one is skipped (settled row) so an old
+        // log range does not restate a published week.
+        if (currentCycle === undefined) break;
+        const row = ensure(currentCycle);
+        if (row.settled) break;
+        const n = toBig(arg(log, "contractsCount"));
+        if (n === undefined) break;
+        row.contracts = (row.contracts ?? 0n) + n;
+        row.contractsSold = row.contracts;
+        row.filled = row.contracts > 0n;
         break;
       }
       case "ListingApproved": {
@@ -154,6 +196,18 @@ export function foldVaultLogs(logs: LooseLog[]): ChainDraft[] {
         // The latest approved hash wins: relisting cancels the previous order on-chain, so the
         // most recent ListingApproved is the one Seaport will honour.
         row.orderHash = arg(log, "orderHash") as Hex | undefined;
+        break;
+      }
+      case "ClaimStranded": {
+        const cycle = toNum(arg(log, "cycleNumber"));
+        if (cycle === undefined) break;
+        ensure(cycle).stranded = true;
+        strandedCycle = cycle;
+        break;
+      }
+      case "StrandedClaimRecovered": {
+        // The claim is home. The row stays marked stranded (it is history: the close did strand)
+        // and its recovery Harvest, in this same transaction, is accepted below.
         break;
       }
       case "RollClose": {
@@ -170,15 +224,18 @@ export function foldVaultLogs(logs: LooseLog[]): ChainDraft[] {
         const cycle = toNum(arg(log, "cycleNumber"));
         if (cycle === undefined) break;
         const row = ensure(cycle);
+        const recovered = log.transactionHash ? recoveredUsdgByTx.get(log.transactionHash) : undefined;
         // A checkpoint that lands AFTER the week closed still carries the closed week's number:
         // rollClose does not clear `cycleNumber` (Vault.sol only assigns it in rollOpen), and a
         // deposit between rollClose and the next rollOpen sweeps whatever USDG arrived since —
         // a stray transfer, say. That must not restate a published week; summed onto this row it
         // would flip a published "unfilled, 0" to "filled". Once closed, the row accepts only
-        // the terminal Harvest, which shares rollClose's transaction. The indexer's rule is the
-        // same (`touchesCycle`, indexer/src/vault.ts). Without a close hash there is nothing to
-        // compare against, and the sum proceeds as before rather than dropping real money.
-        if (row.settled && row.txClose !== undefined && log.transactionHash !== row.txClose) break;
+        // the terminal Harvest, which shares rollClose's transaction, and the recovery Harvest of
+        // its own stranded claim. The indexer's rule is the same (`touchesCycle`,
+        // indexer/src/vault.ts). Without a close hash there is nothing to compare against, and
+        // the sum proceeds as before rather than dropping real money.
+        const isRecovery = recovered !== undefined && row.stranded === true && strandedCycle === cycle;
+        if (row.settled && row.txClose !== undefined && log.transactionHash !== row.txClose && !isRecovery) break;
         // Accumulated, not assigned. Vault.sol emits Harvest from two places with the same
         // cycle number: `_checkpointHarvest()` on every deposit or mint that lands after premium
         // has already arrived (so the new shares cannot claim it), and `_harvest()` inside
@@ -189,10 +246,15 @@ export function foldVaultLogs(logs: LooseLog[]): ChainDraft[] {
         const gross = toBig(arg(log, "grossUsdg")) ?? 0n;
         const fee = toBig(arg(log, "feeUsdg")) ?? 0n;
         const net = toBig(arg(log, "netUsdg")) ?? 0n;
-        // The strike-proceeds part of this sweep: the RollClose in the same transaction, clamped
-        // to what the sweep found; 0 for a checkpoint. What is left of the gross is premium.
-        const assignment = log.transactionHash ? (assignmentUsdgByTx.get(log.transactionHash) ?? 0n) : 0n;
-        const strike = assignment < gross ? assignment : gross;
+        // The strike-proceeds part of this sweep: the RollClose in the same transaction, or the
+        // recovered claim's fee-free USDG, clamped to what the sweep found; 0 for a checkpoint.
+        // What is left of the gross is premium.
+        const feeFree = isRecovery
+          ? recovered
+          : log.transactionHash
+            ? (assignmentUsdgByTx.get(log.transactionHash) ?? 0n)
+            : 0n;
+        const strike = feeFree < gross ? feeFree : gross;
         const premiumGross = gross - strike;
         const premiumNet = premiumGross > fee ? premiumGross - fee : 0n;
         row.harvestGrossUsdg = (row.harvestGrossUsdg ?? 0n) + gross;
@@ -201,17 +263,19 @@ export function foldVaultLogs(logs: LooseLog[]): ChainDraft[] {
         row.strikeProceedsUsdg = (row.strikeProceedsUsdg ?? 0n) + strike;
         row.premiumGrossUsdg = (row.premiumGrossUsdg ?? 0n) + premiumGross;
         row.premiumNetUsdg = (row.premiumNetUsdg ?? 0n) + premiumNet;
-        row.filled = row.harvestGrossUsdg > 0n;
+        // A buyer paid if any premium reached the vault (or, under write on fill, if any
+        // CallsWritten fired: the two agree, and the CallsWritten path already set this).
+        row.filled = row.filled || (row.premiumGrossUsdg ?? 0n) > 0n;
+        if (isRecovery) strandedCycle = undefined;
         // UsdgDistributed fires at most twice per Harvest transaction — once from
         // `_accrueHarvest` for the net, and in the terminal `_harvest` once more for any
         // unallocated carry — always with the same supply, so keeping the last per hash loses
         // nothing. The pairing is per sweep, not per week. The terminal Harvest of a week whose
         // premium was all swept by checkpoints has gross 0 and, unless dust was being carried,
         // no UsdgDistributed at all; it must not erase the denominator the earlier sweeps
-        // established. Once a deposit
-        // has changed the supply between sweeps no single denominator is exact — the supply at
-        // the last sweep that distributed is as close as logs alone get to the indexer's
-        // `supplyAtHarvest`, which carries the same caveat.
+        // established. Once a deposit has changed the supply between sweeps no single
+        // denominator is exact — the supply at the last sweep that distributed is as close as
+        // logs alone get to the indexer's `supplyAtHarvest`, which carries the same caveat.
         const supply = log.transactionHash ? supplyByTx.get(log.transactionHash) : undefined;
         if (supply !== undefined) row.sharesAtHarvest = supply;
         break;
@@ -227,8 +291,8 @@ export function foldVaultLogs(logs: LooseLog[]): ChainDraft[] {
 /**
  * Rebuild the weekly rows from vault events.
  *
- * An UNFILLED week still produces a full row: RollOpen wrote the contracts, RollClose returned
- * them, and Harvest either never fired or fired with zeros. That row is published as
+ * An UNFILLED week still produces a full row: RollOpen armed the type, no CallsWritten ever
+ * fired, RollClose closed it, and Harvest fired with zeros. That row is published as
  * "unfilled, 0" exactly like a filled one, because the product promises the zero weeks as
  * loudly as the paid ones.
  */
@@ -274,7 +338,7 @@ async function cyclesFromChain(): Promise<CycleRow[]> {
     ...row,
     openedAt: row.openBlock !== undefined ? timestamps.get(row.openBlock) : undefined,
     closedAt: row.closeBlock !== undefined ? timestamps.get(row.closeBlock) : undefined,
-    status: row.settled ? (row.filled ? "filled" : "unfilled") : "open",
+    status: row.settled ? (row.stranded ? "stranded" : row.filled ? "filled" : "unfilled") : "open",
   }));
 
   out.sort((a, b) => b.cycle - a.cycle);

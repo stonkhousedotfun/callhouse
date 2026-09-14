@@ -3,13 +3,10 @@ import schema from "ponder:schema";
 
 import { vaultAbi } from "../abis/vault";
 import { constructorSettings } from "../lib/deployment";
-import { BPS, OVERCALL_FEE_BPS, VAULT } from "../lib/env";
+import { VAULT, WAD } from "../lib/env";
 import { addHarvest, splitHarvest } from "../lib/harvest";
-import { log } from "../lib/log";
-import { roleName } from "../lib/roles";
 import {
   PHASE,
-  assignedContracts,
   eventId,
   getCycle,
   getEpoch,
@@ -19,11 +16,23 @@ import {
   patchCycle,
   patchEpoch,
   patchState,
+  patchStrand,
   safeDiv,
   snapshot,
   sub,
   ZERO_ADDRESS,
 } from "../lib/indexing";
+import {
+  closeStatus,
+  endedListingStatus,
+  entryStrandShare,
+  harvestOrigin,
+  recoveredStatus,
+  settlementCycle,
+  strandRecovery,
+} from "../lib/lifecycle";
+import { log } from "../lib/log";
+import { roleName } from "../lib/roles";
 
 /*//////////////////////////////////////////////////////////////
                        CONSTRUCTOR SETTINGS
@@ -106,6 +115,10 @@ ponder.on("Vault:Transfer", async ({ event, context }) => {
  * `Deposit` fires after the asset transfer and after the mint, so by the time this runs the
  * asset balance and the share supply are already reduced onto `vaultState`. The handler only
  * has to attribute the flow to the receiver and stamp a snapshot.
+ *
+ * Deposits are refused (`DepositsClosed`, `maxDeposit() == 0`) outside Idle and Listed, after
+ * the exercise timestamp, with unclaimed assignment proceeds, while a claim is stranded, and
+ * while the reserve is unbacked — none of which is an event; the API reads `maxDeposit` live.
  */
 ponder.on("Vault:Deposit", async ({ event, context }) => {
   const { owner, assets } = event.args;
@@ -119,7 +132,7 @@ ponder.on("Vault:Deposit", async ({ event, context }) => {
   await snapshot(context.db, event, "Deposit");
 });
 
-/** Instant redeem / withdraw. Only reachable while the vault is flat; otherwise `UseQueue()`. */
+/** Instant redeem / withdraw. Only reachable while the vault is flat (Idle, nothing written); otherwise `UseQueue()`. */
 ponder.on("Vault:Withdraw", async ({ event, context }) => {
   const { owner, assets } = event.args;
 
@@ -163,14 +176,52 @@ ponder.on("Vault:QueueRedeem", async ({ event, context }) => {
 });
 
 /**
+ * An epoch settling while a claim is stranded takes its pro-rata WAD share of that claim.
+ *
+ * Fires inside `_settleQueue`, one log before `QueueSettled`, only when `claimKey != 0` at
+ * settlement — i.e. on the `rollClose` that stranded the claim and on every flat `settleQueue()`
+ * while it stays stranded. The share leaves the live shares' hands now (`strandedRemainingWad`)
+ * and becomes assets and USDG for the epoch's owners only when `retryStrandedClaim` redeems it.
+ */
+ponder.on("Vault:EpochStrandShare", async ({ event, context }) => {
+  const { epochId, gen, wad } = event.args;
+
+  const state = await getState(context.db);
+  await patchState(context.db, {
+    strandedRemainingWad: sub(state.strandedRemainingWad, wad),
+    lastBlock: event.block.number,
+    lastTimestamp: event.block.timestamp,
+  });
+
+  await getEpoch(context.db, epochId, event);
+  await patchEpoch(context.db, epochId, { strandGen: gen, strandWad: wad });
+
+  const s = await context.db.find(schema.strand, { gen });
+  if (s !== null) {
+    await patchStrand(context.db, gen, { epochWad: s.epochWad + wad, epochCount: s.epochCount + 1 });
+  }
+
+  log.info({ epochId, gen, wad, txHash: event.transaction.hash }, "queue epoch took a share of the stranded claim");
+});
+
+/**
  * Settlement: escrowed shares are burnt and a slice of idle assets plus the USDG the escrow
  * itself accrued is set aside for the epoch. Both amounts leave NAV immediately, which is why
  * `reservedAssets` and `usdgReservedForQueue` go up here and come down as people claim.
+ *
+ * TWO ORIGINS. Inside `rollClose` (after `RollClose` and the terminal `Harvest`), and from the
+ * permissionless `settleQueue()`, which anyone may call while the vault is Idle so a queue made
+ * while flat never waits on a `rollOpen` that may not come — and which, while a claim is
+ * stranded, IS the exit. The second runs in its own transaction, preceded by a checkpoint
+ * `Harvest` when USDG had landed since the last close, and does not touch the phase. The state
+ * arithmetic is identical; only the epoch's `cycleNumber` differs, and `settlementCycle` decides
+ * it: the closing week for a `rollClose`, null for a flat settlement, which belongs to no week.
  */
 ponder.on("Vault:QueueSettled", async ({ event, context }) => {
   const { epochId, shares, assets, usdgOut } = event.args;
 
   const state = await getState(context.db);
+  const cycleNumber = settlementCycle(state, event.transaction.hash);
   await patchState(context.db, {
     queuedShares: sub(state.queuedShares, shares),
     reservedAssets: state.reservedAssets + assets,
@@ -188,7 +239,7 @@ ponder.on("Vault:QueueSettled", async ({ event, context }) => {
 
   await patchEpoch(context.db, epochId, {
     status: "settled",
-    cycleNumber: state.cycleNumber,
+    cycleNumber,
     sharesSettled: shares,
     assetsSettled: assets,
     usdgSettled: usdgOut,
@@ -199,9 +250,12 @@ ponder.on("Vault:QueueSettled", async ({ event, context }) => {
   // Open the next epoch so a queue joined before the next settlement has somewhere to land.
   await getEpoch(context.db, epochId + 1n, event);
 
-  log.info({ epochId, shares, assets, usdgOut }, "redeem queue settled");
+  log.info(
+    { epochId, shares, assets, usdgOut, cycleNumber, via: cycleNumber === null ? "settleQueue" : "rollClose" },
+    "redeem queue settled",
+  );
 
-  await snapshot(context.db, event, "QueueSettled");
+  await snapshot(context.db, event, cycleNumber === null ? "SettleQueue" : "QueueSettled");
 });
 
 /**
@@ -217,9 +271,17 @@ ponder.on("Vault:QueueSettled", async ({ event, context }) => {
  * `*Claimed` converging on `*Settled` reads as "no longer the epoch's problem". The vault's
  * `reservedAssets` is NOT touched — the money leaves the reserves only when it actually leaves
  * the vault, at `CompleteRedeem`.
+ *
+ * An epoch that settled while a claim was stranded also owns a WAD share of that claim, and
+ * the entry takes its slice of it here (`Vault._settleEpochEntry`, no event of its own): pro
+ * rata by shares, the last claimant taking the rest. It is staged against the owner as
+ * `strandWad` and becomes assets and USDG only at `StrandShareSettled`.
  */
 ponder.on("Vault:QueueEntrySettled", async ({ event, context }) => {
   const { owner, epochId, shares, assets, usdgOut } = event.args;
+
+  const ep = await getEpoch(context.db, epochId, event);
+  const strandShare = ep.strandGen === null ? 0n : entryStrandShare(ep, shares);
 
   // On chain the slot is zeroed, not decremented — the entry is gone. If the same transaction
   // re-queues, the `QueueRedeem` handler runs after this and starts the slot fresh.
@@ -227,17 +289,102 @@ ponder.on("Vault:QueueEntrySettled", async ({ event, context }) => {
   await context.db.update(schema.user, { address: owner }).set({
     queuedShares: 0n,
     queuedEpoch: null,
+    ...(strandShare === 0n
+      ? {}
+      : {
+          // `_stageStrandShare` folds an older generation's share first (`StrandShareSettled`,
+          // one log earlier in this same call), so by now the owner holds shares of one
+          // generation at most and adding is exact.
+          strandWad: u.strandWad + strandShare,
+          strandGen: ep.strandGen,
+        }),
   });
 
-  const ep = await getEpoch(context.db, epochId, event);
   await patchEpoch(context.db, epochId, {
     sharesClaimed: ep.sharesClaimed + shares,
     assetsClaimed: ep.assetsClaimed + assets,
     usdgClaimed: ep.usdgClaimed + usdgOut,
     claimCount: ep.claimCount + 1,
+    strandWadClaimed: ep.strandWadClaimed + strandShare,
   });
 
   await snapshot(context.db, event, "QueueEntrySettled");
+});
+
+/**
+ * An owner's staged share of a stranded claim became assets and USDG (AF-02).
+ *
+ * The strand analogue of `QueueEntrySettled`: books move, no token. Fires inside
+ * `completeRedeem` (and inside `_stageStrandShare` when a newer share displaces an older,
+ * resolved one) once `retryStrandedClaim` has redeemed the generation; the amounts go into the
+ * owner's owed balances and are paid by the `CompleteRedeem` that follows, like any other owed
+ * balance. The generation's `*Left` come down here; the reserves come down at the payout.
+ */
+ponder.on("Vault:StrandShareSettled", async ({ event, context }) => {
+  const { owner, gen, wad, assets, usdgOut } = event.args;
+
+  const u = await getUser(context.db, owner, event);
+  await context.db.update(schema.user, { address: owner }).set({
+    strandWad: sub(u.strandWad, wad),
+    strandGen: sub(u.strandWad, wad) === 0n ? null : u.strandGen,
+  });
+
+  const s = await context.db.find(schema.strand, { gen });
+  if (s !== null) {
+    await patchStrand(context.db, gen, {
+      wadLeft: sub(s.wadLeft, wad),
+      assetsLeft: sub(s.assetsLeft, assets),
+      usdgLeft: sub(s.usdgLeft, usdgOut),
+      settledCount: s.settledCount + 1,
+    });
+  }
+
+  log.info({ owner, gen, wad, assets, usdgOut, txHash: event.transaction.hash }, "stranded-claim share settled to its owner");
+});
+
+/**
+ * The reserve was unbacked and a settled redeemer took the pro-rata haircut (AF-05).
+ *
+ * `reservedAssets` on chain is released by the BOOKED amount while only `paid` leaves the
+ * vault, and `CompleteRedeem` (one log later) reports `paid`. The shortfall therefore comes off
+ * the indexed reserve here so that the two handlers together release exactly `booked`. The
+ * haircut is permanent: what the issuer's burn took from this claimant is never repaid.
+ */
+ponder.on("Vault:ReserveHaircut", async ({ event, context }) => {
+  const { owner, booked, paid } = event.args;
+  const shortfall = sub(booked, paid);
+
+  const u = await getUser(context.db, owner, event);
+  await context.db.update(schema.user, { address: owner }).set({ haircutAssets: u.haircutAssets + shortfall });
+
+  const state = await getState(context.db);
+  await patchState(context.db, {
+    reservedAssets: sub(state.reservedAssets, shortfall),
+    lifetimeHaircutAssets: state.lifetimeHaircutAssets + shortfall,
+    lastBlock: event.block.number,
+    lastTimestamp: event.block.timestamp,
+  });
+
+  // RESERVE_HAIRCUT: the Stock Token issuer burnt the vault below what settled redeemers are owed.
+  log.warn({ owner, booked, paid, shortfall, txHash: event.transaction.hash }, "reserve haircut paid to a settled redeemer");
+});
+
+/**
+ * The USDG leg of a payout could not move (AF-03): USDG paused, or the vault or the receiver
+ * frozen on it. The Stock Token leg still went, `owedQueueUsdg` stays booked, and a later
+ * `completeRedeem` — to the same or another receiver — collects it. Nothing here is lost; it is
+ * surfaced so the UI can say "your USDG is still owed" instead of "paid".
+ */
+ponder.on("Vault:UsdgLegDeferred", async ({ event, context }) => {
+  const { owner, receiver, usdgOwed } = event.args;
+
+  const u = await getUser(context.db, owner, event);
+  await context.db.update(schema.user, { address: owner }).set({ deferredUsdg: usdgOwed });
+  void u;
+
+  // USDG_LEG_DEFERRED: a stablecoin-side action is holding a redeemer's USDG.
+  log.warn({ owner, receiver, usdgOwed, txHash: event.transaction.hash }, "usdg leg of a redemption deferred");
+  await snapshot(context.db, event, "UsdgLegDeferred");
 });
 
 /**
@@ -246,7 +393,10 @@ ponder.on("Vault:QueueEntrySettled", async ({ event, context }) => {
  * The epoch drawdown is NOT here: it happened at `QueueEntrySettled`, which fires first in
  * the same transaction — or fired transactions earlier, when a later `queueRedeem`
  * auto-settled the slot. What remains is the payout itself: the lifetime redeemed totals, and
- * the reserves, which only ever come down here.
+ * the reserves, which only ever come down here (and at `ReserveHaircut`, by the shortfall).
+ *
+ * `assets` is what was PAID. `usdgOut` is 0 when the USDG leg was deferred; a non-zero
+ * `usdgOut` is the whole owed USDG, so it also clears any deferral on record.
  */
 ponder.on("Vault:CompleteRedeem", async ({ event, context }) => {
   const { owner, assets, usdgOut } = event.args;
@@ -255,6 +405,7 @@ ponder.on("Vault:CompleteRedeem", async ({ event, context }) => {
   await context.db.update(schema.user, { address: owner }).set({
     redeemedAssets: u.redeemedAssets + assets,
     redeemedUsdg: u.redeemedUsdg + usdgOut,
+    ...(usdgOut > 0n ? { deferredUsdg: 0n } : {}),
   });
 
   const state = await getState(context.db);
@@ -273,45 +424,48 @@ ponder.on("Vault:CompleteRedeem", async ({ event, context }) => {
 //////////////////////////////////////////////////////////////*/
 
 /**
- * `CallsWritten` is emitted from inside `_writeCalls`, i.e. BEFORE `RollOpen`, at a point
- * where `vaultState.cycleNumber` still holds the previous cycle. So it must not write to a
- * cycle row — it only stamps the claim onto vault state, and `RollOpen` (which carries the
- * cycle number) copies it across a few logs later.
+ * The keeper ARMED a cycle: a Valorem option type, validated by the vault from the clearinghouse
+ * itself (asset/USDG, lot 1e18, exercise ≥ 1 h out, window ≥ 1 day, tenor ≤ 21 days, strike
+ * inside the band). NOTHING IS WRITTEN HERE. `contractsCount` is always 0 under write on fill;
+ * every write is reported by its own `CallsWritten` from inside the Seaport fill that sold it.
+ *
+ * The vault numbers its own cycles (no registry), so this is what creates the week's row. The
+ * option's window is read from the vault at this block (`cycleExerciseTs` / `cycleExpiryTs`,
+ * both set before the emit): the tuple is immutable in Valorem, so the read is as deterministic
+ * as a log and reproducible on a backfill.
  */
-ponder.on("Vault:CallsWritten", async ({ event, context }) => {
-  const { optionId, claimKey, contractsCount, collateral } = event.args;
-
-  await patchState(context.db, {
-    optionId,
-    claimKey,
-    contractsWritten: contractsCount,
-    contractsSold: 0n,
-    lockedCollateral: collateral,
-    lastBlock: event.block.number,
-    lastTimestamp: event.block.timestamp,
-  });
-});
-
 ponder.on("Vault:RollOpen", async ({ event, context }) => {
   const { cycleNumber, optionId, contractsCount, strikeUsdg } = event.args;
 
   const state = await getState(context.db);
 
-  // The week's two deadlines come from the registry (CycleSet), never from the wall clock:
-  // `exerciseTimestamp` IS `registry.writeDeadline()` (book close) and `expiryTimestamp` is
-  // when the option dies. Copy them onto vault state at the roll so "this week closes at X"
-  // is answerable from the index alone, with no RPC read.
-  const c = await getCycle(context.db, cycleNumber);
+  const readTs = async (functionName: "cycleExerciseTs" | "cycleExpiryTs"): Promise<bigint> => {
+    try {
+      return BigInt(await context.client.readContract({ abi: vaultAbi, address: VAULT, functionName }));
+    } catch {
+      return 0n;
+    }
+  };
+  const exerciseTimestamp = await readTs("cycleExerciseTs");
+  const expiryTimestamp = await readTs("cycleExpiryTs");
+  if (exerciseTimestamp === 0n || expiryTimestamp === 0n) {
+    log.warn({ cycleNumber, optionId, txHash: event.transaction.hash }, "option window unreadable at RollOpen; timestamps stay 0 on the index");
+  }
+  if (contractsCount !== 0n) {
+    // Not possible on the redesigned vault; if it ever is, the tape must not silently miss a write.
+    log.warn({ cycleNumber, contractsCount, txHash: event.transaction.hash }, "RollOpen reported a non-zero write; the redesign writes on fill only");
+  }
 
   await patchState(context.db, {
     phase: PHASE.Listed,
     cycleNumber,
     optionId,
+    claimKey: null,
     strikeUsdg,
-    exerciseTimestamp: c.exerciseTimestamp ?? 0n,
-    expiryTimestamp: c.expiryTimestamp ?? 0n,
-    contractsWritten: contractsCount,
-    contractsSold: 0n,
+    exerciseTimestamp,
+    expiryTimestamp,
+    contractsWritten: 0n,
+    lockedCollateral: 0n,
     listingHash: null,
     listingsThisCycle: 0,
     cyclesWritten: state.cyclesWritten + 1,
@@ -321,27 +475,18 @@ ponder.on("Vault:RollOpen", async ({ event, context }) => {
 
   await patchCycle(context.db, cycleNumber, {
     status: "listed",
-    wrote: true,
     optionId,
-    claimKey: state.claimKey,
-    // Held on vault state by `Clear:BucketWrittenInto`, which fires before this event while
-    // `cycleNumber` still names the previous week.
-    bucketIndex: state.bucketIndex,
     strikeUsdg,
-    contractsWritten: contractsCount,
-    // `CallsWritten` ran first in this same transaction, so the collateral is already known.
-    collateral: state.lockedCollateral,
+    exerciseTimestamp,
+    expiryTimestamp,
     openedAt: event.block.timestamp,
     openedBlock: event.block.number,
     txOpen: event.transaction.hash,
-    // A cycle the registry never announced to us still needs a lot size for the assignment
-    // maths at close; fall back to what the write implies.
-    lotSize: c.lotSize ?? safeDiv(state.lockedCollateral, contractsCount),
   });
 
   log.info(
-    { cycleNumber, optionId, contractsCount, strikeUsdg, txHash: event.transaction.hash },
-    "cycle opened: calls written",
+    { cycleNumber, optionId, strikeUsdg, exerciseTimestamp, expiryTimestamp, txHash: event.transaction.hash },
+    "cycle armed: option type accepted, nothing written yet",
   );
 
   await snapshot(context.db, event, "RollOpen", {
@@ -350,9 +495,68 @@ ponder.on("Vault:RollOpen", async ({ event, context }) => {
   });
 });
 
-/** The book closes at the registry's exercise timestamp. Permissionless, so anyone may call it. */
+/**
+ * ONE FILL WROTE ITS CONTRACTS. Emitted from `_recordWrite` inside the Seaport zone hook
+ * `authorizeOrder`, after `clear.write` and before Seaport moves the minted tokens to the
+ * buyer, so it sits in the same transaction as the `OrderFulfilled` that bought them.
+ *
+ * `contractsCount` is THIS fill's size and `collateral` what THIS fill locked (`n × 1e18`; the
+ * Valorem engine fee, if governance ever accepts it, is pulled on top and is not in it). Both
+ * ACCUMULATE: the first fill of a cycle opens the claim and every later one tops the same claim
+ * up (the library reverts if Valorem hands back any other id). Written == sold by construction,
+ * so `vaultState.contractsWritten` is the week's size and `cycle.contractsSold` (from Seaport)
+ * is its cross-check.
+ */
+ponder.on("Vault:CallsWritten", async ({ event, context }) => {
+  const { optionId, claimKey, contractsCount, collateral } = event.args;
+  const n = BigInt(contractsCount);
+
+  const state = await getState(context.db);
+  const contractsWritten = state.contractsWritten + n;
+  const lockedCollateral = state.lockedCollateral + collateral;
+
+  await patchState(context.db, {
+    optionId,
+    claimKey,
+    contractsWritten,
+    lockedCollateral,
+    lastBlock: event.block.number,
+    lastTimestamp: event.block.timestamp,
+  });
+
+  if (state.cycleNumber !== 0) {
+    const c = await getCycle(context.db, state.cycleNumber);
+    await patchCycle(context.db, state.cycleNumber, {
+      claimKey,
+      contractsWritten: c.contractsWritten + n,
+      collateral: c.collateral + collateral,
+      writeCount: c.writeCount + 1,
+      firstWriteAt: c.firstWriteAt ?? event.block.timestamp,
+      lastWriteAt: event.block.timestamp,
+    });
+  }
+
+  log.info(
+    { cycleNumber: state.cycleNumber, optionId, claimKey, contracts: n, collateral, contractsWritten, txHash: event.transaction.hash },
+    "fill wrote its contracts",
+  );
+
+  // Collateral moved from idle into Valorem: the one moment `totalAssets` is unchanged while
+  // `idleAssets` falls, and worth a row in the trail.
+  await snapshot(context.db, event, "CallsWritten");
+});
+
+/**
+ * The book closes at the option's exercise timestamp. Permissionless, so anyone may call it.
+ * A listing still live is invalidated on the way (`ListingCancelled` + `AllListingsInvalidated`
+ * one and two logs earlier), and this is where that listing's end reason learns it was the book
+ * closing rather than the guardian.
+ */
 ponder.on("Vault:BookLocked", async ({ event, context }) => {
   const { cycleNumber } = event.args;
+
+  const state = await getState(context.db);
+  await refineEndReason(context.db, state, event.transaction.hash, "lockBook");
 
   await patchState(context.db, {
     phase: PHASE.Exercisable,
@@ -367,19 +571,61 @@ ponder.on("Vault:BookLocked", async ({ event, context }) => {
 });
 
 /**
- * The claim has been redeemed and the balance deltas are known.
+ * `rollClose` could not redeem the claim (AF-02): Valorem's `redeem` reverted — USDG paused,
+ * the vault or Clear frozen on USDG, Clear's USDG burnt, or the vault blocklisted on the Stock
+ * Token in an unassigned week. Emitted immediately BEFORE the `RollClose` of the same
+ * transaction, which then reports zero legs.
  *
- * `contractsAssignedCount` is read by the vault from `contractsAssigned()` — i.e. Valorem's
- * `claim().amountExercised`, divided back down by the 1e18 scalar — BEFORE `_redeemClaim`
- * zeroes the claim key, so it is the authoritative count and it is used. (An earlier build of
- * the vault emitted a hardcoded 0 here; the fallback below covers that, and it is also what
- * answers if the cycle's collateral is known but the event's count is not.)
+ * The vault still reaches Idle with the claim, `optionId` and `contractsWritten` all kept:
+ * `lockedAssets()` stays honest, the instant path stays shut, deposits and `rollOpen` refuse,
+ * and the queue keeps settling on the idle balance with each epoch taking its share of the
+ * claim. `retryStrandedClaim()` is the way out, and anyone may call it.
+ */
+ponder.on("Vault:ClaimStranded", async ({ event, context }) => {
+  const { cycleNumber, claimKey, gen } = event.args;
+
+  const state = await getState(context.db);
+  await patchState(context.db, {
+    stranded: true,
+    strandGen: gen,
+    strandedRemainingWad: WAD,
+    strandedCycleNumber: cycleNumber,
+    cyclesStranded: state.cyclesStranded + 1,
+    lastBlock: event.block.number,
+    lastTimestamp: event.block.timestamp,
+  });
+
+  await context.db
+    .insert(schema.strand)
+    .values({
+      gen,
+      cycleNumber,
+      claimKey,
+      strandedAt: event.block.timestamp,
+      strandedBlock: event.block.number,
+      strandedTx: event.transaction.hash,
+    })
+    .onConflictDoNothing();
+
+  await patchCycle(context.db, cycleNumber, { stranded: true, strandGen: gen });
+
+  // CLAIM_STRANDED: the week's strike proceeds and unassigned collateral are stuck in Valorem
+  // until an issuer lifts whatever blocked the redeem. Deposits and instant redemption are shut.
+  log.warn({ cycleNumber, claimKey, gen, txHash: event.transaction.hash }, "rollClose stranded the claim");
+});
+
+/**
+ * The close: the claim was redeemed (or stranded, one log earlier) and the balance deltas are
+ * known.
  *
- * The fallback derives the same number from the collateral that did NOT come back:
- * (collateral − underlyingReturned) / lotSize. The two agree by construction.
+ * `contractsAssignedCount` is read by the vault from `contractsAssigned()` — Valorem's
+ * `claim().amountExercised`, divided back down by the 1e18 scalar — BEFORE the redeem is
+ * attempted, so it is authoritative on a stranded close too. On a stranded close
+ * `assetsReturned` and `usdgFromAssignment` are both 0; the real figures arrive with
+ * `StrandedClaimRecovered` and the retry's `ClaimRedeemed`.
  *
- * This handler also stamps `rollCloseTx`, which is how the `Harvest` handler tells the week's
- * terminal harvest apart from a mid-week `_checkpointHarvest()` fired by a deposit.
+ * This handler also stamps `rollCloseTx`, which is how the `Harvest` and `QueueSettled`
+ * handlers tell the week's terminal events apart from a checkpoint or a flat `settleQueue`.
  */
 ponder.on("Vault:RollClose", async ({ event, context }) => {
   const { cycleNumber, assetsReturned, usdgFromAssignment, contractsAssignedCount } =
@@ -387,15 +633,21 @@ ponder.on("Vault:RollClose", async ({ event, context }) => {
 
   const state = await getState(context.db);
   const c = await getCycle(context.db, cycleNumber);
+  await refineEndReason(context.db, state, event.transaction.hash, "rollClose");
 
-  const collateral = c.collateral !== 0n ? c.collateral : state.lockedCollateral;
-  const derived = assignedContracts(collateral, assetsReturned, c.lotSize);
-  const assigned = contractsAssignedCount > 0n ? contractsAssignedCount : derived;
+  if (c.contractsSold !== c.contractsWritten) {
+    // Written == sold is a property of the contracts, not of this index. If the two sums differ
+    // the tape has missed a fill or a write, and that is worth knowing at once.
+    log.warn(
+      { cycleNumber, contractsSold: c.contractsSold, contractsWritten: c.contractsWritten, txHash: event.transaction.hash },
+      "contracts sold (Seaport) and written (CallsWritten) disagree at the close",
+    );
+  }
 
   await patchCycle(context.db, cycleNumber, {
     assetsReturned,
     assignmentUsdg: usdgFromAssignment,
-    contractsAssigned: assigned,
+    contractsAssigned: contractsAssignedCount,
     closedAt: event.block.timestamp,
     closedBlock: event.block.number,
     txClose: event.transaction.hash,
@@ -403,9 +655,11 @@ ponder.on("Vault:RollClose", async ({ event, context }) => {
 
   await patchState(context.db, {
     phase: PHASE.Settling,
-    lockedCollateral: 0n,
+    // A stranded claim keeps its collateral locked; `Vault:ClaimRedeemed` clears it otherwise
+    // (one log earlier) and clears it again when the retry lands.
+    lockedCollateral: state.stranded ? state.lockedCollateral : 0n,
     lifetimeAssignmentUsdg: state.lifetimeAssignmentUsdg + usdgFromAssignment,
-    // Read by the Harvest handler, one or two logs later in this same transaction.
+    // Read by the Harvest and QueueSettled handlers, a few logs later in this same transaction.
     rollCloseTx: event.transaction.hash,
     lastBlock: event.block.number,
     lastTimestamp: event.block.timestamp,
@@ -415,12 +669,14 @@ ponder.on("Vault:RollClose", async ({ event, context }) => {
   log.info(
     {
       cycleNumber,
+      sold: c.contractsSold,
       assetsReturned,
       usdgFromAssignment,
-      contractsAssigned: assigned,
+      contractsAssigned: contractsAssignedCount,
+      stranded: state.stranded,
       txHash: event.transaction.hash,
     },
-    "cycle closed: claim redeemed",
+    state.stranded ? "cycle closed: claim STRANDED" : "cycle closed: claim redeemed",
   );
 
   await snapshot(context.db, event, "RollClose", {
@@ -430,20 +686,95 @@ ponder.on("Vault:RollClose", async ({ event, context }) => {
 });
 
 /**
- * The vault's own view of the Valorem redemption. Fires inside `rollClose`, just before
- * `RollClose`, and is where the cycle's position is torn down. `Clear:ClaimRedeemed` carries
- * the same numbers from Valorem's side and is used as the cross-check.
+ * The vault's own view of the Valorem redemption: the cycle's position is torn down. Fires
+ * inside `rollClose` just before `RollClose` on an ordinary close, and inside
+ * `retryStrandedClaim` just before `StrandedClaimRecovered` on a recovery. `Clear:ClaimRedeemed`
+ * carries the same numbers from Valorem's side and is the cross-check.
+ *
+ * A stranded close does NOT emit this: the position is kept, and so are these columns.
  */
 ponder.on("Vault:ClaimRedeemed", async ({ event, context }) => {
+  const { claimKey, underlyingReturned, exerciseReceived } = event.args;
+
+  const state = await getState(context.db);
   await patchState(context.db, {
     claimKey: null,
-    bucketIndex: null,
     optionId: null,
     contractsWritten: 0n,
-    contractsSold: 0n,
     lockedCollateral: 0n,
     lastBlock: event.block.number,
     lastTimestamp: event.block.timestamp,
+  });
+
+  // The retry: the stranded week finally learns what its claim returned. The ordinary close
+  // writes the same figures from `RollClose`, one log later.
+  if (state.stranded && state.strandedCycleNumber !== null) {
+    await patchCycle(context.db, state.strandedCycleNumber, {
+      assetsReturned: underlyingReturned,
+      assignmentUsdg: exerciseReceived,
+    });
+    log.info(
+      { cycleNumber: state.strandedCycleNumber, claimKey, underlyingReturned, exerciseReceived, txHash: event.transaction.hash },
+      "stranded claim redeemed",
+    );
+  }
+});
+
+/**
+ * `retryStrandedClaim` got the claim through (AF-02). What the redeem returned is split by
+ * `queueWad`: the settled epochs' part of both legs moves into the reserves and is drawn down
+ * owner by owner (`StrandShareSettled`); the live shares' NVDA is simply in the balance again,
+ * and their USDG goes through the retry's `Harvest` fee-free, one log later, under the stranded
+ * cycle's number. The vault is no longer stranded, and the stranded week gets its verdict.
+ */
+ponder.on("Vault:StrandedClaimRecovered", async ({ event, context }) => {
+  const { gen, assets, usdgOut, queueWad } = event.args;
+  const split = strandRecovery(assets, usdgOut, queueWad);
+
+  const state = await getState(context.db);
+  await patchState(context.db, {
+    stranded: false,
+    lastResolvedGen: gen,
+    strandedRemainingWad: 0n,
+    strandedCycleNumber: null,
+    reservedAssets: state.reservedAssets + split.queueAssets,
+    usdgReservedForQueue: state.usdgReservedForQueue + split.queueUsdg,
+    lifetimeAssignmentUsdg: state.lifetimeAssignmentUsdg + usdgOut,
+    lastBlock: event.block.number,
+    lastTimestamp: event.block.timestamp,
+  });
+
+  await patchStrand(context.db, gen, {
+    recovered: true,
+    recoveredAt: event.block.timestamp,
+    recoveredBlock: event.block.number,
+    recoveredTx: event.transaction.hash,
+    assetsIn: assets,
+    usdgIn: usdgOut,
+    queueWad,
+    wadLeft: queueWad,
+    assetsLeft: split.queueAssets,
+    usdgLeft: split.queueUsdg,
+  });
+
+  const cycleNumber = state.strandedCycleNumber;
+  if (cycleNumber !== null) {
+    const c = await getCycle(context.db, cycleNumber);
+    await patchCycle(context.db, cycleNumber, {
+      status: recoveredStatus({ assigned: c.contractsAssigned }),
+      recoveredAt: event.block.timestamp,
+      recoveredTx: event.transaction.hash,
+    });
+  }
+
+  log.warn(
+    { gen, cycleNumber, assets, usdgOut, queueWad, ...split, txHash: event.transaction.hash },
+    "stranded claim recovered",
+  );
+
+  await snapshot(context.db, event, "StrandedClaimRecovered", {
+    client: context.client,
+    refreshMultiplier: true,
   });
 });
 
@@ -452,21 +783,21 @@ ponder.on("Vault:ClaimRedeemed", async ({ event, context }) => {
 //////////////////////////////////////////////////////////////*/
 
 /**
- * A listing the vault authorised on chain.
+ * A listing the vault authorised on chain: a PARTIAL_RESTRICTED Seaport 1.6 order, offerer and
+ * zone both the vault, one ERC-1155 offer item (this cycle's option type, at most the vault's
+ * capacity), ONE ERC-20 consideration item (USDG to the vault), no signature (the vault
+ * pre-validates on Seaport). The contract has proved `grossUsdg % amount == 0`, so the unit
+ * price is exact and a partial fill pays exactly `unitPrice × k`.
  *
- * `grossUsdg` is the sum of both consideration items, and the contract has already proved it
- * divides evenly by `amount`, so the unit price is exact. The 95/5 split is recomputed here
- * the same way `Policy.splitPremium` does it — floor the fee PER CONTRACT, then multiply.
- * Rounding the fee on the total instead yields an order that signs and validates and is then
- * refused by Seaport on a partial fill (InexactFraction); since every Overcall order is
- * PARTIAL_OPEN, that quietly turns the listing into full-fill-only.
+ * `seq` is `listingsThisCycle` after this approval: every `approveListing` spends one of the
+ * cycle's three, cancelled or not, so it is a plain count, unique within the cycle. A relist is
+ * a reprice (after a rally the fill gate refuses the old price), never a resize: Seaport tracks
+ * the fraction filled and the vault sizes every fill itself.
  */
 ponder.on("Vault:ListingApproved", async ({ event, context }) => {
   const { orderHash, optionId, amount, grossUsdg, seq } = event.args;
 
   const unitPrice = safeDiv(grossUsdg, amount);
-  const feePerContract = (unitPrice * OVERCALL_FEE_BPS) / BPS;
-  const writerPerContract = unitPrice - feePerContract;
 
   const state = await getState(context.db);
 
@@ -480,15 +811,14 @@ ponder.on("Vault:ListingApproved", async ({ event, context }) => {
       amount,
       grossUsdg,
       unitPriceUsdg: unitPrice,
-      writerUsdg: writerPerContract * amount,
-      overcallFeeUsdg: feePerContract * amount,
       status: "approved",
       approvedAt: event.block.timestamp,
       approvedBlock: event.block.number,
       approvedTx: event.transaction.hash,
     })
     // Re-approving an identical hash is impossible on chain (the vault refuses a second live
-    // listing), but a reorg replay must not duplicate the row.
+    // listing, and Seaport refuses a validated hash twice), but a reorg replay must not
+    // duplicate the row.
     .onConflictDoNothing();
 
   await patchState(context.db, {
@@ -506,12 +836,19 @@ ponder.on("Vault:ListingApproved", async ({ event, context }) => {
     listedContracts: amount,
     listedAt: event.block.timestamp,
   });
+
+  log.info(
+    { cycleNumber: state.cycleNumber, orderHash, seq, amount, grossUsdg, unitPrice, txHash: event.transaction.hash },
+    "listing approved",
+  );
 });
 
 /**
- * The live listing stopped being live. Emitted both by an explicit `cancelListing` and by
- * `invalidateAllListings`; the latter follows up with `AllListingsInvalidated`, which refines
- * the end reason. A listing that already filled is left alone — a fill is the better story.
+ * The live listing stopped being live. Emitted by an explicit `cancelListing` and by every
+ * counter bump (`invalidateAllListings`, `lockBook`, `rollClose`); a counter bump follows up
+ * with `AllListingsInvalidated`, and `lockBook` / `rollClose` with their own event, each of
+ * which refines the end reason. A listing that already filled is left alone — a fill is the
+ * better story.
  */
 ponder.on("Vault:ListingCancelled", async ({ event, context }) => {
   const { orderHash } = event.args;
@@ -519,7 +856,7 @@ ponder.on("Vault:ListingCancelled", async ({ event, context }) => {
   const l = await context.db.find(schema.listing, { orderHash });
   if (l !== null && l.status !== "filled") {
     await context.db.update(schema.listing, { orderHash }).set({
-      status: l.contractsFilled > 0n ? "partially_filled" : "cancelled",
+      status: endedListingStatus(l.contractsFilled),
       endedAt: event.block.timestamp,
       endedTx: event.transaction.hash,
       endReason: "cancelled",
@@ -536,29 +873,17 @@ ponder.on("Vault:ListingCancelled", async ({ event, context }) => {
 });
 
 /**
- * The guardian's blunt instrument: bumping the Seaport counter kills every outstanding order
- * from this offerer without needing the order data. `lockBook` and `rollClose` also use it.
+ * The Seaport counter was bumped, which kills every outstanding order from this offerer
+ * without needing the order data: the keeper's or guardian's `invalidateAllListings`, and
+ * `lockBook` and `rollClose` on their way through. The listing `ListingCancelled` just closed
+ * (one log earlier, same tx) reads "counter" for now; `BookLocked` or `RollClose` in the same
+ * transaction refines it to say which.
  */
 ponder.on("Vault:AllListingsInvalidated", async ({ event, context }) => {
   const { newCounter } = event.args;
 
   const state = await getState(context.db);
-
-  // `_invalidateAllListings` emitted ListingCancelled one log earlier in this same tx; that
-  // handler recorded which hash it was, so the end reason can be upgraded without a scan.
-  if (
-    state.lastCancelledHash !== null &&
-    state.lastCancelledTx === event.transaction.hash
-  ) {
-    const l = await context.db.find(schema.listing, {
-      orderHash: state.lastCancelledHash,
-    });
-    if (l !== null && l.status !== "filled") {
-      await context.db
-        .update(schema.listing, { orderHash: state.lastCancelledHash })
-        .set({ endReason: "invalidated" });
-    }
-  }
+  await refineEndReason(context.db, state, event.transaction.hash, "counter");
 
   await patchState(context.db, {
     listingHash: null,
@@ -568,6 +893,23 @@ ponder.on("Vault:AllListingsInvalidated", async ({ event, context }) => {
   });
 });
 
+/**
+ * Upgrade the end reason of the listing `ListingCancelled` closed earlier in `txHash`, if any.
+ * The three counter-bump paths emit identical `ListingCancelled` + `AllListingsInvalidated`
+ * pairs; only the event that follows them in the same transaction says which path it was.
+ */
+async function refineEndReason(
+  db: Parameters<typeof patchState>[0],
+  state: Awaited<ReturnType<typeof getState>>,
+  txHash: `0x${string}`,
+  endReason: "counter" | "lockBook" | "rollClose",
+) {
+  if (state.lastCancelledHash === null || state.lastCancelledTx !== txHash) return;
+  const l = await db.find(schema.listing, { orderHash: state.lastCancelledHash });
+  if (l === null || l.status === "filled") return;
+  await db.update(schema.listing, { orderHash: state.lastCancelledHash }).set({ endReason });
+}
+
 /*//////////////////////////////////////////////////////////////
                             HARVEST
 //////////////////////////////////////////////////////////////*/
@@ -575,34 +917,40 @@ ponder.on("Vault:AllListingsInvalidated", async ({ event, context }) => {
 /**
  * The week's money, and — for the terminal one — the week's verdict.
  *
- * *** `Harvest` IS EMITTED FROM TWO PLACES AND THEY MEAN DIFFERENT THINGS. ***
+ * *** `Harvest` IS EMITTED FROM THREE PLACES AND THEY MEAN DIFFERENT THINGS. ***
  *
- *   `_harvest()`            runs inside `rollClose`. Always emits, even with a gross of zero,
- *                           which is exactly how an unfilled week gets its honest row. This
- *                           is the TERMINAL harvest: it closes the week and returns the vault
- *                           to Idle.
- *   `_checkpointHarvest()`  runs inside `deposit` and `mint`, and emits whenever premium has
- *                           already landed (gross != 0). It exists so a depositor arriving on
- *                           Thursday cannot mint into premium earned on Tuesday. It fires
- *                           MID-CYCLE, carries the SAME cycle number, and is not a result.
+ *   `_harvest()` in `rollClose`   Always emits, even with a gross of zero, which is exactly how
+ *                                 an unfilled week gets its honest row. This is the TERMINAL
+ *                                 harvest: it closes the week and returns the vault to Idle.
+ *   `_checkpointHarvest()`        Runs inside `deposit`, `mint` and `settleQueue`, and emits
+ *                                 whenever premium has already landed (gross != 0). It exists so
+ *                                 a depositor arriving on Thursday cannot mint into premium
+ *                                 earned on Tuesday, and so a flat queue settlement pays the
+ *                                 escrow its accrual. It carries the SAME cycle number — a
+ *                                 settleQueue's checkpoint carries the number of the week that
+ *                                 ALREADY closed — and is not a result.
+ *   `_harvest()` in the retry     `retryStrandedClaim` indexes the live shares' part of the
+ *                                 recovered claim's USDG fee-free, under the STRANDED cycle's
+ *                                 number, and pushes any fee the stranded close could not.
  *
- * Nothing in the event itself separates them. What does: `rollClose` emits `RollClose`
- * immediately before `_harvest()`, so the terminal harvest is the one whose transaction hash
- * matches `vaultState.rollCloseTx`. Treating a checkpoint as terminal would flip `phase` to
- * Idle while the vault is still Listed, publish a half-week as the week's result, and add a
- * phantom week to every lifetime tally on every deposit.
+ * Nothing in the event itself separates them; `lib/lifecycle.ts harvestOrigin` does, from the
+ * transaction. Treating a checkpoint as terminal would flip `phase` to Idle while the vault is
+ * still Listed, publish a half-week as the week's result, and add a phantom week to every
+ * lifetime tally on every deposit.
  *
- * Both kinds move real money, so both accumulate onto the cycle and both get a row. Only the
- * terminal one decides the status:
+ * All three move real money, so all three accumulate onto the cycle (a checkpoint only while
+ * the week is still open) and all three get a row. Only the terminal one decides the status:
+ *   stranded  the claim could not be redeemed; the verdict waits for the retry
  *   assigned  contracts were taken at the strike
  *   closed    filled, expired out of the money — premium and tokens both kept
  *   unfilled  nothing sold. THE MOST LIKELY OUTCOME, published as "unfilled, 0".
  *
  * The three amounts are taken from the event verbatim; nothing here recomputes the fee. That
  * matters on an assigned week: `grossUsdg` includes the strike proceeds, but the vault charges
- * `feeUsdg` on `grossUsdg − RollClose.usdgFromAssignment` only (Vault._accrueHarvest; a deposit
- * checkpoint excludes 0), so `feeUsdg / grossUsdg` is NOT the policy rate there and must never
- * be used as one. `netUsdg == grossUsdg − feeUsdg` always.
+ * `feeUsdg` on `grossUsdg − RollClose.usdgFromAssignment` only (Vault._accrueHarvest; a
+ * checkpoint excludes 0; the retry excludes the live shares' part of the recovered USDG), so
+ * `feeUsdg / grossUsdg` is NOT the policy rate there and must never be used as one.
+ * `netUsdg == grossUsdg − feeUsdg` always.
  *
  * And for the same reason `netUsdg` is NOT premium on an assigned week (W-21): the strike
  * proceeds in it are returned principal. `lib/harvest.ts` splits every event into premium and
@@ -612,18 +960,16 @@ ponder.on("Vault:AllListingsInvalidated", async ({ event, context }) => {
 ponder.on("Vault:Harvest", async ({ event, context }) => {
   const { cycleNumber, grossUsdg, feeUsdg, netUsdg } = event.args;
 
-  // Terminal iff `RollClose` was emitted earlier in THIS transaction and the phase it set is
-  // still Settling. The phase conjunction makes a second Harvest in the same transaction —
-  // a `rollClose` and a `deposit` batched through a multicall, say — fall through to the
-  // checkpoint branch, because the first terminal harvest already returned the vault to Idle.
   const state = await getState(context.db);
-  const terminal =
-    state.rollCloseTx === event.transaction.hash && state.phase === PHASE.Settling;
+  const lastStrand =
+    state.lastResolvedGen === 0n ? null : await context.db.find(schema.strand, { gen: state.lastResolvedGen });
+  const origin = harvestOrigin(state, lastStrand, event.transaction.hash);
+  const terminal = origin === "rollClose";
 
   const c = await getCycle(context.db, cycleNumber);
 
   const filled = c.contractsSold > 0n;
-  const status = c.contractsAssigned > 0n ? "assigned" : filled ? "closed" : "unfilled";
+  const status = closeStatus({ stranded: state.stranded, sold: c.contractsSold, assigned: c.contractsAssigned });
 
   // Supply at harvest is the pre-burn, pre-mint supply. For the terminal harvest that is
   // deliberate — `_settleQueue` runs after `_harvest`, so shares still escrowed for the queue
@@ -633,14 +979,15 @@ ponder.on("Vault:Harvest", async ({ event, context }) => {
 
   // The fee-free part of this sweep, exactly as the vault passed it to `_accrueHarvest`: the
   // terminal harvest gets `RollClose.usdgFromAssignment` — which the RollClose handler wrote to
-  // `c.assignmentUsdg` one log earlier in this same transaction — and a checkpoint gets 0.
-  const h = {
-    grossUsdg,
-    feeUsdg,
-    netUsdg,
-    usdgFromAssignment: terminal ? c.assignmentUsdg : 0n,
-    supply,
-  };
+  // `c.assignmentUsdg` one log earlier in this same transaction — the retry gets the live
+  // shares' part of the recovered USDG, and a checkpoint gets 0.
+  const feeFree =
+    origin === "rollClose"
+      ? c.assignmentUsdg
+      : origin === "retry" && lastStrand !== null
+        ? strandRecovery(lastStrand.assetsIn, lastStrand.usdgIn, lastStrand.queueWad).liveUsdg
+        : 0n;
+  const h = { grossUsdg, feeUsdg, netUsdg, usdgFromAssignment: feeFree, supply };
   const split = splitHarvest(h);
 
   await context.db
@@ -649,6 +996,7 @@ ponder.on("Vault:Harvest", async ({ event, context }) => {
       id: eventId(event),
       cycleNumber,
       terminal,
+      origin,
       filled,
       grossUsdg,
       feeUsdg,
@@ -656,7 +1004,6 @@ ponder.on("Vault:Harvest", async ({ event, context }) => {
       premiumGrossUsdg: split.premiumGross,
       strikeProceedsUsdg: split.strikeProceeds,
       premiumNetUsdg: split.premiumNet,
-      premiumToVault: c.premiumToVault,
       assignmentUsdg: c.assignmentUsdg,
       contractsSold: c.contractsSold,
       contractsAssigned: c.contractsAssigned,
@@ -670,10 +1017,12 @@ ponder.on("Vault:Harvest", async ({ event, context }) => {
     })
     .onConflictDoNothing();
 
-  // A checkpoint harvest that lands AFTER the week already closed (a deposit between
-  // `rollClose` and the next `rollOpen` still carries the closed cycle's number) must not
-  // reopen or restate a published week. It keeps its row; the cycle is left alone.
-  const touchesCycle = cycleNumber !== 0 && (terminal || !c.harvested);
+  // A checkpoint harvest that lands AFTER the week already closed (a deposit or a settleQueue
+  // between `rollClose` and the next `rollOpen` still carries the closed cycle's number) must
+  // not reopen or restate a published week. It keeps its row; the cycle is left alone. The
+  // retry is the one post-close harvest that DOES belong to its week: it is the stranded
+  // week's strike proceeds arriving late.
+  const touchesCycle = cycleNumber !== 0 && (terminal || origin === "retry" || !c.harvested);
 
   if (touchesCycle) {
     await patchCycle(context.db, cycleNumber, {
@@ -703,7 +1052,8 @@ ponder.on("Vault:Harvest", async ({ event, context }) => {
           // The cycle fields are deliberately NOT cleared. The contract does not clear them
           // either — `cycleNumber`, `cycleStrikeUsdg` and the two timestamps survive until
           // the next `rollOpen` — and `_settleQueue` runs AFTER `_harvest`, so `QueueSettled`
-          // still needs the closing cycle's number to stamp on its epoch.
+          // still needs the closing cycle's number to stamp on its epoch. A stranded close
+          // leaves `claimKey`, `optionId` and `contractsWritten` in place as well.
           phase: PHASE.Idle,
           cyclesFilled: state.cyclesFilled + (filled ? 1 : 0),
           cyclesUnfilled: state.cyclesUnfilled + (filled ? 0 : 1),
@@ -714,7 +1064,11 @@ ponder.on("Vault:Harvest", async ({ event, context }) => {
     lastTimestamp: event.block.timestamp,
   });
 
-  await snapshot(context.db, event, terminal ? "Harvest" : "CheckpointHarvest");
+  await snapshot(
+    context.db,
+    event,
+    origin === "rollClose" ? "Harvest" : origin === "retry" ? "RetryHarvest" : "CheckpointHarvest",
+  );
 });
 
 /** The Distributor index moved. Fires just before `Harvest`, and only when there is something to index. */
@@ -789,7 +1143,10 @@ ponder.on("Vault:FeeSwept", async ({ event, context }) => {
                           GOVERNANCE
 //////////////////////////////////////////////////////////////*/
 
-/** A halt blocks `rollOpen` and nothing else: queueing, claiming and closing stay open. */
+/**
+ * A halt blocks `rollOpen`, `approveListing` and every fill (the zone hook refuses) and nothing
+ * else: queueing, `settleQueue`, claiming, cancelling, closing and `retryStrandedClaim` stay open.
+ */
 ponder.on("Vault:WritesHalted", async ({ event, context }) => {
   await patchState(context.db, {
     writesHalted: event.args.halted,
@@ -825,7 +1182,7 @@ ponder.on("Vault:DepositCapUpdated", async ({ event, context }) => {
 });
 
 /**
- * How stale the spot price may be before `rollOpen` refuses to write.
+ * How stale the spot price may be before `rollOpen` refuses to arm and a fill is refused.
  *
  * It is measured in DAYS, not hours, and that is deliberate: the NVDA/USD feed on this chain
  * only updates while the US equity market is open, so a weekend gap of ~52 hours is normal
@@ -841,9 +1198,10 @@ ponder.on("Vault:MaxPriceAgeUpdated", async ({ event, context }) => {
 });
 
 /**
- * Valorem's engine fee is 15 bps of NOTIONAL, which on a weekly out-of-the-money call is a
- * large slice of the premium. The vault refuses to write while it is on unless governance has
- * explicitly accepted paying it, so this flag is worth surfacing.
+ * Valorem's engine fee is 15 bps of NOTIONAL, charged on every fill, which on a weekly
+ * out-of-the-money call is a large slice of the premium. The vault refuses to arm or fill while
+ * it is on unless governance has explicitly accepted paying it (the fill floor is then raised by
+ * the fee valued at spot), so this flag is worth surfacing.
  */
 ponder.on("Vault:ValoremFeeAccepted", async ({ event, context }) => {
   await patchState(context.db, {

@@ -1,16 +1,16 @@
 /**
  * A listing the vault no longer authorises must leave the keeper's own book.
  *
- * WHY THIS FILE EXISTS: dryrun-extended.ts found it on a fork. The guardian cancelListing()ed a
- * partially filled listing; the keeper's next tick relisted the rest — and the dead row stayed
- * `partial`, so GET /orders served the Seaport-cancelled order beside the relist until endTime.
- * An invalidateAllListings() is worse for detection: a counter bump never sets isCancelled, so no
- * Seaport poll would ever flag it. roll.ts:retireUnauthorisedListings now runs on every Listed
- * tick that sees `listingHash == 0`, before any relist decision.
+ * WHY THIS FILE EXISTS: the guardian cancelListing()s or invalidateAllListings() while the keeper
+ * is between ticks. Nothing else notices: pollLiveListing only reads the vault's live hash,
+ * refreshListings runs only at boot, and a counter bump never sets Seaport's isCancelled. The
+ * dead row would stay `approved`/`partial` and GET /orders — the book the fill page reads — would
+ * serve an order Seaport rejects until endTime. roll.ts:retireUnauthorisedListings runs on every
+ * Listed tick that sees `listingHash == 0`, before any relist decision.
  *
  * HOW: the same technique as roll.close.test.ts — the keeper's own client methods are replaced
- * for the test and restored after; the RPC in the environment is a discard port; `fetch` is
- * replaced so the best-effort DELETE to the book is observed rather than sent.
+ * for the test and restored after; the RPC in the environment is a discard port. Capacity is
+ * zero on the stubbed vault, so the tick may retire rows but must not simulate a relist.
  */
 import assert from 'node:assert/strict';
 import { mkdtempSync } from 'node:fs';
@@ -22,13 +22,10 @@ import { mock, test } from 'node:test';
 const scratch = mkdtempSync(join(tmpdir(), 'callhouse-keeper-roll-relist-'));
 process.env.KEEPER_ENV_FILE = '/dev/null';
 process.env.RH_RPC = 'http://127.0.0.1:9';
-process.env.REGISTRY = '0x8E973cE1A6884E28Ad3E377d5f670Bc0b463f4EA';
 process.env.VAULT = '0x1111111111111111111111111111111111111111';
 process.env.KEEPER_PK = `0x${'11'.repeat(32)}`;
 process.env.KEEPER_DB_PATH = join(scratch, 'keeper.db');
 process.env.KEEPER_LOG_LEVEL = 'fatal';
-process.env.OVERCALL_ORDERS_URL = 'http://127.0.0.1:9/api/orders';
-process.env.OVERCALL_MAX_ATTEMPTS = '1';
 delete process.env.ALERT_WEBHOOK;
 
 const { publicClient } = await import('./clients.js');
@@ -53,10 +50,10 @@ function seedListing(cycleNumber: number, seq: number, orderHash: string, status
     seq,
     option_id: OPTION_ID.toString(),
     contracts: '28',
-    unit_price6: '873192',
-    gross_usdg6: '24449376',
-    to_vault6: '23227016',
-    to_overcall6: '1222360',
+    unit_price6: '881924',
+    gross_usdg6: (881_924n * 28n).toString(),
+    to_vault6: (881_924n * 28n).toString(),
+    to_overcall6: '0',
     end_time: endTime,
     counter: '0',
     salt: String(seq),
@@ -65,10 +62,10 @@ function seedListing(cycleNumber: number, seq: number, orderHash: string, status
     approve_tx: hash(`a${seq}`),
     cancel_tx: null,
     status,
-    api_status: 'open',
+    api_status: null,
     api_error: null,
-    posted_at: 1,
-    visible_at: 1,
+    posted_at: null,
+    visible_at: null,
     filled_numerator: null,
     filled_denominator: null,
     seaport_total_filled: null,
@@ -85,10 +82,11 @@ test('a Listed tick with listingHash 0 retires every offered row of the cycle: c
   const FILLED = hash('c3'); // filled in full just before the guardian cancelled it
   const OTHER_CYCLE = hash('c9'); // another cycle's live row: not this tick's business
   store.ensureCycle(7, 'open');
+  store.updateCycle(7, { contracts: 28 });
   seedListing(7, 1, CANCELLED, 'partial', Number(exerciseTs));
-  seedListing(7, 2, INVALIDATED, 'visible', Number(exerciseTs));
-  seedListing(7, 3, FILLED, 'visible', Number(exerciseTs));
-  seedListing(8, 1, OTHER_CYCLE, 'visible', Number(exerciseTs));
+  seedListing(7, 2, INVALIDATED, 'approved', Number(exerciseTs));
+  seedListing(7, 3, FILLED, 'approved', Number(exerciseTs));
+  seedListing(8, 1, OTHER_CYCLE, 'approved', Number(exerciseTs));
   assert.equal(store.openListings().length, 4, 'before: /orders would serve all four');
 
   const statuses: Record<string, [boolean, boolean, bigint, bigint]> = {
@@ -103,28 +101,30 @@ test('a Listed tick with listingHash 0 retires every offered row of the cycle: c
     cycleNumber: 7,
     cycleExerciseTs: exerciseTs,
     cycleExpiryTs: exerciseTs + 86_400n,
-    cycleStrikeUsdg: 225_000_000n,
+    cycleStrikeUsdg: 229_000_000n,
     optionId: OPTION_ID,
     claimKey: OPTION_ID | 1n,
     contractsWritten: 28n,
     listingHash: ZERO32,
+    listingGrossUsdg: 0n,
+    listingAmount: 0n,
     listingsThisCycle: 3,
-    idleAssets: 0n,
+    idleAssets: 2n * LOT,
+    // 30 NVDA at 95% is 28 contracts, all written: capacity 0, so no relist is attempted.
     totalAssets: 30n * LOT,
     lockedAssets: 28n * LOT,
+    isStranded: false,
+    strandGen: 0n,
+    queuedShares: 0n,
     KEEPER_ROLE: ZERO32,
+    policy: [300, 1200, 40, 9500, 500, 50n],
+    spotUsdg: 218_297_934n,
     feesEnabled: false,
     feeBps: 15,
-    cycle: { number: 7, exerciseTimestamp: exerciseTs, expiryTimestamp: exerciseTs + 86_400n, lotSize: LOT, optionIds: [] },
-    isWritingOpen: true,
-    isCycleLive: true,
     hasRole: true,
-    // clear.balanceOf(vault, optionId): nothing left to sell, so no relist is attempted either way.
-    balanceOf: 0n,
     oraclePaused: false,
   };
   const statusReads: string[] = [];
-  const deletes: string[] = [];
   const mocks = [
     mock.method(publicClient, 'readContract', async (call: ReadCall) => {
       if (call.functionName === 'getOrderStatus') {
@@ -142,10 +142,6 @@ test('a Listed tick with listingHash 0 retires every offered row of the cycle: c
     mock.method(publicClient, 'simulateContract', async () => {
       throw new Error('no transaction may be simulated: nothing is left to list');
     }),
-    mock.method(globalThis, 'fetch', async (url: string, init?: RequestInit) => {
-      deletes.push(`${init?.method ?? 'GET'} ${url}`);
-      return new Response('{"ok":true}', { status: 200, headers: { 'content-type': 'application/json' } });
-    }),
   ];
   try {
     await tick();
@@ -161,15 +157,11 @@ test('a Listed tick with listingHash 0 retires every offered row of the cycle: c
   assert.equal(row(INVALIDATED)?.status, 'cancelled', 'counter bump: retired although Seaport never set isCancelled');
   assert.equal(row(INVALIDATED)?.seaport_cancelled, 0);
   assert.equal(row(FILLED)?.status, 'filled', 'fully filled before the cancel: filled, not cancelled');
-  assert.equal(row(OTHER_CYCLE)?.status, 'visible', "another cycle's row is untouched");
-  assert.deepEqual(
-    deletes.sort(),
-    [`DELETE http://127.0.0.1:9/api/orders/${CANCELLED}`, `DELETE http://127.0.0.1:9/api/orders/${INVALIDATED}`].sort(),
-    'the book is told about the two dead orders, not the filled one',
-  );
+  assert.equal(row(OTHER_CYCLE)?.status, 'approved', "another cycle's row is untouched");
   assert.deepEqual(
     store.openListings().map((l) => l.order_hash),
     [OTHER_CYCLE],
     '/orders no longer serves any dead order of cycle 7',
   );
+  assert.equal(store.getCycle(7)?.contracts, 28, 'the sold count is what the vault says');
 });

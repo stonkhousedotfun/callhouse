@@ -18,6 +18,8 @@
 // artefacts (`mergeErrorsFrom`), deduplicated by signature. Errors only: the library artefacts'
 // FUNCTION entries use forge's internal type names (`IValoremClear`, `ItemType`) and would not
 // parse as an ABI.
+//
+// There is no OvercallRegistry target: the redesigned vault has no registry (decision D16).
 import { readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -36,13 +38,6 @@ const targets = [
     mergeErrorsFrom: ["ValoremLib.json", "SeaportOrderLib.json", "Policy.json"],
   },
   {
-    src: "OvercallRegistry.json",
-    out: "overcallRegistry.ts",
-    export: "overcallRegistryAbi",
-    note:
-      "Overcall per-market registry. The NVDA registry on chain 4663 is\n// 0x8E973cE1A6884E28Ad3E377d5f670Bc0b463f4EA. NOTE: the cycle struct has NO status field —\n// `isWritingOpen()` and `isCycleLive()` are the whole state machine.",
-  },
-  {
     src: "ValoremClear.json",
     out: "valoremClear.ts",
     export: "valoremClearAbi",
@@ -54,7 +49,7 @@ const targets = [
     out: "stockToken.ts",
     export: "stockTokenAbi",
     note:
-      "Robinhood Chain Stock Token: ERC-20 plus ERC-8056 scaled UI amount, recovered from the\n// deployed implementation's bytecode and verified live (see ops/abis/StockToken.json).\n// `uiMultiplier()` is DISPLAY ONLY — the vault never rebases and its share maths use raw\n// balances. `oraclePaused()` gates writes: a paused oracle blocks rollOpen.",
+      "Robinhood Chain Stock Token: ERC-20 plus ERC-8056 scaled UI amount, recovered from the\n// deployed implementation's bytecode and verified live (see ops/abis/StockToken.json).\n// `uiMultiplier()` is DISPLAY ONLY — the vault never rebases and its share maths use raw\n// balances. `oraclePaused()` gates writes: a paused oracle blocks rollOpen and every fill.",
   },
 ];
 

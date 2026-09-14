@@ -1,14 +1,14 @@
 /**
- * What the fork harnesses share: dryrun.ts (the three-cycle rehearsal) and dryrun-extended.ts
- * (the K-22 scenarios). Chain 4663 constants, the derived actors, raw anvil RPC, storage-written
- * balances, linked deployments, the recorded trail, the in-process Overcall stub and alert
- * capture, and the ABI fragments the keeper itself never needs.
+ * What the fork harnesses share: dryrun.ts (the three-cycle rehearsal) and dryrun-extended.ts.
+ * Chain 4663 constants, the derived actors, raw anvil RPC, storage-written balances, linked
+ * deployments, the recorded trail, the alert capture, the USDG freeze (Paxos's own role,
+ * impersonated), and the ABI fragments the keeper itself never needs.
  *
  * Nothing here imports a keeper module that reads the environment (abi.ts has no imports), so a
  * harness can still set every keeper variable before config.ts is first evaluated.
  */
 import { readFileSync } from 'node:fs';
-import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
+import { createServer, type Server } from 'node:http';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
@@ -18,6 +18,7 @@ import {
   createWalletClient,
   defineChain,
   encodeAbiParameters,
+  encodeFunctionData,
   getAddress,
   http,
   keccak256,
@@ -42,10 +43,14 @@ export const CLEAR = '0x9a7b40e5c1dB1Af822ef091c990b58b02C78C0C0' as const;
 export const SEAPORT = '0x0000000000000068F116a894984e2DB1123eB395' as const;
 export const USDG = '0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168' as const;
 export const NVDA = '0xd0601CE157Db5bdC3162BbaC2a2C8aF5320D9EEC' as const;
-export const REGISTRY_NVDA = '0x8E973cE1A6884E28Ad3E377d5f670Bc0b463f4EA' as const;
-export const OVERCALL_FEE = '0xdAe7e82A2E7D566C67E87C164B05a1C560190782' as const;
 export const FEED = '0x379EC4f7C378F34a1B47E4F3cbeBCbAC3E8E9F15' as const;
 export const CHAIN_ID = 4663;
+
+/** The EOA holding USDG's PAUSE_ROLE and ASSET_PROTECTION_ROLE on 4663 (integrations/usdg.md §3).
+ *  Impersonated to freeze the vault; if the role has moved, the harness writes the `frozen`
+ *  mapping (slot 6) directly, the same fallback contracts/test/fork/ForkLive.t.sol uses. */
+export const USDG_ASSET_PROTECTION = '0x3Af3e85f4f97De7AD0f000B724Fb77fE5ffc024B' as const;
+export const USDG_FROZEN_SLOT = 6n;
 
 export const ZERO_BYTES32 = '0x0000000000000000000000000000000000000000000000000000000000000000' as const;
 export const ONE_HUNDRED_ETH = 100_000_000_000_000_000_000n;
@@ -54,8 +59,8 @@ export const BPS = 10_000n;
 
 /**
  * Policy.launchDefaults(): what the Vault constructor installs, and so what this run's vault
- * must read back before the keeper sizes its first write. protocolFeeBps is the 2026-09-13
- * decision: 5% of harvested PREMIUM, never of strike proceeds.
+ * must read back before the keeper sizes its first listing. protocolFeeBps is 5% of harvested
+ * PREMIUM, never of strike proceeds.
  */
 export const LAUNCH_POLICY = {
   minOtmBps: 300n,
@@ -68,10 +73,9 @@ export const LAUNCH_POLICY = {
 
 /**
  * The protocol fee on ONE Harvest event, charged exactly as Vault._accrueHarvest charges it:
- * floor((grossUsdg - feeFree) x protocolFeeBps / 10000), where `feeFree` is
- * `RollClose.usdgFromAssignment` for the terminal harvest inside rollClose (same transaction)
- * and 0 for a deposit/mint checkpoint. `grossUsdg` still includes the strike proceeds; only the
- * premium part is fee-bearing, and `netUsdg = grossUsdg - feeUsdg` either way.
+ * floor((grossUsdg - feeFree) x protocolFeeBps / 10000), where `feeFree` is the strike proceeds
+ * credited in the same transaction (RollClose.usdgFromAssignment, or a recovery's queue-free USDG)
+ * and 0 for a deposit checkpoint.
  */
 export function harvestFee(grossUsdg: bigint, feeFree: bigint, protocolFeeBps: bigint): bigint {
   const feeBearing = grossUsdg > feeFree ? grossUsdg - feeFree : 0n;
@@ -84,6 +88,14 @@ export function harvestFee(grossUsdg: bigint, feeFree: bigint, protocolFeeBps: b
 
 export const RPC = process.env.DRYRUN_RPC ?? 'http://127.0.0.1:8545';
 export const ARTIFACTS = process.env.DRYRUN_ARTIFACTS ?? fileURLToPath(new URL('../../contracts/out/', import.meta.url));
+
+/** Refuse anything that is not a local anvil: this harness writes storage and warps time. */
+export function assertLocalRpc(): void {
+  const url = new URL(RPC);
+  if (url.hostname !== '127.0.0.1' && url.hostname !== 'localhost' && url.hostname !== '::1') {
+    throw new Error(`DRYRUN_RPC must be a local anvil fork, got ${url.origin}`);
+  }
+}
 
 /*//////////////////////////////////////////////////////////////
                                ACTORS
@@ -105,6 +117,7 @@ export const ADMIN = derivedActor('admin');
 export const FEE_SAFE = derivedActor('fee-safe');
 export const DEPOSITOR = derivedActor('depositor');
 export const BUYER = derivedActor('buyer');
+export const BUYER_B = derivedActor('buyer-b');
 
 export const forkChain: Chain = defineChain({
   id: CHAIN_ID,
@@ -144,7 +157,6 @@ export const trail = {
   addresses: {} as Record<string, string>,
   harnessTxs: [] as TxRecord[],
   steps: [] as StepRecord[],
-  stubRequests: [] as string[],
   alerts: [] as Array<{ kind: string; severity: string; message: string }>,
 };
 
@@ -245,6 +257,34 @@ export async function warpTo(target: bigint, label: string): Promise<void> {
   note(`warped ${label}: ${before} -> ${after} (+${delta}s)`);
 }
 
+/** Mine one empty block at exactly `timestamp`; returns its number. */
+export async function mineAt(timestamp: bigint): Promise<bigint> {
+  await rpc('evm_setNextBlockTimestamp', [Number(timestamp)]);
+  await rpc('evm_mine', []);
+  const block = await pub.getBlock({ blockTag: 'latest' });
+  assertEq(block.timestamp, timestamp, 'mined at the requested timestamp');
+  return block.number;
+}
+
+/**
+ * Send a transaction FROM an address the harness does not hold the key for, through anvil's
+ * impersonation. Used for USDG's role holder and for the Clear's `feeTo`.
+ */
+export async function sendAs(label: string, from: Address, to: Address, data: Hex): Promise<{ hash: Hex; receipt: TransactionReceipt }> {
+  await setBalance(from, ONE_HUNDRED_ETH);
+  await rpc('anvil_impersonateAccount', [from]);
+  try {
+    const hash = await rpc<Hex>('eth_sendTransaction', [{ from, to, data, gas: toHex(500_000n) }]);
+    const receipt = await pub.waitForTransactionReceipt({ hash });
+    assert(receipt.status === 'success', `${label} reverted (tx ${hash})`);
+    trail.harnessTxs.push({ label, by: from, hash, block: receipt.blockNumber.toString(), gasUsed: receipt.gasUsed.toString() });
+    note(`${label}: tx ${hash} (block ${receipt.blockNumber}, gas ${receipt.gasUsed}, impersonating ${from})`);
+    return { hash, receipt };
+  } finally {
+    await rpc('anvil_stopImpersonatingAccount', [from]);
+  }
+}
+
 /*//////////////////////////////////////////////////////////////
                             ERC-20 FUNDING
 //////////////////////////////////////////////////////////////*/
@@ -282,6 +322,37 @@ export async function deal(token: Address, holder: Address, amount: bigint): Pro
     await rpc('anvil_setStorageAt', [token, slot, previous]);
   }
   throw new Error(`could not find the balances slot of ${token}`);
+}
+
+/*//////////////////////////////////////////////////////////////
+                          THE USDG FREEZE
+//////////////////////////////////////////////////////////////*/
+
+export const usdgAdminAbi = [
+  { type: 'function', name: 'freeze', inputs: [{ name: 'addr', type: 'address' }], outputs: [], stateMutability: 'nonpayable' },
+  { type: 'function', name: 'unfreeze', inputs: [{ name: 'addr', type: 'address' }], outputs: [], stateMutability: 'nonpayable' },
+  { type: 'function', name: 'isFrozen', inputs: [{ name: 'addr', type: 'address' }], outputs: [{ type: 'bool' }], stateMutability: 'view' },
+] as const;
+
+export async function isFrozen(addr: Address): Promise<boolean> {
+  return pub.readContract({ address: USDG, abi: usdgAdminAbi, functionName: 'isFrozen', args: [addr] });
+}
+
+/**
+ * Freeze or unfreeze an address on the REAL USDG, the way Paxos would: `freeze(address)` from the
+ * ASSET_PROTECTION_ROLE holder, impersonated. Falls back to writing the `frozen` mapping (slot 6)
+ * if the role has moved since the recon. Either way `isFrozen` is read back as the proof.
+ */
+export async function setUsdgFrozen(addr: Address, frozen: boolean): Promise<void> {
+  const fn = frozen ? 'freeze' : 'unfreeze';
+  try {
+    await sendAs(`USDG.${fn}(${addr})`, USDG_ASSET_PROTECTION, USDG, encodeFunctionData({ abi: usdgAdminAbi, functionName: fn, args: [addr] }));
+  } catch (error) {
+    note(`${fn} from the role holder failed (${error instanceof Error ? error.message.split('\n')[0] : String(error)}); writing the frozen slot directly`);
+    const slot = keccak256(encodeAbiParameters([{ type: 'address' }, { type: 'uint256' }], [addr, USDG_FROZEN_SLOT]));
+    await rpc('anvil_setStorageAt', [USDG, slot, pad(toHex(frozen ? 1n : 0n), { size: 32 })]);
+  }
+  assertEq(await isFrozen(addr), frozen, `USDG.isFrozen(${addr})`);
 }
 
 /*//////////////////////////////////////////////////////////////
@@ -361,55 +432,96 @@ export async function deploy(label: string, by: PrivateKeyAccount, abi: Abi, byt
   return address;
 }
 
-/*//////////////////////////////////////////////////////////////
-                         THE OVERCALL STUB
-//////////////////////////////////////////////////////////////*/
+/**
+ * MockFeed + both libraries + the linked Vault, from contracts/out, with KEEPER_ROLE granted.
+ * The vault is constructed exactly as script/Deploy.s.sol constructs it, on the real Clear, the
+ * real Seaport, the real tokens; only the feed is a mock seeded with the REAL answer so the run
+ * can warp a week without tripping the vault's StalePrice gate.
+ */
+export async function deployVault(depositCap: bigint): Promise<{ vault: Address; feed: Address; answer: bigint }> {
+  const [, answer] = await pub.readContract({ address: FEED, abi: feedAbi, functionName: 'latestRoundData' });
+  note(`real Chainlink answer at the fork block: ${answer} (8 dp)`);
+  const mockFeed = artifact('MockFeed.sol/MockFeed.json');
+  const feed = await deploy('MockFeed', ADMIN, mockFeed.abi, mockFeed.bytecode.object, [8, answer, 'RHNVDA / USD (dry-run mirror of the real answer)']);
 
-export interface StubListing extends Record<string, unknown> {
-  orderHash: string;
-  status: string;
-  optionId: string;
-  offerer: string;
+  const vaultArtifact = artifact('Vault.sol/Vault.json');
+  const refs = Object.values(vaultArtifact.bytecode.linkReferences).flatMap((byName) => Object.keys(byName)).sort();
+  assert(refs.join(',') === 'SeaportOrderLib,ValoremLib', `Vault should link exactly SeaportOrderLib and ValoremLib, the artifact names: ${refs.join(',') || 'none'}`);
+  const vault = await deployLinked('Vault', ADMIN, vaultArtifact, [
+    {
+      asset: NVDA,
+      usdg: USDG,
+      clear: CLEAR,
+      seaport: SEAPORT,
+      priceFeed: feed,
+      maxPriceAge: 4 * 86_400,
+      conduitKey: ZERO_BYTES32,
+      admin: ADMIN.address,
+      feeRecipient: FEE_SAFE.address,
+      depositCap,
+      name: 'Callhouse NVDA (dry run)',
+      symbol: 'cNVDA',
+    },
+  ]);
+  const keeperRole = await pub.readContract({ address: vault, abi: vaultAbi, functionName: 'KEEPER_ROLE' });
+  await sendTx('grantRole(KEEPER_ROLE, keeper)', ADMIN, () =>
+    wallet.writeContract({ account: ADMIN, chain: forkChain, address: vault, abi: vaultAbi, functionName: 'grantRole', args: [keeperRole, KEEPER.address] }),
+  );
+  const zone = await pub.readContract({ address: vault, abi: vaultAbi, functionName: 'seaportZone' });
+  assertEq(zone, vault, 'the vault is its own Seaport zone');
+  return { vault, feed, answer };
 }
 
-/**
- * The four endpoints overcallApi.ts speaks, with the response shapes recorded in recon R3. The
- * order hash is derived from the posted components the same way Overcall does it (they hash the
- * components server-side); the derivation is injected after the keeper's seaport.ts is imported.
- */
-export class OvercallStub {
-  readonly listings = new Map<string, StubListing>();
-  readonly requests: string[] = [];
-  hashOf: ((components: unknown) => string) | null = null;
+/** Refresh the mock feed's `updatedAt` (and optionally its answer) after a warp. */
+export async function refreshFeed(feed: Address, answer: bigint, why: string): Promise<void> {
+  await sendTx(`MockFeed.setAnswer(${answer}) (${why})`, ADMIN, () =>
+    wallet.writeContract({ account: ADMIN, chain: forkChain, address: feed, abi: mockFeedAbi, functionName: 'setAnswer', args: [answer] }),
+  );
+}
+
+/*//////////////////////////////////////////////////////////////
+                           ALERT CAPTURE
+//////////////////////////////////////////////////////////////*/
+
+/** Captures what alerts.ts POSTs to ALERT_WEBHOOK. Can hold one delivery open, to put a signal
+ *  inside a tick that is provably still in flight. */
+export class AlertCapture {
+  readonly received: Array<{ kind: string; severity: string; message: string; data: Record<string, unknown> }> = [];
   private server: Server | null = null;
+  private gate: { kind: string; arrived: () => void; released: Promise<void> } | null = null;
   url = '';
 
   async start(): Promise<void> {
-    this.server = createServer((req, res) => void this.handle(req, res));
+    this.server = createServer((req, res) => {
+      const chunks: Buffer[] = [];
+      req.on('data', (chunk: Buffer) => chunks.push(chunk));
+      req.on('end', () => {
+        const payload = JSON.parse(Buffer.concat(chunks).toString('utf8')) as { kind: string; severity: string; message: string; data: Record<string, unknown> };
+        const reply = (): void => {
+          this.received.push(payload);
+          trail.alerts.push({ kind: payload.kind, severity: payload.severity, message: payload.message });
+          process.stdout.write(`    ALERT [${payload.severity}] ${payload.kind}: ${payload.message}\n`);
+          res.writeHead(200, { 'content-type': 'application/json' });
+          res.end('{"ok":true}');
+        };
+        if (this.gate && this.gate.kind === payload.kind) {
+          const gate = this.gate;
+          this.gate = null;
+          gate.arrived();
+          void gate.released.then(reply);
+          return;
+        }
+        reply();
+      });
+    });
     await new Promise<void>((done) => this.server?.listen(0, '127.0.0.1', done));
     const address = this.server.address();
-    if (!address || typeof address === 'string') throw new Error('stub did not bind');
-    this.url = `http://127.0.0.1:${address.port}`;
+    if (!address || typeof address === 'string') throw new Error('alert capture did not bind');
+    this.url = `http://127.0.0.1:${address.port}/alerts`;
   }
 
-  stop(): void {
-    this.server?.close();
-  }
-
-  markFilled(orderHash: string, realisedPremium6: string): void {
-    const listing = this.listings.get(orderHash);
-    if (!listing) throw new Error(`stub has no listing ${orderHash}`);
-    Object.assign(listing, { status: 'filled', remaining: '0', filledNumerator: '1', filledDenominator: '1', realisedPremium6, checkedAt: new Date().toISOString() });
-  }
-
-  private postGate: { arrived: () => void; released: Promise<void> } | null = null;
-
-  /**
-   * Hold the NEXT POST /api/orders before it is answered. `arrived` resolves when the request
-   * is in; the reply is sent only after `release()`. dryrun-extended.ts uses this to put a
-   * SIGTERM inside a tick that is provably still in flight.
-   */
-  holdNextPost(): { arrived: Promise<void>; release: () => void } {
+  /** Hold the next delivery of `kind` before it is answered; `arrived` resolves when it is in. */
+  holdNext(kind: string): { arrived: Promise<void>; release: () => void } {
     let arrived!: () => void;
     let release!: () => void;
     const arrivedPromise = new Promise<void>((done) => {
@@ -418,132 +530,8 @@ export class OvercallStub {
     const released = new Promise<void>((done) => {
       release = done;
     });
-    this.postGate = { arrived, released };
+    this.gate = { kind, arrived, released };
     return { arrived: arrivedPromise, release };
-  }
-
-  private async handle(req: IncomingMessage, res: ServerResponse): Promise<void> {
-    const chunks: Buffer[] = [];
-    for await (const chunk of req) chunks.push(chunk as Buffer);
-    const raw = Buffer.concat(chunks).toString('utf8');
-    const url = new URL(req.url ?? '/', 'http://stub');
-    const method = req.method ?? 'GET';
-    this.requests.push(`${method} ${url.pathname}${url.search}`);
-    trail.stubRequests.push(`${method} ${url.pathname}${url.search}`);
-    if (method === 'POST' && this.postGate) {
-      const gate = this.postGate;
-      this.postGate = null;
-      gate.arrived();
-      await gate.released;
-    }
-
-    const reply = (status: number, body: unknown): void => {
-      res.writeHead(status, { 'content-type': 'application/json' });
-      res.end(JSON.stringify(body));
-    };
-
-    const match = /^\/api\/orders(?:\/(0x[0-9a-fA-F]{64}))?$/.exec(url.pathname);
-    if (!match) return reply(404, { error: 'not found' });
-    const hash = match[1]?.toLowerCase();
-
-    if (method === 'POST' && !hash) {
-      let body: { chainId?: number; components?: Record<string, unknown>; signature?: string };
-      try {
-        body = JSON.parse(raw) as typeof body;
-      } catch {
-        return reply(400, { error: 'invalid json' });
-      }
-      if (url.searchParams.get('market') !== 'NVDA') return reply(400, { error: 'unknown market' });
-      if (body.chainId !== CHAIN_ID) return reply(400, { error: 'wrong chainId' });
-      if (!body.signature || !/^0x([0-9a-f]{128}|[0-9a-f]{130})$/.test(body.signature)) return reply(400, { error: 'signature must be 64 or 65 bytes' });
-      const c = body.components;
-      if (!c || !Array.isArray(c.offer) || !Array.isArray(c.consideration) || c.orderType !== 1) return reply(400, { error: 'components: bad shape' });
-      if (!this.hashOf) return reply(500, { error: 'stub not wired' });
-      const orderHash = this.hashOf(c).toLowerCase();
-      const existing = this.listings.get(orderHash);
-      if (existing) return reply(200, { listing: existing });
-      const offer = (c.offer as Array<Record<string, string>>)[0] ?? {};
-      const consideration = c.consideration as Array<Record<string, string>>;
-      const total = consideration.reduce((sum, item) => sum + BigInt(item.startAmount ?? '0'), 0n);
-      const quantity = BigInt(offer.startAmount ?? '0');
-      const listing: StubListing = {
-        orderHash,
-        chainId: CHAIN_ID,
-        offerer: String(c.offerer),
-        optionId: String(offer.identifierOrCriteria),
-        quantity: quantity.toString(),
-        remaining: quantity.toString(),
-        unitPrice6: quantity === 0n ? '0' : (total / quantity).toString(),
-        totalPrice6: total.toString(),
-        realisedPremium6: '0',
-        startTime: String(c.startTime),
-        endTime: String(c.endTime),
-        salt: String(c.salt),
-        counter: String(c.counter),
-        status: 'open',
-        filledNumerator: '0',
-        filledDenominator: '0',
-        signature: body.signature,
-        createdAt: new Date().toISOString(),
-        checkedAt: new Date().toISOString(),
-        components: c,
-      };
-      this.listings.set(orderHash, listing);
-      return reply(201, { listing });
-    }
-
-    if (method === 'GET' && !hash) {
-      const status = url.searchParams.get('status');
-      const offerer = url.searchParams.get('offerer')?.toLowerCase();
-      const optionId = url.searchParams.get('optionId');
-      const limit = Number(url.searchParams.get('limit') ?? '50');
-      const listings = [...this.listings.values()]
-        .filter((l) => (status && status !== 'all' ? l.status === status : true))
-        .filter((l) => (offerer ? l.offerer.toLowerCase() === offerer : true))
-        .filter((l) => (optionId ? l.optionId === optionId : true))
-        .slice(0, limit);
-      return reply(200, { listings });
-    }
-
-    if (method === 'GET' && hash) {
-      const listing = this.listings.get(hash);
-      return listing ? reply(200, { listing }) : reply(404, { error: 'listing not found' });
-    }
-
-    if (method === 'DELETE' && hash) {
-      const listing = this.listings.get(hash);
-      if (!listing) return reply(404, { error: 'listing not found' });
-      listing.status = 'cancelled';
-      return reply(200, { ok: true });
-    }
-
-    return reply(405, { error: 'method not allowed' });
-  }
-}
-
-/** Captures what alerts.ts POSTs to ALERT_WEBHOOK. */
-export class AlertCapture {
-  readonly received: Array<{ kind: string; severity: string; message: string; data: unknown }> = [];
-  private server: Server | null = null;
-  url = '';
-
-  async start(): Promise<void> {
-    this.server = createServer((req, res) => {
-      const chunks: Buffer[] = [];
-      req.on('data', (chunk: Buffer) => chunks.push(chunk));
-      req.on('end', () => {
-        const payload = JSON.parse(Buffer.concat(chunks).toString('utf8')) as { kind: string; severity: string; message: string; data: unknown };
-        this.received.push(payload);
-        trail.alerts.push({ kind: payload.kind, severity: payload.severity, message: payload.message });
-        process.stdout.write(`    ALERT [${payload.severity}] ${payload.kind}: ${payload.message}\n`);
-        res.writeHead(200, { 'content-type': 'application/json' });
-        res.end('{"ok":true}');
-      });
-    });
-    await new Promise<void>((done) => this.server?.listen(0, '127.0.0.1', done));
-    const address = this.server.address();
-    if (!address || typeof address === 'string') throw new Error('alert capture did not bind');
-    this.url = `http://127.0.0.1:${address.port}/alerts`;
   }
 
   stop(): void {
@@ -553,26 +541,17 @@ export class AlertCapture {
   kinds(): string[] {
     return this.received.map((a) => a.kind);
   }
+
+  last(kind: string): { kind: string; severity: string; message: string; data: Record<string, unknown> } {
+    const found = [...this.received].reverse().find((a) => a.kind === kind);
+    assert(found !== undefined, `an alert of kind ${kind} was captured`);
+    return found;
+  }
 }
 
 /*//////////////////////////////////////////////////////////////
                           ABI FRAGMENTS (harness)
 //////////////////////////////////////////////////////////////*/
-
-export const mockRegistryAbi = [
-  {
-    type: 'function',
-    name: 'setCycleWithStrikes',
-    inputs: [
-      { name: 'ids', type: 'uint256[]' },
-      { name: 'strikes', type: 'uint96[]' },
-      { name: 'exerciseAt', type: 'uint40' },
-      { name: 'expireAt', type: 'uint40' },
-    ],
-    outputs: [],
-    stateMutability: 'nonpayable',
-  },
-] as const;
 
 export const mockFeedAbi = [
   { type: 'function', name: 'setAnswer', inputs: [{ name: 'a', type: 'int256' }], outputs: [], stateMutability: 'nonpayable' },
@@ -594,28 +573,9 @@ export const feedAbi = [
   },
 ] as const;
 
-/** Valorem's option-type factory, absent from abi.ts because the keeper never creates options. */
-export const newOptionTypeAbi = [
-  {
-    type: 'function',
-    name: 'newOptionType',
-    inputs: [
-      { name: 'underlyingAsset', type: 'address' },
-      { name: 'underlyingAmount', type: 'uint96' },
-      { name: 'exerciseAsset', type: 'address' },
-      { name: 'exerciseAmount', type: 'uint96' },
-      { name: 'exerciseTimestamp', type: 'uint40' },
-      { name: 'expiryTimestamp', type: 'uint40' },
-    ],
-    outputs: [{ name: 'optionId', type: 'uint256' }],
-    stateMutability: 'nonpayable',
-  },
-] as const;
-
 /**
  * The vault surface the keeper never touches — the redeem queue and the USDG accounting views —
- * absent from abi.ts on purpose. Cycle 3 checks every fragment here against the compiled
- * artifact before using it, so this cannot drift from Vault.sol unnoticed.
+ * absent from abi.ts on purpose.
  */
 export const vaultQueueAbi = [
   { type: 'function', name: 'queueRedeem', inputs: [{ name: 'shares', type: 'uint256' }], outputs: [{ name: 'queuedEpoch', type: 'uint256' }], stateMutability: 'nonpayable' },
@@ -628,61 +588,16 @@ export const vaultQueueAbi = [
   },
   {
     type: 'function',
-    name: 'previewCompleteRedeem',
-    inputs: [{ name: 'owner', type: 'address' }],
-    outputs: [{ name: 'assets', type: 'uint256' }, { name: 'usdgOut', type: 'uint256' }],
-    stateMutability: 'view',
-  },
-  {
-    type: 'function',
     name: 'epochs',
     inputs: [{ name: 'id', type: 'uint256' }],
     outputs: [{ name: 'sharesRemaining', type: 'uint256' }, { name: 'assetsRemaining', type: 'uint256' }, { name: 'usdgRemaining', type: 'uint256' }],
     stateMutability: 'view',
   },
-  { type: 'function', name: 'queuedSharesOf', inputs: [{ name: 'a', type: 'address' }], outputs: [{ type: 'uint256' }], stateMutability: 'view' },
-  { type: 'function', name: 'queuedEpochOf', inputs: [{ name: 'a', type: 'address' }], outputs: [{ type: 'uint256' }], stateMutability: 'view' },
-  { type: 'function', name: 'owedAssets', inputs: [{ name: 'a', type: 'address' }], outputs: [{ type: 'uint256' }], stateMutability: 'view' },
-  { type: 'function', name: 'owedQueueUsdg', inputs: [{ name: 'a', type: 'address' }], outputs: [{ type: 'uint256' }], stateMutability: 'view' },
   { type: 'function', name: 'pendingFeeUsdg', inputs: [], outputs: [{ type: 'uint256' }], stateMutability: 'view' },
   { type: 'function', name: 'usdgDust', inputs: [], outputs: [{ type: 'uint256' }], stateMutability: 'view' },
-  { type: 'function', name: 'usdgUnallocated', inputs: [], outputs: [{ type: 'uint256' }], stateMutability: 'view' },
   { type: 'function', name: 'usdgOwed', inputs: [], outputs: [{ type: 'uint256' }], stateMutability: 'view' },
   { type: 'function', name: 'usdgAccounted', inputs: [], outputs: [{ type: 'uint256' }], stateMutability: 'view' },
-  { type: 'function', name: 'totalUsdgClaimed', inputs: [], outputs: [{ type: 'uint256' }], stateMutability: 'view' },
   { type: 'function', name: 'previewRedeem', inputs: [{ name: 'shares', type: 'uint256' }], outputs: [{ type: 'uint256' }], stateMutability: 'view' },
-  { type: 'function', name: 'maxDeposit', inputs: [{ name: 'a', type: 'address' }], outputs: [{ type: 'uint256' }], stateMutability: 'view' },
-  {
-    type: 'event',
-    name: 'QueueRedeem',
-    inputs: [
-      { name: 'owner', type: 'address', indexed: true },
-      { name: 'shares', type: 'uint256', indexed: false },
-      { name: 'epochId', type: 'uint256', indexed: false },
-    ],
-  },
-  {
-    type: 'event',
-    name: 'CompleteRedeem',
-    inputs: [
-      { name: 'owner', type: 'address', indexed: true },
-      { name: 'receiver', type: 'address', indexed: true },
-      { name: 'shares', type: 'uint256', indexed: false },
-      { name: 'assets', type: 'uint256', indexed: false },
-      { name: 'usdgOut', type: 'uint256', indexed: false },
-    ],
-  },
-  {
-    type: 'event',
-    name: 'QueueEntrySettled',
-    inputs: [
-      { name: 'owner', type: 'address', indexed: true },
-      { name: 'epochId', type: 'uint256', indexed: true },
-      { name: 'shares', type: 'uint256', indexed: false },
-      { name: 'assets', type: 'uint256', indexed: false },
-      { name: 'usdgOut', type: 'uint256', indexed: false },
-    ],
-  },
   {
     type: 'event',
     name: 'QueueSettled',
@@ -693,152 +608,20 @@ export const vaultQueueAbi = [
       { name: 'usdgOut', type: 'uint256', indexed: false },
     ],
   },
-  {
-    type: 'event',
-    name: 'ClaimUsdg',
-    inputs: [
-      { name: 'account', type: 'address', indexed: true },
-      { name: 'to', type: 'address', indexed: true },
-      { name: 'amount', type: 'uint256', indexed: false },
-    ],
-  },
-  {
-    type: 'event',
-    name: 'FeeSwept',
-    inputs: [
-      { name: 'feeRecipient', type: 'address', indexed: true },
-      { name: 'amount', type: 'uint256', indexed: false },
-    ],
-  },
-  {
-    type: 'event',
-    name: 'UsdgDistributed',
-    inputs: [
-      { name: 'amount', type: 'uint256', indexed: false },
-      { name: 'accUsdgPerShare', type: 'uint256', indexed: false },
-      { name: 'totalSupply', type: 'uint256', indexed: false },
-    ],
-  },
-  /** AdapterValorem's ClaimRedeemed (the balance deltas), not the Clear's event of the same name. */
-  {
-    type: 'event',
-    name: 'ClaimRedeemed',
-    inputs: [
-      { name: 'claimKey', type: 'uint256', indexed: true },
-      { name: 'underlyingReturned', type: 'uint256', indexed: false },
-      { name: 'exerciseReceived', type: 'uint256', indexed: false },
-    ],
-  },
-  {
-    type: 'event',
-    name: 'Harvest',
-    inputs: [
-      { name: 'cycleNumber', type: 'uint32', indexed: true },
-      { name: 'grossUsdg', type: 'uint256', indexed: false },
-      { name: 'feeUsdg', type: 'uint256', indexed: false },
-      { name: 'netUsdg', type: 'uint256', indexed: false },
-    ],
-  },
-  {
-    type: 'event',
-    name: 'RollClose',
-    inputs: [
-      { name: 'cycleNumber', type: 'uint32', indexed: true },
-      { name: 'assetsReturned', type: 'uint256', indexed: false },
-      { name: 'usdgFromAssignment', type: 'uint256', indexed: false },
-      { name: 'contractsAssignedCount', type: 'uint256', indexed: false },
-    ],
-  },
   { type: 'error', name: 'EpochNotSettled', inputs: [{ name: 'epochId', type: 'uint256' }, { name: 'currentEpoch', type: 'uint256' }] },
   { type: 'error', name: 'NothingQueued', inputs: [] },
-  { type: 'error', name: 'DepositsClosedForCycle', inputs: [{ name: 'exerciseTs', type: 'uint40' }] },
+  { type: 'error', name: 'DepositsClosed', inputs: [] },
 ] as const;
 
 /**
- * The Clear's fee surface the keeper does not carry in abi.ts: the switch its `feeTo` owns, the
- * per-token fee ledger, and the event that moves the switch (ops/recon/R4-valorem-abi.md).
+ * The Clear's fee surface the keeper does not carry in abi.ts: the switch its `feeTo` owns and
+ * the per-token fee ledger (ops/recon/R4-valorem-abi.md).
  */
 export const clearFeeAbi = [
   { type: 'function', name: 'setFeesEnabled', inputs: [{ name: 'enabled', type: 'bool' }], outputs: [], stateMutability: 'nonpayable' },
   { type: 'function', name: 'feeBalance', inputs: [{ name: 'token', type: 'address' }], outputs: [{ type: 'uint256' }], stateMutability: 'view' },
-  {
-    type: 'event',
-    name: 'FeeSwitchUpdated',
-    inputs: [
-      { name: 'feeTo', type: 'address', indexed: false },
-      { name: 'enabled', type: 'bool', indexed: false },
-    ],
-  },
 ] as const;
 
 export const erc20AllowanceAbi = [
   { type: 'function', name: 'allowance', inputs: [{ name: 'o', type: 'address' }, { name: 's', type: 'address' }], outputs: [{ type: 'uint256' }], stateMutability: 'view' },
 ] as const;
-
-/** Mine one empty block at exactly `timestamp`; returns its number. */
-export async function mineAt(timestamp: bigint): Promise<bigint> {
-  await rpc('evm_setNextBlockTimestamp', [Number(timestamp)]);
-  await rpc('evm_mine', []);
-  const block = await pub.getBlock({ blockTag: 'latest' });
-  assertEq(block.timestamp, timestamp, 'mined at the requested timestamp');
-  return block.number;
-}
-
-/** The next block (and so the next transaction) lands at exactly `timestamp`. */
-export async function setNextBlockTimestamp(timestamp: bigint): Promise<void> {
-  await rpc('evm_setNextBlockTimestamp', [Number(timestamp)]);
-}
-
-/** The addresses a harness deploys, which the shared cycle helper below needs. */
-export interface ForkDeployment {
-  vault: Address;
-  feed: Address;
-  registry: Address;
-  /** The real Chainlink answer at the fork block, which MockFeed mirrors. */
-  answer: bigint;
-}
-
-/**
- * Five fresh option types on the REAL Valorem Clear, installed on the mock registry as cycle
- * `n`. Fresh timestamps mean fresh option ids even when the strikes repeat (Valorem hashes the
- * whole tuple; identical parameters would revert OptionsTypeExists).
- */
-export async function createFreshSeries(
-  d: ForkDeployment,
-  n: number,
-  rec: Record<string, unknown>,
-): Promise<{ ids: bigint[]; strikes: bigint[]; exercise: bigint; expiry: bigint }> {
-  await sendTx('MockFeed.setAnswer (refresh updatedAt after the warp)', ADMIN, () =>
-    wallet.writeContract({ account: ADMIN, chain: forkChain, address: d.feed, abi: mockFeedAbi, functionName: 'setAnswer', args: [d.answer] }),
-  );
-  const spot = await pub.readContract({ address: d.vault, abi: vaultAbi, functionName: 'spotUsdg' });
-  const now = await latestTimestamp();
-  // The real Clear needs only a minute between now, exercise and expiry; the registry's
-  // MIN_EXERCISE_WINDOW is a day, and the vault caps the tenor at 21 days. An hour before the
-  // write deadline is plenty for a rehearsal.
-  const exercise = now + 3_600n;
-  const expiry = exercise + 86_400n;
-  const strikes = [1035n, 1055n, 1075n, 1095n, 1115n].map((bps) => ((spot * bps) / 1000n / 1_000_000n) * 1_000_000n);
-  const ids: bigint[] = [];
-  for (const strike of strikes) {
-    const { result, request } = await pub.simulateContract({
-      account: ADMIN,
-      address: CLEAR,
-      abi: newOptionTypeAbi,
-      functionName: 'newOptionType',
-      args: [NVDA, LOT, USDG, strike, Number(exercise), Number(expiry)],
-    });
-    await sendTx(`clear.newOptionType(strike ${strike / 1_000_000n})`, ADMIN, () => wallet.writeContract(request));
-    ids.push(result);
-  }
-  await sendTx(`MockRegistry.setCycleWithStrikes(cycle ${n})`, ADMIN, () =>
-    wallet.writeContract({ account: ADMIN, chain: forkChain, address: d.registry, abi: mockRegistryAbi, functionName: 'setCycleWithStrikes', args: [ids, strikes, Number(exercise), Number(expiry)] }),
-  );
-  note(`spot ${spot} USDG6; strikes ${strikes.map((s) => (s / 1_000_000n).toString()).join('/')}; exercise ${exercise}, expiry ${expiry}`);
-  rec.spotUsdg6 = spot.toString();
-  rec.optionIds = ids.map(String);
-  rec.strikes = strikes.map(String);
-  rec.exerciseTimestamp = Number(exercise);
-  rec.expiryTimestamp = Number(expiry);
-  return { ids, strikes, exercise, expiry };
-}

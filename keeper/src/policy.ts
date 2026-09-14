@@ -1,26 +1,24 @@
 /**
- * The strike picker and the sizer.
- *
- * Everything here mirrors contracts/src/Policy.sol exactly, in the same integer arithmetic,
- * because the vault re-checks all of it on chain and reverts if the keeper's answer differs.
- * Getting the rounding right here is the difference between a simulation that passes and a
- * Friday-night `StrikeBelowBand` revert.
+ * The strike, the size and the price, mirroring contracts/src/Policy.sol and the fill gate in
+ * contracts/src/lib/ValoremLib.sol in the same integer arithmetic. The vault re-checks all of it
+ * on chain — at the arm, at the approval and at EVERY FILL — and reverts if the keeper's answer
+ * differs, so getting the rounding right here is the difference between a filled week and a
+ * `PremiumBelowFloorAtFill` on Friday.
  *
  * Nothing is hardcoded. The band, the utilisation, the cap and the premium floor are all read
  * from `vault.policy()` so an admin policy change takes effect without a keeper deploy.
  *
  * UNITS, stated once:
  *   spotUsdg6    spot price of ONE lot (1e18 of the asset) in USDG base units (6 dp).
- *   strikeUsdg6  registry.strikePerContract(optionId), same units.
- *   contracts    whole lots. One lot = cycle.lotSize asset base units (1e18 on every market).
- *   unitPrice6   the ask for ONE contract, USDG base units, gross (before Overcall's 5%).
+ *   strikeUsdg6  the option type's exerciseAmount, same units, a whole USDG for our own types.
+ *   contracts    whole lots. One lot = 1e18 asset base units, compiled into Policy.sol.
+ *   unitPrice6   the ask for ONE contract, USDG base units. Gross == net: one consideration item.
  */
-import { registryAbi, vaultAbi } from './abi.js';
+import { vaultAbi } from './abi.js';
 import { publicClient } from './clients.js';
 import { BPS, ONE_LOT, config } from './config.js';
 import { log } from './logger.js';
-import { lastFilledUnitPrice6 } from './overcallApi.js';
-import { MIN_LISTABLE_UNIT_PRICE_6, splitPremium } from './seaport.js';
+import { targetStrike6 } from './optionType.js';
 
 /*//////////////////////////////////////////////////////////////
                               TYPES
@@ -35,46 +33,9 @@ export interface PolicyParams {
   maxContractsCap: bigint;
 }
 
-export interface Rung {
-  optionId: bigint;
-  strikeUsdg6: bigint;
-  approved: boolean;
-  cycleOf: number;
-}
-
-export interface CycleView {
-  number: number;
-  exerciseTimestamp: bigint;
-  expiryTimestamp: bigint;
-  lotSize: bigint;
-  optionIds: readonly bigint[];
-}
-
-export interface WritePlan {
-  optionId: bigint;
-  strikeUsdg6: bigint;
-  contracts: bigint;
-  unitPrice6: bigint;
-  gross6: bigint;
-  toVault6: bigint;
-  toOvercall6: bigint;
-  /** exerciseTimestamp: the Seaport order's endTime. Friday book close, not Saturday expiry. */
-  endTime: bigint;
-  spotUsdg6: bigint;
-  bandLowUsdg6: bigint;
-  bandHighUsdg6: bigint;
-  priceSource: 'policy-floor' | 'last-fill' | 'manual-override';
-}
-
-/** A refusal to write is a first-class result, not an exception. An unfilled week is the most
- *  likely week and the product publishes it honestly as "unfilled, 0". */
-export interface NoWrite {
-  ok: false;
-  reason: string;
-  detail: Record<string, string>;
-}
-
-export type PickResult = ({ ok: true } & WritePlan) | NoWrite;
+/** The vault's own per-cycle listing cap (Policy.MAX_LISTINGS_PER_CYCLE), mirrored so the keeper
+ *  stops before a `TooManyListings` revert. Every approveListing spends one, cancelled or not. */
+export const MAX_LISTINGS_PER_CYCLE = 3;
 
 /*//////////////////////////////////////////////////////////////
                            CHAIN READS
@@ -114,87 +75,6 @@ export async function readPolicy(): Promise<PolicyParams> {
   };
 }
 
-/** The last lotSize value warned about, so a non-1e18 market warns once per boot, not per tick. */
-let warnedLotSize: string | undefined;
-
-/** The registry's live cycle. Note there is NO status field on this struct; the write gate is
- *  `isWritingOpen()`. */
-export async function readCycle(): Promise<CycleView> {
-  const cycle = await publicClient.readContract({
-    address: config.REGISTRY,
-    abi: registryAbi,
-    functionName: 'cycle',
-  });
-  const lotSize = BigInt(cycle.lotSize);
-  // Policy.sol's sizer divides by a COMPILED LOT = 1e18 while pickWrite below divides by this
-  // registry value. A market that ever set a different lot size would have every write revert
-  // ContractsAboveUtilization all week — say so once, because it would otherwise stay silent
-  // until the first revert.
-  if (lotSize !== ONE_LOT && warnedLotSize !== lotSize.toString()) {
-    warnedLotSize = lotSize.toString();
-    log.policy.warn(
-      { lotSize: lotSize.toString() },
-      'registry lot size is not 1e18; Policy.sol divides by a compiled LOT=1e18, so keeper sizing will revert on chain',
-    );
-  }
-  return {
-    number: cycle.number,
-    exerciseTimestamp: BigInt(cycle.exerciseTimestamp),
-    expiryTimestamp: BigInt(cycle.expiryTimestamp),
-    lotSize,
-    optionIds: cycle.optionIds,
-  };
-}
-
-/**
- * Every rung in the live cycle, with its strike, sorted ascending.
- *
- * `cycle().optionIds` and `activeOptionIds()` return the same set; we read `activeOptionIds()`
- * as the authority (it is what Overcall's own validator consults for `isApproved`) and fall
- * back to the cycle struct's array if it comes back empty.
- */
-export async function readRungs(cycle: CycleView): Promise<Rung[]> {
-  let ids: readonly bigint[] = await publicClient.readContract({
-    address: config.REGISTRY,
-    abi: registryAbi,
-    functionName: 'activeOptionIds',
-  });
-  if (ids.length === 0) ids = cycle.optionIds;
-
-  const rungs = await Promise.all(
-    ids.map(async (optionId): Promise<Rung> => {
-      const [strike, approved, cycleOf] = await Promise.all([
-        publicClient.readContract({
-          address: config.REGISTRY,
-          abi: registryAbi,
-          functionName: 'strikePerContract',
-          args: [optionId],
-        }),
-        publicClient.readContract({
-          address: config.REGISTRY,
-          abi: registryAbi,
-          functionName: 'isApproved',
-          args: [optionId],
-        }),
-        publicClient.readContract({
-          address: config.REGISTRY,
-          abi: registryAbi,
-          functionName: 'cycleOf',
-          args: [optionId],
-        }),
-      ]);
-      return { optionId, strikeUsdg6: BigInt(strike), approved, cycleOf };
-    }),
-  );
-
-  const sorted = rungs.sort((a, b) => (a.strikeUsdg6 < b.strikeUsdg6 ? -1 : a.strikeUsdg6 > b.strikeUsdg6 ? 1 : 0));
-  log.policy.debug(
-    { count: sorted.length, rungs: sorted.map((rung) => `${rung.strikeUsdg6.toString()}:${rung.approved}`).join(',') },
-    'ladder read',
-  );
-  return sorted;
-}
-
 /*//////////////////////////////////////////////////////////////
                               MATHS
 //////////////////////////////////////////////////////////////*/
@@ -207,18 +87,30 @@ export function strikeBand(spotUsdg6: bigint, p: PolicyParams): { lo: bigint; hi
   };
 }
 
-/** Policy.maxContracts: floor(idle * utilisation / 1e4 / lot), capped. */
-export function maxContracts(idleAssets: bigint, lotSize: bigint, p: PolicyParams): bigint {
-  if (lotSize === 0n) return 0n;
-  const byUtilisation = (idleAssets * p.maxUtilizationBps) / BPS / lotSize;
+/** Policy.maxContracts: floor(assets × utilisation / 1e4 / LOT), capped. `assets` is what the
+ *  vault sizes against: `totalAssets()`, i.e. idle plus locked less reserved. */
+export function maxContracts(assets: bigint, p: PolicyParams): bigint {
+  const byUtilisation = (assets * p.maxUtilizationBps) / BPS / ONE_LOT;
   return byUtilisation < p.maxContractsCap ? byUtilisation : p.maxContractsCap;
 }
 
 /**
- * The smallest per-contract ask that clears the vault's premium floor.
+ * Contracts the vault could still write this cycle: `Policy.maxContracts(totalAssets()) −
+ * contractsWritten`, floored at zero. This is exactly the `capacityContracts` approveListing
+ * checks the offer against (Vault.approveListing), and the size every fill is re-checked
+ * against on the total (ValoremLib.writeOnFill step 6). There is no inventory: the vault holds
+ * no option tokens between fills.
+ */
+export function capacity(totalAssets: bigint, contractsWritten: bigint, p: PolicyParams): bigint {
+  const cap = maxContracts(totalAssets, p);
+  return cap > contractsWritten ? cap - contractsWritten : 0n;
+}
+
+/**
+ * The smallest per-contract ask that clears `Policy.minPremium` for ANY size.
  *
- * On chain the check is `gross >= floor(spot * contracts * minPremiumBps / 10000)`, and
- * `gross == unitPrice6 * contracts`. Taking the CEILING of the per-contract floor therefore
+ * On chain the check is `gross >= floor(spot × contracts × minPremiumBps / 10000)`, and
+ * `gross == unitPrice6 × contracts`. Taking the CEILING of the per-contract floor therefore
  * always clears it, and taking the floor sometimes misses it by one base unit — which is a
  * `PremiumBelowMinimum` revert for the sake of a millionth of a dollar.
  */
@@ -227,19 +119,54 @@ export function minUnitPrice6(spotUsdg6: bigint, p: PolicyParams): bigint {
 }
 
 /**
- * The list floor: the policy floor lifted by PREMIUM_MARGIN_BPS, rounded UP.
+ * The Valorem engine fee a fill of `n` contracts pulls from the vault in the ASSET, when the fee
+ * switch is on: floor(n × LOT × feeBps / 10000), floored at one base unit
+ * (ValoremLib.writeOnFill). Zero while the switch is off.
+ */
+export function engineFeeAsset(n: bigint, feesEnabled: boolean, feeBps: number | bigint): bigint {
+  if (!feesEnabled) return 0n;
+  const fee = (n * ONE_LOT * BigInt(feeBps)) / BPS;
+  return fee === 0n ? 1n : fee;
+}
+
+/**
+ * The FILL-TIME premium floor for the whole listing, exactly as `ValoremLib.writeOnFill` computes
+ * it for a fill of `n`:
  *
- *   listFloor = ceil(floorUnit6 * (10000 + marginBps) / 10000)
+ *   floorUsdg = Policy.minPremium(spot, n) + engineFee(n) × spot / LOT
  *
- * WHY: `approveListing` re-derives the floor from spot read in ITS block. A price exactly at
- * the floor the keeper computed one block earlier reverts `PremiumBelowMinimum` on any uptick in
- * between. A margin of m bps survives a spot rise of up to m bps: the ceiling guarantees
- * `listFloor >= floor * (1 + m/1e4) >= spot' * minPremiumBps / 1e4` for every spot' within it.
- * The trade-off is the other direction: a higher ask is slightly less likely to fill.
+ * The engine fee is asset base units valued at spot, added on top of the premium floor when the
+ * switch is on (AUDIT-FINDINGS F-04): the buyer's USDG must cover it or the depositors are
+ * paying to sell. Off, the second term is zero and this equals the approval-time floor.
+ */
+export function fillFloorUsdg6(spotUsdg6: bigint, n: bigint, p: PolicyParams, feesEnabled: boolean, feeBps: number | bigint): bigint {
+  const premiumFloor = (spotUsdg6 * n * p.minPremiumBps) / BPS;
+  const feeValued = (engineFeeAsset(n, feesEnabled, feeBps) * spotUsdg6) / ONE_LOT;
+  return premiumFloor + feeValued;
+}
+
+/**
+ * The per-contract ask that clears the fill floor for a listing of `n`, as a ceiling:
+ * `ceil(fillFloor(n) / n)`. Because the fill gate scales the listing's gross pro rata and the
+ * floor for `k` of `n` is `minPremium(spot, k) + fee(k) × spot / LOT`, an ask that clears the
+ * floor for the full size clears it for every partial size too, up to the one-base-unit fee
+ * floor on tiny fills, which the margin absorbs.
+ */
+export function fillFloorUnit6(spotUsdg6: bigint, n: bigint, p: PolicyParams, feesEnabled: boolean, feeBps: number | bigint): bigint {
+  if (n <= 0n) return minUnitPrice6(spotUsdg6, p);
+  return ceilDiv(fillFloorUsdg6(spotUsdg6, n, p, feesEnabled, feeBps), n);
+}
+
+/**
+ * The list price: the floor lifted by KEEPER_PREMIUM_MARGIN_BPS, rounded UP.
  *
- * margin 0 is the identity — ceil(f * 10000 / 10000) is f exactly — so the default reproduces the
- * floor price bit for bit. The per-contract Overcall 5% split is applied to the resulting unit
- * price by `splitPremium`, so the margin cannot break the fee rounding.
+ *   listPrice = ceil(floorUnit6 × (10000 + marginBps) / 10000)
+ *
+ * WHY: the fill gate re-derives the floor from the spot of the FILL. A price exactly at the
+ * floor the keeper computed reverts `PremiumBelowFloorAtFill` on the first buyer after any
+ * uptick. A margin of m bps survives a spot rise of up to m bps: the ceiling guarantees
+ * `listPrice >= floor × (1 + m/1e4) >= spot' × minPremiumBps / 1e4` for every spot' within it.
+ * margin 0 is the identity, so ceil(f × 10000 / 10000) is f exactly.
  */
 export function withPremiumMargin(floorUnit6: bigint, marginBps: number | bigint): bigint {
   const margin = BigInt(marginBps);
@@ -247,240 +174,250 @@ export function withPremiumMargin(floorUnit6: bigint, marginBps: number | bigint
   return ceilDiv(floorUnit6 * (BPS + margin), BPS);
 }
 
-/**
- * The ask when there is no manual override: the margined list floor, lifted to the last observed
- * fill but no further than LAST_FILL_MAX_LIFT times the POLICY floor (the clamp is anchored to
- * the on-chain floor, not the margin, so the margin never widens what a fake print can buy). A
- * zero floor anchors nothing — the lift is skipped. Returns whether the lift applied.
- */
-export function liftedUnitPrice6(
-  floorUnit6: bigint,
-  marginBps: number | bigint,
-  lastFill6: bigint | null,
-): { unitPrice6: bigint; lifted: boolean } {
-  const listFloor6 = withPremiumMargin(floorUnit6, marginBps);
-  if (lastFill6 !== null && floorUnit6 > 0n && lastFill6 > listFloor6) {
-    const cap6 = floorUnit6 * LAST_FILL_MAX_LIFT;
-    // A margin of at most 10% keeps the list floor under the 3x cap, but never publish less
-    // than the list floor whatever the constants become.
-    const lifted6 = lastFill6 < cap6 ? lastFill6 : cap6;
-    return lifted6 > listFloor6 ? { unitPrice6: lifted6, lifted: true } : { unitPrice6: listFloor6, lifted: false };
-  }
-  return { unitPrice6: listFloor6, lifted: false };
-}
-
-/**
- * The replacement ask after a cancel or invalidation: never below the previous ask (our own
- * earlier price), never below the margined floor the vault will re-derive from LIVE spot. A
- * failed live-floor read (null) keeps the previous price; the simulation gate judges it.
- */
-export function relistUnitPrice6(previous6: bigint, liveFloorUnit6: bigint | null, marginBps: number | bigint): bigint {
-  if (liveFloorUnit6 === null) return previous6;
-  const listFloor6 = withPremiumMargin(liveFloorUnit6, marginBps);
-  return listFloor6 > previous6 ? listFloor6 : previous6;
-}
-
 export function ceilDiv(a: bigint, b: bigint): bigint {
   if (b === 0n) throw new Error('division by zero');
   return (a + b - 1n) / b;
 }
 
-/**
- * The last-fill lift is honoured at most to this multiple of the policy floor.
- *
- * Why a clamp at all: anyone can write 1 contract of this week's rung on permissionless
- * Valorem and self-fill it on Overcall at an absurd price — the cost is the 5% fee on one
- * contract. An unclamped max(floor, last fill) would then price the WHOLE vault's listing at
- * the attacker's number and guarantee an unfilled week, repeatable weekly. A real market
- * signal three times the floor is still honoured; beyond that, faking the signal costs more
- * than the premium at stake.
- */
-export const LAST_FILL_MAX_LIFT = 3n;
-
 /*//////////////////////////////////////////////////////////////
                            THE DECISION
 //////////////////////////////////////////////////////////////*/
 
-export interface PickInput {
-  cycle: CycleView;
-  rungs: Rung[];
+/** Everything the arm decision reads from chain, in one struct so a test can hand it in. */
+export interface PlanInput {
   policy: PolicyParams;
-  /** vault.idleAssets(), asset base units. */
-  idleAssets: bigint;
   /** vault.spotUsdg(), the same oracle read the vault's own gate uses. */
   spotUsdg6: bigint;
-  /**
-   * SEAM, for tests and the fork dry run only. Where "the last fill on these rungs" comes from.
-   * Production never sets it and gets `lastFilledUnitPrice6` — the live Overcall book. It is
-   * injectable so the picker's integer maths can be pinned in a unit test without a network,
-   * and so a rehearsal can hand it a stubbed book. Same signature, same null-means-no-fill.
-   */
-  readLastFill?: (optionIds: readonly bigint[]) => Promise<bigint | null>;
-  /**
-   * SEAM, for tests only. Stands in for KEEPER_UNIT_PRICE_USDG6. `undefined` (the production
-   * value: the field is absent) reads the environment as before; `null` means "no override"
-   * regardless of the environment; a bigint is the override. Exists because config is fixed
-   * at import time and a test needs both branches in one process.
-   */
-  unitPriceOverride6?: bigint | null;
-  /** SEAM, for tests only. Stands in for PREMIUM_MARGIN_BPS; `undefined` reads the environment. */
+  /** vault.totalAssets(): what the size gate measures against. */
+  totalAssets: bigint;
+  /** vault.contractsWritten(): 0 at the arm, the sold count later in the week. */
+  contractsWritten: bigint;
+  feesEnabled: boolean;
+  feeBps: number | bigint;
+  /** SEAM for tests: stands in for KEEPER_STRIKE_OTM_BPS; `undefined` reads the environment. */
+  strikeOtmBps?: number;
+  /** SEAM for tests: stands in for KEEPER_PREMIUM_MARGIN_BPS; `undefined` reads the environment. */
   premiumMarginBps?: number;
+  /** SEAM for tests: KEEPER_UNIT_PRICE_USDG6. `undefined` reads the environment, `null` is "no
+   *  override" regardless of it, a bigint is the override. */
+  unitPriceOverride6?: bigint | null;
 }
 
+export interface WeekPlan {
+  ok: true;
+  strikeUsdg6: bigint;
+  /** The contracts to offer: the vault's remaining capacity. */
+  contracts: bigint;
+  unitPrice6: bigint;
+  gross6: bigint;
+  spotUsdg6: bigint;
+  bandLowUsdg6: bigint;
+  bandHighUsdg6: bigint;
+  /** The fill floor per contract at this spot, before the margin. */
+  floorUnit6: bigint;
+  priceSource: 'fill-floor' | 'manual-override';
+}
+
+/** A refusal to arm is a first-class result, not an exception. An unfilled week is the most
+ *  likely week and the product publishes it honestly as "unfilled, 0". */
+export interface NoWrite {
+  ok: false;
+  reason: string;
+  detail: Record<string, string>;
+}
+
+export type PlanResult = WeekPlan | NoWrite;
+
 /**
- * Pick this week's rung, size and ask — or decline.
+ * Pick this week's strike, size and ask — or decline.
  *
- * Order of operations:
- *   1. rungs -> keep the ones approved and in the live cycle
- *   2. keep the ones inside the vault's OTM band, read from policy() rather than hardcoded
- *   3. take the NEAREST out-of-the-money one, i.e. the lowest eligible strike. Nearest OTM is
- *      where the premium is; the far rungs earn nothing on a weekly.
- *   4. size = floor(idle * maxUtilizationBps / 10000 / lotSize), capped by maxContractsCap
- *   5. price = max(policy floor lifted by PREMIUM_MARGIN_BPS, last fill), the last-fill lift
- *      clamped at LAST_FILL_MAX_LIFT times the policy floor (a self-filled print is a cheap fake
- *      signal), floored again at 20 base units so Overcall's 5% does not round to zero, and
- *      never above the strike (both the vault and Overcall reject a premium above the strike as
- *      a fat finger)
+ *   1. strike = round(spot × (1 + KEEPER_STRIKE_OTM_BPS/1e4)) to the nearest whole USDG; it
+ *      must sit inside the vault's OTM band at this spot, both bounds (the arm gate checks both;
+ *      the fill gate the floor only).
+ *   2. contracts = capacity: floor(totalAssets × maxUtilizationBps / 1e4 / LOT), capped, less
+ *      what is already written. Zero means nothing to sell.
+ *   3. unitPrice = ceil(fillFloor(contracts) / contracts) lifted by KEEPER_PREMIUM_MARGIN_BPS,
+ *      never above the strike (the vault reverts `UnitPriceExceedsStrike`); a manual override
+ *      replaces the price but is still bounded the same way.
  *
  * Any failure returns `ok: false` with a reason. Skipping a week is legitimate; forcing a bad
- * write is not.
+ * arm is not.
  */
-export async function pickWrite(input: PickInput): Promise<PickResult> {
-  const { cycle, rungs, policy, idleAssets, spotUsdg6 } = input;
+export function planWeek(input: PlanInput): PlanResult {
+  const { policy, spotUsdg6, totalAssets, contractsWritten } = input;
+  if (spotUsdg6 === 0n) return { ok: false, reason: 'spot-zero', detail: {} };
 
-  if (cycle.number === 0) {
-    return { ok: false, reason: 'no-cycle', detail: { cycleNumber: '0' } };
-  }
-  if (spotUsdg6 === 0n) {
-    return { ok: false, reason: 'spot-zero', detail: {} };
-  }
-
-  const contracts = maxContracts(idleAssets, cycle.lotSize, policy);
-  if (contracts === 0n) {
-    return {
-      ok: false,
-      reason: 'no-idle-collateral',
-      detail: {
-        idleAssets: idleAssets.toString(),
-        lotSize: cycle.lotSize.toString(),
-        maxUtilizationBps: policy.maxUtilizationBps.toString(),
-      },
-    };
-  }
-
+  const otmBps = input.strikeOtmBps ?? config.KEEPER_STRIKE_OTM_BPS;
+  const strikeUsdg6 = targetStrike6(spotUsdg6, otmBps);
   const { lo, hi } = strikeBand(spotUsdg6, policy);
-  const live = rungs.filter((rung) => rung.approved && rung.cycleOf === cycle.number);
-  const eligible = live.filter((rung) => rung.strikeUsdg6 >= lo && rung.strikeUsdg6 <= hi);
-
-  if (eligible.length === 0) {
+  if (strikeUsdg6 < lo || strikeUsdg6 > hi) {
     return {
       ok: false,
-      reason: 'no-rung-in-band',
+      reason: 'strike-outside-band',
       detail: {
+        strikeUsdg6: strikeUsdg6.toString(),
         spotUsdg6: spotUsdg6.toString(),
         bandLowUsdg6: lo.toString(),
         bandHighUsdg6: hi.toString(),
-        strikes: live.map((rung) => rung.strikeUsdg6.toString()).join(','),
+        strikeOtmBps: String(otmBps),
         minOtmBps: policy.minOtmBps.toString(),
         maxOtmBps: policy.maxOtmBps.toString(),
       },
     };
   }
 
-  // `rungs` is sorted ascending, so the first survivor is the nearest out-of-the-money strike.
-  const chosen = eligible[0];
-  if (!chosen) {
-    return { ok: false, reason: 'no-rung-in-band', detail: {} };
-  }
-
-  const floorUnit6 = minUnitPrice6(spotUsdg6, policy);
-  const marginBps = input.premiumMarginBps ?? config.PREMIUM_MARGIN_BPS;
-
-  // Prefer a fill on the rung we are actually writing. Only if that rung has never traded do
-  // we fall back to any rung in the cycle — a fill on a further-out strike is a weak signal
-  // for a nearer one, but it is a better floor than nothing.
-  const readLastFill = input.readLastFill ?? lastFilledUnitPrice6;
-  const lastFill6 =
-    (await readLastFill([chosen.optionId])) ?? (await readLastFill(live.map((rung) => rung.optionId)));
-  // The margined floor, lifted to a clamped last fill — see liftedUnitPrice6.
-  const priced = liftedUnitPrice6(floorUnit6, marginBps, lastFill6);
-  let unitPrice6 = priced.unitPrice6;
-  let priceSource: WritePlan['priceSource'] = priced.lifted ? 'last-fill' : 'policy-floor';
-
-  // The seam resolves to exactly the old read when the field is absent (see PickInput).
-  const override6 =
-    input.unitPriceOverride6 === undefined ? config.KEEPER_UNIT_PRICE_USDG6 : (input.unitPriceOverride6 ?? undefined);
-  if (override6 !== undefined) {
-    unitPrice6 = override6;
-    priceSource = 'manual-override';
-  }
-
-  if (unitPrice6 < MIN_LISTABLE_UNIT_PRICE_6) unitPrice6 = MIN_LISTABLE_UNIT_PRICE_6;
-
-  // The vault reverts `UnitPriceExceedsStrike` and Overcall's check 5 rejects it too. If the
-  // floor genuinely lands above the strike the oracle is broken, not the market.
-  if (unitPrice6 > chosen.strikeUsdg6) {
+  const contracts = capacity(totalAssets, contractsWritten, policy);
+  if (contracts === 0n) {
     return {
       ok: false,
-      reason: 'premium-above-strike',
+      reason: 'no-capacity',
       detail: {
-        unitPrice6: unitPrice6.toString(),
-        strikeUsdg6: chosen.strikeUsdg6.toString(),
-        spotUsdg6: spotUsdg6.toString(),
+        totalAssets: totalAssets.toString(),
+        contractsWritten: contractsWritten.toString(),
+        maxUtilizationBps: policy.maxUtilizationBps.toString(),
+        maxContractsCap: policy.maxContractsCap.toString(),
       },
     };
   }
 
-  const { toVault6, toOvercall6, gross6 } = splitPremium(unitPrice6, contracts);
+  const priced = priceListing({ ...input, strikeUsdg6, contracts });
+  if (!priced.ok) return priced;
 
   log.policy.info(
     {
-      optionId: chosen.optionId.toString(),
-      strikeUsdg6: chosen.strikeUsdg6.toString(),
+      strikeUsdg6: strikeUsdg6.toString(),
       contracts: contracts.toString(),
-      unitPrice6: unitPrice6.toString(),
-      priceSource,
-      floorUnit6: floorUnit6.toString(),
-      premiumMarginBps: marginBps,
+      unitPrice6: priced.unitPrice6.toString(),
+      priceSource: priced.priceSource,
+      floorUnit6: priced.floorUnit6.toString(),
       bandLowUsdg6: lo.toString(),
       bandHighUsdg6: hi.toString(),
       spotUsdg6: spotUsdg6.toString(),
     },
-    'picked this cycle',
+    'planned this week',
   );
 
   return {
     ok: true,
-    optionId: chosen.optionId,
-    strikeUsdg6: chosen.strikeUsdg6,
+    strikeUsdg6,
     contracts,
-    unitPrice6,
-    gross6,
-    toVault6,
-    toOvercall6,
-    endTime: cycle.exerciseTimestamp,
+    unitPrice6: priced.unitPrice6,
+    gross6: priced.unitPrice6 * contracts,
     spotUsdg6,
     bandLowUsdg6: lo,
     bandHighUsdg6: hi,
-    priceSource,
+    floorUnit6: priced.floorUnit6,
+    priceSource: priced.priceSource,
   };
 }
 
-/*//////////////////////////////////////////////////////////////
-                        RELIST SIZING
-//////////////////////////////////////////////////////////////*/
-
-/**
- * Size a replacement listing.
- *
- * After a cancel or a partial fill the vault may hold fewer option tokens than it wrote, and
- * `approveListing` checks the offer against `clear.balanceOf(vault, optionId)`. `contractsSold`
- * on the vault is reporting-only and is never decremented by a Seaport fill, so the ERC-1155
- * balance is the only honest source for "what can we still sell".
- */
-export function relistContracts(inventory: bigint): bigint {
-  return inventory;
+export interface PriceInput {
+  policy: PolicyParams;
+  spotUsdg6: bigint;
+  strikeUsdg6: bigint;
+  contracts: bigint;
+  feesEnabled: boolean;
+  feeBps: number | bigint;
+  premiumMarginBps?: number;
+  unitPriceOverride6?: bigint | null;
 }
 
-/** The vault's own per-cycle cap, mirrored so the keeper stops before a revert. */
-export const MAX_LISTINGS_PER_CYCLE = 3;
+export type PriceResult =
+  | { ok: true; unitPrice6: bigint; floorUnit6: bigint; priceSource: WeekPlan['priceSource'] }
+  | NoWrite;
+
+/**
+ * Price a listing of `contracts` at the current spot: the fill floor per contract, lifted by the
+ * margin, never above the strike. Shared by the first listing of a week and every reprice, so a
+ * reprice can never re-pick the strike — the vault is armed on one option id all week.
+ */
+export function priceListing(input: PriceInput): PriceResult {
+  const { policy, spotUsdg6, strikeUsdg6, contracts } = input;
+  if (spotUsdg6 === 0n) return { ok: false, reason: 'spot-zero', detail: {} };
+  if (contracts <= 0n) return { ok: false, reason: 'no-capacity', detail: {} };
+
+  const floorUnit6 = fillFloorUnit6(spotUsdg6, contracts, policy, input.feesEnabled, input.feeBps);
+  const marginBps = input.premiumMarginBps ?? config.KEEPER_PREMIUM_MARGIN_BPS;
+  let unitPrice6 = withPremiumMargin(floorUnit6, marginBps);
+  let priceSource: WeekPlan['priceSource'] = 'fill-floor';
+
+  // The seam resolves to exactly the environment read when the field is absent (see PlanInput).
+  const override6 =
+    input.unitPriceOverride6 === undefined ? config.KEEPER_UNIT_PRICE_USDG6 : (input.unitPriceOverride6 ?? undefined);
+  if (override6 !== undefined) {
+    // An override below the fill floor would be a listing no buyer can fill; lift it silently
+    // rather than publish something dead.
+    unitPrice6 = override6 > floorUnit6 ? override6 : floorUnit6;
+    priceSource = 'manual-override';
+  }
+
+  // The vault reverts `UnitPriceExceedsStrike`. If the floor genuinely lands above the strike
+  // the oracle is broken, not the market.
+  if (strikeUsdg6 > 0n && unitPrice6 > strikeUsdg6) {
+    return {
+      ok: false,
+      reason: 'premium-above-strike',
+      detail: { unitPrice6: unitPrice6.toString(), strikeUsdg6: strikeUsdg6.toString(), spotUsdg6: spotUsdg6.toString() },
+    };
+  }
+  return { ok: true, unitPrice6, floorUnit6, priceSource };
+}
+
+/*//////////////////////////////////////////////////////////////
+                        THE FILL GATE, MIRRORED
+//////////////////////////////////////////////////////////////*/
+
+export interface LiveListing {
+  /** The listing's gross for its whole size (`vault.listingGrossUsdg`). */
+  grossUsdg6: bigint;
+  /** The listing's size (`vault.listingAmount`); Seaport tracks the fraction filled. */
+  amount: bigint;
+  strikeUsdg6: bigint;
+}
+
+export type FillVerdict =
+  | { fillable: true; floorUnit6: bigint }
+  | { fillable: false; reason: 'strike-below-band' | 'premium-below-floor'; floorUnit6: bigint; detail: Record<string, string> };
+
+/**
+ * Would a fill of the live listing clear the vault's fill gate at THIS spot? The checks
+ * `ValoremLib.writeOnFill` makes that depend on spot, reproduced integer for integer:
+ *
+ *   strike >= Policy.strikeBand(spot).lo          else StrikeBelowBand   (a rally: no price fixes it)
+ *   gross(k) >= minPremium(spot, k) + fee(k)×spot  else PremiumBelowFloorAtFill (a reprice fixes it)
+ *
+ * evaluated for the full size `k = amount`, which is the binding case for the linear parts and
+ * within a base unit of it for the fee floor. This is what decides a reprice: the vault never
+ * tells the keeper a listing has gone unfillable — buyers simply get reverts — so the keeper
+ * must ask the same question the hook will. An eth_call of a real fill needs a funded buyer
+ * with a USDG allowance, which the keeper does not have; the mirror is the honest substitute,
+ * and `approveListing`'s own simulation is the backstop for the reprice it produces.
+ */
+export function fillVerdict(spotUsdg6: bigint, listing: LiveListing, p: PolicyParams, feesEnabled: boolean, feeBps: number | bigint): FillVerdict {
+  const { lo } = strikeBand(spotUsdg6, p);
+  const floorUnit6 = fillFloorUnit6(spotUsdg6, listing.amount, p, feesEnabled, feeBps);
+  if (listing.strikeUsdg6 < lo) {
+    return {
+      fillable: false,
+      reason: 'strike-below-band',
+      floorUnit6,
+      detail: { strikeUsdg6: listing.strikeUsdg6.toString(), bandLowUsdg6: lo.toString(), spotUsdg6: spotUsdg6.toString() },
+    };
+  }
+  const floorUsdg6 = fillFloorUsdg6(spotUsdg6, listing.amount, p, feesEnabled, feeBps);
+  if (listing.grossUsdg6 < floorUsdg6) {
+    return {
+      fillable: false,
+      reason: 'premium-below-floor',
+      floorUnit6,
+      detail: {
+        grossUsdg6: listing.grossUsdg6.toString(),
+        floorUsdg6: floorUsdg6.toString(),
+        unitPrice6: listing.amount === 0n ? '0' : (listing.grossUsdg6 / listing.amount).toString(),
+        floorUnit6: floorUnit6.toString(),
+        spotUsdg6: spotUsdg6.toString(),
+      },
+    };
+  }
+  return { fillable: true, floorUnit6 };
+}

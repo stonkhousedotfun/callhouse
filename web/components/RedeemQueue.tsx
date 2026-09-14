@@ -5,7 +5,7 @@ import type { Abi } from "viem";
 import { useAccount, useWriteContract } from "wagmi";
 
 import { MARKET, SHARE_DECIMALS, SHARE_TICKER, VAULT, vaultAbi } from "@/lib/contracts";
-import { fmtAsset, fmtShares, fmtUsdg, parseAmount } from "@/lib/format";
+import { canSettleQueue, fmtAsset, fmtShares, fmtUsdg, parseAmount } from "@/lib/format";
 import type { AccountPosition, VaultSnapshot } from "@/lib/hooks";
 import { ConnectButton } from "./ConnectButton";
 import { useTxRunner } from "./TxToast";
@@ -30,6 +30,21 @@ import { useTxRunner } from "./TxToast";
  *    so a share sitting in the queue still collects the week it sat through.
  *  - under a Stock Token issuer freeze, queueing still works — it is pure bookkeeping inside the
  *    vault — but `completeRedeem` moves the token itself and reverts until the freeze lifts.
+ *
+ * SETTLING WHILE FLAT. A queue entry in the current epoch used to settle only inside the keeper's
+ * `rollClose`, which needs a `rollOpen` first. If the next week is never armed (writes halted, a
+ * stale or paused price feed, an option type the vault refuses, less than one lot idle) the entry
+ * waited indefinitely while holders who had not queued could still redeem instantly.
+ * `settleQueue()` is permissionless and works only while the vault is Idle; it prices the queue
+ * exactly like an instant redemption and moves no tokens, so this form offers it whenever the
+ * account's entry is in the current epoch and the vault is Idle, then `completeRedeem` pays as
+ * usual.
+ *
+ * WHILE A CLAIM IS STRANDED the queue is the only exit: instant redemption is off, an epoch
+ * settled now is paid its slice of the idle balance now and its pro-rata share of the stranded
+ * claim when `retryStrandedClaim` succeeds (the stranded-claim notice above the forms says how
+ * much). `completeRedeem` reverts StillStranded for an entry whose claim share is not yet
+ * collectable; `previewCompleteRedeem` quotes only what can be collected now.
  */
 export function RedeemQueue({
   snapshot,
@@ -52,10 +67,12 @@ export function RedeemQueue({
   // Distinguish "we read the vault and the queue is the only path" from "we have not read the
   // vault at all". Telling someone a call is open when nothing has been read is a false claim.
   const instantKnown = snapshot.canRedeemInstantly !== undefined;
+  const stranded = snapshot.isStranded === true;
   const queued = position.queuedShares ?? 0n;
   const pendingAssets = position.pendingAssets ?? 0n;
   const pendingUsdg = position.pendingUsdg ?? 0n;
   const hasPending = pendingAssets > 0n || pendingUsdg > 0n;
+  const strandShareWaiting = (position.owedStrandWad ?? 0n) > 0n && stranded;
 
   // queuedEpoch < epochId means the keeper has already closed that week, so the payout exists.
   const waitingOnKeeper =
@@ -63,6 +80,15 @@ export function RedeemQueue({
     position.queuedEpoch !== undefined &&
     snapshot.epochId !== undefined &&
     position.queuedEpoch >= snapshot.epochId;
+
+  // Idle and the entry is still in the current epoch: nothing will settle it unless someone calls
+  // settleQueue(). Checked before waitingOnKeeper, which is also true in this state.
+  const settleable = canSettleQueue({
+    phase: snapshot.phase,
+    epochId: snapshot.epochId,
+    queuedShares: queued,
+    queuedEpoch: position.queuedEpoch,
+  });
 
   const overBalance = shares !== null && shares > free;
   const disabled = busy || !isConnected || !VAULT || shares === null || shares === 0n || overBalance;
@@ -124,12 +150,33 @@ export function RedeemQueue({
     }
   }
 
+  async function settle() {
+    if (!VAULT || !address) return;
+    const vault = VAULT;
+    setBusy(true);
+    try {
+      const hash = await run(
+        () =>
+          writeContractAsync({
+            address: vault,
+            abi: vaultAbi as unknown as Abi,
+            functionName: "settleQueue",
+            args: [],
+          }),
+        { pending: "Settling the queue", success: "Queue settled — redemption ready to collect" },
+      );
+      if (hash) onDone();
+    } finally {
+      setBusy(false);
+    }
+  }
+
   return (
     <div className="card">
       <div className="card-head">
         <span className="card-title">Withdraw</span>
         <span className="tiny faint mono">
-          {!instantKnown ? "state unavailable" : instant ? "instant path open" : "queue only"}
+          {!instantKnown ? "state unavailable" : instant ? "instant path open" : stranded ? "queue only · claim stranded" : "queue only"}
         </span>
       </div>
 
@@ -191,10 +238,12 @@ export function RedeemQueue({
           ? "The vault's phase has not been read yet, so which withdrawal path is open is unknown. The contract decides at the moment you send the transaction."
           : instant
             ? "The vault is flat, so a redemption settles in the same transaction."
-            : "A call is open. Redemptions are queued and paid after the keeper closes the week. An assigned week pays part of the queue in USDG at the strike instead of in tokens."}
+            : stranded
+              ? "A claim is stranded, so instant redemption is off. A queued redemption is paid its share of the idle balance as soon as the queue settles, and its share of the stranded claim when the claim is redeemed."
+              : "A call is open. Redemptions are queued and paid after the keeper closes the week. An assigned week pays part of the queue in USDG at the strike instead of in tokens."}
       </div>
 
-      {queued > 0n ? (
+      {queued > 0n || strandShareWaiting ? (
         <>
           <hr className="hr" />
           <div className="card-head">
@@ -213,15 +262,41 @@ export function RedeemQueue({
               <span className="v">{fmtUsdg(pendingUsdg)}</span>
             </div>
           </div>
-          {waitingOnKeeper ? (
+          {settleable ? (
+            <>
+              <div className="notice" data-tone="info" style={{ marginTop: 12 }}>
+                The vault is Idle and this entry is in the current epoch, so nothing will settle it until someone
+                calls settleQueue. Settling it here does not need the keeper. It pays what an instant redemption of
+                the same shares would pay now, plus the USDG the escrowed shares earned while queued
+                {stranded ? ", and books this epoch's share of the stranded claim for when it is redeemed" : ""}. It
+                settles every entry in this epoch, not only yours, and anyone can send it. After it confirms, collect
+                with Complete redemption.
+              </div>
+              <button style={{ width: "100%", marginTop: 12 }} disabled={busy || !isConnected} onClick={settle}>
+                {busy ? "Working…" : "Settle queue"}
+              </button>
+              {hasPending ? (
+                <button style={{ width: "100%", marginTop: 8 }} disabled={busy} onClick={complete}>
+                  {busy ? "Working…" : "Collect earlier settled redemption"}
+                </button>
+              ) : null}
+            </>
+          ) : waitingOnKeeper ? (
             <div className="notice" data-tone="warn" style={{ marginTop: 12 }}>
-              This epoch settles after the keeper closes the week at expiry. The amounts above turn
-              non-zero then.
+              This epoch settles after the keeper closes the week at expiry. The amounts above turn non-zero then.
             </div>
           ) : (
-            <button style={{ width: "100%", marginTop: 12 }} disabled={busy || !hasPending} onClick={complete}>
-              {busy ? "Working…" : "Complete redemption"}
-            </button>
+            <>
+              {strandShareWaiting ? (
+                <div className="notice" data-tone="warn" style={{ marginTop: 12 }}>
+                  Part of this redemption is a share of the stranded claim and cannot be collected until the claim is
+                  redeemed (Retry claim above). The amounts above are what can be collected now.
+                </div>
+              ) : null}
+              <button style={{ width: "100%", marginTop: 12 }} disabled={busy || !hasPending} onClick={complete}>
+                {busy ? "Working…" : "Complete redemption"}
+              </button>
+            </>
           )}
         </>
       ) : null}

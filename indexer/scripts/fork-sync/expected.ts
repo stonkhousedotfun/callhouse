@@ -10,6 +10,14 @@
  * Every expected money figure is derived here the way the product defines it (README "The money
  * columns the site quotes"), not copied from the indexer's lib/harvest.ts, so an arithmetic slip
  * in the indexer cannot agree with itself.
+ *
+ * THE DRY RUN THIS EXPECTS (write on fill, no registry): three cycles armed with `rollOpen(id)` on
+ * option types the keeper created itself; cycle 1 filled in full and expired out of the money;
+ * cycle 2 listed and unfilled, its listing invalidated at `lockBook`; cycle 3 filled in full with
+ * 9 of 23 assigned at the strike and 10 of 25 shares queued and settled at the close; the
+ * depositor claimed USDG and collected the queue; no claim stranded. The run.json fields read are
+ * the `KeeperCycleRow` / `KeeperListingRow` / `RunJson` types below and the `cycleN.*` paths
+ * named in `deriveWeek`; `runValue` fails loudly on a missing one.
  */
 import { formatUnits, keccak256, toHex } from "viem";
 
@@ -24,6 +32,7 @@ export type KeeperCycleRow = {
   cycle_number: number;
   option_id: string;
   strike_usdg6: string;
+  /** Contracts SOLD, which under write on fill is also the number written. 0 on an unfilled week. */
   contracts: number;
   status: string;
   roll_open_tx: string | null;
@@ -45,8 +54,6 @@ export type KeeperListingRow = {
   contracts: string;
   unit_price6: string;
   gross_usdg6: string;
-  to_vault6: string;
-  to_overcall6: string;
   status: string;
   approve_tx: string | null;
 };
@@ -82,18 +89,15 @@ const runBig = (run: RunJson, path: string): bigint => {
   return BigInt(v);
 };
 
-/** Block bounds of the dry run: the vault's and the mock registry's deploy blocks, and the last tx. */
-export function runBlocks(run: RunJson): { vaultDeployBlock: bigint; registryDeployBlock: bigint; lastBlock: bigint } {
-  const deploy = (label: string) => {
-    const tx = run.harnessTxs.find((t) => t.label === `deploy ${label}`);
-    if (tx === undefined) throw new Error(`run.json harnessTxs has no "deploy ${label}"`);
-    return BigInt(tx.block);
-  };
+/** Block bounds of the dry run: the vault's deploy block and the last tx. */
+export function runBlocks(run: RunJson): { vaultDeployBlock: bigint; lastBlock: bigint } {
+  const deploy = run.harnessTxs.find((t) => t.label === "deploy Vault");
+  if (deploy === undefined) throw new Error('run.json harnessTxs has no "deploy Vault"');
   const blocks = [
     ...run.harnessTxs.map((t) => BigInt(t.block)),
     ...run.db.txs.filter((t) => t.block_number !== null).map((t) => BigInt(t.block_number as number)),
   ];
-  return { vaultDeployBlock: deploy("Vault"), registryDeployBlock: deploy("MockRegistry"), lastBlock: blocks.reduce((m, b) => (b > m ? b : m), 0n) };
+  return { vaultDeployBlock: BigInt(deploy.block), lastBlock: blocks.reduce((m, b) => (b > m ? b : m), 0n) };
 }
 
 /*//////////////////////////////////////////////////////////////
@@ -103,6 +107,7 @@ export function runBlocks(run: RunJson): { vaultDeployBlock: bigint; registryDep
 const USDG_DECIMALS = 6;
 const ASSET_DECIMALS = 18;
 const ONE = 10n ** 18n;
+const LOT = 10n ** 18n;
 const ZERO_HASH = `0x${"0".repeat(64)}`;
 
 /** The API's `iso()`: unix seconds to ISO 8601, and 0 / null to null. */
@@ -110,6 +115,13 @@ export const isoOf = (secs: bigint | null | undefined): string | null =>
   secs === null || secs === undefined || secs === 0n ? null : new Date(Number(secs) * 1000).toISOString();
 
 const lower = (s: string) => s.toLowerCase();
+
+/** `Policy.maxContracts(totalAssets) − contractsWritten`, as the API publishes `week.assignmentLive.capacity`. */
+export const capacityOf = (p: { maxUtilizationBps: number; maxContractsCap: bigint }, totalAssets: bigint, written: bigint): bigint => {
+  const byUtilization = (totalAssets * BigInt(p.maxUtilizationBps)) / 10_000n / LOT;
+  const max = byUtilization < p.maxContractsCap ? byUtilization : p.maxContractsCap;
+  return max > written ? max - written : 0n;
+};
 
 class Builder {
   readonly expectations: Expectation[] = [];
@@ -168,25 +180,24 @@ type RouteWriter = ReturnType<Builder["route"]>;
 export type WeekTruth = {
   cycleNumber: number;
   status: "closed" | "unfilled" | "assigned";
-  optionIds: string[];
-  lotSize: bigint;
   exerciseTimestamp: bigint;
   expiryTimestamp: bigint;
-  setAt: bigint;
-  setTx: string;
   optionId: bigint;
-  claimKey: bigint;
+  /** Null on an unfilled week: nothing was written, so no claim was opened. */
+  claimKey: bigint | null;
   strike: bigint;
+  /** Contracts written == sold: the sum of the fills' `CallsWritten`. */
   contracts: bigint;
   collateral: bigint;
+  writeCount: number;
+  firstWriteAt: bigint | null;
+  lastWriteAt: bigint | null;
   openedAt: bigint;
   txOpen: string;
   listing: ListingTruth;
   sold: bigint;
   fillCount: number;
   premiumGross: bigint;
-  premiumToVault: bigint;
-  overcallFee: bigint;
   firstFillAt: bigint | null;
   lastFillAt: bigint | null;
   lockedAt: bigint;
@@ -221,12 +232,9 @@ export type ListingTruth = {
   contracts: bigint;
   gross: bigint;
   unitPrice: bigint;
-  writer: bigint;
-  overcallFee: bigint;
   contractsFilled: bigint;
   fillCount: number;
   proceeds: bigint;
-  feePaid: bigint;
   lastFillAt: bigint | null;
   lastFillTx: string | null;
   approvedAt: bigint;
@@ -254,14 +262,11 @@ function deriveListing(b: Builder, run: RunJson, cycle: number, chain: ChainList
 
   const contractsFilled = chain.fills.reduce((s, f) => s + f.contracts, 0n);
   const proceeds = chain.fills.reduce((s, f) => s + f.toVault, 0n);
-  const feePaid = chain.fills.reduce((s, f) => s + f.toOvercall, 0n);
   const lastFill = chain.fills.at(-1) ?? null;
   const complete = contractsFilled >= contracts && contracts > 0n;
   b.agree(`cycle ${cycle} keeper listing status`, k.status === "filled", complete);
-  if (complete) {
-    b.agree(`cycle ${cycle} fill to vault`, k.to_vault6, proceeds);
-    b.agree(`cycle ${cycle} fill to Overcall`, k.to_overcall6, feePaid);
-  }
+  // One consideration item: every fill pays exactly unitPrice × contracts to the vault.
+  b.agree(`cycle ${cycle} fill proceeds = unit price x filled`, unitPrice * contractsFilled, proceeds);
 
   let status: ListingTruth["status"] = "approved";
   let endedAt: bigint | null = null;
@@ -276,7 +281,7 @@ function deriveListing(b: Builder, run: RunJson, cycle: number, chain: ChainList
     status = contractsFilled > 0n ? "partially_filled" : "cancelled";
     endedAt = chain.cancelled.timestamp;
     endedTx = chain.cancelled.txHash;
-    endReason = chain.cancelled.invalidated ? "invalidated" : "cancelled";
+    endReason = chain.cancelled.reason;
   } else if (contractsFilled > 0n) {
     status = "partially_filled";
   }
@@ -290,12 +295,9 @@ function deriveListing(b: Builder, run: RunJson, cycle: number, chain: ChainList
     contracts,
     gross,
     unitPrice,
-    writer: BigInt(k.to_vault6),
-    overcallFee: BigInt(k.to_overcall6),
     contractsFilled,
     fillCount: chain.fills.length,
     proceeds,
-    feePaid,
     lastFillAt: lastFill?.timestamp ?? null,
     lastFillTx: lastFill?.txHash ?? null,
     approvedAt: chain.approvedTimestamp,
@@ -311,34 +313,38 @@ function deriveWeek(b: Builder, run: RunJson, chain: ChainFacts, n: 1 | 2 | 3): 
   const r = `cycle${n}`;
   const c: ChainCycle | undefined = chain.cycles.find((x) => x.cycleNumber === n);
   const k = run.db.cycles.find((x) => x.cycle_number === n);
-  if (c === undefined || c.set === null || c.open === null || c.written === null || c.locked === null || c.close === null) {
-    throw new Error(`the chain has no complete cycle ${n} (CycleSet, RollOpen, CallsWritten, BookLocked, RollClose)`);
+  if (c === undefined || c.open === null || c.locked === null || c.close === null) {
+    throw new Error(`the chain has no complete cycle ${n} (RollOpen, BookLocked, RollClose)`);
   }
   if (k === undefined) throw new Error(`run.json db.cycles has no row for cycle ${n}`);
 
-  const optionIds = runValue(run, `${r}.optionIds`) as string[];
-  b.agree(`cycle ${n} registry option ids`, optionIds, c.set.optionIds);
+  const optionId = runBig(run, `${r}.optionId`);
+  b.agree(`cycle ${n} option id`, optionId, c.open.optionId);
+  b.agree(`cycle ${n} keeper row option id`, k.option_id, c.open.optionId);
   const exerciseTimestamp = runBig(run, `${r}.exerciseTimestamp`);
   const expiryTimestamp = runBig(run, `${r}.expiryTimestamp`);
-  b.agree(`cycle ${n} exercise timestamp`, exerciseTimestamp, c.set.exerciseAt);
-  b.agree(`cycle ${n} expiry timestamp`, expiryTimestamp, c.set.expireAt);
-  const setTx = run.harnessTxs.find((t) => t.label === `MockRegistry.setCycleWithStrikes(cycle ${n})`);
-  b.agree(`cycle ${n} CycleSet tx`, setTx?.hash ?? null, c.set.txHash);
+  b.agree(`cycle ${n} exercise timestamp`, exerciseTimestamp, c.open.exerciseTs);
+  b.agree(`cycle ${n} expiry timestamp`, expiryTimestamp, c.open.expiryTs);
 
-  const contracts = runBig(run, `${r}.contracts`);
   const strike = runBig(run, `${r}.strikeUsdg6`);
-  b.agree(`cycle ${n} contracts written`, contracts, c.open.contracts);
-  b.agree(`cycle ${n} keeper row contracts`, k.contracts, c.open.contracts);
   b.agree(`cycle ${n} strike`, strike, c.open.strike);
-  b.agree(`cycle ${n} option id`, k.option_id, c.open.optionId);
   if (k.roll_open_tx !== null) b.agree(`cycle ${n} rollOpen tx`, k.roll_open_tx, c.open.txHash);
   b.agree(`cycle ${n} lockBook tx`, k.lock_tx, c.locked.txHash);
   const txClose = String(runValue(run, `${r}.rollCloseTx`));
   b.agree(`cycle ${n} rollClose tx`, txClose, c.close.txHash);
   b.agree(`cycle ${n} keeper row rollClose tx`, k.roll_close_tx, c.close.txHash);
-  if (n === 3) b.agree("cycle 3 claim key", runBig(run, "cycle3.claimKey"), c.written.claimKey);
-  const collateral = contracts * c.set.lotSize;
-  b.agree(`cycle ${n} collateral = contracts x lot`, collateral, c.written.collateral);
+  b.agree(`cycle ${n} did not strand`, null, c.stranded);
+
+  // Written == sold, per fill. run.json's `contracts` is what sold; the chain's writes must sum to it.
+  const contracts = runBig(run, `${r}.contracts`);
+  const written = c.writes.reduce((s, w) => s + w.contracts, 0n);
+  const collateral = c.writes.reduce((s, w) => s + w.collateral, 0n);
+  b.agree(`cycle ${n} contracts sold = sum of CallsWritten`, contracts, written);
+  b.agree(`cycle ${n} keeper row contracts`, k.contracts, written);
+  b.agree(`cycle ${n} collateral = contracts x lot`, contracts * LOT, collateral);
+  const claimKey = c.writes[0]?.claimKey ?? null;
+  for (const w of c.writes) b.agree(`cycle ${n} every fill writes into one claim`, claimKey, w.claimKey);
+  if (n === 3) b.agree("cycle 3 claim key", runBig(run, "cycle3.claimKey"), claimKey);
 
   const chainListing = chain.listings.find((l) => l.optionId === c.open!.optionId);
   if (chainListing === undefined) throw new Error(`the chain has no ListingApproved for cycle ${n}`);
@@ -346,14 +352,11 @@ function deriveWeek(b: Builder, run: RunJson, chain: ChainFacts, n: 1 | 2 | 3): 
   b.agree(`cycle ${n} order hash`, String(runValue(run, `${r}.orderHash`)), listing.orderHash);
 
   const sold = listing.contractsFilled;
-  const premiumToVault = listing.proceeds;
-  const overcallFee = listing.feePaid;
-  const premiumGross = premiumToVault + overcallFee;
-  if (sold > 0n) {
-    b.agree(`cycle ${n} fill gross`, runBig(run, `${r}.gross6`), premiumGross);
-    b.agree(`cycle ${n} fill to vault`, runBig(run, `${r}.toVault6`), premiumToVault);
-    b.agree(`cycle ${n} fill to Overcall`, runBig(run, `${r}.toOvercall6`), overcallFee);
-  }
+  const premiumGross = listing.proceeds;
+  b.agree(`cycle ${n} contracts sold (Seaport) = written (CallsWritten)`, sold, written);
+  // Each fill's write sits in the fill's own transaction.
+  b.agree(`cycle ${n} one write per fill`, chainListing.fills.map((f) => lower(f.txHash)), c.writes.map((w) => lower(w.txHash)));
+  if (sold > 0n) b.agree(`cycle ${n} fill gross`, runBig(run, `${r}.gross6`), premiumGross);
 
   // The week's money, from the dry run's record.
   const gross = runBig(run, `${r}.harvest.gross`);
@@ -383,6 +386,8 @@ function deriveWeek(b: Builder, run: RunJson, chain: ChainFacts, n: 1 | 2 | 3): 
   // The vault is the only writer of each of these private option types, so every exercised
   // contract lands in its one bucket.
   b.agree(`cycle ${n} bucket assignment = contracts assigned`, assigned, c.bucketAssigned);
+  // Nothing sold means nothing written, no claim, and no collateral to bring home.
+  if (sold === 0n) b.agree(`cycle ${n} unfilled: nothing to return`, 0n, c.close.assetsReturned);
 
   // Supply at harvest: the share count the terminal sweep indexed against. Pre-close, so the
   // queued shares escrowed in cycle 3 still count. Cross-checked against UsdgDistributed and
@@ -399,25 +404,22 @@ function deriveWeek(b: Builder, run: RunJson, chain: ChainFacts, n: 1 | 2 | 3): 
   return {
     cycleNumber: n,
     status,
-    optionIds,
-    lotSize: c.set.lotSize,
     exerciseTimestamp,
     expiryTimestamp,
-    setAt: c.set.timestamp,
-    setTx: lower(c.set.txHash),
-    optionId: BigInt(k.option_id),
-    claimKey: c.written.claimKey,
+    optionId,
+    claimKey,
     strike,
-    contracts,
+    contracts: written,
     collateral,
+    writeCount: c.writes.length,
+    firstWriteAt: c.writes[0]?.timestamp ?? null,
+    lastWriteAt: c.writes.at(-1)?.timestamp ?? null,
     openedAt: c.open.timestamp,
     txOpen: lower(k.roll_open_tx ?? c.open.txHash),
     listing,
     sold,
     fillCount: listing.fillCount,
     premiumGross,
-    premiumToVault,
-    overcallFee,
     firstFillAt: chainListing.fills[0]?.timestamp ?? null,
     lastFillAt: chainListing.fills.at(-1)?.timestamp ?? null,
     lockedAt: c.locked.timestamp,
@@ -450,29 +452,27 @@ function deriveWeek(b: Builder, run: RunJson, chain: ChainFacts, n: 1 | 2 | 3): 
 function expectCycle(w: RouteWriter, t: WeekTruth) {
   w.eq("cycle", t.cycleNumber);
   w.eq("status", t.status);
-  w.eq("wrote", true);
   w.eq("filled", t.sold > 0n);
   w.eq("assigned", t.assigned > 0n);
+  w.eq("stranded", false);
 
-  const reg = w.at("registry");
-  reg.eq("optionIds", t.optionIds, "run.json cycleN.optionIds");
-  reg.eq("strikeCount", t.optionIds.length);
-  reg.asset("lotSize", t.lotSize, "CycleSet.lotSize");
-  reg.eq("exerciseTimestamp", t.exerciseTimestamp.toString(), "run.json cycleN.exerciseTimestamp");
-  reg.eq("exerciseAt", isoOf(t.exerciseTimestamp));
-  reg.eq("expiryTimestamp", t.expiryTimestamp.toString(), "run.json cycleN.expiryTimestamp");
-  reg.eq("expiryAt", isoOf(t.expiryTimestamp));
-  reg.eq("setAt", isoOf(t.setAt), "CycleSet block timestamp");
-  reg.eq("setTx", t.setTx, "run.json harnessTxs setCycleWithStrikes");
+  const op = w.at("option");
+  op.eq("exerciseTimestamp", t.exerciseTimestamp.toString(), "run.json cycleN.exerciseTimestamp / cycleExerciseTs() at RollOpen");
+  op.eq("exerciseAt", isoOf(t.exerciseTimestamp));
+  op.eq("expiryTimestamp", t.expiryTimestamp.toString(), "run.json cycleN.expiryTimestamp / cycleExpiryTs() at RollOpen");
+  op.eq("expiryAt", isoOf(t.expiryTimestamp));
 
   const wr = w.at("written");
-  wr.eq("optionId", t.optionId.toString(), "run.json db.cycles option_id");
-  wr.eq("claimKey", t.claimKey.toString(), "CallsWritten.claimKey");
+  wr.eq("optionId", t.optionId.toString(), "run.json cycleN.optionId");
+  wr.eq("claimKey", t.claimKey === null ? null : t.claimKey.toString(), "CallsWritten.claimKey (null when nothing sold)");
   wr.usdg("strikeUsdg", t.strike, "run.json cycleN.strikeUsdg6");
-  wr.eq("contracts", t.contracts.toString(), "run.json cycleN.contracts");
-  wr.asset("collateral", t.collateral, "contracts x lot");
+  wr.eq("contracts", t.contracts.toString(), "sum of CallsWritten.contractsCount");
+  wr.asset("collateral", t.collateral, "sum of CallsWritten.collateral");
+  wr.eq("writeCount", t.writeCount, "CallsWritten events");
   wr.eq("openedAt", isoOf(t.openedAt), "RollOpen block timestamp");
-  wr.eq("txOpen", t.txOpen, "run.json db.cycles roll_open_tx (cycle 2: RollOpen log; the keeper adopted it)");
+  wr.eq("txOpen", t.txOpen, "run.json db.cycles roll_open_tx");
+  wr.eq("firstWriteAt", isoOf(t.firstWriteAt));
+  wr.eq("lastWriteAt", isoOf(t.lastWriteAt));
 
   const li = w.at("listing");
   li.eq("count", 1);
@@ -486,8 +486,6 @@ function expectCycle(w: RouteWriter, t: WeekTruth) {
   fi.eq("contractsSold", t.sold.toString(), "Seaport OrderFulfilled offer");
   fi.eq("fillCount", t.fillCount);
   fi.usdg("premiumGross", t.premiumGross, "run.json cycleN.gross6 (0 when unfilled)");
-  fi.usdg("premiumToVault", t.premiumToVault, "run.json cycleN.toVault6");
-  fi.usdg("overcallFee", t.overcallFee, "run.json cycleN.toOvercall6");
   fi.usdg("unitPriceUsdg", t.sold === 0n ? 0n : t.premiumGross / t.sold);
   fi.eq("firstFillAt", isoOf(t.firstFillAt));
   fi.eq("lastFillAt", isoOf(t.lastFillAt));
@@ -498,10 +496,11 @@ function expectCycle(w: RouteWriter, t: WeekTruth) {
   se.usdg("assignmentUsdg", t.strikeProceeds, "RollClose.usdgFromAssignment");
   se.asset("assetsReturned", t.assetsReturned, "run.json RollClose.assetsReturned");
   se.eq("marketExercised", t.marketExercised.toString(), "Valorem OptionsExercised");
-  se.eq("bucketIndex", t.bucketIndex === null ? null : t.bucketIndex.toString(), "Valorem BucketWrittenInto in this cycle's rollOpen tx");
+  se.eq("bucketIndex", t.bucketIndex === null ? null : t.bucketIndex.toString(), "Valorem BucketWrittenInto in this cycle's first fill");
   se.eq("bucketAssigned", t.bucketAssigned.toString(), "Valorem BucketAssignedExercise on that bucket");
   se.eq("closedAt", isoOf(t.closedAt), "RollClose block timestamp");
   se.eq("txClose", t.txClose, "run.json cycleN.rollCloseTx");
+  se.eq("strand", null, "no ClaimStranded in this run");
 
   const hv = w.at("harvest");
   hv.eq("harvested", true);
@@ -526,25 +525,23 @@ function expectListing(w: RouteWriter, l: ListingTruth) {
   w.eq("contracts", l.contracts.toString());
   w.usdg("grossUsdg", l.gross, "run.json db.listings gross_usdg6");
   w.usdg("unitPriceUsdg", l.unitPrice, "run.json db.listings unit_price6");
-  w.usdg("writerUsdg", l.writer, "run.json db.listings to_vault6");
-  w.usdg("overcallFeeUsdg", l.overcallFee, "run.json db.listings to_overcall6");
   const f = w.at("fill");
   f.eq("contractsFilled", l.contractsFilled.toString());
   f.eq("fillCount", l.fillCount);
   f.usdg("proceedsUsdg", l.proceeds);
-  f.usdg("feePaidUsdg", l.feePaid);
   f.eq("lastFillAt", isoOf(l.lastFillAt));
   f.eq("lastFillTx", l.lastFillTx === null ? null : lower(l.lastFillTx));
   w.eq("approvedAt", isoOf(l.approvedAt));
   w.eq("approvedTx", lower(l.approvedTx), "run.json db.listings approve_tx");
   w.eq("endedAt", isoOf(l.endedAt));
   w.eq("endedTx", l.endedTx === null ? null : lower(l.endedTx));
-  w.eq("endReason", l.endReason);
+  w.eq("endReason", l.endReason, "filled / cancelled / counter / lockBook / rollClose, from the same tx's other events");
 }
 
 function expectHarvest(w: RouteWriter, t: WeekTruth) {
   w.eq("cycle", t.cycleNumber);
   w.eq("terminal", true);
+  w.eq("origin", "rollClose");
   w.eq("filled", t.sold > 0n);
   w.usdg("grossUsdg", t.gross, "run.json cycleN.harvest.gross");
   w.usdg("fee", t.fee, "run.json cycleN.harvest.fee");
@@ -552,7 +549,6 @@ function expectHarvest(w: RouteWriter, t: WeekTruth) {
   w.usdg("premiumGross", t.harvestPremiumGross);
   w.usdg("strikeProceedsUsdg", t.strikeProceeds);
   w.usdg("premiumNet", t.premiumNet);
-  w.usdg("premiumToVault", t.premiumToVault);
   w.usdg("assignmentUsdg", t.strikeProceeds);
   w.eq("contractsSold", t.sold.toString());
   w.eq("contractsAssigned", t.assigned.toString());
@@ -577,6 +573,7 @@ export type Routes = {
   health: string;
   activity: string;
   activityAll: string;
+  strands: string;
   graphql: string;
 };
 
@@ -589,22 +586,24 @@ export const routesFor = (depositor: string): Routes => ({
   health: "GET /v1/health",
   activity: "GET /v1/activity",
   activityAll: "GET /v1/activity?include=all",
+  strands: "GET /v1/strands",
   graphql: "POST /graphql",
 });
 
 /** The GraphQL document the sync posts. Epochs and the vault row are not all on a REST route. */
 export const graphqlQuery = (vault: string) => `{
   queueEpochs(orderBy: "epochId", orderDirection: "asc") {
-    items { epochId status cycleNumber sharesQueued queueCount sharesSettled assetsSettled usdgSettled sharesClaimed assetsClaimed usdgClaimed claimCount settledTx }
+    items { epochId status cycleNumber sharesQueued queueCount sharesSettled assetsSettled usdgSettled sharesClaimed assetsClaimed usdgClaimed claimCount strandGen strandWad strandWadClaimed settledTx }
   }
   vaultState(id: "${vault}") {
     phase cycleNumber writesHalted claimKey optionId listingHash lockedCollateral contractsWritten
     assetBalance usdgBalance reservedAssets usdgReservedForQueue totalShares queuedShares epochId
     accUsdgPerShare totalUsdgDistributed totalUsdgClaimed usdgUnallocated seaportCounter
     protocolFeeBps feeRecipient depositCap maxPriceAge totalFeeSwept lifetimeProtocolFee
-    lifetimePremiumGross lifetimePremiumToVault lifetimeOvercallFee lifetimeAssignmentUsdg
-    lifetimePremiumNet lifetimeStrikeProceeds lifetimeCreditedUsdg
-    cyclesWritten cyclesFilled cyclesUnfilled cyclesAssigned lastBlock
+    lifetimePremiumGross lifetimeAssignmentUsdg
+    lifetimePremiumNet lifetimeStrikeProceeds lifetimeCreditedUsdg lifetimeHaircutAssets
+    cyclesWritten cyclesFilled cyclesUnfilled cyclesAssigned cyclesStranded
+    stranded strandGen lastResolvedGen strandedRemainingWad strandedCycleNumber lastBlock
   }
 }`;
 
@@ -617,11 +616,11 @@ export function buildExpectations(run: RunJson, chain: ChainFacts): Built {
   const routes = routesFor(depositor);
 
   b.agree("vault address", run.addresses.Vault, chain.vault);
-  b.agree("registry address", run.addresses.MockRegistry, chain.immutables.registry);
   b.agree("chain id", run.chainId, chain.chainId);
   const { lastBlock } = runBlocks(run);
   b.agree("last dry-run block = END_BLOCK", lastBlock, chain.endBlock);
   if (run.error !== null) b.disagreements.push(`the dry run recorded an error: ${run.error}`);
+  b.agree("no claim stranded in this run", 0, chain.strands.length);
 
   const weeks = ([1, 2, 3] as const).map((n) => deriveWeek(b, run, chain, n));
   const byNumberDesc = [...weeks].sort((x, y) => y.cycleNumber - x.cycleNumber);
@@ -635,15 +634,17 @@ export function buildExpectations(run: RunJson, chain: ChainFacts): Built {
     expectListing(r.at("listings[0]"), t.listing);
     r.eq("harvests.length", 1);
     expectHarvest(r.at("harvests[0]"), t);
+    r.eq("strands.length", 0);
   }
 
   const list = b.route(routes.cycles);
   list.eq("count", weeks.length);
   list.eq("cycles.length", weeks.length);
-  list.eq("totals.written", chain.cycles.filter((c) => c.open !== null).length, "RollOpen events");
+  list.eq("totals.armed", chain.cycles.length, "RollOpen events");
   list.eq("totals.filled", weeks.filter((t) => t.sold > 0n).length);
   list.eq("totals.unfilled", weeks.filter((t) => t.sold === 0n).length);
   list.eq("totals.assigned", weeks.filter((t) => t.assigned > 0n).length);
+  list.eq("totals.stranded", 0);
   byNumberDesc.forEach((t, i) => expectCycle(list.at(`cycles[${i}]`), t));
 
   const listings = b.route(routes.listings);
@@ -662,6 +663,11 @@ export function buildExpectations(run: RunJson, chain: ChainFacts): Built {
   activityAll.eq("include", "all");
   activityAll.eq("count", chain.harvests.length, "every Harvest log on chain");
 
+  const strands = b.route(routes.strands);
+  strands.eq("stranded", false);
+  strands.eq("count", 0);
+  strands.eq("strands.length", 0);
+
   /* ---------------- /v1/vault ---------------- */
   const v = b.route(routes.vault);
   const imm = chain.immutables;
@@ -669,10 +675,8 @@ export function buildExpectations(run: RunJson, chain: ChainFacts): Built {
   v.eq("addresses.vault", chain.vault);
   v.eq("addresses.asset", imm.asset);
   v.eq("addresses.usdg", imm.usdg);
-  v.eq("addresses.registry", imm.registry, "run.json addresses.MockRegistry");
   v.eq("addresses.clearinghouse", imm.clear);
   v.eq("addresses.seaport", imm.seaport);
-  v.eq("addresses.overcallFeeRecipient", imm.overcallFeeRecipient);
   v.eq("live", true);
   v.eq("blockNumber", chain.endBlock.toString());
 
@@ -681,16 +685,31 @@ export function buildExpectations(run: RunJson, chain: ChainFacts): Built {
   v.eq("phase.name", ["Idle", "Listed", "Exercisable", "Settling"][views.phase] ?? "Unknown");
   v.eq("phase.writesHalted", views.writesHalted);
   v.eq("phase.canRedeemInstantly", views.canRedeemInstantly);
+  v.eq("phase.depositsOpen", views.maxDepositZero > 0n, "maxDeposit(0) > 0");
   v.eq("phase.valoremFeeAccepted", views.valoremFeeAccepted);
   v.eq("phase.oraclePaused", views.oraclePaused);
   v.eq("phase.tokenPaused", false);
   v.eq("phase.maxPriceAgeSeconds", chain.settings.maxPriceAge, "maxPriceAge()");
+
+  b.agree("not stranded at the end", false, views.isStranded);
+  b.agree("strand generations resolved", views.strandGen, views.lastResolvedGen);
+  const st = v.at("stranded");
+  st.eq("stranded", views.isStranded, "isStranded()");
+  st.eq("gen", views.strandGen.toString(), "strandGen()");
+  st.eq("lastResolvedGen", views.lastResolvedGen.toString(), "lastResolvedGen()");
+  st.eq("remainingWad", views.strandedRemainingWad.toString(), "strandedRemainingWad()");
+  st.eq("wad", ONE.toString());
+  st.eq("cycle", null);
+  st.eq("claimKey", null);
+  st.eq("since", null);
+  st.eq("lockedAssets", null);
 
   const finalIdle = runBig(run, "cycle3.final.idleAssets");
   const finalSupply = runBig(run, "cycle3.final.totalSupply");
   b.agree("final idleAssets", finalIdle, views.idleAssets);
   b.agree("final totalSupply", finalSupply, views.totalSupply);
   b.agree("final totalAssets = idle (nothing locked)", finalIdle, views.totalAssets);
+  b.agree("nothing written after the close", 0n, views.contractsWritten);
   v.asset("tvl.totalAssets", views.totalAssets, "run.json cycle3.final.idleAssets");
   v.asset("tvl.idleAssets", views.idleAssets, "run.json cycle3.final.idleAssets");
   v.asset("tvl.lockedAssets", views.lockedAssets);
@@ -715,49 +734,39 @@ export function buildExpectations(run: RunJson, chain: ChainFacts): Built {
   v.usdg("usdg.unallocated", views.usdgUnallocated);
   v.eq("usdg.accUsdgPerShare", views.accUsdgPerShare.toString(), "accUsdgPerShare()");
   v.eq("usdg.accUsdgPerSharePrecision", (10n ** 27n).toString());
-  v.eq("usdg.protocolFeeBps", chain.settings.protocolFeeBps, "policy().protocolFeeBps (set in the constructor, no event)");
+  v.eq("usdg.protocolFeeBps", chain.settings.protocolFeeBps, "policy().protocolFeeBps");
   v.eq("usdg.feeRecipient", lower(chain.settings.feeRecipient), "feeRecipient() (set in the constructor, no event)");
   b.agree("fee recipient = the dry run's fee Safe", run.actors.feeSafe, chain.settings.feeRecipient);
   v.asset("queue.queuedShares", views.queuedShares);
   v.eq("queue.epochId", views.epochId.toString(), "epochId()");
+  v.eq("queue.canSettle", views.phase === 0 && views.queuedShares > 0n, "Idle with shares queued");
 
   expectCycle(v.at("week.cycle"), w3);
-  const live = chain.registryLive;
-  const wr = v.at("week.registry");
-  wr.eq("live", true);
-  wr.eq("cycleNumber", live.cycleNumber);
-  wr.eq("isWritingOpen", live.isWritingOpen);
-  wr.eq("isCycleLive", live.isCycleLive);
-  wr.eq("writeDeadline", live.writeDeadline.toString());
-  wr.eq("writeDeadlineAt", isoOf(live.writeDeadline));
-  wr.eq("exerciseAt", isoOf(live.exerciseTimestamp));
-  wr.eq("expiryAt", isoOf(live.expiryTimestamp));
-  wr.asset("lotSize", live.lotSize);
-  wr.eq("rungs.length", live.rungs.length);
-  const strikes3 = runValue(run, "cycle3.strikes") as string[];
-  live.rungs.forEach((rung, i) => {
-    b.agree(`live rung ${i} strike`, strikes3[i] ?? null, rung.strike);
-    wr.eq(`rungs[${i}].optionId`, rung.optionId.toString());
-    wr.usdg(`rungs[${i}].strikeUsdg`, rung.strike, "run.json cycle3.strikes");
-    wr.eq(`rungs[${i}].approved`, rung.approved);
-    wr.eq(`rungs[${i}].ours`, rung.optionId === w3.optionId);
-  });
-  v.eq("week.listing.hash", lower(views.listingHash), "listingHash()");
+  const wo = v.at("week.option");
+  // After the close the vault forgets the armed type (`optionId` 0 → null on the wire) but keeps
+  // the strike and the window until the next `rollOpen`.
+  wo.eq("optionId", views.optionId === 0n ? w3.optionId.toString() : views.optionId.toString(), "optionId(), or the cycle row once cleared");
+  wo.eq("claimKey", views.claimKey === 0n ? (w3.claimKey === null ? null : w3.claimKey.toString()) : views.claimKey.toString(), "claimKey(), or the cycle row once cleared");
+  wo.usdg("strikeUsdg", views.cycleStrikeUsdg, "cycleStrikeUsdg()");
+  wo.eq("exerciseTimestamp", views.cycleExerciseTs.toString(), "cycleExerciseTs()");
+  wo.eq("exerciseAt", isoOf(views.cycleExerciseTs));
+  wo.eq("expiryTimestamp", views.cycleExpiryTs.toString(), "cycleExpiryTs()");
+  wo.eq("expiryAt", isoOf(views.cycleExpiryTs));
+  v.eq("week.listing.hash", views.listingHash === ZERO_HASH ? null : lower(views.listingHash), "listingHash() (zero = null, X-1)");
   v.eq("week.listing.contracts", views.listingAmount.toString());
   v.usdg("week.listing.grossUsdg", views.listingGrossUsdg);
   v.eq("week.listing.listingsThisCycle", views.listingsThisCycle);
   v.eq("week.listing.maxListingsPerCycle", 3);
   v.eq("week.assignmentLive.contractsAssigned", views.contractsAssigned.toString());
-  v.eq("week.assignmentLive.contractsRemaining", views.contractsRemaining.toString());
   v.eq("week.assignmentLive.contractsWritten", views.contractsWritten.toString());
+  v.eq("week.assignmentLive.capacity", capacityOf(chain.settings, views.totalAssets, views.contractsWritten).toString(), "Policy.maxContracts(totalAssets) - contractsWritten");
 
-  expectHarvest(v.at("lastWeek"), w3);
+  expectHarvest(v.at("lastHarvest"), w3);
+  expectCycle(v.at("lastClosedCycle"), w3);
 
   const sum = (f: (t: WeekTruth) => bigint) => weeks.reduce((s, t) => s + f(t), 0n);
   const lifetime = {
     premiumGross: sum((t) => t.premiumGross),
-    premiumToVault: sum((t) => t.premiumToVault),
-    overcallFee: sum((t) => t.overcallFee),
     assignmentUsdg: sum((t) => t.strikeProceeds),
     protocolFee: sum((t) => t.fee),
     premiumNet: sum((t) => t.premiumNet),
@@ -766,18 +775,18 @@ export function buildExpectations(run: RunJson, chain: ChainFacts): Built {
   };
   b.agree("fee swept = fee accrued", lifetime.protocolFee, chain.feeSwept);
   b.agree("pendingFeeUsdg", 0n, views.pendingFeeUsdg);
-  v.eq("lifetime.cyclesWritten", weeks.length);
+  v.eq("lifetime.cyclesArmed", weeks.length);
   v.eq("lifetime.cyclesFilled", weeks.filter((t) => t.sold > 0n).length);
   v.eq("lifetime.cyclesUnfilled", weeks.filter((t) => t.sold === 0n).length);
   v.eq("lifetime.cyclesAssigned", weeks.filter((t) => t.assigned > 0n).length);
-  v.usdg("lifetime.premiumGross", lifetime.premiumGross, "sum of fills, both legs");
-  v.usdg("lifetime.premiumToVault", lifetime.premiumToVault);
-  v.usdg("lifetime.overcallFee", lifetime.overcallFee);
+  v.eq("lifetime.cyclesStranded", 0);
+  v.usdg("lifetime.premiumGross", lifetime.premiumGross, "sum of fills (one consideration item)");
   v.usdg("lifetime.assignmentUsdg", lifetime.assignmentUsdg, "sum of RollClose.usdgFromAssignment");
   v.usdg("lifetime.protocolFee", lifetime.protocolFee, "sum of run.json harvest fees");
   v.usdg("lifetime.premiumNet", lifetime.premiumNet, "sum of (gross - strike proceeds - fee)");
   v.usdg("lifetime.strikeProceedsUsdg", lifetime.strikeProceeds);
   v.usdg("lifetime.creditedUsdg", lifetime.credited, "sum of run.json harvest nets");
+  v.asset("lifetime.haircutAssets", 0n);
 
   const holders = (role: string) => chain.roles.filter((r) => r.granted && lower(role) === lower(r.role)).map((r) => lower(r.account));
   // Role hashes: keccak256 of the name, and 0x00 for the admin (OpenZeppelin AccessControl).
@@ -808,6 +817,7 @@ export function buildExpectations(run: RunJson, chain: ChainFacts): Built {
   b.agree("depositor USDG claimed", claimedUsdg, claimedOnChain);
   b.agree("depositor redeemed assets", redeemedAssets, completes.reduce((s, c) => s + c.assets, 0n));
   b.agree("depositor redeemed USDG", redeemedUsdg, completes.reduce((s, c) => s + c.usdgOut, 0n));
+  b.agree("depositor holds no strand share", 0n, acct.owedStrandWad);
   a.eq("address", depositor);
   a.eq("live", true);
   a.eq("known", true);
@@ -821,11 +831,14 @@ export function buildExpectations(run: RunJson, chain: ChainFacts): Built {
   a.asset("queue.previewAssets", acct.previewAssets);
   a.usdg("queue.previewUsdg", acct.previewUsdg);
   a.eq("queue.epochSettledAt", null);
+  a.usdg("queue.deferredUsdg", 0n);
+  a.eq("strand", null, "owedStrandWad(depositor) == 0 and no epoch share");
   a.asset("lifetime.deposited", deposited, "Deposit logs");
   a.asset("lifetime.withdrawn", 0n);
   a.asset("lifetime.redeemedAssets", redeemedAssets, "run.json cycle3.queue.assetsOut");
   a.usdg("lifetime.redeemedUsdg", redeemedUsdg, "run.json cycle3.queue.usdgOut");
   a.usdg("lifetime.claimedUsdg", claimedUsdg, "run.json cycle1.harvest.depositorReceived + cycle3.claimed");
+  a.asset("lifetime.haircutAssets", 0n);
   a.eq("lifetime.depositCount", chain.deposits.filter((d) => lower(d.owner) === lower(depositor)).length);
   a.eq("lifetime.firstSeenAt", isoOf(chain.depositorFirstSeen));
   a.eq("lifetime.lastActivityAt", isoOf(chain.depositorLastActivity));
@@ -846,9 +859,9 @@ export function buildExpectations(run: RunJson, chain: ChainFacts): Built {
   hl.eq("vault.phaseName", ["Idle", "Listed", "Exercisable", "Settling"][views.phase] ?? "Unknown");
   hl.eq("vault.cycle", views.cycleNumber, "cycleNumber()");
   hl.eq("vault.writesHalted", views.writesHalted);
+  hl.eq("vault.stranded", false);
   hl.eq("vault.lastActivityBlock", chain.lastVaultActivityBlock.toString());
   hl.eq("vault.lastActivityAt", isoOf(chain.lastVaultActivityTimestamp));
-  hl.eq("relay.keeperAuthConfigured", false);
 
   /* ---------------- GraphQL: epochs and the vault row ---------------- */
   const g = b.route(routes.graphql);
@@ -878,6 +891,9 @@ export function buildExpectations(run: RunJson, chain: ChainFacts): Built {
     e.eq("assetsClaimed", entries.reduce((s, q) => s + q.assets, 0n).toString(), "run.json cycle3.queue.assetsOut");
     e.eq("usdgClaimed", entries.reduce((s, q) => s + q.usdgOut, 0n).toString(), "run.json cycle3.queue.usdgOut");
     e.eq("claimCount", entries.length);
+    e.eq("strandGen", null);
+    e.eq("strandWad", "0");
+    e.eq("strandWadClaimed", "0");
     e.eq("settledTx", settled === undefined ? null : lower(settled.txHash));
   });
 
@@ -909,16 +925,21 @@ export function buildExpectations(run: RunJson, chain: ChainFacts): Built {
   vs.eq("totalFeeSwept", chain.feeSwept.toString(), "FeeSwept logs");
   vs.eq("lifetimeProtocolFee", lifetime.protocolFee.toString());
   vs.eq("lifetimePremiumGross", lifetime.premiumGross.toString());
-  vs.eq("lifetimePremiumToVault", lifetime.premiumToVault.toString());
-  vs.eq("lifetimeOvercallFee", lifetime.overcallFee.toString());
   vs.eq("lifetimeAssignmentUsdg", lifetime.assignmentUsdg.toString());
   vs.eq("lifetimePremiumNet", lifetime.premiumNet.toString());
   vs.eq("lifetimeStrikeProceeds", lifetime.strikeProceeds.toString());
   vs.eq("lifetimeCreditedUsdg", lifetime.credited.toString());
+  vs.eq("lifetimeHaircutAssets", "0");
   vs.eq("cyclesWritten", weeks.length);
   vs.eq("cyclesFilled", weeks.filter((t) => t.sold > 0n).length);
   vs.eq("cyclesUnfilled", weeks.filter((t) => t.sold === 0n).length);
   vs.eq("cyclesAssigned", weeks.filter((t) => t.assigned > 0n).length);
+  vs.eq("cyclesStranded", 0);
+  vs.eq("stranded", false);
+  vs.eq("strandGen", "0");
+  vs.eq("lastResolvedGen", "0");
+  vs.eq("strandedRemainingWad", "0");
+  vs.eq("strandedCycleNumber", null);
   vs.eq("lastBlock", chain.lastVaultActivityBlock.toString());
 
   return { expectations: b.expectations, disagreements: b.disagreements, crossChecks: b.crossChecks, weeks };

@@ -13,8 +13,9 @@ import Link from "next/link";
 import { CycleTapeInline } from "@/components/CycleTape";
 import { GuardBadges, PhaseBadge } from "@/components/PhaseBadge";
 import { PositionSplit } from "@/components/PositionSplit";
+import { StrandedBanner } from "@/components/StrandedBanner";
 import { addressUrl } from "@/lib/chain";
-import { MARKET, SHARE_TICKER, VAULT } from "@/lib/contracts";
+import { MARKET, MAX_LISTINGS_PER_CYCLE, SHARE_TICKER, VAULT } from "@/lib/contracts";
 import {
   WAD,
   fmtAsset,
@@ -44,9 +45,8 @@ export default function HomePage() {
 
   const tvl = tvlUsdg(v.totalAssets, v.spotUsdg);
 
-  // Locked collateral splits into "sold" (calls a buyer owns, so assignable) and "listed"
-  // (written but nobody has bought them). The per-contract size comes from what the vault
-  // actually locked, not from a hardcoded lot: the registry owns lotSize and can move it.
+  // Locked collateral is "sold": under write on fill every contract the vault has written was
+  // bought in the same transaction, so there is no unsold inventory to draw.
   const split = collateralSplit(v);
 
   // Premium only. On an assigned week the harvest also carried the strike proceeds, which are
@@ -59,14 +59,15 @@ export default function HomePage() {
   return (
     <>
       <div className="page-head">
-        <div className="eyebrow">Robinhood Chain 4663 · Overcall · Valorem Clear · Seaport 1.6</div>
+        <div className="eyebrow">Robinhood Chain 4663 · Valorem Clear · Seaport 1.6</div>
         <h1>
           {SHARE_TICKER} — pooled covered calls on {MARKET} Stock Tokens
         </h1>
         <p className="lede">
-          Deposit one tokenised stock, receive vault shares. Each week a keeper writes an Overcall
-          call against the idle collateral and lists it for USDG. Depositors receive whatever
-          premium actually fills — and nothing at all in a week where nobody buys.
+          Deposit one tokenised stock, receive vault shares. Each week a keeper arms one out-of-the-money call on the
+          idle collateral and lists it for USDG on this site&apos;s own fill page. Nothing is written until a buyer
+          fills; each fill writes exactly what it buys. Depositors receive whatever premium actually fills — and
+          nothing at all in a week where nobody buys.
         </p>
       </div>
 
@@ -74,8 +75,8 @@ export default function HomePage() {
         <div className="notice" data-tone="warn">
           <strong>No vault address configured.</strong>
           Set <code>NEXT_PUBLIC_VAULT</code> to the deployed Callhouse vault on chain 4663. Every
-          other address (registry, clearinghouse, Seaport, USDG, the Stock Token) is compiled in
-          from explorer-confirmed recon and needs no configuration.
+          other address (clearinghouse, Seaport, USDG, the Stock Token) is compiled in from
+          explorer-confirmed recon and needs no configuration.
         </div>
       ) : null}
 
@@ -83,18 +84,19 @@ export default function HomePage() {
       {chainReadFailed ? (
         <div className="notice" data-tone="warn">
           <strong>Chain reads are failing right now.</strong>
-          The vault and registry could not be read from the RPC, so the numbers below are missing
-          rather than zero.
+          The vault could not be read from the RPC, so the numbers below are missing rather than zero.
         </div>
       ) : null}
 
-      <div className="card">
+      <StrandedBanner snapshot={v} compact />
+
+      <div className="card" style={{ marginTop: v.isStranded ? 16 : 0 }}>
         <div className="card-head">
           <span className="card-title">
             {SHARE_TICKER} vault
             {v.symbol && v.symbol !== SHARE_TICKER ? ` · on-chain symbol ${v.symbol}` : ""}
           </span>
-          <PhaseBadge phase={v.phase} fillState={v.fillState} />
+          <PhaseBadge phase={v.phase} fillState={v.fillState} sold={v.contractsWritten} />
         </div>
 
         <GuardBadges
@@ -102,6 +104,7 @@ export default function HomePage() {
           oraclePaused={v.oraclePaused}
           spotStale={v.spotStale}
           valoremFeeAccepted={v.valoremFeeAccepted}
+          stranded={v.isStranded}
         />
 
         <div className="grid grid-3" style={{ marginTop: 14 }}>
@@ -126,20 +129,28 @@ export default function HomePage() {
           <div className="stat">
             <div className="stat-label">This week&apos;s strike</div>
             <div className="stat-value">
-              {v.cycleStrikeUsdg && v.cycleStrikeUsdg > 0n ? fmtUsdg(v.cycleStrikeUsdg) : "—"}{" "}
+              {v.cycleStrikeUsdg && v.cycleStrikeUsdg > 0n && v.phase !== 0 ? fmtUsdg(v.cycleStrikeUsdg) : "—"}{" "}
               <span className="faint">USDG</span>
             </div>
             <div className="stat-sub">
-              {v.contractsWritten !== undefined && v.contractsWritten > 0n
-                ? `${v.contractsWritten.toString()} contracts written · ${(v.contractsSold ?? 0n).toString()} sold`
-                : "nothing written this cycle"}
+              {v.phase === undefined
+                ? "—"
+                : v.phase === 0
+                  ? "nothing armed this cycle"
+                  : `${(v.contractsWritten ?? 0n).toString()} calls sold this week${
+                      v.capacity !== undefined && v.phase === 1 ? ` · capacity for ${v.capacity.toString()} more` : ""
+                    }`}
             </div>
           </div>
         </div>
 
         <hr className="hr" />
 
-        <PositionSplit idle={split.idle} listed={split.listed} sold={split.sold} assigned={split.assigned} />
+        <PositionSplit idle={split.idle} sold={split.sold} assigned={split.assigned} />
+        <p className="tiny faint" style={{ marginTop: 8, marginBottom: 0 }}>
+          Every contract the vault has written was sold in the same transaction that wrote it, so there is no unsold
+          inventory: the vault can only ever be assigned on what it was paid for.
+        </p>
 
         {multiplierIsActive(v.uiMultiplier) ? (
           <div className="tiny faint" style={{ marginTop: 10 }}>
@@ -158,8 +169,8 @@ export default function HomePage() {
             </div>
             <div className="rows">
               <div className="row">
-                <span className="k">Registry cycle</span>
-                <span className="v">#{v.registryCycleNumber ?? "—"}</span>
+                <span className="k">Vault cycle</span>
+                <span className="v">#{v.cycleNumber ?? "—"}</span>
               </div>
               <div className="row">
                 <span className="k">Order hash</span>
@@ -174,8 +185,10 @@ export default function HomePage() {
                 </span>
               </div>
               <div className="row">
-                <span className="k">Listings signed</span>
-                <span className="v">{v.listingsThisCycle === undefined ? "—" : v.listingsThisCycle} / 3</span>
+                <span className="k">Listings authorised</span>
+                <span className="v">
+                  {v.listingsThisCycle === undefined ? "—" : v.listingsThisCycle} / {MAX_LISTINGS_PER_CYCLE}
+                </span>
               </div>
               <CycleTapeInline snapshot={v} />
             </div>
@@ -216,12 +229,12 @@ export default function HomePage() {
                 <div className="row">
                   <span className="k">Result</span>
                   <span className="v">
-                    {last.filled
-                      ? (last.contractsAssigned ?? 0n) > 0n
-                        ? `assigned ${(last.contractsAssigned ?? 0n).toString()}`
-                        : "filled, expired worthless"
-                      : (last.contractsAssigned ?? 0n) > 0n
-                        ? `unfilled, assigned ${(last.contractsAssigned ?? 0n).toString()}`
+                    {last.stranded
+                      ? "closed, claim stranded"
+                      : last.filled
+                        ? (last.contractsAssigned ?? 0n) > 0n
+                          ? `assigned ${(last.contractsAssigned ?? 0n).toString()}`
+                          : "filled, expired worthless"
                         : "unfilled, 0"}
                   </span>
                 </div>
@@ -236,7 +249,7 @@ export default function HomePage() {
                     ? "Loading…"
                     : source === "none"
                       ? "No closed week yet, and history is unavailable right now."
-                      : "No week has closed yet. The first result publishes after the first Saturday expiry."}
+                      : "No week has closed yet. The first result publishes after the first expiry."}
               </p>
             )}
             {historyError ? (
@@ -252,7 +265,7 @@ export default function HomePage() {
             Deposit or withdraw
           </Link>
           <Link className="btn" href="/vault/nvda/cycle">
-            This week&apos;s ladder
+            This week&apos;s call · buy it
           </Link>
           <Link className="btn" href="/activity">
             Every week, including the zeros
@@ -264,16 +277,16 @@ export default function HomePage() {
         <div className="card">
           <div className="card-title">Premium, or nothing</div>
           <p className="small muted" style={{ marginTop: 8, marginBottom: 0 }}>
-            The vault lists a call on Overcall&apos;s book. If no buyer takes it, the week earns
-            zero. That is the most likely outcome on a thin book and it is published as a row like
-            any other.
+            The vault lists a call on <Link href="/vault/nvda/cycle">its own fill page</Link>, the only venue. If no
+            buyer takes it, the week earns zero. That is the most likely outcome on a thin book and it is published
+            as a row like any other.
           </p>
         </div>
         <div className="card">
           <div className="card-title">Assignment is real</div>
           <p className="small muted" style={{ marginTop: 8, marginBottom: 0 }}>
-            If the call is exercised, collateral leaves at the strike and comes back as USDG.
-            Upside above the strike is gone for that week. v1 does not buy the token back.
+            If a call the vault sold is exercised, collateral leaves at the strike and comes back as USDG. Upside
+            above the strike is gone for that week. v1 does not buy the token back.
           </p>
         </div>
         <div className="card">
@@ -293,6 +306,7 @@ export default function HomePage() {
             {VAULT}
           </a>
           {source === "chain" ? " · history rebuilt from vault logs" : source === "indexer" ? " · history from the indexer" : ""}
+          {" · unaudited"}
         </p>
       ) : null}
     </>

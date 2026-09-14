@@ -2,10 +2,10 @@
  * Durable keeper state, in SQLite.
  *
  * The keeper is a single process that must survive being killed at any instant — including
- * between `vault.approveListing()` landing on chain and the POST to Overcall, which is the one
- * window where the two sides of the world can disagree. Everything it has done is written here
+ * between `vault.approveListing()` landing on chain and the row being written, which is the one
+ * window where the chain and this file can disagree. Everything it has done is written here
  * before and after the fact, and `roll.ts` reconciles this table against live vault state on
- * every boot. Nothing is inferred from "it is Friday, so I probably wrote already".
+ * every boot. Nothing is inferred from "it is Friday, so I probably armed already".
  *
  * All 256-bit values are stored as decimal TEXT. SQLite integers are 64-bit and an optionId is
  * 256 bits; storing one as INTEGER silently truncates it.
@@ -20,37 +20,40 @@ import { log } from './logger.js';
                               TYPES
 //////////////////////////////////////////////////////////////*/
 
-/** Where a cycle got to. `skipped` is a first-class, expected outcome: no rung inside the
- *  policy band, or writes halted, is a legitimate week with zero premium. */
-export type CycleStatus = 'skipped' | 'open' | 'locked' | 'closed';
+/**
+ * Where a cycle got to. A row exists only for a cycle the vault ARMED (`rollOpen` landed), and
+ * it is keyed by the vault's own `cycleNumber`. A week the keeper decided not to arm has no
+ * row: it is remembered in `meta` (`skip_reason:<exerciseTs>`) and published as an alert.
+ *   open      armed and Listed; `contracts` is what has sold so far (== contractsWritten).
+ *   locked    lockBook ran; the exercise window is open.
+ *   closed    rollClose ran and the claim (if any) was redeemed.
+ *   stranded  rollClose ran but the claim could not be redeemed (AF-02); `strand_gen` is set and
+ *             `retryStrandedClaim` closes it out later, recording `retry_tx`.
+ */
+export type CycleStatus = 'open' | 'locked' | 'closed' | 'stranded';
 
 /**
- * Listing lifecycle.
- *   approved    — vault.approveListing landed; the order hash is authorised on chain.
- *   posted      — accepted by Overcall (201, or 200 on an idempotent repost).
- *   visible     — confirmed present in GET /api/orders?offerer=<vault>.
- *   post_failed — on chain but not in Overcall's book. The fallback payload is served from
- *                 /orders so a buyer can still fill it. This is NOT a dead listing.
- *   partial/filled/cancelled/expired/unfillable — terminal-ish states from Seaport + the book.
+ * Listing lifecycle, from Seaport's own `getOrderStatus` and the vault's `listingHash`.
+ *   approved   vault.approveListing landed; the order is validated on Seaport, nothing filled.
+ *   partial    Seaport reports a fraction filled and the order is still live.
+ *   filled     Seaport reports it fully filled.
+ *   cancelled  cancelListing (Seaport isCancelled) or invalidateAllListings (counter bump; Seaport
+ *              never sets isCancelled, the vault's listingHash going to zero is the signal).
+ *   expired    killed by lockBook or rollClose (counter bump at the end of the week).
+ * `approved` and `partial` are what /orders serves.
  */
-export type ListingStatus =
-  | 'approved'
-  | 'posted'
-  | 'visible'
-  | 'post_failed'
-  | 'partial'
-  | 'filled'
-  | 'cancelled'
-  | 'expired'
-  | 'unfillable';
+export type ListingStatus = 'approved' | 'partial' | 'filled' | 'cancelled' | 'expired';
 
 export type TxKind =
+  | 'newOptionType'
   | 'rollOpen'
   | 'approveListing'
   | 'cancelListing'
   | 'invalidateAllListings'
   | 'lockBook'
-  | 'rollClose';
+  | 'rollClose'
+  | 'retryStrandedClaim'
+  | 'settleQueue';
 
 export type TxStatus = 'pending' | 'success' | 'reverted';
 
@@ -58,6 +61,8 @@ export interface CycleRow {
   cycle_number: number;
   option_id: string | null;
   strike_usdg6: string | null;
+  /** Contracts SOLD so far (== `contractsWritten`, the sum of `CallsWritten` for the cycle):
+   *  0 at the arm, updated on every fill the keeper observes, final at the close. */
   contracts: number | null;
   exercise_ts: number | null;
   expiry_ts: number | null;
@@ -78,10 +83,15 @@ export interface CycleRow {
    *  Already INSIDE `gross_usdg6` (the terminal Harvest includes it) and fee-free, so premium is
    *  `gross_usdg6 - usdg_from_assignment`. NULL means unknown, never 0. */
   usdg_from_assignment: string | null;
+  /** Reprices this cycle: approveListing calls after the first. The vault caps the total at 3. */
   relists_used: number;
   opened_at: number | null;
   locked_at: number | null;
   closed_at: number | null;
+  /** `ClaimStranded.gen` when the close stranded the claim; NULL otherwise. */
+  strand_gen: string | null;
+  /** The `retryStrandedClaim` transaction that recovered it; NULL until it has. */
+  retry_tx: string | null;
   created_at: number;
   updated_at: number;
 }
@@ -91,19 +101,25 @@ export interface ListingRow {
   cycle_number: number;
   seq: number;
   option_id: string;
+  /** The order's size (`vault.listingAmount`), not the unfilled remainder. */
   contracts: string;
   unit_price6: string;
+  /** `unit_price6 × contracts`; the one consideration item, paid to the vault in full. */
   gross_usdg6: string;
+  /** Equal to `gross_usdg6`: the whole premium is the vault's under write on fill. */
   to_vault6: string;
+  /** Always '0'. Kept for the column shape of an earlier keeper; there is no venue fee item. */
   to_overcall6: string;
   end_time: number;
   counter: string;
   salt: string;
   components_json: string;
+  /** Always '0x'. The vault pre-validates on Seaport; no signature exists. */
   signature: string;
   approve_tx: string | null;
   cancel_tx: string | null;
   status: ListingStatus;
+  /** Unused since the venue went away; NULL on every new row. */
   api_status: string | null;
   api_error: string | null;
   posted_at: number | null;
@@ -167,6 +183,8 @@ CREATE TABLE IF NOT EXISTS cycles (
   opened_at          INTEGER,
   locked_at          INTEGER,
   closed_at          INTEGER,
+  strand_gen         TEXT,
+  retry_tx           TEXT,
   created_at         INTEGER NOT NULL,
   updated_at         INTEGER NOT NULL
 );
@@ -248,6 +266,9 @@ CREATE TABLE IF NOT EXISTS meta (
 const MIGRATIONS: ReadonlyArray<{ table: string; column: string; type: string }> = [
   { table: 'cycles', column: 'assets_returned', type: 'TEXT' },
   { table: 'cycles', column: 'usdg_from_assignment', type: 'TEXT' },
+  // Write on fill (2026-09-13): the stranded-claim state machine.
+  { table: 'cycles', column: 'strand_gen', type: 'TEXT' },
+  { table: 'cycles', column: 'retry_tx', type: 'TEXT' },
 ];
 
 /** Columns the generic updaters are allowed to touch. Keeps the dynamic SQL honest. */
@@ -273,6 +294,8 @@ const CYCLE_COLUMNS = new Set<keyof CycleRow>([
   'opened_at',
   'locked_at',
   'closed_at',
+  'strand_gen',
+  'retry_tx',
 ]);
 
 const LISTING_COLUMNS = new Set<keyof ListingRow>([
@@ -458,31 +481,25 @@ export class KeeperStore {
   }
 
   /**
-   * Listings whose signed payload should still be offered to buyers from our own UI.
+   * Listings whose payload should still be offered to buyers from our own fill page.
    *
    * `end_time` is the order's Seaport endTime, i.e. the cycle's exerciseTimestamp. Past it
-   * Seaport rejects the fill, so an expired row must never reach /orders: the fallback buy
-   * page would be showing a buyer an order that cannot be filled. It is also the only guard
-   * that holds when the vault went straight from Listed to rollClose without a `lockBook` —
-   * `rollClose` kills listings by bumping the Seaport counter, which does NOT set
-   * `isCancelled`, so polling alone would never retire the row.
+   * Seaport rejects the fill, so an expired row must never reach /orders: the fill page would
+   * be showing a buyer an order that cannot be filled. It is also the only guard that holds
+   * when the vault went straight from Listed to rollClose without a `lockBook` — `rollClose`
+   * kills listings by bumping the Seaport counter, which does NOT set `isCancelled`, so polling
+   * alone would never retire the row.
    */
   openListings(nowSeconds: number = Math.floor(Date.now() / 1000)): ListingRow[] {
     return this.db
-      .prepare(
-        "SELECT * FROM listings WHERE status IN ('approved','posted','visible','post_failed','partial') " +
-          'AND end_time > ? ORDER BY created_at DESC',
-      )
+      .prepare("SELECT * FROM listings WHERE status IN ('approved','partial') AND end_time > ? ORDER BY created_at DESC")
       .all(nowSeconds) as ListingRow[];
   }
 
-  /** Every listing for a cycle that is not yet in a terminal state. */
+  /** Every listing for a cycle that still offers an order: the same set /orders serves. */
   liveListingsForCycle(cycleNumber: number): ListingRow[] {
     return this.db
-      .prepare(
-        "SELECT * FROM listings WHERE cycle_number = ? AND status IN " +
-          "('approved','posted','visible','post_failed') ORDER BY seq ASC",
-      )
+      .prepare("SELECT * FROM listings WHERE cycle_number = ? AND status IN ('approved','partial') ORDER BY seq ASC")
       .all(cycleNumber) as ListingRow[];
   }
 

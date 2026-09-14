@@ -2,16 +2,8 @@ import { publicClients } from "ponder:api";
 import type { Address } from "viem";
 
 import { stockTokenAbi } from "../../abis/stockToken";
-import { overcallRegistryAbi } from "../../abis/overcallRegistry";
 import { vaultAbi } from "../../abis/vault";
-import {
-  ASSET,
-  CHAIN_NAME,
-  LIVE_READ_TIMEOUT_MS,
-  MULTICALL3,
-  REGISTRY,
-  VAULT,
-} from "../../lib/env";
+import { ASSET, CHAIN_NAME, LIVE_READ_TIMEOUT_MS, MULTICALL3, VAULT } from "../../lib/env";
 
 /**
  * Live chain reads for the API.
@@ -20,11 +12,15 @@ import {
  * These reads exist for the handful of facts that logs genuinely cannot carry:
  *
  *   - `lockedAssets()` / `contractsAssigned()` read Valorem's live position, which falls as
- *     buyers are assigned MID-WEEK. The index only learns the final figure at redeem.
- *   - `claimableUsdg(addr)` depends on a per-account index snapshot inside the Distributor,
- *     not on any event.
+ *     buyers are assigned after the exercise timestamp. The index only learns the final figure
+ *     at the close.
+ *   - `maxDeposit()` folds the whole deposit gate (phase, exercise window, unclaimed assignment,
+ *     stranded claim, unbacked reserve, share-price floor) into one number; `DepositsClosed`
+ *     is not an event.
+ *   - `claimableUsdg(addr)`, `owedStrandWad(addr)` and `previewCompleteRedeem(addr)` depend on
+ *     per-account state inside the Distributor and the queue, not on any event.
  *   - `spotUsdg()` and `uiMultiplier()` are display values with no event at all.
- *   - the registry's live cycle and strike ladder, which is what the cycle page renders.
+ *   - `policy()` feeds the capacity figure, `Policy.maxContracts(totalAssets) − contractsWritten`.
  *
  * Every call is wrapped: a reverting view (a stale oracle makes `spotUsdg()` revert by
  * design) must degrade one field to null, never fail the whole response. Callers surface
@@ -70,8 +66,8 @@ type Call = {
  * Read many views in ONE `eth_call`, through Multicall3's `aggregate3`.
  *
  * WHY THIS EXISTS, and why it is not a `Promise.all` of `readContract`:
- * `GET /v1/vault` needs about thirty-five views. Ponder's API client funnels every request
- * through the same rate-limited RPC queue the indexer uses, so thirty-five of them serialise
+ * `GET /v1/vault` needs about thirty views. Ponder's API client funnels every request
+ * through the same rate-limited RPC queue the indexer uses, so thirty of them serialise
  * behind each other and blow any deadline worth having — measured on
  * rpc.mainnet.chain.robinhood.com, where it emptied the entire live half of the payload to
  * nulls while the node itself was perfectly healthy.
@@ -111,20 +107,32 @@ async function multiread(calls: readonly Call[]): Promise<(unknown | null)[]> {
   });
 }
 
+/** `Vault.policy()` as viem decodes it. */
+export type LivePolicy = {
+  minOtmBps: number;
+  maxOtmBps: number;
+  minPremiumBps: number;
+  maxUtilizationBps: number;
+  protocolFeeBps: number;
+  maxContractsCap: bigint;
+};
+
 export type LiveVault = {
   live: boolean;
   blockNumber: bigint | null;
   phase: number | null;
+  cycleNumber: number | null;
   totalAssets: bigint | null;
   idleAssets: bigint | null;
-  /** Live Valorem position: falls as buyers are assigned during the week. */
+  /** Live Valorem position: falls as buyers are assigned after the exercise timestamp. */
   lockedAssets: bigint | null;
-  /** Live from `clear.claim().amountExercised / 1e18`, so it moves intra-week. */
+  /** Live from `clear.claim().amountExercised / 1e18`, so it moves once exercise opens. */
   contractsAssigned: bigint | null;
-  contractsRemaining: bigint | null;
+  /** Sum of every fill's write this cycle; equals sold. */
   contractsWritten: bigint | null;
   totalSupply: bigint | null;
   canRedeemInstantly: boolean | null;
+  /** 0 whenever `deposit` would revert `DepositsClosed`: the whole gate in one number. */
   maxDeposit: bigint | null;
   depositCap: bigint | null;
   uiMultiplier: bigint | null;
@@ -138,6 +146,18 @@ export type LiveVault = {
   listingsThisCycle: number | null;
   queuedShares: bigint | null;
   usdgReservedForQueue: bigint | null;
+  /** The armed option this cycle, as the vault holds it. */
+  optionId: bigint | null;
+  claimKey: bigint | null;
+  cycleStrikeUsdg: bigint | null;
+  cycleExerciseTs: bigint | null;
+  cycleExpiryTs: bigint | null;
+  /** The stranded-claim state machine (AF-02). */
+  isStranded: boolean | null;
+  strandGen: bigint | null;
+  lastResolvedGen: bigint | null;
+  strandedRemainingWad: bigint | null;
+  policy: LivePolicy | null;
 };
 
 export async function readVaultLive(): Promise<LiveVault> {
@@ -146,11 +166,11 @@ export async function readVaultLive(): Promise<LiveVault> {
   // Order matters: the destructuring below reads positionally out of the batch.
   const names = [
     "phase",
+    "cycleNumber",
     "totalAssets",
     "idleAssets",
     "lockedAssets",
     "contractsAssigned",
-    "contractsRemaining",
     "contractsWritten",
     "totalSupply",
     "canRedeemInstantly",
@@ -166,6 +186,16 @@ export async function readVaultLive(): Promise<LiveVault> {
     "listingsThisCycle",
     "queuedShares",
     "usdgReservedForQueue",
+    "optionId",
+    "claimKey",
+    "cycleStrikeUsdg",
+    "cycleExerciseTs",
+    "cycleExpiryTs",
+    "isStranded",
+    "strandGen",
+    "lastResolvedGen",
+    "strandedRemainingWad",
+    "policy",
   ] as const;
 
   // `maxDeposit(address)` is the only one that takes an argument. The zero address is the
@@ -184,20 +214,25 @@ export async function readVaultLive(): Promise<LiveVault> {
 
   const at = <T>(name: (typeof names)[number]): T | null =>
     (batch[names.indexOf(name)] ?? null) as T | null;
+  const big = (name: (typeof names)[number]): bigint | null => {
+    const v = at<bigint | number>(name);
+    return v === null ? null : BigInt(v);
+  };
 
   const totalAssets = at<bigint>("totalAssets");
+  const policyRaw = at<readonly [number, number, number, number, number, bigint]>("policy");
 
   return {
     // `totalAssets` is the cheapest proof the vault answered at all.
     live: totalAssets !== null,
     blockNumber,
     phase: at<number>("phase"),
+    cycleNumber: at<number>("cycleNumber"),
     totalAssets,
     idleAssets: at<bigint>("idleAssets"),
     lockedAssets: at<bigint>("lockedAssets"),
     contractsAssigned: at<bigint>("contractsAssigned"),
-    contractsRemaining: at<bigint>("contractsRemaining"),
-    contractsWritten: at<bigint>("contractsWritten"),
+    contractsWritten: big("contractsWritten"),
     totalSupply: at<bigint>("totalSupply"),
     canRedeemInstantly: at<boolean>("canRedeemInstantly"),
     maxDeposit: at<bigint>("maxDeposit"),
@@ -212,6 +247,26 @@ export async function readVaultLive(): Promise<LiveVault> {
     listingsThisCycle: at<number>("listingsThisCycle"),
     queuedShares: at<bigint>("queuedShares"),
     usdgReservedForQueue: at<bigint>("usdgReservedForQueue"),
+    optionId: at<bigint>("optionId"),
+    claimKey: at<bigint>("claimKey"),
+    cycleStrikeUsdg: at<bigint>("cycleStrikeUsdg"),
+    cycleExerciseTs: big("cycleExerciseTs"),
+    cycleExpiryTs: big("cycleExpiryTs"),
+    isStranded: at<boolean>("isStranded"),
+    strandGen: at<bigint>("strandGen"),
+    lastResolvedGen: at<bigint>("lastResolvedGen"),
+    strandedRemainingWad: at<bigint>("strandedRemainingWad"),
+    policy:
+      policyRaw === null
+        ? null
+        : {
+            minOtmBps: Number(policyRaw[0]),
+            maxOtmBps: Number(policyRaw[1]),
+            minPremiumBps: Number(policyRaw[2]),
+            maxUtilizationBps: Number(policyRaw[3]),
+            protocolFeeBps: Number(policyRaw[4]),
+            maxContractsCap: BigInt(policyRaw[5]),
+          },
   };
 }
 
@@ -222,9 +277,16 @@ export type LiveAccount = {
   claimableUsdg: bigint | null;
   queuedShares: bigint | null;
   queuedEpoch: bigint | null;
-  /** What a settled queue position pays right now. (0, 0) until its epoch settles. */
+  /**
+   * What a `completeRedeem` would pay right now: the settled entry, any recovered strand share,
+   * the reserve haircut applied. (0, 0) until the epoch settles; a share of a claim still
+   * stranded is quoted as nothing.
+   */
   previewAssets: bigint | null;
   previewUsdg: bigint | null;
+  /** The owner's staged share of a stranded claim (`owedStrandWad` / `owedStrandGen`), WAD of 1e18. */
+  strandWad: bigint | null;
+  strandGen: bigint | null;
 };
 
 export async function readAccountLive(address: Address): Promise<LiveAccount> {
@@ -235,12 +297,14 @@ export async function readAccountLive(address: Address): Promise<LiveAccount> {
     args,
   });
 
-  const [shares, claimableUsdg, queuedShares, queuedEpoch, preview] = await multiread([
+  const [shares, claimableUsdg, queuedShares, queuedEpoch, preview, strandWad, strandGen] = await multiread([
     call("balanceOf", [address]),
     call("claimableUsdg", [address]),
     call("queuedSharesOf", [address]),
     call("queuedEpochOf", [address]),
     call("previewCompleteRedeem", [address]),
+    call("owedStrandWad", [address]),
+    call("owedStrandGen", [address]),
   ]);
 
   // A second batch, because its argument is the first batch's answer. Skipped entirely when
@@ -261,113 +325,12 @@ export async function readAccountLive(address: Address): Promise<LiveAccount> {
     queuedEpoch: queuedEpoch as bigint | null,
     previewAssets: previewPair === null ? null : previewPair[0],
     previewUsdg: previewPair === null ? null : previewPair[1],
+    strandWad: strandWad as bigint | null,
+    strandGen: strandGen as bigint | null,
   };
 }
 
-export type LiveRung = {
-  optionId: bigint;
-  strikeUsdg: bigint | null;
-  approved: boolean | null;
-};
-
-export type LiveCycle = {
-  live: boolean;
-  cycleNumber: number | null;
-  exerciseTimestamp: bigint | null;
-  expiryTimestamp: bigint | null;
-  lotSize: bigint | null;
-  /** The registry's own gate. The keeper binds to this, never to the wall clock. */
-  isWritingOpen: boolean | null;
-  isCycleLive: boolean | null;
-  writeDeadline: bigint | null;
-  rungs: LiveRung[];
-};
-
-/**
- * The live Overcall cycle: the five-rung ladder, the two timestamps, and the two gates.
- *
- * The cycle struct carries NO status field — `isWritingOpen()` (a cycle is set and
- * `now < writeDeadline()`, which equals `exerciseTimestamp`) and `isCycleLive()`
- * (`now < expiryTimestamp`) are the whole state machine.
- */
-export async function readCycleLive(): Promise<LiveCycle> {
-  const reg = (functionName: string, args: readonly unknown[] = []) => ({
-    abi: overcallRegistryAbi,
-    address: REGISTRY,
-    functionName,
-    args,
-  });
-
-  // One batch for the cycle and its gates, a second for the ladder (its size is only known
-  // once the first has answered). Two round trips is the worst case for this whole function.
-  const [cycleRaw, isWritingOpenRaw, isCycleLiveRaw, writeDeadlineRaw] = await multiread([
-    reg("cycle"),
-    reg("isWritingOpen"),
-    reg("isCycleLive"),
-    reg("writeDeadline"),
-  ]);
-
-  const isWritingOpen = isWritingOpenRaw as boolean | null;
-  const isCycleLive = isCycleLiveRaw as boolean | null;
-  const writeDeadline =
-    writeDeadlineRaw === null ? null : BigInt(writeDeadlineRaw as bigint | number);
-
-  const cycle = cycleRaw as {
-    number: number;
-    exerciseTimestamp: number | bigint;
-    expiryTimestamp: number | bigint;
-    lotSize: bigint;
-    optionIds: readonly bigint[];
-  } | null;
-
-  if (cycle === null) {
-    return {
-      live: false,
-      cycleNumber: null,
-      exerciseTimestamp: null,
-      expiryTimestamp: null,
-      lotSize: null,
-      isWritingOpen,
-      isCycleLive,
-      writeDeadline,
-      rungs: [],
-    };
-  }
-
-  // Two views per rung — the strike and whether the registry still approves it — batched into
-  // a single call rather than 2N of them.
-  const ids = cycle.optionIds;
-  const ladder = await multiread(
-    ids.flatMap((optionId) => [
-      reg("strikePerContract", [optionId]),
-      reg("isApproved", [optionId]),
-    ]),
-  );
-
-  const rungs: LiveRung[] = ids.map((optionId, i) => {
-    const strike = ladder[i * 2] ?? null;
-    const approved = ladder[i * 2 + 1] ?? null;
-    return {
-      optionId,
-      strikeUsdg: strike === null ? null : BigInt(strike as bigint | number),
-      approved: approved as boolean | null,
-    };
-  });
-
-  return {
-    live: true,
-    cycleNumber: cycle.number,
-    exerciseTimestamp: BigInt(cycle.exerciseTimestamp),
-    expiryTimestamp: BigInt(cycle.expiryTimestamp),
-    lotSize: BigInt(cycle.lotSize),
-    isWritingOpen,
-    isCycleLive,
-    writeDeadline,
-    rungs,
-  };
-}
-
-/** Whether the issuer has paused the Stock Token's oracle. A paused oracle blocks every write. */
+/** Whether the issuer has paused the Stock Token's oracle. A paused oracle blocks every arm and every fill. */
 export async function readOraclePaused(): Promise<boolean | null> {
   return await safe(
     client().readContract({

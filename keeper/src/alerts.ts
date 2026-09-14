@@ -6,18 +6,24 @@
  * through a relay. If no webhook is configured the alert is still logged at its severity and
  * still written to SQLite, so nothing is silently lost.
  *
- * WHAT EARNS AN ALERT (plan.md 5.5, task K-13). Each of these is a week of premium or a
- * depositor's money:
- *   tx_revert             a simulation or a receipt came back reverted
- *   api_reject            Overcall refused the listing (4xx that is not a retry)
- *   listing_invisible     accepted but not in the book 15 minutes later
- *   oracle_paused         the Stock Token halted its own oracle; the vault will refuse to write
- *   valorem_fees_enabled  Valorem turned its 15 bps notional fee on; writes stop until accepted
- *   low_gas               keeper ETH under KEEPER_MIN_GAS_WEI (0.01 by default)
- *   rpc_lag               head block trails the wall clock by over KEEPER_RPC_LAG_ALERT_MS
- *   phase_stuck           still not Idle an hour after expiry — the guardian path is now open
- *   no_rung               no strike inside the policy band: an honest skipped week, info only
- *   keeper_error          an unhandled error inside the loop
+ * WHAT EARNS AN ALERT. Each of these is a week of premium or a depositor's money:
+ *   tx_revert            a simulation or a receipt came back reverted (decoded error in the text)
+ *   cycle_not_created    a Friday passed without the vault being armed; the reason is attached
+ *   option_type_failed   clear.newOptionType could not be created or confirmed
+ *   listing_unfillable   the live listing would be refused at the fill gate (a rally moved the
+ *                        strike inside the band floor, or the ask under the fill floor) and the
+ *                        keeper cannot or may not reprice it
+ *   stranded             rollClose could not redeem the claim (USDG paused/frozen, NVDA blocklist)
+ *   retry_failed         retryStrandedClaim still reverts; the cause has not cleared
+ *   stranded_recovered   the retry went through; both legs are home
+ *   low_gas              keeper ETH under KEEPER_MIN_GAS_WEI (0.01 by default)
+ *   fee_switch           Valorem's engine fee switch flipped (FeeSwitchUpdated on Clear)
+ *   valorem_fees_enabled the fee is on and governance has not accepted it; nothing sells
+ *   oracle_paused        the Stock Token halted its own oracle; the vault will refuse to arm/fill
+ *   rpc_lag              head block trails the wall clock by over KEEPER_RPC_LAG_ALERT_MS
+ *   phase_stuck          still not Idle an hour after expiry — the guardian path is now open
+ *   keeper_error         an unhandled error inside the loop
+ *   boot / roll_open / listing / fill / queue_settled / roll_close   state changes, info
  */
 import { config } from './config.js';
 import { log } from './logger.js';
@@ -25,34 +31,48 @@ import { bigintReplacer, store } from './state.js';
 
 export type AlertKind =
   | 'tx_revert'
-  | 'api_reject'
-  | 'listing_invisible'
-  | 'oracle_paused'
-  | 'valorem_fees_enabled'
+  | 'cycle_not_created'
+  | 'option_type_failed'
+  | 'listing_unfillable'
+  | 'stranded'
+  | 'retry_failed'
+  | 'stranded_recovered'
   | 'low_gas'
+  | 'fee_switch'
+  | 'valorem_fees_enabled'
+  | 'oracle_paused'
   | 'rpc_lag'
   | 'phase_stuck'
-  | 'no_rung'
   | 'keeper_error'
   | 'boot'
   | 'roll_open'
+  | 'listing'
+  | 'fill'
+  | 'queue_settled'
   | 'roll_close';
 
 export type AlertSeverity = 'info' | 'warn' | 'error';
 
 const DEFAULT_SEVERITY: Record<AlertKind, AlertSeverity> = {
   tx_revert: 'error',
-  api_reject: 'error',
-  listing_invisible: 'error',
-  oracle_paused: 'warn',
-  valorem_fees_enabled: 'warn',
+  cycle_not_created: 'warn',
+  option_type_failed: 'error',
+  listing_unfillable: 'warn',
+  stranded: 'error',
+  retry_failed: 'warn',
+  stranded_recovered: 'info',
   low_gas: 'warn',
+  fee_switch: 'warn',
+  valorem_fees_enabled: 'warn',
+  oracle_paused: 'warn',
   rpc_lag: 'warn',
   phase_stuck: 'error',
-  no_rung: 'info',
   keeper_error: 'error',
   boot: 'info',
   roll_open: 'info',
+  listing: 'info',
+  fill: 'info',
+  queue_settled: 'info',
   roll_close: 'info',
 };
 

@@ -42,7 +42,6 @@ const scratch = mkdtempSync(join(tmpdir(), 'callhouse-keeper-health-'));
 const port = await freePort();
 process.env.KEEPER_ENV_FILE = '/dev/null';
 process.env.RH_RPC = 'http://127.0.0.1:9';
-process.env.REGISTRY = '0x8E973cE1A6884E28Ad3E377d5f670Bc0b463f4EA';
 process.env.VAULT = '0x1111111111111111111111111111111111111111';
 process.env.KEEPER_PK = `0x${'11'.repeat(32)}`;
 process.env.KEEPER_DB_PATH = join(scratch, 'keeper.db');

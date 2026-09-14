@@ -5,40 +5,62 @@ import { index, onchainEnum, onchainTable } from "ponder";
 //////////////////////////////////////////////////////////////*/
 
 /**
- * The life of one Overcall cycle as this product tells it.
+ * The life of one cycle as this product tells it. The vault numbers its own cycles (no
+ * registry), so a row exists from `RollOpen` and never before: there is no "the week was
+ * announced and the vault sat it out" row, because nothing announces weeks any more.
  *
- *   idle      the registry opened the week but the vault never wrote into it (no rung inside
- *             the OTM band, writes halted, nothing idle to write against). A real, published
- *             outcome, not a gap in the tape.
- *   listed    the vault wrote calls and the inventory is (or was) on the book.
- *   filled    a buyer actually filled. Set the moment the first matching OrderFulfilled lands.
- *   unfilled  the week closed with zero contracts sold. THE MOST LIKELY OUTCOME, and the one
- *             the product promises to publish honestly as "unfilled, 0".
+ *   listed    the keeper armed an option type (`RollOpen`). Nothing is written yet: under write
+ *             on fill collateral moves only when a buyer fills.
+ *   filled    a buyer filled. Set the moment the first matching OrderFulfilled lands; the same
+ *             transaction's `CallsWritten` is the write that fill caused.
+ *   unfilled  the week closed with zero contracts sold, so nothing was ever written and there
+ *             was no claim to redeem. THE MOST LIKELY OUTCOME, published honestly as "unfilled, 0".
  *   closed    the week closed after a fill, expiring out of the money. Premium kept, tokens kept.
  *   assigned  the week closed with contracts assigned: tokens went out at the strike, USDG came in.
+ *   stranded  the week closed but Valorem's redeem reverted (USDG paused or frozen, the vault
+ *             blocklisted on the Stock Token): the vault is Idle with the claim kept, deposits
+ *             and instant redemption shut, and anyone may `retryStrandedClaim()`. Resolves to
+ *             `assigned` or `closed` when the retry lands.
  *
- * `unfilled`, `closed` and `assigned` are terminal. `idle` is terminal for a skipped week.
+ * `unfilled`, `closed` and `assigned` are terminal. `stranded` is terminal until recovery.
  */
 export const cycleStatus = onchainEnum("cycle_status", [
-  "idle",
   "listed",
   "filled",
   "unfilled",
   "assigned",
   "closed",
+  "stranded",
 ]);
 
-/** Seaport order lifecycle as observed on chain. */
+/**
+ * Seaport order lifecycle as observed on chain. `partially_filled` and `cancelled` can both be
+ * final states (a listing cancelled after a partial fill keeps `partially_filled`); `endedAt`
+ * says whether the order is still live, and `endReason` says what ended it. Nothing here ever
+ * reads "expired" or "invalidated": Seaport's clock is not an event, and a counter bump is
+ * reported by the vault as `ListingCancelled` like any other cancellation.
+ */
 export const listingStatus = onchainEnum("listing_status", [
   "approved",
   "partially_filled",
   "filled",
   "cancelled",
-  "invalidated",
-  "expired",
 ]);
 
 export const epochStatus = onchainEnum("epoch_status", ["open", "settled"]);
+
+/**
+ * Where a `Harvest` came from. The event is identical on every path and only the transaction
+ * tells them apart (see `lib/lifecycle.ts harvestOrigin`).
+ *
+ *   rollClose   `_harvest()` inside `rollClose`: the week's verdict, emitted even at zero.
+ *   checkpoint  `_checkpointHarvest()` inside `deposit`, `mint` or `settleQueue`: premium that
+ *               already landed is indexed before new shares mint or the queue's escrow takes
+ *               its accrual. Real money, not a weekly result.
+ *   retry       `_harvest()` inside `retryStrandedClaim`: the live shares' part of a stranded
+ *               claim's strike USDG, indexed fee-free under the stranded cycle's number.
+ */
+export const harvestOrigin = onchainEnum("harvest_origin", ["rollClose", "checkpoint", "retry"]);
 
 /*//////////////////////////////////////////////////////////////
                           VAULT STATE
@@ -58,23 +80,27 @@ export const vaultState = onchainTable("vault_state", (t) => ({
   phase: t.integer().notNull().default(0),
   writesHalted: t.boolean().notNull().default(false),
 
-  /** Registry cycle the vault is written into. 0 while flat. */
+  /** The vault's own cycle counter. 0 before the first `rollOpen`; kept until the next one. */
   cycleNumber: t.integer().notNull().default(0),
+  /** The armed Valorem option type. Cleared when the claim is redeemed, or at an unfilled close. */
   optionId: t.bigint(),
+  /** The one Valorem claim every fill of the cycle writes into. Null until the first fill. */
   claimKey: t.bigint(),
   strikeUsdg: t.bigint().notNull().default(0n),
+  /** The armed option's window, read from the vault at `RollOpen` (`cycleExerciseTs` / `cycleExpiryTs`). */
   exerciseTimestamp: t.bigint().notNull().default(0n),
   expiryTimestamp: t.bigint().notNull().default(0n),
 
-  contractsWritten: t.bigint().notNull().default(0n),
   /**
-   * Contracts that left the vault on a Seaport fill.
-   * NOT readable from the vault: `AdapterValorem.contractsSold` is declared but never written
-   * on chain. The only source of truth is Seaport's OrderFulfilled, so this is indexed.
+   * Contracts written this cycle: the sum of every `CallsWritten.contractsCount` since
+   * `RollOpen`. Under write on fill this IS the number sold — every write happens inside the
+   * Seaport fill that bought it — so there is no separate sold figure here. The cycle row keeps
+   * Seaport's own count beside it as the cross-check.
    */
-  contractsSold: t.bigint().notNull().default(0n),
+  contractsWritten: t.bigint().notNull().default(0n),
 
   listingHash: t.hex(),
+  /** `listingsThisCycle()`: `approveListing` calls this cycle, cancelled or not. Max 3. */
   listingsThisCycle: t.integer().notNull().default(0),
 
   /** Raw ERC-20 balance of the asset held by the vault, from Transfer logs. 18 decimals. */
@@ -82,15 +108,16 @@ export const vaultState = onchainTable("vault_state", (t) => ({
   /** Raw USDG balance of the vault, from Transfer logs. 6 decimals. */
   usdgBalance: t.bigint().notNull().default(0n),
   /**
-   * Collateral currently locked in Valorem, set at write and cleared at redeem.
-   * Deliberately NOT called `lockedAssets`: the contract's `lockedAssets()` reads Valorem's
-   * live position and therefore falls as buyers are assigned mid-week, while this figure
-   * holds at the amount written until the claim is redeemed. The API reads the live number.
+   * Collateral locked in Valorem, summed over every fill's `CallsWritten.collateral` and
+   * cleared when the claim is redeemed. Deliberately NOT called `lockedAssets`: the contract's
+   * `lockedAssets()` reads Valorem's live position and therefore falls as buyers are assigned
+   * after the exercise timestamp, while this figure holds at what was written until the claim
+   * is redeemed. The API reads the live number. Stays put while a claim is stranded.
    */
   lockedCollateral: t.bigint().notNull().default(0n),
-  /** Asset base units promised to settled redemption epochs and excluded from NAV. */
+  /** Asset base units promised to settled redemption epochs (and recovered strand shares) and excluded from NAV. */
   reservedAssets: t.bigint().notNull().default(0n),
-  /** USDG base units promised to settled redemption epochs. */
+  /** USDG base units promised to settled redemption epochs (and recovered strand shares). */
   usdgReservedForQueue: t.bigint().notNull().default(0n),
 
   totalShares: t.bigint().notNull().default(0n),
@@ -104,9 +131,9 @@ export const vaultState = onchainTable("vault_state", (t) => ({
   totalUsdgClaimed: t.bigint().notNull().default(0n),
 
   /** Lifetime totals across every cycle. USDG base units. */
+  /** What buyers paid on every fill (Seaport `OrderFulfilled`, the one USDG consideration item). */
   lifetimePremiumGross: t.bigint().notNull().default(0n),
-  lifetimePremiumToVault: t.bigint().notNull().default(0n),
-  lifetimeOvercallFee: t.bigint().notNull().default(0n),
+  /** Strike USDG the claims returned: `RollClose.usdgFromAssignment`, plus a recovered strand's `usdgOut`. */
   lifetimeAssignmentUsdg: t.bigint().notNull().default(0n),
   lifetimeProtocolFee: t.bigint().notNull().default(0n),
   /**
@@ -118,20 +145,30 @@ export const vaultState = onchainTable("vault_state", (t) => ({
   totalFeeSwept: t.bigint().notNull().default(0n),
   /**
    * Premium after the protocol fee, summed over every `Harvest`: `grossUsdg − strike proceeds −
-   * feeUsdg`. PREMIUM ONLY. Before W-21 this summed `Harvest.netUsdg`, which on an assigned week
-   * includes the strike proceeds; that total now lives in `lifetimeCreditedUsdg`.
+   * feeUsdg`. PREMIUM ONLY (W-21). The whole credited figure lives in `lifetimeCreditedUsdg`.
    */
   lifetimePremiumNet: t.bigint().notNull().default(0n),
-  /** The strike-proceeds part of every terminal `Harvest` (`RollClose.usdgFromAssignment`). Returned principal. */
+  /**
+   * The strike-proceeds part of every `Harvest` that carried any: `RollClose.usdgFromAssignment`
+   * on a terminal harvest, the live shares' part of a recovered stranded claim on a retry
+   * harvest. Returned principal, never yield. The queue's part of a recovered claim goes to
+   * `usdgReservedForQueue` without passing through a harvest, so this can sit below
+   * `lifetimeAssignmentUsdg` after a strand.
+   */
   lifetimeStrikeProceeds: t.bigint().notNull().default(0n),
   /** Sum of `Harvest.netUsdg`: everything credited to holders. `lifetimePremiumNet + lifetimeStrikeProceeds`. */
   lifetimeCreditedUsdg: t.bigint().notNull().default(0n),
+  /** Asset base units settled redeemers were booked and NOT paid, across every `ReserveHaircut` (AF-05). */
+  lifetimeHaircutAssets: t.bigint().notNull().default(0n),
+  /** Cycles armed (`RollOpen`). Nothing is written at arm, so "armed" is the honest word. */
   cyclesWritten: t.integer().notNull().default(0),
   cyclesFilled: t.integer().notNull().default(0),
   cyclesUnfilled: t.integer().notNull().default(0),
   cyclesAssigned: t.integer().notNull().default(0),
+  /** Cycles whose close stranded the claim (AF-02), recovered or not. */
+  cyclesStranded: t.integer().notNull().default(0),
 
-  /** Governance-visible settings, mirrored from their events. */
+  /** Governance-visible settings, mirrored from their events (and seeded from the constructor by `Vault:setup`). */
   depositCap: t.bigint().notNull().default(0n),
   feeRecipient: t.hex(),
   protocolFeeBps: t.integer().notNull().default(0),
@@ -140,25 +177,14 @@ export const vaultState = onchainTable("vault_state", (t) => ({
   /** USDG received while there were no shares, or too small to index. Carried, never dropped. */
   usdgUnallocated: t.bigint().notNull().default(0n),
 
-  /**
-   * Valorem bucket the open claim was written into, from `BucketWrittenInto`. That event fires
-   * inside `clear.write`, BEFORE the vault's `RollOpen`, while `cycleNumber` still names the
-   * previous week — so it is held here and copied onto the cycle row at `RollOpen`, the same way
-   * `claimKey` is. Cleared when the claim is redeemed.
-   */
-  bucketIndex: t.bigint(),
-
-  /** Seaport nonce for this offerer. Bumped by `invalidateAllListings()`. */
+  /** Seaport nonce for this offerer. Bumped by `invalidateAllListings()`, `lockBook`, `rollClose`. */
   seaportCounter: t.bigint().notNull().default(0n),
-
-  /** Lot size the registry last announced, asset base units per contract. */
-  registryLotSize: t.bigint().notNull().default(0n),
 
   /**
    * The listing cancelled most recently, and the tx it happened in.
-   * `_invalidateAllListings()` emits ListingCancelled and then AllListingsInvalidated, so
-   * this is how the second handler recognises the order the first one just closed and
-   * upgrades its end reason from "cancelled" to "invalidated" without a table scan.
+   * `_invalidateAllListings()` emits ListingCancelled and then AllListingsInvalidated, and
+   * `lockBook` / `rollClose` emit their own event after that, so this is how the later handlers
+   * recognise the order the first one just closed and refine its end reason without a scan.
    */
   lastCancelledHash: t.hex(),
   lastCancelledTx: t.hex(),
@@ -166,17 +192,33 @@ export const vaultState = onchainTable("vault_state", (t) => ({
   /**
    * The transaction the most recent `RollClose` was emitted in.
    *
-   * WHY: `Harvest` is emitted from TWO places. `_harvest()` runs inside `rollClose` and is
-   * the week's verdict; `_checkpointHarvest()` runs inside `deposit`/`mint` and fires
-   * mid-week, whenever premium has already landed, so that new shares cannot claim premium
-   * earned before they arrived. Both emit the identical event with the identical cycle
-   * number. The only thing that tells them apart from logs alone is the transaction:
-   * `rollClose` emits `RollClose` immediately BEFORE `_harvest()`, so a `Harvest` whose tx
-   * hash matches this column is the terminal one and every other `Harvest` is a checkpoint.
-   * Treating a checkpoint as terminal would flip the vault to Idle mid-cycle, close the week
-   * early with a partial figure, and count a phantom week in the lifetime tallies.
+   * WHY: `Harvest` is emitted from THREE places. `_harvest()` runs inside `rollClose` and is
+   * the week's verdict; `_checkpointHarvest()` runs inside `deposit`/`mint`/`settleQueue` and
+   * fires whenever premium has already landed; and `_harvest()` runs again inside
+   * `retryStrandedClaim`. All emit the identical event with the same cycle number. The only
+   * thing that tells the terminal one apart from logs alone is the transaction: `rollClose`
+   * emits `RollClose` immediately BEFORE `_harvest()`, so a `Harvest` whose tx hash matches this
+   * column is the terminal one. Treating a checkpoint as terminal would flip the vault to Idle
+   * mid-cycle, close the week early with a partial figure, and count a phantom week in the
+   * lifetime tallies. The retry is told apart by the strand row's `recoveredTx` the same way.
    */
   rollCloseTx: t.hex(),
+
+  /*── the stranded-claim state machine (AF-02) ──*/
+  /** `isStranded()`: Idle with a claim still open. Deposits, instant redemption and `rollOpen` are shut. */
+  stranded: t.boolean().notNull().default(false),
+  /** `strandGen()`: how many claims have ever stranded. */
+  strandGen: t.bigint().notNull().default(0n),
+  /** `lastResolvedGen()`: the last generation `retryStrandedClaim` redeemed. Equals `strandGen` when nothing is stranded. */
+  lastResolvedGen: t.bigint().notNull().default(0n),
+  /**
+   * `strandedRemainingWad()`: the part of the stranded claim live shares still own (of 1e18).
+   * 1e18 at the strand, minus every `EpochStrandShare`, 0 after recovery. NAV counts the locked
+   * collateral scaled by this while stranded.
+   */
+  strandedRemainingWad: t.bigint().notNull().default(0n),
+  /** The cycle whose close stranded the open claim. Null when nothing is stranded. */
+  strandedCycleNumber: t.integer(),
 
   /** ERC-8056 display multiplier, last value seen. 1e18 == 1.0. Display only, never share maths. */
   uiMultiplier: t.bigint().notNull().default(10n ** 18n),
@@ -186,13 +228,13 @@ export const vaultState = onchainTable("vault_state", (t) => ({
 
   /**
    * The issuer's switches, mirrored from the Stock Token's own events.
-   * `oraclePaused` blocks every `rollOpen`; a transfer pause blocks settlement itself, which
-   * is a risk the product discloses rather than one it can engineer around.
+   * `oraclePaused` blocks every `rollOpen` and every fill; a transfer pause blocks settlement
+   * itself, which is a risk the product discloses rather than one it can engineer around.
    */
   oraclePaused: t.boolean().notNull().default(false),
   tokenPaused: t.boolean().notNull().default(false),
 
-  /** How stale the spot price may be before a write is refused, in seconds. */
+  /** How stale the spot price may be before an arm or a fill is refused, in seconds. */
   maxPriceAge: t.integer().notNull().default(0),
 
   lastBlock: t.bigint().notNull().default(0n),
@@ -213,18 +255,19 @@ export const vaultSnapshot = onchainTable(
     logIndex: t.integer().notNull(),
     timestamp: t.bigint().notNull(),
     txHash: t.hex().notNull(),
-    /** The event that produced this snapshot, e.g. "Deposit", "RollOpen", "Harvest". */
+    /** The event that produced this snapshot, e.g. "Deposit", "RollOpen", "CallsWritten", "Harvest". */
     reason: t.text().notNull(),
 
     phase: t.integer().notNull(),
     cycleNumber: t.integer().notNull(),
     writesHalted: t.boolean().notNull(),
+    stranded: t.boolean().notNull(),
 
     assetBalance: t.bigint().notNull(),
     /** assetBalance − reservedAssets. Matches `Vault.idleAssets()`. */
     idleAssets: t.bigint().notNull(),
     lockedCollateral: t.bigint().notNull(),
-    /** idleAssets + lockedCollateral. Matches `Vault.totalAssets()` outside mid-week assignment. */
+    /** idleAssets + lockedCollateral. Matches `Vault.totalAssets()` outside assignment and a strand. */
     totalAssets: t.bigint().notNull(),
     reservedAssets: t.bigint().notNull(),
     usdgBalance: t.bigint().notNull(),
@@ -246,68 +289,72 @@ export const vaultSnapshot = onchainTable(
 //////////////////////////////////////////////////////////////*/
 
 /**
- * The product's public record: one row per Overcall registry cycle.
+ * The product's public record: one row per cycle the vault armed.
  *
- * A row exists as soon as the registry emits `CycleSet`, whether or not the vault ever writes
- * into it, and it survives with zeros if nobody buys. A week with no buyer is a row of zeros,
- * never a missing row.
+ * A row exists from `RollOpen`, and it survives with zeros if nobody buys. A week with no buyer
+ * is a row of zeros, never a missing row.
+ *
+ * Contracts appear twice on purpose. `contractsWritten` sums the vault's own `CallsWritten`
+ * (one per fill) and `contractsSold` sums Seaport's `OrderFulfilled` offer items; under write on
+ * fill the two are equal by construction, so a difference is a bug in the tape, not a fact
+ * about the week. `collateral` is what those writes locked (the Valorem engine fee, if ever
+ * accepted, is pulled ON TOP of it and is not in this figure).
  *
  * The money columns the site quotes, and exactly what each one means:
- *   premiumGross         what buyers paid for our calls, INCLUDING Overcall's 5% cut.
+ *   premiumGross         what buyers paid for our calls. ONE consideration item, USDG to the
+ *                        vault, so there is no venue cut and gross is what reached the vault.
  *   harvestGross         the vault's whole USDG take as the Harvest events measured it: premium
- *                        that reached the vault PLUS, on an assigned week, the strike proceeds.
- *   harvestPremiumGross  `harvestGross − strikeProceeds`: premium only, after Overcall's 5%.
- *   strikeProceeds       the strike-proceeds part of the terminal harvest
- *                        (`RollClose.usdgFromAssignment`). Returned principal — collateral that
- *                        left at the strike — and NEVER yield.
+ *                        PLUS, on an assigned week, the strike proceeds.
+ *   harvestPremiumGross  `harvestGross − strikeProceeds`: premium only, as harvested.
+ *   strikeProceeds       the strike-proceeds part of the harvests: `RollClose.usdgFromAssignment`
+ *                        on the terminal harvest, the live shares' part of a recovered stranded
+ *                        claim on a retry harvest. Returned principal — collateral that left at
+ *                        the strike — and NEVER yield. `assignmentUsdg` is the whole strike USDG
+ *                        the claim returned; the two differ only after a strand, by the part the
+ *                        queue took directly.
  *   fee                  the protocol fee taken at harvest: `protocolFeeBps` (launch 500, 5%) of
  *                        the PREMIUM only. Strike proceeds are never fee'd, so on an assigned week
  *                        `fee != harvestGross × bps / 10_000`; it is
- *                        `(harvestGross − assignmentUsdg) × bps / 10_000`, per Harvest event.
+ *                        `(harvestGross − usdgFromAssignment) × bps / 10_000`, per Harvest event.
  *   premiumNet           `harvestPremiumGross − fee`. PREMIUM ONLY: the only figure that says
- *                        what the week earned. (Before W-21 this column was `harvestGross − fee`
- *                        and included the strike proceeds; that figure is now `creditedUsdg`.)
+ *                        what the week earned.
  *   creditedUsdg         `harvestGross − fee` = `premiumNet + strikeProceeds`: everything the
  *                        Distributor credited to holders. Real money, not a return.
- * `premiumToVault`, `overcallFee` and `assignmentUsdg` are carried alongside so nothing about
- * the two stacked fees or the assignment has to be inferred. The split is `lib/harvest.ts`.
+ * The split is `lib/harvest.ts`.
  */
 export const cycle = onchainTable(
   "cycle",
   (t) => ({
     cycleNumber: t.integer().primaryKey(),
-    status: cycleStatus("status").notNull().default("idle"),
+    status: cycleStatus("status").notNull().default("listed"),
 
-    /*── registry facts, from CycleSet ──*/
-    /** Every rung the registry approved this week, as decimal strings (uint256 does not fit JSON). */
-    optionIds: t.json().$type<string[]>(),
-    strikeCount: t.integer().notNull().default(0),
-    lotSize: t.bigint(),
-    /** Book close / write deadline. `registry.writeDeadline() == exerciseTimestamp`. */
+    /*── the armed option type, from RollOpen ──*/
+    optionId: t.bigint(),
+    /** USDG base units per contract. 6 decimals. The option's `exerciseAmount`. */
+    strikeUsdg: t.bigint().notNull().default(0n),
+    /** The option's window, read from the vault at the roll: fills stop and `lockBook` opens at exercise; `rollClose` at expiry. */
     exerciseTimestamp: t.bigint(),
     expiryTimestamp: t.bigint(),
-    setAt: t.bigint(),
-    setBlock: t.bigint(),
-    setTx: t.hex(),
-
-    /*── what the vault wrote ──*/
-    wrote: t.boolean().notNull().default(false),
-    optionId: t.bigint(),
-    claimKey: t.bigint(),
-    /** USDG base units per contract. 6 decimals. */
-    strikeUsdg: t.bigint().notNull().default(0n),
-    contractsWritten: t.bigint().notNull().default(0n),
-    /** Asset base units locked into Valorem: contractsWritten × lotSize. */
-    collateral: t.bigint().notNull().default(0n),
     openedAt: t.bigint(),
     openedBlock: t.bigint(),
     txOpen: t.hex(),
 
+    /*── what the fills wrote, from CallsWritten (one per fill) ──*/
+    /** The one Valorem claim. Null until the first fill. */
+    claimKey: t.bigint(),
+    contractsWritten: t.bigint().notNull().default(0n),
+    /** Asset base units locked into Valorem: contractsWritten × 1e18, summed across fills. */
+    collateral: t.bigint().notNull().default(0n),
+    writeCount: t.integer().notNull().default(0),
+    firstWriteAt: t.bigint(),
+    lastWriteAt: t.bigint(),
+
     /*── listings ──*/
+    /** Listings the vault authorised this cycle (`ListingApproved.seq` of the latest one). */
     listingCount: t.integer().notNull().default(0),
     /** Hash of the most recent listing the vault authorised this cycle. */
     orderHash: t.hex(),
-    /** Ask on that listing: total USDG demanded, both consideration items. */
+    /** Ask on that listing: total USDG demanded for the whole order. */
     listedGrossUsdg: t.bigint().notNull().default(0n),
     listedUnitPriceUsdg: t.bigint().notNull().default(0n),
     listedContracts: t.bigint().notNull().default(0n),
@@ -316,8 +363,6 @@ export const cycle = onchainTable(
     /*── fills, from Seaport ──*/
     contractsSold: t.bigint().notNull().default(0n),
     premiumGross: t.bigint().notNull().default(0n),
-    premiumToVault: t.bigint().notNull().default(0n),
-    overcallFee: t.bigint().notNull().default(0n),
     /** premiumGross / contractsSold. 0 on an unfilled week. */
     fillUnitPriceUsdg: t.bigint().notNull().default(0n),
     fillCount: t.integer().notNull().default(0),
@@ -327,30 +372,38 @@ export const cycle = onchainTable(
     /*── exercise signals seen during the week (market-wide, NOT our assignment) ──*/
     /** Contracts exercised against this option type by anyone. Our share is a bucket lottery. */
     marketExercised: t.bigint().notNull().default(0n),
-    /** Valorem bucket our claim wrote into, from BucketWrittenInto. uint96 on chain. */
+    /** Valorem bucket our claim wrote into, from BucketWrittenInto on the first fill. uint96 on chain. */
     bucketIndex: t.bigint(),
     /** Contracts assigned to that bucket. A signal that we are likely to be assigned. */
     bucketAssigned: t.bigint().notNull().default(0n),
 
     /*── settlement ──*/
     lockedAt: t.bigint(),
-    /** Contracts actually assigned to this vault, measured at redeem. 0..contractsWritten. */
+    /** Contracts assigned to this vault, as `RollClose.contractsAssignedCount` read before the redeem. 0..contractsWritten. Known even on a stranded close. */
     contractsAssigned: t.bigint().notNull().default(0n),
-    /** USDG received because of assignment: strike × contractsAssigned. */
+    /** USDG the claim returned for the assignment: strike × contractsAssigned. 0 while stranded; set at recovery. */
     assignmentUsdg: t.bigint().notNull().default(0n),
-    /** Asset base units that came back from the claim. */
+    /** Asset base units that came back from the claim. 0 while stranded; set at recovery. */
     assetsReturned: t.bigint().notNull().default(0n),
     closedAt: t.bigint(),
     closedBlock: t.bigint(),
     txClose: t.hex(),
 
+    /*── the stranded close (AF-02) ──*/
+    /** True if this cycle's `rollClose` could not redeem the claim. Stays true as history after recovery. */
+    stranded: t.boolean().notNull().default(false),
+    /** The strand generation, keyed into `strand`. */
+    strandGen: t.bigint(),
+    recoveredAt: t.bigint(),
+    recoveredTx: t.hex(),
+
     /*── harvest ──*/
     harvested: t.boolean().notNull().default(false),
-    /** Vault's USDG take this cycle, as the Harvest event measured it. Premium + strike proceeds. */
+    /** Vault's USDG take this cycle, as the Harvest events measured it. Premium + strike proceeds. */
     harvestGross: t.bigint().notNull().default(0n),
     /** harvestGross − strikeProceeds. Premium only. */
     harvestPremiumGross: t.bigint().notNull().default(0n),
-    /** Strike proceeds swept by the terminal harvest. Returned principal, not premium. */
+    /** Strike proceeds swept by the harvests. Returned principal, not premium. */
     strikeProceeds: t.bigint().notNull().default(0n),
     fee: t.bigint().notNull().default(0n),
     /** harvestPremiumGross − fee. Premium only. */
@@ -377,37 +430,30 @@ export const cycle = onchainTable(
 /**
  * One row per Seaport order the vault authorised, keyed by order hash.
  *
- * The 95/5 split is recomputed here per contract, exactly as `Policy.splitPremium` does it:
- *   feePerContract    = floor(unitPrice × 500 / 10_000)
- *   writerPerContract = unitPrice − feePerContract
- * Rounding on the total instead would produce an order that signs and validates and is then
- * refused by Seaport on a partial fill (InexactFraction) — and every Overcall order is
- * PARTIAL_OPEN, so that silently turns the listing into full-fill-only.
+ * Every listing is a PARTIAL_RESTRICTED Seaport 1.6 order with the vault as offerer AND zone,
+ * one ERC-1155 offer item (the armed option type, up to capacity) and ONE ERC-20 consideration
+ * item (USDG to the vault). The contract has proved `grossUsdg % amount == 0` at approval, so
+ * the unit price is exact and a partial fill pays exactly `unitPrice × k`. There is no venue
+ * fee item and no 95/5 split: what a fill pays is what reached the vault.
  */
 export const listing = onchainTable(
   "listing",
   (t) => ({
     orderHash: t.hex().primaryKey(),
     cycleNumber: t.integer().notNull(),
-    /** `listingsThisCycle` at approval: 1, 2 or 3. The contract caps the cycle at 3. */
+    /** `listingsThisCycle` after this approval: 1, 2 or 3, unique within a cycle. The contract caps the cycle at 3. */
     seq: t.integer().notNull(),
     optionId: t.bigint().notNull(),
-    /** Contracts offered. */
+    /** Contracts offered: the order's size, up to the vault's capacity at approval. */
     amount: t.bigint().notNull(),
-    /** Both consideration items summed. Always an exact multiple of `amount`. */
+    /** The one consideration item. Always an exact multiple of `amount`. */
     grossUsdg: t.bigint().notNull(),
     unitPriceUsdg: t.bigint().notNull(),
-    /** consideration[0], to the vault: writerPerContract × amount. */
-    writerUsdg: t.bigint().notNull(),
-    /** consideration[1], to Overcall: feePerContract × amount. */
-    overcallFeeUsdg: t.bigint().notNull(),
 
     status: listingStatus("status").notNull().default("approved"),
     contractsFilled: t.bigint().notNull().default(0n),
     /** USDG that actually reached the vault on fills of this order. */
     proceedsUsdg: t.bigint().notNull().default(0n),
-    /** USDG that actually reached Overcall on fills of this order. */
-    feePaidUsdg: t.bigint().notNull().default(0n),
     fillCount: t.integer().notNull().default(0),
 
     approvedAt: t.bigint().notNull(),
@@ -417,7 +463,11 @@ export const listing = onchainTable(
     lastFillTx: t.hex(),
     endedAt: t.bigint(),
     endedTx: t.hex(),
-    /** Why the order stopped being live: "filled", "cancelled", "counter", "lockBook", "rollClose". */
+    /**
+     * Why the order stopped being live: "filled", "cancelled" (`cancelListing`), "counter" (the
+     * keeper's or guardian's `invalidateAllListings`), "lockBook" or "rollClose" (each bumps the
+     * counter on its way through, and its own event one log later says which).
+     */
     endReason: t.text(),
   }),
   (t) => ({
@@ -452,6 +502,19 @@ export const user = onchainTable(
     redeemedUsdg: t.bigint().notNull().default(0n),
     claimedUsdg: t.bigint().notNull().default(0n),
 
+    /**
+     * The owner's staged share of a stranded claim, WAD of 1e18 (`owedStrandWad`). Set when a
+     * queue entry settles out of an epoch that owns part of the claim, cleared by
+     * `StrandShareSettled` once the claim is redeemed and the share becomes assets and USDG.
+     */
+    strandWad: t.bigint().notNull().default(0n),
+    /** Which generation that share belongs to (`owedStrandGen`). */
+    strandGen: t.bigint(),
+    /** USDG booked to this owner that a `completeRedeem` could not move (`UsdgLegDeferred`, AF-03). Still owed; 0 once paid. */
+    deferredUsdg: t.bigint().notNull().default(0n),
+    /** Asset base units booked and not paid because the reserve was unbacked (`ReserveHaircut`, AF-05). Permanent. */
+    haircutAssets: t.bigint().notNull().default(0n),
+
     depositCount: t.integer().notNull().default(0),
     firstSeenAt: t.bigint().notNull(),
     firstSeenBlock: t.bigint().notNull(),
@@ -474,9 +537,9 @@ export const user = onchainTable(
  * renders it as "unfilled, 0". The terminal harvest fires on every `rollClose` unconditionally
  * — including with a gross of zero — so an unfilled week always produces a row.
  *
- * Mid-week `_checkpointHarvest()` rows also land here, with `terminal: false`. They are real
- * money movements (premium swept into the index before a deposit mints) but they are NOT
- * weekly results, so `/v1/activity` shows terminal rows only unless asked otherwise.
+ * Checkpoint rows (`deposit`, `mint`, `settleQueue`) and the retry's row (`retryStrandedClaim`)
+ * land here too, with `terminal: false` and their `origin`. They are real money movements but
+ * they are NOT weekly results, so `/v1/activity` shows terminal rows only unless asked otherwise.
  */
 export const harvest = onchainTable(
   "harvest",
@@ -485,13 +548,9 @@ export const harvest = onchainTable(
     cycleNumber: t.integer().notNull(),
     filled: t.boolean().notNull(),
 
-    /**
-     * True for the end-of-cycle harvest inside `rollClose` — the week's verdict.
-     * False for a mid-week `_checkpointHarvest()`, which `deposit`/`mint` fire to fix the
-     * USDG index before new shares exist. Both emit the same event; only the terminal one
-     * closes the week, and only terminal rows belong in the weekly tape at `/v1/activity`.
-     */
+    /** True for the end-of-cycle harvest inside `rollClose` — the week's verdict. `origin === "rollClose"`. */
     terminal: t.boolean().notNull().default(true),
+    origin: harvestOrigin("origin").notNull().default("rollClose"),
 
     grossUsdg: t.bigint().notNull(),
     feeUsdg: t.bigint().notNull(),
@@ -499,16 +558,15 @@ export const harvest = onchainTable(
 
     /**
      * THIS event's gross, split (lib/harvest.ts). `strikeProceedsUsdg` is non-zero only on the
-     * terminal harvest of an assigned week; `premiumGrossUsdg = grossUsdg − strikeProceedsUsdg`
-     * and `premiumNetUsdg = premiumGrossUsdg − feeUsdg`. `netUsdg` stays the event's own figure,
-     * which includes the strike proceeds.
+     * terminal harvest of an assigned week and on a retry harvest; `premiumGrossUsdg = grossUsdg
+     * − strikeProceedsUsdg` and `premiumNetUsdg = premiumGrossUsdg − feeUsdg`. `netUsdg` stays
+     * the event's own figure, which includes the strike proceeds.
      */
     premiumGrossUsdg: t.bigint().notNull().default(0n),
     strikeProceedsUsdg: t.bigint().notNull().default(0n),
     premiumNetUsdg: t.bigint().notNull().default(0n),
 
     /** The cycle's figures at the time of this harvest, for context. */
-    premiumToVault: t.bigint().notNull().default(0n),
     assignmentUsdg: t.bigint().notNull().default(0n),
     contractsSold: t.bigint().notNull().default(0n),
     contractsAssigned: t.bigint().notNull().default(0n),
@@ -543,13 +601,18 @@ export const harvest = onchainTable(
  * escrow itself accrued over the cycle. Claimants then draw the epoch down, and the last one
  * takes the remainder so no dust is stranded — which is why `*Claimed` converges on
  * `*Settled` rather than being recomputed per user.
+ *
+ * Settlement happens inside `rollClose` (`cycleNumber` is that week) or, while the vault is
+ * Idle, through the permissionless `settleQueue()`, which belongs to no week (`cycleNumber`
+ * null). An epoch settled while a claim is stranded also takes a WAD share of that claim
+ * (`EpochStrandShare`), paid to its owners once `retryStrandedClaim` redeems it.
  */
 export const queueEpoch = onchainTable(
   "queue_epoch",
   (t) => ({
     epochId: t.bigint().primaryKey(),
     status: epochStatus("status").notNull().default("open"),
-    /** The cycle this epoch settled in. Null while still open. */
+    /** The cycle whose `rollClose` settled this epoch. Null while open, and null for a flat `settleQueue()`. */
     cycleNumber: t.integer(),
 
     sharesQueued: t.bigint().notNull().default(0n),
@@ -564,12 +627,68 @@ export const queueEpoch = onchainTable(
     usdgClaimed: t.bigint().notNull().default(0n),
     claimCount: t.integer().notNull().default(0),
 
+    /** The stranded claim this epoch owns a share of (`epochStrandGen`). Null for an ordinary epoch. */
+    strandGen: t.bigint(),
+    /** The epoch's share of that claim, WAD of 1e18, as `EpochStrandShare` fixed it at settlement. */
+    strandWad: t.bigint().notNull().default(0n),
+    /** How much of it has been staged against owners as their entries settled. Converges on `strandWad`. */
+    strandWadClaimed: t.bigint().notNull().default(0n),
+
     openedAt: t.bigint(),
     settledAt: t.bigint(),
     settledTx: t.hex(),
   }),
   (t) => ({
     byStatus: index().on(t.status),
+  }),
+);
+
+/*//////////////////////////////////////////////////////////////
+                        STRANDED CLAIMS
+//////////////////////////////////////////////////////////////*/
+
+/**
+ * One row per stranded claim (AF-02), keyed by the vault's generation counter.
+ *
+ * A generation opens when `rollClose` cannot redeem the claim (`ClaimStranded`) and closes when
+ * `retryStrandedClaim` does (`StrandedClaimRecovered`). Between the two, every epoch the queue
+ * settles takes a WAD share of the claim out of the live shares' hands (`EpochStrandShare`,
+ * summed here as `epochWad`); at recovery that part of both legs, `queueWad` of them, moves into
+ * the reserves and is drawn down owner by owner (`StrandShareSettled`, `*Left`), while the rest
+ * belongs to the shares still live and goes through the retry's `Harvest`.
+ */
+export const strand = onchainTable(
+  "strand",
+  (t) => ({
+    gen: t.bigint().primaryKey(),
+    cycleNumber: t.integer().notNull(),
+    claimKey: t.bigint().notNull(),
+    strandedAt: t.bigint().notNull(),
+    strandedBlock: t.bigint().notNull(),
+    strandedTx: t.hex().notNull(),
+
+    /** WAD of the claim handed to settled epochs so far (`1e18 − strandedRemainingWad` while open). */
+    epochWad: t.bigint().notNull().default(0n),
+    epochCount: t.integer().notNull().default(0),
+
+    recovered: t.boolean().notNull().default(false),
+    recoveredAt: t.bigint(),
+    recoveredBlock: t.bigint(),
+    recoveredTx: t.hex(),
+    /** What the redeem returned, both legs. `strands(gen).assetsIn / usdgIn`. */
+    assetsIn: t.bigint().notNull().default(0n),
+    usdgIn: t.bigint().notNull().default(0n),
+    /** The queue's part of the claim at recovery: `1e18 − strandedRemainingWad` then. */
+    queueWad: t.bigint().notNull().default(0n),
+    /** The queue's part not yet folded into an owner's owed balances. `strands(gen).wadLeft / assetsLeft / usdgLeft`. */
+    wadLeft: t.bigint().notNull().default(0n),
+    assetsLeft: t.bigint().notNull().default(0n),
+    usdgLeft: t.bigint().notNull().default(0n),
+    /** `StrandShareSettled` events: owners whose share became assets and USDG. */
+    settledCount: t.integer().notNull().default(0),
+  }),
+  (t) => ({
+    byCycle: index().on(t.cycleNumber),
   }),
 );
 

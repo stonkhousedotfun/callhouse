@@ -1,34 +1,26 @@
 /**
  * The pure verdicts of the roll state machine.
  *
- * WHY THIS FILE EXISTS: the chain must outrank Overcall's book. Before these rules, a wrong or
- * malicious API row could latch a listing `filled` and censor a still-fillable order from the
- * keeper's own /orders fallback — an unfilled week by censorship, with the order valid on chain
- * the whole time. Pinned here, without a chain:
+ * WHY THIS FILE EXISTS: Seaport is the only authority on a listing's lifecycle now — there is no
+ * book to disagree with it — and the close publishes numbers a depositor reads. Pinned here,
+ * without a chain:
  *
- *   seaportVerdict   Seaport's own getOrderStatus — the authority. It may DOWNGRADE what the
- *                    book claimed, but only on a chain-valid state: a counter bump kills an
- *                    order without setting isCancelled, and that must not resurrect it.
- *   bookVerdict      the API's opinion. `filled` is believed only when the row's own Seaport
- *                    fields agree; a chain-confirmed `filled` is never downgraded by the book.
- *   isPostRetryable  the idempotent-repost set: approved, post_failed, and a partial the book
- *                    never accepted (a direct fill through /orders must not stop the repost).
+ *   seaportVerdict   Seaport's own getOrderStatus: fills and cancels move a row, `cancelled` and
+ *                    `expired` are latches (counters only move forward).
  *   resolveContractsAssigned
  *                    the assignment count a closed week publishes. The vault's RollClose is the
  *                    number; the keeper's pre-close Valorem read is the fallback for a receipt
- *                    without one and the cross-check for a receipt with one. Both branches are
- *                    unreachable through a tick with the deployed bytecode (the event is always
- *                    there), so they are pinned here on synthetic receipts and driven on a real
- *                    one by dryrun.ts cycle 3.
+ *                    without one and the cross-check for a receipt with one.
+ *   decodeRollClose / decodeClaimStranded
+ *                    the two events that decide whether a close redeemed or stranded the claim.
  *   rollCloseMessage / rollCloseAlertData
- *                    what the roll_close alert says (K-21). On an assigned week the gross includes
- *                    the strike proceeds, which are returned principal, so premium and strike
- *                    proceeds are named separately; unfilled and unassigned wordings are pinned
- *                    verbatim so they never drift. roll.close.test.ts drives both close paths.
+ *                    what the roll_close alert says. On an assigned week the gross includes the
+ *                    strike proceeds, which are returned principal, so premium and strike
+ *                    proceeds are named separately; a stranded close says so on the end.
  *
  * DELIBERATELY ABSENT: no chain, no HTTP. roll.ts is imported for its pure exports only; the
- * RPC in the environment is a discard port. (roll.close.test.ts covers the one impure piece of
- * the close path, contractsAssignedAt, with the keeper's own client stubbed.)
+ * RPC in the environment is a discard port. (roll.close.test.ts drives both close paths through
+ * tick() with the keeper's own client stubbed.)
  */
 import assert from 'node:assert/strict';
 import { mkdtempSync } from 'node:fs';
@@ -41,13 +33,12 @@ import { encodeAbiParameters, encodeEventTopics, type TransactionReceipt } from 
 const scratch = mkdtempSync(join(tmpdir(), 'callhouse-keeper-roll-'));
 process.env.KEEPER_ENV_FILE = '/dev/null';
 process.env.RH_RPC = 'http://127.0.0.1:9';
-process.env.REGISTRY = '0x8E973cE1A6884E28Ad3E377d5f670Bc0b463f4EA';
 process.env.VAULT = '0x1111111111111111111111111111111111111111';
 process.env.KEEPER_PK = `0x${'11'.repeat(32)}`;
 process.env.KEEPER_DB_PATH = join(scratch, 'keeper.db');
 process.env.KEEPER_LOG_LEVEL = 'fatal';
 
-const { bookVerdict, decodeRollClose, isPostRetryable, postOutcomeStatus, resolveContractsAssigned, rollCloseAlertData, rollCloseMessage, seaportVerdict } =
+const { decodeClaimStranded, decodeRollClose, listingFilled, resolveContractsAssigned, rollCloseAlertData, rollCloseMessage, seaportVerdict } =
   await import('./roll.js');
 type RollCloseSummary = import('./roll.js').RollCloseSummary;
 const { vaultAbi } = await import('./abi.js');
@@ -57,62 +48,30 @@ function seaport(overrides: Partial<SeaportOrderStatus> = {}): SeaportOrderStatu
   return { isValidated: true, isCancelled: false, totalFilled: 0n, totalSize: 23n, isFullyFilled: false, ...overrides };
 }
 
-test('seaportVerdict: fills and cancels upgrade any state', () => {
-  assert.equal(seaportVerdict('visible', seaport({ isFullyFilled: true, totalFilled: 23n })), 'filled');
-  assert.equal(seaportVerdict('unfillable', seaport({ isFullyFilled: true, totalFilled: 23n })), 'filled');
-  assert.equal(seaportVerdict('visible', seaport({ isCancelled: true })), 'cancelled');
-  assert.equal(seaportVerdict('filled', seaport({ isCancelled: true, totalFilled: 3n })), 'cancelled');
-  assert.equal(seaportVerdict('visible', seaport({ totalFilled: 3n })), 'partial');
-  assert.equal(seaportVerdict('filled', seaport({ totalFilled: 3n })), 'partial', 'a book-filled row the chain says is only part-filled downgrades');
+test('seaportVerdict: fills and cancels move a row', () => {
+  assert.equal(seaportVerdict('approved', seaport({ isFullyFilled: true, totalFilled: 23n })), 'filled');
+  assert.equal(seaportVerdict('partial', seaport({ isFullyFilled: true, totalFilled: 23n })), 'filled');
+  assert.equal(seaportVerdict('approved', seaport({ isCancelled: true })), 'cancelled');
+  assert.equal(seaportVerdict('partial', seaport({ isCancelled: true, totalFilled: 3n })), 'cancelled');
+  assert.equal(seaportVerdict('approved', seaport({ totalFilled: 3n })), 'partial');
+  assert.equal(seaportVerdict('approved', seaport({})), 'approved', 'untouched stays approved');
+  assert.equal(seaportVerdict('partial', seaport({ totalFilled: 3n })), 'partial');
+  // A row marked filled by a read the chain now says is only part-filled: the chain wins.
+  assert.equal(seaportVerdict('filled', seaport({ totalFilled: 3n })), 'partial');
 });
 
-test('seaportVerdict: a chain-VALID untouched order revives a buried row; an invalid one does not', () => {
-  // The book-latched states recover on the chain's say-so...
-  assert.equal(seaportVerdict('filled', seaport({})), 'visible');
-  assert.equal(seaportVerdict('partial', seaport({})), 'visible');
-  assert.equal(seaportVerdict('unfillable', seaport({})), 'visible');
-  // ...but a counter bump (invalidateAllListings, lockBook, rollClose) kills an order WITHOUT
-  // setting isCancelled, and that must never bring a dead order back to /orders.
-  assert.equal(seaportVerdict('unfillable', seaport({ isValidated: false })), 'unfillable');
-  assert.equal(seaportVerdict('filled', seaport({ isValidated: false })), 'filled');
-  // Latches and steady states.
+test('seaportVerdict: cancelled and expired are latches', () => {
+  // A counter bump (invalidateAllListings, lockBook, rollClose) kills an order WITHOUT setting
+  // isCancelled, so Seaport reads it as untouched and valid. The latch keeps it dead.
   assert.equal(seaportVerdict('cancelled', seaport({})), 'cancelled');
   assert.equal(seaportVerdict('expired', seaport({})), 'expired');
-  assert.equal(seaportVerdict('approved', seaport({})), 'approved');
-  assert.equal(seaportVerdict('post_failed', seaport({})), 'post_failed');
+  assert.equal(seaportVerdict('expired', seaport({ isFullyFilled: true, totalFilled: 23n })), 'expired');
 });
 
-test('bookVerdict: `filled` is believed only when the row’s own Seaport fields agree', () => {
-  assert.equal(bookVerdict('visible', 'filled', 23n, 23n), 'filled');
-  assert.equal(bookVerdict('visible', 'filled', 0n, 0n), undefined, 'no chain fields stamped: untouched');
-  assert.equal(bookVerdict('visible', 'filled', 3n, 23n), undefined, 'chain says part-filled: untouched');
-  // A chain-confirmed filled row is never downgraded by the book's say-so.
-  assert.equal(bookVerdict('filled', 'open', 23n, 23n), undefined);
-  assert.equal(bookVerdict('filled', 'partial', 23n, 23n), undefined);
-});
-
-test('bookVerdict: an `open` (re-)report confirms posts and revives `unfillable`', () => {
-  assert.equal(bookVerdict('visible', 'partial', 3n, 23n), 'partial');
-  assert.equal(bookVerdict('visible', 'unfillable', 0n, 23n), 'unfillable');
-  assert.equal(bookVerdict('posted', 'open', 0n, 0n), 'visible');
-  assert.equal(bookVerdict('post_failed', 'open', 0n, 0n), 'visible');
-  assert.equal(bookVerdict('unfillable', 'open', 0n, 0n), 'visible', 'unfillable is a warning, not a death certificate');
-  assert.equal(bookVerdict('posted', null, 0n, 0n), 'visible', 'in the book at all is visible');
-  assert.equal(bookVerdict('approved', 'open', 0n, 0n), undefined);
-  assert.equal(bookVerdict('cancelled', 'open', 0n, 0n), undefined);
-});
-
-test('isPostRetryable: approved, post_failed, and a partial the book never accepted', () => {
-  assert.equal(isPostRetryable({ status: 'approved', api_status: null }), true);
-  assert.equal(isPostRetryable({ status: 'post_failed', api_status: null }), true);
-  assert.equal(
-    isPostRetryable({ status: 'partial', api_status: null }),
-    true,
-    'an API outage at listing time plus one direct fill via /orders must not stop the repost',
-  );
-  assert.equal(isPostRetryable({ status: 'partial', api_status: 'open' }), false, 'the book has it');
-  assert.equal(isPostRetryable({ status: 'visible', api_status: 'open' }), false);
-  assert.equal(isPostRetryable({ status: 'filled', api_status: null }), false);
+test('listingFilled: the row’s Seaport fraction applied to its size', () => {
+  assert.equal(listingFilled({ contracts: '28', seaport_total_filled: '7', seaport_total_size: '28' }), 7n);
+  assert.equal(listingFilled({ contracts: '28', seaport_total_filled: null, seaport_total_size: null }), 0n);
+  assert.equal(listingFilled({ contracts: '28', seaport_total_filled: '1', seaport_total_size: '1' }), 28n);
 });
 
 /* ---- rollClose: which assignment count gets published ---- */
@@ -122,7 +81,7 @@ const OTHER = '0x2222222222222222222222222222222222222222' as const;
 const LOT = 1_000_000_000_000_000_000n;
 
 /** A `RollClose(cycleNumber, assetsReturned, usdgFromAssignment, contractsAssignedCount)` log as
- *  the vault emits it (Vault.sol:801): the cycle number indexed, the three amounts in data. */
+ *  the vault emits it: the cycle number indexed, the three amounts in data. */
 function rollCloseLog(count: bigint, address: `0x${string}` = VAULT, cycleNumber = 3): TransactionReceipt['logs'][number] {
   const topics = encodeEventTopics({ abi: vaultAbi, eventName: 'RollClose', args: { cycleNumber } });
   const data = encodeAbiParameters(
@@ -149,40 +108,29 @@ function harvestLog(): TransactionReceipt['logs'][number] {
   return { ...rollCloseLog(0n), topics, data, logIndex: 1 } as unknown as TransactionReceipt['logs'][number];
 }
 
+/** `ClaimStranded(cycleNumber, claimKey, gen)`: the close could not redeem the claim. */
+function claimStrandedLog(gen: bigint, address: `0x${string}` = VAULT): TransactionReceipt['logs'][number] {
+  const claimKey = (0xabcdefn << 96n) | 1n;
+  const topics = encodeEventTopics({ abi: vaultAbi, eventName: 'ClaimStranded', args: { cycleNumber: 3, claimKey } });
+  const data = encodeAbiParameters([{ type: 'uint256' }], [gen]);
+  return { ...rollCloseLog(0n, address), topics, data, logIndex: 2 } as unknown as TransactionReceipt['logs'][number];
+}
+
 function receiptWith(...logs: Array<TransactionReceipt['logs'][number]>): TransactionReceipt {
   return { logs } as unknown as TransactionReceipt;
 }
 
 test("resolveContractsAssigned: the vault's RollClose is the number published; the pre-read is its cross-check", () => {
   const receipt = receiptWith(harvestLog(), rollCloseLog(9n));
-  assert.deepEqual(resolveContractsAssigned(receipt, 9n), {
-    assigned: 9,
-    source: 'RollClose',
-    fromEvent: 9n,
-    fromClaim: 9n,
-    mismatch: false,
-  });
+  assert.deepEqual(resolveContractsAssigned(receipt, 9n), { assigned: 9, source: 'RollClose', fromEvent: 9n, fromClaim: 9n, mismatch: false });
   // The two are read from the same Valorem claim across a window with no possible exercise, so
   // a disagreement is a defect: the event is still what gets published, and the caller warns.
-  assert.deepEqual(resolveContractsAssigned(receipt, 4n), {
-    assigned: 9,
-    source: 'RollClose',
-    fromEvent: 9n,
-    fromClaim: 4n,
-    mismatch: true,
-  });
+  assert.deepEqual(resolveContractsAssigned(receipt, 4n), { assigned: 9, source: 'RollClose', fromEvent: 9n, fromClaim: 4n, mismatch: true });
   // A failed pre-read (null, never a silent 0) is not a mismatch.
-  assert.deepEqual(resolveContractsAssigned(receipt, null), {
-    assigned: 9,
-    source: 'RollClose',
-    fromEvent: 9n,
-    fromClaim: null,
-    mismatch: false,
-  });
+  assert.deepEqual(resolveContractsAssigned(receipt, null), { assigned: 9, source: 'RollClose', fromEvent: 9n, fromClaim: null, mismatch: false });
 });
 
 test('resolveContractsAssigned: a RollClose count of 0 is a result, not a reason to fall through', () => {
-  // Cycles 1 and 2 of the dry run: out of the money and unfilled. `0n ?? x` must stay 0n.
   const outOfTheMoney = resolveContractsAssigned(receiptWith(rollCloseLog(0n)), 0n);
   assert.deepEqual(outOfTheMoney, { assigned: 0, source: 'RollClose', fromEvent: 0n, fromClaim: 0n, mismatch: false });
   const disagreeing = resolveContractsAssigned(receiptWith(rollCloseLog(0n)), 9n);
@@ -201,25 +149,11 @@ test('resolveContractsAssigned: without a RollClose from the vault, the pre-read
   });
   // Case-insensitive on the address, the way receipts come back.
   assert.equal(resolveContractsAssigned(receiptWith(rollCloseLog(9n, VAULT.toUpperCase().replace('0X', '0x') as `0x${string}`)), null).source, 'RollClose');
-  assert.deepEqual(resolveContractsAssigned(receiptWith(), 0n), {
-    assigned: 0,
-    source: 'claim-preread',
-    fromEvent: null,
-    fromClaim: 0n,
-    mismatch: false,
-  });
-  assert.deepEqual(resolveContractsAssigned(receiptWith(harvestLog()), null), {
-    assigned: 0,
-    source: 'unknown',
-    fromEvent: null,
-    fromClaim: null,
-    mismatch: false,
-  });
+  assert.deepEqual(resolveContractsAssigned(receiptWith(), 0n), { assigned: 0, source: 'claim-preread', fromEvent: null, fromClaim: 0n, mismatch: false });
+  assert.deepEqual(resolveContractsAssigned(receiptWith(harvestLog()), null), { assigned: 0, source: 'unknown', fromEvent: null, fromClaim: null, mismatch: false });
 });
 
-/* ---- rollClose: what the roll_close alert says (K-21) ---- */
-
-test('decodeRollClose: all three amounts from the vault\'s RollClose, null without one', () => {
+test('decodeRollClose: all three amounts from the vault’s RollClose, null without one', () => {
   assert.deepEqual(decodeRollClose(receiptWith(harvestLog(), rollCloseLog(9n))), {
     assetsReturned: 14n * LOT,
     usdgFromAssignment: 2_025_000_000n,
@@ -228,6 +162,16 @@ test('decodeRollClose: all three amounts from the vault\'s RollClose, null witho
   assert.deepEqual(decodeRollClose(receiptWith(rollCloseLog(0n))), { assetsReturned: 23n * LOT, usdgFromAssignment: 0n, contractsAssignedCount: 0n });
   assert.equal(decodeRollClose(receiptWith(harvestLog(), rollCloseLog(9n, OTHER))), null, "another contract's RollClose is not the vault's");
   assert.equal(decodeRollClose(receiptWith(harvestLog())), null);
+});
+
+test('decodeClaimStranded: the vault’s ClaimStranded in a close receipt, null when the claim redeemed', () => {
+  assert.deepEqual(decodeClaimStranded(receiptWith(rollCloseLog(1n), claimStrandedLog(1n))), {
+    cycleNumber: 3,
+    claimKey: (0xabcdefn << 96n) | 1n,
+    gen: 1n,
+  });
+  assert.equal(decodeClaimStranded(receiptWith(rollCloseLog(9n), harvestLog())), null);
+  assert.equal(decodeClaimStranded(receiptWith(claimStrandedLog(1n, OTHER))), null, "another contract's event is not the vault's");
 });
 
 /** Dry-run cycle 3 in USDG base units: 19.079259 premium, 5% fee on the premium only, 2025 strike
@@ -243,9 +187,10 @@ const ASSIGNED: RollCloseSummary = {
   witnessedLive: true,
 };
 const UNWITNESSED = ' The close ran without this keeper witnessing it; reconstructed from chain logs.';
+const STRANDED = ' The claim could NOT be redeemed and is stranded: its legs are paid by retryStrandedClaim.';
 
 test('rollCloseMessage: an assigned week names premium and strike proceeds separately', () => {
-  assert.equal(ASSIGNED.fee, (ASSIGNED.gross - (ASSIGNED.usdgFromAssignment ?? 0n)) * 500n / 10_000n, 'fixture: fee on premium only');
+  assert.equal(ASSIGNED.fee, ((ASSIGNED.gross - (ASSIGNED.usdgFromAssignment ?? 0n)) * 500n) / 10_000n, 'fixture: fee on premium only');
   assert.equal(ASSIGNED.net, ASSIGNED.gross - ASSIGNED.fee, 'fixture: net = gross - fee');
   assert.equal(
     rollCloseMessage(ASSIGNED),
@@ -273,16 +218,23 @@ test('rollCloseMessage: unassigned and unfilled wordings are unchanged, live and
     assetsReturned: 23n * LOT,
     contractsAssigned: 0,
   };
-  // The exact templates the keeper published before K-21.
   assert.equal(rollCloseMessage(unassigned), 'cycle 1 closed: 19.079259 USDG harvested, 18.125297 to depositors.');
   assert.equal(rollCloseMessage({ ...unassigned, witnessedLive: false }), `cycle 1 closed: 19.079259 USDG harvested, 18.125297 to depositors.${UNWITNESSED}`);
-  // Strike proceeds unknown with nothing assigned (no RollClose in the receipt, a legacy row): the same wording.
   assert.equal(rollCloseMessage({ ...unassigned, usdgFromAssignment: null, assetsReturned: null }), 'cycle 1 closed: 19.079259 USDG harvested, 18.125297 to depositors.');
 
   const unfilled: RollCloseSummary = { ...unassigned, cycleNumber: 2, gross: 0n, fee: 0n, net: 0n };
   assert.equal(rollCloseMessage(unfilled), 'cycle 2 closed unfilled: 0 USDG harvested.');
   assert.equal(rollCloseMessage({ ...unfilled, witnessedLive: false }), `cycle 2 closed unfilled: 0 USDG harvested.${UNWITNESSED}`);
   assert.equal(rollCloseMessage({ ...unfilled, usdgFromAssignment: null }), 'cycle 2 closed unfilled: 0 USDG harvested.');
+});
+
+test('rollCloseMessage: a stranded close says so, after the numbers and before the unwitnessed note', () => {
+  // A strand reports zero legs: the harvest is whatever premium sat idle, and the proceeds wait.
+  const stranded: RollCloseSummary = { ...ASSIGNED, gross: 19_079_259n, net: 18_125_297n, usdgFromAssignment: 0n, assetsReturned: 0n, contractsAssigned: 1, stranded: true };
+  assert.equal(rollCloseMessage(stranded), `cycle 3 closed: 19.079259 USDG harvested, 18.125297 to depositors.${STRANDED}`);
+  assert.equal(rollCloseMessage({ ...stranded, witnessedLive: false }), `cycle 3 closed: 19.079259 USDG harvested, 18.125297 to depositors.${STRANDED}${UNWITNESSED}`);
+  assert.equal(rollCloseAlertData(stranded).stranded, true);
+  assert.equal(rollCloseAlertData(ASSIGNED).stranded, false);
 });
 
 test('rollCloseMessage: assigned with the proceeds unknown says so instead of calling the gross premium', () => {
@@ -304,6 +256,7 @@ test('rollCloseAlertData: premiumUsdg and strikeProceedsUsdg beside the gross/fe
     strikeProceedsUsdg: '2025',
     assetsReturned: '14000000000000000000',
     contractsAssigned: 9,
+    stranded: false,
   });
   const unassigned = rollCloseAlertData({ ...ASSIGNED, gross: 19_079_259n, net: 18_125_297n, usdgFromAssignment: 0n, contractsAssigned: 0 });
   assert.equal(unassigned.premiumUsdg, '19.079259', 'nothing assigned: the whole gross is premium');
@@ -316,21 +269,4 @@ test('rollCloseAlertData: premiumUsdg and strikeProceedsUsdg beside the gross/fe
   assert.equal(unknown.strikeProceedsUsdg, null);
   assert.equal(unknown.assetsReturned, null);
   assert.equal(unknown.grossUsdg, '2044.079259');
-});
-
-test('postOutcomeStatus: a POST result never overwrites what Seaport says about fills', () => {
-  // Regression (W-13 fork acceptance): a partly filled listing whose repost the book refused
-  // flipped partial -> post_failed -> partial on every retry.
-  assert.equal(postOutcomeStatus('partial', 'post_failed'), 'partial');
-  assert.equal(postOutcomeStatus('partial', 'posted'), 'partial');
-  assert.equal(postOutcomeStatus('filled', 'post_failed'), 'filled');
-  assert.equal(postOutcomeStatus('cancelled', 'posted'), 'cancelled');
-  assert.equal(postOutcomeStatus('expired', 'post_failed'), 'expired');
-  // Book-side states still take the POST outcome.
-  assert.equal(postOutcomeStatus('approved', 'post_failed'), 'post_failed');
-  assert.equal(postOutcomeStatus('approved', 'posted'), 'posted');
-  assert.equal(postOutcomeStatus('post_failed', 'posted'), 'posted');
-  assert.equal(postOutcomeStatus(undefined, 'posted'), 'posted');
-  // A partial the book refused stays retryable through api_status, not through status.
-  assert.equal(isPostRetryable({ status: 'partial', api_status: null }), true);
 });

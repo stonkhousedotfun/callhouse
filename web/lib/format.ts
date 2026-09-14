@@ -1,8 +1,9 @@
 import { formatUnits, parseUnits } from "viem";
 
-import { ASSET_DECIMALS, OVERCALL_FEE_BPS, SHARE_DECIMALS, USDG_DECIMALS } from "./contracts";
+import { ASSET_DECIMALS, LOT_SIZE, SHARE_DECIMALS, USDG_DECIMALS } from "./contracts";
 
 export const WAD = 10n ** 18n;
+const BPS = 10_000n;
 
 /* -------------------------------------------------------------------------------------------
  * Number formatting
@@ -47,6 +48,12 @@ export function fmtAsset(value: bigint | undefined | null, displayDecimals = 4):
 /** Vault shares (cNVDA) are 18 decimals, same as the asset. */
 export function fmtShares(value: bigint | undefined | null, displayDecimals = 4): string {
   return formatAmount(value, SHARE_DECIMALS, displayDecimals);
+}
+
+/** A WAD (1e18) share as a percentage: 0.25e18 → "25.00%". */
+export function fmtWadPercent(wad: bigint | undefined | null): string {
+  if (wad === undefined || wad === null) return "—";
+  return `${formatAmount(wad * 100n, 18, 2)}%`;
 }
 
 /** Parse user input into base units. Returns null on anything that is not a clean number. */
@@ -171,66 +178,80 @@ export function fmtRealizedWeek(premiumNetUsdg6: bigint | undefined, tvlUsdg6: b
 }
 
 /* -------------------------------------------------------------------------------------------
- * The Overcall fee split — THE rounding rule
+ * The listing's price
+ *
+ * Every listing has ONE consideration leg, USDG to the vault, and the vault enforces
+ * `gross % amount == 0` at approveListing so a partial fill of k of N pays exactly gross × k / N.
+ * There is no third-party fee leg: gross and net premium are the same figure, and what the buyer
+ * pays is what the vault receives (the protocol fee is taken later, at harvest).
  * ----------------------------------------------------------------------------------------- */
 
-export type PremiumSplit = {
-  unitPrice6: bigint;
-  contracts: bigint;
-  feePerContract6: bigint;
-  writerPerContract6: bigint;
-  /** consideration[1] — Overcall's 5% leg. */
-  feeTotal6: bigint;
-  /** consideration[0] — the vault's leg. */
-  writerTotal6: bigint;
-  /** What the buyer pays in total. */
-  gross6: bigint;
-  /** False when the 5% leg floors to zero and Overcall's schema would reject the order. */
-  listable: boolean;
+/** The per-contract price of a listing, or undefined for an empty one. Exact by construction. */
+export function unitPriceUsdg(grossUsdg6: bigint | undefined, contracts: bigint | undefined): bigint | undefined {
+  if (grossUsdg6 === undefined || contracts === undefined || contracts === 0n) return undefined;
+  return grossUsdg6 / contracts;
+}
+
+/* -------------------------------------------------------------------------------------------
+ * Policy maths, mirrored from contracts/src/Policy.sol
+ *
+ * The vault re-runs these at every fill against TODAY's spot (ValoremLib.writeOnFill). The page
+ * shows the same figures so a buyer can see a refusal coming; the pre-flight simulation is the
+ * authority, this is the explanation beside it. If Policy.sol changes, these change.
+ * ----------------------------------------------------------------------------------------- */
+
+export type PolicyBps = {
+  minOtmBps: number;
+  maxOtmBps: number;
+  minPremiumBps: number;
+  maxUtilizationBps: number;
+  protocolFeeBps: number;
+  maxContractsCap: bigint;
 };
 
 /**
- * Split a premium the way Overcall does: round PER CONTRACT, then multiply.
- *
- *   feePerContract6    = floor(unitPrice6 * 500 / 10000)
- *   writerPerContract6 = unitPrice6 - feePerContract6
- *   consideration[1]   = feePerContract6    * N
- *   consideration[0]   = writerPerContract6 * N
- *
- * WHY it has to be this way round: every Overcall listing is orderType 1 (PARTIAL_OPEN). Seaport
- * fills a fraction k/N by scaling each item amount, and reverts with InexactFraction if any
- * amount is not exactly divisible. Rounding the TOTAL produces an order that signs fine and
- * validates fine, and then silently cannot be partially filled — which on a thin book is the
- * difference between a fill and an unfilled week.
- *
- * `listable` is false below unitPrice6 = 20, where 5% floors to zero and Overcall's schema
- * rejects the order outright ("A consideration item must carry a non-zero amount").
- *
- * This mirrors Policy.splitPremium() in contracts/src/Policy.sol. If one changes, both change.
+ * Contracts the vault may have written in total this cycle against `nav` (its totalAssets()),
+ * Policy.maxContracts: the utilisation ceiling in whole lots, capped at maxContractsCap.
  */
-export function splitPremium(unitPrice6: bigint, contracts: bigint): PremiumSplit {
-  const feePerContract6 = (unitPrice6 * OVERCALL_FEE_BPS) / 10_000n;
-  const writerPerContract6 = unitPrice6 - feePerContract6;
+export function maxContracts(nav18: bigint | undefined, policy: PolicyBps | undefined): bigint | undefined {
+  if (nav18 === undefined || policy === undefined) return undefined;
+  const byUtilization = (nav18 * BigInt(policy.maxUtilizationBps)) / BPS / LOT_SIZE;
+  return byUtilization < policy.maxContractsCap ? byUtilization : policy.maxContractsCap;
+}
+
+/**
+ * Contracts the vault can still write this cycle: `maxContracts(totalAssets()) − contractsWritten`.
+ * There is no inventory under write on fill; this is the whole of what is for sale, and every
+ * fill is re-sized against it at the hook.
+ */
+export function capacityContracts(
+  nav18: bigint | undefined,
+  contractsWritten: bigint | undefined,
+  policy: PolicyBps | undefined,
+): bigint | undefined {
+  const cap = maxContracts(nav18, policy);
+  if (cap === undefined || contractsWritten === undefined) return undefined;
+  return cap > contractsWritten ? cap - contractsWritten : 0n;
+}
+
+/** The inclusive [min, max] strike window for a spot, Policy.strikeBand. */
+export function strikeBand(spotUsdg6: bigint | undefined, policy: PolicyBps | undefined): { min: bigint; max: bigint } | undefined {
+  if (spotUsdg6 === undefined || spotUsdg6 === 0n || policy === undefined) return undefined;
   return {
-    unitPrice6,
-    contracts,
-    feePerContract6,
-    writerPerContract6,
-    feeTotal6: feePerContract6 * contracts,
-    writerTotal6: writerPerContract6 * contracts,
-    gross6: unitPrice6 * contracts,
-    listable: unitPrice6 >= 20n && contracts > 0n,
+    min: (spotUsdg6 * (BPS + BigInt(policy.minOtmBps))) / BPS,
+    max: (spotUsdg6 * (BPS + BigInt(policy.maxOtmBps))) / BPS,
   };
 }
 
-/** Recover the per-contract unit price from a listing's two consideration legs. */
-export function unitPriceFromLegs(
-  writerTotal6: bigint,
-  feeTotal6: bigint,
-  contracts: bigint,
-): bigint | undefined {
-  if (contracts === 0n) return undefined;
-  return (writerTotal6 + feeTotal6) / contracts;
+/**
+ * The premium floor the fill gate applies to a fill of `contracts` at `spot`, Policy.minPremium.
+ * Valorem's engine fee (15 bps of notional, valued at spot) is added on top when it is switched
+ * on; that term is omitted here because the fee is off on the deployed Clear and the simulation
+ * is the authority when it is not.
+ */
+export function minPremiumUsdg(spotUsdg6: bigint | undefined, contracts: bigint, policy: PolicyBps | undefined): bigint | undefined {
+  if (spotUsdg6 === undefined || spotUsdg6 === 0n || policy === undefined) return undefined;
+  return (spotUsdg6 * contracts * BigInt(policy.minPremiumBps)) / BPS;
 }
 
 /* -------------------------------------------------------------------------------------------
@@ -249,9 +270,9 @@ export function scaleToContracts(scaled: bigint | undefined): bigint | undefined
 /* -------------------------------------------------------------------------------------------
  * Time
  *
- * Every deadline on this site comes from the Overcall registry (exerciseTimestamp /
- * expiryTimestamp), never from a hardcoded "Friday 20:00". The registry owner can move a cycle;
- * a wall clock cannot know that.
+ * Every deadline on this site comes from the option type the vault armed — `cycleExerciseTs`
+ * and `cycleExpiryTs`, snapshotted from the clearinghouse at rollOpen — never from a hardcoded
+ * "Friday 20:00". The keeper chooses the type; the vault records it; a wall clock knows neither.
  * ----------------------------------------------------------------------------------------- */
 
 export function fmtUtc(ts: number | bigint | undefined | null): string {
@@ -297,4 +318,95 @@ export function windowProgress(startSeconds: number, endSeconds: number, nowSeco
   if (!Number.isFinite(startSeconds) || !Number.isFinite(endSeconds) || endSeconds <= startSeconds) return 0;
   const p = (nowSeconds - startSeconds) / (endSeconds - startSeconds);
   return Math.max(0, Math.min(1, p));
+}
+
+/* -------------------------------------------------------------------------------------------
+ * Deposit and queue states that change what the forms must say
+ * ----------------------------------------------------------------------------------------- */
+
+/**
+ * How exposed a deposit made right now is to this week's short call.
+ *
+ *  - "none":   not Listed (or unread). Idle is flat; Exercisable and Settling refuse deposits.
+ *  - "listed": a call is armed and may be selling. Shares are priced on a NAV that values the
+ *              short call at zero, so an assigned week is socialised across every share, a
+ *              deposit made now included, and every later fill this week is sized against a
+ *              balance that includes it (decision D8: Listed deposits allowed, risk disclosed).
+ *  - "near":   as "listed", and live spot is already at or above strike × (1 − minOtmBps). That
+ *              is the point where the vault would no longer arm this strike, i.e. the call is
+ *              close to (or already) in the money.
+ *
+ * Spot and strike are both USDG base units per lot. A stale feed (spot undefined) cannot prove
+ * "near", so it falls back to "listed" rather than guessing either way.
+ */
+export type ListedDepositRisk = "none" | "listed" | "near";
+
+export function listedDepositRisk(v: {
+  phase?: number;
+  cycleStrikeUsdg?: bigint;
+  spotUsdg?: bigint;
+  minOtmBps?: number;
+}): ListedDepositRisk {
+  if (v.phase !== 1) return "none";
+  const strike = v.cycleStrikeUsdg;
+  if (strike === undefined || strike === 0n || v.spotUsdg === undefined || v.minOtmBps === undefined) {
+    return "listed";
+  }
+  const threshold = (strike * BigInt(10_000 - v.minOtmBps)) / 10_000n;
+  return v.spotUsdg >= threshold ? "near" : "listed";
+}
+
+/**
+ * Why deposits are closed right now, from what the page has read, or undefined when they are
+ * open as far as it can tell. Mirrors Vault._depositRefused, whose single `DepositsClosed`
+ * error carries no argument on purpose; `maxDeposit() == 0` is the chain's own word (checked by
+ * the form as well), and this names the reason beside it. The share-price floor (a dead book)
+ * is not derivable from the snapshot and is left to `maxDeposit`.
+ */
+export type DepositsClosedReason = "phase" | "window" | "assignmentPending" | "stranded" | "reserveUnbacked";
+
+export function depositsClosedReason(
+  v: {
+    phase?: number;
+    cycleExerciseTs?: number;
+    claimKey?: bigint;
+    contractsAssigned?: bigint;
+    assetHeld?: bigint;
+    reservedAssets?: bigint;
+  },
+  nowSeconds: number,
+): DepositsClosedReason | undefined {
+  if (v.phase === undefined) return undefined;
+  if (v.phase !== 0 && v.phase !== 1) return "phase";
+  if (v.phase === 1 && v.cycleExerciseTs !== undefined && nowSeconds > 0 && nowSeconds >= v.cycleExerciseTs) return "window";
+  const claim = v.claimKey ?? 0n;
+  if (claim !== 0n && v.phase === 0) return "stranded";
+  if (claim !== 0n && (v.contractsAssigned ?? 0n) > 0n) return "assignmentPending";
+  if (v.assetHeld !== undefined && v.reservedAssets !== undefined && v.assetHeld < v.reservedAssets) return "reserveUnbacked";
+  return undefined;
+}
+
+/**
+ * Whether this account's queue entry can be settled with the permissionless `settleQueue()`.
+ *
+ * Only while the vault is Idle, and only for an entry in the CURRENT epoch: an entry whose epoch
+ * is below `epochId` was already settled and is collected with `completeRedeem`. Without this
+ * path a queue entered while flat waited for a `rollClose` that needs a fresh `rollOpen`, and a
+ * week that never gets armed (halted, stale oracle, less than one lot idle) held it indefinitely.
+ * While a claim is stranded this is also the exit: the entry is paid its slice of the idle
+ * balance now and its share of the claim when `retryStrandedClaim` succeeds.
+ */
+export function canSettleQueue(v: {
+  phase?: number;
+  epochId?: bigint;
+  queuedShares?: bigint;
+  queuedEpoch?: bigint;
+}): boolean {
+  return (
+    v.phase === 0 &&
+    (v.queuedShares ?? 0n) > 0n &&
+    v.epochId !== undefined &&
+    v.queuedEpoch !== undefined &&
+    v.queuedEpoch === v.epochId
+  );
 }

@@ -4,20 +4,8 @@ import { useEffect, useMemo, useState, useSyncExternalStore } from "react";
 import type { Abi, Address, Hex } from "viem";
 import { useReadContracts } from "wagmi";
 
-import {
-  ASSET,
-  CLEARINGHOUSE,
-  LOT_SIZE,
-  REGISTRY,
-  SEAPORT,
-  USDG,
-  VAULT,
-  overcallRegistryAbi,
-  seaportAbi,
-  stockTokenAbi,
-  valoremClearAbi,
-  vaultAbi,
-} from "./contracts";
+import { ASSET, CLEARINGHOUSE, LOT_SIZE, SEAPORT, USDG, VAULT, seaportAbi, stockTokenAbi, valoremClearAbi, vaultAbi } from "./contracts";
+import { capacityContracts, strikeBand, type PolicyBps } from "./format";
 
 /* ------------------------------------------------------------------ multicall plumbing --- */
 
@@ -105,46 +93,53 @@ export function phaseLabel(phase: number | undefined): string {
 /**
  * What the week is actually doing, in the product's own words. This is the state the site
  * promises to publish honestly — "unfilled" included, because it is the most likely one.
+ *
+ * Under write on fill nothing is written until a buyer fills, and each fill writes exactly what
+ * it sold. So there is no "listed but unsold" inventory: contracts written IS contracts sold, and
+ * the interesting number while Listed is how many have been sold against how many the vault can
+ * still write (its capacity).
  */
 export type FillState =
   | "unknown" // nothing read yet, or no vault configured
-  | "flat" // no call written; the vault is holding spot
-  | "listed" // written and listed, no buyer yet
-  | "partial" // some contracts sold
-  | "filled" // every written contract sold
-  | "locked" // past book close, no more listing
+  | "flat" // Idle, nothing armed; the vault is holding spot
+  | "stranded" // Idle, but rollClose could not redeem the claim; deposits and instant redemption shut
+  | "armed" // Listed, an option type armed, nothing sold yet
+  | "selling" // Listed, some sold, capacity left
+  | "filled" // Listed, sold to capacity
+  | "locked" // past the sale window (Exercisable), calls sold
   | "settling" // past expiry, reclaiming
-  | "assigned" // past book close, and part of the claim has been assigned
-  | "unfilled"; // past book close with nothing sold: no premium (it can still be assigned)
+  | "assigned" // Exercisable and part of the claim has been assigned
+  | "unfilled"; // past the sale window with nothing sold: no premium
 
 export const FILL_STATE_COPY: Record<FillState, string> = {
   unknown: "State unavailable",
-  flat: "Flat — no call written",
-  listed: "Listed — waiting for a buyer",
-  partial: "Partially filled",
-  filled: "Filled",
-  locked: "Book closed",
+  flat: "Flat — no call armed",
+  stranded: "Stranded claim",
+  armed: "Armed — nothing sold yet",
+  selling: "Selling",
+  filled: "Sold to capacity",
+  locked: "Sale window closed",
   settling: "Settling",
   assigned: "Assigned",
-  unfilled: "Book closed, unsold",
+  unfilled: "Window closed, unsold",
 };
 
 function deriveFillState(v: {
   phase?: number;
+  claimKey?: bigint;
   contractsWritten?: bigint;
-  contractsSold?: bigint;
   contractsAssigned?: bigint;
+  capacity?: bigint;
 }): FillState {
   // No phase means no answer yet (or no vault configured). Saying "flat" would be asserting
   // something about a vault we have not read.
   if (v.phase === undefined) return "unknown";
-  const written = v.contractsWritten ?? 0n;
-  const sold = v.contractsSold ?? 0n;
+  const sold = v.contractsWritten ?? 0n;
   const assigned = v.contractsAssigned ?? 0n;
   switch (v.phase) {
     case 1:
-      if (sold === 0n) return "listed";
-      return sold >= written && written > 0n ? "filled" : "partial";
+      if (sold === 0n) return "armed";
+      return v.capacity !== undefined && v.capacity === 0n ? "filled" : "selling";
     case 2:
       // Exercisable: the claim is still open, so assignment is readable here and only here.
       // rollClose zeroes contractsWritten and the claim key, which makes every Idle read "flat";
@@ -155,7 +150,8 @@ function deriveFillState(v: {
       return "settling";
     case 0:
     default:
-      return "flat";
+      // Idle with a claim is the one state only a failed redeem produces (Vault.isStranded).
+      return (v.claimKey ?? 0n) !== 0n ? "stranded" : "flat";
   }
 }
 
@@ -176,19 +172,23 @@ export type VaultSnapshot = {
   phase?: number;
   fillState: FillState;
   cycleNumber?: number;
+  /** This cycle's clock, snapshotted from the option type at rollOpen. The only deadlines on this site. */
   cycleExerciseTs?: number;
   cycleExpiryTs?: number;
   cycleStrikeUsdg?: bigint;
   optionId?: bigint;
   claimKey?: bigint;
+  /** Contracts written this cycle. Equals contracts SOLD: every write happens inside a fill. */
   contractsWritten?: bigint;
-  contractsSold?: bigint;
-  contractsRemaining?: bigint;
   contractsAssigned?: bigint;
+  /** Contracts the vault can still write this cycle: maxContracts(totalAssets) − contractsWritten. */
+  capacity?: bigint;
   listingHash?: Hex;
   listingGrossUsdg?: bigint;
   listingAmount?: bigint;
   listingsThisCycle?: number;
+  /** The vault's Seaport conduit key (zero at deploy). A listing must carry exactly this. */
+  conduitKey?: Hex;
   accUsdgPerShare?: bigint;
   totalUsdgDistributed?: bigint;
   usdgReservedForQueue?: bigint;
@@ -199,28 +199,22 @@ export type VaultSnapshot = {
   valoremFeeAccepted?: boolean;
   depositCap?: bigint;
   canRedeemInstantly?: boolean;
+  /** Anyone may deposit right now (maxDeposit for a zero address is non-zero). Mirrors DepositsClosed. */
+  depositsOpen?: boolean;
   uiMultiplier?: bigint;
   /** USDG base units per lot. undefined when the feed is stale — the call reverts, by design. */
   spotUsdg?: bigint;
   spotStale: boolean;
+  /** The [min, max] strike the vault would accept at today's spot; the floor is re-checked at every fill. */
+  band?: { min: bigint; max: bigint };
   feeRecipient?: Address;
-  policy?: {
-    minOtmBps: number;
-    maxOtmBps: number;
-    minPremiumBps: number;
-    maxUtilizationBps: number;
-    protocolFeeBps: number;
-    maxContractsCap: bigint;
-  };
-  /** Registry, the single source of truth for every deadline on this site. */
-  registryCycleNumber?: number;
-  registryExerciseTs?: number;
-  registryExpiryTs?: number;
-  registryLotSize?: bigint;
-  registryOptionIds?: readonly bigint[];
-  isWritingOpen?: boolean;
-  isCycleLive?: boolean;
-  writeDeadline?: number;
+  policy?: PolicyBps;
+  /** The stranded-claim state machine (Vault.sol "STRANDED CLAIM"). */
+  isStranded?: boolean;
+  strandGen?: bigint;
+  lastResolvedGen?: bigint;
+  /** WAD share of the stranded claim still owned by live shares. Meaningful only while stranded. */
+  strandedRemainingWad?: bigint;
   /** Stock Token kill switch. True means the vault cannot write this week at all. */
   oraclePaused?: boolean;
 };
@@ -231,11 +225,6 @@ export function useVaultSnapshot() {
   const { contracts, index } = useMemo(() => {
     const vault = (functionName: string, args?: readonly unknown[]): Call | null =>
       VAULT ? { address: VAULT, abi: vaultAbi as unknown as Abi, functionName, args } : null;
-    const registry = (functionName: string): Call => ({
-      address: REGISTRY,
-      abi: overcallRegistryAbi as unknown as Abi,
-      functionName,
-    });
 
     return buildBatch([
       ["symbol", vault("symbol")],
@@ -253,13 +242,12 @@ export function useVaultSnapshot() {
       ["optionId", vault("optionId")],
       ["claimKey", vault("claimKey")],
       ["contractsWritten", vault("contractsWritten")],
-      ["contractsSold", vault("contractsSold")],
-      ["contractsRemaining", vault("contractsRemaining")],
       ["contractsAssigned", vault("contractsAssigned")],
       ["listingHash", vault("listingHash")],
       ["listingGrossUsdg", vault("listingGrossUsdg")],
       ["listingAmount", vault("listingAmount")],
       ["listingsThisCycle", vault("listingsThisCycle")],
+      ["conduitKey", vault("conduitKey")],
       ["accUsdgPerShare", vault("accUsdgPerShare")],
       ["totalUsdgDistributed", vault("totalUsdgDistributed")],
       ["usdgReservedForQueue", vault("usdgReservedForQueue")],
@@ -270,12 +258,19 @@ export function useVaultSnapshot() {
       ["valoremFeeAccepted", vault("valoremFeeAccepted")],
       ["depositCap", vault("depositCap")],
       ["canRedeemInstantly", vault("canRedeemInstantly")],
+      // maxDeposit ignores its argument and returns 0 whenever `deposit` would revert
+      // DepositsClosed, so a zero address is enough to ask "are deposits open at all".
+      ["maxDepositAny", vault("maxDeposit", ["0x0000000000000000000000000000000000000000"])],
       ["uiMultiplier", vault("uiMultiplier")],
       // spotUsdg() REVERTS when the feed is older than maxPriceAge. That is not a bug to hide:
-      // a stale feed is exactly the condition under which the vault refuses to write.
+      // a stale feed is exactly the condition under which the vault refuses to write or sell.
       ["spotUsdg", vault("spotUsdg")],
       ["feeRecipient", vault("feeRecipient")],
       ["policy", vault("policy")],
+      ["isStranded", vault("isStranded")],
+      ["strandGen", vault("strandGen")],
+      ["lastResolvedGen", vault("lastResolvedGen")],
+      ["strandedRemainingWad", vault("strandedRemainingWad")],
       [
         "assetHeld",
         VAULT ? { address: ASSET, abi: stockTokenAbi as unknown as Abi, functionName: "balanceOf", args: [VAULT] } : null,
@@ -285,12 +280,6 @@ export function useVaultSnapshot() {
         VAULT ? { address: USDG, abi: stockTokenAbi as unknown as Abi, functionName: "balanceOf", args: [VAULT] } : null,
       ],
       ["oraclePaused", { address: ASSET, abi: stockTokenAbi as unknown as Abi, functionName: "oraclePaused" }],
-      ["registryCycle", registry("cycle")],
-      ["isWritingOpen", registry("isWritingOpen")],
-      ["isCycleLive", registry("isCycleLive")],
-      ["writeDeadline", registry("writeDeadline")],
-      ["registryLotSize", registry("lotSize")],
-      ["registryCycleNumber", registry("cycleNumber")],
     ]);
   }, []);
 
@@ -303,31 +292,35 @@ export function useVaultSnapshot() {
   const data = useMemo<VaultSnapshot>(() => {
     const r = readerFor(index, query.data as readonly CallResult[] | undefined);
 
-    /**
-     * registry.cycle() has ONE output that is a struct with named components, so viem decodes it
-     * as a named object — not as a positional tuple. (A function with several separate outputs,
-     * like policy() below, does decode to an array.) Indexing this by position silently yields
-     * undefined, which turns every countdown into NaN and empties the ladder.
-     */
-    const cycleStruct = r.raw("registryCycle") as
-      | {
-          number: number;
-          exerciseTimestamp: number;
-          expiryTimestamp: number;
-          lotSize: bigint;
-          optionIds: readonly bigint[];
-        }
-      | undefined;
-
+    // policy() has six separate outputs, so viem decodes it as a positional tuple. (A function
+    // with ONE struct output would decode as a named object instead; indexing that by position
+    // silently yields undefined.)
     const policyTuple = r.raw("policy") as
       | readonly [number, number, number, number, number, bigint]
       | undefined;
+    const policy: PolicyBps | undefined = policyTuple
+      ? {
+          minOtmBps: Number(policyTuple[0]),
+          maxOtmBps: Number(policyTuple[1]),
+          minPremiumBps: Number(policyTuple[2]),
+          maxUtilizationBps: Number(policyTuple[3]),
+          protocolFeeBps: Number(policyTuple[4]),
+          maxContractsCap: policyTuple[5],
+        }
+      : undefined;
+
+    const totalAssets = big(r.raw("totalAssets"));
+    const contractsWritten = big(r.raw("contractsWritten"));
+    const capacity = capacityContracts(totalAssets, contractsWritten, policy);
+    const spotUsdg = big(r.raw("spotUsdg"));
+    const maxDepositAny = big(r.raw("maxDepositAny"));
 
     const base = {
       phase: num(r.raw("phase")),
-      contractsWritten: big(r.raw("contractsWritten")),
-      contractsSold: big(r.raw("contractsSold")),
+      claimKey: big(r.raw("claimKey")),
+      contractsWritten,
       contractsAssigned: big(r.raw("contractsAssigned")),
+      capacity,
     };
 
     return {
@@ -335,7 +328,7 @@ export function useVaultSnapshot() {
       symbol: str(r.raw("symbol")),
       name: str(r.raw("name")),
       totalSupply: big(r.raw("totalSupply")),
-      totalAssets: big(r.raw("totalAssets")),
+      totalAssets,
       idleAssets: big(r.raw("idleAssets")),
       lockedAssets: big(r.raw("lockedAssets")),
       reservedAssets: big(r.raw("reservedAssets")),
@@ -348,12 +341,11 @@ export function useVaultSnapshot() {
       cycleExpiryTs: num(r.raw("cycleExpiryTs")),
       cycleStrikeUsdg: big(r.raw("cycleStrikeUsdg")),
       optionId: big(r.raw("optionId")),
-      claimKey: big(r.raw("claimKey")),
-      contractsRemaining: big(r.raw("contractsRemaining")),
       listingHash: hex(r.raw("listingHash")),
       listingGrossUsdg: big(r.raw("listingGrossUsdg")),
       listingAmount: big(r.raw("listingAmount")),
       listingsThisCycle: num(r.raw("listingsThisCycle")),
+      conduitKey: hex(r.raw("conduitKey")),
       accUsdgPerShare: big(r.raw("accUsdgPerShare")),
       totalUsdgDistributed: big(r.raw("totalUsdgDistributed")),
       usdgReservedForQueue: big(r.raw("usdgReservedForQueue")),
@@ -364,28 +356,17 @@ export function useVaultSnapshot() {
       valoremFeeAccepted: bool(r.raw("valoremFeeAccepted")),
       depositCap: big(r.raw("depositCap")),
       canRedeemInstantly: bool(r.raw("canRedeemInstantly")),
+      depositsOpen: maxDepositAny === undefined ? undefined : maxDepositAny > 0n,
       uiMultiplier: big(r.raw("uiMultiplier")),
-      spotUsdg: big(r.raw("spotUsdg")),
+      spotUsdg,
       spotStale: r.reverted("spotUsdg"),
+      band: strikeBand(spotUsdg, policy),
       feeRecipient: hex(r.raw("feeRecipient")) as Address | undefined,
-      policy: policyTuple
-        ? {
-            minOtmBps: Number(policyTuple[0]),
-            maxOtmBps: Number(policyTuple[1]),
-            minPremiumBps: Number(policyTuple[2]),
-            maxUtilizationBps: Number(policyTuple[3]),
-            protocolFeeBps: Number(policyTuple[4]),
-            maxContractsCap: policyTuple[5],
-          }
-        : undefined,
-      registryCycleNumber: num(r.raw("registryCycleNumber")) ?? num(cycleStruct?.number),
-      registryExerciseTs: num(cycleStruct?.exerciseTimestamp),
-      registryExpiryTs: num(cycleStruct?.expiryTimestamp),
-      registryLotSize: big(r.raw("registryLotSize")) ?? big(cycleStruct?.lotSize),
-      registryOptionIds: cycleStruct?.optionIds,
-      isWritingOpen: bool(r.raw("isWritingOpen")),
-      isCycleLive: bool(r.raw("isCycleLive")),
-      writeDeadline: num(r.raw("writeDeadline")),
+      policy,
+      isStranded: bool(r.raw("isStranded")),
+      strandGen: big(r.raw("strandGen")),
+      lastResolvedGen: big(r.raw("lastResolvedGen")),
+      strandedRemainingWad: big(r.raw("strandedRemainingWad")),
       // A token that does not expose oraclePaused() makes the call revert; that is "not paused",
       // not "paused". Same posture the vault itself takes with its staticcall probe.
       oraclePaused: r.reverted("oraclePaused") ? false : bool(r.raw("oraclePaused")),
@@ -395,109 +376,73 @@ export function useVaultSnapshot() {
   return { data, isLoading: query.isLoading, isError: query.isError, error: query.error, refetch: query.refetch };
 }
 
-/* -------------------------------------------------------------------------- the 5 rungs --- */
+/* ------------------------------------------------------------------- this week's option --- */
 
-export type Rung = {
-  optionId: bigint;
-  /** Strike per contract, USDG base units (6 dec). */
-  strikeUsdg?: bigint;
+export type CycleOption = {
+  /** Valorem's tuple for the armed option id, read from the clearinghouse. */
+  underlyingAsset?: Address;
   underlyingAmount?: bigint;
+  exerciseAsset?: Address;
+  /** Strike per contract, USDG base units (6 dec). Valorem's `exerciseAmount`. */
+  strikeUsdg?: bigint;
   exerciseTs?: number;
   expiryTs?: number;
-  approved?: boolean;
-  /** True when this is the rung the vault wrote this week. */
-  picked: boolean;
   /** Distance above spot, in basis points. undefined when spot is unavailable. */
   otmBps?: number;
-  /** Inside the policy band, i.e. a rung the vault is allowed to write. */
-  inBand?: boolean;
+  /** The vault's own snapshot of the same tuple agrees with the clearinghouse's. */
+  agreesWithVault?: boolean;
 };
 
 /**
- * The Overcall ladder for the live cycle: one row per approved rung, ascending by strike.
- *
- * Strikes come from registry.strikePerContract(), cross-checked against
- * ValoremClear.option().exerciseAmount. They agree — the registry is derived from the option
- * series — but reading both means a mismatch shows up on screen instead of in a failed write.
+ * The option type the vault armed this cycle, read back from the clearinghouse. There is no
+ * registry and no ladder: the keeper creates one type a week (`clear.newOptionType`) and the
+ * vault checks its tuple at rollOpen (asset, USDG, one-token lot, window, both band bounds) and
+ * snapshots strike, exercise and expiry. Reading the tuple here too means a disagreement shows up
+ * on screen instead of being trusted from one side.
  */
-export function useLadder(snapshot: VaultSnapshot) {
-  const optionIds = snapshot.registryOptionIds;
-
-  const { contracts, index } = useMemo(() => {
-    const entries: Array<readonly [string, Call | null]> = [];
-    for (const id of optionIds ?? []) {
-      const key = id.toString();
-      entries.push([
-        `strike:${key}`,
-        { address: REGISTRY, abi: overcallRegistryAbi as unknown as Abi, functionName: "strikePerContract", args: [id] },
-      ]);
-      entries.push([
-        `approved:${key}`,
-        { address: REGISTRY, abi: overcallRegistryAbi as unknown as Abi, functionName: "isApproved", args: [id] },
-      ]);
-      entries.push([
-        `option:${key}`,
-        { address: CLEARINGHOUSE, abi: valoremClearAbi as unknown as Abi, functionName: "option", args: [id] },
-      ]);
-    }
-    return buildBatch(entries);
-  }, [optionIds]);
+export function useCycleOption(snapshot: VaultSnapshot) {
+  const optionId = snapshot.optionId;
+  const enabled = optionId !== undefined && optionId !== 0n;
 
   const query = useReadContracts({
-    contracts,
+    contracts: enabled
+      ? [{ address: CLEARINGHOUSE, abi: valoremClearAbi as unknown as Abi, functionName: "option", args: [optionId] }]
+      : [],
     allowFailure: true,
-    query: { enabled: contracts.length > 0, refetchInterval: 60_000, staleTime: 30_000 },
+    query: { enabled, refetchInterval: 60_000, staleTime: 30_000 },
   });
 
-  const rungs = useMemo<Rung[]>(() => {
-    const r = readerFor(index, query.data as readonly CallResult[] | undefined);
+  const data = useMemo<CycleOption | undefined>(() => {
+    const entry = (query.data as readonly CallResult[] | undefined)?.[0];
+    if (!entry || entry.status !== "success") return undefined;
+    const option = entry.result as {
+      underlyingAsset: Address;
+      underlyingAmount: bigint;
+      exerciseAsset: Address;
+      exerciseAmount: bigint;
+      exerciseTimestamp: number;
+      expiryTimestamp: number;
+    };
+    const strikeUsdg = option.exerciseAmount;
     const spot = snapshot.spotUsdg;
-    const policy = snapshot.policy;
+    const exerciseTs = Number(option.exerciseTimestamp);
+    const expiryTs = Number(option.expiryTimestamp);
+    return {
+      underlyingAsset: option.underlyingAsset,
+      underlyingAmount: option.underlyingAmount,
+      exerciseAsset: option.exerciseAsset,
+      strikeUsdg,
+      exerciseTs,
+      expiryTs,
+      otmBps: spot !== undefined && spot > 0n ? Number(((strikeUsdg - spot) * 10_000n) / spot) : undefined,
+      agreesWithVault:
+        snapshot.cycleStrikeUsdg === undefined || snapshot.cycleExerciseTs === undefined || snapshot.cycleExpiryTs === undefined
+          ? undefined
+          : snapshot.cycleStrikeUsdg === strikeUsdg && snapshot.cycleExerciseTs === exerciseTs && snapshot.cycleExpiryTs === expiryTs,
+    };
+  }, [query.data, snapshot.spotUsdg, snapshot.cycleStrikeUsdg, snapshot.cycleExerciseTs, snapshot.cycleExpiryTs]);
 
-    const rows: Rung[] = (optionIds ?? []).map((id) => {
-      const key = id.toString();
-      const option = r.raw(`option:${key}`) as
-        | {
-            underlyingAsset: Address;
-            underlyingAmount: bigint;
-            exerciseAsset: Address;
-            exerciseAmount: bigint;
-            exerciseTimestamp: number;
-            expiryTimestamp: number;
-          }
-        | undefined;
-
-      const strikeUsdg = big(r.raw(`strike:${key}`)) ?? option?.exerciseAmount;
-      const otmBps =
-        strikeUsdg !== undefined && spot !== undefined && spot > 0n
-          ? Number(((strikeUsdg - spot) * 10_000n) / spot)
-          : undefined;
-
-      return {
-        optionId: id,
-        strikeUsdg,
-        underlyingAmount: option?.underlyingAmount,
-        exerciseTs: option ? Number(option.exerciseTimestamp) : undefined,
-        expiryTs: option ? Number(option.expiryTimestamp) : undefined,
-        approved: bool(r.raw(`approved:${key}`)),
-        picked: snapshot.optionId !== undefined && snapshot.optionId !== 0n && snapshot.optionId === id,
-        otmBps,
-        inBand:
-          otmBps === undefined || !policy
-            ? undefined
-            : otmBps >= policy.minOtmBps && otmBps <= policy.maxOtmBps,
-      };
-    });
-
-    rows.sort((a, b) => {
-      const x = a.strikeUsdg ?? 0n;
-      const y = b.strikeUsdg ?? 0n;
-      return x < y ? -1 : x > y ? 1 : 0;
-    });
-    return rows;
-  }, [index, query.data, optionIds, snapshot.spotUsdg, snapshot.policy, snapshot.optionId]);
-
-  return { rungs, isLoading: query.isLoading };
+  return { data, isLoading: query.isLoading };
 }
 
 /* ------------------------------------------------------------------------ account state --- */
@@ -511,13 +456,21 @@ export type AccountPosition = {
   /** Assets those shares are worth right now at the raw share price. */
   sharesValueAssets?: bigint;
   claimableUsdg?: bigint;
-  /** Non-zero only once the queued epoch has settled. */
+  /** Non-zero only once the queued epoch has settled (and includes a resolved stranded share). */
   pendingAssets?: bigint;
   pendingUsdg?: bigint;
   assetBalance?: bigint;
   assetAllowance?: bigint;
   usdgBalance?: bigint;
   maxDeposit?: bigint;
+  /** WAD share of a stranded claim staged against this account by a settled queue entry. */
+  owedStrandWad?: bigint;
+  owedStrandGen?: bigint;
+  /** The queued epoch's own WAD share of a stranded claim (0 for an epoch that settled while flat). */
+  epochStrandWad?: bigint;
+  epochStrandGen?: bigint;
+  /** Shares still in the queued epoch, the denominator of this account's slice of it. */
+  epochSharesRemaining?: bigint;
 };
 
 export function useAccountPosition(address: Address | undefined) {
@@ -539,6 +492,8 @@ export function useAccountPosition(address: Address | undefined) {
       ["claimable", vault("claimableUsdg", [address])],
       ["pending", vault("previewCompleteRedeem", [address])],
       ["maxDeposit", vault("maxDeposit", [address])],
+      ["owedStrandWad", vault("owedStrandWad", [address])],
+      ["owedStrandGen", vault("owedStrandGen", [address])],
       [
         "assetBalance",
         { address: ASSET, abi: stockTokenAbi as unknown as Abi, functionName: "balanceOf", args: [address] },
@@ -565,16 +520,26 @@ export function useAccountPosition(address: Address | undefined) {
     query: { enabled: contracts.length > 0, refetchInterval: REFRESH_MS, staleTime: 5_000 },
   });
 
-  const balance = useMemo(() => {
+  const { balance, queuedEpoch, queued } = useMemo(() => {
     const r = readerFor(index, query.data as readonly CallResult[] | undefined);
-    return big(r.raw("balance"));
+    return { balance: big(r.raw("balance")), queuedEpoch: big(r.raw("queuedEpoch")), queued: big(r.raw("queuedShares")) ?? 0n };
   }, [index, query.data]);
 
-  // convertToAssets needs the balance, so it is a second, dependent read rather than a guess.
-  const convert = useReadContracts({
+  // convertToAssets needs the balance, and the queued epoch's strand share needs the epoch, so
+  // these are a second, dependent read rather than a guess.
+  const dependent = useReadContracts({
     contracts:
       VAULT && balance !== undefined
-        ? [{ address: VAULT, abi: vaultAbi as unknown as Abi, functionName: "convertToAssets", args: [balance] }]
+        ? [
+            { address: VAULT, abi: vaultAbi as unknown as Abi, functionName: "convertToAssets", args: [balance] },
+            ...(queued > 0n && queuedEpoch !== undefined
+              ? [
+                  { address: VAULT, abi: vaultAbi as unknown as Abi, functionName: "epochStrandWad", args: [queuedEpoch] },
+                  { address: VAULT, abi: vaultAbi as unknown as Abi, functionName: "epochStrandGen", args: [queuedEpoch] },
+                  { address: VAULT, abi: vaultAbi as unknown as Abi, functionName: "epochs", args: [queuedEpoch] },
+                ]
+              : []),
+          ]
         : [],
     allowFailure: true,
     query: { enabled: VAULT !== undefined && balance !== undefined, staleTime: 5_000 },
@@ -583,18 +548,19 @@ export function useAccountPosition(address: Address | undefined) {
   const data = useMemo<AccountPosition>(() => {
     const r = readerFor(index, query.data as readonly CallResult[] | undefined);
     const pending = r.raw("pending") as readonly [bigint, bigint] | undefined;
-    const queued = big(r.raw("queuedShares")) ?? 0n;
     const total = big(r.raw("balance"));
-    const convertResult = (convert.data as readonly CallResult[] | undefined)?.[0];
+    const dep = dependent.data as readonly CallResult[] | undefined;
+    const ok = (i: number): unknown => (dep?.[i]?.status === "success" ? dep[i]!.result : undefined);
+    // epochs(id) has three named outputs and decodes positionally.
+    const epoch = ok(3) as readonly [bigint, bigint, bigint] | undefined;
     return {
       ready: query.data !== undefined,
       // The vault escrows queued shares by transferring them to itself, so balanceOf already
       // excludes them. Reported as-is: this is the number the user can still act on.
       shares: total,
       queuedShares: queued,
-      queuedEpoch: big(r.raw("queuedEpoch")),
-      sharesValueAssets:
-        convertResult && convertResult.status === "success" ? big(convertResult.result) : undefined,
+      queuedEpoch,
+      sharesValueAssets: big(ok(0)),
       claimableUsdg: big(r.raw("claimable")),
       pendingAssets: pending?.[0],
       pendingUsdg: pending?.[1],
@@ -602,15 +568,20 @@ export function useAccountPosition(address: Address | undefined) {
       assetAllowance: big(r.raw("assetAllowance")),
       usdgBalance: big(r.raw("usdgBalance")),
       maxDeposit: big(r.raw("maxDeposit")),
+      owedStrandWad: big(r.raw("owedStrandWad")),
+      owedStrandGen: big(r.raw("owedStrandGen")),
+      epochStrandWad: big(ok(1)),
+      epochStrandGen: big(ok(2)),
+      epochSharesRemaining: epoch?.[0],
     };
-  }, [index, query.data, convert.data]);
+  }, [index, query.data, dependent.data, queued, queuedEpoch]);
 
   return {
     data,
     isLoading: query.isLoading,
     refetch: async () => {
       await query.refetch();
-      await convert.refetch();
+      await dependent.refetch();
     },
   };
 }
@@ -691,45 +662,24 @@ export function useMounted(): boolean {
 /**
  * Where the vault's collateral sits right now, in RAW asset base units.
  *
- * The per-contract collateral is NOT a constant. `rollOpen` locks `n * cycle.lotSize` and the
- * lot size is a registry field the owner can change between cycles (`LotSizeSet`), so
- * multiplying a contract count by a hardcoded 1e18 would misreport the split the moment
- * Overcall moves it. Derive it from what the vault actually locked — lockedAssets /
- * contractsWritten — and fall back to the registry's live lotSize, then to the launch lot size,
- * only when there is nothing written to derive from.
+ *   idle     — free collateral, the base every fill is sized against.
+ *   sold     — locked behind calls a buyer owns. Under write on fill this is ALL the locked
+ *              collateral: nothing is written until it is sold, so there is no "listed but
+ *              unsold" slice, by construction.
+ *   assigned — already taken at the strike.
+ *
+ * One contract is exactly one lot (Policy.LOT, compiled in and checked at rollOpen), so the
+ * assigned figure is `contractsAssigned × 1e18`; the sold figure is what Valorem still holds for
+ * the claim (`lockedAssets`), which already excludes assigned lots.
  */
 export function collateralSplit(v: VaultSnapshot): {
   idle?: bigint;
-  listed: bigint;
   sold: bigint;
   assigned: bigint;
 } {
-  const written = v.contractsWritten ?? 0n;
-  const locked = v.lockedAssets ?? 0n;
-  const registryLot = v.registryLotSize !== undefined && v.registryLotSize > 0n ? v.registryLotSize : LOT_SIZE;
-  // lockedAssets already excludes assigned lots, so divide by the contracts still behind the
-  // claim. Dividing by `written` after an exercise under-reports every lot (11e18 / 14, not 1e18).
-  const assignedCount = v.contractsAssigned ?? 0n;
-  const unassigned = written > assignedCount ? written - assignedCount : 0n;
-  const perContract = unassigned > 0n && locked > 0n ? locked / unassigned : registryLot;
-
-  const soldRaw = (v.contractsSold ?? 0n) * perContract;
-  // Clamp: contractsSold is derived from the ERC-1155 balance and locked collateral is the
-  // authority, so a rounding edge must never paint more "sold" than the vault has locked.
-  const sold = soldRaw > locked ? locked : soldRaw;
   return {
     idle: v.idleAssets,
-    listed: locked > sold ? locked - sold : 0n,
-    sold,
-    assigned: (v.contractsAssigned ?? 0n) * perContract,
+    sold: v.lockedAssets ?? 0n,
+    assigned: (v.contractsAssigned ?? 0n) * LOT_SIZE,
   };
-}
-
-/** Contracts the vault could still write, from idle assets and the utilization cap. */
-export function writableContracts(snapshot: VaultSnapshot): bigint | undefined {
-  if (snapshot.idleAssets === undefined || !snapshot.policy) return undefined;
-  const byUtilization =
-    (snapshot.idleAssets * BigInt(snapshot.policy.maxUtilizationBps)) / 10_000n / LOT_SIZE;
-  const cap = snapshot.policy.maxContractsCap;
-  return byUtilization < cap ? byUtilization : cap;
 }

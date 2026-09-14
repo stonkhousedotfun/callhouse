@@ -5,8 +5,9 @@ import { getAddress, type Address, type Hex } from "viem";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { fetchKeeperOrderBook } from "./api";
-import { CLEARINGHOUSE, OVERCALL_FEE_RECIPIENT, SEAPORT, USDG } from "./contracts";
+import { CLEARINGHOUSE, SEAPORT, USDG } from "./contracts";
 import {
+  EMPTY_SIGNATURE,
   KEEPER_MAX_ORDERS,
   KEEPER_REASONS,
   NOT_CONFIGURED,
@@ -29,8 +30,8 @@ import {
   type OrderComponentsStruct,
   type VaultListingSlot,
 } from "./keeperOrders";
+import { REASONS, checkListingIsOurs } from "./listing";
 import type { SeaportFillStatus } from "./seaportOrder";
-import { REASONS, checkListingIsOurs } from "./overcall";
 
 /**
  * The keeper is not trusted. One good /orders entry, as keeper/src/health.ts serves it, then one
@@ -42,15 +43,17 @@ import { REASONS, checkListingIsOurs } from "./overcall";
  * (tests/acceptance/fork.acceptance.ts) asserts that derivation equals Seaport.getOrderHash on
  * chain.
  *
- * The order is the lib/overcall.test.ts reference listing: the vault offers 20 contracts at
- * 4.000000 USDG, 3.800000 to the vault and 0.200000 to Overcall per contract. Seaport's counter
- * for the vault is 7, not 0, so a check that skipped the restore would hash the wrong order.
+ * The order is the lib/listing.test.ts reference listing: the vault (offerer and zone) offers 20
+ * contracts of this cycle's option id for ONE leg of 80.000000 USDG to itself, PARTIAL_RESTRICTED,
+ * empty signature. Seaport's counter for the vault is 7, not 0, so a check that skipped the
+ * restore would hash the wrong order.
  */
 const VAULT_T = getAddress("0xabcdefabcdefabcdefabcdefabcdefabcdefabcd");
 const STRANGER = getAddress("0x2222222222222222222222222222222222222222");
 const OPTION_ID = "56885395977254369119998982131173877604217583767740146085872832926902011297792";
 const SALT = "95941992777576660739888578361827826050802484697670100586800480598437555708740";
 const ZERO32 = `0x${"0".repeat(64)}` as Hex;
+/** What an older keeper served: 65 bytes of nothing. Accepted, and never carried. */
 const PLACEHOLDER_SIGNATURE = `0x${"11".repeat(32)}${"22".repeat(32)}1b` as Hex;
 const COUNTER = 7n;
 const NOW = 1_789_000_000;
@@ -69,26 +72,18 @@ type Parameters = KeeperOrderJson["parameters"];
 function goodParameters(): Parameters {
   return {
     offerer: VAULT_T,
-    zone: "0x0000000000000000000000000000000000000000",
+    zone: VAULT_T,
     offer: [{ itemType: 3, token: CLEARINGHOUSE, identifierOrCriteria: OPTION_ID, startAmount: "20", endAmount: "20" }],
     consideration: [
-      { itemType: 1, token: USDG, identifierOrCriteria: "0", startAmount: "76000000", endAmount: "76000000", recipient: VAULT_T },
-      {
-        itemType: 1,
-        token: USDG,
-        identifierOrCriteria: "0",
-        startAmount: "4000000",
-        endAmount: "4000000",
-        recipient: OVERCALL_FEE_RECIPIENT,
-      },
+      { itemType: 1, token: USDG, identifierOrCriteria: "0", startAmount: "80000000", endAmount: "80000000", recipient: VAULT_T },
     ],
-    orderType: 1,
+    orderType: 3,
     startTime: "0",
     endTime: END,
     zoneHash: ZERO32,
     salt: SALT,
     conduitKey: ZERO32,
-    totalOriginalConsiderationItems: "2",
+    totalOriginalConsiderationItems: "1",
   };
 }
 
@@ -107,10 +102,9 @@ function keeperEntry(parameters: Parameters = goodParameters(), counter: bigint 
     unitPrice6: "4000000",
     grossUsdg6: "80000000",
     endTime: Number(parameters.endTime),
-    status: "post_failed",
-    bookStatus: "rejected: detail from the book the keeper posted to",
+    status: "live",
     parameters,
-    signature: PLACEHOLDER_SIGNATURE,
+    signature: "0x",
   };
 }
 
@@ -151,6 +145,7 @@ function fakeChain(overrides: {
           listingAmount: 20n,
           listingGrossUsdg: 80_000_000n,
           optionId: BigInt(OPTION_ID),
+          conduitKey: ZERO32,
           ...overrides.slot,
         },
         counters: query.offerers.map((o) => (o === overrides.failCounterFor ? undefined : (counters[o] ?? 0n))),
@@ -162,7 +157,7 @@ function fakeChain(overrides: {
     async getOrderHashes(components) {
       calls.getOrderHashes.push([...components]);
       if (overrides.failOrderHash) throw new Error("rpc down");
-      return components.map((c) => (overrides.skewOrderHash ? ZERO32.replace(/0$/, "1") as Hex : seaportOrderHash(c)));
+      return components.map((c) => (overrides.skewOrderHash ? (ZERO32.replace(/0$/, "1") as Hex) : seaportOrderHash(c)));
     },
   };
   return { reader, calls };
@@ -213,7 +208,7 @@ describe("verifyKeeperOrders", () => {
     expect(hashOf(goodParameters(), 0n)).not.toBe(AUTHORISED);
     expect(row.orderHash).toBe(AUTHORISED);
 
-    // The row is a book row the page's own check accepts, with figures from the components.
+    // The row is one the page's own check accepts, with figures from the components.
     const slot = (await reader.readState({ offerers: [], orderHashes: [] })).vault;
     const pageCheck = checkListingIsOurs(
       row,
@@ -223,6 +218,7 @@ describe("verifyKeeperOrders", () => {
         amount: slot.listingAmount,
         grossUsdg: slot.listingGrossUsdg,
         optionId: slot.optionId,
+        conduitKey: slot.conduitKey,
       },
       NOW,
     );
@@ -236,8 +232,11 @@ describe("verifyKeeperOrders", () => {
       unitPrice6: "4000000",
       totalPrice6: "80000000",
       status: "open",
-      signature: PLACEHOLDER_SIGNATURE,
+      signature: EMPTY_SIGNATURE,
     });
+    expect(row.components.orderType).toBe(3);
+    expect(row.components.zone).toBe(VAULT_T);
+    expect(row.components.consideration).toHaveLength(1);
 
     // Nothing else the keeper said is passed on.
     expect(Object.keys(row).sort()).toEqual(
@@ -259,8 +258,23 @@ describe("verifyKeeperOrders", () => {
         "unitPrice6",
       ].sort(),
     );
-    expect(JSON.stringify(row)).not.toContain("detail from the book");
+    expect(JSON.stringify(row)).not.toContain("grossUsdg6");
     expect(JSON.stringify(row)).not.toContain("totalOriginalConsiderationItems");
+  });
+
+  it("never carries the keeper's signature bytes: the row's signature is empty, whatever was served", async () => {
+    // An older keeper served a 65-byte placeholder. It is accepted (well-formed) and dropped: the
+    // vault validated the order on chain and Seaport skips verification, so `0x` is the only
+    // honest value, and the fill sends `0x` regardless.
+    const legacy = { ...keeperEntry(), signature: PLACEHOLDER_SIGNATURE };
+    expect(isKeeperOrder(legacy)).toBe(true);
+    const { orders } = await verifyKeeperOrders([legacy], fakeChain().reader, CONFIG, NOW);
+    expect(orders[0]!.signature).toBe("0x");
+    // A keeper that sends no signature field at all is fine too.
+    const { signature: _dropped, ...withoutSignature } = keeperEntry();
+    expect(isKeeperOrder(withoutSignature)).toBe(true);
+    const { orders: also } = await verifyKeeperOrders([withoutSignature], fakeChain().reader, CONFIG, NOW);
+    expect(also[0]!.signature).toBe("0x");
   });
 
   it("reads remaining contracts from Seaport's fill fraction, not from the keeper", async () => {
@@ -346,6 +360,31 @@ describe("verifyKeeperOrders", () => {
     expect(reasons).toContain(REASONS.seller);
   });
 
+  it("rejects a zone that is not the vault and an order type that is not PARTIAL_RESTRICTED", async () => {
+    // The pre-redesign shape: zero zone, PARTIAL_OPEN. Under write on fill nothing would be written.
+    const open = goodParameters();
+    open.zone = "0x0000000000000000000000000000000000000000";
+    open.orderType = 1;
+    const reasons = await reasonsFor(claimingAuthorised(open));
+    expect(reasons).toContain(REASONS.zone);
+    expect(reasons).toContain(REASONS.orderType);
+  });
+
+  it("rejects a conduit key that is not the vault's, and accepts the vault's own", async () => {
+    const withConduit = goodParameters();
+    withConduit.conduitKey = `0x${"ab".repeat(32)}`;
+    expect(await reasonsFor(claimingAuthorised(withConduit))).toContain(REASONS.conduit);
+    // A vault deployed with a conduit key: the slot carries it, the order must too.
+    const hash = hashOf(withConduit, COUNTER);
+    const { orders } = await verifyKeeperOrders(
+      [keeperEntry(withConduit)],
+      fakeChain({ slot: { listingHash: hash, conduitKey: `0x${"ab".repeat(32)}` } }).reader,
+      CONFIG,
+      NOW,
+    );
+    expect(orders).toHaveLength(1);
+  });
+
   it("reports an expired order as closed", async () => {
     const expired = goodParameters();
     expired.endTime = String(NOW);
@@ -364,7 +403,7 @@ describe("verifyKeeperOrders", () => {
     expect((await stateOf(keeperEntry(), fakeChain({ slot: { phase } }).reader)).state).toBe("notListed");
   });
 
-  it("rejects a swapped premium recipient even when the keeper names the authorised hash", async () => {
+  it("rejects a swapped payment recipient even when the keeper names the authorised hash", async () => {
     const tampered = goodParameters();
     tampered.consideration[0]!.recipient = STRANGER;
     const reasons = await reasonsFor(claimingAuthorised(tampered));
@@ -373,29 +412,23 @@ describe("verifyKeeperOrders", () => {
     expect(reasons).toContain(REASONS.writerRecipient);
   });
 
-  it("rejects inflated payment legs even when the keeper names the authorised hash", async () => {
+  it("rejects an inflated payment leg even when the keeper names the authorised hash", async () => {
     const tampered = goodParameters();
-    tampered.consideration[0]!.startAmount = "760000000";
-    tampered.consideration[0]!.endAmount = "760000000";
-    tampered.consideration[1]!.startAmount = "40000000";
-    tampered.consideration[1]!.endAmount = "40000000";
+    tampered.consideration[0]!.startAmount = "800000000";
+    tampered.consideration[0]!.endAmount = "800000000";
     const reasons = await reasonsFor(claimingAuthorised(tampered));
     expect(reasons).toContain(REASONS.hashMismatch);
     expect(reasons).toContain(REASONS.grossMismatch);
   });
 
-  it("rejects a skimmed fee leg, a third leg, and a mismatched item count", async () => {
-    const skim = goodParameters();
-    skim.consideration[1]!.recipient = STRANGER;
-    expect(await reasonsFor(claimingAuthorised(skim))).toContain(REASONS.feeRecipient);
-
+  it("rejects a second payment leg and a mismatched item count", async () => {
     const extra = goodParameters();
-    extra.consideration.push({ ...extra.consideration[1]!, recipient: STRANGER });
-    extra.totalOriginalConsiderationItems = "3";
+    extra.consideration.push({ ...extra.consideration[0]!, startAmount: "4000000", endAmount: "4000000", recipient: STRANGER });
+    extra.totalOriginalConsiderationItems = "2";
     expect(await reasonsFor(claimingAuthorised(extra))).toContain(REASONS.considerationShape);
 
     const miscount = goodParameters();
-    miscount.totalOriginalConsiderationItems = "1";
+    miscount.totalOriginalConsiderationItems = "2";
     expect(await reasonsFor(keeperEntry(miscount))).toEqual([KEEPER_REASONS.itemCount]);
   });
 
@@ -480,6 +513,7 @@ describe("verifyKeeperOrders", () => {
   it("treats address case as meaning nothing, and ignores a counter the keeper sends", async () => {
     const lower = goodParameters();
     lower.offerer = VAULT_T.toLowerCase() as Address;
+    lower.zone = VAULT_T.toLowerCase() as Address;
     lower.consideration[0]!.recipient = VAULT_T.toUpperCase().replace("0X", "0x") as Address;
     const entry = { ...keeperEntry(lower), parameters: { ...lower, counter: "999" } };
     expect(isKeeperOrder(entry)).toBe(true);
@@ -952,7 +986,7 @@ describe("fetchKeeperOrderBook (the browser's client)", () => {
         rejected: [],
         closed: [],
         unchecked: [],
-        error: "The fallback route did not answer.",
+        error: "The order feed route did not answer.",
       });
       expect(JSON.stringify(book)).not.toMatch(/aborted|Failed to fetch/);
     }
@@ -992,6 +1026,6 @@ describe("fetchKeeperOrderBook (the browser's client)", () => {
     );
     expect((await fetchKeeperOrderBook()).error).toBe(VAULT_UNREADABLE);
     vi.stubGlobal("fetch", async () => new Response("<html>bad gateway</html>", { status: 502 }));
-    expect((await fetchKeeperOrderBook()).error).toBe("The fallback route answered HTTP 502.");
+    expect((await fetchKeeperOrderBook()).error).toBe("The order feed route answered HTTP 502.");
   });
 });

@@ -1,9 +1,9 @@
 import type { Abi, Address, Hex, PublicClient } from "viem";
 
-import type { OvercallListing as BookRow, OrderComponentsJson as BookComponents } from "./api";
 import { seaportAbi } from "./abi/seaport";
 import { vaultAbi } from "./abi/vault";
-import { REASONS, checkListingIsOurs, isOrderComponents } from "./overcall";
+import { ZERO_CONDUIT_KEY } from "./contracts";
+import { REASONS, checkListingIsOurs, isOrderComponents, type ListingRow, type OrderComponentsJson } from "./listing";
 import {
   addr,
   componentsStruct,
@@ -17,19 +17,19 @@ import {
 export { componentsStruct, seaportOrderHash, type OrderComponentsStruct } from "./seaportOrder";
 
 /**
- * The keeper fallback: the vault's own listing, read from the keeper's GET /orders, checked
- * against the chain on the server, and handed to the cycle page in the exact row shape the
- * Overcall book uses, so the page fills it through the one fill path it already has.
+ * The order feed: the vault's own listing, read from the keeper's GET /orders, checked against
+ * the chain on the server, and handed to the cycle page as a listing row it can fill.
  *
- * WHY: the vault authorises one Seaport order by hash (EIP-1271). The keeper posts it to
- * Overcall's book, and if Overcall's validator refuses it (open question L-04) the book never
- * shows it and nobody can buy the week. The keeper keeps serving the order at /orders; this file
- * is how app.callhouse.finance reads it.
+ * WHY: the vault authorises one Seaport order by hash (`approveListing` validates it on Seaport
+ * and records its hash, size, gross and option id). The chain carries those four facts but not
+ * the salt, the times or the counter a fill has to send, so the parameters have to come from the
+ * process that built the order: the keeper, at /orders. This app's fill page is the ONLY venue
+ * for the vault's calls, and this file is how it reads them.
  *
  * THE KEEPER IS NOT TRUSTED. It is our process, but it is a hot-key host on a network, and a
  * wrong or tampered order reaching the fill button would spend a buyer's USDG. So nothing it
- * says is carried to the page except the Seaport OrderParameters and the signature bytes, and
- * those only after every one of these holds on chain:
+ * says is carried to the page except the Seaport OrderParameters, and those only after every
+ * one of these holds on chain:
  *
  *   - the order the keeper names is the vault's listingHash(). Any other order it serves is an
  *     earlier or superseded listing (a counter bump retires one without cancelling it, and the
@@ -41,13 +41,18 @@ export { componentsStruct, seaportOrderHash, type OrderComponentsStruct } from "
  *   - the order hash is derived locally (lib/seaportOrder.ts) AND read from Seaport.getOrderHash,
  *     and the two must agree. The keeper's own `orderHash` string must equal it, and the row the
  *     page receives carries that value;
- *   - the offerer is the configured vault, the end time has not passed, and the payment legs are
- *     exactly the vault leg plus Overcall's 5% leg at the contract count and gross the vault
- *     recorded (checkListingIsOurs, the same function the page runs on Overcall's rows);
+ *   - the order is the vault's in every field a fill spends against: offerer AND zone are the
+ *     vault, PARTIAL_RESTRICTED, one ERC-1155 offer of this cycle's option id, ONE USDG leg to the
+ *     vault at the count and gross the vault recorded, the vault's conduit key, no zone hash, not
+ *     past its end time (checkListingIsOurs, the same function the page runs on the row);
  *   - the vault's phase is Listed and Seaport does not report the order cancelled or sold out.
  *
+ * The signature the keeper serves is NOT carried. The vault pre-validates the order on Seaport
+ * and has no signing key, so an empty signature is the only honest one; the row's `signature`
+ * is `0x` whatever the feed sent (a legacy 64/65-byte placeholder is accepted and dropped).
+ *
  * FOUR OUTCOMES, so an alarm is only raised for what deserves one:
- *   orders     the vault's live, authorised listing, as a book row.
+ *   orders     the vault's live, authorised listing, as a row.
  *   rejected   the keeper served something that claims the authorised hash and is not that
  *              order, or does not parse. An integrity failure: logged as a warning.
  *   closed     a lifecycle state, not a fault: sold out, cancelled, not Listed, past its end
@@ -56,11 +61,11 @@ export { componentsStruct, seaportOrderHash, type OrderComponentsStruct } from "
  *
  * The chain state (the vault's slot, counters, statuses) is read in ONE eth_call, so one block;
  * Seaport's getOrderHash, a pure function, is a second. The route bounds both with a deadline.
- * The page runs checkListingIsOurs again on what it receives, so a bug here still does not
- * produce a fill button on its own.
+ * The page runs checkListingIsOurs again on what it receives, and simulates the fill before
+ * enabling the button, so a bug here still does not produce a live fill button on its own.
  *
  * DELIBERATELY ABSENT: any URL from the request, any header or field the keeper sent beyond the
- * parameters and signature, a redirect follower, a clock (`nowSeconds` is passed in), React.
+ * parameters, a redirect follower, a clock (`nowSeconds` is passed in), React.
  */
 
 /*//////////////////////////////////////////////////////////////
@@ -90,15 +95,18 @@ export const PHASE_LISTED = 1;
 export type KeeperOrderJson = {
   orderHash: string;
   chainId?: number;
-  parameters: Omit<BookComponents, "counter"> & { totalOriginalConsiderationItems: string };
-  signature: string;
+  parameters: Omit<OrderComponentsJson, "counter"> & { totalOriginalConsiderationItems: string };
+  signature?: string;
 };
 
 const DECIMAL = /^[0-9]+$/;
 const BYTES32 = /^0x[0-9a-fA-F]{64}$/;
-/** Seaport accepts any bytes, and the vault ignores them, but Overcall's schema and the keeper
- *  both use 64 or 65 bytes. An empty signature is also fillable for an order validated on chain. */
+/** Empty (the honest value for a pre-validated order), or the 64/65-byte placeholder an older
+ *  keeper served. Anything else is a malformed row; whatever passes is dropped, not carried. */
 const SIGNATURE = /^0x(?:[0-9a-fA-F]{128}|[0-9a-fA-F]{130})?$/;
+
+/** The one signature a row ever carries. */
+export const EMPTY_SIGNATURE: Hex = "0x";
 
 function isRecord(x: unknown): x is Record<string, unknown> {
   return typeof x === "object" && x !== null && !Array.isArray(x);
@@ -110,7 +118,7 @@ function isRecord(x: unknown): x is Record<string, unknown> {
 export function isKeeperOrder(x: unknown): x is KeeperOrderJson {
   if (!isRecord(x) || !isRecord(x.parameters)) return false;
   if (typeof x.orderHash !== "string" || !BYTES32.test(x.orderHash)) return false;
-  if (typeof x.signature !== "string" || !SIGNATURE.test(x.signature)) return false;
+  if (x.signature !== undefined && (typeof x.signature !== "string" || !SIGNATURE.test(x.signature))) return false;
   if (x.chainId !== undefined && !(typeof x.chainId === "number" && Number.isInteger(x.chainId) && x.chainId > 0)) {
     return false;
   }
@@ -131,7 +139,7 @@ export function isKeeperOrder(x: unknown): x is KeeperOrderJson {
  * page's fill path reads. `totalOriginalConsiderationItems` is dropped: the fill path rebuilds it
  * from the consideration length, which the caller has already asserted it equals.
  */
-export function restoreComponents(parameters: KeeperOrderJson["parameters"], counter: bigint): BookComponents {
+export function restoreComponents(parameters: KeeperOrderJson["parameters"], counter: bigint): OrderComponentsJson {
   return {
     offerer: addr(parameters.offerer),
     zone: addr(parameters.zone),
@@ -170,6 +178,8 @@ export type VaultListingSlot = {
   listingAmount: bigint;
   listingGrossUsdg: bigint;
   optionId: bigint;
+  /** `vault.conduitKey()`: zero at deploy, read rather than assumed. */
+  conduitKey: Hex;
 };
 
 /** Chain reads the check needs. The route builds one from the app's server-side viem client;
@@ -200,7 +210,7 @@ export type KeeperCheckConfig = {
 };
 
 /** Reasons specific to the keeper path, as the page and the server log print them. The
- *  field-by-field reasons come from REASONS in lib/overcall.ts. */
+ *  field-by-field reasons come from REASONS in lib/listing.ts. */
 export const KEEPER_REASONS = {
   malformed: "The keeper served an order whose fields do not parse as Seaport order parameters.",
   itemCount: "The keeper's totalOriginalConsiderationItems is not the number of payment legs it served.",
@@ -230,7 +240,7 @@ export type KeeperOrderIssue = {
 export type ClosedKeeperOrder = { orderHash: Hex; state: KeeperOrderState };
 
 export type VerifiedKeeperOrders = {
-  orders: BookRow[];
+  orders: ListingRow[];
   rejected: KeeperOrderIssue[];
   closed: ClosedKeeperOrder[];
   unchecked: KeeperOrderIssue[];
@@ -286,7 +296,7 @@ export async function verifyKeeperOrders(
   type Candidate = {
     entry: KeeperOrderJson;
     claimed: Hex;
-    components: BookComponents;
+    components: OrderComponentsJson;
     struct: OrderComponentsStruct;
     localHash: Hex;
     status: SeaportFillStatus;
@@ -351,6 +361,7 @@ export async function verifyKeeperOrders(
         amount: state.vault.listingAmount,
         grossUsdg: state.vault.listingGrossUsdg,
         optionId: state.vault.optionId,
+        conduitKey: state.vault.conduitKey,
       },
       nowSeconds,
     );
@@ -371,7 +382,8 @@ export async function verifyKeeperOrders(
     const total = BigInt(components.offer[0]!.startAmount);
     const remaining = seaportRemaining(total, status) ?? total;
     if (remaining === 0n) return void out.closed.push({ orderHash: claimed, state: "soldOut" });
-    const gross = BigInt(components.consideration[0]!.startAmount) + BigInt(components.consideration[1]!.startAmount);
+    // ONE leg: the check above has asserted the shape, so consideration[0] is the whole gross.
+    const gross = BigInt(components.consideration[0]!.startAmount);
     out.orders.push({
       orderHash: seaportHash,
       chainId: config.chainId,
@@ -387,7 +399,7 @@ export async function verifyKeeperOrders(
       counter: components.counter,
       status: remaining === total ? "open" : "partial",
       components,
-      signature: entry.signature.toLowerCase() as Hex,
+      signature: EMPTY_SIGNATURE,
     });
   });
 
@@ -534,10 +546,10 @@ export async function fetchKeeperOrders(
 //////////////////////////////////////////////////////////////*/
 
 /** What GET /api/keeper/orders answers. `configured: false` is the one state in which the page
- *  shows nothing about the fallback at all. */
+ *  says the feed is not wired on this deployment. */
 export type KeeperOrdersBody = {
   configured: boolean;
-  orders: BookRow[];
+  orders: ListingRow[];
   rejected: KeeperOrderIssue[];
   closed: ClosedKeeperOrder[];
   unchecked: KeeperOrderIssue[];
@@ -560,7 +572,7 @@ export type KeeperRouteDeps = {
 };
 
 export const NOT_CONFIGURED =
-  "The keeper fallback is not configured on this deployment (KEEPER_ORDERS_URL is not set).";
+  "The order feed is not configured on this deployment (KEEPER_ORDERS_URL is not set).";
 
 export const VAULT_UNREADABLE = "The vault could not be read from the chain, so the keeper's orders cannot be checked.";
 
@@ -634,8 +646,8 @@ export async function serveKeeperOrders(deps: KeeperRouteDeps): Promise<{ status
   const target = parseKeeperOrdersUrl(deps.keeperOrdersUrl);
   if (target.kind === "unset") return { status: 503, body: emptyBody(false, NOT_CONFIGURED) };
   if (target.kind === "invalid") {
-    log({ level: "error", msg: "keeper fallback misconfigured", problem: target.problem });
-    return { status: 503, body: emptyBody(true, "The keeper fallback is misconfigured on this deployment.") };
+    log({ level: "error", msg: "order feed misconfigured", problem: target.problem });
+    return { status: 503, body: emptyBody(true, "The order feed is misconfigured on this deployment.") };
   }
   if (deps.config.vault === undefined) {
     return { status: 503, body: emptyBody(true, "This build has no vault address configured, so nothing can be checked.") };
@@ -725,20 +737,19 @@ export function viemKeeperChainReader(client: PublicClient, addresses: { vault: 
     (await client.multicall({ allowFailure: true, batchSize: 0, contracts: contracts as never })) as unknown as CallResult[];
   const ok = (r: CallResult | undefined): unknown => (r?.status === "success" ? r.result : undefined);
 
+  const SLOT = ["phase", "listingHash", "listingAmount", "listingGrossUsdg", "optionId", "conduitKey"] as const;
+
   return {
     async readState({ offerers, orderHashes }) {
       const results = await multicall([
-        vault("phase"),
-        vault("listingHash"),
-        vault("listingAmount"),
-        vault("listingGrossUsdg"),
-        vault("optionId"),
+        ...SLOT.map((name) => vault(name)),
         ...offerers.map((o) => seaport("getCounter", [o])),
         ...orderHashes.map((h) => seaport("getOrderStatus", [h])),
       ]);
-      const slot = results.slice(0, 5);
+      const slot = results.slice(0, SLOT.length);
       if (slot.some((r) => r.status !== "success")) throw new Error("vault listing slot unreadable");
-      const [phase, listingHash, listingAmount, listingGrossUsdg, optionId] = slot.map(ok);
+      const [phase, listingHash, listingAmount, listingGrossUsdg, optionId, conduitKey] = slot.map(ok);
+      const base = SLOT.length;
       return {
         vault: {
           phase: Number(phase),
@@ -746,10 +757,11 @@ export function viemKeeperChainReader(client: PublicClient, addresses: { vault: 
           listingAmount: listingAmount as bigint,
           listingGrossUsdg: listingGrossUsdg as bigint,
           optionId: optionId as bigint,
+          conduitKey: (conduitKey as Hex | undefined) ?? ZERO_CONDUIT_KEY,
         },
-        counters: offerers.map((_, i) => ok(results[5 + i]) as bigint | undefined),
+        counters: offerers.map((_, i) => ok(results[base + i]) as bigint | undefined),
         statuses: orderHashes.map((_, i) => {
-          const tuple = ok(results[5 + offerers.length + i]) as readonly [boolean, boolean, bigint, bigint] | undefined;
+          const tuple = ok(results[base + offerers.length + i]) as readonly [boolean, boolean, bigint, bigint] | undefined;
           return tuple === undefined ? undefined : { isCancelled: tuple[1], totalFilled: tuple[2], totalSize: tuple[3] };
         }),
       };
