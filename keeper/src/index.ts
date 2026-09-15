@@ -16,6 +16,7 @@ import { config } from './config.js';
 import { startHealthServer } from './health.js';
 import { log, logger } from './logger.js';
 import { describeError, reconcile, tick } from './roll.js';
+import { tickSolo } from './solo.js';
 import { store } from './state.js';
 
 let stopping = false;
@@ -26,6 +27,7 @@ async function runTick(): Promise<void> {
   if (stopping) return;
   try {
     await tick();
+    await tickSolo();
   } catch (error) {
     // An unhandled error inside one tick must not kill the loop: the next tick re-reads
     // everything from chain and this one's work is either done or not, never half-done.

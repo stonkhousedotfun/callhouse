@@ -1,31 +1,32 @@
 /**
- * app.stonkhouse.fun/ — the app home. A product landing, not the vault.
+ * app.stonkhouse.fun/ — the app home. 1-lot covered calls, not a pooled vault.
  *
- * NVDA is the first vault; more Stock Token vaults follow. Live figures, deposits and this week's
- * call live on /vault/nvda and /vault/nvda/cycle. This page does not read the chain.
+ * Deposit and write on /account. Buy lots on /book. The old pooled vault is closed; collect a
+ * queued redemption on /collect.
  *
  * Status matches stonkhouse.fun: beta, pending audit.
  */
 import Link from "next/link";
 
 import { Button, Card, Chip, ExternalLink, Figure, Notice, PageHead, SectionHead } from "@/components/ui";
-import { MARKET, SHARE_TICKER } from "@/lib/contracts";
+import { MARKET } from "@/lib/contracts";
 import { SITE_URL, STATUS } from "@/lib/site";
 
-const VAULT_HREF = "/vault/nvda";
+const ACCOUNT_HREF = "/account";
+const BOOK_HREF = "/book";
 
 const ROADMAP = [
   {
     when: "Now",
     title: "Beta, NVDA first",
     current: true,
-    body: `Public beta. One vault, ${MARKET}. Write-on-fill covered calls. ${STATUS.audit}.`,
+    body: `Public beta. ${MARKET} first. You write 1-lot covered calls on your own stock. ${STATUS.audit}.`,
   },
   {
     when: "Next",
     title: "External audit",
     current: false,
-    body: "An external audit of the vault. The report is published. The cap stays until then.",
+    body: "An external audit of the contracts. The report is published. The cap stays until then.",
   },
   {
     when: "Then",
@@ -35,9 +36,9 @@ const ROADMAP = [
   },
   {
     when: "Later",
-    title: "More stock vaults",
+    title: "More stock books",
     current: false,
-    body: "Additional Stock Token vaults, one underlying each, same week and the same rules.",
+    body: "Additional Stock Token books, one underlying each, same week and the same rules.",
   },
 ] as const;
 
@@ -61,15 +62,15 @@ export default function HomePage() {
               <Chip tone="warn">{STATUS.audit}</Chip>
             </div>
             <p>
-              Stonkhouse is a pooled vault: you deposit a tokenised stock, and each week it lists covered calls against
-              that stock. A call is written only when a buyer pays for it. You claim whatever premium actually fills, in
-              USDG. The first vault is {MARKET}. More stocks follow, one vault each.
+              Stonkhouse is 1-lot covered calls on tokenised stocks. You deposit {MARKET}, choose how many of yours to
+              write, and a fill writes only those lots. Premium goes to you. Assignment cannot take someone else&apos;s
+              stock. More stocks follow, one book each.
             </p>
           </>
         }
         aside={
-          <Button href={VAULT_HREF} className="max-sm:w-full">
-            Open the {MARKET} vault
+          <Button href={ACCOUNT_HREF} className="max-sm:w-full">
+            Open your account
           </Button>
         }
       />
@@ -88,24 +89,24 @@ export default function HomePage() {
                   Live first
                 </Chip>
                 <h2 className="mt-3 text-[26px] font-extrabold tracking-[-0.02em]">
-                  {MARKET} vault
+                  {MARKET} 1-lots
                 </h2>
                 <p className="mt-1.5 max-w-[36em] text-[15.5px] text-ink-2">
-                  Deposit {MARKET} Stock Tokens, receive {SHARE_TICKER}. Each week the vault lists covered calls and
-                  writes them only when a buyer fills. Claim USDG here; buy the week&apos;s call on the cycle page.
+                  Deposit your {MARKET}. Request N lots. Each lot is one full Seaport order of 1 contract. A fill
+                  writes your stock and pays you the premium. Unfilled lots come back.
                 </p>
               </div>
             </div>
             <dl className="grid grid-cols-2 gap-3 sm:grid-cols-4">
-              <Figure label="Share token" value={SHARE_TICKER} />
-              <Figure label="You claim" value="USDG" tone="usdg" />
+              <Figure label="Lot" value="1" unit={MARKET} />
+              <Figure label="You receive" value="USDG" tone="usdg" />
               <Figure label="Protocol fee" value="5% of premium" />
-              <Figure label="Launch cap" value="20" unit={MARKET} />
+              <Figure label="Per-account cap" value="20" unit={MARKET} />
             </dl>
             <div className="flex flex-wrap gap-3 border-t border-line pt-5">
-              <Button href={VAULT_HREF}>Deposit, withdraw, claim</Button>
-              <Button variant="ghost" href="/vault/nvda/cycle">
-                This week&apos;s call
+              <Button href={ACCOUNT_HREF}>Deposit and write</Button>
+              <Button variant="ghost" href={BOOK_HREF}>
+                Buy a lot
               </Button>
             </div>
           </Card>
@@ -114,11 +115,11 @@ export default function HomePage() {
             <Chip>Next</Chip>
             <h2 className="text-[22px] font-extrabold tracking-[-0.02em] text-ink-2">More stocks</h2>
             <p className="text-[15.5px] text-ink-2">
-              Additional Stock Token vaults, one underlying each, after {MARKET} is live and the audit report is
-              public. We will not name the next ticker until that vault is being built.
+              Additional Stock Token books, one underlying each, after {MARKET} and the audit report is public. We
+              will not name the next ticker until that book is being built.
             </p>
             <p className="text-[13.5px] text-ink-3">
-              Same design: deposit the token, weekly covered calls, claim USDG. No basket, no points.
+              Same design: your lots, your premium, your assignment. No basket, no points.
             </p>
           </Card>
         </div>

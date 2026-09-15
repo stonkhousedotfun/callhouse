@@ -146,6 +146,8 @@ const schema = z.object({
 
   /* ---- our deployment ---- */
   VAULT: addressField,
+  /** Isolated 1-lot factory. Unset keeps the keeper on the pooled vault only. */
+  FACTORY: addressField.optional(),
 
   /* ---- keeper ---- */
   KEEPER_PK: privateKeyField,
@@ -254,6 +256,11 @@ const schema = z.object({
 
   /* ---- loop ---- */
   POLL_INTERVAL_MS: intField(5_000, 3_600_000).default(60_000),
+  /** Close the pooled vault: never arm or list; still lockBook/rollClose/settleQueue so queued redemptions pay. */
+  WIND_DOWN: z
+    .string()
+    .optional()
+    .transform((v) => v === "true" || v === "1"),
 });
 
 export type KeeperConfig = z.infer<typeof schema>;

@@ -4,7 +4,7 @@ import Link from "next/link";
 import { useAccount } from "wagmi";
 
 import { CycleTape } from "@/components/CycleTape";
-import { DepositForm } from "@/components/DepositForm";
+
 import { VaultOverview } from "@/components/VaultOverview";
 import { GuardBadges, VaultPhaseBadge } from "@/components/PhaseBadge";
 import { PositionSplit } from "@/components/PositionSplit";
@@ -59,16 +59,19 @@ export default function VaultPage() {
   return (
     <>
       <PageHead
-        eyebrow={<>Vault · {MARKET} · Beta</>}
+        eyebrow={<>Pooled vault · closed</>}
         title={
           <>
-            {SHARE_TICKER} — deposit, withdraw, claim
+            Collect your queued {SHARE_TICKER}
           </>
         }
         lede={
           <p>
-            Deposit {MARKET} Stock Tokens and receive {SHARE_TICKER}. Premium arrives as USDG and is
-            claimed separately; it is never folded into the share price.
+            The pooled vault is wound down. New covered calls are 1-lot accounts on{" "}
+            <Link href="/account" className="link">
+              Account
+            </Link>
+            . If you queued a redemption, collect it here after Saturday 4:00pm New York.
           </p>
         }
       />
@@ -185,7 +188,10 @@ export default function VaultPage() {
         </Card>
 
         <div className="grid grid-cols-1 items-start gap-4 sm:gap-5 lg:grid-cols-2">
-          <DepositForm snapshot={v} position={position} onDone={refresh} />
+          <Notice tone="warn" title="Deposits are closed.">
+            This vault will not arm another week. Queued redemptions pay at <code className="num">rollClose</code> after
+            expiry (Saturday 4:00pm New York). Then use Complete redeem below.
+          </Notice>
           <RedeemQueue snapshot={v} position={position} onDone={refresh} />
         </div>
 

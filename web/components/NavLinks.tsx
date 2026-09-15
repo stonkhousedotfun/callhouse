@@ -24,9 +24,9 @@ import { SITE_URL } from "@/lib/site";
 
 const LINKS = [
   { href: "/", label: "Home" },
-  { href: "/vault/nvda", label: "Vault" },
-  { href: "/vault/nvda/cycle", label: "Cycle" },
-  { href: "/activity", label: "Activity" },
+  { href: "/account", label: "Account" },
+  { href: "/book", label: "Book" },
+  { href: "/collect", label: "Collect" },
   { href: "/docs", label: "Docs" },
   { href: "/legal", label: "Legal" },
 ] as const;

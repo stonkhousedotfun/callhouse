@@ -1092,6 +1092,13 @@ export async function tick(): Promise<void> {
     // transaction landed). One SELECT when the row exists; see adoptOpenCycle.
     if (snap.phase !== Phase.Idle) await adoptOpenCycle(snap);
 
+    if (config.WIND_DOWN) {
+      log.roll.warn({ phase: PHASE_NAMES[snap.phase] }, "WIND_DOWN: pooled vault is closing; not arming");
+      await tickWindDown(snap);
+      store.beat();
+      return;
+    }
+
     log.roll.debug(
       {
         phase: PHASE_NAMES[snap.phase],
@@ -1143,6 +1150,30 @@ const WEEK_ARMED_KEY = 'week_armed_ts';
 /** The week the keeper would arm next, from the head block's clock. Exported for /state. */
 export function nextWindow(snap: Pick<ChainSnapshot, 'blockTimestamp'>): WeekWindow {
   return nextWeekWindow(Number(snap.blockTimestamp), config.KEEPER_ARM_LEAD_S, config.KEEPER_NYSE_HOLIDAYS);
+}
+
+/** Pooled vault is retired. Kill any live listing, close the week when the timestamps allow, settle the queue. Never arm. */
+async function tickWindDown(snap: ChainSnapshot): Promise<void> {
+  if (snap.phase === Phase.Listed) {
+    if (snap.listingHash && snap.listingHash !== ZERO_HASH) {
+      await cancelLiveListing(snap, snap.listingHash, "wind-down");
+    }
+    if (snap.blockTimestamp >= snap.vaultExpiryTs && snap.vaultExpiryTs > 0n) {
+      await doRollClose(snap);
+      return;
+    }
+    if (snap.blockTimestamp >= snap.vaultExerciseTs && snap.vaultExerciseTs > 0n) {
+      await doLockBook(snap);
+    }
+    return;
+  }
+  if (snap.phase === Phase.Exercisable) {
+    if (snap.blockTimestamp >= snap.vaultExpiryTs) await doRollClose(snap);
+    return;
+  }
+  if (snap.phase === Phase.Idle && snap.queuedShares > 0n) {
+    await doSettleQueue(snap);
+  }
 }
 
 async function onIdle(initial: ChainSnapshot): Promise<void> {

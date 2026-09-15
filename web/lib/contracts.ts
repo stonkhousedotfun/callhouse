@@ -4,8 +4,10 @@ import { valoremClearAbi } from "./abi/clear";
 import { erc20Abi, stockTokenAbi } from "./abi/erc20";
 import { seaportAbi } from "./abi/seaport";
 import { vaultAbi } from "./abi/vault";
+import { accountFactoryAbi } from "./abi/accountFactory";
+import { writerAccountAbi } from "./abi/writerAccount";
 
-export { valoremClearAbi, erc20Abi, stockTokenAbi, seaportAbi, vaultAbi };
+export { valoremClearAbi, erc20Abi, stockTokenAbi, seaportAbi, vaultAbi, accountFactoryAbi, writerAccountAbi };
 
 /**
  * Addresses.
@@ -37,6 +39,13 @@ function fromEnv(name: string, value: string | undefined, fallback?: Address): A
 
 /** Stonkhouse vault (cNVDA). Deploy-time only — set NEXT_PUBLIC_VAULT. */
 export const VAULT = fromEnv("NEXT_PUBLIC_VAULT", process.env.NEXT_PUBLIC_VAULT);
+
+/** Isolated 1-lot account factory. The product. Deployed 2026-09-15. */
+export const FACTORY = fromEnv(
+  "NEXT_PUBLIC_FACTORY",
+  process.env.NEXT_PUBLIC_FACTORY,
+  getAddress("0x7850Ae4ac03b651263cE78EC5FcED11b0d0e05A7"),
+)!;
 
 /** NVDA Stock Token, 18 decimals, proxy. The vault's `asset`. */
 export const ASSET = fromEnv(
