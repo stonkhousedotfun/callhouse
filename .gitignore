@@ -19,3 +19,6 @@ lcov.info
 
 # keeper dry-run artefacts (report.md, run.json, keeper.db per run) — recorded in keeper/DRYRUN.md, not tracked
 keeper/dryrun-out/
+
+# local scrape cache (Firecrawl dumps, not product)
+.firecrawl/
