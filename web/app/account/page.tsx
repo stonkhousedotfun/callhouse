@@ -6,7 +6,7 @@ import { useAccount, useReadContract, useWriteContract } from "wagmi";
 
 import { ConnectButton } from "@/components/ConnectButton";
 import { useTxRunner } from "@/components/TxToast";
-import { Button, Card, Chip, Field, Notice, PageHead, Stat } from "@/components/ui";
+import { Button, Card, Chip, Field } from "@/components/ui";
 import {
   ASSET,
   ASSET_DECIMALS,
@@ -139,111 +139,209 @@ export default function AccountPage() {
     }
   }
 
+  if (!mounted) {
+    return <p className="py-8 text-sm text-ink-3">Loading…</p>;
+  }
+
+  if (!isConnected) {
+    return (
+      <div className="max-w-sm py-8">
+        <h1 className="text-lg font-bold tracking-[-0.02em]">Account</h1>
+        <p className="mt-1 mb-4 text-sm text-ink-2">Connect to deposit {MARKET}.</p>
+        <ConnectButton />
+      </div>
+    );
+  }
+
+  if (!hasAccount) {
+    return (
+      <div className="max-w-sm py-8">
+        <h1 className="text-lg font-bold tracking-[-0.02em]">Account</h1>
+        <p className="mt-1 mb-4 text-sm text-ink-2">One transaction. Holds your {MARKET}.</p>
+        <Button
+          size="sm"
+          disabled={busy}
+          onClick={() =>
+            send(
+              () =>
+                writeContractAsync({
+                  address: FACTORY,
+                  abi: accountFactoryAbi as unknown as Abi,
+                  functionName: "createAccount",
+                }),
+              "Open account",
+              "Account opened",
+            )
+          }
+        >
+          Open account
+        </Button>
+      </div>
+    );
+  }
+
   return (
-    <>
-      <PageHead
-        eyebrow={MARKET}
-        title={<>Your {MARKET}.</>}
-        lede={<p>Put it in. Offer some this week. Keep the rest.</p>}
-      />
+    <div className="mx-auto max-w-xl py-6">
+      <div className="mb-4 flex flex-wrap items-baseline justify-between gap-2">
+        <h1 className="text-lg font-bold tracking-[-0.02em]">Account</h1>
+        <div className="flex flex-wrap gap-1.5">
+          {listedAmt > 0n ? (
+            <Chip tone="accent" dot>
+              {listedAmt.toString()} listed
+            </Chip>
+          ) : (
+            <Chip>Not listed</Chip>
+          )}
+          {writtenAmt > 0n ? <Chip tone="usdg">{writtenAmt.toString()} sold</Chip> : null}
+          {weekId === 0 ? <Chip tone="warn">Week closed</Chip> : null}
+        </div>
+      </div>
 
-      {!mounted ? (
-        <Card className="max-w-lg">
-          <p className="text-ink-2">Loading…</p>
-        </Card>
-      ) : !isConnected ? (
-        <Card className="max-w-lg">
-          <h2 className="text-[22px] font-bold tracking-[-0.02em]">Connect</h2>
-          <p className="mt-2 mb-5 text-ink-2">MetaMask or Phantom. Robinhood Chain.</p>
-          <ConnectButton block />
-        </Card>
-      ) : !hasAccount ? (
-        <Card className="max-w-lg">
-          <h2 className="text-[22px] font-bold tracking-[-0.02em]">Open an account</h2>
-          <p className="mt-2 mb-5 text-ink-2">One transaction. Holds only your {MARKET}.</p>
-          <Button
-            disabled={busy}
-            onClick={() =>
-              send(
-                () =>
-                  writeContractAsync({
-                    address: FACTORY,
-                    abi: accountFactoryAbi as unknown as Abi,
-                    functionName: "createAccount",
-                  }),
-                "Open account",
-                "Account opened",
-              )
-            }
-          >
-            Open account
-          </Button>
-        </Card>
-      ) : (
-        <div className="grid gap-5">
-          <div className="flex flex-wrap items-center gap-2">
-            {listedAmt > 0n ? (
-              <Chip tone="accent" dot>
-                {listedAmt.toString()} {MARKET} for sale
-              </Chip>
-            ) : (
-              <Chip>Nothing listed</Chip>
-            )}
-            {writtenAmt > 0n ? <Chip tone="usdg">{writtenAmt.toString()} sold</Chip> : null}
-            {weekId === 0 ? <Chip tone="warn">Week not open</Chip> : null}
+      <dl className="mb-4 grid grid-cols-3 gap-px overflow-hidden rounded-md border border-line bg-line text-[12px]">
+        <div className="bg-surface px-3 py-2.5">
+          <dt className="text-ink-3">Account</dt>
+          <dd className="num mt-0.5 font-semibold">
+            {fmtAsset(inAccount)} <span className="font-medium text-ink-3">{MARKET}</span>
+          </dd>
+        </div>
+        <div className="bg-surface px-3 py-2.5">
+          <dt className="text-ink-3">Free</dt>
+          <dd className="num mt-0.5 font-semibold">
+            {fmtAsset(idleAmt)} <span className="font-medium text-ink-3">{MARKET}</span>
+          </dd>
+        </div>
+        <div className="bg-surface px-3 py-2.5">
+          <dt className="text-ink-3">USDG</dt>
+          <dd className="num mt-0.5 font-semibold text-usdg">{fmtUsdg(usdgAmt)}</dd>
+        </div>
+      </dl>
+
+      <Card pad="sm" className="grid gap-4">
+        <div>
+          <div className="mb-1.5 flex items-baseline justify-between gap-2 text-[12px]">
+            <span className="font-semibold text-ink-2">Deposit</span>
+            <button
+              type="button"
+              className="link"
+              onClick={() => setDepositRaw(formatUnits(walletAmt, ASSET_DECIMALS))}
+            >
+              Wallet {fmtAsset(walletAmt)}
+            </button>
           </div>
-
-          <dl className="grid grid-cols-1 gap-3 sm:grid-cols-3">
-            <Card>
-              <Stat size="lg" label="In account" value={fmtAsset(inAccount)} unit={MARKET} />
-            </Card>
-            <Card>
-              <Stat size="lg" label="Free" value={fmtAsset(idleAmt)} unit={MARKET} sub="can take out" />
-            </Card>
-            <Card>
-              <Stat size="lg" label="USDG" value={fmtUsdg(usdgAmt)} tone="usdg" />
-            </Card>
-          </dl>
-
-          <Card>
-            <h2 className="text-[20px] font-bold tracking-[-0.02em]">Put {MARKET} in</h2>
-            <p className="mt-1 mb-4 text-[14.5px] text-ink-2">
-              Wallet: {fmtAsset(walletAmt)} {MARKET}
-            </p>
+          <div className="flex items-center gap-2">
             <Field
               id="solo-deposit"
-              label="Amount"
+              size="sm"
+              className="min-w-0 flex-1"
               suffix={MARKET}
               value={depositRaw}
               onChange={(e) => setDepositRaw(e.target.value)}
               inputMode="decimal"
-              hint={
-                <button
-                  type="button"
-                  className="link text-[13px]"
-                  onClick={() => setDepositRaw(formatUnits(walletAmt, ASSET_DECIMALS))}
-                >
-                  Use max
-                </button>
-              }
+              placeholder="0"
             />
-            <div className="mt-4 flex flex-wrap gap-2">
+            <Button
+              size="sm"
+              disabled={busy || depositAmt === null || depositAmt === 0n}
+              onClick={async () => {
+                const amt = depositAmt!;
+                const current = (allowance.data as bigint | undefined) ?? 0n;
+                if (current < amt) {
+                  const ok = await send(
+                    () =>
+                      writeContractAsync({
+                        address: ASSET,
+                        abi: stockTokenAbi as unknown as Abi,
+                        functionName: "approve",
+                        args: [account, amt],
+                      }),
+                    "Approve",
+                    "Approved",
+                  );
+                  if (!ok) return;
+                }
+                await send(
+                  () =>
+                    writeContractAsync({
+                      address: account!,
+                      abi: writerAccountAbi as unknown as Abi,
+                      functionName: "deposit",
+                      args: [amt],
+                    }),
+                  "Deposit",
+                  "Deposited",
+                );
+                setDepositRaw("");
+              }}
+            >
+              Deposit
+            </Button>
+            <Button
+              size="sm"
+              variant="ghost"
+              disabled={busy || idleAmt === 0n}
+              onClick={() =>
+                send(
+                  () =>
+                    writeContractAsync({
+                      address: account!,
+                      abi: writerAccountAbi as unknown as Abi,
+                      functionName: "withdraw",
+                      args: [idleAmt],
+                    }),
+                  "Withdraw",
+                  "Withdrawn",
+                )
+              }
+            >
+              Withdraw
+            </Button>
+          </div>
+        </div>
+
+        <div className="border-t border-line pt-4">
+          <div className="mb-1.5 flex items-baseline justify-between gap-2 text-[12px]">
+            <span className="font-semibold text-ink-2">Offer this week</span>
+            {wholeIdle > 0n && listedAmt === 0n ? (
+              <button type="button" className="link" onClick={() => setOfferRaw(wholeIdle.toString())}>
+                Free {wholeIdle.toString()}
+              </button>
+            ) : null}
+          </div>
+          {weekId === 0 ? (
+            <p className="text-[13px] text-ink-3">Week not open.</p>
+          ) : listedAmt > 0n ? (
+            <p className="text-[13px] text-ink-2">
+              {listedAmt.toString()} {MARKET} listed
+              {writtenAmt > 0n ? ` · ${writtenAmt.toString()} sold` : ""}.
+            </p>
+          ) : (
+            <div className="flex items-center gap-2">
+              <Field
+                id="solo-offer"
+                size="sm"
+                className="w-28 shrink-0"
+                suffix={MARKET}
+                value={offerRaw}
+                placeholder={wholeIdle > 0n ? wholeIdle.toString() : "0"}
+                onChange={(e) => setOfferRaw(e.target.value)}
+                inputMode="numeric"
+              />
               <Button
-                disabled={busy || depositAmt === null || depositAmt === 0n}
+                size="sm"
+                disabled={busy || !Number.isInteger(offerLots) || offerLots <= 0}
                 onClick={async () => {
-                  const amt = depositAmt!;
-                  const current = (allowance.data as bigint | undefined) ?? 0n;
-                  if (current < amt) {
+                  const lots = BigInt(offerLots);
+                  if (requestedAmt !== lots) {
                     const ok = await send(
                       () =>
                         writeContractAsync({
-                          address: ASSET,
-                          abi: stockTokenAbi as unknown as Abi,
-                          functionName: "approve",
-                          args: [account, amt],
+                          address: account!,
+                          abi: writerAccountAbi as unknown as Abi,
+                          functionName: "requestWrite",
+                          args: [lots],
                         }),
-                      "Approve",
-                      "Approved",
+                      "Set amount",
+                      "Amount set",
                     );
                     if (!ok) return;
                   }
@@ -252,156 +350,65 @@ export default function AccountPage() {
                       writeContractAsync({
                         address: account!,
                         abi: writerAccountAbi as unknown as Abi,
-                        functionName: "deposit",
-                        args: [amt],
+                        functionName: "list",
                       }),
-                    "Deposit",
-                    "Deposited",
+                    "List",
+                    "Listed",
                   );
-                  setDepositRaw("");
                 }}
               >
-                Deposit
-              </Button>
-              <Button
-                variant="ghost"
-                disabled={busy || idleAmt === 0n}
-                onClick={() =>
-                  send(
-                    () =>
-                      writeContractAsync({
-                        address: account!,
-                        abi: writerAccountAbi as unknown as Abi,
-                        functionName: "withdraw",
-                        args: [idleAmt],
-                      }),
-                    "Withdraw",
-                    "Withdrawn",
-                  )
-                }
-              >
-                Take out free
+                Offer
               </Button>
             </div>
-          </Card>
+          )}
+        </div>
+      </Card>
 
-          <Card>
-            <h2 className="text-[20px] font-bold tracking-[-0.02em]">Offer this week</h2>
-            <p className="mt-1 mb-4 text-[14.5px] text-ink-2">Whole {MARKET} only. The rest stays yours.</p>
-            {weekId === 0 ? (
-              <Notice tone="info">This week is not open yet.</Notice>
-            ) : listedAmt > 0n ? (
-              <p className="text-[15.5px] text-ink-2">
-                {listedAmt.toString()} {MARKET} is listed.
-                {writtenAmt > 0n ? ` ${writtenAmt.toString()} sold.` : ""}
-              </p>
-            ) : (
-              <>
-                <Field
-                  id="solo-offer"
-                  label="Amount"
-                  suffix={MARKET}
-                  value={offerRaw}
-                  placeholder={wholeIdle > 0n ? wholeIdle.toString() : "0"}
-                  onChange={(e) => setOfferRaw(e.target.value)}
-                  inputMode="numeric"
-                  hint={
-                    wholeIdle > 0n ? (
-                      <button
-                        type="button"
-                        className="link text-[13px]"
-                        onClick={() => setOfferRaw(wholeIdle.toString())}
-                      >
-                        Use free ({wholeIdle.toString()})
-                      </button>
-                    ) : (
-                      "Deposit first"
-                    )
-                  }
-                />
-                <div className="mt-4">
-                  <Button
-                    disabled={busy || !Number.isInteger(offerLots) || offerLots <= 0}
-                    onClick={async () => {
-                      const lots = BigInt(offerLots);
-                      if (requestedAmt !== lots) {
-                        const ok = await send(
-                          () =>
-                            writeContractAsync({
-                              address: account!,
-                              abi: writerAccountAbi as unknown as Abi,
-                              functionName: "requestWrite",
-                              args: [lots],
-                            }),
-                          "Set amount",
-                          "Amount set",
-                        );
-                        if (!ok) return;
-                      }
-                      await send(
-                        () =>
-                          writeContractAsync({
-                            address: account!,
-                            abi: writerAccountAbi as unknown as Abi,
-                            functionName: "list",
-                          }),
-                        "List",
-                        "Listed",
-                      );
-                    }}
-                  >
-                    Offer {Number.isInteger(offerLots) && offerLots > 0 ? offerLots : ""} {MARKET}
-                  </Button>
-                </div>
-              </>
-            )}
-          </Card>
-
-          {listedAmt > 0n || writtenAmt > 0n || usdgAmt > 0n ? (
-            <div className="flex flex-wrap gap-2">
-              {listedAmt > 0n || writtenAmt > 0n ? (
-                <Button
-                  variant="ghost"
-                  disabled={busy}
-                  onClick={() =>
-                    send(
-                      () =>
-                        writeContractAsync({
-                          address: account!,
-                          abi: writerAccountAbi as unknown as Abi,
-                          functionName: "settle",
-                        }),
-                      "Close the week",
-                      "Week closed",
-                    )
-                  }
-                >
-                  Close the week
-                </Button>
-              ) : null}
-              {usdgAmt > 0n ? (
-                <Button
-                  disabled={busy}
-                  onClick={() =>
-                    send(
-                      () =>
-                        writeContractAsync({
-                          address: account!,
-                          abi: writerAccountAbi as unknown as Abi,
-                          functionName: "claimUsdg",
-                        }),
-                      "Collect USDG",
-                      "Collected",
-                    )
-                  }
-                >
-                  Collect {fmtUsdg(usdgAmt)} USDG
-                </Button>
-              ) : null}
-            </div>
+      {listedAmt > 0n || writtenAmt > 0n || usdgAmt > 0n ? (
+        <div className="mt-3 flex flex-wrap gap-2">
+          {listedAmt > 0n || writtenAmt > 0n ? (
+            <Button
+              size="sm"
+              variant="ghost"
+              disabled={busy}
+              onClick={() =>
+                send(
+                  () =>
+                    writeContractAsync({
+                      address: account!,
+                      abi: writerAccountAbi as unknown as Abi,
+                      functionName: "settle",
+                    }),
+                  "Close the week",
+                  "Week closed",
+                )
+              }
+            >
+              Close week
+            </Button>
+          ) : null}
+          {usdgAmt > 0n ? (
+            <Button
+              size="sm"
+              disabled={busy}
+              onClick={() =>
+                send(
+                  () =>
+                    writeContractAsync({
+                      address: account!,
+                      abi: writerAccountAbi as unknown as Abi,
+                      functionName: "claimUsdg",
+                    }),
+                  "Collect USDG",
+                  "Collected",
+                )
+              }
+            >
+              Collect {fmtUsdg(usdgAmt)} USDG
+            </Button>
           ) : null}
         </div>
-      )}
-    </>
+      ) : null}
+    </div>
   );
 }
