@@ -128,7 +128,7 @@ const FILL_FROM_PAGE = 2n;
 const FILL_FROM_RAW_PAYLOAD = 3n;
 /** Of the 5 sold, the buyer exercises this many. The rest expire. */
 const EXERCISE_W = 2n;
-const WALLET_NAME = "Callhouse acceptance wallet";
+
 const EMPTY_SIGNATURE = "0x" as Hex;
 
 /** The launch policy the Vault constructor installs (Policy.launchDefaults()). */
@@ -531,7 +531,9 @@ class BrowserWallet {
     await context.exposeBinding("__callhouseAcceptanceWallet", async (_source, method: string, params: unknown) =>
       this.handle(method, Array.isArray(params) ? params : []),
     );
-    await context.addInitScript({ content: injectedProviderSource({ name: WALLET_NAME, uuid: "5b8d3c2e-6b0e-4a51-9d7e-0c1f3a2b4c5d" }) });
+    await context.addInitScript({
+      content: injectedProviderSource({ name: "MetaMask", uuid: "5b8d3c2e-6b0e-4a51-9d7e-0c1f3a2b4c5d" }),
+    });
   }
 
   private async handle(method: string, params: unknown[]): Promise<{ result?: unknown; error?: RpcError }> {
@@ -615,6 +617,7 @@ function injectedProviderSource(info: { name: string; uuid: string }): string {
   return `(() => {
   const listeners = new Map();
   const provider = {
+    isMetaMask: true,
     isCallhouseAcceptanceWallet: true,
     async request(req) {
       const out = await window.__callhouseAcceptanceWallet(req.method, req.params === undefined ? [] : req.params);
@@ -644,7 +647,7 @@ function injectedProviderSource(info: { name: string; uuid: string }): string {
       uuid: ${JSON.stringify(info.uuid)},
       name: ${JSON.stringify(info.name)},
       icon: "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAxIDEiLz4=",
-      rdns: "finance.callhouse.acceptance",
+      rdns: "io.metamask",
     }),
     provider,
   });
@@ -733,7 +736,7 @@ async function expectAbsent(label: string, locator: Locator): Promise<void> {
 async function connectWallet(page: Page, account: Address): Promise<void> {
   const header = page.locator(`header${SLOT.topbar}`);
   await header.getByRole("button", { name: "Connect", exact: true }).click({ timeout: 60_000 });
-  await header.getByRole("button", { name: WALLET_NAME, exact: true }).click({ timeout: 30_000 });
+  await header.getByRole("button", { name: "MetaMask", exact: true }).click({ timeout: 30_000 });
   await expectText("header connect button", header.getByRole("button").last(), shortAddress(account));
 }
 

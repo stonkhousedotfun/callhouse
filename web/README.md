@@ -339,9 +339,9 @@ strike proceeds in separate columns).
 Unfilled and stranded weeks are covered by the keeper dry run (`pnpm --filter @callhouse/keeper
 dryrun`) and X-11, not by this browser run.
 
-Each wallet is an EIP-1193 provider injected into headless Chromium and announced over EIP-6963;
-wagmi's `injected()` connector lists it like an extension, it exposes no account until the page's
-Connect flow asks, and it signs the page's `eth_sendTransaction` with a key generated for the run.
+Each wallet is an EIP-1193 provider injected into headless Chromium and announced over EIP-6963 as
+MetaMask (`io.metamask`); wagmi's `metaMask()` connector lists it, it exposes no account until the
+page's Connect flow asks, and it signs the page's `eth_sendTransaction` with a key generated for the run.
 It refuses a call it cannot decode against `lib/abi`, so every page transaction is checked by name
 and exact arguments. No uncaught page error is tolerated in any state.
 

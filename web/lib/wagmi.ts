@@ -1,29 +1,35 @@
 import { createConfig, fallback, http } from "wagmi";
 import { injected } from "wagmi/connectors/injected";
+import { metaMask } from "wagmi/connectors/metaMask";
 
 import { robinhoodChain } from "./chain";
+import { APP_URL } from "./site";
 
 /**
  * wagmi config.
  *
- * Connectors: `injected()` only, with EIP-6963 multi-provider discovery on. That covers every
- * browser wallet the user actually has installed (MetaMask, Rabby, Brave, Coinbase extension …)
- * with zero extra dependencies. connectkit and RainbowKit are deliberately NOT installed — the
- * connect button in components/ConnectButton.tsx is fifty lines and adds no supply chain.
- * WalletConnect is not wired either: it would need @walletconnect/* and a project id, and a
- * relay hop for a chain whose wallet story is a browser extension.
+ * Two named wallets, no generic `injected()`:
+ *   - `metaMask()` — wagmi's MetaMask connector (extension via EIP-6963, SDK fallback)
+ *   - `injected({ target: "phantom" })` — Phantom's EVM provider (`window.phantom.ethereum`)
  *
- * Transports: the same two RPCs as lib/chain.ts, primary first, in a fallback. `rank: false`
- * keeps the order fixed rather than letting latency sampling promote the backup, which is the
- * one that refuses archive reads.
+ * `multiInjectedProviderDiscovery` is off so EIP-6963 does not add a third "Injected" row for
+ * every other extension. WalletConnect is not wired (no project id, no relay).
  *
- * `ssr: true` because these pages are prerendered: it stops wagmi touching storage on the server
- * and defers hydration of the persisted connection to the client.
+ * Transports: the same two RPCs as lib/chain.ts, primary first. `rank: false` keeps that order.
+ * `ssr: true` because these pages are prerendered.
  */
 export const wagmiConfig = createConfig({
   chains: [robinhoodChain],
-  connectors: [injected({ shimDisconnect: true })],
-  multiInjectedProviderDiscovery: true,
+  connectors: [
+    metaMask({
+      dappMetadata: {
+        name: "Stonkhouse",
+        url: APP_URL,
+      },
+    }),
+    injected({ target: "phantom", shimDisconnect: true }),
+  ],
+  multiInjectedProviderDiscovery: false,
   ssr: true,
   transports: {
     [robinhoodChain.id]: fallback(

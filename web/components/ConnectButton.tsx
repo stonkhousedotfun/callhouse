@@ -10,21 +10,19 @@ import { useMounted } from "@/lib/hooks";
 import { describeError, useNotice } from "./TxToast";
 
 /**
- * Wallet connect, written by hand.
+ * Wallet connect: MetaMask and Phantom only.
  *
- * connectkit and RainbowKit are not installed and must not be. wagmi's `injected()` connector
- * plus EIP-6963 discovery already enumerates every browser wallet the visitor actually has, so
- * the whole widget is one button and a list — no modal library, no project id, no extra bundle.
+ * RainbowKit / connectkit are not installed. The two connectors are declared in lib/wagmi.ts;
+ * this widget lists those two names, never a generic "Injected" row.
  *
- * The app is single-chain: CHAIN_ID is pinned to 4663 (Robinhood Chain). A wallet on any other
- * network gets a switch prompt, never a network picker.
+ * The app is single-chain: CHAIN_ID is pinned to 4663. A wallet on any other network gets a
+ * switch prompt, never a network picker.
  *
- * `block` stretches the button to its container's width and gives it the md size: the forms render
- * this in place of their submit button when no wallet is connected, and it takes the submit
- * button's full-width slot at the submit button's height.
+ * `block` stretches the button to its container's width (forms render this in place of submit).
  */
-/** The menu under the button: a lifted surface, right-aligned to the button, above the page. */
-const MENU = "absolute right-0 top-[calc(100%+8px)] z-40 rounded-md bg-surface p-2.5 shadow-lift ring-1 ring-line";
+const MENU = "absolute right-0 top-[calc(100%+8px)] z-40 rounded-md bg-surface p-2 shadow-lift ring-1 ring-line";
+
+const WALLET_ORDER = ["metaMaskSDK", "metaMask", "phantom"] as const;
 
 export function ConnectButton({ block = false }: { block?: boolean }) {
   const mounted = useMounted();
@@ -54,8 +52,6 @@ export function ConnectButton({ block = false }: { block?: boolean }) {
     };
   }, [open]);
 
-  // Server render and first client render must agree, so nothing wallet-shaped exists until
-  // after mount. The placeholder keeps the header from jumping.
   if (!mounted) {
     return (
       <Button size={block ? "md" : "sm"} disabled className={block ? "w-full" : undefined}>
@@ -116,48 +112,41 @@ export function ConnectButton({ block = false }: { block?: boolean }) {
     );
   }
 
-  // Deduplicate by connector id: EIP-6963 discovery and the generic `injected()` connector can
-  // both describe the same wallet.
-  const seen = new Set<string>();
-  const options = connectors.filter((c) => {
-    if (seen.has(c.id)) return false;
-    seen.add(c.id);
-    return true;
-  });
+  const options = WALLET_ORDER.flatMap((id) => connectors.filter((c) => c.id === id));
 
   return (
     <div ref={wrapRef} className={block ? "relative w-full" : "relative"}>
-      <Button size={block ? "md" : "sm"} className={block ? "w-full" : undefined} onClick={() => setOpen((v) => !v)} aria-expanded={open}>
+      <Button
+        size={block ? "md" : "sm"}
+        className={block ? "w-full" : undefined}
+        onClick={() => setOpen((v) => !v)}
+        aria-expanded={open}
+        aria-haspopup="listbox"
+      >
         {connecting ? "Connecting…" : "Connect"}
       </Button>
       {open ? (
-        <div className={`${MENU} w-[250px]`}>
-          {options.length === 0 ? (
-            <p className="px-1 py-0.5 text-[13px] text-ink-2">
-              No browser wallet detected. Install one, then reload this page.
-            </p>
-          ) : (
-            <div className="grid gap-1.5">
-              {options.map((connector) => (
-                <Button
-                  key={connector.uid}
-                  size="sm"
-                  variant="ghost"
-                  className="w-full justify-start!"
-                  onClick={async () => {
-                    setOpen(false);
-                    try {
-                      await connect({ connector, chainId: CHAIN_ID });
-                    } catch (err) {
-                      notice("error", "Could not connect", describeError(err));
-                    }
-                  }}
-                >
-                  {connector.name}
-                </Button>
-              ))}
-            </div>
-          )}
+        <div className={`${MENU} w-[220px]`} role="listbox" aria-label="Wallets">
+          <div className="grid gap-1">
+            {options.map((connector) => (
+              <Button
+                key={connector.uid}
+                size="sm"
+                variant="ghost"
+                className="w-full justify-start!"
+                onClick={async () => {
+                  setOpen(false);
+                  try {
+                    await connect({ connector, chainId: CHAIN_ID });
+                  } catch (err) {
+                    notice("error", "Could not connect", describeError(err));
+                  }
+                }}
+              >
+                {connector.name}
+              </Button>
+            ))}
+          </div>
         </div>
       ) : null}
     </div>

@@ -211,10 +211,10 @@ describe("decodeExerciseRevert", () => {
   it("names the clearinghouse's errors with their figures", () => {
     const early = decodeExerciseRevert(clear("ExerciseTooEarly", [OPTION_ID, EXERCISE_TS]));
     expect(early).toMatchObject({ source: "clear", name: "ExerciseTooEarly" });
-    expect(early!.text).toContain("2026-09-18 20:00 UTC · 2026-09-18 16:00 EDT");
+    expect(early!.text).toContain("Fri 18 Sep, 8:00pm UTC · Fri 18 Sep, 4:00pm EDT");
     const expired = decodeExerciseRevert(clear("ExpiredOption", [OPTION_ID, EXPIRY_TS]));
     expect(expired).toMatchObject({ source: "clear", name: "ExpiredOption" });
-    expect(expired!.text).toContain("2026-09-19 20:00 UTC");
+    expect(expired!.text).toContain("Sat 19 Sep, 8:00pm UTC");
     expect(decodeExerciseRevert(clear("CallerHoldsInsufficientOptions", [OPTION_ID, 6n]))!.text).toContain("fewer than 6");
     expect(decodeExerciseRevert(clear("InvalidOption", [OPTION_ID]))).toMatchObject({ source: "clear", name: "InvalidOption" });
   });
