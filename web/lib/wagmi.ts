@@ -23,7 +23,7 @@ export const wagmiConfig = createConfig({
   connectors: [
     metaMask({
       dappMetadata: {
-        name: "Stonkhouse",
+        name: "StonkHouse",
         url: APP_URL,
       },
     }),

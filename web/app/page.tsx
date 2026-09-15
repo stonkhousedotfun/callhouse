@@ -105,7 +105,7 @@ export default function HomePage() {
               More stocks later. We will not name the next ticker until we are building it.
             </p>
             <p className="text-[13.5px] text-ink-3">
-              Same design: your lots, your premium, your assignment. No basket, no points.
+              Same design. No basket, no points.
             </p>
           </Card>
         </div>

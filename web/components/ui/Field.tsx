@@ -47,9 +47,9 @@ export function Field({ id, label, suffix, hint, className, ...input }: FieldPro
         ) : null}
       </div>
       {hint ? (
-        <p id={hintId} className="text-[12.5px] text-ink-3">
+        <div id={hintId} className="text-[12.5px] text-ink-3">
           {hint}
-        </p>
+        </div>
       ) : null}
     </div>
   );

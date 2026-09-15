@@ -1,31 +1,19 @@
-/**
- * 404 for app.stonkhouse.fun. Modelled on stonkhouse.fun's app/not-found.tsx: a way back, not
- * a content page. A lost visitor gets the three places most people come here for (the vault,
- * deposits, the weekly history) as buttons, and beside them every route this app has, so an old or
- * mistyped link still lands somewhere useful. The layout supplies the nav, footer and Container.
- *
- * Server component. No wallet code, no chain reads, no client state.
- *
- * The route list mirrors components/NavLinks.tsx (same labels, same order). If a route is added or
- * removed, change both.
- */
 import type { Metadata } from "next";
 import Link from "next/link";
 
 import { Button, Chip, Panel } from "@/components/ui";
 
 export const metadata: Metadata = {
-  title: "Not found — Stonkhouse",
+  title: "Not found — StonkHouse",
   robots: { index: false },
 };
 
 const ROUTES = [
-  { href: "/", label: "Home", what: "What Stonkhouse is: NVDA first, more stocks later" },
-  { href: "/vault/nvda", label: "Vault", what: "Deposit, withdraw, claim, and this week's call" },
-  { href: "/vault/nvda/cycle", label: "Cycle", what: "This week's call, and where to buy it" },
-  { href: "/activity", label: "Activity", what: "Every week, including the zeros" },
-  { href: "/docs", label: "Docs", what: "How the weekly cycle works, and what can go wrong" },
-  { href: "/legal", label: "Legal", what: "Who this is for, and what the collateral actually is" },
+  { href: "/", label: "Home", what: "What StonkHouse is" },
+  { href: "/account", label: "Account", what: "Put NVDA in. Offer it this week." },
+  { href: "/book", label: "Book", what: "Buy this week, or exercise" },
+  { href: "/docs", label: "Docs", what: "How this works" },
+  { href: "/legal", label: "Legal", what: "Who this is for" },
 ] as const;
 
 export default function NotFound() {
@@ -41,16 +29,15 @@ export default function NotFound() {
           There is nothing <span className="text-accent-text">at this address.</span>
         </h1>
         <p className="mt-5 max-w-[34em] text-[17.5px] leading-[1.6] text-ink-2 sm:text-[18.5px]">
-          The link is old or mistyped. This app has a home, the NVDA vault, this week&apos;s call, the
-          history of every week, the docs and the legal text. Pick one, or go back home.
+          The link is old or mistyped.
         </p>
         <div className="mt-7 flex flex-wrap gap-2.5 sm:gap-3">
-          <Button href="/">Back to home</Button>
-          <Button variant="ghost" href="/vault/nvda">
-            Vault
+          <Button href="/">Home</Button>
+          <Button variant="ghost" href="/account">
+            Account
           </Button>
-          <Button variant="ghost" href="/activity">
-            Activity
+          <Button variant="ghost" href="/book">
+            Book
           </Button>
         </div>
       </div>
@@ -58,7 +45,7 @@ export default function NotFound() {
       <Panel pad="none" className="overflow-hidden">
         <nav aria-labelledby="routes-h">
           <h2 id="routes-h" className="px-[22px] pb-3 pt-5 font-display text-[17px] font-bold tracking-[-0.01em]">
-            Every page in this app
+            Pages
           </h2>
           <ul>
             {ROUTES.map((route) => (

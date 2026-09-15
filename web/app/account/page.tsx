@@ -19,8 +19,10 @@ import {
   writerAccountAbi,
 } from "@/lib/contracts";
 import { fmtAsset, fmtUsdg, parseAmount } from "@/lib/format";
+import { useMounted } from "@/lib/hooks";
 
 export default function AccountPage() {
+  const mounted = useMounted();
   const { address, isConnected } = useAccount();
   const { writeContractAsync } = useWriteContract();
   const run = useTxRunner();
@@ -145,7 +147,11 @@ export default function AccountPage() {
         lede={<p>Put it in. Offer some this week. Keep the rest.</p>}
       />
 
-      {!isConnected ? (
+      {!mounted ? (
+        <Card className="max-w-lg">
+          <p className="text-ink-2">Loading…</p>
+        </Card>
+      ) : !isConnected ? (
         <Card className="max-w-lg">
           <h2 className="text-[22px] font-bold tracking-[-0.02em]">Connect</h2>
           <p className="mt-2 mb-5 text-ink-2">MetaMask or Phantom. Robinhood Chain.</p>
