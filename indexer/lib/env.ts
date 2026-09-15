@@ -83,7 +83,7 @@ export const VAULT: Address = (() => {
   if (raw === undefined) {
     throw new Error(
       "[callhouse/indexer] Missing required env var VAULT_ADDRESS (alias: VAULT). " +
-        "Set it to the deployed Callhouse vault on chain 4663.",
+        "Set it to the deployed Stonkhouse vault on chain 4663.",
     );
   }
   if (!isAddress(raw)) {

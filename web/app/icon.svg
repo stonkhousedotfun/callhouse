@@ -1,5 +1,5 @@
 <!--
-  Favicon for app.callhouse.finance, identical to callhouse.finance's (leekzor/callhouse-site: app/icon.svg). Next serves this via the app/icon file convention and emits the
+  Favicon for app.stonkhouse.fun, identical to stonkhouse.fun's (leekzor/callhouse-site: app/icon.svg). Next serves this via the app/icon file convention and emits the
   <link rel="icon"> itself, so nothing imports it and nothing should.
 
   THE MARK (Daylight): an emerald rounded square carrying a white base rule, the strike, with a

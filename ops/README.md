@@ -1,6 +1,6 @@
 # ops/
 
-Everything needed to run Callhouse in production, and the on-chain evidence behind it.
+Everything needed to run Stonkhouse in production, and the on-chain evidence behind it.
 
 Two rules for this directory:
 

@@ -298,7 +298,7 @@ Three independent confirmations:
    ```
 3. The `TransferSingle` `operator` is Seaport `0x…68f116a894984e2db1123eb395`, not a conduit address.
 
-**Implication for Callhouse:** `AdapterSeaport` must call
+**Implication for Stonkhouse:** `AdapterSeaport` must call
 `clear.setApprovalForAll(0x0000000000000068F116a894984e2DB1123eB395, true)` — approve **Seaport
 directly**. Do not deploy or use a conduit.
 

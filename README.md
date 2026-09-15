@@ -1,4 +1,6 @@
-# Callhouse
+# Stonkhouse
+
+Renamed from Callhouse (callhouse.finance) to Stonkhouse (stonkhouse.fun) on 2026-09-15. Repo, package, service, env and on-chain names still say callhouse.
 
 Pooled covered-call account for Robinhood Chain Stock Tokens.
 
@@ -7,7 +9,7 @@ You deposit one tokenized stock. Each week a keeper arms an out-of-the-money cal
 Vault share ticker (first market): **cNVDA**  
 Chain: Robinhood Chain (`4663`)  
 Settlement: Valorem Clear (the vault's own instance or Overcall's unmodified one) + Seaport 1.6  
-Venue: the self-hosted fill page at `app.callhouse.finance/vault/nvda/cycle`, or any Seaport 1.6 fulfil function
+Venue: the self-hosted fill page at `app.stonkhouse.fun/vault/nvda/cycle`, or any Seaport 1.6 fulfil function
 
 > Premium is paid only if a buyer fills the listing.
 > Assignment can take the tokens at the strike.
@@ -43,25 +45,25 @@ That is the whole app.
 
 ## Domains
 
-Two frontends, two domains, two repositories. `callhouse.finance` is the public landing: static, no wallet code, no chain reads, indexed. `app.callhouse.finance` is the dapp, `noindex`, reached by link from the landing. Each is a separate Railway service: the dapp deploys from this repository (runbook: [`ops/deploy.md`](ops/deploy.md)), the landing from `leekzor/callhouse-site` (runbook: that repository's README).
+Two frontends, two domains, two repositories. `stonkhouse.fun` is the public landing: static, no wallet code, no chain reads, indexed. `app.stonkhouse.fun` is the dapp, `noindex`, reached by link from the landing. Each is a separate Railway service: the dapp deploys from this repository (runbook: [`ops/deploy.md`](ops/deploy.md)), the landing from `leekzor/callhouse-site` (runbook: that repository's README).
 
 | Domain | Code | What it is |
 |---|---|---|
-| `callhouse.finance` | `leekzor/callhouse-site` | explains the product. No wallet, no live numbers. Indexed |
-| `app.callhouse.finance` | `/web` (this repo) | deposit, cycle tape, claim USDG, **the fill page**. Noindex, reached by link |
+| `stonkhouse.fun` | `leekzor/callhouse-site` | explains the product. No wallet, no live numbers. Indexed |
+| `app.stonkhouse.fun` | `/web` (this repo) | deposit, cycle tape, claim USDG, **the fill page**. Noindex, reached by link |
 
 ---
 
 ## Repositories
 
-Callhouse is four private repositories, split out of one on 2026-09-13:
+Stonkhouse is four private repositories, split out of one on 2026-09-13:
 
 | Repository | What lives there |
 |---|---|
 | `leekzor/callhouse` (this one) | the app: `web/`, `keeper/`, `indexer/`, `relay/`, `ops/`, `docs/ARCHITECTURE.md`, `docs/WIRING.md`, the spec, plan and task list. Railway `web`, `keeper`, `indexer` and `relay` deploy from here |
 | `leekzor/callhouse-contracts` | the Foundry project, plus `docs/AUDIT-SCOPE.md`, `docs/ACCOUNTING.md`, `docs/DEPLOY.md` and `SECURITY.md` (the full threat model, the 2026-09-12 review and the 2026-09-13 audit findings with their fixes) |
-| `leekzor/callhouse-site` | the marketing landing at `callhouse.finance` |
-| `leekzor/callhouse-docs` | the GitBook source for `docs.callhouse.finance` (pass 2 for the redesign is pending; a push to its `main` publishes immediately) |
+| `leekzor/callhouse-site` | the marketing landing at `stonkhouse.fun` |
+| `leekzor/callhouse-docs` | the GitBook source for `docs.stonkhouse.fun` (pass 2 for the redesign is pending; a push to its `main` publishes immediately) |
 
 The contracts repository is mounted here as a git submodule at `contracts/`, so every `contracts/...` path in these docs resolves inside a full checkout. Clone with it:
 
@@ -108,13 +110,13 @@ If the close cannot redeem the claim (USDG paused or frozen, the vault blocklist
 /contracts    git submodule → leekzor/callhouse-contracts. Foundry — Vault, Policy, Valorem + Seaport adapters, Distributor
 /keeper       Node 22 — weekly roll state machine; serves the fill payload at /orders
 /indexer      Ponder — vault / Valorem / Seaport / token events, the public cycle tape
-/web          Next.js — the dapp at app.callhouse.finance: deposit, cycle tape, claim USDG, the fill page
+/web          Next.js — the dapp at app.stonkhouse.fun: deposit, cycle tape, claim USDG, the fill page
 /relay        Node 22 — keeper alert webhook → Discord / Telegram
 /ops          runbooks, ABIs, Safe addresses, on-chain recon evidence, go-live script
 /docs         architecture, runtime wiring, launch plan
 ```
 
-The landing at `callhouse.finance` is not in this tree; it is `leekzor/callhouse-site`.
+The landing at `stonkhouse.fun` is not in this tree; it is `leekzor/callhouse-site`.
 
 | Read this | For |
 |---|---|
@@ -219,13 +221,13 @@ pnpm --filter @callhouse/keeper dev
 # indexer
 pnpm --filter @callhouse/indexer dev
 
-# web — the dapp, app.callhouse.finance
+# web — the dapp, app.stonkhouse.fun
 pnpm --filter @callhouse/web dev
 ```
 
 The two frontends run side by side: web on port 3000 from this checkout, the landing on 3001 from
 a checkout of `leekzor/callhouse-site`. Nothing is shared between them at runtime, so a CTA on the
-landing is an absolute link to `app.callhouse.finance`, not a route.
+landing is an absolute link to `app.stonkhouse.fun`, not a route.
 
 `SeaportOrderLib` and `ValoremLib` are linked public libraries. Foundry deploys and links them automatically in tests and scripts. **Anvil needs `--code-size-limit 98304`** for the vault.
 
@@ -290,7 +292,7 @@ Required disclosures: Stock Token legal form, assignment, empty-book weeks, depo
 - **Sequencer down** into the open window; there is no uptime feed on 4663.
 - **Keeper or admin pricing.** A compromised keeper (or the bootstrap admin) can sell at the floor to itself: ≈ 1.1% (2.2%) of sold notional per week at launch policy. The whole bound.
 - **Admin.** One deployer key holds every admin power until the Safe handover; no timelock.
-- **Unaudited.** Valorem was audited by Zellic (2022–2023) under the old name `OptionSettlementEngine`. Callhouse's Vault (`contracts/`) has not been, and the owner has decided to launch without an external audit. The gate is the test suite.
+- **Unaudited.** Valorem was audited by Zellic (2022–2023) under the old name `OptionSettlementEngine`. Stonkhouse's Vault (`contracts/`) has not been, and the owner has decided to launch without an external audit. The gate is the test suite.
 
 ---
 

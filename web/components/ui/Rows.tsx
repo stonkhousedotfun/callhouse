@@ -4,7 +4,7 @@ import { cn } from "@/lib/cn";
 
 /**
  * Label / value lists: the app's ledger rows ("Protocol fee ........ 0.214047"). The fee slip on
- * callhouse.finance is the model: a quiet label on the left, the figure right-aligned in Geist Mono,
+ * stonkhouse.fun is the model: a quiet label on the left, the figure right-aligned in Geist Mono,
  * a hairline between rows.
  *
  *   <Rows>

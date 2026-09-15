@@ -11,7 +11,7 @@ import path from "node:path";
  * block is gone and an empty `turbopack` config states the intent explicitly.
  *
  * ---------------------------------------------------------------------------------------
- * The two keys below exist for the Docker image (web/Dockerfile → Railway → app.callhouse.finance).
+ * The two keys below exist for the Docker image (web/Dockerfile → Railway → app.stonkhouse.fun).
  *
  * `output: 'standalone'` makes `next build` emit a self-contained server plus the subset of
  * node_modules it actually traced. The runner stage ships that and nothing else: no pnpm, no

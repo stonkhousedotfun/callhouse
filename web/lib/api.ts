@@ -1,5 +1,5 @@
 /**
- * Typed client for the Callhouse indexer (Ponder + Hono, plan §6) and for this app's own
+ * Typed client for the Stonkhouse indexer (Ponder + Hono, plan §6) and for this app's own
  * server-side order feed (app/api/keeper/orders).
  *
  * Two rules shape this file.

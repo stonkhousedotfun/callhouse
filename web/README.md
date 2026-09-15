@@ -1,10 +1,10 @@
 # web
 
-`app.callhouse.finance` — the Callhouse dapp. Next.js App Router, React 19, wagmi 3, viem. No custody,
+`app.stonkhouse.fun` — the Stonkhouse dapp. Next.js App Router, React 19, wagmi 3, viem. No custody,
 no private keys, no server-side signing. Unaudited, and it says so on every page.
 
 The marketing landing is a separate repository, `leekzor/callhouse-site`, served at
-`callhouse.finance`. It carries no wallet code at all and it is not a copy of anything here; the two
+`stonkhouse.fun`. It carries no wallet code at all and it is not a copy of anything here; the two
 domains share a palette, nothing else at runtime.
 
 **This package is `noindex`.** That is deliberate: the disclosures should have one canonical
@@ -207,7 +207,7 @@ If a forbidden phrase genuinely belongs inside an explicit negation on the docs 
 
 ## Design: Daylight, shared with the landing
 
-The app uses the same "Daylight" design as `callhouse.finance`: Tailwind CSS v4, light and dark
+The app uses the same "Daylight" design as `stonkhouse.fun`: Tailwind CSS v4, light and dark
 from `prefers-color-scheme` (no toggle), Schibsted Grotesk / Figtree / Geist Mono through
 `next/font` (downloaded at build time, so the Docker build needs to reach Google Fonts).
 

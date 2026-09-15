@@ -35,7 +35,7 @@ function fromEnv(name: string, value: string | undefined, fallback?: Address): A
   return getAddress(raw);
 }
 
-/** Callhouse vault (cNVDA). Deploy-time only — set NEXT_PUBLIC_VAULT. */
+/** Stonkhouse vault (cNVDA). Deploy-time only — set NEXT_PUBLIC_VAULT. */
 export const VAULT = fromEnv("NEXT_PUBLIC_VAULT", process.env.NEXT_PUBLIC_VAULT);
 
 /** NVDA Stock Token, 18 decimals, proxy. The vault's `asset`. */

@@ -26,19 +26,20 @@ Status (2026-09-13 ~14:30 PT):
 | Fallback | **done.** The cycle page falls back to the keeper's `/orders` through a server route that checks every order against the chain (457c4fc, 41b0a66; 11 review findings fixed); W-13 fork acceptance passes on merged `main`, including a tampered order that is refused. Deploy needs `KEEPER_ORDERS_URL` on the `web` service (`ops/deploy.md` §3) |
 | E-03 rehearsal defects | from the other session's fork rehearsal: W-3–W-6 fixed (0c6cd47). **Open, handed to a separate workflow** (`~/Desktop/robinhood-dev/projects/callhouse/HANDOFF-BUGS-2026-09-13.md`): L-1 the keeper posts an off-curve placeholder signature that Overcall's verifier may reject before ERC-1271 (**blocks L-04**); the K-1 remainder; X-1–X-3 indexer; W-2 deposit form; K-2; D-1 |
 | Owner decision | **W-1:** a deposit while a call is open is priced at face value and shares that week's assignment. Copy on site (46d79b2) and docs (fe82ec0) now says so; the alternative is Idle-only deposits, a contract change |
-| Open | GitBook site title shows "callhouse Docs" (rename in GitBook site settings) |
+| Open | GitBook site title shows "callhouse Docs" (rename to "Stonkhouse Docs" in GitBook site settings) |
+| Open | Rename to `stonkhouse.fun` (2026-09-15): the DNS, TLS and Email Routing work recorded above was done on `callhouse.finance`. Steps 1.1–1.5, the `app` record (part 6) and Email Routing (`legal@`, `privacy@`, `security@`) are owed again on `stonkhouse.fun` |
 
 ---
 
-## 1. Site live on `callhouse.finance`
+## 1. Site live on `stonkhouse.fun`
 
 | Step | Who | Done when |
 |---|---|---|
 | 1.1 Read Railway's required CNAME targets for both custom domains from the API (do not trust notes) | Claude | targets printed from Railway |
-| 1.2 Create `CNAME callhouse.finance → <target>` and `CNAME www → <target>`, **DNS only** (Cloudflare flattens the apex) | Claude if the Cloudflare token has Zone DNS:Edit; otherwise the owner in the dashboard | `dig` resolves both |
-| 1.3 Wait for Railway to issue TLS | — | `https://callhouse.finance` and `https://www.callhouse.finance` return 200 with a valid certificate |
+| 1.2 Create `CNAME stonkhouse.fun → <target>` and `CNAME www → <target>`, **DNS only** (Cloudflare flattens the apex) | Claude if the Cloudflare token has Zone DNS:Edit; otherwise the owner in the dashboard | `dig` resolves both |
+| 1.3 Wait for Railway to issue TLS | — | `https://stonkhouse.fun` and `https://www.stonkhouse.fun` return 200 with a valid certificate |
 | 1.4 Connect the `site` service to `leekzor/callhouse-site` (Settings → Source) for push-to-deploy | owner (the CLI/API repo-link mutation was rejected for this account) | a push to `main` triggers a deploy |
-| 1.5 `docs.callhouse.finance`: CNAME to the target GitBook shows (DNS only) | owner reads the target in GitBook; Claude or owner adds it | GitBook marks the domain verified |
+| 1.5 `docs.stonkhouse.fun`: CNAME to the target GitBook shows (DNS only) | owner reads the target in GitBook; Claude or owner adds it | GitBook marks the domain verified |
 
 ## 2. Correct live site copy that the code contradicts
 
@@ -122,7 +123,7 @@ the handover). Rehearsed end to end on a fork with negative checks.
    - `web`: every `NEXT_PUBLIC_*` as a build variable before the first build
      (`NEXT_PUBLIC_VAULT`, `NEXT_PUBLIC_VAULT_FROM_BLOCK`, `NEXT_PUBLIC_API_URL` = indexer URL).
    - Connect each service to `leekzor/callhouse` with its `railway.json` path.
-6. **DNS**: `app.callhouse.finance` CNAME to the web service target (DNS only); indexer on a Railway
+6. **DNS**: `app.stonkhouse.fun` CNAME to the web service target (DNS only); indexer on a Railway
    domain or `api.` if the web app needs a stable name.
 7. **Monitors**: keeper `/health`, indexer health, site, app — external uptime checks alerting the same
    channel as the relay. Test the webhook end to end.

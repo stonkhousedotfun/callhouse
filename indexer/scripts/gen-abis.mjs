@@ -34,7 +34,7 @@ const targets = [
     out: "vault.ts",
     export: "vaultAbi",
     note:
-      "Callhouse Vault. Compiled artefact of contracts/src/Vault.sol, plus the custom errors of\n// its linked libraries (ValoremLib, SeaportOrderLib) and Policy, which Vault.json omits.",
+      "Stonkhouse Vault. Compiled artefact of contracts/src/Vault.sol, plus the custom errors of\n// its linked libraries (ValoremLib, SeaportOrderLib) and Policy, which Vault.json omits.",
     mergeErrorsFrom: ["ValoremLib.json", "SeaportOrderLib.json", "Policy.json"],
   },
   {

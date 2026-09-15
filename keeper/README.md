@@ -1,4 +1,4 @@
-# Callhouse keeper
+# Stonkhouse keeper
 
 The weekly roll, as a single Node 22 process. One vault per process.
 
@@ -265,7 +265,7 @@ worse than one that will not start. `keeper/.env.example` lists every key with i
 | Key | What it is |
 |---|---|
 | `RH_RPC` | Primary RPC. **Must be an archive node** — it is the only endpoint used for `eth_getLogs`. |
-| `VAULT` | The Callhouse vault this process drives. |
+| `VAULT` | The Stonkhouse vault this process drives. |
 | `KEEPER_PK` | The hot key. Needs gas and `KEEPER_ROLE`. Keep ~0.05 ETH on it. |
 
 ### Chain, with working defaults

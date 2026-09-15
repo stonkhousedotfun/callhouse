@@ -6,7 +6,7 @@
 # Restarting is safe at any instant. On boot the keeper reconciles its SQLite database
 # against live vault state and never re-does work it has already done.
 [Unit]
-Description=Callhouse keeper (weekly covered-call roll)
+Description=Stonkhouse keeper (weekly covered-call roll)
 After=network-online.target
 Wants=network-online.target
 

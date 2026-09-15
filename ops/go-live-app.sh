@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ---------------------------------------------------------------------------------------------
-# ops/go-live-app.sh — turn on the Callhouse app services on Railway AFTER the vault is deployed.
+# ops/go-live-app.sh — turn on the Stonkhouse app services on Railway AFTER the vault is deployed.
 #
 # Run by the owner, once the vault exists on chain 4663:
 #
@@ -49,7 +49,7 @@ RW_ENV=319fcb44-0e25-4367-947c-09351a349d2e         # production
 REPO=leekzor/callhouse
 CHAIN_ID=4663
 RPC=${RH_RPC:-https://rpc.mainnet.chain.robinhood.com}
-APP_URL=${APP_URL:-https://app.callhouse.finance}
+APP_URL=${APP_URL:-https://app.stonkhouse.fun}
 RELAY_PRIVATE_URL=http://relay.railway.internal:8080/alert
 READY_WAIT_SECS=${READY_WAIT_SECS:-1200}
 MIN_RAILWAY_CLI="5.47.2"                             # first release that lists sealed variables (as null)
@@ -132,7 +132,7 @@ if [ -z "$code" ] || [ "$code" = "0x" ]; then
 fi
 note "vault $VAULT has $(( (${#code} - 2) / 2 )) bytes of code"
 VAULT=$(cast to-check-sum-address "$VAULT")
-# Code alone is not enough: any contract has code. The Callhouse vault exposes asset(), clear() and
+# Code alone is not enough: any contract has code. The Stonkhouse vault exposes asset(), clear() and
 # seaportZone(); the asset must be NVDA and the zone must be the vault itself (the redesigned vault is
 # the zone of its own PARTIAL_RESTRICTED listings), or this is not our vault.
 v_asset=$(cast call --rpc-url "$RPC" "$VAULT" 'asset()(address)' 2>/dev/null | lc || true)
@@ -141,7 +141,7 @@ v_clear=$(cast call --rpc-url "$RPC" "$VAULT" 'clear()(address)' 2>/dev/null | l
 [ "$v_asset" = "$NVDA" ] \
   || die "$VAULT asset() is '${v_asset:-no answer}', expected NVDA 0xd0601CE157Db5bdC3162BbaC2a2C8aF5320D9EEC"
 [ "$v_zone" = "$(echo "$VAULT" | lc)" ] \
-  || die "$VAULT seaportZone() is '${v_zone:-no answer}', expected the vault itself — not a redesigned Callhouse vault"
+  || die "$VAULT seaportZone() is '${v_zone:-no answer}', expected the vault itself — not a redesigned Stonkhouse vault"
 echo "$v_clear" | grep -Eq '^0x[0-9a-f]{40}$' || die "$VAULT clear() gave '${v_clear:-no answer}'"
 clear_code=$(cast code --rpc-url "$RPC" "$v_clear" 2>/dev/null) || die "cast code failed for clear() $v_clear"
 [ -n "$clear_code" ] && [ "$clear_code" != "0x" ] || die "vault.clear() $v_clear has no code"

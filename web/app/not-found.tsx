@@ -1,5 +1,5 @@
 /**
- * 404 for app.callhouse.finance. Modelled on callhouse.finance's app/not-found.tsx: a way back, not
+ * 404 for app.stonkhouse.fun. Modelled on stonkhouse.fun's app/not-found.tsx: a way back, not
  * a content page. A lost visitor gets the three places most people come here for (the vault,
  * deposits, the weekly history) as buttons, and beside them every route this app has, so an old or
  * mistyped link still lands somewhere useful. The layout supplies the nav, footer and Container.
@@ -15,7 +15,7 @@ import Link from "next/link";
 import { Button, Chip, Panel } from "@/components/ui";
 
 export const metadata: Metadata = {
-  title: "Not found — Callhouse",
+  title: "Not found — Stonkhouse",
   robots: { index: false },
 };
 

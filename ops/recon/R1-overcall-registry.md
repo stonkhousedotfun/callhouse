@@ -397,7 +397,7 @@ the write, not cached from an earlier read.
 **nothing has been written yet on the current ladder** (it reads `nextClaimKey == 1` on every rung
 straight from Valorem). Overcall's comment calls this "never a mid-week rug of the front page."
 
-The hazard for Callhouse: if our vault is the *first* writer of the week, then between the keeper's
+The hazard for Stonkhouse: if our vault is the *first* writer of the week, then between the keeper's
 `cycle()` read and the vault's `write()` the owner can legally swap the whole ladder. The vault would
 then write against an `optionId` that is no longer approved.
 

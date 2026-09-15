@@ -1,5 +1,5 @@
 /**
- * App chrome, in the Daylight layout callhouse.finance uses (leekzor/callhouse-site:
+ * App chrome, in the Daylight layout stonkhouse.fun uses (leekzor/callhouse-site:
  * components/Nav.tsx): brand, the link row, and on the right the one control in the chrome — here
  * the wallet button rather than "Open the app".
  *
@@ -12,7 +12,7 @@
  * sideways.
  *
  * The brand points at "/". Inside the app, home is the vault, not the marketing site; the link row
- * ends with callhouse.finance for anyone who wants that.
+ * ends with stonkhouse.fun for anyone who wants that.
  *
  * TEST HOOK: `data-slot="topbar"` on the header. The W-13 run connects its wallet through it.
  */

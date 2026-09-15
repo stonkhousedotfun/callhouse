@@ -7,7 +7,7 @@
  * The link order is the depositor's journey: land on the vault, deposit, watch the cycle, audit
  * the tape, then read the docs and the legal text.
  *
- * One link leaves the app: callhouse.finance, the marketing site. It is LAST, it is deliberately
+ * One link leaves the app: stonkhouse.fun, the marketing site. It is LAST, it is deliberately
  * not part of LINKS (a plain new-tab <a> through ExternalLink, not next/link, because next/link is
  * for routes this app owns and prefetching another origin is meaningless), it is set off by a rule
  * so it does not read as a seventh route, and it is never "active".
@@ -38,7 +38,7 @@ const LINK =
 const IDLE = "text-ink-2 hover:bg-surface-2 hover:text-ink";
 const ACTIVE = "bg-surface text-ink shadow-soft";
 
-/** "callhouse.finance" in production; whatever host a preview build points at otherwise. */
+/** "stonkhouse.fun" in production; whatever host a preview build points at otherwise. */
 const SITE_HOST = SITE_URL.replace(/^https?:\/\//i, "");
 
 export function NavLinks() {

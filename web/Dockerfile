@@ -1,5 +1,5 @@
 # ---------------------------------------------------------------------------------------------
-# @callhouse/web  →  app.callhouse.finance  (the dapp. Every route unchanged by the domain split.)
+# @callhouse/web  →  app.stonkhouse.fun  (the dapp. Every route unchanged by the domain split.)
 #
 # WHY THIS FILE EXISTS: Railway builds this package with the REPO ROOT as the build context, not
 # web/. pnpm-lock.yaml and pnpm-workspace.yaml live at the root and the install must be
@@ -130,11 +130,11 @@ ENV NEXT_PUBLIC_VAULT_FROM_BLOCK=$NEXT_PUBLIC_VAULT_FROM_BLOCK
 
 # ---- the two domains. Used for metadataBase, canonical URLs and the links back to the marketing
 #      site. Never for chain access (lib/site.ts says so). ----
-ARG NEXT_PUBLIC_SITE_URL="https://callhouse.finance"
+ARG NEXT_PUBLIC_SITE_URL="https://stonkhouse.fun"
 ENV NEXT_PUBLIC_SITE_URL=$NEXT_PUBLIC_SITE_URL
-ARG NEXT_PUBLIC_DOCS_URL="https://docs.callhouse.finance"
+ARG NEXT_PUBLIC_DOCS_URL="https://docs.stonkhouse.fun"
 ENV NEXT_PUBLIC_DOCS_URL=$NEXT_PUBLIC_DOCS_URL
-ARG NEXT_PUBLIC_APP_URL="https://app.callhouse.finance"
+ARG NEXT_PUBLIC_APP_URL="https://app.stonkhouse.fun"
 ENV NEXT_PUBLIC_APP_URL=$NEXT_PUBLIC_APP_URL
 
 ENV NEXT_TELEMETRY_DISABLED=1

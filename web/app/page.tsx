@@ -92,7 +92,7 @@ export default function HomePage() {
       <div className="grid gap-4 sm:gap-5">
         {!VAULT ? (
           <Notice tone="warn" title="No vault address configured.">
-            Set <code>NEXT_PUBLIC_VAULT</code> to the deployed Callhouse vault on chain 4663. Every
+            Set <code>NEXT_PUBLIC_VAULT</code> to the deployed Stonkhouse vault on chain 4663. Every
             other address (clearinghouse, Seaport, USDG, the Stock Token) is compiled in from
             explorer-confirmed recon and needs no configuration.
           </Notice>

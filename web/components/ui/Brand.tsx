@@ -24,7 +24,7 @@ export function BrandMark({ size = 26, className }: { size?: number; className?:
   );
 }
 
-/** Mark + "callhouse" wordmark, linking home. */
+/** Mark + "stonkhouse" wordmark, linking home. */
 export function Brand({ className }: { className?: string }) {
   return (
     <Link
@@ -35,7 +35,7 @@ export function Brand({ className }: { className?: string }) {
       )}
     >
       <BrandMark />
-      callhouse
+      stonkhouse
     </Link>
   );
 }

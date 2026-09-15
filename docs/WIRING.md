@@ -23,8 +23,8 @@ Three facts frame everything below:
 
 | Process | Package | Default port | Public name | What it is |
 |---|---|---|---|---|
-| `site` | `leekzor/callhouse-site` (separate repo) | 3001 | `callhouse.finance` | static marketing; **no fetches, no wallet, no chain reads, ever** |
-| `web` | `web/` | 3000 | `app.callhouse.finance` | the dapp; Next.js SSR + browser wagmi; hosts the fill page |
+| `site` | `leekzor/callhouse-site` (separate repo) | 3001 | `stonkhouse.fun` | static marketing; **no fetches, no wallet, no chain reads, ever** |
+| `web` | `web/` | 3000 | `app.stonkhouse.fun` | the dapp; Next.js SSR + browser wagmi; hosts the fill page |
 | indexer | `indexer/` | 42069 | a Railway domain (W-19) | Ponder: event indexer + the `/v1/*` read API |
 | keeper | `keeper/` | 8787 | none (operator-only) | the roll bot; serves `/health` `/state` `/cycles` `/orders` |
 | relay | `relay/` | 8080 | none (private network) | keeper alert webhook → Discord / Telegram |

@@ -559,7 +559,7 @@ supposed to bind to `registry.cycle()`, and a ladder without a registry is not k
 
 ### `0x780a9ee45f84d2bdeb8451da4bedc869ba0a8b60` and `0xb55fbcf06f9924578687beebb26c0877948d83b1`
 
-Nothing to do with Callhouse. Both were created **inside the same transaction**
+Nothing to do with Stonkhouse. Both were created **inside the same transaction**
 `0xc9f859fa62bf25fa9bb8e85d1bb3c15ed7b4af7f55d4f2d825151e2b790619d1` (to launchpad
 `0xe33e9e479df8802cb0866d5d05258bec4cf62948`) in block **61299061** (Sat 2026-09-12 17:56:31Z — minutes old when
 I looked):
@@ -1208,7 +1208,7 @@ and "nearest OTM" picks 226. The count is right; the end of the ladder is not.
   name()        -> revert 0x
 ```
 A real UniV2 pair exposes `token0()`/`token1()`. This is a Pons V2 launch pool, not a
-Uniswap-V2 pair. Irrelevant to Callhouse either way — the "unrelated" conclusion stands.
+Uniswap-V2 pair. Irrelevant to Stonkhouse either way — the "unrelated" conclusion stands.
 
 ### B.11 Not verifiable: the busiest-`to` table
 

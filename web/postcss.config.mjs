@@ -1,5 +1,5 @@
 /**
- * PostCSS for the dapp (app.callhouse.finance): Tailwind CSS v4 and nothing else. Next picks this file up on its
+ * PostCSS for the dapp (app.stonkhouse.fun): Tailwind CSS v4 and nothing else. Next picks this file up on its
  * own (Turbopack reads postcss.config.mjs), so no next.config.mjs change goes with it.
  *
  * Tailwind v4 needs no tailwind.config.*: the theme lives in app/globals.css (@theme inline over

@@ -1,8 +1,8 @@
 /**
  * The two domains this product is served from.
  *
- * callhouse.finance      — the marketing surface (repo leekzor/callhouse-site). Static, no wallet code.
- * app.callhouse.finance  — this package. The dapp, every route unchanged.
+ * stonkhouse.fun         — the marketing surface (repo leekzor/callhouse-site). Static, no wallet code.
+ * app.stonkhouse.fun     — this package. The dapp, every route unchanged.
  *
  * These exist for exactly two reasons: so the app can link back to the marketing site, and so
  * Next has an absolute base for metadata (`metadataBase`, canonical URLs, Open Graph). NOTHING
@@ -22,13 +22,13 @@ function clean(value: string | undefined, fallback: string): string {
 }
 
 /** Marketing site. Landing, /how-it-works, /risks, /legal, /terms, /privacy. Canonical for the disclosures. */
-export const SITE_URL = clean(process.env.NEXT_PUBLIC_SITE_URL, "https://callhouse.finance");
+export const SITE_URL = clean(process.env.NEXT_PUBLIC_SITE_URL, "https://stonkhouse.fun");
 
 /** The full documentation (GitBook, synced from leekzor/callhouse-docs). Linked from the footer. */
-export const DOCS_URL = clean(process.env.NEXT_PUBLIC_DOCS_URL, "https://docs.callhouse.finance");
+export const DOCS_URL = clean(process.env.NEXT_PUBLIC_DOCS_URL, "https://docs.stonkhouse.fun");
 
 /** This app. Used as the metadata base; the dapp is reached by link from SITE_URL. */
-export const APP_URL = clean(process.env.NEXT_PUBLIC_APP_URL, "https://app.callhouse.finance");
+export const APP_URL = clean(process.env.NEXT_PUBLIC_APP_URL, "https://app.stonkhouse.fun");
 
 /**
  * The two legal documents. They live on the marketing site ONLY and are linked from here, not

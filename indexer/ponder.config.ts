@@ -19,7 +19,7 @@ import {
 } from "./lib/env";
 
 /**
- * Callhouse indexer — chain 4663 (Robinhood Chain mainnet), one vault.
+ * Stonkhouse indexer — chain 4663 (Robinhood Chain mainnet), one vault.
  *
  * Sources, and why each one is here:
  *

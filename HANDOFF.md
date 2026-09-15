@@ -1,6 +1,8 @@
 # Handoff — 2026-09-14 (write-on-fill port, launch)
 
-Callhouse is **not deployed**. Owner decision D14: no external audit; the gate is the test suite.
+Renamed from Callhouse (callhouse.finance) to Stonkhouse (stonkhouse.fun) on 2026-09-15. Repo, package, service, env and on-chain names still say callhouse.
+
+Stonkhouse is **not deployed**. Owner decision D14: no external audit; the gate is the test suite.
 An internal review of `redesign/a2-own-strikes-2026-09-13` @ `79cee08` on 2026-09-14 found no
 Critical/High/Medium; Low L-01 (in-fill deposit) is fixed at `bec4dbd`. Tip is `165b4ab` (script-only:
 Clear `feeTo` must be the admin Safe). Report:

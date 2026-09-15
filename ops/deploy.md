@@ -1,10 +1,10 @@
 # Runbook — Deploy the app
 
-**What this is.** How the dapp (`app.callhouse.finance`) gets onto Railway, what every setting means,
+**What this is.** How the dapp (`app.stonkhouse.fun`) gets onto Railway, what every setting means,
 and the three things that go wrong. The other Railway services this repository deploys have their
 own sections: keeper §10, indexer §11, alert relay §12. The contracts are deployed from the
 contracts repository with its own runbook; §13 is the hand-off between the two. The landing
-(`callhouse.finance`) deploys from `leekzor/callhouse-site`, and that repository's README is its
+(`stonkhouse.fun`) deploys from `leekzor/callhouse-site`, and that repository's README is its
 runbook.
 
 **Who runs it.** Anyone with write access to the Railway project. Nothing in this runbook touches
@@ -33,10 +33,10 @@ redeploy.
 ## 0. The shape of it
 
 ```
-callhouse.finance          ->  Railway service "site"  ->  leekzor/callhouse-site (its own repo,
+stonkhouse.fun             ->  Railway service "site"  ->  leekzor/callhouse-site (its own repo,
                            its own Dockerfile and build context). Not covered here.
 
-app.callhouse.finance      ->  Railway service "web"   ->  web/Dockerfile   ->  web/server.js
+app.stonkhouse.fun         ->  Railway service "web"   ->  web/Dockerfile   ->  web/server.js
                            The dapp, every route unchanged. wagmi + viem, one server route
                            (/api/keeper/orders, the fill page's order source).
 ```
@@ -47,8 +47,8 @@ it installs, because the lockfile is workspace-wide. This is why the Root Direct
 is not negotiable.
 
 Nothing is shared between the two domains at runtime. No cookie, no session, no CORS grant, no
-shared origin. Every "go and do something" control on `callhouse.finance` is a plain absolute link to
-`https://app.callhouse.finance/...`, which is the whole reason the split is cheap.
+shared origin. Every "go and do something" control on `stonkhouse.fun` is a plain absolute link to
+`https://app.stonkhouse.fun/...`, which is the whole reason the split is cheap.
 
 ---
 
@@ -153,9 +153,9 @@ to it identically.
 | `NEXT_PUBLIC_CLEARINGHOUSE` | leave unset unless the vault was built on our own Clear (§13) | `lib/contracts.ts` defaults to Overcall's unmodified instance `0x9a7b…C0C0`. It must equal `vault.clear()`; the fill payload's offer item names this token |
 | `NEXT_PUBLIC_SEAPORT` | leave unset | as above |
 | `NEXT_PUBLIC_VAULT_FROM_BLOCK` | the vault's deploy block | Falls back to `0`. Only makes `/activity`'s fallback scan cheaper |
-| `NEXT_PUBLIC_SITE_URL` | `https://callhouse.finance` | ARG default, same value |
-| `NEXT_PUBLIC_APP_URL` | `https://app.callhouse.finance` | ARG default, same value. Used as `metadataBase` |
-| `NEXT_PUBLIC_DOCS_URL` | `https://docs.callhouse.finance` | ARG default, same value. Footer link to the GitBook docs |
+| `NEXT_PUBLIC_SITE_URL` | `https://stonkhouse.fun` | ARG default, same value |
+| `NEXT_PUBLIC_APP_URL` | `https://app.stonkhouse.fun` | ARG default, same value. Used as `metadataBase` |
+| `NEXT_PUBLIC_DOCS_URL` | `https://docs.stonkhouse.fun` | ARG default, same value. Footer link to the GitBook docs |
 
 The four address variables are left blank on purpose. `lib/contracts.ts` owns those values,
 `ops/addresses.json` carries the evidence for each one, and a second copy in the Railway UI is a
@@ -190,7 +190,7 @@ reverting transaction. The browser never talks to the keeper, so the keeper need
 domain**. Verify after setting it:
 
 ```bash
-curl -s https://app.callhouse.finance/api/keeper/orders | head -c 300
+curl -s https://app.stonkhouse.fun/api/keeper/orders | head -c 300
 # {"configured":true,"orders":[...],"rejected":[],"closed":[],"unchecked":[]}   wired; orders is [] outside a Listed week
 # {"configured":false,...}   HTTP 503                    KEEPER_ORDERS_URL is not set on web
 # {"configured":true,...,"error":"The keeper could not be reached."}   HTTP 502   see §9 item 14
@@ -205,7 +205,7 @@ hostname of the form `<something>.up.railway.app` **and a `_railway-verify` TXT 
 the TXT the domain answers 404. Then create the DNS records, all **DNS only** (grey cloud) on
 Cloudflare.
 
-### `app.callhouse.finance`
+### `app.stonkhouse.fun`
 
 A subdomain. Plain `CNAME`, works at every registrar.
 
@@ -219,7 +219,7 @@ TLS is issued by Railway (Let's Encrypt, 90 days, auto-renewed) once the record 
 few minutes. If CAA records are ever added to the zone, allow `letsencrypt.org` (Railway) and
 `pki.goog` (GitBook, for `docs.`).
 
-### `callhouse.finance` and `www` — the landing's records, documented with the landing
+### `stonkhouse.fun` and `www` — the landing's records, documented with the landing
 
 The apex and `www` attach to the `site` service, and the full step is in the
 `leekzor/callhouse-site` README. One fact is repeated here because it lives in the same DNS zone as
@@ -256,13 +256,13 @@ The second cause is a `PORT` mismatch: Railway probes `$PORT` and `server.js` re
 
 ```bash
 # 1. The host answers.
-curl -sI https://app.callhouse.finance/        | head -1     # HTTP/2 200
+curl -sI https://app.stonkhouse.fun/        | head -1     # HTTP/2 200
 
 # 2-4. The landing's checks (no wallet code, absolute CTAs into the app, its four routes)
 #      moved with the landing to the leekzor/callhouse-site README.
 
 # 5. THE ONE THAT MATTERS: which vault did this image get baked with?
-curl -s https://app.callhouse.finance/vault/nvda | grep -oiE '0x[0-9a-f]{40}' | sort -u
+curl -s https://app.stonkhouse.fun/vault/nvda | grep -oiE '0x[0-9a-f]{40}' | sort -u
 ```
 
 Take the addresses from step 5 and diff them against `ops/addresses.json`. If the vault address is
@@ -305,7 +305,7 @@ The corollary: reverting the commit alone does **not** undo a variable change. T
 on the service, and the next build will pick it up again. Fix the variable, then rebuild.
 
 Rolling back `web` does not affect the landing. They share nothing, not even a repository, so
-`callhouse.finance` can sit on last week's build while `app.callhouse.finance` ships.
+`stonkhouse.fun` can sit on last week's build while `app.stonkhouse.fun` ships.
 
 ---
 
@@ -333,7 +333,7 @@ bare COPY error. If you see that message, read the next section.
    only failure here that is silent. The container starts, the healthcheck passes, the page serves
    the wrong vault. Rebuild, never restart, and verify with §5 step 5.
 
-2. **A `CNAME` at the apex is invalid DNS.** `callhouse.finance` needs Cloudflare's CNAME
+2. **A `CNAME` at the apex is invalid DNS.** `stonkhouse.fun` needs Cloudflare's CNAME
    flattening. Do not pin an A record to an IP you resolved yourself. (The landing's record; the
    full step is in the `leekzor/callhouse-site` README, §4 here has the summary.)
 

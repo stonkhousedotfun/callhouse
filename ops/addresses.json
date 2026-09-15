@@ -1,5 +1,5 @@
 {
-  "_readme": "Callhouse address book. Every entry carries the call that proved it. `confirmed: true` means an eth_getCode or eth_call was actually run against a chain-4663 RPC and returned the stated result. Never add an address here without that check, and never copy one out of a frontend bundle without re-deriving it from chain state.",
+  "_readme": "Stonkhouse address book. Every entry carries the call that proved it. `confirmed: true` means an eth_getCode or eth_call was actually run against a chain-4663 RPC and returned the stated result. Never add an address here without that check, and never copy one out of a frontend bundle without re-deriving it from chain state.",
   "_reconfirmedAt": "2026-09-12T18:36:00Z",
   "_reconfirmedAtBlock": 61322378,
   "_reconfirmedBy": "ops pass, cast 1.3.5 against https://rpc.mainnet.chain.robinhood.com. Every `confirmed: true` row on chain 4663 below was re-read in this pass, not copied from recon. The 2026-09-13 redesign pass restructured the file (registry moved to history, `ours.clearinghouse` added, 46630 verdict corrected) without re-reading addresses.",
@@ -170,7 +170,7 @@
         },
         "tokenUriGenerator": {
           "address": "0xE53cCB924d27f421a91b59087587fD866C5d64c7",
-          "what": "Valorem's TokenURIGenerator. Renders the option/claim ERC-1155 metadata. Informational; nothing in Callhouse calls it.",
+          "what": "Valorem's TokenURIGenerator. Renders the option/claim ERC-1155 metadata. Informational; nothing in Stonkhouse calls it.",
           "chainId": 4663,
           "confirmed": true,
           "evidence": "eth_getCode -> 9901 bytes. Sourcify exact_match. Re-read 2026-09-12."
@@ -184,7 +184,7 @@
         },
         "weth": {
           "address": "0x0Bd7D308f8E1639FAb988df18A8011f41EAcAD73",
-          "what": "WETH on 4663. Not used by Callhouse. Recorded so nobody has to go looking.",
+          "what": "WETH on 4663. Not used by Stonkhouse. Recorded so nobody has to go looking.",
           "chainId": 4663,
           "confirmed": true,
           "evidence": "eth_getCode -> 2202 bytes (ops/recon/R12-overcall-discovery.md section 1.3)."
@@ -307,7 +307,7 @@
         },
         "registries": {
           "_what": "One OvercallRegistry per market, one per collateral token. All 11 were the same 5,905-byte contract; they differ only in the immutable collateralToken. All used USDG as exerciseToken and the same Valorem Clear.",
-          "_deployer": "All 11 were deployed and owned by 0x408adcFFebDF48EC23F1E3811A91AeD3cC951CC0, the sender of all newOptionType calls on this chain before Callhouse. A single EOA.",
+          "_deployer": "All 11 were deployed and owned by 0x408adcFFebDF48EC23F1E3811A91AeD3cC951CC0, the sender of all newOptionType calls on this chain before Stonkhouse. A single EOA.",
           "_observedAt": "2026-09-12T18:36:00Z, block 61322378",
           "markets": {
             "NVDA": {
@@ -377,7 +377,7 @@
       "name": "Robinhood Chain Testnet",
       "chainId": 46630,
       "chainIdHex": "0xb626",
-      "_VERDICT": "NOT a useful rehearsal target for Callhouse. Overcall's own Valorem Clear DOES exist on 46630 at 0x0059Df7C6229373a5AFC0685B0EE8777f59BAcbc (an earlier pass recorded it as absent; the R7-R8 adversarial re-check found it, byte-identical to mainnet), but it is unusable for us: the Overcall cycles set on it are hand-set by their operator and lapsed, there is no official NVDA Stock Token (the StockFactory has deployed TSLA, AMZN, PLTR, NFLX, AMD only), no Chainlink RHNVDA feed, and Overcall's mocks (NVDA, USDG, feed) are not the tokens the vault is built for. The redesigned vault does not need a registry, so the registry rows below are moot. The code-size limit is the same 98,304 B as mainnet. A mainnet fork with `--code-size-limit 98304` is the only place to compress a week into minutes; the vault may there be rehearsed against Overcall's Clear or our own (DeployClear.s.sol, rehearsal step A0).",
+      "_VERDICT": "NOT a useful rehearsal target for Stonkhouse. Overcall's own Valorem Clear DOES exist on 46630 at 0x0059Df7C6229373a5AFC0685B0EE8777f59BAcbc (an earlier pass recorded it as absent; the R7-R8 adversarial re-check found it, byte-identical to mainnet), but it is unusable for us: the Overcall cycles set on it are hand-set by their operator and lapsed, there is no official NVDA Stock Token (the StockFactory has deployed TSLA, AMZN, PLTR, NFLX, AMD only), no Chainlink RHNVDA feed, and Overcall's mocks (NVDA, USDG, feed) are not the tokens the vault is built for. The redesigned vault does not need a registry, so the registry rows below are moot. The code-size limit is the same 98,304 B as mainnet. A mainnet fork with `--code-size-limit 98304` is the only place to compress a week into minutes; the vault may there be rehearsed against Overcall's Clear or our own (DeployClear.s.sol, rehearsal step A0).",
       "_whatItIsGoodFor": "A free smoke test of the deploy script, constructor wiring, role grants, Sourcify verification against a live chain, the real Robinhood Stock token transfer/approve/uiMultiplier path and Ponder's live-chain sync, against TSLA instead of NVDA with a stand-in price feed. Skip the Valorem/Seaport legs, or bring our own Clear.",
       "codeSizeLimitBytes": 98304,
       "rpc": {
@@ -403,7 +403,7 @@
         },
         "valoremClearOvercall": {
           "address": "0x0059Df7C6229373a5AFC0685B0EE8777f59BAcbc",
-          "what": "Overcall's Valorem Clear on 46630. Exists and is byte-identical to mainnet's; unusable for a Callhouse rehearsal for the reasons in _VERDICT (no NVDA, no feed, lapsed hand-set cycles).",
+          "what": "Overcall's Valorem Clear on 46630. Exists and is byte-identical to mainnet's; unusable for a Stonkhouse rehearsal for the reasons in _VERDICT (no NVDA, no feed, lapsed hand-set cycles).",
           "chainId": 46630,
           "confirmed": true,
           "evidence": "R7-R8 adversarial re-check: eth_getCode non-zero, bytecode matches mainnet 0x9a7b40e5\u2026; the earlier 'DOES NOT EXIST' finding in this file was wrong and is withdrawn."

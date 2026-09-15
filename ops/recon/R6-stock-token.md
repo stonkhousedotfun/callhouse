@@ -464,7 +464,7 @@ Note `ASSET_PROTECTION_ROLE` — the freeze/wipe key — **is a bare EOA**, not 
 
 ---
 
-## 8. What this means for Callhouse (concrete)
+## 8. What this means for Stonkhouse (concrete)
 
 1. **Share math is safe. Ship it.** `README.md` line 143 ("Use raw `balanceOf` for ERC-20 math. Display layer multiplies by `uiMultiplier()`. Never rebase internally.") is **exactly right** and now proven on-chain. No change needed to `Vault.sol`.
 2. **The multiplier is free NAV, as TECHSPEC line 16 assumes.** It has moved once, +0.0775%, on 2026-09-10, and it only goes up (monotonic per the embedded revert string).

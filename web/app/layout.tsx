@@ -9,7 +9,7 @@ import { Providers } from "./providers";
 import "./globals.css";
 
 /**
- * Daylight type, the same three faces as callhouse.finance (leekzor/callhouse-site:
+ * Daylight type, the same three faces as stonkhouse.fun (leekzor/callhouse-site:
  * app/layout.tsx). next/font downloads them at BUILD time and serves them from this origin, so a
  * visitor's browser never contacts Google; the build itself does need to reach Google Fonts. Each
  * exposes a CSS variable on <html> that app/globals.css maps into font-display / font-body /
@@ -37,13 +37,13 @@ const mono = Geist_Mono({
 });
 
 /**
- * `metadataBase` is app.callhouse.finance because that is where this package is served. Relative
+ * `metadataBase` is app.stonkhouse.fun because that is where this package is served. Relative
  * canonicals and Open Graph URLs resolve against it; without it Next warns and falls back to
  * localhost in a production build.
  *
  * THE robots DECISION — the app is NOT indexed, and that is on purpose. Two reasons, both real:
  *
- *   1. The marketing site at callhouse.finance carries the canonical /legal and /how-it-works copy.
+ *   1. The marketing site at stonkhouse.fun carries the canonical /legal and /how-it-works copy.
  *      Serving the same disclosures from two domains is duplicate content, and duplicate
  *      content splits which of the two a search engine decides to show. The disclosures should
  *      have one address.
@@ -53,22 +53,22 @@ const mono = Geist_Mono({
  *
  * `follow: true` because the links out of here (explorer, the marketing site) are still worth
  * following; it is indexing this domain that we decline. The app is reached by link from
- * callhouse.finance, not by search. app/robots.ts states the same thing as a served robots.txt —
+ * stonkhouse.fun, not by search. app/robots.ts states the same thing as a served robots.txt —
  * the two must be changed together.
  */
 export const metadata: Metadata = {
   metadataBase: new URL(APP_URL),
-  title: "Callhouse — pooled covered calls on Robinhood Chain",
+  title: "Stonkhouse — pooled covered calls on Robinhood Chain",
   description:
     "Deposit one tokenised stock, receive vault shares. Each week the vault sells one call against it and pays depositors whatever premium actually fills.",
   // Per-page canonicals override this where a route sets one; the default is the app root.
   alternates: { canonical: "/" },
   openGraph: {
-    title: "Callhouse — pooled covered calls on Robinhood Chain",
+    title: "Stonkhouse — pooled covered calls on Robinhood Chain",
     description:
       "Deposit one tokenised stock, receive vault shares. Each week the vault sells one call against it and pays depositors whatever premium actually fills.",
     url: APP_URL,
-    siteName: "Callhouse",
+    siteName: "Stonkhouse",
     type: "website",
   },
   twitter: { card: "summary_large_image" },
@@ -77,7 +77,7 @@ export const metadata: Metadata = {
 
 /**
  * Browser chrome follows the page ground in each colour scheme: the --ground token in
- * app/globals.css, light and dark, the same pair callhouse.finance declares, so moving between the
+ * app/globals.css, light and dark, the same pair stonkhouse.fun declares, so moving between the
  * two domains does not flash a different chrome colour. Change them together.
  */
 export const viewport: Viewport = {

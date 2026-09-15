@@ -53,16 +53,20 @@ placeholder.
 
 | Thing | State | Where |
 |---|---|---|
-| Terms of Use | adopted v1-2026-09-13 by owner decision, no counsel; corrected v2-2026-09-13; gap sentences still render | `callhouse.finance/terms` |
-| Privacy notice | adopted v1-2026-09-13, same basis | `callhouse.finance/privacy` |
-| Perimeter disclosure | live since before this runbook; now links the terms instead of "the terms you accept here" | `callhouse.finance/legal`, `app.callhouse.finance/legal` |
-| Vulnerability reporting | section exists; address set 2026-09-13 (`security@callhouse.finance`) | `callhouse.finance/legal#reporting` |
-| `security.txt` | returns **200** since 2026-09-13, Contact line present | `callhouse.finance/.well-known/security.txt` |
+| Terms of Use | adopted v1-2026-09-13 by owner decision, no counsel; corrected v2-2026-09-13; gap sentences still render | `stonkhouse.fun/terms` |
+| Privacy notice | adopted v1-2026-09-13, same basis | `stonkhouse.fun/privacy` |
+| Perimeter disclosure | live since before this runbook; now links the terms instead of "the terms you accept here" | `stonkhouse.fun/legal`, `app.stonkhouse.fun/legal` |
+| Vulnerability reporting | section exists; address set 2026-09-13 (`security@callhouse.finance`) | `stonkhouse.fun/legal#reporting` |
+| `security.txt` | returns **200** since 2026-09-13, Contact line present | `stonkhouse.fun/.well-known/security.txt` |
 | Operator constants | six; the three contacts are set, name / jurisdiction / governing law still `undefined` | `lib/legal.ts` (site repo) |
-| Document version | `v2-2026-09-13` (v1 adopted 2026-09-13; v2 the same day corrects the Terms' third-party clause: an oracle pause stops writing and listing, not settlement) | `LEGAL_DOCS_VERSION` in `lib/legal.ts` (site repo) |
+| Document version | `v3-2026-09-15` (v1 adopted 2026-09-13; v2 the same day corrects the Terms' third-party clause: an oracle pause stops writing and listing, not settlement; v3 on 2026-09-15 renames Callhouse to Stonkhouse and callhouse.finance to stonkhouse.fun, nothing else) | `LEGAL_DOCS_VERSION` in `lib/legal.ts` (site repo) |
 | Accept flow | none. Use is acceptance; the pages say so | — |
 | Geoblock | none. The US-person perimeter is disclosure-only, on every legal page, in bold | — |
 | Cookies / analytics | none on either domain, verified by grep and stated on `/privacy` | — |
+
+The states above were measured on `callhouse.finance`, the domain before the 2026-09-15 rename. On
+`stonkhouse.fun` they are owed again: DNS and TLS, Email Routing for `legal@`, `privacy@` and
+`security@`, the three contact variables on the Railway `site` service, and a rebuild.
 
 What the privacy notice says the system does is grounded file by file in the header comment of
 `app/privacy/page.tsx` in `leekzor/callhouse-site`. If counsel wants a sentence changed, check that comment first: the
@@ -190,10 +194,10 @@ Do these in order. Step 1 is the long one and it is not ours.
 
    ```bash
    # The operator gap is closed (the draft marker is gone since adoption, §2 item 9):
-   curl -s https://callhouse.finance/terms   | grep -c 'not yet designated'     # 0
-   curl -s https://callhouse.finance/privacy | grep -c 'not yet designated'     # 0
-   curl -s https://callhouse.finance/terms   | grep -c 'No operating entity'    # 0
-   curl -s https://callhouse.finance/legal   | grep -c 'not yet designated'     # 0
+   curl -s https://stonkhouse.fun/terms   | grep -c 'not yet designated'     # 0
+   curl -s https://stonkhouse.fun/privacy | grep -c 'not yet designated'     # 0
+   curl -s https://stonkhouse.fun/terms   | grep -c 'No operating entity'    # 0
+   curl -s https://stonkhouse.fun/legal   | grep -c 'not yet designated'     # 0
    ```
 
    A non-zero count means the variable did not reach the build: check the `ARG` from step 2,
@@ -201,16 +205,16 @@ Do these in order. Step 1 is the long one and it is not ours.
 
 6. **Verify `security.txt` returns 200** and has a real contact line. *Verified 2026-09-13 on
    the Railway host (pre-DNS): 200 with `Contact: mailto:security@callhouse.finance` and
-   `Expires: 2027-09-13`. Re-run on `callhouse.finance` once DNS resolves.*
+   `Expires: 2027-09-13`. Re-run on `stonkhouse.fun` once DNS resolves.*
 
    ```bash
-   curl -s -o /dev/null -w '%{http_code}\n' https://callhouse.finance/.well-known/security.txt   # 200
-   curl -s https://callhouse.finance/.well-known/security.txt
+   curl -s -o /dev/null -w '%{http_code}\n' https://stonkhouse.fun/.well-known/security.txt   # 200
+   curl -s https://stonkhouse.fun/.well-known/security.txt
    # Contact: mailto:<the address>
    # Expires: <LEGAL_DOCS_VERSION date + 1 year>
    # Preferred-Languages: en
-   # Canonical: https://callhouse.finance/.well-known/security.txt
-   # Policy: https://callhouse.finance/legal#reporting
+   # Canonical: https://stonkhouse.fun/.well-known/security.txt
+   # Policy: https://stonkhouse.fun/legal#reporting
    ```
 
    The `Expires:` line is one year after the date in `LEGAL_DOCS_VERSION`. When the documents
@@ -220,7 +224,9 @@ Do these in order. Step 1 is the long one and it is not ours.
 7. **Update the reporting paragraph in both places** to drop the sentence saying the address is
    unset. *Done 2026-09-13, paired: this repository's `SECURITY.md` "Reporting" and
    `contracts/SECURITY.md` §6 in leekzor/callhouse-contracts both now name
-   `security@callhouse.finance`.*
+   `security@callhouse.finance`. On 2026-09-15 this repository's copy moved to
+   `security@stonkhouse.fun`; the contracts copy still names the old address until a paired commit
+   lands there.*
 
 8. **Check the mailboxes.** Send one message to each of the three addresses from outside and
    confirm a human reads it. Then close the audit blocker.
@@ -235,7 +241,7 @@ Do these in order. Step 1 is the long one and it is not ours.
   points at the mailbox until that exists, then at whatever replaces it.
 - The Stock Token issuer's terms. They govern whether a visitor may hold the collateral, and
   nothing on our pages widens or waives them (`/legal`).
-- Anything on `app.callhouse.finance` beyond the links. The dapp carries the perimeter disclosure
+- Anything on `app.stonkhouse.fun` beyond the links. The dapp carries the perimeter disclosure
   and links out; every operator fact renders on the site once.
 
 ## Related

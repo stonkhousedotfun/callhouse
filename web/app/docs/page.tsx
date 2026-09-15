@@ -17,12 +17,12 @@ import { cn } from "@/lib/cn";
 import { ASSET, CLEARINGHOUSE, MARKET, SEAPORT, SHARE_TICKER, USDG, VAULT } from "@/lib/contracts";
 
 export const metadata: Metadata = {
-  title: "Docs — Callhouse",
+  title: "Docs — Stonkhouse",
   description: "How the weekly covered-call cycle works, what it costs, and everything that can go wrong.",
 };
 
 const ADDRESSES: Array<[string, string | undefined, string]> = [
-  ["Callhouse vault", VAULT, "shares, deposits, the queue, the phase machine; the offerer AND the zone of every listing"],
+  ["Stonkhouse vault", VAULT, "shares, deposits, the queue, the phase machine; the offerer AND the zone of every listing"],
   ["NVDA Stock Token", ASSET, "the collateral, 18 decimals"],
   ["USDG", USDG, "premium and strike currency, 6 decimals"],
   ["Valorem Clear", CLEARINGHOUSE, "holds the option types; the vault writes into it at each fill and settles assignment through it"],
@@ -131,7 +131,7 @@ export default function DocsPage() {
         <DocSection {...SECTIONS.costs}>
           <DocList>
             <li>
-              <strong>Callhouse: 5% of the premium.</strong> Taken at harvest from the premium that reached the vault, on
+              <strong>Stonkhouse: 5% of the premium.</strong> Taken at harvest from the premium that reached the vault, on
               filled weeks only. Strike proceeds from an assignment carry no fee: they are your collateral sold at the
               strike, not income. An unfilled week costs nothing because nothing was collected. There is no third-party
               venue fee: the listing has one payment leg, to the vault, and the buyer pays exactly the unit price.
@@ -315,7 +315,7 @@ export default function DocsPage() {
             </RiskItem>
             <RiskItem>
               <strong>This vault is unaudited.</strong> Valorem Clear was audited by Zellic under its
-              former name; the Callhouse vault and its libraries have not been audited by anyone outside the project. The
+              former name; the Stonkhouse vault and its libraries have not been audited by anyone outside the project. The
               test suite and the fork rehearsal are the whole gate. Treat the deposit cap as the real statement of
               confidence.
             </RiskItem>
@@ -546,7 +546,7 @@ function Step({ children }: { children: ReactNode }) {
   );
 }
 
-/** The risk list: a warning triangle per entry and a hairline between them, as on callhouse.finance. */
+/** The risk list: a warning triangle per entry and a hairline between them, as on stonkhouse.fun. */
 function RiskList({ children }: { children: ReactNode }) {
   return (
     <ul role="list" className="border-t border-line">

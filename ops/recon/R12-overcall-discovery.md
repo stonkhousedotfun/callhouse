@@ -331,11 +331,11 @@ Hex ids (upper-160 form):
 246 -> 0x7dc3fe3e6e640b0e22b2e3206a1ff607437e9e54000000000000000000000000
 ```
 
-### Strike ladder vs. Callhouse's OTM band
+### Strike ladder vs. Stonkhouse's OTM band
 
 Overcall's own site reports NVDA spot **218.30** (Chainlink RHNVDA/USD, display only). Against that:
 
-| strike | OTM % | inside Callhouse 3–12% band? |
+| strike | OTM % | inside Stonkhouse 3–12% band? |
 |---|---|---|
 | 226 | +3.53% | yes |
 | 231 | +5.82% | yes |
@@ -343,7 +343,7 @@ Overcall's own site reports NVDA spot **218.30** (Chainlink RHNVDA/USD, display 
 | 241 | +10.40% | yes |
 | 246 | +12.69% | **no — 0.69pp above the 12% cap** |
 
-The NVDA ladder is a **flat 5.00 USDG rung spacing**, not a percentage spacing (the equity markets all use flat rungs; the pool-priced memecoin markets use ~2% relative rungs). With spot at 218.30, four of five rungs qualify. Callhouse's `Policy` "nearest rung inside the band" therefore has real choices today — but note the band nearly excludes the top rung, and a 3% move in spot would push rungs out of the band from either end. **Recommend Policy treat "no qualifying rung ⇒ write nothing" as a routine weekly outcome, not an exception.**
+The NVDA ladder is a **flat 5.00 USDG rung spacing**, not a percentage spacing (the equity markets all use flat rungs; the pool-priced memecoin markets use ~2% relative rungs). With spot at 218.30, four of five rungs qualify. Stonkhouse's `Policy` "nearest rung inside the band" therefore has real choices today — but note the band nearly excludes the top rung, and a 3% move in spot would push rungs out of the band from either end. **Recommend Policy treat "no qualifying rung ⇒ write nothing" as a routine weekly outcome, not an exception.**
 
 ### All markets, cycle 1 (full data in `ops/recon/live-option-series.json`)
 
@@ -412,7 +412,7 @@ block=60910684 tx=0x4b8beaa93970fa0e46453af4ec7b527680d4ead0bbeef8ea5dfaf356b390
 
 `OptionsExercised: 0 logs`. `ClaimRedeemed: 0 logs`.
 
-**Both writers are EOAs calling the clearinghouse directly. `codeBytes=0` on both. No contract has ever written on Valorem Clear on this chain.** Callhouse's `AdapterValorem` would be the first contract writer — which also means:
+**Both writers are EOAs calling the clearinghouse directly. `codeBytes=0` on both. No contract has ever written on Valorem Clear on this chain.** Stonkhouse's `AdapterValorem` would be the first contract writer — which also means:
 
 - the ERC-1155 `onERC1155Received` / `onERC1155BatchReceived` path in Valorem's mint has **never been exercised by a contract on 4663**. Fork-test it hard; the vault must implement `ERC1155Holder` for both the option tokens and the claim NFT or `write()` will revert on mint.
 - total protocol usage to date: **2 writes, 1 fill, 0 exercises, 0 redeems.** This is a week-one protocol.
@@ -547,7 +547,7 @@ z.string().regex(/^0x([0-9a-fA-F]{128}|[0-9a-fA-F]{130})$/, "Not a valid signatu
 
 64-byte (EIP-2098 compact) or 65-byte ECDSA **only**. A 200-byte signature — the shape an EIP-1271 contract signature takes — is rejected at the schema layer with `400 Not a valid signature.` The server returns the client's zod messages verbatim, so **the same schema runs server-side**; this is not a client-only check I could bypass.
 
-**Impact on Callhouse.** `AdapterSeaport.sol` is specified in TECHSPEC §5 as "EIP-1271 listings". Seaport itself will honour a 1271 order from the vault on chain, so a listing signed that way **is fulfillable** — but it can never be POSTed to Overcall, so it will **never appear on overcall.finance**, and per README that is "an unfilled week". Options, in preference order:
+**Impact on Stonkhouse.** `AdapterSeaport.sol` is specified in TECHSPEC §5 as "EIP-1271 listings". Seaport itself will honour a 1271 order from the vault on chain, so a listing signed that way **is fulfillable** — but it can never be POSTed to Overcall, so it will **never appear on overcall.finance**, and per README that is "an unfilled week". Options, in preference order:
 
 1. **Ask Overcall to widen the regex** to accept an arbitrary-length signature and verify via `Seaport.getOrderStatus`/ERC-1271. Small change on their side; this is the real "handshake" to negotiate pre-launch.
 2. **Make the offerer an EOA keeper**, and have the vault transfer the option ERC-1155s to that EOA before listing. This puts written options in a hot EOA between write and fill — a custody regression the Admin Safe has to accept explicitly. Note `consideration[0].recipient` must equal `offerer`, so the USDG premium would land in the EOA too and need sweeping back to the vault.
@@ -620,9 +620,9 @@ The client hard-fails if the mainnet fee recipient is ever set to the testnet de
 ## 11. ⚠️ Impostor / look-alike warnings
 
 1. **"Overcall Finance" (OVC) token — `0xfc920df31d8382137f77548c838486ce5d8981d0`** — an ERC-20 with 3248 bytes of code, `name() = "Overcall Finance"`, `symbol() = "OVC"`, 18 decimals. A web search returned this as "the contract address" for Overcall. **It is referenced nowhere in overcall.finance's HTML, JS bundles, or docs** (`grep -ril` across all fetched assets: not found). Overcall's docs describe no protocol token. **Treat OVC as unaffiliated; do not wire it into anything, and do not let it near the UI address book.**
-2. **Counterfeit GME.** Overcall's docs: *"A counterfeit GME token has traded over a hundred million dollars on this chain."* The registry-approved GME collateral is `0x1b0E319c6A659F002271B69dB8A7df2F911c153E` (`name() = "GameStop • Robinhood Token"`, 283 bytes, beacon proxy). Whitelist by address, never by symbol — that is Overcall's stated rule and should be Callhouse's too.
+2. **Counterfeit GME.** Overcall's docs: *"A counterfeit GME token has traded over a hundred million dollars on this chain."* The registry-approved GME collateral is `0x1b0E319c6A659F002271B69dB8A7df2F911c153E` (`name() = "GameStop • Robinhood Token"`, 283 bytes, beacon proxy). Whitelist by address, never by symbol — that is Overcall's stated rule and should be Stonkhouse's too.
 3. **`newOptionType` is permissionless.** Anyone can mint an option type with NVDA/USDG and the same timestamps but a different strike, or the same strike with a subtly different `underlyingAmount`. **`registry.isApproved(optionId)` is the only defence.** Make it a hard require in `AdapterValorem.write`.
-4. **`addresses[4663].registry` is the JUGGERNAUT registry**, not NVDA. A naive read of the bundle's singleton `registry` field would point Callhouse at a memecoin market. Resolve per market.
+4. **`addresses[4663].registry` is the JUGGERNAUT registry**, not NVDA. A naive read of the bundle's singleton `registry` field would point Stonkhouse at a memecoin market. Resolve per market.
 
 ### 11.5 Stock Token proxy + blocklist shape (partial R6 input)
 
@@ -649,7 +649,7 @@ beacon.isBlocked(0x408adc…1CC0)   [0xfbac3951]
 | Beacon **and blocklist** (`implementation()`, `isBlocked(address)`) | `0xe10b6f6b275de231345c20d14ab812db62151b00` | 2332 |
 | Shared `Stock` implementation | `0xb35490d6f9163DE4F80d88dc75c3516eb64C5aE2` | 11614 |
 
-Two consequences for Callhouse:
+Two consequences for Stonkhouse:
 
 - **The issuer can swap the implementation behind every Stock Token at once** by pointing the beacon elsewhere. That is a single upgrade key over the vault's entire underlying. It belongs in `README` risk copy and in the audit scope note.
 - **`isBlocked` is enforced on transfer**, so the *vault itself* can be blocked. Overcall reproduced the paused-token case on testnet: with collateral paused, both reclaim and exercise revert (their txs `0x581b3776…a12efe` and `0xa3c38a22…6840867`). A blocked or paused underlying freezes `rollClose`/redemption with no contract able to unstick it. `Guardian` cannot fix this — worth saying plainly in the risk page.
@@ -676,7 +676,7 @@ Two consequences for Callhouse:
 
 1. **Whether Overcall will accept an EIP-1271 signature if asked.** The regex is a hard `400` today. Whether they will widen it is a business question I cannot answer from chain or code. **This is the single highest-value item to escalate.** (I confirmed the rejection; I did not attempt to contact them.)
 2. **Cycle-2 timing and whether the cadence is truly weekly.** `cycleCount() == 1` everywhere on mainnet — there is exactly one cycle in history. The Friday/Saturday 20:00 UTC pattern comes from cycle 1 plus the site's copy, not from an observed repetition. Cannot be confirmed until cycle 2 lands.
-3. **How the operator chooses the 5 strikes.** NVDA uses flat 5.00 USDG rungs; the pool-priced markets use ~2% relative rungs. With one cycle of data I cannot tell whether the rung anchor is spot-at-setCycle, a round number, or discretionary. This matters for whether Callhouse's 3–12% band will reliably contain a rung. **Re-measure at cycle 2.**
+3. **How the operator chooses the 5 strikes.** NVDA uses flat 5.00 USDG rungs; the pool-priced markets use ~2% relative rungs. With one cycle of data I cannot tell whether the rung anchor is spot-at-setCycle, a round number, or discretionary. This matters for whether Stonkhouse's 3–12% band will reliably contain a rung. **Re-measure at cycle 2.**
 4. **`realisedPremium6` semantics in the API.** On the filled order `unitPrice6 = 4000000` but `realisedPremium6 = 3800000` — it appears to be the **writer's net** (post-5%-fee), but I only have one filled order, so I cannot rule out a different definition under partial fills.
 5. **Whether the POST endpoint rate-limits or dedupes.** I sent 4 probes; none were accepted, so I never observed the success path, a duplicate-salt response, or any rate limit.
 6. **`ops/recon/live-option-series.json` `contractsWritten_inferred`** is derived from `nextClaimKey - 1`, i.e. the number of *claims opened*, not the number of contracts written. For NVDA 246 they coincide (1 claim, 1 contract) but they diverge if one writer writes twice into one claim. Read `claim(claimId).amountWritten` for the true figure.
@@ -853,7 +853,7 @@ block 60302146 optionId 56885395…297792 writer 0xe73d7021a3ef2808c3dd8237982fc
 block 60910684 optionId 87339332…129344 writer 0x789a7490718cf944d6f2ca411ed53cdefd56306a claimId …129345 amount 21
    writer codeBytes: 0
 ```
-**"No contract has ever written on Valorem Clear on 4663" is CONFIRMED.** Callhouse would be the
+**"No contract has ever written on Valorem Clear on 4663" is CONFIRMED.** Stonkhouse would be the
 first contract writer; the ERC-1155 receiver path is untested on this chain. `ERC1155Holder` on the
 vault for both token types remains a hard requirement.
 

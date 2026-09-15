@@ -1,4 +1,4 @@
-# Callhouse — End-to-End Build Plan
+# Stonkhouse — End-to-End Build Plan
 
 Source of truth: `README.md` + `TECHSPEC.md`. This plan turns those two docs into a buildable sequence. Progress lives in `tasks.md`.
 

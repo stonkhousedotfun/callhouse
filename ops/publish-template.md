@@ -75,7 +75,7 @@ Hard rules. CI lints the site copy for these; the post is held to the same stand
 
 ## Template A — filled, not assigned
 
-> **Callhouse cNVDA — week {N}, ending Sat {YYYY-MM-DD} 20:00 UTC**
+> **Stonkhouse cNVDA — week {N}, ending Sat {YYYY-MM-DD} 20:00 UTC**
 >
 > Filled.
 >
@@ -101,7 +101,7 @@ assigns exercises across every writer of the option series, so an unfilled week 
 assigned. If `RollClose.contractsAssignedCount > 0`, use Template C with "Contracts filled: 0" and
 "Premium received by the vault: 0 USDG".
 
-> **Callhouse cNVDA — week {N}, ending Sat {YYYY-MM-DD} 20:00 UTC**
+> **Stonkhouse cNVDA — week {N}, ending Sat {YYYY-MM-DD} 20:00 UTC**
 >
 > **Unfilled. 0.**
 >
@@ -122,7 +122,7 @@ assigned. If `RollClose.contractsAssignedCount > 0`, use Template C with "Contra
 
 ## Template C — assigned
 
-> **Callhouse cNVDA — week {N}, ending Sat {YYYY-MM-DD} 20:00 UTC**
+> **Stonkhouse cNVDA — week {N}, ending Sat {YYYY-MM-DD} 20:00 UTC**
 >
 > Filled, and **assigned {A} of {W}**.
 >
@@ -149,7 +149,7 @@ assigned. If `RollClose.contractsAssignedCount > 0`, use Template C with "Contra
 
 For a week with no eligible rung, no cycle, a paused oracle, or a halt.
 
-> **Callhouse cNVDA — week {N}, ending Sat {YYYY-MM-DD} 20:00 UTC**
+> **Stonkhouse cNVDA — week {N}, ending Sat {YYYY-MM-DD} 20:00 UTC**
 >
 > **No calls written. 0.**
 >

@@ -105,7 +105,7 @@ Record here after deploy:
 
 ## D. Deposit (owner)
 
-1. Open `https://app.callhouse.finance/vault/nvda`, connect the depositor wallet.
+1. Open `https://app.stonkhouse.fun/vault/nvda`, connect the depositor wallet.
 2. Deposit **1.06 NVDA**: approve, then deposit. The form must show the deposit as open.
 3. Tell Claude the transaction hash.
 
@@ -133,7 +133,7 @@ Check with `GET /health` and `GET /orders` on the keeper, the cycle page, and on
 
 ## F. Fill one contract (owner)
 
-1. Open `https://app.callhouse.finance/vault/nvda/cycle` with the **buyer** wallet.
+1. Open `https://app.stonkhouse.fun/vault/nvda/cycle` with the **buyer** wallet.
 2. The page shows the listing, capacity 1, the unit price (about 0.86 USDG at the floor at today's
    spot; higher in vol mode when the market pays more), and the
    pre-flight result. If it says the fill would be refused after a price move, wait one or two minutes

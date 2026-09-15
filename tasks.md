@@ -1,4 +1,4 @@
-# Callhouse — Tasks & Progress
+# Stonkhouse — Tasks & Progress
 
 Companion to `plan.md`. Progress as of **2026-09-13, 15:30 PT**. The launch sequence and its live status are in `docs/LAUNCH-PLAN.md`.
 
@@ -74,7 +74,7 @@ Plan and live status: `docs/LAUNCH-PLAN.md`. Everything below is pushed.
 - **From the other session's E-03 fork rehearsal:** W-3–W-6 fixed (0c6cd47); W-1 copy corrected on
   site and docs (owner decision on Idle-only deposits pending); the rest (L-1 listing signature,
   K-1 remainder, X-1–X-3, W-2, K-2, D-1) is in `~/Desktop/robinhood-dev/projects/callhouse/HANDOFF-BUGS-2026-09-13.md`.
-- **Not done here:** the GitBook site title ("callhouse Docs", GitBook UI only).
+- **Not done here:** the GitBook site title ("callhouse Docs", to become "Stonkhouse Docs"; GitBook UI only).
 
 ### Session log — 2026-09-13 (evening): repository split
 
@@ -302,8 +302,8 @@ Evidence lives in `ops/recon/`. Spec repairs are written up in `plan.md` section
 
 ### Frontend split — two domains, two services (code written, nothing deployed)
 
-- [x] W-14 New `site/` package = `callhouse.finance`, the marketing landing: `/`, `/how-it-works`, `/risks`, `/legal`. **No wallet code** — `wagmi`, `viem` and `@tanstack/react-query` are not dependencies and must not become dependencies. No chain read, no `fetch()`, no live figure: the vault is not deployed, so every live number would render zero, and a zero beside "realized" reads as a result rather than an absence. Every CTA is an absolute external link to `https://app.callhouse.finance/...`
-- [x] W-15 `web/` retargeted to `app.callhouse.finance`, routes unchanged, and set `noindex` — the disclosures get one canonical address and it is the other domain (reasoning in `web/app/layout.tsx`, restated by `app/robots.ts`). `NEXT_PUBLIC_SITE_URL` / `NEXT_PUBLIC_APP_URL` added to both packages via `lib/site.ts`, production values compiled in as defaults
+- [x] W-14 New `site/` package = `stonkhouse.fun`, the marketing landing: `/`, `/how-it-works`, `/risks`, `/legal`. **No wallet code** — `wagmi`, `viem` and `@tanstack/react-query` are not dependencies and must not become dependencies. No chain read, no `fetch()`, no live figure: the vault is not deployed, so every live number would render zero, and a zero beside "realized" reads as a result rather than an absence. Every CTA is an absolute external link to `https://app.stonkhouse.fun/...`
+- [x] W-15 `web/` retargeted to `app.stonkhouse.fun`, routes unchanged, and set `noindex` — the disclosures get one canonical address and it is the other domain (reasoning in `web/app/layout.tsx`, restated by `app/robots.ts`). `NEXT_PUBLIC_SITE_URL` / `NEXT_PUBLIC_APP_URL` added to both packages via `lib/site.ts`, production values compiled in as defaults
 - [x] W-16 **Since the 2026-09-13 split the two copies live in different repositories (`web/app/globals.css` here, `app/globals.css` in `leekzor/callhouse-site`): change them in paired commits.** Design tokens duplicated, not imported: the token block in `web/app/globals.css` is copied into `site/app/globals.css` so `site/` builds with no dependency on `web/`. **The two must be changed in the same commit** or the domains drift
 - [x] W-17 **Since the split: this repo's `scripts/copy-lint.mjs` lints `web/`, its twin in `leekzor/callhouse-site` lints the landing; the FORBIDDEN tables must stay identical.** copy-lint now walks both packages under one rule set, and a missing package is a hard failure rather than a silent pass. CI `js` job typechecks and builds `@callhouse/site` alongside `web`
 - [x] W-18 **Since the split the site's Dockerfile and `railway.json` live in `leekzor/callhouse-site` with that repo as build context.** `site/Dockerfile` + `site/railway.json`, `web/Dockerfile` + `web/railway.json`; `output: "standalone"`, repo root as build context (a `site/`-scoped context cannot install — the lockfile is workspace-wide), per-service `watchPatterns` so one push does not rebuild both. Runbook: `ops/deploy.md`

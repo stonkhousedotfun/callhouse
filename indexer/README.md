@@ -1,6 +1,6 @@
 # @callhouse/indexer
 
-Ponder indexer and read API for the Callhouse covered-call vault on **Robinhood Chain mainnet
+Ponder indexer and read API for the Stonkhouse covered-call vault on **Robinhood Chain mainnet
 (chain id 4663)**.
 
 It watches one vault, the Valorem clearinghouse it writes into, the Seaport 1.6 order book it
@@ -46,7 +46,7 @@ pnpm --filter @callhouse/indexer codegen     # ponder codegen: the config and sc
 | Variable | Required | Meaning |
 |---|---|---|
 | `PONDER_RPC_URL_4663` | yes | Archive-capable RPC. Use `https://rpc.mainnet.chain.robinhood.com`. |
-| `VAULT_ADDRESS` (alias `VAULT`) | yes | The deployed Callhouse vault. |
+| `VAULT_ADDRESS` (alias `VAULT`) | yes | The deployed Stonkhouse vault. |
 | `START_BLOCK` | yes | Block the vault was deployed in. |
 | `DATABASE_URL` | no | Postgres. Omit for a local PGlite DB under `.ponder/pglite`. |
 | `DATABASE_PRIVATE_URL` | no | Railway-style private URL; Ponder prefers it over `DATABASE_URL`. Set one, not both. |

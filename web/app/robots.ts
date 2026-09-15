@@ -1,7 +1,7 @@
 import type { MetadataRoute } from "next";
 
 /**
- * app.callhouse.finance is not indexed. Full disallow, every user agent.
+ * app.stonkhouse.fun is not indexed. Full disallow, every user agent.
  *
  * This file and the `robots: { index: false, follow: true }` block in app/layout.tsx are the
  * same decision expressed twice — a served /robots.txt for crawlers that read it before
