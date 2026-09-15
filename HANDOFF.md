@@ -31,7 +31,7 @@ Canary runbook: `ops/runbooks/canary-week.md`.
 
 ## Owner decisions (2026-09-14)
 
-- Own Clear via `DeployClear.s.sol`. **`feeTo` = a 1-of-1 Safe owned by the owner's personal wallet** (address still needed). Vault admin stays hot-wallet account 0 until handover. `HandoverAdmin` does not move `feeTo`.
+- Own Clear via `DeployClear.s.sol`. **`feeTo` = a 1-of-1 Safe owned by `0x7A3a8C3F6331f63107D5b3aEeA0515e799022C32`** (personal wallet, given 2026-09-14; EOA, 0.27 ETH on 4663, nonce 0). Vault admin stays hot-wallet account 0 until handover. `HandoverAdmin` does not move `feeTo`.
 - `KEEPER_PREMIUM_MARGIN_BPS=50`. Guardian = mnemonic account 2 `0x29741A8d…6F39`. Cap 20 NVDA, raise weekly. No alerts for the canary.
 - Merge+push both repos when gates and the fork rehearsal are green (authorised). Tag contracts `v1.0.0-rc1`.
 - Funded on 4663: admin `0xEb82c3D0…19d9b` 0.05 ETH, keeper `0x06c131cf…FC1d2` 0.02 ETH, guardian 0.01 ETH.
@@ -39,9 +39,8 @@ Canary runbook: `ops/runbooks/canary-week.md`.
 
 ## Next, in order
 
-1. Owner: personal wallet address that will own the 1-of-1 admin Safe.
-2. Merge+push contracts then app (already authorised; X-11, W-13 and the Safe-feeTo deploy rehearsal are green). Create the Safe, then mainnet deploy. Site/docs branches stay unpublished until the owner says so.
-3. Canary week per `ops/runbooks/canary-week.md`. Keeper stays stopped until the 1.06 NVDA deposit lands.
+1. Create the 1-of-1 admin Safe on 4663 from account 0, owner = `0x7A3a8C3F6331f63107D5b3aEeA0515e799022C32`. Then merge+push contracts then app (already authorised; X-11, W-13 and the Safe-feeTo deploy rehearsal are green). Then mainnet deploy. Site/docs branches stay unpublished until the owner says so.
+2. Canary week per `ops/runbooks/canary-week.md`. Keeper stays stopped until the 1.06 NVDA deposit lands.
 
 Deploy rehearsal (2026-09-14, fork block 63400155): **REHEARSAL PASSED**. Path A on our Clear with `feeTo` = admin Safe 2/3; Verify's missing/wrong-holder checks have teeth; handover; path B on Overcall's Clear with Safe from block one.
 

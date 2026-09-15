@@ -80,7 +80,7 @@ Hot wallet, funded 2026-09-14 and re-checked before broadcasting:
 Sequence, from `contracts/docs/DEPLOY.md` path A with our own clearinghouse. **Owner decision 2026-09-14: Clear's `feeTo` is a 1-of-1 Safe owned by the owner's personal wallet, not account 0.** `HandoverAdmin` never moves `feeTo`.
 
 1. The contracts branch is merged, tagged `v1.0.0-rc1` and pushed; the app is merged and pushed.
-2. Create the 1-of-1 admin Safe on 4663 from account 0, owner = the owner's personal wallet. Record the Safe address.
+2. Create the 1-of-1 admin Safe on 4663 from account 0, owner = `0x7A3a8C3F6331f63107D5b3aEeA0515e799022C32` (owner's personal wallet, given 2026-09-14; EOA, 0.27 ETH on 4663, nonce 0). Record the Safe address.
 3. `DeployClear.s.sol` with `CLEAR_FEE_TO` = that Safe. Confirm `feeTo() == Safe` before Deploy. Record the Clear address.
 4. `Deploy.s.sol` with `CLEARINGHOUSE` = that address, `ADMIN` = account 0, deposit cap 20 NVDA.
 5. `Verify.s.sol` with `EXPECTED_CLEAR_FEE_TO` = the Safe (bootstrap), `Configure.s.sol` (keeper = account 1, guardian = account 2), `Verify.s.sol` again.
