@@ -5,7 +5,7 @@ import type { Abi } from "viem";
 import { useAccount, useWriteContract } from "wagmi";
 
 import { MARKET, SHARE_DECIMALS, SHARE_TICKER, VAULT, vaultAbi } from "@/lib/contracts";
-import { canSettleQueue, fmtAsset, fmtShares, fmtUsdg, parseAmount } from "@/lib/format";
+import { canSettleQueue, fmtAsset, fmtShares, fmtUsdg, parseAmount, redeemQueueView } from "@/lib/format";
 import type { AccountPosition, VaultSnapshot } from "@/lib/hooks";
 import { ConnectButton } from "./ConnectButton";
 import { useTxRunner } from "./TxToast";
@@ -41,10 +41,19 @@ import { useTxRunner } from "./TxToast";
  * usual.
  *
  * WHILE A CLAIM IS STRANDED the queue is the only exit: instant redemption is off, an epoch
- * settled now is paid its slice of the idle balance now and its pro-rata share of the stranded
- * claim when `retryStrandedClaim` succeeds (the stranded-claim notice above the forms says how
- * much). `completeRedeem` reverts StillStranded for an entry whose claim share is not yet
- * collectable; `previewCompleteRedeem` quotes only what can be collected now.
+ * settled now books its slice of the idle balance now and its pro-rata share of the stranded
+ * claim for when `retryStrandedClaim` succeeds (the stranded-claim notice above the forms says how
+ * much). Settling is bookkeeping and always works; the payout is a transfer, so the Stock Token
+ * leg waits out a Stock Token blocklist of the vault (which can be the very cause of the strand)
+ * and the USDG leg is deferred while USDG cannot move. `completeRedeem` reverts StillStranded for
+ * an entry whose claim share is not yet collectable; `previewCompleteRedeem` quotes only what can
+ * be collected now.
+ *
+ * THE BLOCK OUTLIVES THE QUEUE ENTRY (lib/format.ts redeemQueueView). Collecting settles the entry
+ * and zeroes `queuedSharesOf`, but a staged share of a stranded claim, or a USDG leg the vault
+ * could not move, is still owed afterwards and only `completeRedeem` pays it. So the block, and
+ * its Complete button, render whenever anything is queued, collectable or staged; "waiting on the
+ * claim" is decided by strand generation, not by `isStranded`, which the recovery clears.
  */
 export function RedeemQueue({
   snapshot,
@@ -71,8 +80,21 @@ export function RedeemQueue({
   const queued = position.queuedShares ?? 0n;
   const pendingAssets = position.pendingAssets ?? 0n;
   const pendingUsdg = position.pendingUsdg ?? 0n;
-  const hasPending = pendingAssets > 0n || pendingUsdg > 0n;
-  const strandShareWaiting = (position.owedStrandWad ?? 0n) > 0n && stranded;
+  const view = redeemQueueView({
+    queuedShares: queued,
+    queuedEpoch: position.queuedEpoch,
+    epochId: snapshot.epochId,
+    pendingAssets,
+    pendingUsdg,
+    owedStrandWad: position.owedStrandWad,
+    owedStrandGen: position.owedStrandGen,
+    epochStrandWad: position.epochStrandWad,
+    epochStrandGen: position.epochStrandGen,
+    lastResolvedGen: snapshot.lastResolvedGen,
+    isStranded: snapshot.isStranded,
+  });
+  const hasPending = view.collectable;
+  const strandShareWaiting = view.strandShareWaiting;
 
   // queuedEpoch < epochId means the keeper has already closed that week, so the payout exists.
   const waitingOnKeeper =
@@ -239,17 +261,19 @@ export function RedeemQueue({
           : instant
             ? "The vault is flat, so a redemption settles in the same transaction."
             : stranded
-              ? "A claim is stranded, so instant redemption is off. A queued redemption is paid its share of the idle balance as soon as the queue settles, and its share of the stranded claim when the claim is redeemed."
+              ? `A claim is stranded, so instant redemption is off. Queue here: settling the queue always works, because it only books each entry's share of the idle balance and of the stranded claim. Paying it out moves tokens, so ${MARKET} is paid only while the Stock Token lets the vault transfer (an issuer blocklist of the vault holds it back until lifted) and USDG only while USDG can move. The share of the claim is paid once the claim is redeemed.`
               : "A call is open. Redemptions are queued and paid after the keeper closes the week. An assigned week pays part of the queue in USDG at the strike instead of in tokens."}
       </div>
 
-      {queued > 0n || strandShareWaiting ? (
+      {view.show ? (
         <>
           <hr className="hr" />
           <div className="card-head">
-            <span className="card-title">Queued redemption</span>
+            <span className="card-title">{queued > 0n ? "Queued redemption" : "Settled redemption to collect"}</span>
             <span className="tiny faint mono">
-              epoch {position.queuedEpoch?.toString() ?? "—"} · current {snapshot.epochId?.toString() ?? "—"}
+              {queued > 0n
+                ? `epoch ${position.queuedEpoch?.toString() ?? "—"} · current ${snapshot.epochId?.toString() ?? "—"}`
+                : "nothing queued"}
             </span>
           </div>
           <div className="rows">
@@ -282,15 +306,35 @@ export function RedeemQueue({
               ) : null}
             </>
           ) : waitingOnKeeper ? (
-            <div className="notice" data-tone="warn" style={{ marginTop: 12 }}>
-              This epoch settles after the keeper closes the week at expiry. The amounts above turn non-zero then.
-            </div>
+            <>
+              <div className="notice" data-tone="warn" style={{ marginTop: 12 }}>
+                This epoch settles after the keeper closes the week at expiry.{" "}
+                {hasPending
+                  ? "The amounts above are owed from an earlier redemption and can be collected now."
+                  : "The amounts above turn non-zero then."}
+              </div>
+              {hasPending ? (
+                <button style={{ width: "100%", marginTop: 12 }} disabled={busy} onClick={complete}>
+                  {busy ? "Working…" : "Collect earlier settled redemption"}
+                </button>
+              ) : null}
+            </>
           ) : (
             <>
               {strandShareWaiting ? (
                 <div className="notice" data-tone="warn" style={{ marginTop: 12 }}>
                   Part of this redemption is a share of the stranded claim and cannot be collected until the claim is
                   redeemed (Retry claim above). The amounts above are what can be collected now.
+                </div>
+              ) : view.strandShareRecovered ? (
+                <div className="notice" data-tone="info" style={{ marginTop: 12 }}>
+                  The stranded claim this redemption had a share of has been redeemed. Complete redemption collects that
+                  share with anything else owed.
+                </div>
+              ) : view.usdgLegDeferred ? (
+                <div className="notice" data-tone="info" style={{ marginTop: 12 }}>
+                  USDG from an earlier collection is still owed: it could not move at the time (USDG paused, or the vault
+                  or the receiver frozen on USDG), so the vault kept it for you. Complete redemption tries again.
                 </div>
               ) : null}
               <button style={{ width: "100%", marginTop: 12 }} disabled={busy || !hasPending} onClick={complete}>

@@ -5,7 +5,7 @@ import { collateralSplit, type VaultSnapshot } from "./hooks";
 const E18 = 10n ** 18n;
 
 function snap(over: Partial<VaultSnapshot>): VaultSnapshot {
-  return { ready: true, fillState: "unknown", spotStale: false, ...over } as VaultSnapshot;
+  return { ready: true, spotStale: false, ...over } as VaultSnapshot;
 }
 
 describe("collateralSplit", () => {

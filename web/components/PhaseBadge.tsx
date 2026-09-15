@@ -7,7 +7,8 @@
  * by the option type the vault armed (its exercise and expiry timestamps), never by the
  * browser's wall clock. A visitor in any timezone sees the same week in the same state.
  */
-import { FILL_STATE_COPY, phaseLabel, type FillState } from "@/lib/hooks";
+import { phaseLabel } from "@/lib/hooks";
+import { deriveFillState, FILL_STATE_COPY, vaultGuards, type FillState } from "@/lib/vaultStatus";
 
 type Tone = "good" | "warn" | "bad" | "info" | "neutral";
 
@@ -24,9 +25,23 @@ const FILL_TONE: Record<FillState, Tone> = {
   unfilled: "neutral",
 };
 
-export function Badge({ tone = "neutral", children }: { tone?: Tone; children: React.ReactNode }) {
+const GUARD_TONE: Record<"bad" | "warn" | "info", Tone> = {
+  bad: "bad",
+  warn: "warn",
+  info: "info",
+};
+
+export function Badge({
+  tone = "neutral",
+  title,
+  children,
+}: {
+  tone?: Tone;
+  title?: string;
+  children: React.ReactNode;
+}) {
   return (
-    <span className="badge" data-tone={tone === "neutral" ? undefined : tone}>
+    <span className="badge" data-tone={tone === "neutral" ? undefined : tone} title={title}>
       <span className="dot" />
       {children}
     </span>
@@ -65,26 +80,37 @@ export function PhaseBadge({
   );
 }
 
-/** Conditions that stop the vault selling at all. Shown only when they are true. */
-export function GuardBadges({
-  writesHalted,
-  oraclePaused,
-  spotStale,
-  valoremFeeAccepted,
-  stranded,
+/** Fill-state chip from the snapshot and the clock. Pages pass `useNow()` so SSR and the first client frame agree. */
+export function VaultPhaseBadge({
+  snapshot,
+  nowSeconds,
+  showPhase = true,
 }: {
-  writesHalted?: boolean;
-  oraclePaused?: boolean;
-  spotStale?: boolean;
-  valoremFeeAccepted?: boolean;
-  stranded?: boolean;
+  snapshot: Parameters<typeof deriveFillState>[0];
+  nowSeconds: number;
+  showPhase?: boolean;
 }) {
-  const badges: React.ReactNode[] = [];
-  if (stranded) badges.push(<Badge key="stranded" tone="bad">Claim stranded</Badge>);
-  if (writesHalted) badges.push(<Badge key="halt" tone="bad">Writes halted</Badge>);
-  if (oraclePaused) badges.push(<Badge key="oracle" tone="bad">Token oracle paused</Badge>);
-  if (spotStale) badges.push(<Badge key="spot" tone="warn">Price feed stale</Badge>);
-  if (valoremFeeAccepted) badges.push(<Badge key="fee" tone="warn">Valorem fee accepted</Badge>);
-  if (badges.length === 0) return null;
-  return <span style={{ display: "inline-flex", gap: 6, flexWrap: "wrap" }}>{badges}</span>;
+  return (
+    <PhaseBadge
+      phase={snapshot.phase}
+      fillState={deriveFillState(snapshot, nowSeconds)}
+      sold={snapshot.contractsWritten}
+      showPhase={showPhase}
+    />
+  );
+}
+
+/** Conditions that stop the vault selling at all. Shown only when they are true. */
+export function GuardBadges({ snapshot }: { snapshot: Parameters<typeof vaultGuards>[0] }) {
+  const guards = vaultGuards(snapshot);
+  if (guards.length === 0) return null;
+  return (
+    <span style={{ display: "inline-flex", gap: 6, flexWrap: "wrap" }}>
+      {guards.map((g) => (
+        <Badge key={g.key} tone={GUARD_TONE[g.tone]} title={g.title}>
+          {g.label}
+        </Badge>
+      ))}
+    </span>
+  );
 }

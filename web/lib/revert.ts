@@ -3,7 +3,7 @@ import { decodeErrorResult, type Abi, type Hex } from "viem";
 import { usdgErrorsAbi } from "./abi/erc20";
 import { seaportAbi } from "./abi/seaport";
 import { vaultAbi } from "./abi/vault";
-import { fmtUsdg, fmtUtc } from "./format";
+import { fmtEastern, fmtUsdg, fmtUtc } from "./format";
 
 /**
  * Turn a revert into a sentence a human can act on.
@@ -74,8 +74,12 @@ export const EXPLAINED: Record<string, string | ((args: readonly unknown[]) => s
   // Deposits and the queue.
   UseQueue: "A call is open, so this redemption has to go through the queue.",
   DepositCapExceeded: "That would take the vault past its deposit cap.",
+  // Vault._depositRefused, every reason a depositor can meet. "Assignment pending" is left out on
+  // purpose: nothing can be assigned before cycleExerciseTs, so it only ever holds alongside the
+  // sale window, the settling phase or a stranded claim, which are named. A full deposit cap is
+  // not this error (DepositCapExceeded).
   DepositsClosed:
-    "Deposits are closed right now: the vault is past this week's sale window, settling, holding a stranded claim, or its reserve is unbacked. They reopen by themselves when the reason clears.",
+    "Deposits are closed right now: the vault is past this week's sale window, settling, holding a stranded claim, its reserve is unbacked, or the book is worth too little per share to sell new shares. They reopen by themselves when the reason clears.",
   NothingToClaim: "There is no USDG to claim yet.",
   NothingQueued: "Nothing is queued for this address.",
   EpochNotSettled: "This queued redemption settles after the keeper closes the week.",
@@ -95,11 +99,14 @@ export const EXPLAINED: Record<string, string | ((args: readonly unknown[]) => s
   WritesAreHalted: "Writes are halted by the guardian. The listing stands, but no fill goes through until the halt is lifted.",
   NotLiveListing: "That order is not the vault's live listing, so the vault will not write for it.",
   NotSeaport: "Only Seaport may call the vault's fill hooks.",
-  WriteWindowClosed: (a) => `This week's sale window closed at ${fmtUtc(big(a[0]))}: the exercise window has opened and nothing more can be written.`,
+  WriteWindowClosed: (a) =>
+    `This week's sale window closed at ${fmtUtc(big(a[0]))} · ${fmtEastern(big(a[0]))}: the exercise window has opened and nothing more can be written.`,
   PremiumBelowFloorAtFill: (a) =>
     `The vault re-priced its premium floor at today's spot: this fill would pay ${usdg(a[0])} USDG against a floor of ${usdg(a[1])} USDG. The keeper reprices, or spot comes back; until then the vault will not sell.`,
+  // No reprice clears this one: the strike is the armed option type's and fixed until the week
+  // closes, and approveListing re-checks the same floor, so a relist reverts too. Only spot does.
   StrikeBelowBand: (a) =>
-    `After the rally this week's strike (${usdg(a[0])} USDG) is below the vault's minimum of ${usdg(a[1])} USDG at today's spot, so the vault will not sell it. The keeper reprices, or spot falls back.`,
+    `After the rally this week's strike (${usdg(a[0])} USDG) is below the vault's minimum of ${usdg(a[1])} USDG at today's spot, so the vault will not sell it. The strike is fixed for the week and a new price cannot change it: the vault sells again only if spot falls back far enough that the strike clears the floor.`,
   StrikeAboveBand: (a) => `This week's strike (${usdg(a[0])} USDG) is above the vault's maximum of ${usdg(a[1])} USDG at today's spot.`,
   PremiumBelowMinimum: (a) => `The premium ${usdg(a[0])} USDG is below the vault's minimum of ${usdg(a[1])} USDG.`,
   ReserveBreached:

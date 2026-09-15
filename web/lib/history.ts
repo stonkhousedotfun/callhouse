@@ -402,3 +402,60 @@ export function useCycleHistory() {
 export function lastSettled(rows: CycleRow[]): CycleRow | undefined {
   return rows.find((row) => row.settled);
 }
+
+/**
+ * A week's result, short (the table cell and the vault page's line) and long (the cell's title).
+ *
+ * AN UNFILLED WEEK CANNOT BE ASSIGNED. Under write on fill nothing is written until a buyer fills,
+ * so a week nobody bought opens no Valorem claim, `rollClose` takes the `claimKey == 0` path and
+ * `contractsAssigned()` reads 0 (ValoremLib.contractsAssigned). Both history sources agree: the
+ * indexer's `filled` is `contractsSold > 0` and the log fallback's is the `CallsWritten` sum. The
+ * "unfilled, assigned" label from before the redesign told depositors the vault could be assigned
+ * on calls it never sold. A row that nevertheless says unfilled with an assignment is not a result
+ * but a broken record (the log rebuild started after the week's fills, say, so it saw the
+ * `RollClose` and none of the `CallsWritten`), and it is marked as exactly that rather than
+ * rendered as a week that happened.
+ */
+export type WeekResult = { short: string; long: string; inconsistent: boolean };
+
+export function unfilledWeekResult(row: CycleRow): WeekResult {
+  const assigned = row.contractsAssigned ?? 0n;
+  if (assigned > 0n) {
+    return {
+      short: `record incomplete, assigned ${assigned.toString()}`,
+      long: `this record shows ${assigned.toString()} contracts assigned but no sale; the vault only ever writes, and so can only be assigned on, calls it sold, so the week's sale records are missing from this source (a log rebuild that starts after the week's fills, or an indexer that is behind)`,
+      inconsistent: true,
+    };
+  }
+  return { short: "unfilled, 0", long: "nobody bought the call; nothing was written and the week earned nothing", inconsistent: false };
+}
+
+export function weekResult(row: CycleRow): WeekResult {
+  const assigned = row.contractsAssigned ?? 0n;
+  const sold = row.contractsSold ?? row.contracts ?? 0n;
+  const gen = row.strandGen !== undefined ? ` (strand generation ${row.strandGen})` : "";
+  if (!row.settled) return { short: "open", long: "the week is still running", inconsistent: false };
+  if (row.stranded && row.strandRecovered !== true) {
+    return {
+      short: "closed, claim stranded",
+      long: `the week closed and its premium was harvested, but Valorem could not return the claim's collateral (a USDG pause or freeze, or a Stock Token blocklist); anyone can retry the claim, and its collateral and strike USDG arrive when the retry succeeds${gen}`,
+      inconsistent: false,
+    };
+  }
+  if (row.stranded) {
+    return {
+      short: `claim stranded, recovered${assigned > 0n ? `, assigned ${assigned.toString()}` : ""}`,
+      long: `the close could not redeem the claim, and a later retryStrandedClaim brought it home: the strike proceeds landed fee-free through the retry's harvest${gen}`,
+      inconsistent: false,
+    };
+  }
+  if (!row.filled) return unfilledWeekResult(row);
+  if (assigned > 0n) {
+    return {
+      short: `assigned ${assigned.toString()}`,
+      long: `${assigned.toString()} of the ${sold.toString()} contracts sold were assigned to the vault; that collateral left at the strike and came back as the strike proceeds`,
+      inconsistent: false,
+    };
+  }
+  return { short: "filled", long: `buyers filled ${sold.toString()} contracts and the calls expired out of the money`, inconsistent: false };
+}

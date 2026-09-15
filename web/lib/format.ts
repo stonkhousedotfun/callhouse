@@ -387,12 +387,20 @@ export function listedDepositRisk(v: {
 
 /**
  * Why deposits are closed right now, from what the page has read, or undefined when they are
- * open as far as it can tell. Mirrors Vault._depositRefused, whose single `DepositsClosed`
- * error carries no argument on purpose; `maxDeposit() == 0` is the chain's own word (checked by
- * the form as well), and this names the reason beside it. The share-price floor (a dead book)
- * is not derivable from the snapshot and is left to `maxDeposit`.
+ * open as far as it can tell. Mirrors Vault._depositRefused, whose single `DepositsClosed` error
+ * carries no argument on purpose. The share-price floor (reason 6, a dead book) is read off the
+ * snapshot's `totalSupply` and `totalAssets` against the vault's compiled MAX_SHARES_PER_ASSET.
+ * Reason 7 (a fill of the same transaction has written) cannot hold for a page's read.
+ *
+ * A FULL DEPOSIT CAP IS NOT HERE. `maxDeposit()` also returns 0 when `totalAssets() >= depositCap`,
+ * but that is not a `DepositsClosed` condition (a deposit reverts `DepositCapExceeded`) and a full
+ * cap is the likely steady state of a healthy launch vault. `depositState` below tells the two
+ * apart; this function only ever names a refusal.
  */
-export type DepositsClosedReason = "phase" | "window" | "assignmentPending" | "stranded" | "reserveUnbacked";
+export type DepositsClosedReason = "phase" | "window" | "assignmentPending" | "stranded" | "reserveUnbacked" | "deadBook";
+
+/** Vault.MAX_SHARES_PER_ASSET: below one millionth of an asset base unit per share, the vault sells no shares. */
+export const MAX_SHARES_PER_ASSET = 1_000_000n;
 
 export function depositsClosedReason(
   v: {
@@ -402,6 +410,8 @@ export function depositsClosedReason(
     contractsAssigned?: bigint;
     assetHeld?: bigint;
     reservedAssets?: bigint;
+    totalSupply?: bigint;
+    totalAssets?: bigint;
   },
   nowSeconds: number,
 ): DepositsClosedReason | undefined {
@@ -412,7 +422,48 @@ export function depositsClosedReason(
   if (claim !== 0n && v.phase === 0) return "stranded";
   if (claim !== 0n && (v.contractsAssigned ?? 0n) > 0n) return "assignmentPending";
   if (v.assetHeld !== undefined && v.reservedAssets !== undefined && v.assetHeld < v.reservedAssets) return "reserveUnbacked";
+  if (v.totalSupply !== undefined && v.totalAssets !== undefined && v.totalSupply > v.totalAssets * MAX_SHARES_PER_ASSET) return "deadBook";
   return undefined;
+}
+
+/**
+ * What the deposit form and the vault page's "Deposits" row say, in one predicate.
+ *
+ * `maxDeposit() == 0` is the chain's word that a deposit would revert, but it says so for two
+ * different reasons (Vault.maxDeposit): the vault refuses deposits (`_depositRefused`, the one
+ * `DepositsClosed` gate), or `totalAssets() >= depositCap`, which is a full cap and not a closure.
+ * Reporting the second as "Deposits are closed" listed five alarming reasons (settling, a stranded
+ * claim, an unbacked reserve...) to every visitor of a healthy vault whose small launch cap had
+ * simply filled up, and hid the one notice that names the cap.
+ *
+ *  - "unknown":  the phase has not been read (or no vault is configured). Neither open nor closed.
+ *  - "closed":   a refusal. `reason` names it when the snapshot can; undefined when only the
+ *                chain's zero says so and the cap is not what is full.
+ *  - "capFull":  nothing refuses deposits, but the cap has no room: `totalAssets >= depositCap`.
+ *  - "open":     nothing the page has read stops a deposit.
+ *
+ * Refusals win over a full cap, exactly as `maxDeposit` checks `_depositRefused` first.
+ * `accountHeadroom` is the connected account's own `maxDeposit`, when it has been read.
+ */
+export type DepositState =
+  | { kind: "unknown" }
+  | { kind: "open" }
+  | { kind: "closed"; reason?: DepositsClosedReason }
+  | { kind: "capFull"; cap: bigint; held: bigint };
+
+export function depositState(
+  v: Parameters<typeof depositsClosedReason>[0] & { depositCap?: bigint; depositsOpen?: boolean },
+  nowSeconds: number,
+  accountHeadroom?: bigint,
+): DepositState {
+  if (v.phase === undefined) return { kind: "unknown" };
+  const reason = depositsClosedReason(v, nowSeconds);
+  if (reason !== undefined) return { kind: "closed", reason };
+  if (v.totalAssets !== undefined && v.depositCap !== undefined && v.totalAssets >= v.depositCap) {
+    return { kind: "capFull", cap: v.depositCap, held: v.totalAssets };
+  }
+  if (v.depositsOpen === false || accountHeadroom === 0n) return { kind: "closed" };
+  return { kind: "open" };
 }
 
 /**
@@ -422,8 +473,11 @@ export function depositsClosedReason(
  * is below `epochId` was already settled and is collected with `completeRedeem`. Without this
  * path a queue entered while flat waited for a `rollClose` that needs a fresh `rollOpen`, and a
  * week that never gets armed (halted, stale oracle, less than one lot idle) held it indefinitely.
- * While a claim is stranded this is also the exit: the entry is paid its slice of the idle
- * balance now and its share of the claim when `retryStrandedClaim` succeeds.
+ * While a claim is stranded this is also the exit: settling books the entry's slice of the idle
+ * balance now (bookkeeping, no token moves, so it works whatever the issuers are doing) and its
+ * share of the claim for when `retryStrandedClaim` succeeds. The PAYOUT is `completeRedeem`, a
+ * transfer: the Stock Token leg moves only while the vault may transfer the token, and the USDG
+ * leg only while USDG can move (Vault._payoutOwed).
  */
 export function canSettleQueue(v: {
   phase?: number;
@@ -438,4 +492,70 @@ export function canSettleQueue(v: {
     v.queuedEpoch !== undefined &&
     v.queuedEpoch === v.epochId
   );
+}
+
+/**
+ * What the withdraw card's queued-redemption block shows, as a pure function of the account's
+ * queue slot and the vault's strand generations.
+ *
+ * WHY IT IS NOT JUST `queuedShares > 0`. `completeRedeem` settles the entry (`queuedSharesOf` goes
+ * to 0) and then pays what is owed, and two things can still be owed after that:
+ *   - a share of a stranded claim (`owedStrandWad`). While the claim is stranded it is not
+ *     collectable; once any `retryStrandedClaim` lands, `lastResolvedGen` covers its generation,
+ *     `previewCompleteRedeem` quotes it and `completeRedeem` pays it. That recovery also clears
+ *     `isStranded`, so a block gated on "queued, or stranded with a share" vanished at exactly the
+ *     moment the share became collectable, for every queuer who had collected during the strand;
+ *   - a USDG leg the vault could not move when the entry was collected (`UsdgLegDeferred`: USDG
+ *     paused, or the vault or the receiver frozen on USDG). It stays in `owedQueueUsdg` with
+ *     nothing queued.
+ * So the block shows whenever anything is queued, collectable, or staged, and "waiting on the
+ * claim" is decided by generation (`gen > lastResolvedGen`), not by `isStranded`, which says
+ * nothing about an older generation. `isStranded` is used only when the generations are unread.
+ */
+export type RedeemQueueView = {
+  /** Render the queued-redemption block at all. */
+  show: boolean;
+  /** previewCompleteRedeem quotes something: Complete redemption pays it now. */
+  collectable: boolean;
+  /** Part of this account's redemption is a share of a claim that is still stranded. */
+  strandShareWaiting: boolean;
+  /** A staged share of a stranded claim whose claim has since been redeemed: collectable. */
+  strandShareRecovered: boolean;
+  /** USDG is owed with nothing queued and no strand share behind it: a deferred USDG leg. */
+  usdgLegDeferred: boolean;
+};
+
+export function redeemQueueView(v: {
+  queuedShares?: bigint;
+  queuedEpoch?: bigint;
+  epochId?: bigint;
+  pendingAssets?: bigint;
+  pendingUsdg?: bigint;
+  owedStrandWad?: bigint;
+  owedStrandGen?: bigint;
+  epochStrandWad?: bigint;
+  epochStrandGen?: bigint;
+  lastResolvedGen?: bigint;
+  isStranded?: boolean;
+}): RedeemQueueView {
+  const queued = v.queuedShares ?? 0n;
+  const pendingAssets = v.pendingAssets ?? 0n;
+  const pendingUsdg = v.pendingUsdg ?? 0n;
+  const collectable = pendingAssets > 0n || pendingUsdg > 0n;
+  const unresolved = (gen: bigint | undefined): boolean =>
+    gen !== undefined && v.lastResolvedGen !== undefined ? gen > v.lastResolvedGen : v.isStranded === true;
+
+  const staged = (v.owedStrandWad ?? 0n) > 0n;
+  const stagedWaiting = staged && unresolved(v.owedStrandGen);
+  const settledEpoch = queued > 0n && v.queuedEpoch !== undefined && v.epochId !== undefined && v.queuedEpoch < v.epochId;
+  const epochWaiting = settledEpoch && (v.epochStrandWad ?? 0n) > 0n && unresolved(v.epochStrandGen);
+  const strandShareRecovered = staged && !stagedWaiting;
+
+  return {
+    show: queued > 0n || collectable || staged,
+    collectable,
+    strandShareWaiting: stagedWaiting || epochWaiting,
+    strandShareRecovered,
+    usdgLegDeferred: queued === 0n && !staged && pendingAssets === 0n && pendingUsdg > 0n,
+  };
 }

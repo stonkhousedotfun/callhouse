@@ -6,8 +6,9 @@ import { useAccount, useReadContract, useWriteContract } from "wagmi";
 
 import { ASSET, ASSET_DECIMALS, MARKET, SHARE_TICKER, VAULT, stockTokenAbi, vaultAbi } from "@/lib/contracts";
 import {
-  depositsClosedReason,
+  depositState,
   fmtAsset,
+  fmtEastern,
   fmtShares,
   fmtUsdg,
   fmtUtc,
@@ -30,13 +31,16 @@ import { useTxRunner } from "./TxToast";
  *  - hide the cap. maxDeposit() is the vault's own headroom and a deposit past it reverts with
  *    DepositCapExceeded, so the number is on screen before the button is pressed.
  *
- * ONE GATE. The vault has a single `DepositsClosed` error and `maxDeposit()` returns 0 on exactly
- * the same conditions (Vault._depositRefused): not Idle or Listed; Listed and past this week's
- * exercise time, whether or not anyone called lockBook (W-2); a contract assigned and its claim
- * not yet redeemed; a stranded claim; the reserve unbacked after an issuer burn; a dead book. So
- * `maxDeposit() == 0` is the chain's word that deposits are closed, and this form treats it as
- * such for the connected account and, through the snapshot's zero-address read, for everyone.
- * `depositsClosedReason` names the reason beside it from what the page has read.
+ * ONE GATE, AND A CAP THAT IS NOT A GATE. The vault has a single `DepositsClosed` error
+ * (Vault._depositRefused): not Idle or Listed; Listed and past this week's exercise time, whether
+ * or not anyone called lockBook (W-2); a contract assigned and its claim not yet redeemed; a
+ * stranded claim; the reserve unbacked after an issuer burn; a dead book. `maxDeposit()` returns 0
+ * on every one of those AND when `totalAssets() >= depositCap`, which is a full cap, not a closure
+ * (a deposit then reverts `DepositCapExceeded`). With the cap deliberately small at launch a full
+ * cap is the likely state of a healthy vault, so a zero is not read as "closed" on its own:
+ * `depositState` (lib/format.ts) names the refusal when there is one, says "cap full" when the cap
+ * is what has no room, and falls back to the chain's zero (for the connected account, or for
+ * anyone through the snapshot's zero-address read) only when neither explains it.
  *
  * Deposits are allowed in Idle and Listed (decision D8). A deposit in Listed buys into the open
  * short: shares are priced on totalAssets(), which values the short call at zero, so if the week
@@ -83,16 +87,15 @@ export function DepositForm({
   });
   const previewShares = typeof preview.data === "bigint" ? preview.data : undefined;
 
-  // Closed by the chain's own word (maxDeposit == 0 for the account, or for anyone), or by a
-  // reason the snapshot can name. An unknown phase (no vault configured, or the read has not
-  // landed) is not "closed": the button is disabled by other means, and a false "we are
-  // settling" notice would be a lie.
-  const reason = depositsClosedReason(snapshot, nowSeconds);
-  const chainSaysClosed =
-    snapshot.depositsOpen === false || (position.ready && headroom !== undefined && headroom === 0n && snapshot.phase !== undefined);
-  const closed = reason !== undefined || chainSaysClosed;
+  // A refusal the snapshot can name, a full cap, or the chain's own zero (for the account, or for
+  // anyone) with neither to explain it. An unknown phase (no vault configured, or the read has not
+  // landed) is neither open nor closed: the button is disabled by other means, and a false "we
+  // are settling" notice would be a lie.
+  const gate = depositState(snapshot, nowSeconds, position.ready ? headroom : undefined);
+  const closed = gate.kind === "closed";
+  const capFull = gate.kind === "capFull";
 
-  const risk = closed
+  const risk = closed || capFull
     ? "none"
     : listedDepositRisk({
         phase: snapshot.phase,
@@ -102,7 +105,7 @@ export function DepositForm({
       });
 
   const disabled =
-    busy || !isConnected || !VAULT || amount === null || amount === 0n || overBalance || overCap || closed;
+    busy || !isConnected || !VAULT || amount === null || amount === 0n || overBalance || overCap || closed || capFull;
 
   async function submit() {
     if (!VAULT || !address || amount === null || amount === 0n) return;
@@ -150,7 +153,11 @@ export function DepositForm({
       <div className="card-head">
         <span className="card-title">Deposit</span>
         <span className="tiny faint mono">
-          {closed ? "closed" : `cap headroom ${headroom === undefined ? "—" : `${fmtAsset(headroom)} ${MARKET}`}`}
+          {closed
+            ? "closed"
+            : capFull
+              ? "cap full"
+              : `cap headroom ${headroom === undefined ? "—" : `${fmtAsset(headroom)} ${MARKET}`}`}
         </span>
       </div>
 
@@ -213,9 +220,13 @@ export function DepositForm({
         </div>
       </div>
 
-      {closed ? (
+      {gate.kind === "closed" ? (
         <div className="notice" data-tone="warn" style={{ marginTop: 12 }}>
-          <strong>Deposits are closed right now.</strong> {closedCopy(reason, snapshot)}
+          <strong>Deposits are closed right now.</strong> {closedCopy(gate.reason, snapshot)}
+        </div>
+      ) : gate.kind === "capFull" ? (
+        <div className="notice" data-tone="info" style={{ marginTop: 12 }}>
+          <strong>The deposit cap is full.</strong> {capFullCopy(gate.cap, gate.held)}
         </div>
       ) : null}
       {risk !== "none" ? (
@@ -247,7 +258,7 @@ export function DepositForm({
           That is more than the wallet holds.
         </div>
       ) : null}
-      {overCap && !overBalance && !closed ? (
+      {overCap && !overBalance && gate.kind === "open" ? (
         <div className="notice" data-tone="bad" style={{ marginTop: 12 }}>
           That is past the vault&apos;s deposit cap. The cap is deliberately small at launch.
         </div>
@@ -258,7 +269,15 @@ export function DepositForm({
           <ConnectButton />
         ) : (
           <button data-variant="primary" style={{ width: "100%" }} disabled={disabled} onClick={submit}>
-            {busy ? "Working…" : closed ? "Deposits closed" : needsApproval ? `Approve and deposit` : "Deposit"}
+            {busy
+              ? "Working…"
+              : closed
+                ? "Deposits closed"
+                : capFull
+                  ? "Deposit cap reached"
+                  : needsApproval
+                    ? `Approve and deposit`
+                    : "Deposit"}
           </button>
         )}
       </div>
@@ -272,16 +291,24 @@ function closedCopy(reason: DepositsClosedReason | undefined, snapshot: VaultSna
     case "phase":
       return "The vault is settling the week (past its sale window). Deposits reopen when it returns to Idle.";
     case "window":
-      return `This week's sale window closed at ${fmtUtc(snapshot.cycleExerciseTs)}: the exercise window is open and assignment can take collateral at the strike, so no new shares are minted against it. Deposits reopen after the keeper closes the week.`;
+      return `This week's sale window closed at ${fmtUtc(snapshot.cycleExerciseTs)} · ${fmtEastern(snapshot.cycleExerciseTs)}: the exercise window is open and assignment can take collateral at the strike, so no new shares are minted against it. Deposits reopen after the keeper closes the week.`;
     case "assignmentPending":
       return "Contracts have been assigned and the claim has not been redeemed yet, so the collateral has left while the strike USDG is still inside Valorem. Deposits reopen once the week is closed.";
     case "stranded":
       return "The last close could not redeem its Valorem claim (see the stranded-claim notice). Deposits reopen once the claim is redeemed with Retry claim.";
     case "reserveUnbacked":
       return "The vault's token balance is below what settled redeemers are owed, which only an issuer burn produces. Deposits reopen once the reserve is collected or refilled.";
+    case "deadBook":
+      return "The book is worth less than a millionth of a token base unit per share, so the vault will not sell new shares at that price. Deposits reopen once collateral or a redeemed claim comes back, or the outstanding shares redeem out.";
     default:
-      return "The vault's maxDeposit() is zero: it is past its sale window, settling, holding a stranded claim, its reserve is unbacked, or the book is worth too little per share to sell new shares. Deposits reopen by themselves when the reason clears.";
+      return "The vault's maxDeposit() is zero and this page could not read which reason applies. The vault refuses deposits past its sale window, while settling, while holding a stranded claim, while its reserve is unbacked, or when the book is worth too little per share to sell new shares; a full deposit cap also reads as zero. Deposits reopen by themselves when the reason clears.";
   }
+}
+
+/** A full cap, said as a full cap: a healthy vault whose deliberately small launch cap has no room. */
+function capFullCopy(cap: bigint, held: bigint): string {
+  if (cap === 0n) return "The vault's deposit cap is set to zero, so it takes no new deposits until the admin raises it.";
+  return `The vault holds ${fmtAsset(held)} ${MARKET} of collateral against a deposit cap of ${fmtAsset(cap)} ${MARKET}, so any deposit would take it past the cap. That is not a closure: room opens when collateral leaves (a redemption or an assignment) or the admin raises the cap.`;
 }
 
 /** Full-precision decimal string for the max button — never a rounded display value. */

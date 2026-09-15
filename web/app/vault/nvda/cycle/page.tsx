@@ -4,7 +4,7 @@ import { useQuery } from "@tanstack/react-query";
 
 import { CycleTape } from "@/components/CycleTape";
 import { OrderPayload } from "@/components/OrderPayload";
-import { GuardBadges, PhaseBadge } from "@/components/PhaseBadge";
+import { GuardBadges, VaultPhaseBadge } from "@/components/PhaseBadge";
 import { StrandedBanner } from "@/components/StrandedBanner";
 import { fetchKeeperOrderBook } from "@/lib/api";
 import { addressUrl } from "@/lib/chain";
@@ -136,7 +136,7 @@ export default function CyclePage() {
       <div className="card" style={{ marginTop: 16 }}>
         <div className="card-head">
           <span className="card-title">This week&apos;s option · vault cycle #{v.cycleNumber ?? "—"}</span>
-          <PhaseBadge phase={v.phase} fillState={v.fillState} sold={v.contractsWritten} />
+          <VaultPhaseBadge snapshot={v} nowSeconds={nowSeconds} />
         </div>
 
         {v.phase === 0 || v.optionId === undefined || v.optionId === 0n ? (
@@ -236,7 +236,7 @@ export default function CyclePage() {
       <div className="card" style={{ marginTop: 16 }}>
         <div className="card-head">
           <span className="card-title">The vault&apos;s order, on chain</span>
-          <GuardBadges writesHalted={v.writesHalted} oraclePaused={v.oraclePaused} spotStale={v.spotStale} stranded={v.isStranded} />
+          <GuardBadges snapshot={v} />
         </div>
 
         {hasOnChainListing ? (

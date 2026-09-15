@@ -130,22 +130,46 @@ describe("classifyFillSimulation", () => {
     });
     expect(classifyFillSimulation({ ok: false, revertData: panic }).kind).toBe("inconclusive");
     expect(classifyFillSimulation({ ok: false }).kind).toBe("inconclusive");
-    expect(preflightAllowsFill(undefined)).toBe(true);
+  });
+
+  it("no verdict yet is not a pass: the button waits for the simulation of the exact fill", () => {
+    // A new quantity or a wallet connecting keys a fresh query whose data is undefined until the
+    // eth_call returns. Allowing that let a buyer send approve(SEAPORT, cost) after a rally for a
+    // fill the vault was about to refuse with PremiumBelowFloorAtFill.
+    expect(preflightAllowsFill(undefined)).toBe(false);
+    // The same size, once simulated, decides on its verdict alone.
+    const refused = classifyFillSimulation({ ok: false, revertData: vault("PremiumBelowFloorAtFill", [856_189n, 860_426n]) });
+    expect(preflightAllowsFill(refused)).toBe(false);
+    expect(preflightAllowsFill(classifyFillSimulation({ ok: true }))).toBe(true);
   });
 });
 
 describe("fill gas", () => {
-  it("the simulation gas covers a first fill with room, and the sentences name both figures", () => {
-    // Measured on the live Seaport 1.6 + Clear of 4663: 386k first fill, 156k top-up; the spike
-    // figures were 470k and 245k. Both readings sit inside the ranges.
-    expect(FILL_GAS.firstFill.low).toBeLessThanOrEqual(386_000);
-    expect(FILL_GAS.firstFill.high).toBeGreaterThanOrEqual(470_000);
-    expect(FILL_GAS.topUp.low).toBeLessThanOrEqual(156_000);
-    expect(FILL_GAS.topUp.high).toBeGreaterThanOrEqual(245_000);
+  // Whole-transaction receipts from the keeper's fork dry run (keeper/DRYRUN.md): real Seaport 1.6
+  // fills of the vault's order through the real Clear on a 4663 fork. The last first fill ran with
+  // Valorem's engine fee on.
+  const FIRST_FILL_RECEIPTS = [445_577, 450_181, 462_677, 462_701, 476_071];
+  const TOP_UP_RECEIPTS = [276_627, 288_951, 289_157];
+
+  it("every measured receipt sits inside its range, and the simulation gas covers the highest", () => {
+    for (const g of FIRST_FILL_RECEIPTS) {
+      expect(g, `first fill ${g}`).toBeGreaterThanOrEqual(FILL_GAS.firstFill.low);
+      expect(g, `first fill ${g}`).toBeLessThanOrEqual(FILL_GAS.firstFill.high);
+    }
+    for (const g of TOP_UP_RECEIPTS) {
+      expect(g, `top-up ${g}`).toBeGreaterThanOrEqual(FILL_GAS.topUp.low);
+      expect(g, `top-up ${g}`).toBeLessThanOrEqual(FILL_GAS.topUp.high);
+    }
     expect(SIMULATION_GAS).toBeGreaterThan(BigInt(FILL_GAS.firstFill.high));
-    expect(fillGasSentence(true)).toContain("380k–500k");
+  });
+
+  it("the sentences name both ranges: 440k–500k for a first fill, 270k–320k for a top-up", () => {
+    expect(fillGasSentence(true)).toContain("440k–500k");
     expect(fillGasSentence(true)).toContain("first fill of the cycle");
-    expect(fillGasSentence(false)).toContain("150k–250k");
+    expect(fillGasSentence(true)).toContain("Later fills cost about 270k–320k.");
+    expect(fillGasSentence(false)).toContain("270k–320k");
     expect(fillGasSentence(false)).toContain("tops up");
+    // The contracts suite's in-test figure is not a receipt and must not be what a buyer reads.
+    expect(fillGasSentence(false)).not.toContain("150k");
   });
 });

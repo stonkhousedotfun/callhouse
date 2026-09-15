@@ -5,7 +5,7 @@ import { useAccount } from "wagmi";
 
 import { CycleTape } from "@/components/CycleTape";
 import { DepositForm } from "@/components/DepositForm";
-import { GuardBadges, PhaseBadge } from "@/components/PhaseBadge";
+import { GuardBadges, VaultPhaseBadge } from "@/components/PhaseBadge";
 import { PositionSplit } from "@/components/PositionSplit";
 import { RedeemQueue } from "@/components/RedeemQueue";
 import { StrandedBanner } from "@/components/StrandedBanner";
@@ -13,6 +13,7 @@ import { UsdgClaim } from "@/components/UsdgClaim";
 import { addressUrl } from "@/lib/chain";
 import { ASSET, MARKET, SHARE_TICKER, VAULT } from "@/lib/contracts";
 import {
+  depositState,
   fmtAsset,
   fmtMultiplier,
   fmtRealizedWeek,
@@ -23,8 +24,8 @@ import {
   toNvdaEq,
   tvlUsdg,
 } from "@/lib/format";
-import { lastSettled, useCycleHistory } from "@/lib/history";
-import { collateralSplit, useAccountPosition, useVaultSnapshot } from "@/lib/hooks";
+import { lastSettled, unfilledWeekResult, useCycleHistory } from "@/lib/history";
+import { collateralSplit, useAccountPosition, useNow, useVaultSnapshot } from "@/lib/hooks";
 
 export default function VaultPage() {
   const { address } = useAccount();
@@ -32,6 +33,9 @@ export default function VaultPage() {
   const { data: position, refetch: refetchPosition } = useAccountPosition(address);
   const { rows } = useCycleHistory();
   const last = lastSettled(rows);
+  const nowSeconds = useNow();
+  // The same predicate as the deposit form: a full cap is "cap full", never "closed".
+  const deposits = depositState(v, nowSeconds);
 
   const refresh = () => {
     void refetchVault();
@@ -94,7 +98,7 @@ export default function VaultPage() {
       <div className="card" style={{ marginTop: 16 }}>
         <div className="card-head">
           <span className="card-title">Your position</span>
-          <PhaseBadge phase={v.phase} fillState={v.fillState} sold={v.contractsWritten} />
+          <VaultPhaseBadge snapshot={v} nowSeconds={nowSeconds} />
         </div>
 
         {!address ? (
@@ -181,9 +185,7 @@ export default function VaultPage() {
                 <div className="stat-sub">
                   {last.filled
                     ? `${(last.contractsSold ?? last.contracts ?? 0n).toString()} calls sold`
-                    : lastWasAssigned
-                      ? `unfilled, assigned ${(last.contractsAssigned ?? 0n).toString()}`
-                      : "unfilled, 0"}
+                    : unfilledWeekResult(last).short}
                   {last.stranded ? (last.strandRecovered === true ? " · claim stranded at the close, since recovered" : " · claim stranded at the close") : ""} ·{" "}
                   {fmtUtcDate(last.closedAt)}
                 </div>
@@ -245,13 +247,7 @@ export default function VaultPage() {
       <div className="card" style={{ marginTop: 16 }}>
         <div className="card-head">
           <span className="card-title">Vault collateral</span>
-          <GuardBadges
-            writesHalted={v.writesHalted}
-            oraclePaused={v.oraclePaused}
-            spotStale={v.spotStale}
-            valoremFeeAccepted={v.valoremFeeAccepted}
-            stranded={v.isStranded}
-          />
+          <GuardBadges snapshot={v} />
         </div>
         <PositionSplit idle={split.idle} sold={split.sold} assigned={split.assigned} />
         <div className="rows" style={{ marginTop: 14 }}>
@@ -284,7 +280,9 @@ export default function VaultPage() {
           </div>
           <div className="row">
             <span className="k">Deposits</span>
-            <span className="v">{v.depositsOpen === undefined ? "—" : v.depositsOpen ? "open" : "closed"}</span>
+            <span className="v">
+              {deposits.kind === "unknown" ? "—" : deposits.kind === "capFull" ? "cap full" : deposits.kind}
+            </span>
           </div>
           <div className="row">
             <span className="k">Protocol fee on harvested premium</span>

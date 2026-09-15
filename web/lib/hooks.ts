@@ -90,70 +90,9 @@ export function phaseLabel(phase: number | undefined): string {
   return PHASE_LABELS[phase] ?? `Phase ${phase}`;
 }
 
-/**
- * What the week is actually doing, in the product's own words. This is the state the site
- * promises to publish honestly — "unfilled" included, because it is the most likely one.
- *
- * Under write on fill nothing is written until a buyer fills, and each fill writes exactly what
- * it sold. So there is no "listed but unsold" inventory: contracts written IS contracts sold, and
- * the interesting number while Listed is how many have been sold against how many the vault can
- * still write (its capacity).
- */
-export type FillState =
-  | "unknown" // nothing read yet, or no vault configured
-  | "flat" // Idle, nothing armed; the vault is holding spot
-  | "stranded" // Idle, but rollClose could not redeem the claim; deposits and instant redemption shut
-  | "armed" // Listed, an option type armed, nothing sold yet
-  | "selling" // Listed, some sold, capacity left
-  | "filled" // Listed, sold to capacity
-  | "locked" // past the sale window (Exercisable), calls sold
-  | "settling" // past expiry, reclaiming
-  | "assigned" // Exercisable and part of the claim has been assigned
-  | "unfilled"; // past the sale window with nothing sold: no premium
-
-export const FILL_STATE_COPY: Record<FillState, string> = {
-  unknown: "State unavailable",
-  flat: "Flat — no call armed",
-  stranded: "Stranded claim",
-  armed: "Armed — nothing sold yet",
-  selling: "Selling",
-  filled: "Sold to capacity",
-  locked: "Sale window closed",
-  settling: "Settling",
-  assigned: "Assigned",
-  unfilled: "Window closed, unsold",
-};
-
-function deriveFillState(v: {
-  phase?: number;
-  claimKey?: bigint;
-  contractsWritten?: bigint;
-  contractsAssigned?: bigint;
-  capacity?: bigint;
-}): FillState {
-  // No phase means no answer yet (or no vault configured). Saying "flat" would be asserting
-  // something about a vault we have not read.
-  if (v.phase === undefined) return "unknown";
-  const sold = v.contractsWritten ?? 0n;
-  const assigned = v.contractsAssigned ?? 0n;
-  switch (v.phase) {
-    case 1:
-      if (sold === 0n) return "armed";
-      return v.capacity !== undefined && v.capacity === 0n ? "filled" : "selling";
-    case 2:
-      // Exercisable: the claim is still open, so assignment is readable here and only here.
-      // rollClose zeroes contractsWritten and the claim key, which makes every Idle read "flat";
-      // the closed week's result comes from history (the "Result" row), never from this badge.
-      if (assigned > 0n) return "assigned";
-      return sold === 0n ? "unfilled" : "locked";
-    case 3:
-      return "settling";
-    case 0:
-    default:
-      // Idle with a claim is the one state only a failed redeem produces (Vault.isStranded).
-      return (v.claimKey ?? 0n) !== 0n ? "stranded" : "flat";
-  }
-}
+// The fill-state badge and the guard chips are decided in lib/vaultStatus.ts, from this snapshot
+// and the clock (a Listed vault past its exercise time is closed whatever its phase says), so the
+// snapshot itself carries no clock-free "fill state" that could disagree with the badge.
 
 /* ------------------------------------------------------------------------ vault snapshot --- */
 
@@ -170,7 +109,6 @@ export type VaultSnapshot = {
   assetHeld?: bigint;
   usdgHeld?: bigint;
   phase?: number;
-  fillState: FillState;
   cycleNumber?: number;
   /** This cycle's clock, snapshotted from the option type at rollOpen. The only deadlines on this site. */
   cycleExerciseTs?: number;
@@ -199,6 +137,13 @@ export type VaultSnapshot = {
    * reported on the cycle page.
    */
   clear?: Address;
+  /**
+   * `clear.feesEnabled()` on the vault's own clearinghouse. With `valoremFeeAccepted` false this
+   * stops every arm and every fill (ValoremFeeNotAccepted); undefined until both reads land.
+   */
+  clearFeesEnabled?: boolean;
+  /** `clear.feeBps()`, read beside it. */
+  clearFeeBps?: number;
   accUsdgPerShare?: bigint;
   totalUsdgDistributed?: bigint;
   usdgReservedForQueue?: bigint;
@@ -300,6 +245,25 @@ export function useVaultSnapshot() {
     query: { refetchInterval: REFRESH_MS, staleTime: 5_000 },
   });
 
+  // Clear's fee switch, on the clearinghouse the VAULT names: a dependent read, because the address
+  // is only known once `vault.clear()` has answered, and the compiled constant is not asked in its
+  // place (a build pointed at another Clear would report that Clear's switch).
+  const clearAddress = useMemo(
+    () => hex(readerFor(index, query.data as readonly CallResult[] | undefined).raw("clear")) as Address | undefined,
+    [index, query.data],
+  );
+  const feeQuery = useReadContracts({
+    contracts:
+      clearAddress !== undefined
+        ? [
+            { address: clearAddress, abi: valoremClearAbi as unknown as Abi, functionName: "feesEnabled" },
+            { address: clearAddress, abi: valoremClearAbi as unknown as Abi, functionName: "feeBps" },
+          ]
+        : [],
+    allowFailure: true,
+    query: { enabled: clearAddress !== undefined, refetchInterval: REFRESH_MS, staleTime: 5_000 },
+  });
+
   const data = useMemo<VaultSnapshot>(() => {
     const r = readerFor(index, query.data as readonly CallResult[] | undefined);
 
@@ -326,13 +290,8 @@ export function useVaultSnapshot() {
     const spotUsdg = big(r.raw("spotUsdg"));
     const maxDepositAny = big(r.raw("maxDepositAny"));
 
-    const base = {
-      phase: num(r.raw("phase")),
-      claimKey: big(r.raw("claimKey")),
-      contractsWritten,
-      contractsAssigned: big(r.raw("contractsAssigned")),
-      capacity,
-    };
+    const fee = feeQuery.data as readonly CallResult[] | undefined;
+    const feeRead = (i: number): unknown => (fee?.[i]?.status === "success" ? (fee[i] as { result: unknown }).result : undefined);
 
     return {
       ready: query.data !== undefined,
@@ -345,8 +304,11 @@ export function useVaultSnapshot() {
       reservedAssets: big(r.raw("reservedAssets")),
       assetHeld: big(r.raw("assetHeld")),
       usdgHeld: big(r.raw("usdgHeld")),
-      ...base,
-      fillState: deriveFillState(base),
+      phase: num(r.raw("phase")),
+      claimKey: big(r.raw("claimKey")),
+      contractsWritten,
+      contractsAssigned: big(r.raw("contractsAssigned")),
+      capacity,
       cycleNumber: num(r.raw("cycleNumber")),
       cycleExerciseTs: num(r.raw("cycleExerciseTs")),
       cycleExpiryTs: num(r.raw("cycleExpiryTs")),
@@ -358,6 +320,8 @@ export function useVaultSnapshot() {
       listingsThisCycle: num(r.raw("listingsThisCycle")),
       conduitKey: hex(r.raw("conduitKey")),
       clear: hex(r.raw("clear")) as Address | undefined,
+      clearFeesEnabled: bool(feeRead(0)),
+      clearFeeBps: num(feeRead(1)),
       accUsdgPerShare: big(r.raw("accUsdgPerShare")),
       totalUsdgDistributed: big(r.raw("totalUsdgDistributed")),
       usdgReservedForQueue: big(r.raw("usdgReservedForQueue")),
@@ -383,7 +347,7 @@ export function useVaultSnapshot() {
       // not "paused". Same posture the vault itself takes with its staticcall probe.
       oraclePaused: r.reverted("oraclePaused") ? false : bool(r.raw("oraclePaused")),
     };
-  }, [index, query.data]);
+  }, [index, query.data, feeQuery.data]);
 
   return { data, isLoading: query.isLoading, isError: query.isError, error: query.error, refetch: query.refetch };
 }

@@ -16,6 +16,7 @@ import {
   type PreflightVerdict,
 } from "@/lib/fillPreflight";
 import { fmtUsdg, minPremiumUsdg, shortAddress, shortHash, unitPriceUsdg } from "@/lib/format";
+import { explainRevert } from "@/lib/revert";
 import { useNow, type VaultSnapshot } from "@/lib/hooks";
 import { checkListingIsOurs, type ListingRow } from "@/lib/listing";
 import { advancedOrderFor, fillableContracts, seaportRemaining, type SeaportFillStatus } from "@/lib/seaportOrder";
@@ -57,7 +58,11 @@ import { useNotice, useTxRunner } from "./TxToast";
  * from the buyer's address, and lib/fillPreflight.ts says what the result means: a vault refusal
  * blocks the button with the vault's reason; a Seaport pre-hook refusal blocks it with Seaport's;
  * a token-transfer failure means the hook passed and the buyer's USDG approval is what is
- * missing, which the approve step fixes.
+ * missing, which the approve step fixes. NO VERDICT IS NOT A PASS: the query is keyed on the size
+ * and the fulfiller, so a new quantity or a wallet connecting has no verdict until its own
+ * `eth_call` returns, and the button stays off until then. And a verdict can be up to one refetch
+ * interval old, so `fill()` simulates once more and re-checks the fresh verdict before it sends
+ * the approve: a rally between the last simulation and the click costs the buyer nothing.
  *
  * The signature is EMPTY. The vault has no key: it validated the order on Seaport inside
  * approveListing, and Seaport skips verification for a validated order. The fee is the
@@ -223,8 +228,11 @@ export function OrderPayload({
       return classifyFillSimulation(sim);
     },
   });
+  // Undefined until the simulation of THIS size from THIS address has returned, and undefined is
+  // not a pass (preflightAllowsFill): the button waits for the verdict instead of racing it.
   const verdict = preflight.data;
   const canFill = preflightAllowsFill(verdict);
+  const simulating = verdict === undefined && want > 0n && publicClient !== undefined && preflight.isPending;
 
   // Shaped for a stranger's Seaport client: the components, the hash, and the empty signature.
   // Anyone can hand it to a raw fulfillAdvancedOrder call without trusting this page's maths.
@@ -255,9 +263,21 @@ export function OrderPayload({
 
   async function fill() {
     // The buttons are not rendered when the check fails; this is the belt to that brace.
-    if (!verified || !address || want === 0n || !canFill) return;
+    if (!verified || !address || want === 0n || !canFill || publicClient === undefined) return;
     setBusy(true);
     try {
+      // Simulate the same fill once more before anything is sent. The verdict on screen can be a
+      // refetch interval old, and the approve cannot be taken back if the vault refuses the fill
+      // it pays for. A refusal here stops before the approve and says why.
+      const fresh = await preflight.refetch();
+      if (!preflightAllowsFill(fresh.data)) {
+        const why =
+          fresh.data !== undefined && fresh.data.kind !== "ok" && fresh.data.kind !== "inconclusive"
+            ? fresh.data.decoded.text
+            : "The simulation did not return a verdict. Nothing was sent; try again.";
+        notice("error", "Fill not sent", why);
+        return;
+      }
       if ((usdgAllowance ?? 0n) < cost) {
         // Seaport pulls directly — the vault's conduit key is zero and the check has confirmed the
         // order carries it — so the approval goes to Seaport itself, never to a conduit.
@@ -398,15 +418,16 @@ export function OrderPayload({
             </div>
           </div>
 
+          {/* One sentence source with the decoded revert (lib/revert.ts StrikeBelowBand): the strike
+              is fixed for the week, so only spot falling back clears this, never a reprice. */}
           {strikeBelowFloor ? (
             <div className="notice" data-tone="warn" style={{ marginTop: 12 }}>
-              Spot has rallied: this week&apos;s strike ({fmtUsdg(snapshot.cycleStrikeUsdg)} USDG) is now below the
-              vault&apos;s minimum of {fmtUsdg(snapshot.band?.min)} USDG. The fill hook re-checks that floor at every
-              sale, so the vault will refuse this fill until the keeper reprices or spot falls back.
+              {explainRevert("StrikeBelowBand", [snapshot.cycleStrikeUsdg, snapshot.band?.min])} The fill hook re-checks
+              that floor at every sale.
             </div>
           ) : null}
 
-          <PreflightNotice verdict={verdict} pending={preflight.isPending && want > 0n} placeholder={address === undefined} />
+          <PreflightNotice verdict={verdict} pending={simulating} placeholder={address === undefined} />
 
           {insufficient ? (
             <div className="notice" data-tone="bad" style={{ marginTop: 12 }}>
@@ -468,7 +489,7 @@ function PreflightNotice({ verdict, pending, placeholder }: { verdict: Preflight
   if (verdict === undefined) {
     return pending ? (
       <p className="tiny faint" style={{ marginTop: 12 }}>
-        Simulating this fill against the chain…
+        Simulating this fill against the chain… The button turns on once the simulation says the vault accepts it.
       </p>
     ) : null;
   }

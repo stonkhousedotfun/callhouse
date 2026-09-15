@@ -12,8 +12,9 @@ import { decodeRevertData, type DecodedRevert } from "./revert";
  * oracle, the reserve. A listing that was fine on Monday can be refused on Friday after a rally
  * (PremiumBelowFloorAtFill, StrikeBelowBand), and a buyer who only learns that from a reverted
  * transaction has paid gas and approved USDG for nothing. So the page simulates the exact fill it
- * would send, from the buyer's address, before the button is live, and this file says what the
- * result means.
+ * would send, from the buyer's address, before the button is live (and again right before the
+ * approve), and this file says what the result means. Until a verdict for that exact fill exists
+ * the button stays off (preflightAllowsFill).
  *
  * SEAPORT'S ORDER OF OPERATIONS is what makes the classification honest. For a restricted order
  * Seaport 1.6 validates the order (time, cancellation, fraction, signature or on-chain
@@ -96,22 +97,39 @@ export function classifyFillSimulation(sim: FillSimulation, decode: (data: Hex |
   return { kind: "inconclusive", text: decoded.text };
 }
 
-/** Whether the page may enable the fill button on this verdict. */
+/**
+ * Whether the page may enable the fill button on this verdict.
+ *
+ * NO VERDICT IS NOT A PASS. The simulation is keyed on the exact fill (size, fulfiller), so every
+ * new quantity and a wallet connecting start a fresh query whose verdict is `undefined` until the
+ * `eth_call` returns. An earlier version treated that as allowed, and the button came back on in
+ * exactly the moment the pre-flight exists for: after a rally, a buyer who typed a new size and
+ * clicked straight away sent `approve(SEAPORT, cost)` for a fill the vault was about to refuse.
+ * The button is live only once a verdict for the current fill exists and says the vault's side
+ * passes (or that nothing can be said about it, which is left to the wallet).
+ */
 export function preflightAllowsFill(verdict: PreflightVerdict | undefined): boolean {
-  return verdict === undefined || verdict.kind === "ok" || verdict.kind === "buyerSide" || verdict.kind === "inconclusive";
+  if (verdict === undefined) return false;
+  return verdict.kind === "ok" || verdict.kind === "buyerSide" || verdict.kind === "inconclusive";
 }
 
 /**
- * Gas a fill needs. The contracts' fork suite measured a first fill (which opens the cycle's
- * Valorem claim inside the hook) at 386k and a top-up at 156k on the live Seaport 1.6 and Clear
- * of chain 4663 (HANDOFF-2026-09-14 §4); the redesign report's spike figures were 470k and 245k.
- * The ranges cover both readings; both are re-measured on the live week. The simulation runs
- * with SIMULATION_GAS, well above the highest reading, so a genuine first fill is never mistaken
- * for an out-of-gas.
+ * Gas a fill needs, as a whole transaction. The keeper's fork dry run (keeper/DRYRUN.md) sent real
+ * Seaport 1.6 fills of the vault's order through the real Clear on a 4663 fork and kept the
+ * receipts: first fills (the vault opens the cycle's Valorem claim inside the hook) used 445,577,
+ * 450,181, 462,677 and 462,701 gas, and 476,071 with Valorem's engine fee on; top-ups used 276,627,
+ * 288,951 and 289,157. The contracts' fork suite's figures (386k and 156k) are `gasleft()` taken
+ * around the call inside one test function: no base or calldata cost for the large
+ * fulfillAdvancedOrder input, and storage already warmed by the steps before it, so they are not
+ * what a buyer's wallet spends and the old 150k–250k top-up range sat below every receipt. The
+ * ranges below cover every receipt; the live chain can add Arbitrum's L1 data charge, which anvil
+ * does not model, and both are re-measured on the live week. The simulation runs with
+ * SIMULATION_GAS, well above the highest receipt, so a genuine first fill is never mistaken for an
+ * out-of-gas.
  */
 export const FILL_GAS = {
-  firstFill: { low: 380_000, high: 500_000 },
-  topUp: { low: 150_000, high: 250_000 },
+  firstFill: { low: 440_000, high: 500_000 },
+  topUp: { low: 270_000, high: 320_000 },
 } as const;
 
 export const SIMULATION_GAS = 800_000n;

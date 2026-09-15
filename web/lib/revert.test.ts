@@ -36,17 +36,29 @@ describe("decodeRevertData", () => {
     expect(decodeRevertData(vault("OfferExceedsCapacity", [30n, 23n]))!.text).toBe(
       "The listing offers 30 contracts but the vault can only write 23 more this cycle.",
     );
-    expect(decodeRevertData(vault("StrikeBelowBand", [190_000_000n, 195_000_000n]))).toMatchObject({ name: "StrikeBelowBand", source: "vault" });
+    const band = decodeRevertData(vault("StrikeBelowBand", [190_000_000n, 195_000_000n]));
+    expect(band).toMatchObject({ name: "StrikeBelowBand", source: "vault" });
+    // The strike is fixed for the week and approveListing re-checks the same floor, so no reprice
+    // clears this: the sentence must not tell a buyer to wait for one.
+    expect(band!.text).toContain("this week's strike (190.000000 USDG) is below the vault's minimum of 195.000000 USDG");
+    expect(band!.text).toContain("only if spot falls back");
+    expect(band!.text).not.toMatch(/keeper|reprice/i);
+    // The premium floor IS cleared by a relist at a higher price, and says so.
+    expect(decodeRevertData(vault("PremiumBelowFloorAtFill", [856_189n, 860_426n]))!.text).toContain("The keeper reprices");
     expect(decodeRevertData(vault("ContractsAboveUtilization", [24n, 23n]))!.text).toContain("24 written against a maximum of 23");
     expect(decodeRevertData(vault("WriteReturnedWrongClaim", [1n, 2n]))).toMatchObject({ name: "WriteReturnedWrongClaim" });
   });
 
   it("names the one deposit gate and the stranded-claim errors", () => {
-    expect(decodeRevertData(vault("DepositsClosed"))!.text).toContain("Deposits are closed right now");
+    const closed = decodeRevertData(vault("DepositsClosed"))!.text;
+    expect(closed).toContain("Deposits are closed right now");
+    // Vault._depositRefused reason 6, the share-price floor, is one a depositor can meet.
+    expect(closed).toContain("the book is worth too little per share to sell new shares");
     expect(decodeRevertData(vault("StillStranded"))!.text).toContain("still cannot be redeemed");
     expect(decodeRevertData(vault("NotStranded"))!.text).toBe("No claim is stranded, so there is nothing to retry.");
-    // 1_789_000_000 is 2026-09-10T00:26:40Z; the sentence carries the date and time of the close.
-    expect(decodeRevertData(vault("WriteWindowClosed", [1_789_000_000]))!.text).toContain("2026-09-10 00:26 UTC");
+    // 1_789_000_000 is 2026-09-10T00:26:40Z, 20:26 on the 9th in New York (EDT, UTC−4): the
+    // sentence carries the close on both clocks, as every other deadline on the site does.
+    expect(decodeRevertData(vault("WriteWindowClosed", [1_789_000_000]))!.text).toContain("2026-09-10 00:26 UTC · 2026-09-09 20:26 EDT");
     expect(decodeRevertData(vault("UsdgLegBlocked", [12_000000n]))!.text).toContain("USDG stays owed");
   });
 

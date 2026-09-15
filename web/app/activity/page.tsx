@@ -4,7 +4,7 @@ import { txUrl } from "@/lib/chain";
 import { MARKET, SHARE_TICKER, VAULT } from "@/lib/contracts";
 import type { CycleRow } from "@/lib/api";
 import { fmtRealizedWeek, fmtUsdg, fmtUtcDate, premiumPerShare, tvlUsdg } from "@/lib/format";
-import { useCycleHistory } from "@/lib/history";
+import { useCycleHistory, weekResult } from "@/lib/history";
 
 /** A column total that is only a number when every row's figure is known; otherwise a dash. */
 function sumKnown(rows: CycleRow[], figure: (row: CycleRow) => bigint | undefined): bigint | undefined {
@@ -63,8 +63,8 @@ export default function ActivityPage() {
         <h1>Every week, including the zeros</h1>
         <p className="lede">
           One row per cycle. Filled weeks show what actually landed; weeks where nobody bought the
-          call show <strong>unfilled, 0</strong>, or <strong>unfilled, assigned</strong> when Valorem
-          assigned the vault&apos;s contracts anyway. No week is ever extrapolated to a longer period.
+          call show <strong>unfilled, 0</strong>: nothing was written, so nothing could be assigned. No week
+          is ever extrapolated to a longer period.
         </p>
       </div>
 
@@ -157,32 +157,9 @@ export default function ActivityPage() {
                   // The long form lives in the cell's title attribute.
                   const assigned = row.contractsAssigned ?? 0n;
                   const sold = row.contractsSold ?? row.contracts ?? 0n;
-                  const result = !row.settled
-                    ? "open"
-                    : row.stranded && row.strandRecovered !== true
-                      ? "closed, claim stranded"
-                      : row.stranded
-                        ? `claim stranded, recovered${assigned > 0n ? `, assigned ${assigned.toString()}` : ""}`
-                        : !row.filled
-                        ? assigned > 0n
-                          ? `unfilled, assigned ${assigned.toString()}`
-                          : "unfilled, 0"
-                        : assigned > 0n
-                          ? `assigned ${assigned.toString()}`
-                          : "filled";
-                  const resultLong = !row.settled
-                    ? "the week is still running"
-                    : row.stranded && row.strandRecovered !== true
-                      ? `the week closed and its premium was harvested, but Valorem could not return the claim's collateral (a USDG pause or freeze, or a Stock Token blocklist); anyone can retry the claim, and its collateral and strike USDG arrive when the retry succeeds${row.strandGen !== undefined ? ` (strand generation ${row.strandGen})` : ""}`
-                      : row.stranded
-                        ? `the close could not redeem the claim, and a later retryStrandedClaim brought it home: the strike proceeds landed fee-free through the retry's harvest${row.strandGen !== undefined ? ` (strand generation ${row.strandGen})` : ""}`
-                        : !row.filled
-                        ? assigned > 0n
-                          ? `nobody bought the vault's call, so it earned no premium, but Valorem assigned ${assigned.toString()} of its contracts; that collateral left at the strike and came back as the strike proceeds`
-                          : "nobody bought the call; nothing was written and the week earned nothing"
-                        : assigned > 0n
-                          ? `${assigned.toString()} of the ${sold.toString()} contracts sold were assigned to the vault; that collateral left at the strike and came back as the strike proceeds`
-                          : `buyers filled ${sold.toString()} contracts and the calls expired out of the money`;
+                  // lib/history.ts weekResult: an unfilled week cannot be assigned under write on
+                  // fill, so a row claiming both is marked as an incomplete record, not a result.
+                  const { short: result, long: resultLong } = weekResult(row);
                   return (
                     <tr key={row.cycle}>
                       <td>#{row.cycle}</td>

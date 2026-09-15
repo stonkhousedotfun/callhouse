@@ -11,7 +11,7 @@
 import Link from "next/link";
 
 import { CycleTapeInline } from "@/components/CycleTape";
-import { GuardBadges, PhaseBadge } from "@/components/PhaseBadge";
+import { GuardBadges, VaultPhaseBadge } from "@/components/PhaseBadge";
 import { PositionSplit } from "@/components/PositionSplit";
 import { StrandedBanner } from "@/components/StrandedBanner";
 import { addressUrl } from "@/lib/chain";
@@ -29,11 +29,12 @@ import {
   tvlUsdg,
 } from "@/lib/format";
 import { useCycleHistory, lastSettled } from "@/lib/history";
-import { collateralSplit, useVaultSnapshot } from "@/lib/hooks";
+import { collateralSplit, useNow, useVaultSnapshot } from "@/lib/hooks";
 
 export default function HomePage() {
   const { data: v, isLoading, isError: chainReadFailed } = useVaultSnapshot();
   const { rows, source, error: historyError } = useCycleHistory();
+  const nowSeconds = useNow();
   const last = lastSettled(rows);
 
   // Share price is collateral only, in raw 18-decimal units. Premium is not folded into it:
@@ -96,16 +97,10 @@ export default function HomePage() {
             {SHARE_TICKER} vault
             {v.symbol && v.symbol !== SHARE_TICKER ? ` · on-chain symbol ${v.symbol}` : ""}
           </span>
-          <PhaseBadge phase={v.phase} fillState={v.fillState} sold={v.contractsWritten} />
+          <VaultPhaseBadge snapshot={v} nowSeconds={nowSeconds} />
         </div>
 
-        <GuardBadges
-          writesHalted={v.writesHalted}
-          oraclePaused={v.oraclePaused}
-          spotStale={v.spotStale}
-          valoremFeeAccepted={v.valoremFeeAccepted}
-          stranded={v.isStranded}
-        />
+        <GuardBadges snapshot={v} />
 
         <div className="grid grid-3" style={{ marginTop: 14 }}>
           <div className="stat">

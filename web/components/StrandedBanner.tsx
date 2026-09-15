@@ -23,9 +23,12 @@ import { useTxRunner } from "./TxToast";
  * at a NAV that cannot yet see the claim's strike USDG); `rollOpen` reverts StillStranded, so
  * there is one stranded claim at a time; the queue keeps settling on the IDLE balance, and every
  * epoch that settles while stranded takes a pro-rata WAD share of the claim (`EpochStrandShare`),
- * paid when the claim is finally redeemed. Anyone can call `retryStrandedClaim()`; it reverts
- * StillStranded while the cause persists and settles the claim the first time Valorem lets it
- * through.
+ * paid when the claim is finally redeemed. Settling is bookkeeping and always works; PAYING the
+ * idle share out is a transfer (Vault._payoutOwed), so when the strand's cause is the Stock Token
+ * issuer blocklisting the vault, the token leg of every payout reverts until that lifts too, and a
+ * USDG pause or freeze defers the USDG leg. The banner says so rather than promising payouts the
+ * cause itself blocks. Anyone can call `retryStrandedClaim()`; it reverts StillStranded while the
+ * cause persists and settles the claim the first time Valorem lets it through.
  *
  * WHAT THIS ACCOUNT IS OWED, from the vault's own views (no indexer): a share already staged by a
  * settled queue entry (`owedStrandWad`), the queued epoch's share prorated by this account's
@@ -104,8 +107,10 @@ export function StrandedBanner({
       The close tried to redeem the week&apos;s Valorem claim and the redeem reverted: a USDG pause or freeze, or the
       Stock Token issuer blocklisting the vault. The premium was harvested and the vault went to Idle with the claim
       kept, so {fmtAsset(snapshot.lockedAssets)} {MARKET} (plus the strike USDG for anything assigned) is still inside
-      Valorem. While that holds, deposits and instant redemption are closed and no new week can be armed; the queue
-      keeps working on the idle balance and takes its share of the claim.
+      Valorem. While that holds, deposits and instant redemption are closed and no new week can be armed. The queue
+      still settles, booking each entry&apos;s share of the idle balance and of the claim, but paying it out moves
+      tokens: a Stock Token blocklist of the vault holds the {MARKET} leg back until it lifts, and a USDG pause or
+      freeze defers the USDG leg.
       {!compact ? (
         <>
           <div className="rows" style={{ marginTop: 10 }}>
