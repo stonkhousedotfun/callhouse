@@ -6,11 +6,9 @@ Two rules for this directory:
 
 1. **Nothing here is aspirational.** Every address carries the call that proved it and every command
    was run, not imagined. If something is unknown it says so.
-2. **The recon under `recon/` outranks the spec, and the contracts outrank the recon.** Where
-   `TECHSPEC.md` or `plan.md` disagree with `ops/recon/`, the recon is right; it was read off the
-   live chain. Where the recon describes Overcall's registry, order book or API, it is **history**
-   since the 2026-09-13 redesign (§ "What changed"), kept because it is evidence, not because it is
-   wired.
+2. **The recon under `recon/` outranks the spec, and the contracts outrank the recon.** Where the
+   recon describes Overcall's registry, order book or API, it is **history** since the 2026-09-13
+   redesign (§ "What changed"), kept because it is evidence, not because it is wired.
 
 ---
 
@@ -140,7 +138,7 @@ subset the vault uses (`getOrderHash`, `validate`, `cancel`, `incrementCounter`,
 
 ## Spec repairs the recon forced (history)
 
-Recorded because `TECHSPEC.md` still reads as if some of these were open. Rows about the registry
+Recorded because the old spec treated some of these as open. Rows about the registry
 and Overcall's API are doubly historical: the recon answered them, and then the redesign removed the
 question.
 

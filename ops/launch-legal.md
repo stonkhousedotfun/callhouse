@@ -237,7 +237,7 @@ Do these in order. Step 1 is the long one and it is not ours.
 
 - Whether the product is lawful to operate at all in the chosen jurisdiction. That is the
   question behind every item in §2 and it is entirely counsel's.
-- The bug bounty's own disclosure channel (mainnet week 2, `tasks.md` E-07). `security.txt`
+- The bug bounty's own disclosure channel (mainnet week 2). `security.txt`
   points at the mailbox until that exists, then at whatever replaces it.
 - The Stock Token issuer's terms. They govern whether a visitor may hold the collateral, and
   nothing on our pages widens or waives them (`/legal`).

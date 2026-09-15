@@ -60,7 +60,7 @@ Stonkhouse is four private repositories, split out of one on 2026-09-13:
 
 | Repository | What lives there |
 |---|---|
-| `leekzor/callhouse` (this one) | the app: `web/`, `keeper/`, `indexer/`, `relay/`, `ops/`, `docs/ARCHITECTURE.md`, `docs/WIRING.md`, the spec, plan and task list. Railway `web`, `keeper`, `indexer` and `relay` deploy from here |
+| `leekzor/callhouse` (this one) | the app: `web/`, `keeper/`, `indexer/`, `relay/`, `ops/`, `docs/ARCHITECTURE.md`, `docs/WIRING.md`. Railway `web`, `keeper`, `indexer` and `relay` deploy from here |
 | `leekzor/callhouse-contracts` | the Foundry project, plus `docs/AUDIT-SCOPE.md`, `docs/ACCOUNTING.md`, `docs/DEPLOY.md` and `SECURITY.md` (the full threat model, the 2026-09-12 review and the 2026-09-13 audit findings with their fixes) |
 | `leekzor/callhouse-site` | the marketing landing at `stonkhouse.fun` |
 | `leekzor/callhouse-docs` | the GitBook source for `docs.stonkhouse.fun` (pass 2 for the redesign is pending; a push to its `main` publishes immediately) |
@@ -136,7 +136,6 @@ The landing at `stonkhouse.fun` is not in this tree; it is `leekzor/callhouse-si
 | `leekzor/callhouse-site` README | the landing: what it must never grow, its Railway service and the apex-domain DNS step |
 | [`ops/deploy.md`](ops/deploy.md) | the four Railway services, every variable, and the contracts → app hand-off |
 | [`ops/recon/`](ops/recon/) | the on-chain recon every integration fact in this repo rests on (some of it, the Overcall parts, is now history) |
-| [`plan.md`](plan.md) · [`tasks.md`](tasks.md) | the build plan and current progress |
 
 ### Contracts
 

@@ -64,7 +64,7 @@ redeploy, and the matching wording is consistent with `leekzor/callhouse-docs`.
 | 3.2 Re-run `forge fmt --check`, unit + invariant, fork suite, `forge build --sizes`; re-run the deploy rehearsal | 319/319, 21/21, rehearsal PASSED |
 | 3.3 Push `callhouse-contracts` (fast-forward only, no force) | GitHub CI green |
 | 3.4 Bump the app's `contracts/` submodule; confirm `ops/abis/Vault.json` still equals the build; re-run keeper tests and the keeper dry run through the submodule | dry run PASSED |
-| 3.5 Update app docs that the scripts changed: `ops/safes.md` §7 (renounce happens through `HandoverAdmin.s.sol`, bootstrap plan), `tasks.md`, `HANDOFF.md` | committed |
+| 3.5 Update app docs that the scripts changed: `ops/safes.md` §7 (renounce happens through `HandoverAdmin.s.sol`, bootstrap plan) | committed |
 
 ## 4. App code before the vault goes live
 

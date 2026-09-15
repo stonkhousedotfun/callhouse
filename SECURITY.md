@@ -22,5 +22,5 @@ If you believe you have found a vulnerability, do not open a public issue. Send 
 site rebuilt on 2026-09-13, and the mailbox is a Cloudflare Email Routing forward to the
 operator.
 
-A bug bounty with a dedicated disclosure channel opens in mainnet week 2 (`tasks.md` E-07). Until
+A bug bounty with a dedicated disclosure channel opens in mainnet week 2. Until
 then the contracts are unaudited and a report is a favour, not a claim.

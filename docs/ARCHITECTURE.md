@@ -5,8 +5,8 @@ How the four packages fit together, and why each boundary is where it is.
 For the money maths see [contracts/docs/ACCOUNTING.md](../contracts/docs/ACCOUNTING.md). For the
 threat model see [contracts/SECURITY.md](../contracts/SECURITY.md). Both live in
 `leekzor/callhouse-contracts`, mounted at `contracts/` as a git submodule. For the runtime map (who
-calls whom, over which env var, and what is proven) see [WIRING.md](./WIRING.md). For the build
-plan and the recon evidence see `../plan.md` and `../ops/recon/`.
+calls whom, over which env var, and what is proven) see [WIRING.md](./WIRING.md). For the recon
+evidence see `../ops/recon/`.
 
 **Redesigned 2026-09-13 (owner decisions D1 = A(ii), D16, D17, D14).** The vault **writes on
 fill**: nothing is written at the weekly open, every Seaport fill writes exactly the contracts it
