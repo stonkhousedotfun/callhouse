@@ -297,7 +297,8 @@ export const vaultSnapshot = onchainTable(
  * Contracts appear twice on purpose. `contractsWritten` sums the vault's own `CallsWritten`
  * (one per fill) and `contractsSold` sums Seaport's `OrderFulfilled` offer items; under write on
  * fill the two are equal by construction, so a difference is a bug in the tape, not a fact
- * about the week. `collateral` is what those writes locked (the Valorem engine fee, if ever
+ * about the week. The verdict (`status`, the API's `filled`, `cyclesFilled`) is taken from
+ * `contractsWritten`, which depends on no configured address; `contractsSold` is the cross-check. `collateral` is what those writes locked (the Valorem engine fee, if ever
  * accepted, is pulled ON TOP of it and is not in this figure).
  *
  * The money columns the site quotes, and exactly what each one means:
@@ -546,6 +547,7 @@ export const harvest = onchainTable(
   (t) => ({
     id: t.text().primaryKey(),
     cycleNumber: t.integer().notNull(),
+    /** The cycle had contracts written (`CallsWritten`, == sold) when this harvest landed. False for a cycle-0 checkpoint. */
     filled: t.boolean().notNull(),
 
     /** True for the end-of-cycle harvest inside `rollClose` — the week's verdict. `origin === "rollClose"`. */

@@ -43,3 +43,79 @@ export function constructorSettings(reads: ConstructorReads): ConstructorSetting
   if (reads.depositCap !== null) out.depositCap = reads.depositCap;
   return out;
 }
+
+/*//////////////////////////////////////////////////////////////
+                              WIRING
+//////////////////////////////////////////////////////////////*/
+
+/**
+ * The four contracts the vault was constructed against, as its immutable views name them, next to
+ * the addresses this process was configured with. Pure, like everything above.
+ *
+ * WHY THE INDEXER REFUSES A MISMATCH. The Clear is a deploy-time choice (decision D16: the
+ * upstream build, or our own `DeployClear.s.sol` instance), and so, on a fork or a rehearsal, are
+ * Seaport and the two tokens. Every Ponder source is an address from lib/env.ts, and two handlers
+ * filter on them: `Seaport:OrderFulfilled` counts only offer items whose token equals
+ * CLEARINGHOUSE, and the token handlers track balances on USDG and ASSET. With the default
+ * CLEARINGHOUSE left in place on a vault built over a different Clear, every fill would count 0
+ * contracts, the Clear source would watch a contract the vault never touches, and
+ * `/v1/vault.phase.clearFeesEnabled` would report the wrong switch, with nothing louder than a
+ * warning at each close. The keeper refuses to boot on the same mismatch (keeper/src/roll.ts
+ * `assertWiring`); the indexer is a separate service with separate env, so it checks for itself.
+ *
+ * A view that did not answer (START_BLOCK before the deployment, an RPC failure) is not a
+ * mismatch: it is reported as unverified and checked again at the first `RollOpen`, when the
+ * vault demonstrably exists.
+ */
+export type WiringReads = {
+  clear: Address | null;
+  seaport: Address | null;
+  usdg: Address | null;
+  asset: Address | null;
+};
+
+export type WiringEnv = {
+  CLEARINGHOUSE: Address;
+  SEAPORT: Address;
+  USDG: Address;
+  ASSET: Address;
+};
+
+export type WiringCheck = {
+  /** One line per view that answered with a different address than the env var names. */
+  mismatches: string[];
+  /** Views that did not answer, so could not be compared. */
+  unverified: Array<keyof WiringReads>;
+};
+
+const WIRING: ReadonlyArray<readonly [keyof WiringReads, keyof WiringEnv]> = [
+  ["clear", "CLEARINGHOUSE"],
+  ["seaport", "SEAPORT"],
+  ["usdg", "USDG"],
+  ["asset", "ASSET"],
+];
+
+export function checkWiring(reads: WiringReads, env: WiringEnv): WiringCheck {
+  const mismatches: string[] = [];
+  const unverified: Array<keyof WiringReads> = [];
+  for (const [view, name] of WIRING) {
+    const onChain = reads[view];
+    if (onChain === null || !isAddress(onChain)) {
+      unverified.push(view);
+      continue;
+    }
+    if (onChain.toLowerCase() !== env[name].toLowerCase()) {
+      mismatches.push(`${name}=${env[name]} but vault.${view}() = ${onChain}`);
+    }
+  }
+  return { mismatches, unverified };
+}
+
+/** The error the handlers throw on a mismatch: every wrong address in one message, and the fix. */
+export function wiringError(vault: Address, mismatches: readonly string[]): Error {
+  return new Error(
+    `[callhouse/indexer] vault ${vault} was not built against the contracts this indexer is configured for: ` +
+      `${mismatches.join("; ")}. Set each env var to the address the vault's own view names ` +
+      `(ops/addresses.json records the deployment) and re-sync from START_BLOCK.`,
+  );
+}

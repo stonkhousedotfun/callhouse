@@ -262,62 +262,66 @@ function fixture(): { run: RunJson; chain: ChainFacts } {
     actors: { admin: ADMIN, keeper: KEEPER, guardian: addr(0x6a), depositor: DEPOSITOR, buyerA: addr(0xb0a), buyerB: addr(0xb0b) },
     addresses: { Vault: VAULT, Clear: addr(0xc1ea) },
     blocks: { vaultDeployBlock: "104", lastBlock: "150" },
-    cycles: [
-      {
-        cycleNumber: 1,
-        optionId: "1001",
-        strikeUsdg6: "226000000",
-        exerciseTimestamp: 1_800_000_001,
-        expiryTimestamp: 1_800_086_401,
-        rollOpenTx: hash(111),
-        lockTx: hash(114),
-        rollCloseTx: hash(115),
-        fills: [],
-        contractsAssigned: 0,
-        harvest: { gross: "0", fee: "0", net: "0" },
-        stranded: false,
-        retryTx: null,
-        assetsReturned: "0",
-        usdgFromAssignment: "0",
-      },
-      {
-        cycleNumber: 2,
-        optionId: "2001",
-        strikeUsdg6: "225000000",
-        exerciseTimestamp: "1800000002",
-        expiryTimestamp: "1800086402",
-        rollOpenTx: hash(121),
-        lockTx: hash(128),
-        rollCloseTx: hash(129),
-        fills: [
-          { txHash: hash(123), contracts: 2, grossUsdg6: "1746384" },
-          { txHash: hash(125), contracts: "3", grossUsdg6: 2619576 },
-        ],
-        contractsAssigned: "2",
-        harvest: { gross: "452619576", fee: "130978", net: "452488598" },
-        stranded: false,
-        retryTx: null,
+    cycle1: {
+      optionId: "1001",
+      strikeUsdg6: "226000000",
+      exerciseTimestamp: 1_800_000_001,
+      expiryTimestamp: 1_800_086_401,
+      rollOpenTx: hash(111),
+      lockTx: hash(114),
+      rollCloseTx: hash(115),
+      contracts: "0",
+      fills: [],
+      harvest: { gross: "0", fee: "0", net: "0", assetsReturned: "0", usdgFromAssignment: "0", contractsAssigned: 0 },
+    },
+    cycle2: {
+      optionId: "2001",
+      strikeUsdg6: "225000000",
+      exerciseTimestamp: "1800000002",
+      expiryTimestamp: "1800086402",
+      rollOpenTx: hash(121),
+      lockTx: hash(128),
+      rollCloseTx: hash(129),
+      contracts: "5",
+      fills: [
+        { tx: hash(123), contracts: 2, premium: "1746384" },
+        { tx: hash(125), contracts: "3", premium: 2619576 },
+      ],
+      harvest: {
+        gross: "452619576",
+        fee: "130978",
+        net: "452488598",
         assetsReturned: "3000000000000000000",
         usdgFromAssignment: "450000000",
+        contractsAssigned: "2",
       },
-      {
-        cycleNumber: 3,
-        optionId: "3001",
-        strikeUsdg6: "225000000",
-        exerciseTimestamp: "1800000003",
-        expiryTimestamp: "1800086403",
-        rollOpenTx: hash(141),
-        lockTx: hash(146),
-        rollCloseTx: hash(147),
-        fills: [{ txHash: hash(143), contracts: 4, grossUsdg6: "3492768" }],
-        contractsAssigned: 1,
-        harvest: { gross: "3492768", fee: "174638", net: "3318130" },
-        stranded: true,
-        retryTx: hash(148),
+    },
+    cycle3: {
+      optionId: "3001",
+      strikeUsdg6: "225000000",
+      exerciseTimestamp: "1800000003",
+      expiryTimestamp: "1800086403",
+      rollOpenTx: hash(141),
+      lockTx: hash(146),
+      rollCloseTx: hash(147),
+      contracts: "4",
+      fills: [{ tx: hash(143), contracts: 4, premium: "3492768" }],
+      harvest: {
+        gross: "3492768",
+        fee: "174638",
+        net: "3318130",
         assetsReturned: "3000000000000000000",
         usdgFromAssignment: "225000000",
+        contractsAssigned: 1,
       },
-    ],
+      strand: { rollCloseTx: hash(147), gen: 1, claimKey: "3002" },
+      recovery: {
+        retryTx: hash(148),
+        assets: "3000000000000000000",
+        usdgOut: "225000000",
+        queueWad: (2n * 10n ** 17n).toString(),
+      },
+    },
   };
   return { run, chain };
 }
@@ -375,10 +379,9 @@ function stillStranded(): { run: RunJson; chain: ChainFacts } {
     owedStrandGen: 0n,
   };
   run.blocks.lastBlock = "147";
-  const c3 = run.cycles[2]!;
-  c3.retryTx = null;
-  c3.assetsReturned = "0";
-  c3.usdgFromAssignment = "0";
+  const c3 = run.cycle3!;
+  delete c3.recovery;
+  c3.harvest = { ...c3.harvest!, assetsReturned: "0", usdgFromAssignment: "0" };
   return { run, chain };
 }
 
@@ -673,7 +676,7 @@ describe("buildExpectations on the dry run's three weeks", () => {
   it("reports a run.json figure the chain contradicts instead of choosing one", () => {
     const { run, chain } = fixture();
     chain.harvests[2] = { ...chain.harvests[2]!, net: 452_488597n };
-    run.cycles[2]!.retryTx = null;
+    delete run.cycle3!.recovery;
     const built = buildExpectations(run, chain);
     expect(built.disagreements).toEqual([
       "cycle 2 Harvest.netUsdg: run.json says 452488598, the chain says 452488597",
@@ -691,7 +694,7 @@ describe("buildExpectations on the dry run's three weeks", () => {
 
   it("reports a keeper that did not notice its week stranded", () => {
     const { run, chain } = fixture();
-    run.cycles[2]!.stranded = false;
+    delete run.cycle3!.strand;
     const built = buildExpectations(run, chain);
     expect(built.disagreements).toContain("cycle 3 stranded: run.json says false, the chain says true");
   });
@@ -701,8 +704,10 @@ describe("buildExpectations on the dry run's three weeks", () => {
     delete (run.blocks as Partial<RunJson["blocks"]>).lastBlock;
     expect(() => buildExpectations(run, chain)).toThrow(/run\.json has no blocks\.lastBlock/);
     const bare = fixture();
-    delete (bare.run as Partial<RunJson>).cycles;
-    expect(() => buildExpectations(bare.run, bare.chain)).toThrow(/run\.json has no cycles/);
+    delete (bare.run as { cycle1?: unknown }).cycle1;
+    delete (bare.run as { cycle2?: unknown }).cycle2;
+    delete (bare.run as { cycle3?: unknown }).cycle3;
+    expect(() => buildExpectations(bare.run, bare.chain)).toThrow(/run\.json has no cycle1/);
   });
 });
 

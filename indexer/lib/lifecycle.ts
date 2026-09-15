@@ -66,11 +66,72 @@ export type CloseStatus = "stranded" | "assigned" | "closed" | "unfilled";
  * arrived and the outcome is published when they do (`recoveredStatus`). Otherwise contracts
  * taken at the strike make the week `assigned`; a sale that expired out of the money `closed`;
  * and a week with no sale — the most likely one — `unfilled`, with every money column at zero.
+ *
+ * `written` is the vault's own count: the sum of the week's `CallsWritten`, one per fill, which
+ * does not depend on any address this process was configured with. It is NOT Seaport's
+ * `contractsSold`, which counts only offer items whose token equals the CLEARINGHOUSE env var:
+ * on a deployment whose indexer was pointed at a different Clear than `vault.clear()`, that sum
+ * stays 0 on every fill and every paying week would have closed as `unfilled`. Under write on
+ * fill written == sold, so on a correct deployment the two give the same verdict; the vault's
+ * figure is the one the tape publishes and `contractsSold` stays the cross-check.
  */
-export function closeStatus(c: { stranded: boolean; sold: bigint; assigned: bigint }): CloseStatus {
+export function closeStatus(c: { stranded: boolean; written: bigint; assigned: bigint }): CloseStatus {
   if (c.stranded) return "stranded";
   if (c.assigned > 0n) return "assigned";
-  return c.sold > 0n ? "closed" : "unfilled";
+  return c.written > 0n ? "closed" : "unfilled";
+}
+
+/** The cycle columns a `Harvest` reads, as `getCycle` returns them. */
+export type HarvestCycleRow = {
+  contractsWritten: bigint;
+  contractsSold: bigint;
+  contractsAssigned: bigint;
+  assignmentUsdg: bigint;
+  harvested: boolean;
+};
+
+export type HarvestCycleView = {
+  /** Something was written (== sold) on the cycle when this harvest landed. From `contractsWritten`. */
+  filled: boolean;
+  contractsWritten: bigint;
+  contractsSold: bigint;
+  contractsAssigned: bigint;
+  assignmentUsdg: bigint;
+};
+
+/**
+ * What a `Harvest` knows about its cycle, or zeros when it has none.
+ *
+ * CYCLE 0 IS NOT A WEEK. `cycleNumber` is 0 from the deploy until the first `rollOpen`, and a
+ * checkpoint harvest can carry it: deposits (and `settleQueue`) are open in Idle before cycle 1,
+ * because that is how the first collateral arrives, and `_checkpointHarvest` emits whenever the
+ * vault's USDG balance exceeds what it has accounted for, which one wei sent by anyone makes true.
+ * The handler must not call `getCycle(0)` for it: that inserts a bare row whose status defaults
+ * to "listed", nothing ever closes it, and `/v1/cycles` would publish a week 0 the vault never
+ * armed. The harvest row is kept (it is real money); its cycle figures are zero. The caller
+ * passes null for cycle 0 and never reads a row.
+ */
+export function harvestCycleView(c: HarvestCycleRow | null): HarvestCycleView {
+  if (c === null) return { filled: false, contractsWritten: 0n, contractsSold: 0n, contractsAssigned: 0n, assignmentUsdg: 0n };
+  return {
+    filled: c.contractsWritten > 0n,
+    contractsWritten: c.contractsWritten,
+    contractsSold: c.contractsSold,
+    contractsAssigned: c.contractsAssigned,
+    assignmentUsdg: c.assignmentUsdg,
+  };
+}
+
+/**
+ * Whether a `Harvest` accumulates onto its cycle row. Never for cycle 0 (no row, see
+ * `harvestCycleView`). Always for the terminal harvest and the retry, which are the week's own
+ * money. A checkpoint only while the week is still open: one that lands after the close (a
+ * deposit or a `settleQueue` between `rollClose` and the next `rollOpen` still carries the closed
+ * cycle's number) keeps its harvest row but must not restate a published week.
+ */
+export function harvestTouchesCycle(c: { harvested: boolean } | null, origin: HarvestOrigin): boolean {
+  if (c === null) return false;
+  return origin === "rollClose" || origin === "retry" || !c.harvested;
 }
 
 /** The stranded week's status once `retryStrandedClaim` has redeemed the claim. A claim exists only if something sold. */

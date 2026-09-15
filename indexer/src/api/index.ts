@@ -6,7 +6,7 @@ import { and, desc, eq, graphql, sql } from "ponder";
 import { getAddress, isAddress, type Address } from "viem";
 
 import { ACC_PRECISION, ASSET, CHAIN_ID, CHAIN_NAME, CLEARINGHOUSE, SEAPORT, USDG, VAULT, WAD } from "../../lib/env";
-import { capacity } from "../../lib/lifecycle";
+import { capacity, entryStrandShare } from "../../lib/lifecycle";
 import { ROLE_DEFAULT_ADMIN, ROLE_GUARDIAN, ROLE_KEEPER } from "../../lib/roles";
 import { cache15s } from "./cache";
 import { readAccountLive, readChainHead, readOraclePaused, readVaultLive } from "./chain";
@@ -41,6 +41,57 @@ const ZERO_HASH = `0x${"0".repeat(64)}`;
 /** X-1: the vault's `listingHash()` is `bytes32(0)` when nothing is live; the wire says null, never a zero hash. */
 const hashOrNull = (h: `0x${string}` | null | undefined): `0x${string}` | null =>
   h === null || h === undefined || h.toLowerCase() === ZERO_HASH ? null : h;
+
+/**
+ * `/v1/vault.week.option`'s two ids. The vault's `optionId()` and `claimKey()` answer 0 for
+ * "none" — `claimKey` is 0 while Listed before the first fill (nothing is written at arm) and
+ * after a redeem; `optionId` is 0 after an unfilled close and after a redeem — and a successful
+ * Multicall read of 0 is `0n`, which `??` does not treat as absent. Published as-is that put
+ * `"0"` on the wire for most of every week, where every other route says null for none
+ * (`cycle.written.claimKey`, GraphQL `vaultState`, X-1's listing hash). Zero is absent: the
+ * live id if there is one, else the week's own row, else null.
+ */
+export function weekOptionIds(
+  live: { optionId: bigint | null; claimKey: bigint | null },
+  row: { optionId: bigint | null; claimKey: bigint | null } | null,
+): { optionId: string | null; claimKey: string | null } {
+  const present = (v: bigint | null | undefined): bigint | null => (v === null || v === undefined || v === 0n ? null : v);
+  const optionId = present(live.optionId) ?? present(row?.optionId);
+  const claimKey = present(live.claimKey) ?? present(row?.claimKey);
+  return { optionId: optionId === null ? null : optionId.toString(), claimKey: claimKey === null ? null : claimKey.toString() };
+}
+
+/**
+ * `/v1/account/:addr.strand`: the owner's pending share of a stranded claim, in its two places.
+ *
+ *   staged   `owedStrandWad` / `owedStrandGen`: already moved out of an epoch onto the owner.
+ *   epoch    the part of the owner's queued epoch's `EpochStrandShare` that THIS OWNER's entry will
+ *            take when it settles. Exactly `Vault._settleEpochEntry` (and `previewCompleteRedeem`):
+ *            `w × shares / sharesRemaining`, the last claimant taking the rest. Not the epoch's
+ *            whole remaining WAD — that is every queuer's, and publishing it to each of them
+ *            overstated each owner's share by `sharesRemaining / shares`. Only an epoch that has
+ *            settled (`epochId < vault epochId`) with a strand share (`strandGen` set) has one.
+ *
+ * The two can belong to different generations (a staged share of a resolved generation, and an
+ * entry in an epoch that settled under a later strand), so each carries its own: `gen` is the
+ * staged share's generation when one is staged and the epoch's otherwise (the one `recovered`
+ * and `strand` describe), and `epochGen` is always the epoch share's.
+ */
+export function accountStrand(input: {
+  stagedWad: bigint;
+  stagedGen: bigint | null;
+  epochId: bigint | null;
+  currentEpoch: bigint;
+  queuedShares: bigint;
+  epoch: { strandGen: bigint | null; sharesSettled: bigint; sharesClaimed: bigint; strandWad: bigint; strandWadClaimed: bigint } | null;
+}): { wad: bigint; gen: bigint | null; epochWad: bigint; epochGen: bigint | null } {
+  const { stagedWad, stagedGen, epochId, currentEpoch, queuedShares, epoch } = input;
+  const settledWithShare =
+    epoch !== null && epoch.strandGen !== null && epochId !== null && epochId !== 0n && epochId < currentEpoch && queuedShares > 0n;
+  const epochWad = settledWithShare ? entryStrandShare(epoch, queuedShares) : 0n;
+  const epochGen = settledWithShare ? epoch.strandGen : null;
+  return { wad: stagedWad, gen: stagedWad > 0n ? stagedGen : epochGen, epochWad, epochGen };
+}
 
 const clampLimit = (raw: string | undefined, fallback: number, max: number): number => {
   const n = raw === undefined ? fallback : Number(raw);
@@ -107,7 +158,9 @@ export function cycleJson(c: CycleRow) {
   return {
     cycle: c.cycleNumber,
     status: c.status,
-    filled: c.contractsSold > 0n,
+    // The vault's own count (`CallsWritten`), the same figure the status was decided on. Seaport's
+    // `fill.contractsSold` below is its cross-check and equal by construction.
+    filled: c.contractsWritten > 0n,
     assigned: c.contractsAssigned > 0n,
     stranded: c.stranded,
 
@@ -485,8 +538,8 @@ app.get("/v1/vault", cache15s, async (c) => {
         // The armed option, as the vault holds it. The vault is the clock: fills stop and
         // `lockBook` opens at `exerciseAt`, `rollClose` at `expiryAt`. No registry.
         option: {
-          optionId: (live.optionId ?? thisCycle?.optionId ?? null)?.toString() ?? null,
-          claimKey: (live.claimKey ?? thisCycle?.claimKey ?? null)?.toString() ?? null,
+          // 0 from the vault's view means none: the live id, else the week's row, else null.
+          ...weekOptionIds(live, thisCycle),
           strikeUsdg: usdg(live.cycleStrikeUsdg ?? state?.strikeUsdg ?? 0n),
           exerciseTimestamp: num(live.cycleExerciseTs ?? state?.exerciseTimestamp ?? 0n),
           exerciseAt: iso(live.cycleExerciseTs ?? state?.exerciseTimestamp ?? 0n),
@@ -741,13 +794,22 @@ app.get("/v1/account/:addr", cache15s, async (c) => {
 
   const currentEpoch = state?.epochId ?? 1n;
 
-  // A share of a stranded claim, staged when the owner's epoch settled while the claim was
-  // stranded (or still waiting inside the epoch). It becomes assets and USDG only once the
-  // generation is redeemed; until then `previewCompleteRedeem` quotes it as nothing.
-  const strandWad = live.strandWad ?? indexed?.strandWad ?? 0n;
-  const strandGen = live.strandGen ?? indexed?.strandGen ?? null;
-  const epochStrandWad = epoch === null || epoch.strandGen === null ? 0n : epoch.strandWad - epoch.strandWadClaimed;
-  const pendingGen = strandWad > 0n ? strandGen : epoch?.strandGen ?? null;
+  // A share of a stranded claim, staged when the owner's entry settled while the claim was
+  // stranded, or still waiting inside the owner's settled epoch (this owner's pro-rata part of it,
+  // not the epoch's whole WAD). It becomes assets and USDG only once the generation is redeemed;
+  // until then `previewCompleteRedeem` quotes it as nothing.
+  const queuedShares = live.queuedShares ?? indexed?.queuedShares ?? 0n;
+  const pending = accountStrand({
+    stagedWad: live.strandWad ?? indexed?.strandWad ?? 0n,
+    stagedGen: live.strandGen ?? indexed?.strandGen ?? null,
+    epochId,
+    currentEpoch,
+    queuedShares,
+    epoch,
+  });
+  const strandWad = pending.wad;
+  const epochStrandWad = pending.epochWad;
+  const pendingGen = pending.gen;
   const strandRow =
     pendingGen === null || pendingGen === 0n
       ? null
@@ -774,7 +836,7 @@ app.get("/v1/account/:addr", cache15s, async (c) => {
       },
 
       queue: {
-        queuedShares: asset(live.queuedShares ?? indexed?.queuedShares ?? 0n),
+        queuedShares: asset(queuedShares),
         epochId: epochId === null ? null : epochId.toString(),
         // An epoch only pays once the cycle it sat through has closed and settled.
         settled: epoch !== null && epoch.status === "settled",
@@ -788,7 +850,8 @@ app.get("/v1/account/:addr", cache15s, async (c) => {
       },
 
       // The owner's pending share of a stranded claim (AF-02), if any: staged against the owner
-      // (`wad`) or still inside the epoch they queued into (`epochWad`, drawn on settlement).
+      // (`wad`, generation `gen`) or this owner's part of the settled epoch they queued into
+      // (`epochWad`, generation `epochGen`), which their entry takes on settlement.
       strand:
         strandWad === 0n && epochStrandWad === 0n
           ? null
@@ -796,6 +859,7 @@ app.get("/v1/account/:addr", cache15s, async (c) => {
               gen: pendingGen === null ? null : pendingGen.toString(),
               wad: strandWad.toString(),
               epochWad: epochStrandWad.toString(),
+              epochGen: pending.epochGen === null ? null : pending.epochGen.toString(),
               // Redeemed: the share is worth `assetsIn × wad / 1e18` and `usdgIn × wad / 1e18`
               // and `queue.preview*` already include it. Not yet: it is quoted as nothing.
               recovered: strandRow?.recovered ?? false,

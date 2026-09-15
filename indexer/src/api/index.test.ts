@@ -59,7 +59,7 @@ vi.mock("ponder", async (importOriginal) => {
 import { ZERO_HARVEST_TOTALS, addHarvest, splitHarvest, type HarvestEvent } from "../../lib/harvest";
 import { closeStatus, endedListingStatus, recoveredStatus, type HarvestOrigin } from "../../lib/lifecycle";
 import { cycleStatus, epochStatus, harvestOrigin, listingStatus } from "../../ponder.schema";
-import { CYCLE_STATUSES, LISTING_STATUSES, cycleJson, harvestJson, listingJson, strandJson } from "./index";
+import { CYCLE_STATUSES, LISTING_STATUSES, accountStrand, cycleJson, harvestJson, listingJson, strandJson, weekOptionIds } from "./index";
 import { toJson } from "./serialize";
 
 type CycleRow = typeof schema.cycle.$inferSelect;
@@ -620,8 +620,8 @@ describe("every enum value is produced, and every produced value is an enum valu
   it("cycle_status", () => {
     const produced = new Set<string>(["listed", "filled"]);
     for (const stranded of [false, true]) {
-      for (const sold of [0n, 12n]) {
-        for (const assigned of [0n, 5n]) produced.add(closeStatus({ stranded, sold, assigned }));
+      for (const written of [0n, 12n]) {
+        for (const assigned of [0n, 5n]) produced.add(closeStatus({ stranded, written, assigned }));
       }
     }
     for (const assigned of [0n, 5n]) produced.add(recoveredStatus({ assigned }));
@@ -679,5 +679,61 @@ describe("strandJson (/v1/strands, /v1/cycles/:cycle)", () => {
     expect(j.assetsLeft.raw).toBe("2800000000000000000");
     expect(j.usdgLeft.raw).toBe("380000000");
     expect(j.strandedAt).toBe("2026-09-25T21:00:30.000Z");
+  });
+});
+
+describe("weekOptionIds (/v1/vault week.option)", () => {
+  it("a zero live read is absent, not \"0\": week 4 Listed with nothing written has an option and no claim", () => {
+    // Armed: optionId() is the type, claimKey() is 0 until the first fill writes.
+    expect(weekOptionIds({ optionId: OPTION_ID, claimKey: 0n }, { optionId: OPTION_ID, claimKey: null })).toEqual({
+      optionId: OPTION_ID.toString(),
+      claimKey: null,
+    });
+  });
+
+  it("after a redeemed close both views read 0 and the week's own row answers", () => {
+    expect(weekOptionIds({ optionId: 0n, claimKey: 0n }, FILLED)).toEqual({ optionId: OPTION_ID.toString(), claimKey: CLAIM_KEY.toString() });
+    // An unfilled close: the type is forgotten on chain and no claim ever existed.
+    expect(weekOptionIds({ optionId: 0n, claimKey: 0n }, UNFILLED)).toEqual({ optionId: OPTION_ID.toString(), claimKey: null });
+  });
+
+  it("the live ids win when there are any, a dead RPC falls back to the row, and nothing at all is null", () => {
+    expect(weekOptionIds({ optionId: 3001n, claimKey: 3002n }, FILLED)).toEqual({ optionId: "3001", claimKey: "3002" });
+    expect(weekOptionIds({ optionId: null, claimKey: null }, FILLED)).toEqual({ optionId: OPTION_ID.toString(), claimKey: CLAIM_KEY.toString() });
+    expect(weekOptionIds({ optionId: 0n, claimKey: 0n }, null)).toEqual({ optionId: null, claimKey: null });
+  });
+});
+
+describe("accountStrand (/v1/account/:addr strand)", () => {
+  // An epoch of 10 shares settled while generation 2 was stranded and took 0.4 of that claim.
+  // Two owners queued into it: A with 6 shares, B with 4. Nobody has collected yet.
+  const EPOCH = { strandGen: 2n, sharesSettled: 10n * LOT, sharesClaimed: 0n, strandWad: 4n * 10n ** 17n, strandWadClaimed: 0n };
+  const base = { stagedWad: 0n, stagedGen: null, epochId: 5n, currentEpoch: 6n, epoch: EPOCH };
+
+  it("two queuers each see their own pro-rata part, not the epoch's whole 0.4", () => {
+    // A: floor(0.4e18 × 6 / 10) = 0.24e18. B: floor(0.4e18 × 4 / 10) = 0.16e18. Together the whole 0.4.
+    const a = accountStrand({ ...base, queuedShares: 6n * LOT });
+    const b = accountStrand({ ...base, queuedShares: 4n * LOT });
+    expect(a).toEqual({ wad: 0n, gen: 2n, epochWad: 240000000000000000n, epochGen: 2n });
+    expect(b.epochWad).toBe(160000000000000000n);
+    expect(a.epochWad + b.epochWad).toBe(EPOCH.strandWad);
+  });
+
+  it("after A collects, B is the last claimant and takes exactly what is left", () => {
+    // A's entry took 0.24e18 and 6 shares; B's 4 shares are all that remain.
+    const afterA = { ...EPOCH, sharesClaimed: 6n * LOT, strandWadClaimed: 240000000000000000n };
+    expect(accountStrand({ ...base, epoch: afterA, queuedShares: 4n * LOT }).epochWad).toBe(160000000000000000n);
+  });
+
+  it("an epoch that has not settled, or settled with no strand share, has nothing pending", () => {
+    expect(accountStrand({ ...base, currentEpoch: 5n, queuedShares: 6n * LOT }).epochWad).toBe(0n);
+    expect(accountStrand({ ...base, epoch: { ...EPOCH, strandGen: null }, queuedShares: 6n * LOT })).toEqual({ wad: 0n, gen: null, epochWad: 0n, epochGen: null });
+    expect(accountStrand({ ...base, epochId: null, epoch: null, queuedShares: 0n })).toEqual({ wad: 0n, gen: null, epochWad: 0n, epochGen: null });
+  });
+
+  it("a staged share of one generation and an epoch share of another keep their own labels", () => {
+    // 0.1e18 of generation 1 staged (resolved, not yet folded), and A's entry in generation 2's epoch.
+    const r = accountStrand({ ...base, stagedWad: 10n ** 17n, stagedGen: 1n, queuedShares: 6n * LOT });
+    expect(r).toEqual({ wad: 10n ** 17n, gen: 1n, epochWad: 240000000000000000n, epochGen: 2n });
   });
 });

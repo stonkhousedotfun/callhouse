@@ -13,11 +13,14 @@ import {
   closeStatus,
   endedListingStatus,
   entryStrandShare,
+  harvestCycleView,
   harvestOrigin,
+  harvestTouchesCycle,
   optionIdAfterClose,
   recoveredStatus,
   settlementCycle,
   strandRecovery,
+  type HarvestCycleRow,
 } from "../lib/lifecycle";
 
 const WAD = 10n ** 18n;
@@ -55,16 +58,54 @@ describe("harvestOrigin", () => {
 
 describe("closeStatus / recoveredStatus", () => {
   it("publishes the four verdicts, unfilled being the most likely", () => {
-    expect(closeStatus({ stranded: false, sold: 0n, assigned: 0n })).toBe("unfilled");
-    expect(closeStatus({ stranded: false, sold: 12n, assigned: 0n })).toBe("closed");
-    expect(closeStatus({ stranded: false, sold: 12n, assigned: 5n })).toBe("assigned");
+    expect(closeStatus({ stranded: false, written: 0n, assigned: 0n })).toBe("unfilled");
+    expect(closeStatus({ stranded: false, written: 12n, assigned: 0n })).toBe("closed");
+    expect(closeStatus({ stranded: false, written: 12n, assigned: 5n })).toBe("assigned");
   });
 
-  it("a stranded close is stranded whatever was sold or assigned; the verdict waits for the retry", () => {
-    expect(closeStatus({ stranded: true, sold: 12n, assigned: 5n })).toBe("stranded");
-    expect(closeStatus({ stranded: true, sold: 12n, assigned: 0n })).toBe("stranded");
+  it("a stranded close is stranded whatever was written or assigned; the verdict waits for the retry", () => {
+    expect(closeStatus({ stranded: true, written: 12n, assigned: 5n })).toBe("stranded");
+    expect(closeStatus({ stranded: true, written: 12n, assigned: 0n })).toBe("stranded");
     expect(recoveredStatus({ assigned: 5n })).toBe("assigned");
     expect(recoveredStatus({ assigned: 0n })).toBe("closed");
+  });
+});
+
+describe("harvestCycleView / harvestTouchesCycle (Vault:Harvest)", () => {
+  // A cycle row as getCycle returns it, with only the columns a Harvest reads.
+  const row = (over: Partial<HarvestCycleRow> = {}): HarvestCycleRow => ({
+    contractsWritten: 0n,
+    contractsSold: 0n,
+    contractsAssigned: 0n,
+    assignmentUsdg: 0n,
+    harvested: false,
+    ...over,
+  });
+
+  it("a checkpoint before the first rollOpen (cycle 0) reads no row, touches none, and carries zeros", () => {
+    // The deploy, then 1 wei of USDG sent to the vault, then the first deposit: _checkpointHarvest
+    // emits Harvest(0, 1, 0, 1) because cycleNumber is 0 until rollOpen. The handler passes null.
+    expect(harvestCycleView(null)).toEqual({ filled: false, contractsWritten: 0n, contractsSold: 0n, contractsAssigned: 0n, assignmentUsdg: 0n });
+    expect(harvestTouchesCycle(null, "checkpoint")).toBe(false);
+  });
+
+  it("filled is the vault's CallsWritten sum, so a Seaport count of 0 (wrong CLEARINGHOUSE) cannot unfill a week", () => {
+    // 12 written by the vault's own CallsWritten, 0 counted from Seaport offer items on a Clear the env did not name.
+    const v = harvestCycleView(row({ contractsWritten: 12n, contractsSold: 0n, contractsAssigned: 5n, assignmentUsdg: 950_000000n }));
+    expect(v.filled).toBe(true);
+    expect(v.contractsWritten).toBe(12n);
+    expect(v.contractsSold).toBe(0n); // kept as the cross-check column, never the verdict
+    expect(closeStatus({ stranded: false, written: v.contractsWritten, assigned: 0n })).toBe("closed");
+    expect(closeStatus({ stranded: false, written: v.contractsWritten, assigned: v.contractsAssigned })).toBe("assigned");
+    expect(v.assignmentUsdg).toBe(950_000000n);
+    expect(harvestCycleView(row()).filled).toBe(false);
+  });
+
+  it("the terminal harvest and the retry always touch their week; a checkpoint only while it is open", () => {
+    expect(harvestTouchesCycle(row(), "checkpoint")).toBe(true);
+    expect(harvestTouchesCycle(row({ harvested: true }), "checkpoint")).toBe(false);
+    expect(harvestTouchesCycle(row(), "rollClose")).toBe(true);
+    expect(harvestTouchesCycle(row({ harvested: true }), "retry")).toBe(true);
   });
 });
 

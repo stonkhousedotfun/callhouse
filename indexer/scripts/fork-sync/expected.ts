@@ -9,8 +9,9 @@
  * every figure it records is cross-checked against the chain into `disagreements`; the run fails
  * on any of them, because a dry run that misdescribes its own week is not a dry run.
  *
- * THE DRY RUN THIS EXPECTS (write on fill, no registry): cycles armed with `rollOpen(id)` on option
- * types the keeper created itself, closed in order, each one of
+ * THE DRY RUN THIS EXPECTS (write on fill, no registry): `pnpm --filter @callhouse/keeper dryrun`
+ * (keeper/src/dryrun.ts) deploys the vault on the REAL Clear and Seaport of the fork and arms
+ * weeks with `rollOpen(id)` on option types the keeper created itself, in order, each one of
  *
  *   unfilled    listed, nobody bought, the listing invalidated at `lockBook`, a zero harvest;
  *   assigned    bought in several fills (each fill its own `CallsWritten`), some contracts
@@ -19,13 +20,22 @@
  *   stranded    bought, then the USDG issuer froze the vault so `rollClose` could not redeem
  *               the claim (`ClaimStranded`, zero legs, the queue's epoch taking its share), then
  *               unfrozen and `retryStrandedClaim` redeemed it (`StrandedClaimRecovered`, the
- *               retry's `Harvest` under the stranded cycle's number) and the shares were paid.
+ *               retry's `Harvest` under the stranded cycle's number) and the shares were paid;
+ *   armed       the LAST week may still be open at the run's last block: armed and listed, not
+ *               closed. The keeper's run ends exactly so (week 4 Listed after the recovery), and
+ *               that end state is worth asserting: `/v1/vault.week` is that week, and the
+ *               lifetime tallies count it as armed but not as filled or unfilled.
  *
  * Nothing here assumes which cycle number is which scenario: every week is derived from what its
  * logs say, and the scenario-specific checks switch on the logs (a `ClaimStranded` present, a
- * fill present). The run.json fields read are exactly the `RunJson` / `RunCycle` types below;
- * `runValue` fails loudly on a missing one, naming the path, so a keeper that changes its
- * record shape is caught before a single expectation is compared.
+ * fill present, a `RollClose` present).
+ *
+ * THE RECORD IS THE KEEPER'S OWN SHAPE. run.json carries one key per week, `cycle1` .. `cycleN`
+ * (`KeeperCycle` below, exactly what dryrun.ts writes), not an array. `runCycles` reads those keys
+ * in order and normalises each into a `RunCycle`, failing loudly with the path of any field it
+ * needs and did not find, so a keeper that changes its record shape is caught before a single
+ * expectation is compared. `expected.test.ts` builds its fixture in the same shape, copied from a
+ * real passing run.
  */
 import { formatUnits, keccak256, toHex } from "viem";
 
@@ -36,40 +46,62 @@ import type { Expectation, Json } from "./diff.ts";
                        run.json (the fields read)
 //////////////////////////////////////////////////////////////*/
 
-/** One Seaport fill of the cycle's listing, as the keeper saw it land. */
-export type RunFill = {
-  txHash: string;
+/** A decimal figure as run.json stores it: most are strings, a few counts are numbers. */
+type Num = string | number;
+
+/** One Seaport fill of the week's listing, as keeper/src/dryrun.ts records it in `cycleN.fills[]`. */
+export type KeeperFill = {
+  buyer?: string;
   /** Contracts moved; equals the fill's `CallsWritten.contractsCount`. */
-  contracts: string | number;
+  contracts: Num;
+  tx: string;
+  block?: Num;
   /** The one USDG consideration item, to the vault. */
-  grossUsdg6: string | number;
+  premium: Num;
 };
 
-/** One cycle, as the keeper recorded it. Every field is cross-checked against the chain. */
-export type RunCycle = {
-  cycleNumber: number;
+/**
+ * One week as keeper/src/dryrun.ts records it under `cycleN`. Only the fields read here are
+ * typed; the record carries more (queue legs, the listed deposit, balances) for its own report.
+ * A week still armed at the run's last block has only its arm: no `lockTx`, `rollCloseTx` or
+ * `harvest`.
+ */
+export type KeeperCycle = {
   /** The armed Valorem option id, decimal. */
   optionId: string;
-  strikeUsdg6: string | number;
-  exerciseTimestamp: string | number;
-  expiryTimestamp: string | number;
+  strikeUsdg6: Num;
+  exerciseTimestamp: Num;
+  expiryTimestamp: Num;
   rollOpenTx: string;
-  /** Null when nobody called `lockBook` (a `rollClose` from Listed is legal). */
-  lockTx: string | null;
-  rollCloseTx: string;
-  /** In order. Empty on an unfilled week. */
-  fills: RunFill[];
-  /** `RollClose.contractsAssignedCount`, read before the redeem so it is real on a stranded close too. */
-  contractsAssigned: string | number;
-  /** The terminal `Harvest` inside `rollClose`, from its receipt. */
-  harvest: { gross: string | number; fee: string | number; net: string | number };
-  /** True when the close could not redeem the claim (`ClaimStranded` in the rollClose receipt). */
-  stranded: boolean;
-  /** The `retryStrandedClaim` transaction that redeemed it; null when never stranded or still stranded. */
-  retryTx: string | null;
-  /** What the claim returned: `RollClose`'s legs on an ordinary close, `ClaimRedeemed`'s at the retry, 0 while stranded. */
-  assetsReturned: string | number;
-  usdgFromAssignment: string | number;
+  approveTx?: string;
+  orderHash?: string;
+  /** Sum of the fills; "0" on an unfilled week. Absent while the week is still open. */
+  contracts?: Num;
+  /** Absent on an unfilled week and on an open one with no buyer. */
+  fills?: KeeperFill[];
+  lockTx?: string;
+  rollCloseTx?: string;
+  /**
+   * The keeper's cycle row once the week is done (closed, or recovered after a strand): gross, fee
+   * and net SUMMED over every `Harvest` carrying the cycle's number from its `rollOpen` block to the
+   * close (the retry, after a strand) — keeper/src/roll.ts `harvestForCycle` — and what the claim
+   * returned: `RollClose`'s legs on an ordinary close, `StrandedClaimRecovered`'s after a strand.
+   */
+  harvest?: {
+    gross: Num;
+    fee: Num;
+    net: Num;
+    assetsReturned: Num;
+    usdgFromAssignment: Num;
+    /** `RollClose.contractsAssignedCount`. */
+    contractsAssigned: Num;
+    /** How many `Harvest` logs that sum covered. */
+    harvestEvents?: number;
+  };
+  /** Present when the close stranded the claim. `harvestAtClose` is the terminal `Harvest` alone. */
+  strand?: { rollCloseTx: string; gen: Num; claimKey: string; harvestAtClose?: { gross: Num; fee: Num; net: Num } };
+  /** Present once `retryStrandedClaim` redeemed the stranded claim. `harvest` is the retry's `Harvest` alone. */
+  recovery?: { retryTx: string; assets: Num; usdgOut: Num; queueWad: Num; harvest?: { gross: Num; fee: Num } };
 };
 
 export type RunJson = {
@@ -80,8 +112,52 @@ export type RunJson = {
   actors: { admin: string; keeper: string; depositor: string } & Record<string, string>;
   addresses: { Vault: string } & Record<string, string>;
   /** The vault's deploy block (START_BLOCK) and the block of the run's last transaction (END_BLOCK). */
-  blocks: { vaultDeployBlock: string | number; lastBlock: string | number };
-  cycles: RunCycle[];
+  blocks: { vaultDeployBlock: Num; lastBlock: Num };
+} & { [week: `cycle${number}`]: KeeperCycle };
+
+/** One Seaport fill, normalised. */
+export type RunFill = { txHash: string; contracts: Num; grossUsdg6: Num };
+
+/** What the keeper recorded about a week's close, normalised. Null on the `RunCycle` while the week is open. */
+export type RunClose = {
+  rollCloseTx: string;
+  /** Null when nobody called `lockBook` (a `rollClose` from Listed is legal). */
+  lockTx: string | null;
+  contractsAssigned: Num;
+  /** The keeper's sum over the week's `Harvest` logs (see `KeeperCycle.harvest`), and how many it covered. */
+  harvest: { gross: Num; fee: Num; net: Num };
+  harvestEvents: number | null;
+  /** The terminal `Harvest` alone, when the keeper recorded it (a stranded close). */
+  terminalHarvest: { gross: Num; fee: Num; net: Num } | null;
+  /** The retry's `Harvest` alone, when the keeper recorded it. */
+  retryHarvest: { gross: Num; fee: Num } | null;
+  /** True when the close could not redeem the claim (`ClaimStranded` in the rollClose receipt). */
+  stranded: boolean;
+  /** The `retryStrandedClaim` transaction that redeemed it; null when never stranded or still stranded. */
+  retryTx: string | null;
+  /** What the claim returned: `RollClose`'s legs on an ordinary close, `ClaimRedeemed`'s at the retry, 0 while stranded. */
+  assetsReturned: Num;
+  usdgFromAssignment: Num;
+};
+
+/** One week, as the builder consumes it. Every field is cross-checked against the chain. */
+export type RunCycle = {
+  cycleNumber: number;
+  optionId: string;
+  strikeUsdg6: Num;
+  exerciseTimestamp: Num;
+  expiryTimestamp: Num;
+  rollOpenTx: string;
+  approveTx: string | null;
+  orderHash: string | null;
+  /** `cycleN.contracts` when recorded: the week's contracts sold == written. */
+  contracts: Num | null;
+  /** In order. Empty on an unfilled week. */
+  fills: RunFill[];
+  /** `lockBook` on a week still open at the run's end (null if not called yet). */
+  lockTx: string | null;
+  /** Null while the week is still armed at the run's last block. Only the last week may be. */
+  close: RunClose | null;
 };
 
 /** Walk `a.b.c` into run.json and fail loudly if the dry run did not record it. */
@@ -100,6 +176,97 @@ const big = (v: unknown, what: string): bigint => {
   if (typeof v !== "string" && typeof v !== "number" && typeof v !== "bigint") throw new Error(`run.json ${what} is not a number: ${JSON.stringify(v)}`);
   return BigInt(v);
 };
+
+const WEEK_KEY = /^cycle([1-9][0-9]*)$/;
+
+/**
+ * The dry run's weeks, `cycle1` .. `cycleN` in cycle order, normalised. Throws with the path of the
+ * first missing field. Every week before the last must be closed; the last may still be armed.
+ */
+export function runCycles(run: RunJson): RunCycle[] {
+  const keys = Object.keys(run)
+    .map((key) => ({ key, m: WEEK_KEY.exec(key) }))
+    .filter((x): x is { key: string; m: RegExpExecArray } => x.m !== null)
+    .map(({ key, m }) => ({ key, n: Number(m[1]) }))
+    .sort((a, b) => a.n - b.n);
+  if (keys.length === 0) {
+    throw new Error(`run.json has no cycle1. Did the dry run arm a week? (run.error: ${run.error ?? "none"})`);
+  }
+  return keys.map(({ key, n }, i) => {
+    const path = (field: string) => `${key}.${field}`;
+    const at = (field: string) => runValue(run, path(field));
+    const opt = (field: string): unknown => {
+      try {
+        return at(field);
+      } catch {
+        return undefined;
+      }
+    };
+    const str = (v: unknown, where: string): string => {
+      if (typeof v !== "string") throw new Error(`run.json ${where} is not a string: ${JSON.stringify(v)}`);
+      return v;
+    };
+    const num = (v: unknown, where: string): Num => {
+      if (typeof v !== "string" && typeof v !== "number") throw new Error(`run.json ${where} is not a number: ${JSON.stringify(v)}`);
+      return v;
+    };
+    const k = run[key as `cycle${number}`]!;
+    const fills = (Array.isArray(k.fills) ? k.fills : []).map((f, j) => ({
+      txHash: str(runValue(run, path(`fills.${j}.tx`)), path(`fills[${j}].tx`)),
+      contracts: num(f.contracts, path(`fills[${j}].contracts`)),
+      grossUsdg6: num(runValue(run, path(`fills.${j}.premium`)), path(`fills[${j}].premium`)),
+    }));
+    const lockTx = typeof k.lockTx === "string" ? k.lockTx : null;
+
+    let close: RunClose | null = null;
+    if (k.rollCloseTx !== undefined) {
+      const h = at("harvest");
+      if (h === null || typeof h !== "object") throw new Error(`run.json ${path("harvest")} is not an object`);
+      const harvestEvents = opt("harvest.harvestEvents");
+      const atClose = k.strand?.harvestAtClose;
+      const retryHarvest = k.recovery?.harvest;
+      close = {
+        rollCloseTx: str(k.rollCloseTx, path("rollCloseTx")),
+        lockTx,
+        contractsAssigned: num(at("harvest.contractsAssigned"), path("harvest.contractsAssigned")),
+        harvest: {
+          gross: num(at("harvest.gross"), path("harvest.gross")),
+          fee: num(at("harvest.fee"), path("harvest.fee")),
+          net: num(at("harvest.net"), path("harvest.net")),
+        },
+        harvestEvents: typeof harvestEvents === "number" ? harvestEvents : null,
+        terminalHarvest: atClose === undefined ? null : { gross: num(atClose.gross, path("strand.harvestAtClose.gross")), fee: num(atClose.fee, path("strand.harvestAtClose.fee")), net: num(atClose.net, path("strand.harvestAtClose.net")) },
+        retryHarvest: retryHarvest === undefined ? null : { gross: num(retryHarvest.gross, path("recovery.harvest.gross")), fee: num(retryHarvest.fee, path("recovery.harvest.fee")) },
+        stranded: k.strand !== undefined,
+        retryTx: k.recovery === undefined ? null : str(at("recovery.retryTx"), path("recovery.retryTx")),
+        assetsReturned: num(at("harvest.assetsReturned"), path("harvest.assetsReturned")),
+        usdgFromAssignment: num(at("harvest.usdgFromAssignment"), path("harvest.usdgFromAssignment")),
+      };
+    } else {
+      if (k.strand !== undefined) {
+        throw new Error(`run.json ${key} stranded (${path("strand")}) but records no ${path("rollCloseTx")} or ${path("harvest")}. Did the dry run finish the week?`);
+      }
+      if (i !== keys.length - 1) {
+        throw new Error(`run.json has no ${path("rollCloseTx")} but ${keys[i + 1]!.key} follows it: only the last week may still be open`);
+      }
+    }
+
+    return {
+      cycleNumber: n,
+      optionId: str(at("optionId"), path("optionId")),
+      strikeUsdg6: num(at("strikeUsdg6"), path("strikeUsdg6")),
+      exerciseTimestamp: num(at("exerciseTimestamp"), path("exerciseTimestamp")),
+      expiryTimestamp: num(at("expiryTimestamp"), path("expiryTimestamp")),
+      rollOpenTx: str(at("rollOpenTx"), path("rollOpenTx")),
+      approveTx: typeof k.approveTx === "string" ? k.approveTx : null,
+      orderHash: typeof k.orderHash === "string" ? k.orderHash : null,
+      contracts: k.contracts === undefined ? null : num(k.contracts, path("contracts")),
+      fills,
+      lockTx,
+      close,
+    };
+  });
+}
 
 /** Block bounds of the dry run: the vault's deploy block and the last transaction's block. */
 export function runBlocks(run: RunJson): { vaultDeployBlock: bigint; lastBlock: bigint } {
@@ -467,17 +634,21 @@ function deriveWeek(b: Builder, chain: ChainFacts, k: RunCycle, strands: StrandT
   if (found === undefined || found.open === null || found.close === null) {
     throw new Error(`the chain has no closed cycle ${n} (RollOpen and RollClose)`);
   }
+  if (k.close === null) {
+    throw new Error(`run.json cycle${n} is still open (no rollCloseTx); this derivation is for a closed week`);
+  }
+  const close = k.close;
   const c = found as ChainCycle & { open: NonNullable<ChainCycle["open"]>; close: NonNullable<ChainCycle["close"]> };
   const w = `cycle ${n}`;
 
   /* ---- the armed type ---- */
   b.agree(`${w} option id`, k.optionId, c.open.optionId);
-  b.agree(`${w} strike`, big(k.strikeUsdg6, `cycles[].strikeUsdg6`), c.open.strike);
-  b.agree(`${w} exercise timestamp`, big(k.exerciseTimestamp, "cycles[].exerciseTimestamp"), c.open.exerciseTs);
-  b.agree(`${w} expiry timestamp`, big(k.expiryTimestamp, "cycles[].expiryTimestamp"), c.open.expiryTs);
+  b.agree(`${w} strike`, big(k.strikeUsdg6, `cycle${n}.strikeUsdg6`), c.open.strike);
+  b.agree(`${w} exercise timestamp`, big(k.exerciseTimestamp, `cycle${n}.exerciseTimestamp`), c.open.exerciseTs);
+  b.agree(`${w} expiry timestamp`, big(k.expiryTimestamp, `cycle${n}.expiryTimestamp`), c.open.expiryTs);
   b.agree(`${w} rollOpen tx`, k.rollOpenTx, c.open.txHash);
   b.agree(`${w} lockBook tx`, k.lockTx, c.locked?.txHash ?? null);
-  b.agree(`${w} rollClose tx`, k.rollCloseTx, c.close.txHash);
+  b.agree(`${w} rollClose tx`, close.rollCloseTx, c.close.txHash);
 
   /* ---- listings and fills ---- */
   const chainListings = chain.listings.filter((l) => l.optionId === c.open.optionId).sort((x, y) => x.seq - y.seq);
@@ -506,11 +677,11 @@ function deriveWeek(b: Builder, chain: ChainFacts, k: RunCycle, strands: StrandT
 
   /* ---- the close ---- */
   const assigned = c.close.contractsAssignedCount;
-  b.agree(`${w} contracts assigned`, big(k.contractsAssigned, "cycles[].contractsAssigned"), assigned);
+  b.agree(`${w} contracts assigned`, big(close.contractsAssigned, `cycle${n}.harvest.contractsAssigned`), assigned);
   // The vault is the only writer of each of these private option types, so every exercised
   // contract lands in its one bucket.
   b.agree(`${w} bucket assignment = contracts assigned`, assigned, c.bucketAssigned);
-  b.agree(`${w} stranded`, k.stranded, c.stranded !== null);
+  b.agree(`${w} stranded`, close.stranded, c.stranded !== null);
 
   const strand = c.stranded === null ? null : (strands.find((s) => s.gen === c.stranded!.gen) ?? null);
   const chainStrand = c.stranded === null ? null : (chain.strands.find((s) => s.gen === c.stranded!.gen) ?? null);
@@ -521,7 +692,7 @@ function deriveWeek(b: Builder, chain: ChainFacts, k: RunCycle, strands: StrandT
     // A stranded close reports zero legs; the real figures arrive with the retry.
     b.agree(`${w} stranded close reports zero legs`, "0:0", `${c.close.assetsReturned}:${c.close.usdgFromAssignment}`);
   }
-  b.agree(`${w} retry tx`, k.retryTx, chainStrand?.recovered?.txHash ?? null);
+  b.agree(`${w} retry tx`, close.retryTx, chainStrand?.recovered?.txHash ?? null);
 
   // What the claim returned, once it did.
   let assetsReturned = c.close.assetsReturned;
@@ -536,8 +707,8 @@ function deriveWeek(b: Builder, chain: ChainFacts, k: RunCycle, strands: StrandT
       assignmentUsdg = c.redeemed.exerciseReceived;
     }
   }
-  b.agree(`${w} assetsReturned`, big(k.assetsReturned, "cycles[].assetsReturned"), assetsReturned);
-  b.agree(`${w} usdgFromAssignment`, big(k.usdgFromAssignment, "cycles[].usdgFromAssignment"), assignmentUsdg);
+  b.agree(`${w} assetsReturned`, big(close.assetsReturned, `cycle${n}.harvest.assetsReturned`), assetsReturned);
+  b.agree(`${w} usdgFromAssignment`, big(close.usdgFromAssignment, `cycle${n}.harvest.usdgFromAssignment`), assignmentUsdg);
   // Nothing sold means nothing written, no claim, and no collateral to bring home.
   if (sold === 0n) {
     b.agree(`${w} unfilled: no claim`, null, claimKey);
@@ -552,9 +723,9 @@ function deriveWeek(b: Builder, chain: ChainFacts, k: RunCycle, strands: StrandT
     throw new Error(`the chain has no Harvest in ${w}'s rollClose transaction`);
   }
   b.agree(`${w} one terminal Harvest`, 1, allChain.filter((h) => h.origin === "rollClose").length);
-  b.agree(`${w} Harvest.grossUsdg`, big(k.harvest.gross, "cycles[].harvest.gross"), terminalChain.gross);
-  b.agree(`${w} Harvest.feeUsdg`, big(k.harvest.fee, "cycles[].harvest.fee"), terminalChain.fee);
-  b.agree(`${w} Harvest.netUsdg`, big(k.harvest.net, "cycles[].harvest.net"), terminalChain.net);
+  b.agree(`${w} Harvest.grossUsdg`, big(close.harvest.gross, `cycle${n}.harvest.gross`), terminalChain.gross);
+  b.agree(`${w} Harvest.feeUsdg`, big(close.harvest.fee, `cycle${n}.harvest.fee`), terminalChain.fee);
+  b.agree(`${w} Harvest.netUsdg`, big(close.harvest.net, `cycle${n}.harvest.net`), terminalChain.net);
   b.agree(`${w} retry Harvest present iff recovered`, chainStrand?.recovered !== null && chainStrand?.recovered !== undefined, allChain.some((h) => h.origin === "retry"));
 
   const all = allChain.map((h) => deriveHarvest(b, h, c, fills, chainStrand));
@@ -816,12 +987,11 @@ export function buildExpectations(run: RunJson, chain: ChainFacts): Built {
   const { lastBlock } = runBlocks(run);
   b.agree("last dry-run block = END_BLOCK", lastBlock, chain.endBlock);
   if (run.error !== null) b.disagreements.push(`the dry run recorded an error: ${run.error}`);
-  const runCycles = runValue(run, "cycles");
-  if (!Array.isArray(runCycles) || runCycles.length === 0) throw new Error("run.json cycles is not a non-empty array");
-  b.agree("cycles armed", runCycles.length, chain.cycles.length);
+  const weeksRun = runCycles(run);
+  b.agree("cycles armed", weeksRun.length, chain.cycles.length);
 
   const strands = chain.strands.map((s) => deriveStrand(b, s));
-  const weeks = (runCycles as RunCycle[]).map((k) => deriveWeek(b, chain, k, strands));
+  const weeks = weeksRun.map((k) => deriveWeek(b, chain, k, strands));
   const byNumberDesc = [...weeks].sort((x, y) => y.cycleNumber - x.cycleNumber);
   const latestWeek = byNumberDesc[0]!;
   const views = chain.views;

@@ -1,10 +1,11 @@
 import { ponder } from "ponder:registry";
 import schema from "ponder:schema";
+import type { Address } from "viem";
 
 import { valoremClearAbi } from "../abis/valoremClear";
 import { vaultAbi } from "../abis/vault";
-import { constructorSettings } from "../lib/deployment";
-import { CLEARINGHOUSE, VAULT, WAD } from "../lib/env";
+import { checkWiring, constructorSettings, wiringError, type WiringReads } from "../lib/deployment";
+import { ASSET, CLEARINGHOUSE, SEAPORT, USDG, VAULT, WAD } from "../lib/env";
 import { addHarvest, splitHarvest } from "../lib/harvest";
 import {
   PHASE,
@@ -27,7 +28,9 @@ import {
   closeStatus,
   endedListingStatus,
   entryStrandShare,
+  harvestCycleView,
   harvestOrigin,
+  harvestTouchesCycle,
   optionIdAfterClose,
   recoveredStatus,
   settlementCycle,
@@ -40,12 +43,49 @@ import { roleName } from "../lib/roles";
                        CONSTRUCTOR SETTINGS
 //////////////////////////////////////////////////////////////*/
 
+/** One of the vault's four immutable address views, or null when it did not answer. */
+type ReadWiringView = (functionName: keyof WiringReads) => Promise<Address | null>;
+
+/**
+ * Compare the vault's four immutable contract addresses with the env and THROW on any
+ * difference: a Ponder handler that throws stops the indexer, which is the point. A wrong source
+ * address is a configuration error that would publish a wrong tape (every fill counted as 0
+ * contracts), not something to warn about. Returns false when the views did not all answer, so
+ * the caller knows the check is still owed. See lib/deployment.ts `checkWiring`.
+ */
+async function assertWiring(read: ReadWiringView, when: string): Promise<boolean> {
+  const reads: WiringReads = { clear: await read("clear"), seaport: await read("seaport"), usdg: await read("usdg"), asset: await read("asset") };
+  const { mismatches, unverified } = checkWiring(reads, { CLEARINGHOUSE, SEAPORT, USDG, ASSET });
+  if (mismatches.length > 0) {
+    log.warn({ vault: VAULT, when, mismatches }, "vault wiring does not match the indexer's env; refusing to index");
+    throw wiringError(VAULT, mismatches);
+  }
+  if (unverified.length > 0) {
+    log.warn({ vault: VAULT, when, unverified }, "vault wiring unreadable; checked again at the next RollOpen");
+    return false;
+  }
+  return true;
+}
+
 /**
  * Seed the settings the constructor sets without an event: `policy().protocolFeeBps`,
  * `feeRecipient()` and `depositCap()`. Runs once, before any vault event, with the client pinned
  * to START_BLOCK. Governance events later in the log overwrite them as before. See lib/deployment.ts.
+ *
+ * First, refuse to index a vault built over different contracts than the env names: `clear()`,
+ * `seaport()`, `usdg()` and `asset()` against CLEARINGHOUSE, SEAPORT, USDG and ASSET. If
+ * START_BLOCK precedes the deployment the views do not answer here, and `Vault:RollOpen` makes the
+ * same check before the first week can be misread.
  */
 ponder.on("Vault:setup", async ({ context }) => {
+  await assertWiring(async (functionName) => {
+    try {
+      return (await context.client.readContract({ abi: vaultAbi, address: VAULT, functionName })) as Address;
+    } catch {
+      return null;
+    }
+  }, "setup (START_BLOCK)");
+
   const read = async <T>(functionName: "policy" | "feeRecipient" | "depositCap"): Promise<T | null> => {
     try {
       return (await context.client.readContract({ abi: vaultAbi, address: VAULT, functionName })) as T;
@@ -442,6 +482,17 @@ ponder.on("Vault:CompleteRedeem", async ({ event, context }) => {
 ponder.on("Vault:RollOpen", async ({ event, context }) => {
   const { cycleNumber, optionId, contractsCount, strikeUsdg } = event.args;
 
+  // The vault exists at this block by construction, so the wiring check `Vault:setup` could not
+  // make (START_BLOCK before the deploy) is made here, before a single fill of the week is read.
+  // The four views are immutable, so the reads are as reproducible as a log on a backfill.
+  await assertWiring(async (functionName) => {
+    try {
+      return (await context.client.readContract({ abi: vaultAbi, address: VAULT, functionName })) as Address;
+    } catch {
+      return null;
+    }
+  }, `RollOpen ${cycleNumber}`);
+
   const state = await getState(context.db);
 
   const readTs = async (functionName: "cycleExerciseTs" | "cycleExpiryTs"): Promise<bigint> => {
@@ -693,6 +744,7 @@ ponder.on("Vault:RollClose", async ({ event, context }) => {
   log.info(
     {
       cycleNumber,
+      written: c.contractsWritten,
       sold: c.contractsSold,
       assetsReturned,
       usdgFromAssignment,
@@ -990,10 +1042,17 @@ ponder.on("Vault:Harvest", async ({ event, context }) => {
   const origin = harvestOrigin(state, lastStrand, event.transaction.hash);
   const terminal = origin === "rollClose";
 
-  const c = await getCycle(context.db, cycleNumber);
+  // Cycle 0 is the stretch between the deploy and the first `rollOpen`: a checkpoint there (a
+  // donation or leftover USDG swept by the first deposit) is real money with no week attached.
+  // Reading it through `getCycle` would insert a phantom "listed" row that nothing ever closes,
+  // so no row is read and its cycle figures are zero (lib/lifecycle.ts `harvestCycleView`).
+  const c = cycleNumber === 0 ? null : await getCycle(context.db, cycleNumber);
+  const view = harvestCycleView(c);
 
-  const filled = c.contractsSold > 0n;
-  const status = closeStatus({ stranded: state.stranded, sold: c.contractsSold, assigned: c.contractsAssigned });
+  // The verdict comes from the vault's own write count (`CallsWritten`), not from Seaport's
+  // offer items, which are only counted when their token equals the CLEARINGHOUSE env var.
+  const filled = view.filled;
+  const status = closeStatus({ stranded: state.stranded, written: view.contractsWritten, assigned: view.contractsAssigned });
 
   // Supply at harvest is the pre-burn, pre-mint supply. For the terminal harvest that is
   // deliberate — `_settleQueue` runs after `_harvest`, so shares still escrowed for the queue
@@ -1007,7 +1066,7 @@ ponder.on("Vault:Harvest", async ({ event, context }) => {
   // shares' part of the recovered USDG, and a checkpoint gets 0.
   const feeFree =
     origin === "rollClose"
-      ? c.assignmentUsdg
+      ? view.assignmentUsdg
       : origin === "retry" && lastStrand !== null
         ? strandRecovery(lastStrand.assetsIn, lastStrand.usdgIn, lastStrand.queueWad).liveUsdg
         : 0n;
@@ -1028,9 +1087,9 @@ ponder.on("Vault:Harvest", async ({ event, context }) => {
       premiumGrossUsdg: split.premiumGross,
       strikeProceedsUsdg: split.strikeProceeds,
       premiumNetUsdg: split.premiumNet,
-      assignmentUsdg: c.assignmentUsdg,
-      contractsSold: c.contractsSold,
-      contractsAssigned: c.contractsAssigned,
+      assignmentUsdg: view.assignmentUsdg,
+      contractsSold: view.contractsSold,
+      contractsAssigned: view.contractsAssigned,
       accUsdgPerShare: state.accUsdgPerShare,
       supply,
       premiumNetPerShare: split.premiumNetPerShare,
@@ -1045,10 +1104,8 @@ ponder.on("Vault:Harvest", async ({ event, context }) => {
   // between `rollClose` and the next `rollOpen` still carries the closed cycle's number) must
   // not reopen or restate a published week. It keeps its row; the cycle is left alone. The
   // retry is the one post-close harvest that DOES belong to its week: it is the stranded
-  // week's strike proceeds arriving late.
-  const touchesCycle = cycleNumber !== 0 && (terminal || origin === "retry" || !c.harvested);
-
-  if (touchesCycle) {
+  // week's strike proceeds arriving late. Cycle 0 has no row to touch.
+  if (c !== null && harvestTouchesCycle(c, origin)) {
     await patchCycle(context.db, cycleNumber, {
       // Accumulated, not assigned: the week's take can be swept in more than one go, and the
       // published figure is the whole week. Per-share figures are summed the same way, and for
@@ -1081,7 +1138,7 @@ ponder.on("Vault:Harvest", async ({ event, context }) => {
           phase: PHASE.Idle,
           cyclesFilled: state.cyclesFilled + (filled ? 1 : 0),
           cyclesUnfilled: state.cyclesUnfilled + (filled ? 0 : 1),
-          cyclesAssigned: state.cyclesAssigned + (c.contractsAssigned > 0n ? 1 : 0),
+          cyclesAssigned: state.cyclesAssigned + (view.contractsAssigned > 0n ? 1 : 0),
         }
       : {}),
     lastBlock: event.block.number,
