@@ -446,7 +446,7 @@ export type StrandTruth = {
 /** One week as the product defines it, every figure derived rather than copied. */
 export type WeekTruth = {
   cycleNumber: number;
-  status: "stranded" | "closed" | "unfilled" | "assigned";
+  status: "listed" | "stranded" | "closed" | "unfilled" | "assigned";
   exerciseTimestamp: bigint;
   expiryTimestamp: bigint;
   optionId: bigint;
@@ -476,15 +476,15 @@ export type WeekTruth = {
   marketExercised: bigint;
   bucketIndex: bigint | null;
   bucketAssigned: bigint;
-  closedAt: bigint;
-  txClose: string;
+  closedAt: bigint | null;
+  txClose: string | null;
   stranded: boolean;
   strand: StrandTruth | null;
   /** Every `Harvest` carrying this cycle's number, newest first (what `/v1/cycles/:n` lists). */
   allHarvests: HarvestTruth[];
   /** The harvests that accumulate onto the cycle row: checkpoints while open, the terminal one, the retry's. */
   harvests: HarvestTruth[];
-  terminal: HarvestTruth;
+  terminal: HarvestTruth | null;
   /** The row's harvest columns, summed over `harvests`. */
   gross: bigint;
   fee: bigint;
@@ -628,14 +628,93 @@ function deriveHarvest(
   };
 }
 
+function deriveOpenWeek(b: Builder, chain: ChainFacts, k: RunCycle): WeekTruth {
+  const n = k.cycleNumber;
+  const found = chain.cycles.find((x) => x.cycleNumber === n);
+  if (found === undefined || found.open === null) {
+    throw new Error(`the chain has no RollOpen for still-open cycle ${n}`);
+  }
+  if (found.close !== null) {
+    throw new Error(`run.json cycle${n} is still open but the chain has a RollClose`);
+  }
+  const c = found as ChainCycle & { open: NonNullable<ChainCycle["open"]> };
+  const w = `cycle ${n}`;
+  b.agree(`${w} option id`, k.optionId, c.open.optionId);
+  b.agree(`${w} strike`, big(k.strikeUsdg6, `cycle${n}.strikeUsdg6`), c.open.strike);
+  b.agree(`${w} exercise timestamp`, big(k.exerciseTimestamp, `cycle${n}.exerciseTimestamp`), c.open.exerciseTs);
+  b.agree(`${w} expiry timestamp`, big(k.expiryTimestamp, `cycle${n}.expiryTimestamp`), c.open.expiryTs);
+  b.agree(`${w} rollOpen tx`, k.rollOpenTx, c.open.txHash);
+  b.agree(`${w} still open (no RollClose)`, null, found.close);
+
+  const chainListings = chain.listings.filter((l) => l.optionId === c.open.optionId).sort((x, y) => x.seq - y.seq);
+  const listings = chainListings.map((l) => deriveListing(n, l));
+  const fills = chainListings.flatMap((l) => l.fills).sort((x, y) => (x.block < y.block ? -1 : x.block > y.block ? 1 : 0));
+  const fillLine = (txHash: string, contracts: bigint | string | number, gross: bigint | string | number) => `${lower(txHash)}:${contracts}:${gross}`;
+  b.agree(
+    `${w} fills (tx:contracts:usdg to the vault)`,
+    k.fills.map((f) => fillLine(f.txHash, f.contracts, f.grossUsdg6)),
+    fills.map((f) => fillLine(f.txHash, f.contracts, f.toVault)),
+  );
+  const written = sum(c.writes, (x) => x.contracts);
+  const collateral = sum(c.writes, (x) => x.collateral);
+  const sold = sum(fills, (f) => f.contracts);
+  const premiumGross = sum(fills, (f) => f.toVault);
+  b.agree(`${w} contracts sold (Seaport) = written (CallsWritten)`, sold, written);
+  const claimKey = c.writes[0]?.claimKey ?? null;
+
+  return {
+    cycleNumber: n,
+    status: "listed",
+    exerciseTimestamp: c.open.exerciseTs,
+    expiryTimestamp: c.open.expiryTs,
+    optionId: c.open.optionId,
+    claimKey,
+    strike: c.open.strike,
+    contracts: written,
+    collateral,
+    writeCount: c.writes.length,
+    firstWriteAt: c.writes[0]?.timestamp ?? null,
+    lastWriteAt: c.writes.at(-1)?.timestamp ?? null,
+    openedAt: c.open.timestamp,
+    txOpen: lower(c.open.txHash),
+    listings,
+    sold,
+    fillCount: fills.length,
+    premiumGross,
+    firstFillAt: fills[0]?.timestamp ?? null,
+    lastFillAt: fills.at(-1)?.timestamp ?? null,
+    lockedAt: c.locked?.timestamp ?? null,
+    assigned: 0n,
+    assetsReturned: 0n,
+    assignmentUsdg: 0n,
+    marketExercised: c.marketExercised,
+    bucketIndex: c.bucketIndex,
+    bucketAssigned: c.bucketAssigned,
+    closedAt: null,
+    txClose: null,
+    stranded: false,
+    strand: null,
+    allHarvests: [],
+    harvests: [],
+    terminal: null,
+    gross: 0n,
+    fee: 0n,
+    net: 0n,
+    strikeProceeds: 0n,
+    harvestPremiumGross: 0n,
+    premiumNet: 0n,
+    premiumNetPerShare: 0n,
+    usdgPerShare: 0n,
+    supplyAtHarvest: 0n,
+  };
+}
+
 function deriveWeek(b: Builder, chain: ChainFacts, k: RunCycle, strands: StrandTruth[]): WeekTruth {
+  if (k.close === null) return deriveOpenWeek(b, chain, k);
   const n = k.cycleNumber;
   const found = chain.cycles.find((x) => x.cycleNumber === n);
   if (found === undefined || found.open === null || found.close === null) {
     throw new Error(`the chain has no closed cycle ${n} (RollOpen and RollClose)`);
-  }
-  if (k.close === null) {
-    throw new Error(`run.json cycle${n} is still open (no rollCloseTx); this derivation is for a closed week`);
   }
   const close = k.close;
   const c = found as ChainCycle & { open: NonNullable<ChainCycle["open"]>; close: NonNullable<ChainCycle["close"]> };
@@ -791,7 +870,7 @@ function deriveWeek(b: Builder, chain: ChainFacts, k: RunCycle, strands: StrandT
 
 function expectCycle(w: RouteWriter, t: WeekTruth) {
   w.eq("cycle", t.cycleNumber);
-  w.eq("status", t.status, "ClaimStranded unrecovered → stranded; else assigned / closed / unfilled by what sold and was assigned");
+  w.eq("status", t.status, "listed while still armed; ClaimStranded unrecovered → stranded; else assigned / closed / unfilled by what sold and was assigned");
   w.eq("filled", t.sold > 0n);
   w.eq("assigned", t.assigned > 0n);
   w.eq("stranded", t.stranded, "a ClaimStranded in the rollClose tx; stays true as history after recovery");
@@ -851,7 +930,7 @@ function expectCycle(w: RouteWriter, t: WeekTruth) {
   }
 
   const hv = w.at("harvest");
-  hv.eq("harvested", true);
+  hv.eq("harvested", t.status !== "listed");
   hv.usdg("grossUsdg", t.gross, "sum of Harvest.grossUsdg over the cycle's checkpoints, its terminal harvest and its retry");
   hv.usdg("premiumGross", t.harvestPremiumGross, "gross - strike proceeds, per harvest");
   hv.usdg("strikeProceedsUsdg", t.strikeProceeds, "RollClose.usdgFromAssignment on the terminal harvest + the live shares' part of a recovered claim on the retry");
@@ -861,7 +940,7 @@ function expectCycle(w: RouteWriter, t: WeekTruth) {
   hv.usdg("premiumNetPerShare", t.premiumNetPerShare, "sum over harvests of premiumNet x 1e18 / supply at that harvest");
   hv.usdg("usdgPerShare", t.usdgPerShare, "sum over harvests of net x 1e18 / supply at that harvest");
   hv.asset("supplyAtHarvest", t.supplyAtHarvest, "totalSupply() the block before the last harvest that touched the cycle");
-  hv.eq("harvestedAt", isoOf(t.terminal.timestamp), "the terminal harvest's block timestamp");
+  hv.eq("harvestedAt", t.terminal === null ? null : isoOf(t.terminal.timestamp), "the terminal harvest's block timestamp");
 }
 
 function expectListing(w: RouteWriter, l: ListingTruth) {
@@ -1005,7 +1084,8 @@ export function buildExpectations(run: RunJson, chain: ChainFacts): Built {
 
   const allHarvests = chain.harvests.map((h) => {
     const c = chain.cycles.find((x) => x.cycleNumber === h.cycleNumber);
-    if (c === undefined || c.close === null || c.open === null) throw new Error(`Harvest for cycle ${h.cycleNumber} but that cycle never closed`);
+    if (c === undefined || c.open === null) throw new Error(`Harvest for cycle ${h.cycleNumber} but that cycle never opened`);
+    if (c.close === null) throw new Error(`Harvest for still-open cycle ${h.cycleNumber}: a checkpoint on an armed week is not in this dry run`);
     const cc = c as ChainCycle & { close: NonNullable<ChainCycle["close"]> };
     const fills = chain.listings.filter((l) => l.optionId === c.open!.optionId).flatMap((l) => l.fills);
     const strand = c.stranded === null ? null : (chain.strands.find((s) => s.gen === c.stranded!.gen) ?? null);
@@ -1034,7 +1114,7 @@ export function buildExpectations(run: RunJson, chain: ChainFacts): Built {
   list.eq("cycles.length", weeks.length);
   list.eq("totals.armed", chain.cycles.length, "RollOpen events");
   list.eq("totals.filled", weeks.filter((t) => t.sold > 0n).length);
-  list.eq("totals.unfilled", weeks.filter((t) => t.sold === 0n).length);
+  list.eq("totals.unfilled", weeks.filter((t) => t.status === "unfilled").length);
   list.eq("totals.assigned", weeks.filter((t) => t.assigned > 0n).length);
   list.eq("totals.stranded", weeks.filter((t) => t.stranded).length);
   byNumberDesc.forEach((t, i) => expectCycle(list.at(`cycles[${i}]`), t));
@@ -1128,6 +1208,7 @@ export function buildExpectations(run: RunJson, chain: ChainFacts): Built {
   v.eq("queue.epochId", views.epochId.toString(), "epochId()");
   v.eq("queue.canSettle", views.phase === 0 && views.queuedShares > 0n, "Idle with shares queued");
 
+  const latestClosed = byNumberDesc.find((t) => t.status !== "listed") ?? latestWeek;
   expectCycle(v.at("week.cycle"), latestWeek);
   const wo = v.at("week.option");
   // After a close the vault forgets the armed type (`optionId` 0 → the cycle row's) unless the
@@ -1151,7 +1232,7 @@ export function buildExpectations(run: RunJson, chain: ChainFacts): Built {
   // X-3: the last TERMINAL harvest, which is not the last harvest when a retry or a checkpoint
   // came after it; and the last closed week whole.
   expectHarvest(v.at("lastHarvest"), terminalsDesc[0]!);
-  expectCycle(v.at("lastClosedCycle"), latestWeek);
+  expectCycle(v.at("lastClosedCycle"), latestClosed);
 
   const lifetime = {
     premiumGross: sum(weeks, (t) => t.premiumGross),
@@ -1167,7 +1248,7 @@ export function buildExpectations(run: RunJson, chain: ChainFacts): Built {
   b.agree("pendingFeeUsdg = fee accrued - fee swept", lifetime.protocolFee - chain.feeSwept, views.pendingFeeUsdg);
   v.eq("lifetime.cyclesArmed", weeks.length, "RollOpen events");
   v.eq("lifetime.cyclesFilled", weeks.filter((t) => t.sold > 0n).length);
-  v.eq("lifetime.cyclesUnfilled", weeks.filter((t) => t.sold === 0n).length);
+  v.eq("lifetime.cyclesUnfilled", weeks.filter((t) => t.status === "unfilled").length);
   v.eq("lifetime.cyclesAssigned", weeks.filter((t) => t.assigned > 0n).length);
   v.eq("lifetime.cyclesStranded", weeks.filter((t) => t.stranded).length, "ClaimStranded events");
   v.usdg("lifetime.premiumGross", lifetime.premiumGross, "sum of fills (one consideration item)");
@@ -1366,7 +1447,7 @@ export function buildExpectations(run: RunJson, chain: ChainFacts): Built {
   vs.eq("lifetimeHaircutAssets", lifetime.haircut.toString());
   vs.eq("cyclesWritten", weeks.length);
   vs.eq("cyclesFilled", weeks.filter((t) => t.sold > 0n).length);
-  vs.eq("cyclesUnfilled", weeks.filter((t) => t.sold === 0n).length);
+  vs.eq("cyclesUnfilled", weeks.filter((t) => t.status === "unfilled").length);
   vs.eq("cyclesAssigned", weeks.filter((t) => t.assigned > 0n).length);
   vs.eq("cyclesStranded", weeks.filter((t) => t.stranded).length);
   vs.eq("stranded", views.isStranded);

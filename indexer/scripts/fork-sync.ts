@@ -42,8 +42,9 @@
  *
  * WHAT run.json MUST CARRY. `scripts/fork-sync/expected.ts` names the fields (`RunJson`,
  * `RunCycle`): `addresses.Vault`, `actors.{admin,keeper,depositor}`, `blocks.{vaultDeployBlock,
- * lastBlock}`, and one `cycles[]` entry per armed cycle with its option, its transactions, its
- * fills, its terminal harvest and what its claim returned. A missing field fails loudly by path.
+ * lastBlock}`, and one `cycle1`..`cycleN` object per armed cycle with its option, its transactions, its
+ * fills, its terminal harvest and what its claim returned. The last week may still be open.
+ * A missing field fails loudly by path.
  */
 import { spawn, type ChildProcess } from "node:child_process";
 import { createWriteStream, mkdirSync, readFileSync, writeFileSync } from "node:fs";
