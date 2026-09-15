@@ -2,6 +2,7 @@
 
 import { CyclePricing, useKeeperOrderBook, type CyclePricingFeed } from "@/components/CyclePricing";
 import { CycleTape } from "@/components/CycleTape";
+import { ExercisePanel } from "@/components/ExercisePanel";
 import { OrderPayload } from "@/components/OrderPayload";
 import { GuardBadges, VaultPhaseBadge } from "@/components/PhaseBadge";
 import { StrandedBanner } from "@/components/StrandedBanner";
@@ -533,6 +534,12 @@ export default function CyclePage() {
                 <OrderPayload listing={feedListing} snapshot={v} seaportStatus={seaportStatus} />
               </div>
             ) : null}
+
+            {/* Exercise, for a connected wallet that holds this week's option. It renders nothing
+                for anyone else (no wrapper element here), so this column stays :empty for them.
+                The window, strike and lot are the clearinghouse's own tuple and the clock is the
+                chain's latest block (components/ExercisePanel.tsx). */}
+            <ExercisePanel snapshot={v} />
           </div>
         </div>
 

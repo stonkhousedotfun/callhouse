@@ -2,7 +2,7 @@
 
 import { useEffect, useMemo, useState, useSyncExternalStore } from "react";
 import type { Abi, Address, Hex } from "viem";
-import { useReadContracts } from "wagmi";
+import { useBlock, useReadContracts } from "wagmi";
 
 import { ASSET, CLEARINGHOUSE, LOT_SIZE, SEAPORT, USDG, VAULT, seaportAbi, stockTokenAbi, valoremClearAbi, vaultAbi } from "./contracts";
 import { capacityContracts, strikeBand, type PolicyBps } from "./format";
@@ -599,6 +599,117 @@ export function useOrderStatus(orderHash: Hex | undefined) {
   }, [query.data]);
 
   return { data, isLoading: query.isLoading };
+}
+
+/* ------------------------------------------------------------------------- exercising --- */
+
+/**
+ * The chain's clock: the latest block's timestamp, in whole seconds, polled every few seconds.
+ * Undefined until the first block has been read.
+ *
+ * The exercise button is gated on THIS, not on useNow(): the clearinghouse compares its window
+ * with `block.timestamp`, a device clock can run fast, and a fork can be warped days ahead of the
+ * wall. A mined block's timestamp is never later than the block after it, so nothing gated on this
+ * opens early; lib/exercise.ts explains the one-block lag at the closing edge.
+ */
+export function useChainTime() {
+  const query = useBlock({ blockTag: "latest", query: { refetchInterval: 4_000, staleTime: 2_000 } });
+  return {
+    timestamp: query.data === undefined ? undefined : Number(query.data.timestamp),
+    blockNumber: query.data?.number ?? undefined,
+    refetch: query.refetch,
+  };
+}
+
+export type ExercisePosition = {
+  /** The clearinghouse the reads went to and an exercise goes to: the vault's own `clear()`. */
+  clear?: Address;
+  optionId?: bigint;
+  /** Valorem's tuple for the option id, read from that clearinghouse, not from the keeper. */
+  underlyingAsset?: Address;
+  /** NVDA base units per contract. */
+  underlyingAmount?: bigint;
+  exerciseAsset?: Address;
+  /** Strike per contract, USDG base units. */
+  strikeUsdg?: bigint;
+  exerciseTs?: number;
+  expiryTs?: number;
+  /** The account's balance of the option ERC-1155. */
+  optionBalance?: bigint;
+  usdgBalance?: bigint;
+  /** The account's USDG allowance to the clearinghouse. */
+  usdgAllowance?: bigint;
+  feesEnabled?: boolean;
+  feeBps?: number;
+};
+
+/**
+ * What the Exercise card needs for one account, in one multicall against the clearinghouse the
+ * VAULT names (`snapshot.clear`; never the compiled constant, because an exercise is sent there):
+ * the option tuple, the account's option balance, its USDG balance and allowance to that
+ * clearinghouse, and the clearinghouse's fee switch. Disabled until the vault, its option id and a
+ * wallet are all known.
+ */
+export function useExercisePosition(snapshot: VaultSnapshot, account: Address | undefined) {
+  const clear = snapshot.clear;
+  const optionId = snapshot.optionId;
+  const enabled = clear !== undefined && optionId !== undefined && optionId !== 0n && account !== undefined;
+
+  const { contracts, index } = useMemo(() => {
+    if (!enabled) return buildBatch([]);
+    const onClear = (functionName: string, args?: readonly unknown[]): Call => ({
+      address: clear,
+      abi: valoremClearAbi as unknown as Abi,
+      functionName,
+      args,
+    });
+    return buildBatch([
+      ["option", onClear("option", [optionId])],
+      ["optionBalance", onClear("balanceOf", [account, optionId])],
+      ["feesEnabled", onClear("feesEnabled")],
+      ["feeBps", onClear("feeBps")],
+      ["usdgBalance", { address: USDG, abi: stockTokenAbi as unknown as Abi, functionName: "balanceOf", args: [account] }],
+      ["usdgAllowance", { address: USDG, abi: stockTokenAbi as unknown as Abi, functionName: "allowance", args: [account, clear] }],
+    ]);
+  }, [enabled, clear, optionId, account]);
+
+  const query = useReadContracts({
+    contracts,
+    allowFailure: true,
+    query: { enabled: contracts.length > 0, refetchInterval: REFRESH_MS, staleTime: 5_000 },
+  });
+
+  const data = useMemo<ExercisePosition>(() => {
+    if (!enabled) return {};
+    const r = readerFor(index, query.data as readonly CallResult[] | undefined);
+    const option = r.raw("option") as
+      | {
+          underlyingAsset: Address;
+          underlyingAmount: bigint;
+          exerciseAsset: Address;
+          exerciseAmount: bigint;
+          exerciseTimestamp: number;
+          expiryTimestamp: number;
+        }
+      | undefined;
+    return {
+      clear,
+      optionId,
+      underlyingAsset: option?.underlyingAsset,
+      underlyingAmount: option === undefined ? undefined : big(option.underlyingAmount),
+      exerciseAsset: option?.exerciseAsset,
+      strikeUsdg: option === undefined ? undefined : big(option.exerciseAmount),
+      exerciseTs: option === undefined ? undefined : num(option.exerciseTimestamp),
+      expiryTs: option === undefined ? undefined : num(option.expiryTimestamp),
+      optionBalance: big(r.raw("optionBalance")),
+      usdgBalance: big(r.raw("usdgBalance")),
+      usdgAllowance: big(r.raw("usdgAllowance")),
+      feesEnabled: bool(r.raw("feesEnabled")),
+      feeBps: num(r.raw("feeBps")),
+    };
+  }, [enabled, index, query.data, clear, optionId]);
+
+  return { data, isLoading: query.isLoading, refetch: query.refetch };
 }
 
 /* ---------------------------------------------------------------------------------- misc --- */

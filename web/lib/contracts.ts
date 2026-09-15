@@ -55,13 +55,14 @@ export const USDG = fromEnv(
 /**
  * The Valorem clearinghouse the vault was constructed with. Holds the option ERC-1155s and the
  * vault's claim NFT; the vault reads each week's option tuple (strike, exercise, expiry, lot)
- * from it. The default is the upstream ValoremOptionsClearinghouse build on 4663 (solc 0.8.16);
- * a deploy on our own Clear (contracts/script/DeployClear.s.sol) overrides it.
+ * from it. The default is the Clear the live vault was constructed with: our own
+ * ValoremOptionsClearinghouse (contracts/script/DeployClear.s.sol), whose runtime equals the
+ * upstream build apart from the metadata hash. It is not Overcall's instance at 0x9a7b…C0C0.
  */
 export const CLEARINGHOUSE = fromEnv(
   "NEXT_PUBLIC_CLEARINGHOUSE",
   process.env.NEXT_PUBLIC_CLEARINGHOUSE,
-  getAddress("0x9a7b40e5c1dB1Af822ef091c990b58b02C78C0C0"),
+  getAddress("0x53d7A6d0489Daf3d67b9A314e0eAB2B78Acab9C6"),
 )!;
 
 /** Seaport 1.6. The vault is the offerer AND the zone of its own listing; Seaport pulls directly. */

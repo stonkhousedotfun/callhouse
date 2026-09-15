@@ -677,7 +677,7 @@ re-indexes, see 11.3. The authoritative list is [`../indexer/.env.example`](../i
 
 | Variable | Set to | Notes |
 |---|---|---|
-| `PONDER_RPC_URL_4663` | `https://rpc.mainnet.chain.robinhood.com` | **required.** Archive-capable; backfill runs historical `eth_getLogs`. **Never** the publicnode backup; it refuses archive log queries. A dedicated endpoint turns a backfill from hours into minutes |
+| `PONDER_RPC_URL_4663` | an archive endpoint; production uses `https://robinhood-mainnet.g.alchemy.com/v2/<key>` | **required.** Backfill runs historical `eth_getLogs` **and** `eth_call` at past blocks. `rpc.mainnet.chain.robinhood.com` answers "metadata is not found" on a historical `eth_call`, and a backfill against it stalled at 0% on 2026-09-15. **Never** the publicnode backup either; it refuses archive queries without a token. The URL carries the API key, so treat it as a secret |
 | `VAULT_ADDRESS` (alias `VAULT`) | `ops/addresses.json` → `chains.4663.ours.vault` | **required.** No default by design |
 | `START_BLOCK` | the vault's deploy block | **required.** No default: a genesis scan of a 62M-block chain is not a backfill |
 | `DATABASE_URL` | `${{Postgres.DATABASE_URL}}` | **required on Railway.** Unset means PGlite inside the container, which dies with the container |

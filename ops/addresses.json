@@ -2,7 +2,7 @@
   "_readme": "Stonkhouse address book. Every entry carries the call that proved it. `confirmed: true` means an eth_getCode or eth_call was actually run against a chain-4663 RPC and returned the stated result. Never add an address here without that check, and never copy one out of a frontend bundle without re-deriving it from chain state.",
   "_reconfirmedAt": "2026-09-12T18:36:00Z",
   "_reconfirmedAtBlock": 61322378,
-  "_reconfirmedBy": "ops pass, cast 1.3.5 against https://rpc.mainnet.chain.robinhood.com. Every `confirmed: true` row on chain 4663 below was re-read in this pass, not copied from recon. The 2026-09-13 redesign pass restructured the file (registry moved to history, `ours.clearinghouse` added, 46630 verdict corrected) without re-reading addresses.",
+  "_reconfirmedBy": "ops pass, cast 1.3.5 against https://rpc.mainnet.chain.robinhood.com. Every `confirmed: true` row on chain 4663 below was re-read in this pass, not copied from recon. The 2026-09-13 redesign pass restructured the file (registry moved to history, `ours.clearinghouse` added, 46630 verdict corrected) without re-reading addresses. The `ours.*` rows and `canaryDepositor` did not exist at block 61322378: they were added and read on chain on 2026-09-15 (deploys from block 63467156), and each carries its own evidence.",
   "_redesign_2026_09_13": "The vault no longer reads an Overcall registry, lists on Overcall's order book, pays an Overcall fee item, or answers EIP-1271. It reads the option tuple from the clearinghouse it was constructed with (`vault.clear()`), numbers its own cycles, lists ONE PARTIAL_RESTRICTED Seaport order with itself as zone, and writes exactly the filled contracts inside Seaport's authorizeOrder hook. Everything under `_history_overcall` below is kept as recon evidence and is NOT wired into anything.",
   "_sources": [
     "ops/recon/R1-overcall-registry.md",
@@ -16,7 +16,7 @@
     "ops/recon/sample-overcall-order.json",
     "contracts/docs/DEPLOY.md (redesign rehearsal record, S4, fork block 62533535)"
   ],
-  "_notStale": "Addresses in this file are immutable contract addresses and do not go stale. Cycle data (option ids, strikes, exerciseTimestamp, expiryTimestamp) DOES go stale weekly and is deliberately NOT in this file: the keeper creates each week's option type on the clearinghouse itself, and the vault's `optionId()`, `cycleStrikeUsdg()`, `cycleExerciseTs()`, `cycleExpiryTs()` are the live truth.",
+  "_notStale": "Contract addresses in this file are immutable. What sits AT or BEHIND some of them is not: role holders (admin, keeper, guardian: grantRole/revokeRole), the vault's feeRecipient (setFeeRecipient), the Clear's feeTo (setFeeTo/acceptFeeTo), Safe owners, and the feed proxy's underlying aggregator (see nvdaUsdFeed._bindToTheProxy) can all change; re-read them before relying on them. Cycle data (option ids, strikes, exerciseTimestamp, expiryTimestamp) DOES go stale weekly and is deliberately NOT in this file: the keeper creates each week's option type on the clearinghouse itself, and the vault's `optionId()`, `cycleStrikeUsdg()`, `cycleExerciseTs()`, `cycleExpiryTs()` are the live truth.",
   "chains": {
     "4663": {
       "name": "Robinhood Chain",
@@ -55,7 +55,7 @@
         "sourcify": {
           "url": "https://sourcify.dev",
           "supportsChain": true,
-          "_what": "The source-verification path for the vault and both libraries. Holds exact matches for Valorem Clear and the TokenURIGenerator already. Never exercised for our contracts (fork only); the first mainnet deploy is the first run."
+          "_what": "The source-verification path for the vault and both libraries. Holds exact matches for Overcall's Valorem Clear and the TokenURIGenerator. Used for our contracts on 2026-09-15: the vault is a partial `match` (creationMatch and runtimeMatch both `match`, not `exact_match`, because foundry.toml sets bytecode_hash = \"none\" and the bytecode carries no metadata hash to match exactly), both libraries are runtimeMatch `match` with creationMatch null, and our own Clear (`ours.clearinghouse`) is NOT verified. Re-checked with GET https://sourcify.dev/server/v2/contract/4663/{address} on 2026-09-15."
         },
         "alternates": {
           "_note": "Display only. None is a Blockscout, none has a contract-verification API, none should be depended on programmatically.",
@@ -68,7 +68,7 @@
       "contracts": {
         "valoremClear": {
           "address": "0x9a7b40e5c1dB1Af822ef091c990b58b02C78C0C0",
-          "what": "ValoremOptionsClearinghouse ('Valorem Clear'), Overcall's unmodified upstream instance. valorem-core @6436c823, solc 0.8.16. Holds the collateral, mints the option ERC-1155 and the claim NFT, settles exercise. This is the DEFAULT clearinghouse the vault is constructed with (Deploy.s.sol `CLEARINGHOUSE`); the vault may instead target our own instance from script/DeployClear.s.sol (see `ours.clearinghouse`). The vault writes here only inside a Seaport fill (authorizeOrder \u2192 clear.write) and keeps its own claim NFT; the keeper creates each week's option type here with newOptionType (permissionless).",
+          "what": "ValoremOptionsClearinghouse ('Valorem Clear'), Overcall's unmodified upstream instance. valorem-core @6436c823, solc 0.8.16. Holds the collateral, mints the option ERC-1155 and the claim NFT, settles exercise. It is still the compiled default clearinghouse in Deploy.s.sol (`CLEARINGHOUSE`, overridable with the CLEARINGHOUSE env var) and the code default in the keeper, web and indexer, but the LIVE vault was constructed with our own instance from script/DeployClear.s.sol (`ours.clearinghouse`, vault.clear() read 2026-09-15), so nothing of ours writes here. Kept as the source-verified reference: our Clear's runtime equals this one except the CBOR metadata hash.",
           "chainId": 4663,
           "confirmed": true,
           "evidence": "eth_getCode -> 16110 bytes (re-read 2026-09-12 block 61322378). Sourcify exact_match 2026-09-10T13:24:56Z. eth_call option(0x7dc3fe3e..) returned the NVDA/USDG option struct with underlyingAmount 1e18, exerciseAmount 246000000. feesEnabled() -> false, feeBps() -> 15, feeTo() -> 0xdAe7e82A....",
@@ -98,7 +98,7 @@
         },
         "usdg": {
           "address": "0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168",
-          "what": "USDG, the exercise asset and the premium currency. 6 decimals. Paxos-issued, behind a proxy. Instant pause, per-address freeze (enforced on the transferFrom SPENDER too, so a frozen Seaport blocks every fill), wipe and burn-from powers; 27 freezes observed on 4663, none lifted. A pause or a freeze of the vault or the Clear STRANDS the week's close (the vault keeps the claim, anyone can retryStrandedClaim) and defers the USDG leg of a redemption (UsdgLegDeferred).",
+          "what": "USDG, the exercise asset and the premium currency. 6 decimals. Paxos-issued, behind a proxy. Instant pause, per-address freeze (enforced on the transferFrom SPENDER too, so a frozen Seaport blocks every fill), wipe and burn-from powers; 27 freezes observed on 4663, none lifted. In a week with any assignment, a pause or a freeze of the vault or the Clear STRANDS the week's close (the Clear sends USDG on redeem only when some is due, so an unassigned week's close does not touch USDG; the vault keeps the claim, anyone can retryStrandedClaim). A pause or freeze also defers the USDG leg of a redemption (UsdgLegDeferred).",
           "chainId": 4663,
           "confirmed": true,
           "evidence": "eth_getCode -> 170 bytes (proxy). decimals() -> 6.",
@@ -114,7 +114,7 @@
           "beacon": "0xe10b6f6b275de231345c20d14ab812db62151b00",
           "implementation": "0xb35490d6f9163DE4F80d88dc75c3516eb64C5aE2",
           "_uiMultiplier": "ERC-8056 display multiplier. DISPLAY ONLY. The vault's internal maths use raw balances, and the Chainlink answer ALREADY has the multiplier applied \u2014 never apply it twice. Do not arm on a day the multiplier is scheduled to change.",
-          "_oraclePaused": "An issuer broadcast flag on the token. Vault._requireOracleLive() staticcalls it and reverts OraclePaused when true, at arm AND at every fill, so the vault holds spot and sells nothing. It does not itself stop Chainlink transmitting."
+          "_oraclePaused": "An issuer broadcast flag on the token. The vault staticcalls it and reverts OraclePaused when true at arm (ValoremLib.open), at listing (Vault.approveListing via _requireOracleLive) AND at every fill (ValoremLib.writeOnFill), so the vault holds spot and sells nothing. It does not itself stop Chainlink transmitting."
         },
         "multicall3": {
           "address": "0xcA11bde05977b3631167028862bE2a173976CA11",
@@ -125,7 +125,7 @@
         },
         "clearFeeTo": {
           "address": "0xdAe7e82A2E7D566C67E87C164B05a1C560190782",
-          "what": "ValoremClear.feeTo() on Overcall's instance: the key that can flip the 15 bps engine fee switch (no timelock, no event on nomination). An unfunded EOA, not a contract, not a Safe. It is ALSO Overcall's off-chain premium fee recipient, which no longer concerns us: the redesigned vault's listings carry no fee item and this address appears nowhere in the vault. Monitor it (ETH/nonce activity, FeeSwitchUpdated, Clear storage slot 3) when the vault targets Overcall's Clear; irrelevant when the vault targets our own.",
+          "what": "ValoremClear.feeTo() on Overcall's instance: the key that can flip the 15 bps engine fee switch (no timelock, no event on nomination). An unfunded EOA, not a contract, not a Safe. It is ALSO Overcall's off-chain premium fee recipient, which no longer concerns us: the redesigned vault's listings carry no fee item and this address appears nowhere in the vault. Monitor it (ETH/nonce activity, FeeSwitchUpdated, Clear storage slot 3) when the vault targets Overcall's Clear; irrelevant when the vault targets our own, which the live vault does (its Clear's feeTo is `ours.safeAdmin`).",
           "chainId": 4663,
           "confirmed": true,
           "isEOA": true,
@@ -180,7 +180,7 @@
           "what": "The deterministic CREATE2 factory forge uses for library deploys. SeaportOrderLib and ValoremLib are deployed through it, so their addresses depend only on their bytecode (see `ours`).",
           "chainId": 4663,
           "confirmed": true,
-          "evidence": "Used by the S4 rehearsal on a fork of 4663 (contracts/docs/DEPLOY.md); present on the live chain per forge's deploy path."
+          "evidence": "Used by the S4 rehearsal on a fork of 4663 (contracts/docs/DEPLOY.md). On mainnet 2026-09-15 the admin EOA deployed both libraries through it: nonce 2 tx 0xcd36aa43f3eabd030e4be0659af276ff4792baf229e5ddb7fbf38028930e1cf7 (SeaportOrderLib) and nonce 3 tx 0x5eef1950697ec75ea10181ad417ba5c2aefc8043d1d77116cbce303e27df2d77 (ValoremLib)."
         },
         "weth": {
           "address": "0x0Bd7D308f8E1639FAb988df18A8011f41EAcAD73",
@@ -223,46 +223,46 @@
           }
         ],
         "signature": "empty (0x). The vault pre-validates the hash on Seaport (seaport.validate in approveListing); there is no key and no EIP-1271 hook.",
-        "_fill": "Any Seaport 1.6 fulfil function. Seaport calls vault.authorizeOrder BEFORE any transfer on every path; the hook re-checks the live listing, Listed, not halted, the clock, the fee switch, the oracle, the band FLOOR and the premium floor at live spot (PremiumBelowFloorAtFill), sizes written + k, writes exactly k on the clearinghouse and approves the minted tokens; Seaport moves them to the buyer and the USDG to the vault; vault.validateOrder then reverts InventoryLeftBehind unless the vault's option balance is back at the pre-fill baseline. Gas: first fill \u2248 470k, top-up \u2248 245k (spike figures); the fill page pre-flights with ~500k.",
+        "_fill": "Any Seaport 1.6 fulfil function. Seaport calls vault.authorizeOrder BEFORE any transfer on every path; the hook re-checks the live listing, Listed, not halted, the clock, the fee switch, the oracle, the band FLOOR and the premium floor at live spot (PremiumBelowFloorAtFill), sizes written + k, and writes exactly k on the clearinghouse (approving only its NVDA collateral to the Clear, reset to 0 after); Seaport moves the minted tokens to the buyer under the standing setApprovalForAll the vault's constructor gave it once and the USDG to the vault; vault.validateOrder then reverts InventoryLeftBehind unless the vault's option balance is back at the pre-fill baseline. Gas: the fill page expects 440k-500k for a first fill and 270k-320k for a top-up (anvil receipts, web/lib/fillPreflight.ts FILL_GAS) and simulates with 800k (SIMULATION_GAS).",
         "_venue": "The self-hosted fill page (/vault/nvda/cycle, fed by the keeper's /orders through the web server). There is no other venue and no off-chain book."
       },
       "ours": {
-        "_status": "DEPLOYED 2026-09-15 on chain 4663. Path A bootstrap: own Clear, feeTo = 1-of-1 Safe, vault admin = hot wallet account 0. Sourcify exact match on vault + both libraries. Keeper NOT started.",
+        "_status": "DEPLOYED 2026-09-15 on chain 4663. Path A bootstrap: own Clear, feeTo = 1-of-1 Safe, vault admin = hot wallet account 0 (no timelock; Safe handover deferred). Sourcify partial `match` (not exact_match) on the vault (creation and runtime) and on both libraries (runtime only); our Clear is NOT source-verified on Sourcify or Blockscout, and Blockscout shows only the vault, as partially verified. Keeper RUNNING on Railway (service `keeper`, deployed with `railway up`, no git source; first on chain 07:50 UTC with newOptionType + rollOpen; current deployment 8437b1c3 since 15:28 UTC). Canary cycle 1 Listed as of 2026-09-15 ~17:00 UTC: one contract offered, none sold. Live cycle numbers are on the vault, not here; HANDOFF.md has the dated snapshot.",
         "_fillFrom": "contracts/broadcast/Deploy.s.sol/4663/run-latest.json and DeployClear.s.sol/4663/run-latest.json, 2026-09-15",
-        "_contractsCommit": "v1.0.0-rc1 @ 165b4ab (Vault runtime 25,775 B). Verify.s.sol run from this commit: VERIFY PASSED 61 checks bootstrap unconfigured, then after Configure keeper+guardian granted.",
+        "_contractsCommit": "v1.0.0-rc1 @ 165b4ab (Vault runtime 25,775 B); callhouse-contracts main is 0e2f6f6, a docs-only rename on top with identical src/. Verify.s.sol run from this commit: VERIFY PASSED 61 checks bootstrap unconfigured, then after Configure keeper+guardian granted.",
         "vault": {
           "address": "0x88a98931E3682137E7e4D3426f623247f4A4ecbb",
           "what": "Callhouse NVDA vault (cNVDA). ERC-20 shares, Seaport offerer AND zone, Valorem writer (inside fills only).",
           "chainId": 4663,
           "confirmed": true,
-          "evidence": "eth_getCode live 2026-09-15; Sourcify match; vault.clear()=0x53d7A6d0489Daf3d67b9A314e0eAB2B78Acab9C6; seaportZone()=self; depositCap=20e18; phase Idle. Deploy tx block 63467882.",
+          "evidence": "eth_getCode live 2026-09-15; Sourcify match; vault.clear()=0x53d7A6d0489Daf3d67b9A314e0eAB2B78Acab9C6; seaportZone()=self; depositCap=20e18; phase Idle at deploy (Listed since rollOpen in block 63494170). Deploy tx 0x40ed44483ae7ba95c81046df9f587b61abbfa0a594560de644374dc5891f2842, block 63467882.",
           "deployBlock": 63467882,
           "_deployScript": "contracts/script/Deploy.s.sol"
         },
         "clearinghouse": {
           "address": "0x53d7A6d0489Daf3d67b9A314e0eAB2B78Acab9C6",
-          "what": "Our DeployClear instance. feeTo = 1-of-1 admin Safe 0xff1454009F024507f3E455eb2027E98fAF4ccF61; feesEnabled false; feeBps 15.",
+          "what": "Our DeployClear instance (valorem-core @6436c823, solc 0.8.16). feeTo = 1-of-1 admin Safe 0xff1454009F024507f3E455eb2027E98fAF4ccF61; feesEnabled false; feeBps 15. NOT source-verified on Sourcify or Blockscout; its 16,110-byte runtime equals Overcall's Sourcify exact_match Clear (`contracts.valoremClear`) except the CBOR metadata hash.",
           "chainId": 4663,
           "confirmed": true,
           "evidence": "eth_call feeTo/feesEnabled/feeBps live; vault.clear() returns this."
         },
         "seaportOrderLib": {
           "address": "0x6B617a0B578Ef6EDCD07774468f08b3778272D8A",
-          "what": "SeaportOrderLib CREATE2. Sourcify match.",
+          "what": "SeaportOrderLib CREATE2. Sourcify partial `match` (runtimeMatch match, creationMatch null). Not verified on Blockscout.",
           "chainId": 4663,
           "confirmed": true,
           "evidence": "Sourcify match 2026-09-15; linked into vault."
         },
         "valoremLib": {
           "address": "0xd3CB94893EAb55e425cCd77Db98458b38D75Fa3d",
-          "what": "ValoremLib CREATE2. Sourcify match.",
+          "what": "ValoremLib CREATE2. Sourcify partial `match` (runtimeMatch match, creationMatch null). Not verified on Blockscout.",
           "chainId": 4663,
           "confirmed": true,
           "evidence": "Sourcify match 2026-09-15; linked into vault."
         },
         "safeAdmin": {
           "address": "0xff1454009F024507f3E455eb2027E98fAF4ccF61",
-          "what": "1-of-1 Safe holding Clear feeTo. Owner 0x7A3a8C3F6331f63107D5b3aEeA0515e799022C32. Does NOT hold vault DEFAULT_ADMIN_ROLE yet (bootstrap).",
+          "what": "1-of-1 Safe holding Clear feeTo. Owner 0x7A3a8C3F6331f63107D5b3aEeA0515e799022C32. Does NOT hold vault DEFAULT_ADMIN_ROLE yet (bootstrap). Safe v1.4.1, nonce 0 (never executed a tx), no modules, no guard; created by the admin EOA at its nonce 0.",
           "chainId": 4663,
           "confirmed": true,
           "evidence": "createProxyWithNonce tx 0x69fbef451989bf557c2b2c120464a3e04651df8bc5803176a864987b8709f231; getThreshold=1; getOwners=[0x7A3a\u2026].",
@@ -270,24 +270,31 @@
         },
         "safeFee": {
           "address": "0xEb82c3D0F89d47453F94f0C2b2a2752e27a19d9b",
-          "what": "Protocol fee recipient for the canary: hot-wallet account 0 (EOA). Not a Safe.",
+          "what": "Protocol fee recipient for the canary: hot-wallet account 0 (EOA). Not a Safe, despite this key's name. The same EOA deployed everything and holds the vault's DEFAULT_ADMIN_ROLE (the only holder).",
           "chainId": 4663,
           "confirmed": true,
-          "evidence": "vault.feeRecipient() at deploy"
+          "evidence": "vault.feeRecipient() at deploy and re-read 2026-09-15; no FeeRecipientUpdated event since deploy."
         },
         "guardian": {
           "address": "0x29741A8d283a253E8Ce10aDfd04C6507438b6F39",
-          "what": "Guardian EOA, mnemonic account 2. GUARDIAN_ROLE granted.",
+          "what": "Guardian EOA, mnemonic account 2 (same mnemonic as the admin and keeper). GUARDIAN_ROLE granted; has never sent a tx (nonce 0 on 2026-09-15).",
           "chainId": 4663,
           "confirmed": true,
-          "evidence": "hasRole GUARDIAN_ROLE true after Configure"
+          "evidence": "hasRole GUARDIAN_ROLE true after Configure, re-read 2026-09-15; granted in tx 0x4a883ff7dda6db10c3d01305ca4e4886dae2f5078a805673152ba65fc3cb6144."
         },
         "keeper": {
           "address": "0x06c131cfEd73A56893f5eB52D17252856FAFC1d2",
-          "what": "Keeper hot key, mnemonic account 1. KEEPER_ROLE granted. Service not started.",
+          "what": "Keeper hot key, mnemonic account 1. KEEPER_ROLE granted. Used by the Railway `keeper` service, running since 2026-09-15: cycle 1 newOptionType, rollOpen, two approveListing and one cancelListing (nonce 5).",
           "chainId": 4663,
           "confirmed": true,
-          "evidence": "hasRole KEEPER_ROLE true after Configure"
+          "evidence": "hasRole KEEPER_ROLE true after Configure, re-read 2026-09-15; granted in tx 0x9a5bda09b4e5405e839b8ad2587f3507828d816b5c90c4c497ad8b041a36dd00."
+        },
+        "canaryDepositor": {
+          "address": "0x2B7635F52F7E0818D48CF847BBCd5AaDBFC593Ad",
+          "what": "The canary's depositor (EOA): deposited 1.06 NVDA for 1.06 cNVDA, the vault's only deposit and only shareholder as of 2026-09-15. Holds no role.",
+          "chainId": 4663,
+          "confirmed": true,
+          "evidence": "cast logs on the vault, Deposit(address indexed sender,address indexed owner,uint256 assets,uint256 shares), from block 63467882: one event, block 63487510 (2026-09-15 07:39:18 UTC), tx 0x1baf66920660592ad741cf93265b2134258b7ff47575dc94e55572d08e63310c, sender = owner = this address, assets = shares = 1060000000000000000. eth_getCode -> 0x (EOA)."
         },
         "adminPhase": "bootstrap",
         "_adminPhase": "'bootstrap' while the deployer key holds DEFAULT_ADMIN_ROLE, 'safe' after HandoverAdmin.s.sol STEP=renounce. Verify.s.sol takes it as ADMIN_PHASE.",

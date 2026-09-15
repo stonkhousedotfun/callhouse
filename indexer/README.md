@@ -45,7 +45,7 @@ pnpm --filter @callhouse/indexer codegen     # ponder codegen: the config and sc
 
 | Variable | Required | Meaning |
 |---|---|---|
-| `PONDER_RPC_URL_4663` | yes | Archive-capable RPC. Use `https://rpc.mainnet.chain.robinhood.com`. |
+| `PONDER_RPC_URL_4663` | yes | Archive RPC that serves historical `eth_call` and `eth_getLogs`. Production uses `https://robinhood-mainnet.g.alchemy.com/v2/<key>`. `rpc.mainnet.chain.robinhood.com` cannot backfill: it answers "metadata is not found" on a historical `eth_call`. |
 | `VAULT_ADDRESS` (alias `VAULT`) | yes | The deployed Stonkhouse vault. |
 | `START_BLOCK` | yes | Block the vault was deployed in. |
 | `DATABASE_URL` | no | Postgres. Omit for a local PGlite DB under `.ponder/pglite`. |

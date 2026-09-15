@@ -3,12 +3,58 @@
 // artifact whenever ops/abis changes.
 //
 // The deployed 0x9a7b40e5c1dB1Af822ef091c990b58b02C78C0C0 is the exact upstream
-// ValoremOptionsClearinghouse (valorem-core @6436c823, solc 0.8.16). Read surface only —
-// this app never writes or exercises.
+// ValoremOptionsClearinghouse (valorem-core @6436c823, solc 0.8.16). A read surface, plus ONE
+// write: `exercise(optionId, amount)`, which the cycle page's Exercise card sends for a holder of
+// this week's option (components/ExercisePanel.tsx). The app never writes, redeems or transfers
+// on the clearinghouse. `exercise` and the four errors it can raise (clearExerciseErrorsAbi, just
+// below) were copied from the Clear artifact's ABI
+// (callhouse-contracts/script/artifacts/ValoremOptionsClearinghouse.json) and checked against
+// ValoremOptionsClearinghouse.exercise at 6436c823.
 //
 // TRAP, from ops/recon/R4-valorem-abi.md: `claim(claimId)` returns amountWritten and
 // amountExercised as 1e18-SCALED SCALARS, not contract counts. Divide by 1e18 before you
 // show a number to a human. See scaleToContracts() in lib/format.ts.
+
+/**
+ * The custom errors `exercise` can raise, in the order the Clear checks them: InvalidOption (the id
+ * is a claim, not an option), ExpiredOption (`expiryTimestamp <= block.timestamp`, which is also
+ * what an uninitialised type reads as), ExerciseTooEarly (`exerciseTimestamp > block.timestamp`),
+ * CallerHoldsInsufficientOptions (`balanceOf[msg.sender][optionId] < amount`). The token legs are
+ * solmate SafeTransferLib and revert with Error("TRANSFER_FROM_FAILED") (the USDG pull) and
+ * Error("TRANSFER_FAILED") (the NVDA push), not with the token's own error; lib/exercise.ts reads
+ * them that way. Errors only: nothing here is called.
+ */
+export const clearExerciseErrorsAbi = [
+  {
+    type: "error",
+    name: "InvalidOption",
+    inputs: [{ name: "token", type: "uint256", internalType: "uint256" }],
+  },
+  {
+    type: "error",
+    name: "ExpiredOption",
+    inputs: [
+      { name: "optionId", type: "uint256", internalType: "uint256" },
+      { name: "expiry", type: "uint40", internalType: "uint40" },
+    ],
+  },
+  {
+    type: "error",
+    name: "ExerciseTooEarly",
+    inputs: [
+      { name: "optionId", type: "uint256", internalType: "uint256" },
+      { name: "exercise", type: "uint40", internalType: "uint40" },
+    ],
+  },
+  {
+    type: "error",
+    name: "CallerHoldsInsufficientOptions",
+    inputs: [
+      { name: "optionId", type: "uint256", internalType: "uint256" },
+      { name: "amount", type: "uint112", internalType: "uint112" },
+    ],
+  },
+] as const;
 
 export const valoremClearAbi = [
   {
@@ -496,4 +542,23 @@ export const valoremClearAbi = [
     ],
     "stateMutability": "view"
   },
+  {
+    "type": "function",
+    "name": "exercise",
+    "inputs": [
+      {
+        "name": "optionId",
+        "type": "uint256",
+        "internalType": "uint256"
+      },
+      {
+        "name": "amount",
+        "type": "uint112",
+        "internalType": "uint112"
+      }
+    ],
+    "outputs": [],
+    "stateMutability": "nonpayable"
+  },
+  ...clearExerciseErrorsAbi,
 ] as const;

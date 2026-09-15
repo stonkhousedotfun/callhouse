@@ -67,14 +67,21 @@ function blockNumber(name: string, fallback?: number): number {
   return n;
 }
 
-/** RPC. The publicnode backup rejects `eth_getLogs` on old ranges, so backfill needs the primary. */
+/**
+ * RPC. It must serve historical state: during backfill the handlers `eth_call` the vault at past
+ * blocks, not only `eth_getLogs`. rpc.mainnet.chain.robinhood.com answers "metadata is not found"
+ * on a historical `eth_call` (a backfill against it stalled at 0% on 2026-09-15), and the
+ * publicnode backup answers "Archive requests require a personal token". Production uses a keyed
+ * Alchemy endpoint.
+ */
 export const RPC_URL =
   env("PONDER_RPC_URL_4663") ??
   requireEnv(
     "PONDER_RPC_URL_4663",
-    "Set it to https://rpc.mainnet.chain.robinhood.com (archive-capable). The publicnode " +
-      "backup answers 'Archive requests require a personal token' on historical getLogs and " +
-      "cannot backfill.",
+    "Set it to an archive RPC for chain 4663 that serves historical eth_call and eth_getLogs " +
+      "(production uses https://robinhood-mainnet.g.alchemy.com/v2/<key>). " +
+      "rpc.mainnet.chain.robinhood.com answers 'metadata is not found' on historical eth_call, and " +
+      "the publicnode backup answers 'Archive requests require a personal token'; neither can backfill.",
   );
 
 /** Our vault. The Seaport offerer AND zone, the Valorem writer, the ERC-20 whose shares we track. */

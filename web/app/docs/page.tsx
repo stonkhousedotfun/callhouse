@@ -1,11 +1,15 @@
 /**
- * The in-app docs: the weekly cycle in one page, what it costs, and the unabridged risk list.
+ * The in-app docs: the weekly cycle in one page, what it costs, and the risk list.
  *
  * This page is a condensation, not the source of truth. The canonical documents are
  * docs/ARCHITECTURE.md at the repo root, contracts/README.md, contracts/SECURITY.md and
  * contracts/docs/ACCOUNTING.md (the contracts submodule, leekzor/callhouse-contracts) and the
  * operator material in ops/runbooks/. Where this page and those disagree, this page is the one
  * that is wrong.
+ *
+ * Live values quoted below (policy, cap, fee, role holders, verification) were read on chain and
+ * on Sourcify on 2026-09-15. The admin can change the parameters at any time; when it does, this
+ * page must change with them.
  */
 import type { Metadata } from "next";
 import Link from "next/link";
@@ -22,12 +26,28 @@ export const metadata: Metadata = {
 };
 
 const ADDRESSES: Array<[string, string | undefined, string]> = [
-  ["Stonkhouse vault", VAULT, "shares, deposits, the queue, the phase machine; the offerer AND the zone of every listing"],
+  [
+    "Stonkhouse vault",
+    VAULT,
+    "shares, deposits, the queue, the phase machine; the offerer and the zone of every listing. Its on-chain name, “Callhouse NVDA” (cNVDA), predates the rename",
+  ],
   ["NVDA Stock Token", ASSET, "the collateral, 18 decimals"],
   ["USDG", USDG, "premium and strike currency, 6 decimals"],
-  ["Valorem Clear", CLEARINGHOUSE, "holds the option types; the vault writes into it at each fill and settles assignment through it"],
+  [
+    "Valorem Clear",
+    CLEARINGHOUSE,
+    "holds the option types and the calls; the vault writes into it at each fill, holders exercise on it, and the vault redeems its claim from it",
+  ],
   ["Seaport 1.6", SEAPORT, "the fill venue; the vault validates its order on chain and answers Seaport's zone hooks"],
 ];
+
+/** Role holders and the Clear's fee switch, read on chain on 2026-09-15 (hasRole, feeRecipient, feeTo). */
+const ADMIN_KEY = "0xEb82c3D0F89d47453F94f0C2b2a2752e27a19d9b";
+const KEEPER_KEY = "0x06c131cfEd73A56893f5eB52D17252856FAFC1d2";
+const GUARDIAN_KEY = "0x29741A8d283a253E8Ce10aDfd04C6507438b6F39";
+const CLEAR_FEE_SAFE = "0xff1454009F024507f3E455eb2027E98fAF4ccF61";
+/** The vault's `clear()`, read on chain on 2026-09-15. Fixed at deployment, so it cannot change. */
+const LIVE_CLEAR = "0x53d7A6d0489Daf3d67b9A314e0eAB2B78Acab9C6";
 
 /**
  * The page's h2s, in render order. The section list and the headings both read from here, so the
@@ -36,6 +56,7 @@ const ADDRESSES: Array<[string, string | undefined, string]> = [
 const SECTIONS = {
   product: { id: "product-in-one-paragraph", title: "The product in one paragraph" },
   week: { id: "week-step-by-step", title: "A week, step by step" },
+  exercise: { id: "exercising-a-call", title: "Exercising a call you bought" },
   costs: { id: "what-it-costs", title: "What it costs" },
   numbers: { id: "numbers-on-this-site", title: "The numbers on this site" },
   queue: { id: "deposits-withdrawals-queue", title: "Deposits, withdrawals, and the queue" },
@@ -66,13 +87,13 @@ export default function DocsPage() {
             <p>
               You deposit {MARKET} Stock Tokens and receive {SHARE_TICKER} shares. Once a week the keeper creates one
               out-of-the-money option type on Valorem Clear and the vault arms it after checking the strike, the lot and
-              the window itself; the vault then authorises one Seaport order for it and this site&apos;s{" "}
-              <Link href="/vault/nvda/cycle" className={DOC_LINK}>fill page</Link> is where the order is sold. Nothing is written when the
+              the window itself; the vault then authorises one Seaport order for it, and this site&apos;s{" "}
+              <Link href="/vault/nvda/cycle" className={DOC_LINK}>cycle page</Link> is where the order is sold. Nothing is written when the
               week opens: every fill writes exactly the contracts it buys, inside the buyer&apos;s transaction, so the vault
-              never holds an unsold call and can never be assigned on more than it was paid for. After expiry the keeper
-              reclaims: an out-of-the-money call returns the collateral, an exercised one returns the strike in USDG
-              instead. 5% of the premium goes to the protocol fee address; the rest of the premium, and any strike USDG
-              in full, becomes claimable pro rata. There is no protocol token.
+              never holds an unsold call and can never be assigned on more than it was paid for. After expiry{" "}
+              <code>rollClose</code> redeems the vault&apos;s claim: an unexercised call returns the collateral, an exercised
+              one returns the strike in USDG instead. 5% of the premium goes to the fee recipient; the rest of the premium,
+              and any strike USDG in full, becomes claimable pro rata. There is no protocol token.
             </p>
             <p>
               If nobody buys the call, the week earns nothing. That is a normal outcome, not a failure
@@ -88,59 +109,127 @@ export default function DocsPage() {
               <strong>The option type.</strong> The keeper creates it on the clearinghouse with{" "}
               <code>newOptionType</code> (permissionless): {MARKET} in, USDG out, one token per contract, an exercise time
               at the NYSE close on the cycle&apos;s Friday (16:00 Eastern, which is 20:00 UTC in daylight time and 21:00
-              UTC from November; the Thursday before a Friday market holiday) and an expiry 24 hours later. Every page
+              UTC from November; the Thursday before a Friday market holiday) and an expiry 24 hours later. The cycle page
               prints those two instants from the chain, in UTC and on the Eastern clock.
             </Step>
             <Step>
               <strong>Arm.</strong> <code>rollOpen(optionId)</code> reads the type back from the clearinghouse and
               refuses it unless the underlying is this vault&apos;s asset, the exercise asset is USDG, the lot is exactly one
-              token, the exercise time is at least an hour out, the window at least a day and the tenor at most three
-              weeks, Valorem&apos;s fee is off or accepted, the oracle is live, and the strike sits inside the vault&apos;s
-              out-of-the-money band, both bounds. It writes nothing. There is no registry.
+              token, the exercise time is at least an hour out, the window at least a day and the expiry at most 21 days
+              out, Valorem&apos;s fee is off or accepted, the feed is fresh and the oracle not paused, and the strike sits
+              inside the vault&apos;s out-of-the-money band, both bounds (3% to 12% above spot under today&apos;s policy). It
+              writes nothing. There is no registry.
             </Step>
             <Step>
               <strong>List.</strong> <code>approveListing</code> checks the keeper&apos;s Seaport order field by field —
               the vault is offerer and zone, PARTIAL_RESTRICTED, one ERC-1155 offer of the armed id sized at most to the
               vault&apos;s capacity, one USDG leg to the vault that divides by the size, the unit price at or below the
-              strike, an end time at or before the exercise time — then validates it on Seaport by hash. At most three
-              listings a cycle, cancelled or not: a relist is a reprice.
+              strike, an end time at or before the exercise time — then validates it on Seaport, so the order needs no
+              signature. At most three listings a cycle, cancelled or not: a relist is a reprice. The keeper prices a new
+              week from Cboe&apos;s free, delayed {MARKET} option quotes: a strike near 0.15 delta, kept 5% to 11.5% above
+              spot under today&apos;s policy, and an ask that is the larger of the vault&apos;s premium floor raised by 0.5%
+              of itself (a 50 bps margin on the floor, not on spot) and the quoted fair value plus 10%, never above the
+              strike. If the quotes are missing, stale or
+              inconsistent when a week opens, the keeper skips that week. The cycle page shows the inputs the keeper
+              reports; the chain cannot check them.
             </Step>
             <Step>
-              <strong>Fill, and write.</strong> A buyer fills k of N on the fill page (or with any Seaport 1.6 client).
-              Seaport calls the vault&apos;s <code>authorizeOrder</code> before moving anything; the vault re-checks its gate
-              at today&apos;s spot — the strike still above the band floor, the premium above its floor (plus Valorem&apos;s
-              fee valued at spot when it is on), the total size within capacity, the sale window still open, the oracle
-              live, writes not halted — and writes exactly k contracts into Valorem. Seaport moves them to the buyer and
-              the USDG to the vault; <code>validateOrder</code> reverts the fill unless no token stayed behind.
+              <strong>Fill, and write.</strong> A buyer fills k of N on the cycle page (or with any Seaport 1.6 client,
+              from the order the page lets you copy). Seaport calls the vault&apos;s <code>authorizeOrder</code> before
+              moving anything; the vault re-checks its gate at the feed&apos;s current price — the strike still at or above
+              the band floor, the premium at or above its floor (0.10% of spot per contract today, plus Valorem&apos;s fee
+              valued at spot when it is on), the total size within capacity, the sale window still open, the feed fresh
+              and the oracle not paused, writes not halted — and writes exactly k contracts into Valorem. Seaport moves
+              them to the buyer and the USDG to the vault; <code>validateOrder</code> reverts the fill unless no token
+              stayed behind.
             </Step>
             <Step>
-              <strong>Sale window closes.</strong> From the option&apos;s exercise time the hook refuses every fill and
-              deposits close (<code>maxDeposit() == 0</code>), whether or not anyone calls <code>lockBook</code>. The calls
-              sold are exercisable until expiry.
+              <strong>Sale window closes, exercise opens.</strong> From the option&apos;s exercise time the hook refuses
+              every fill and deposits close (<code>maxDeposit() == 0</code>), whether or not anyone calls{" "}
+              <code>lockBook</code>. From then until expiry a holder can exercise on the Clear (next section). Valorem
+              assigns the exercise to writers of the option id inside the holder&apos;s own transaction, and when that
+              reaches the vault&apos;s claim the share price falls there and then.
             </Step>
             <Step>
               <strong>Expiry, then settle.</strong> <code>rollClose</code> redeems the Valorem claim, harvests the USDG,
               settles the redemption queue and returns the vault to Idle. The keeper can call it from expiry; anyone can
-              call it an hour later, so a dead keeper cannot strand the week. If Valorem&apos;s redeem reverts (a USDG pause
-              or freeze, a Stock Token blocklist) the vault still goes to Idle with the claim kept: the stranded state,
+              call it an hour later, so a dead keeper cannot strand the week. If Valorem&apos;s redeem reverts (in an assigned
+              week a USDG pause or freeze; in a week not fully assigned a Stock Token pause or blocklist) the vault still goes to Idle with the claim kept: the stranded state,
               below.
             </Step>
           </StepList>
         </DocSection>
 
+        <DocSection {...SECTIONS.exercise}>
+          <p>
+            A call bought on the cycle page is an ERC-1155 token on the Valorem Clear whose id is the vault&apos;s{" "}
+            <code>optionId()</code>. Each one is the right to buy one {MARKET} Stock Token for the week&apos;s strike in
+            USDG, from the option&apos;s exercise time until its expiry: the Clear accepts an exercise only while{" "}
+            <code>exerciseTimestamp ≤ now &lt; expiryTimestamp</code>. Nothing is exercised automatically, and a call
+            that is not exercised before expiry is worthless.
+          </p>
+          <DocList>
+            <li>
+              <strong>The Exercise card.</strong> On the <Link href="/vault/nvda/cycle" className={DOC_LINK}>cycle page</Link>,
+              a connected wallet that holds this week&apos;s option sees an Exercise card: its option balance, the strike,
+              the {MARKET} received per contract, and the exact USDG totals. You pick a number of contracts, up to your
+              balance.
+            </li>
+            <li>
+              <strong>When it works.</strong> The Exercise button is enabled only inside the exercise window, judged by
+              the timestamp of the chain&apos;s latest block, the clock the Clear uses. That block can trail the chain by one
+              block interval, so right at expiry the button can stay on a moment too long; the simulation run just
+              before sending catches that, and a refused exercise moves no tokens. Before the window the card shows when
+              exercise opens, in UTC and Eastern time. After expiry it says the options expired, but only until the week
+              is closed: <code>rollClose</code> clears the vault&apos;s <code>optionId()</code>, and from then on the card
+              no longer appears.
+            </li>
+            <li>
+              <strong>What it sends.</strong> If the wallet&apos;s USDG allowance to the Clear is below the total (the
+              strike cost, plus Valorem&apos;s fee if that switch is ever turned on), first an approval of exactly that
+              total; an allowance that already covers it is left as it is. Then <code>exercise(optionId, amount)</code>. In the exercise
+              transaction the Clear burns your calls, takes the USDG and sends you the {MARKET}. The card simulates it
+              first and shows the revert reason if it would fail.
+            </li>
+            <li>
+              <strong>Out of the money.</strong> The card compares the vault&apos;s feed price with the total cost: the
+              strike, plus Valorem&apos;s fee when it is on. When the {MARKET} received is worth no more than that total,
+              or when the feed cannot be read (<code>spotUsdg()</code> reverts once the price is older than{" "}
+              <code>maxPriceAge</code>), it warns you and asks for explicit confirmation, because exercising may then
+              cost at least as much as the {MARKET} is worth. The feed price can be up to four days old today, so check
+              the market yourself. The Clear itself never checks this.
+            </li>
+            <li>
+              <strong>Without this site.</strong> From the wallet holding the calls, approve the vault&apos;s Clear (the
+              address the vault&apos;s <code>clear()</code> returns, <Addr address={LIVE_CLEAR} />) to spend at least strike × amount
+              USDG (plus the fee, if it is on), then call{" "}
+              <code>exercise(uint256 optionId, uint112 amount)</code> on it. It reverts <code>ExerciseTooEarly</code> before
+              the exercise time, <code>ExpiredOption</code> from expiry, and <code>CallerHoldsInsufficientOptions</code>{" "}
+              above your balance.
+            </li>
+          </DocList>
+        </DocSection>
+
         <DocSection {...SECTIONS.costs}>
           <DocList>
             <li>
-              <strong>Stonkhouse: 5% of the premium.</strong> Taken at harvest from the premium that reached the vault, on
-              filled weeks only. Strike proceeds from an assignment carry no fee: they are your collateral sold at the
-              strike, not income. An unfilled week costs nothing because nothing was collected. There is no third-party
-              venue fee: the listing has one payment leg, to the vault, and the buyer pays exactly the unit price.
+              <strong>Stonkhouse: 5% of the premium.</strong> <code>protocolFeeBps</code> is 500 today; the admin can
+              change it with <code>setPolicy</code>, up to 2,000 (20%), and the rate in force when premium is harvested is
+              the one applied, including to premium that arrived earlier that week. It is paid to the vault&apos;s{" "}
+              <code>feeRecipient</code>, today the admin key (see Roles). Strike proceeds from an assignment carry no fee:
+              they are your collateral sold at the strike, not income. An unfilled week costs nothing because nothing was
+              collected. There is no third-party venue fee: the listing has one payment leg, to the vault, and the buyer
+              pays exactly the unit price.
             </li>
             <li>
-              <strong>Valorem: 15 bps of notional, currently off.</strong> If the switch flips on, the vault refuses to
-              arm or sell until an admin explicitly accepts it, and while accepted the fill hook adds the fee, valued at
-              spot, to the premium floor a buyer must clear — 15 bps of notional can eat a whole weekly out-of-the-money
-              premium.
+              <strong>Valorem: 15 bps, currently off.</strong> When switched on, the Clear charges 15 bps to the writer on
+              the {MARKET} written and to the exerciser on the strike USDG paid. The switch belongs to the Clear&apos;s{" "}
+              <code>feeTo</code>, a Safe with one owner and a threshold of one (
+              <Addr address={CLEAR_FEE_SAFE} />
+              ), not to the vault. If it is turned on, the vault refuses to arm or sell until the admin explicitly accepts
+              the fee, and while accepted the fill hook adds the fee, valued at spot, to the premium floor a buyer must
+              clear. 15 bps is more than today&apos;s 0.10% premium floor. An exerciser pays it whether or not the vault
+              accepted it.
             </li>
           </DocList>
         </DocSection>
@@ -154,7 +243,9 @@ export default function DocsPage() {
             <li>
               <strong>USDG is tracked separately.</strong> It accrues per share and is pulled with{" "}
               <code>claimUsdg()</code>, so a share price that has not moved does not mean nothing was
-              earned — and vice versa.
+              earned — and vice versa. Premium from a fill sits in the vault from the moment of the fill but becomes
+              claimable only when it is harvested: at the next deposit, <code>settleQueue</code>, <code>rollClose</code>{" "}
+              or <code>retryStrandedClaim</code>. Claiming does not harvest.
             </li>
             <li>
               <strong>Calls sold equals calls written.</strong> <code>contractsWritten()</code> is the sum of the
@@ -178,8 +269,9 @@ export default function DocsPage() {
               adjusted figure it is labelled as display-only.
             </li>
             <li>
-              <strong>The short call is never marked to market.</strong> The share price moves when USDG
-              arrives or when collateral is assigned away, and at no other time.
+              <strong>The short call is never marked to market.</strong> USDG never moves the share price. It moves when
+              an exercise assigns collateral away, and otherwise only when Stock Tokens reach or leave the vault other
+              than through a deposit or a redemption, such as an issuer burn.
             </li>
             <li>
               We do not publish an APY, an APR or any annualised figure, and there is no price chart on this site.{/* copy-lint-allow */}
@@ -190,10 +282,13 @@ export default function DocsPage() {
         <DocSection {...SECTIONS.queue}>
           <DocList>
             <li>
-              Deposits are accepted while the vault is Idle or Listed, and closed by one gate (<code>DepositsClosed</code>,{" "}
+              Deposits are accepted while the vault is Idle or Listed, up to the deposit cap, 20 {MARKET} today, measured
+              on <code>totalAssets()</code> (<code>DepositCapExceeded</code>). The admin sets the cap with no bound, so it
+              can also close deposits by setting it to zero. Deposits are closed by one gate (<code>DepositsClosed</code>,{" "}
               <code>maxDeposit() == 0</code>) from the moment the sale window closes, while a week settles, while a
-              contract is assigned and its claim not yet redeemed, while a claim is stranded, or while an issuer burn has
-              left the reserve unbacked. The deposit form says which.
+              contract is assigned and its claim not yet redeemed, while a claim is stranded, while an issuer burn has
+              left the reserve unbacked, or while the book is worth less than a millionth of a token per share.
+              The deposit form says which.
             </li>
             <li>
               A deposit made while Listed buys into the open call: shares are priced as if the call were worth nothing, so
@@ -207,23 +302,28 @@ export default function DocsPage() {
             </li>
             <li>
               Otherwise the redemption is queued. Your shares are escrowed and tagged with an epoch;
-              when the keeper closes the week the epoch is settled into a pot of collateral and USDG and
-              you draw a pro-rata slice with <code>completeRedeem</code>.
+              when <code>rollClose</code> closes the week the epoch is settled into a pot of collateral and USDG and
+              you draw a pro-rata slice with <code>completeRedeem</code>. A queue entry cannot be cancelled, and escrowed
+              shares stay exposed to the week&apos;s result until their epoch settles.
             </li>
             <li>
               A queue entry made while the vault is Idle does not have to wait for the next week to be
               armed. Anyone can call <code>settleQueue</code> while the vault is Idle; it settles the
-              current epoch at the same price an instant redemption would pay, and{" "}
-              <code>completeRedeem</code> then pays it out.
+              current epoch pro rata on the vault&apos;s idle collateral, which is the price an instant redemption would
+              pay while nothing is written. While a claim is stranded (when instant redemption is off) the epoch also
+              takes a pro-rata share of that claim, paid when it is redeemed. <code>completeRedeem</code> then pays it
+              out.
             </li>
             <li>
               A queued redemption is never a promise of a fixed number of tokens. If the week was
               assigned, part of your payout arrives as USDG at the strike. The Stock Token leg is paid whatever USDG is
-              doing; the USDG leg may be deferred if USDG cannot move, and is paid when it can.
+              doing; the USDG leg may be deferred if USDG cannot move, and stays owed until a later{" "}
+              <code>completeRedeem</code> can pay it.
             </li>
             <li>
-              Halting writes never blocks a redemption, a claim, or the close of a week. It blocks
-              exactly one thing: arming or selling a new call.
+              Halting writes never blocks a deposit, a redemption, a claim, or the close of a week. It blocks arming,
+              listing and selling a call (<code>rollOpen</code>, <code>approveListing</code> and every fill), and nothing
+              else.
             </li>
           </DocList>
         </DocSection>
@@ -231,36 +331,39 @@ export default function DocsPage() {
         <DocSection {...SECTIONS.stranded}>
           <p>
             <code>rollClose</code> redeems the week&apos;s Valorem claim, and Valorem pushes USDG and then {MARKET} to the
-            vault in one call. Either token&apos;s issuer can make that revert: USDG paused, the vault or the clearinghouse
-            frozen on USDG, or the vault blocklisted on the Stock Token in a week that was not fully assigned. Rather than
+            vault in one call. Valorem skips a leg with nothing to send, so either token&apos;s issuer can make that revert
+            only when its leg is due: in a week with any assignment, USDG paused or the vault or the clearinghouse
+            frozen on USDG; in a week that was not fully assigned, the Stock Token paused or the vault blocklisted on
+            it. Rather than
             hold every unit of idle collateral and the whole queue hostage to a stablecoin action, the vault goes to Idle
             anyway and keeps the claim. While it is stranded: deposits are refused and instant redemption is off (nobody
             buys in or leaves at a NAV that cannot yet see the claim&apos;s USDG); no new week can be armed; the queue keeps
             settling on the idle balance, and every epoch that settles takes a pro-rata share of the claim, paid when it
-            is redeemed. Anyone can call <code>retryStrandedClaim</code> at any time; it fails harmlessly while the cause
-            persists and settles the claim the first time Valorem lets it through. The pages show a banner with your
-            pending share and a Retry button whenever this state holds.
+            is redeemed. Anyone can call <code>retryStrandedClaim</code> for as long as the claim is stranded; it fails
+            harmlessly while the cause persists and settles the claim the first time Valorem lets it through. The pages
+            show a banner with your pending share and a Retry button whenever this state holds.
           </p>
         </DocSection>
 
         <DocSection {...SECTIONS.risks}>
           <p className="text-[15px] text-ink-3">
-            The list the build plan carries, unabridged. Read it before depositing.
+            Read these before depositing.
           </p>
           <RiskList>
             <RiskItem>
               <strong>No buyer.</strong> The most likely failure mode, and an economic one rather than a
-              technical one. The week&apos;s premium is zero. The mitigation is transparency: the fill page on{" "}
-              <Link href="/vault/nvda/cycle" className={DOC_LINK}>the cycle page</Link> publishes the order so anyone can buy it, and the zero
-              is published as a row.
+              technical one. The week&apos;s premium is zero. The mitigation is transparency:{" "}
+              <Link href="/vault/nvda/cycle" className={DOC_LINK}>the cycle page</Link> publishes the order so anyone can buy
+              it, and the zero is published as a row.
             </RiskItem>
             <RiskItem>
-              <strong>A fill refused after a rally.</strong> The vault re-prices its floors at every fill against live
-              spot. If {MARKET} rallies after the week is armed, a strike that was in the band on Monday can be below the
-              floor on Thursday and the vault refuses to sell it (<code>StrikeBelowBand</code>,{" "}
-              <code>PremiumBelowFloorAtFill</code>) until the keeper reprices, at most three listings a week. That
-              protects depositors from selling a near-the-money call for an out-of-the-money premium; it can also mean an
-              unfilled week.
+              <strong>A fill refused after a rally.</strong> The vault re-checks its floors at every fill against the
+              feed&apos;s current price. If {MARKET} rallies after the week is armed, a strike that was in the band when the
+              week opened can fall below the band floor, and the vault refuses to sell it (<code>StrikeBelowBand</code>).
+              The strike is fixed for the week, so only a fall in spot reopens the sale. A premium that has fallen below
+              the floor at the new spot (<code>PremiumBelowFloorAtFill</code>) can be fixed by a reprice, within the
+              cycle&apos;s three listings. Both protect depositors from selling a near-the-money call for an out-of-the-money
+              premium; both can also mean an unfilled week.
             </RiskItem>
             <RiskItem>
               <strong>Assignment.</strong> An exercised call takes the collateral at the strike. Upside
@@ -269,8 +372,9 @@ export default function DocsPage() {
               is never assigned on more than it was paid for.
             </RiskItem>
             <RiskItem>
-              <strong>Partial assignment.</strong> Valorem assigns pro rata by amount written across every writer of the
-              option id, by bucket, so the vault can be assigned on some contracts and not others.
+              <strong>Partial assignment.</strong> Valorem assigns bucket by bucket, pro rata by amount written within a
+              bucket, across every writer of the option id, so the vault can be assigned on some contracts and not
+              others.
             </RiskItem>
             <RiskItem>
               <strong>Late depositor.</strong> A deposit while Listed buys into the open short and is sized against by
@@ -289,35 +393,55 @@ export default function DocsPage() {
               (<code>ReserveHaircut</code>).
             </RiskItem>
             <RiskItem>
-              <strong>Valorem fee switch.</strong> 15 bps of notional, currently off. Gated behind{" "}
-              <code>feesEnabled</code> plus an explicit admin acceptance.
+              <strong>Valorem fee switch.</strong> 15 bps, currently off. The Clear&apos;s <code>feeTo</code> Safe can turn it
+              on at any time; the vault then stops arming and selling until the admin accepts it, and exercisers pay it
+              regardless.
             </RiskItem>
             <RiskItem>
-              <strong>Admin misconfiguration.</strong> The policy bounds live in bytecode — a minimum
-              out-of-the-money floor, a maximum ceiling, a utilization ceiling of 99.85%, a fee ceiling — so an
-              admin cannot quietly sell at-the-money. Within those bounds they can still set the knobs
-              badly. At launch one deployer key holds the admin role with no timelock until the handover.
+              <strong>Admin misconfiguration.</strong> The policy bounds live in bytecode (<code>Policy.validate</code>): a
+              strike band starting at least 1% and ending at most 25% above spot, a premium floor of at least 0.10% of
+              spot per contract, utilization at most 99.85%, a protocol fee at most 20%. So an admin cannot sell a call
+              whose strike is less than 1% above the feed&apos;s price. That price can be up to <code>maxPriceAge</code>{" "}
+              old (seven days at most), so after a rally such a strike can be at or in the money against the market.
+              Within those bounds they can still set the knobs badly; the deposit cap has no bound, and the per-cycle
+              contract cap no upper bound. Every change applies at once, mid-week included. The
+              premium floor is at its compiled minimum today (<code>minPremiumBps</code> 10); the admin can raise it.
             </RiskItem>
             <RiskItem>
-              <strong>Keeper or admin compromise.</strong> The vault checks every field of every order, sizes every fill
-              itself, and the keeper can never move a token. What a compromised keeper can do is list badly, inside the
-              policy floors: the bound is about 1.1% to 2.2% of the notional sold per week, for at most three listings,
-              before the guardian must act.
+              <strong>Keeper or admin compromise.</strong> The vault checks every field of every order and sizes every
+              fill itself, and no function lets the keeper or the admin withdraw the vault&apos;s collateral. A compromised keeper
+              can still sell cheaply inside today&apos;s policy, to itself if it likes: a strike as close as 3% above spot,
+              a premium as low as 0.10% of spot per contract, on up to 95% of the collateral and at most 50 contracts a
+              cycle, until the guardian halts writes. The caps are per cycle, not per week: the vault accepts an
+              exercise time one hour after arming and an expiry one day after that, and the keeper can close a cycle at
+              expiry and arm the next at once, so a compromised keeper could run a new cycle about every 25 hours. A compromised admin can grant itself the keeper role and do the same
+              with the policy loosened to its bytecode bounds, raise the fee to 20% of premium and send it anywhere, or
+              let the vault sell on a price up to 7 days old.
             </RiskItem>
             <RiskItem>
-              <strong>Keeper failure mid-week.</strong> The guardian can close the week after expiry,
-              and the close is permissionless an hour after that. Settling the queue and retrying a stranded claim are
-              permissionless too.
+              <strong>Keeper failure mid-week.</strong> From expiry only the keeper can close the week. An hour later{" "}
+              <code>rollClose</code> is open to anyone, the guardian and the admin included. Locking the book, settling
+              the queue and retrying a stranded claim are permissionless too. A live listing can still be filled without
+              the keeper, but the cycle page gets the order from the keeper and cannot offer it while the keeper is down.
             </RiskItem>
             <RiskItem>
-              <strong>Sequencer or feed outage into the sale window.</strong> The vault refuses to sell on a stale feed
-              (<code>StalePrice</code>) or a paused oracle; the keeper alerts.
+              <strong>Sequencer or feed outage into the sale window.</strong> The vault refuses to arm, list or sell when
+              the RHNVDA/USD feed is older than <code>maxPriceAge</code> (<code>StalePrice</code>; 345,600 seconds, four
+              days, today, and the admin can set it anywhere from one hour to seven days) or when the Stock Token&apos;s
+              oracle is paused. Inside that limit a fill checks its floors against the feed&apos;s last posted price, however
+              old: up to four days today. There is no
+              sequencer-uptime check. Nothing watches this for you: the keeper keeps its alerts in its own log and
+              delivers none.
             </RiskItem>
             <RiskItem>
-              <strong>This vault is unaudited.</strong> Valorem Clear was audited by Zellic under its
-              former name; the Stonkhouse vault and its libraries have not been audited by anyone outside the project. The
-              test suite and the fork rehearsal are the whole gate. Treat the deposit cap as the real statement of
-              confidence.
+              <strong>This vault is unaudited.</strong> The Stonkhouse vault and its libraries have had no external audit.
+              The project&apos;s own internal reviews and its test suite are the whole gate; the latest review, on
+              2026-09-14, reported no critical, high or medium findings, and its one low finding is fixed. Valorem&apos;s repository, at the
+              commit the Clear deployed here is built from (valorem-core 6436c823, November 2023), carries a March 2022
+              review, Zellic audit reports from December 2022 and April 2023, and a Zellic patch review from August 2023,
+              all older than that commit. There is no bug bounty; report a vulnerability to{" "}
+              <a href="mailto:security@stonkhouse.fun" className={DOC_LINK}>security@stonkhouse.fun</a>. Treat the
+              deposit cap as the real statement of confidence.
             </RiskItem>
           </RiskList>
         </DocSection>
@@ -361,7 +485,7 @@ export default function DocsPage() {
                           {address}
                         </ExternalLink>
                       ) : (
-                        <span className="text-ink-3">not deployed</span>
+                        <span className="text-ink-3">not configured in this build</span>
                       )}
                     </span>
                     <span role="cell" className="min-w-0 text-ink-2">
@@ -374,30 +498,40 @@ export default function DocsPage() {
           </Panel>
 
           <p className="text-[13.5px] leading-[1.6] text-ink-3">
-            Chain 4663 (Robinhood Chain), an Arbitrum Orbit L2. The clearinghouse is a deploy-time choice recorded in the
-            vault (<code>clear()</code>); the two linked libraries (ValoremLib, SeaportOrderLib) are part of the vault&apos;s
-            deployment and are verified with it.
+            Chain 4663 (Robinhood Chain), an Arbitrum chain. The clearinghouse is fixed when the vault is deployed and
+            recorded in it (<code>clear()</code>). The vault and its two linked libraries (ValoremLib, SeaportOrderLib)
+            are verified on Sourcify as a partial match (Sourcify&apos;s &ldquo;match&rdquo;, not
+            &ldquo;exact_match&rdquo;): the bytecode matches the published source, but the contracts were compiled
+            without an embedded metadata hash, so Sourcify cannot confirm the exact metadata. For the vault both the
+            creation and the runtime bytecode matched; for the libraries only the runtime bytecode was matched. The Clear is not source-verified; its runtime bytecode is identical, apart from the metadata
+            hash, to a Sourcify-verified deployment of Valorem&apos;s published clearinghouse source (valorem-core
+            6436c823).
           </p>
         </DocSection>
 
         <DocSection {...SECTIONS.roles}>
           <DocList>
             <li>
-              <strong>Admin.</strong> Sets policy inside the bytecode caps, the deposit cap, the fee recipient; accepts
-              the Valorem fee; lifts a halt. At launch this is one deployer key with no timelock, until the handover to
-              a multisig; the deposit cap stays small for as long as that holds.
+              <strong>Admin.</strong> Sets policy inside the bytecode caps, the deposit cap, the fee recipient and the
+              price-age limit; accepts the Valorem fee; halts writes and lifts a halt; grants and revokes every role. Today
+              this is one hot key, <Addr address={ADMIN_KEY} />, the address that deployed the vault, with no timelock,
+              and it is also the fee recipient. A handover of the admin role to a multisig is planned and has not
+              happened.
             </li>
             <li>
-              <strong>Keeper (hot key).</strong> Creates the week&apos;s option type, arms it, authorises listings, cancels
-              them, locks the book, closes the week. It can never move funds and never holds the option tokens; every
-              contract is written inside a buyer&apos;s fill.
+              <strong>Keeper (hot key).</strong> Held today by <Addr address={KEEPER_KEY} />. Creates the week&apos;s
+              option type, arms it, authorises listings, cancels them, locks the book, closes the week. It cannot change
+              parameters or halt, has no withdrawal function, and never holds the option tokens; every contract is
+              written inside a buyer&apos;s fill.
             </li>
             <li>
-              <strong>Guardian (single key).</strong> Halts writes and kills listings. Nothing else.
+              <strong>Guardian (single key).</strong> Held today by <Addr address={GUARDIAN_KEY} />. Halts writes and
+              kills listings. Nothing else: only the admin can lift a halt.
             </li>
             <li>
-              <strong>Anyone.</strong> Fills the order; closes a week an hour after expiry; settles the queue while the
-              vault is Idle; retries a stranded claim.
+              <strong>Anyone.</strong> Fills the order; exercises a call it holds; locks the book from the exercise time;
+              closes a week an hour after expiry; settles the queue while the vault is Idle; retries a stranded claim;
+              pushes the accrued fee to the fee recipient (<code>sweepFee</code>).
             </li>
           </DocList>
         </DocSection>
@@ -410,6 +544,15 @@ export default function DocsPage() {
         </div>
       </DocShell>
     </>
+  );
+}
+
+/** A role holder's address, linked to the explorer. */
+function Addr({ address }: { address: string }) {
+  return (
+    <ExternalLink href={addressUrl(address)} srNote={false} className="link num break-all text-[0.9em] text-ink">
+      {address}
+    </ExternalLink>
   );
 }
 

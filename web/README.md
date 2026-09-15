@@ -331,7 +331,7 @@ rejection, and the cycle page renders no fill card. **Then the row is restored**
 fills 2 of N from the page's own button (`approve` then `fulfillAdvancedOrder(k, N, "0x")`); a
 raw Seaport client fills 3 more from `/orders` with no web code. Each fill emits `CallsWritten`
 for exactly those contracts; `contractsWritten == 5`; the vault's option balance is 0. A queued
-redemption is escrowed while Listed. The buyer exercises 2 on Clear inside the window;
+redemption is escrowed while Listed. Inside the window the buyer exercises 2 from the cycle page's Exercise card (an `approve` of exactly the strike cost to the Clear, then `exercise(optionId, 2)`);
 `lockBook`; `rollClose` → assignment 2, strike proceeds fee-free, `completeRedeem` / `claimUsdg`
 to the base unit; "Last week realized" and the `/activity` row agree with the chain (premium and
 strike proceeds in separate columns).

@@ -147,8 +147,10 @@ buyer holds 1 option token.
 
 ## G. Optional exercise (owner)
 
-Only inside the window (Fri 16:00 ET to Sat 16:00 ET). The app has **no exercise button**; exercise
-directly on the clearinghouse:
+Only inside the window (Fri 16:00 ET to Sat 16:00 ET). Once the `accuracy/exercise-and-docs` branch is merged
+and the web service has rebuilt, the cycle page shows the buyer wallet an **Exercise** card: enter 1, and it
+approves exactly the strike in USDG to the Clear (only if the allowance is short), simulates, then calls
+`exercise(optionId, 1)`. Until then, or if the card misbehaves, exercise directly on the clearinghouse:
 
 1. From the buyer wallet, approve the Clear to spend the strike in USDG (`approve(clear, strike)` on USDG).
 2. Call `exercise(uint256 optionId, uint112 amount)` on our Clear with `amount = 1`. Blockscout's
@@ -156,7 +158,9 @@ directly on the clearinghouse:
    wallet to sign.
 
 Exercising below the strike loses money for the buyer and gains it for the depositor; with both wallets
-owned by the owner it nets to zero apart from gas. It proves the first real assignment on this chain.
+owned by the owner it nets to zero apart from gas. It proves the first real assignment on this chain. It also
+takes the vault's NAV to 0.06 NVDA, below the ~1.0527 NVDA the keeper needs to arm one contract, so cycle 2
+will not arm until more is deposited.
 
 ## H. Close (keeper)
 

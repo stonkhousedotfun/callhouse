@@ -399,7 +399,7 @@ export function listedDepositRisk(v: {
  */
 export type DepositsClosedReason = "phase" | "window" | "assignmentPending" | "stranded" | "reserveUnbacked" | "deadBook";
 
-/** Vault.MAX_SHARES_PER_ASSET: below one millionth of an asset base unit per share, the vault sells no shares. */
+/** Vault.MAX_SHARES_PER_ASSET: below one millionth of an asset base unit per share base unit (a millionth of a token per whole share), the vault sells no shares. */
 export const MAX_SHARES_PER_ASSET = 1_000_000n;
 
 export function depositsClosedReason(

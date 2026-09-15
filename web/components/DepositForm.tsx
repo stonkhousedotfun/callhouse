@@ -302,7 +302,7 @@ function closedCopy(reason: DepositsClosedReason | undefined, snapshot: VaultSna
     case "reserveUnbacked":
       return "The vault's token balance is below what settled redeemers are owed, which only an issuer burn produces. Deposits reopen once the reserve is collected or refilled.";
     case "deadBook":
-      return "The book is worth less than a millionth of a token base unit per share, so the vault will not sell new shares at that price. Deposits reopen once collateral or a redeemed claim comes back, or the outstanding shares redeem out.";
+      return "The book is worth less than a millionth of a token per share, so the vault will not sell new shares at that price. Deposits reopen once collateral or a redeemed claim comes back, or the outstanding shares redeem out.";
     default:
       return "The vault's maxDeposit() is zero and this page could not read which reason applies. The vault refuses deposits past its sale window, while settling, while holding a stranded claim, while its reserve is unbacked, or when the book is worth too little per share to sell new shares; a full deposit cap also reads as zero. Deposits reopen by themselves when the reason clears.";
   }

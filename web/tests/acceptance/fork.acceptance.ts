@@ -23,8 +23,9 @@
  * page offers no fill. Then the row is restored, a fresh wallet fills 2 contracts from the page's
  * own button, and a raw Seaport client fills 3 more from /orders with no web code. Each fill
  * writes exactly those contracts (`CallsWritten`); the vault's option balance is 0 after each.
- * The buyer exercises 2 inside the window. lockBook, rollClose (assigned 2), completeRedeem and
- * claimUsdg from the page; /activity agrees with the chain.
+ * The buyer exercises 2 inside the window from the cycle page's Exercise button. lockBook,
+ * rollClose (assigned 2), completeRedeem and claimUsdg from the page; /activity agrees with the
+ * chain.
  *
  * FLOWS, each asserted to the base unit on chain and on the rendered page:
  *   (a) depositor: approve + deposit 25 NVDA from /vault/nvda; shares and their NAV render.
@@ -35,8 +36,10 @@
  *       contract sells and the protocol fee on it) equal to figures computed here from vault reads
  *       and Seaport's status, and the cycle page shows the keeper's fixed-mode pricing report.
  *   (c) depositor: queue 10 shares while the vault is Listed.
- *   (d) warp to exercise (buyer exercises 2) and expiry; keeper ticks lockBook and rollClose;
- *       the depositor completes the redeem and claims USDG from the page.
+ *   (d) warp to exercise; the buyer exercises 2 from the cycle page's Exercise card (approve
+ *       exactly the strike cost plus the Clear's fee to the Clear, then exercise(optionId, 2));
+ *       warp to expiry; keeper ticks lockBook and rollClose; the depositor completes the redeem
+ *       and claims USDG from the page.
  *   (e) /vault/nvda and /activity show the assigned week, premium and strike proceeds apart.
  *
  * ENV (all optional)
@@ -80,6 +83,7 @@ import {
 } from "viem";
 import { generatePrivateKey, privateKeyToAccount, type PrivateKeyAccount } from "viem/accounts";
 
+import { valoremClearAbi } from "../../lib/abi/clear";
 import { stockTokenAbi } from "../../lib/abi/erc20";
 import { seaportAbi } from "../../lib/abi/seaport";
 import { vaultAbi } from "../../lib/abi/vault";
@@ -364,19 +368,6 @@ const mockFeedWriteAbi = [
   { type: "function", name: "setAnswer", inputs: [{ name: "answer", type: "int256" }], outputs: [], stateMutability: "nonpayable" },
 ] as const;
 
-const exerciseAbi = [
-  {
-    type: "function",
-    name: "exercise",
-    inputs: [
-      { name: "optionId", type: "uint256" },
-      { name: "amount", type: "uint112" },
-    ],
-    outputs: [],
-    stateMutability: "nonpayable",
-  },
-] as const;
-
 const feedAbi = [
   {
     type: "function",
@@ -517,6 +508,7 @@ type SentTx = { hash: Hex; to: Address; functionName: string; args: readonly unk
 const KNOWN_CALLS: Array<{ abi: Abi; match: (to: Address) => boolean }> = [
   { abi: stockTokenAbi as unknown as Abi, match: (to) => to === ASSET || to === USDG },
   { abi: seaportAbi as unknown as Abi, match: (to) => to === SEAPORT },
+  { abi: valoremClearAbi as unknown as Abi, match: (to) => to === CLEARINGHOUSE },
   { abi: vaultAbi as unknown as Abi, match: (to) => to === getAddress(record.addresses.Vault ?? "0x0000000000000000000000000000000000000000") },
 ];
 
@@ -1521,7 +1513,7 @@ async function main(): Promise<void> {
       );
     }
 
-    await step("(d) warp to exerciseTimestamp; keeper tick -> lockBook; buyer exercises 2", async () => {
+    await step("(d) warp to exerciseTimestamp; keeper tick -> lockBook; buyer exercises 2 from the cycle page's Exercise button", async () => {
       const exerciseTs = listed.exercise;
       await warpTo(exerciseTs, "exerciseTimestamp");
       const spot = await read<bigint>(vault, vaultAbi, "spotUsdg");
@@ -1534,17 +1526,103 @@ async function main(): Promise<void> {
       assertEq(cycle?.status ?? null, "locked", "keeper cycle status");
       if (cycle?.lock_tx) record.txs.push({ label: "keeper: lockBook", by: KEEPER.address, hash: cycle.lock_tx as Hex, block: "", via: "keeper" });
 
+      // Every figure below is computed here from the Clear's own reads, not from web/lib/exercise.ts.
       const optionId = BigInt(listed.order.optionId);
+      assertEq(await read<bigint>(vault, vaultAbi, "optionId"), optionId, "vault.optionId() is the option the buyer holds");
+      const held = FILL_FROM_PAGE + FILL_FROM_RAW_PAYLOAD;
+      assertEq(await read<bigint>(CLEARINGHOUSE, clearBalanceAbi, "balanceOf", [BUYER.address, optionId]), held, "the buyer holds the 5 bought");
+      const tuple = await read<{ underlyingAsset: Address; underlyingAmount: bigint; exerciseAsset: Address; exerciseAmount: bigint; exerciseTimestamp: number; expiryTimestamp: number }>(
+        CLEARINGHOUSE,
+        valoremClearAbi,
+        "option",
+        [optionId],
+      );
+      assertEq(tuple.exerciseAmount, listed.strike, "the Clear's exerciseAmount is the strike");
+      assertEq(getAddress(tuple.exerciseAsset), USDG, "the Clear's exercise asset is USDG");
+      assertEq(getAddress(tuple.underlyingAsset), ASSET, "the Clear's underlying is the NVDA Stock Token");
+      const chainNow = await latestTimestamp();
+      assert(BigInt(tuple.exerciseTimestamp) <= chainNow && chainNow < BigInt(tuple.expiryTimestamp), "the chain's latest block is inside the Clear's exercise window");
+      assert(BigInt(Math.floor(Date.now() / 1000)) < BigInt(tuple.exerciseTimestamp), "the wall clock is still before the window: the page must use the chain's clock");
+      const [feesEnabled, feeBps] = await Promise.all([
+        read<boolean>(CLEARINGHOUSE, valoremClearAbi, "feesEnabled"),
+        read<number>(CLEARINGHOUSE, valoremClearAbi, "feeBps"),
+      ]);
       const strikeCost = listed.strike * EXERCISE_W;
-      await deal(USDG, BUYER.address, strikeCost);
-      await harnessTx("buyer: USDG.approve(Clear, 2 x strike)", BUYER, () =>
-        walletClient.writeContract({ account: BUYER, chain: forkChain, address: USDG, abi: stockTokenAbi, functionName: "approve", args: [CLEARINGHOUSE, strikeCost] }),
+      // ValoremOptionsClearinghouse._calculateRecordAndEmitFee: floor(cost x feeBps / 10000), at least 1.
+      const clearFeeUsdg = feesEnabled ? ((strikeCost * BigInt(feeBps)) / BPS === 0n ? 1n : (strikeCost * BigInt(feeBps)) / BPS) : 0n;
+      const exerciseCost = strikeCost + clearFeeUsdg;
+      const nvdaOut = tuple.underlyingAmount * EXERCISE_W;
+      await deal(USDG, BUYER.address, exerciseCost);
+      assertEq(await read<bigint>(USDG, stockTokenAbi, "allowance", [BUYER.address, CLEARINGHOUSE]), 0n, "the buyer has no USDG allowance to the Clear yet");
+      const usdgBefore = await erc20Balance(USDG, BUYER.address);
+      const nvdaBefore = await erc20Balance(ASSET, BUYER.address);
+
+      const page = buyerPage;
+      await page.goto(`${web.url}/vault/nvda/cycle`);
+      const exerciseCard = card(page, exactly("Exercise"));
+      /** The whole trimmed decimal of an 18-decimal amount, as the card prints NVDA. */
+      const nvda = (value: bigint): string => {
+        const whole = (value / LOT).toString().replace(/\B(?=(\d{3})+(?!\d))/g, ",");
+        const frac = (value % LOT).toString().padStart(18, "0").replace(/0+$/, "");
+        return frac === "" ? whole : `${whole}.${frac}`;
+      };
+      await expectText("exercise: meta", exerciseCard.locator(SLOT.cardMeta), "window open");
+      await expectText("exercise: Options in this wallet", rowValue(exerciseCard, /^Options in this wallet$/), `${held} contracts`);
+      await expectText("exercise: Strike, per contract", rowValue(exerciseCard, /^Strike, per contract$/), `${fmtUsdg(tuple.exerciseAmount, 6)} USDG`);
+      await expectText("exercise: NVDA received per contract", rowValue(exerciseCard, /^NVDA received per contract$/), `${nvda(tuple.underlyingAmount)} NVDA`);
+      await expectText("exercise: Exercise opens", rowValue(exerciseCard, /^Exercise opens$/), `${fmtUtc(tuple.exerciseTimestamp)} · ${fmtEastern(tuple.exerciseTimestamp)}`);
+      await expectText("exercise: Expires", rowValue(exerciseCard, /^Expires$/), `${fmtUtc(tuple.expiryTimestamp)} · ${fmtEastern(tuple.expiryTimestamp)}`);
+      await exerciseCard.locator("#exercise-amount").fill(EXERCISE_W.toString());
+      await expectText("exercise: You pay", rowValue(exerciseCard, /^You pay$/), `${fmtUsdg(exerciseCost, 6)} USDG`);
+      await expectText("exercise: Strike cost", rowValue(exerciseCard, /^Strike cost$/), `${fmtUsdg(strikeCost, 6)} USDG`);
+      await expectText("exercise: Clearinghouse fee", rowValue(exerciseCard, /^Clearinghouse fee$/), `${fmtUsdg(clearFeeUsdg, 6)} USDG`);
+      await expectText("exercise: You receive", rowValue(exerciseCard, /^You receive$/), `${nvda(nvdaOut)} NVDA`);
+      await expectText("exercise: USDG approved", rowValue(exerciseCard, /^USDG approved to the clearinghouse$/), `${fmtUsdg(0n, 6)} USDG`);
+      await expectText("exercise: Your USDG", rowValue(exerciseCard, /^Your USDG$/), `${fmtUsdg(exerciseCost, 6)} USDG`);
+      // Spot is $5 above the strike, so there is no warning and no confirmation to tick; the
+      // simulation passes the Clear's checks and says only the approval is missing.
+      await expectText(
+        "exercise: simulation notice",
+        exerciseCard.locator(`${SLOT.notice} strong`, { hasText: "checks pass" }),
+        "The clearinghouse's checks pass.",
       );
-      await harnessTx("buyer: clear.exercise(optionId, 2)", BUYER, () =>
-        walletClient.writeContract({ account: BUYER, chain: forkChain, address: CLEARINGHOUSE, abi: exerciseAbi, functionName: "exercise", args: [optionId, EXERCISE_W] }),
+      await expectAbsent("exercise: spot warning", exerciseCard.locator(SLOT.notice, { hasText: /Spot is at or below|Spot could not be read|worth at spot/ }));
+      await expectAbsent("exercise: confirmation", exerciseCard.locator("#exercise-confirm"));
+      const submit = exerciseCard.getByRole("button", { name: `Exercise ${EXERCISE_W} contracts`, exact: true });
+      await expectText("exercise: button id", exerciseCard.locator("#exercise-submit"), `Exercise ${EXERCISE_W} contracts`);
+
+      const from = buyerWallet.sent.length;
+      await submit.click({ timeout: 60_000 });
+      const approve = await buyerWallet.waitFor("approve", from);
+      const exercised = await buyerWallet.waitFor("exercise", from);
+      assertEq(approve.to, USDG, "approve goes to USDG");
+      assertEq(jsonish(approve.args), jsonish([CLEARINGHOUSE, exerciseCost]), "approve(Clear, exactly 2 x strike + the Clear's fee): exact-amount approval");
+      assertEq(exercised.to, CLEARINGHOUSE, "exercise goes to the vault's Clear");
+      assertEq(jsonish(exercised.args), jsonish([optionId, EXERCISE_W]), "exercise(optionId, 2)");
+      assert(approve.block <= exercised.block, "the approval landed before the exercise");
+      assertEq(
+        buyerWallet.sent.slice(from).map((t) => t.functionName).join(","),
+        "approve,exercise",
+        "the button sent exactly one approval and one exercise",
       );
+      const exerciseReceipt = await pub.getTransactionReceipt({ hash: exercised.hash });
+      const exercisedLogs = parseEventLogs({ abi: valoremClearAbi as unknown as Abi, eventName: "OptionsExercised", logs: exerciseReceipt.logs }).filter(
+        (l) => l.address.toLowerCase() === CLEARINGHOUSE.toLowerCase(),
+      ) as unknown as Array<{ args: { optionId: bigint; exerciser: Address; amount: bigint } }>;
+      assertEq(exercisedLogs.length, 1, "one OptionsExercised in the page's exercise");
+      assertEq((exercisedLogs[0] as { args: { amount: bigint } }).args.amount, EXERCISE_W, "OptionsExercised.amount = 2");
+      assertEq(getAddress((exercisedLogs[0] as { args: { exerciser: Address } }).args.exerciser), BUYER.address, "OptionsExercised.exerciser = the buyer");
+
       assertEq(await read<bigint>(CLEARINGHOUSE, clearBalanceAbi, "balanceOf", [BUYER.address, optionId]), FILL_FROM_PAGE + FILL_FROM_RAW_PAYLOAD - EXERCISE_W, "buyer holds the 3 unexercised");
-      note(`buyer exercised ${EXERCISE_W} at strike ${listed.strike} (spot was ${spot})`);
+      assertEq(usdgBefore - (await erc20Balance(USDG, BUYER.address)), exerciseCost, "the buyer paid exactly the strike cost plus the Clear's fee");
+      assertEq((await erc20Balance(ASSET, BUYER.address)) - nvdaBefore, nvdaOut, "the buyer received exactly 2 lots of NVDA");
+      assertEq(await read<bigint>(USDG, stockTokenAbi, "allowance", [BUYER.address, CLEARINGHOUSE]), 0n, "no USDG allowance to the Clear is left over");
+      await expectText("exercise: Options in this wallet after", rowValue(exerciseCard, /^Options in this wallet$/), `${held - EXERCISE_W} contracts`);
+      record.amounts.exerciseApproveTx = approve.hash;
+      record.amounts.exerciseTx = exercised.hash;
+      record.amounts.exerciseCost6 = exerciseCost.toString();
+      record.amounts.exerciseClearFee6 = clearFeeUsdg.toString();
+      note(`buyer exercised ${EXERCISE_W} at strike ${listed.strike} from the page (spot was ${spot}; paid ${exerciseCost} USDG6 incl. Clear fee ${clearFeeUsdg})`);
     });
 
     const closed = await step("(d) warp to expiryTimestamp; keeper tick -> rollClose: harvest premium + strike proceeds, settle the queue", async () => {

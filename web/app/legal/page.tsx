@@ -92,14 +92,14 @@ export default function LegalPage() {
             </li>
             <li>
               The issuer can <strong>freeze or restrict transfers</strong>, which can stop this vault
-              writing, settling, and paying out tokens until it is lifted. The token can also pause its
-              own price oracle, which stops this vault writing and listing new calls; settlement does
+              writing, settling, or paying out tokens until it is lifted. The token can also pause its
+              own price oracle, which stops this vault arming, listing and writing new calls; settlement does
               not read the oracle. No Stonkhouse contract can override either.
             </li>
             <li>
               Corporate actions — splits, dividend adjustments — are expressed through an ERC-8056
-              display multiplier rather than by rebasing balances. This interface shows the adjusted
-              figure clearly labelled as display-only; all vault accounting uses raw balances.
+              display multiplier rather than by rebasing balances. The app shows the adjusted figure
+              clearly labelled as display-only; all vault accounting uses raw balances.
             </li>
           </DocList>
         </DocSection>
@@ -129,7 +129,8 @@ export default function LegalPage() {
               offer of securities.
             </li>
             <li>
-              The Stonkhouse smart contracts have not been audited. They are provided as-is,
+              The Stonkhouse smart contracts have had no external audit, only the project&apos;s own internal
+              reviews. They are provided as-is,
               under the MIT licence, with no warranty of any kind. You can lose the collateral you
               deposit.
             </li>
