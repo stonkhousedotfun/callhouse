@@ -3,6 +3,7 @@ import type { Abi, Address, Hex, PublicClient } from "viem";
 import { seaportAbi } from "./abi/seaport";
 import { vaultAbi } from "./abi/vault";
 import { ZERO_CONDUIT_KEY } from "./contracts";
+import { keeperPricingFigures } from "./cycleTerms";
 import { REASONS, checkListingIsOurs, isOrderComponents, type ListingRow, type OrderComponentsJson } from "./listing";
 import {
   addr,
@@ -98,7 +99,36 @@ export type KeeperOrderJson = {
   chainId?: number;
   parameters: Omit<OrderComponentsJson, "counter"> & { totalOriginalConsiderationItems: string };
   signature?: string;
+  /** Display-only pricing report; see `displayPricing`. Never part of any check. */
+  pricing?: unknown;
 };
+
+/** At most this many keys are carried from a keeper pricing report; the real record has about 30. */
+export const KEEPER_PRICING_MAX_KEYS = 64;
+
+/**
+ * The keeper's per-order pricing report, carried to the page for display and nothing else.
+ *
+ * It is keeper-reported and unverifiable on chain (implied vol, delta, the market's fair value),
+ * so it is gated twice: `keeperPricingFigures` must accept it (shape, ranges and internal
+ * consistency), and only own, primitive-valued, non-prototype keys are copied into a fresh object,
+ * so nothing hostile rides along. Anything else is `null`. The order's hash, listing check and fill
+ * path never read it, and a bad report never rejects an otherwise valid order.
+ */
+export function displayPricing(x: unknown): Record<string, string | number | boolean | null> | null {
+  if (!isRecord(x) || keeperPricingFigures(x) === null) return null;
+  const keys = Object.keys(x);
+  if (keys.length > KEEPER_PRICING_MAX_KEYS) return null;
+  const out: Record<string, string | number | boolean | null> = Object.create(null) as Record<string, string | number | boolean | null>;
+  for (const key of keys) {
+    if (key === "__proto__" || key === "constructor" || key === "prototype") return null;
+    const value = x[key];
+    if (value === null || typeof value === "string" || typeof value === "boolean") out[key] = value;
+    else if (typeof value === "number" && Number.isFinite(value)) out[key] = value;
+    else return null;
+  }
+  return { ...out };
+}
 
 const DECIMAL = /^[0-9]+$/;
 const BYTES32 = /^0x[0-9a-fA-F]{64}$/;
@@ -409,6 +439,7 @@ export async function verifyKeeperOrders(
       status: remaining === total ? "open" : "partial",
       components,
       signature: EMPTY_SIGNATURE,
+      pricing: displayPricing(entry.pricing),
     });
   });
 

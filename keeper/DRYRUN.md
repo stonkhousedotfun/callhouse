@@ -22,7 +22,10 @@ repository.
 | three weeks + a fourth arm, deposit 25e18 | `pnpm --filter @callhouse/keeper dryrun` | 63348605 | `0x0Bb345e8…7f50` (block 63348609; last block 63348666) | 35.6 s | `DRY RUN PASSED` |
 | the extended scenarios, deposit 30e18 | `pnpm --filter @callhouse/keeper dryrun:extended` | 63347757 | `0x0Bb345e8…7f50` (block 63347761; last block 63347827) | 42.0 s | `EXTENDED DRY RUN PASSED` |
 
-Keeper configuration under test: `KEEPER_STRIKE_OTM_BPS` 500, `KEEPER_PREMIUM_MARGIN_BPS` 100,
+Keeper configuration under test: `KEEPER_PRICING_MODE` fixed (both harnesses pin it: the fork's
+warped clock is weeks ahead of any expiry Cboe's live chain lists, so vol mode would skip every
+week; vol pricing is covered by `policy.vol.test.ts` and `roll.vol.test.ts` on the recorded chain),
+`KEEPER_STRIKE_OTM_BPS` 500, `KEEPER_PREMIUM_MARGIN_BPS` 100,
 `KEEPER_ARM_LEAD_S` 21600, `KEEPER_RETRY_STRANDED_MS` 1000 (the schema's floor, so the retry
 timer fires between two ticks), `POLL_INTERVAL_MS` 60000 (5000 for the spawned process). Every
 keeper module ran unmodified: `roll.ts` (`reconcile`, `tick`, `snapshot`, `contractsAssignedAt`),

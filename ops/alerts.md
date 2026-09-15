@@ -102,7 +102,7 @@ export CLEAR=$(cast call $VAULT "clear()(address)" --rpc-url $RH_RPC)
 | `valorem_fees_enabled` | warn | P2 | Valorem's 15 bps notional fee turned on; the vault has already stopped arming and filling | §7 |
 | `low_gas` | warn | P2 | Keeper ETH below `KEEPER_MIN_GAS_WEI` (default 0.01) | §8 |
 | `rpc_lag` | warn | P2 | Head block trails the wall clock, or both RPC endpoints are unreachable | §9 |
-| `no_rung` | info (**warn** for `stale-oracle`) | INFO/P2 | The week is being skipped; `data.reason` says why: `no-strike-in-band`, `premium-above-strike`, `stale-oracle: …`, `writes-halted`, `no-keeper-role`, `valorem-fees-enabled`, `oracle-paused`, `no-capacity`, `stranded` | §10 |
+| `no_rung` | info (**warn** for `stale-oracle`) | INFO/P2 | The week is being skipped; `data.reason` says why: `no-strike-in-band`, `premium-above-strike`, `stale-oracle: …`, `writes-halted`, `no-keeper-role`, `valorem-fees-enabled`, `oracle-paused`, `no-capacity`, `stranded`, and in vol pricing mode `vol-*` (warn; emitted by the keeper as `cycle_not_created`) | §10 |
 | `strand_retry_failed` | warn | P2 | `retryStrandedClaim()` still reverts `StillStranded` on the keeper's timer; `data.cause` carries the USDG/NVDA reads it took | §2 |
 | `boot` | info (**warn** if no KEEPER_ROLE) | INFO | Process online and reconciled. Warn variant: the key can close but not arm | — |
 | `roll_open` | info, `force` | INFO | Cycle armed: strike, window, capacity, price, option id, tx hash in `data`. Nothing written yet | — |
@@ -286,6 +286,15 @@ The week is being skipped; `data.reason` says why:
 - `writes-halted` — see §21. `no-keeper-role` — the boot warn told you already. `no-capacity` —
   `Policy.maxContracts(totalAssets())` is 0 (everything queued, or the vault is empty). `stranded` —
   §2; the keeper will not arm over a stranded claim.
+- `vol-unavailable`, `vol-stale`, `vol-inconsistent`, `vol-no-expiry`, `vol-no-quotes`,
+  `vol-spot-divergence`, `vol-delta-out-of-range`, `vol-strike-unquoted` — **warn** (the keeper
+  emits these as `cycle_not_created`, once per reason per week). `KEEPER_PRICING_MODE=vol` (the
+  default) could not price the week from Cboe's delayed chain and will not arm on a guess.
+  `data.error` / `data.why` say what failed (`keeper/README.md` → Market data). A dark or stuck
+  feed on a weekend is usually temporary: the keeper retries on its own, at most one download every
+  five minutes. If it persists into the week, or `vol-inconsistent` names a changed feed format,
+  set `KEEPER_PRICING_MODE=fixed` (strike `spot + KEEPER_STRIKE_OTM_BPS`, ask floor plus margin)
+  and restart.
 - At window close unarmed, a forced `no_rung` records the skipped week whatever the reason.
 
 ### `roll_close` — INFO: payload and message

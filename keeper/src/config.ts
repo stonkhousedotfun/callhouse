@@ -17,6 +17,7 @@ import { config as loadDotenv } from 'dotenv';
 import { getAddress, isAddress, type Address, type Hex } from 'viem';
 import { z } from 'zod';
 import { parseHolidays, VAULT_MIN_LEAD_SECONDS } from './calendar.js';
+import { CBOE_NVDA_URL, CBOE_ROOT } from './vol.js';
 
 loadDotenv({ path: process.env.KEEPER_ENV_FILE, quiet: true });
 
@@ -67,6 +68,23 @@ const httpUrlField = z.string().transform((raw, ctx): string => {
     return z.NEVER;
   }
   return parsed.toString().replace(/\/$/, '');
+});
+
+/** The market-data URL: https only (vol.ts refuses anything else at fetch time too), and, like
+ *  the other URL fields, never echoed in an error. */
+const httpsUrlField = z.string().transform((raw, ctx): string => {
+  let parsed: URL;
+  try {
+    parsed = new URL(raw);
+  } catch {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, message: `not a URL (value not shown; ${raw.length} chars)` });
+    return z.NEVER;
+  }
+  if (parsed.protocol !== 'https:') {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, message: `not an https URL (scheme ${parsed.protocol})` });
+    return z.NEVER;
+  }
+  return parsed.toString();
 });
 
 const intField = (min: number, max: number) => z.coerce.number().int().min(min).max(max);
@@ -144,9 +162,10 @@ const schema = z.object({
   KEEPER_TX_TIMEOUT_MS: intField(10_000, 600_000).default(180_000),
 
   /* ---- the week ---- */
-  /** How far above spot the strike sits, in basis points, before rounding to a whole USDG.
-   *  Default 500 (5%). Must land inside the vault's policy band (launch: 3%–12%) at the spot of
-   *  the arm; a target outside it is refused before any gas is spent. */
+  /** fixed mode only (KEEPER_PRICING_MODE=fixed): how far above spot the strike sits, in basis
+   *  points, before rounding to a whole USDG. Default 500 (5%). Must land inside the vault's
+   *  policy band (launch: 3%–12%) at the spot of the arm; a target outside it is refused before
+   *  any gas is spent. */
   KEEPER_STRIKE_OTM_BPS: intField(0, 5_000).default(500),
   /** The keeper's own minimum distance to the Friday close when it arms, in seconds. At least
    *  the vault's MIN_LEAD (3600); the default is six hours, because arming an hour before the
@@ -160,7 +179,9 @@ const schema = z.object({
   /* ---- pricing ---- */
   /** Optional manual override for the per-contract ask, in USDG base units. For one unusual
    *  cycle; leave unset in normal operation. Still floored at the live fill floor and capped at
-   *  the strike, because the vault enforces both. */
+   *  the strike, because the vault enforces both. In vol mode it can only RAISE the ask: the
+   *  listing is never below max(fill floor with the margin, fair value with the edge), and never
+   *  armed or listed without market data. To sell below the market, use KEEPER_PRICING_MODE=fixed. */
   KEEPER_UNIT_PRICE_USDG6: bigintField.optional(),
   /** Basis points added to the vault's FILL-TIME premium floor when the keeper prices a listing:
    *  unit = ceil(floor × (10000 + margin) / 10000). The fill gate re-derives the floor from the
@@ -168,8 +189,51 @@ const schema = z.object({
    *  at today's floor is refused by the first buyer after any uptick. A margin of m bps absorbs
    *  a spot rise of up to m bps before the keeper has to reprice (each reprice spends one of the
    *  vault's three listings a week). Trade-off: higher margin, fewer reprices, slightly higher
-   *  ask. Default 100 (1%). Capped at 1000. Not applied to KEEPER_UNIT_PRICE_USDG6. */
+   *  ask. Default 100 (1%). Capped at 1000. Not applied to KEEPER_UNIT_PRICE_USDG6. In vol mode
+   *  this is the floor under the market price, not the price. */
   KEEPER_PREMIUM_MARGIN_BPS: intField(0, 1_000).default(100),
+  /** How the week's strike and ask are chosen.
+   *    vol    (default) strike = the listed weekly call at KEEPER_TARGET_DELTA, from Cboe's delayed
+   *           quotes, mapped to the token and clamped into the vault's band; ask = max(fill floor
+   *           with KEEPER_PREMIUM_MARGIN_BPS, market fair value lifted by KEEPER_PRICE_EDGE_BPS).
+   *           Missing, stale or inconsistent market data skips the week (a named `vol-*` reason);
+   *           it never falls back to `fixed`.
+   *    fixed  strike = spot + KEEPER_STRIKE_OTM_BPS, ask = fill floor with the margin. */
+  KEEPER_PRICING_MODE: z.enum(['vol', 'fixed']).default('vol'),
+  /** vol mode: the call delta the strike targets, 0.05..0.40. Default 0.15. Linear interpolation
+   *  between the two listed strikes that bracket it; a target the quotes do not reach skips. */
+  KEEPER_TARGET_DELTA: z.coerce.number().finite().min(0.05).max(0.4).default(0.15),
+  /** vol mode: basis points over the market's fair value (interpolated listed mid) the ask sits
+   *  at: vol ask = ceil(fair × (10000 + edge) / 10000). Never below the fill floor with the
+   *  margin, never above the strike. Default 1000 (10%). 0..5000. */
+  KEEPER_PRICE_EDGE_BPS: intField(0, 5_000).default(1_000),
+  /** vol mode: the delayed option chain. https only. Default Cboe's NVDA chain. */
+  KEEPER_VOL_URL: httpsUrlField.default(CBOE_NVDA_URL),
+  /** vol mode: the option root the chain must report (`data.symbol`); a file for any other ticker
+   *  is skipped as `vol-inconsistent`. Default NVDA. */
+  KEEPER_VOL_ROOT: z.string().regex(/^[A-Z]{1,6}$/, 'an upper-case option root, e.g. NVDA').default(CBOE_ROOT),
+  /** vol mode: the oldest last trade (and file) the keeper prices on, seconds. Default 345600
+   *  (4 days), the vault's own maxPriceAge: a Saturday arm reads Friday's close. */
+  KEEPER_VOL_MAX_AGE_S: intField(3_600, 14 * 86_400).default(345_600),
+  /** vol mode: how far the vault's token spot may sit from the feed's share spot, in bps of the
+   *  ratio. The token's multiplier is ~8 bps; beyond this one of the two is wrong. Default 300. */
+  KEEPER_VOL_MAX_SPOT_DIVERGENCE_BPS: intField(1, 2_000).default(300),
+  /** vol mode: deadline for the whole fetch (connect, headers, body), ms. Default 10000. */
+  KEEPER_VOL_TIMEOUT_MS: intField(1_000, 60_000).default(10_000),
+  /** vol mode: body byte cap, enforced while streaming. Default 8000000 (the NVDA chain is ~1.9 MB). */
+  KEEPER_VOL_MAX_BYTES: intField(100_000, 64_000_000).default(8_000_000),
+  /** vol mode: the strike is never closer to spot than the vault's band floor PLUS this many bps.
+   *  A strike right on the floor goes unfillable (StrikeBelowBand at the fill) on the first uptick,
+   *  and no reprice fixes a strike; the buffer is the rally the week survives. A delta-0.15 strike
+   *  on a two- to four-day expiry, or in a quiet week, lands close to the floor, so the default is
+   *  200: the room the fixed rule has (5% strike over a 3% floor). 0..1000. */
+  KEEPER_STRIKE_BAND_BUFFER_BPS: intField(0, 1_000).default(200),
+  /** vol mode: reprice a live, still-fillable listing UP when fresh market data puts the ask
+   *  (fair value with the edge) more than this many bps above the live ask, so a rally does not
+   *  leave the week selling at last week's price. Only while a listing slot would still be left
+   *  over for a floor reprice (the vault allows three a week). Checked at most every 30 minutes.
+   *  Default 2500 (the live ask is 20% or more under the market-based ask). 0 turns it off. */
+  KEEPER_VOL_REPRICE_UP_BPS: intField(0, 50_000).default(2_500),
   /** Directory to mirror each authorised order payload into, for the self-hosted fill page.
    *  The payload is always kept in SQLite and served from /orders; this is belt and braces. */
   KEEPER_FALLBACK_DIR: z.string().min(1).optional(),

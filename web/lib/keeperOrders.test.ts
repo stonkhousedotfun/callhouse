@@ -9,6 +9,8 @@ import { CLEARINGHOUSE, SEAPORT, USDG } from "./contracts";
 import {
   EMPTY_SIGNATURE,
   KEEPER_MAX_ORDERS,
+  KEEPER_PRICING_MAX_KEYS,
+  displayPricing,
   KEEPER_REASONS,
   NOT_CONFIGURED,
   componentsStruct,
@@ -238,7 +240,8 @@ describe("verifyKeeperOrders", () => {
     expect(row.components.zone).toBe(VAULT_T);
     expect(row.components.consideration).toHaveLength(1);
 
-    // Nothing else the keeper said is passed on.
+    // Nothing else the keeper said is passed on, except its display-only pricing report, which is
+    // null here (none served) and gated by displayPricing when present.
     expect(Object.keys(row).sort()).toEqual(
       [
         "chainId",
@@ -248,6 +251,7 @@ describe("verifyKeeperOrders", () => {
         "offerer",
         "optionId",
         "orderHash",
+        "pricing",
         "quantity",
         "remaining",
         "salt",
@@ -258,6 +262,7 @@ describe("verifyKeeperOrders", () => {
         "unitPrice6",
       ].sort(),
     );
+    expect(row.pricing).toBeNull();
     expect(JSON.stringify(row)).not.toContain("grossUsdg6");
     expect(JSON.stringify(row)).not.toContain("totalOriginalConsiderationItems");
   });
@@ -1060,5 +1065,57 @@ describe("fetchKeeperOrderBook (the browser's client)", () => {
     expect((await fetchKeeperOrderBook()).error).toBe(VAULT_UNREADABLE);
     vi.stubGlobal("fetch", async () => new Response("<html>bad gateway</html>", { status: 502 }));
     expect((await fetchKeeperOrderBook()).error).toBe("The order feed route answered HTTP 502.");
+  });
+});
+
+/** The keeper's documented vol-mode record (keeper/README.md, "Market data (vol mode)"). */
+const PRICING = {
+  mode: "vol", source: "cboe-delayed", priceSource: "vol-fair", volPath: "fresh",
+  volUnavailableReason: null, targetDelta: 0.15, deltaAtStrike: 0.1464, ivAtStrike: 0.3266,
+  strikeUsdg6: "225000000", strikeOtmBps: 602, deltaStrikeUsdg6: "225000000",
+  strikeClamped: null, bandBufferBps: 50,
+  fairUnit6: "860864", volUnit6: "946951", floorUnit6: "848840", marginUnit6: "857329",
+  unitPrice6: "946951", edgeBps: 1000, marginBps: 100,
+  shareSpot: 212.0404, tokenSpot: 212.21, spotUsdg6: "212210000",
+  expiry: "2026-09-25", chainTimestamp: "2026-09-15 05:57:42", lastTradeTime: "2026-09-14T15:59:59",
+};
+
+describe("the keeper's pricing report is carried for display only", () => {
+  it("passes a record keeperPricingFigures accepts through to the verified row, as a fresh plain object", async () => {
+    const { reader } = fakeChain();
+    const { orders, rejected } = await verifyKeeperOrders([{ ...keeperEntry(), pricing: PRICING }], reader, CONFIG, NOW);
+    expect(rejected).toEqual([]);
+    expect(orders[0]!.pricing).toEqual(PRICING);
+    expect(orders[0]!.pricing).not.toBe(PRICING);
+  });
+
+  it("serves the order with pricing null when the report is absent, malformed or inconsistent, and never rejects the order for it", async () => {
+    const bad: unknown[] = [
+      undefined,
+      null,
+      "vol",
+      [],
+      { ...PRICING, mode: "guess" },
+      { ...PRICING, unitPrice6: "1" }, // below the floor: internally inconsistent
+      { ...PRICING, extra: { nested: true } },
+      { ...PRICING, extra: Number.POSITIVE_INFINITY },
+    ];
+    for (const pricing of bad) {
+      const { reader } = fakeChain();
+      const entry = pricing === undefined ? keeperEntry() : { ...keeperEntry(), pricing };
+      const { orders, rejected } = await verifyKeeperOrders([entry], reader, CONFIG, NOW);
+      expect(rejected, JSON.stringify(pricing)).toEqual([]);
+      expect(orders).toHaveLength(1);
+      expect(orders[0]!.pricing, JSON.stringify(pricing)).toBeNull();
+    }
+  });
+
+  it("drops a report carrying prototype keys or too many keys", () => {
+    const polluted = JSON.parse(`{"__proto__": {"x": 1}, ${JSON.stringify(PRICING).slice(1)}`) as unknown;
+    expect(displayPricing(polluted)).toBeNull();
+    const wide: Record<string, unknown> = { ...PRICING };
+    for (let i = 0; Object.keys(wide).length <= KEEPER_PRICING_MAX_KEYS; i++) wide[`k${i}`] = i;
+    expect(displayPricing(wide)).toBeNull();
+    expect(displayPricing(PRICING)).toEqual(PRICING);
   });
 });

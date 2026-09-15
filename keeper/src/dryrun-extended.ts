@@ -327,8 +327,32 @@ async function main(): Promise<void> {
     KEEPER_FALLBACK_DIR: join(OUT, 'fallback'),
     ALERT_WEBHOOK: alerts.url,
     POLL_INTERVAL_MS: String(POLL_INTERVAL_MS),
+    // Warped fork time: the live delayed chain never lists the fork's expiries, so vol mode would
+    // skip every week. The rehearsal pins the fixed rule it asserts.
+    KEEPER_PRICING_MODE: 'fixed',
   };
-  const unsetForKeeper = ['RH_RPC_2', 'KEEPER_UNIT_PRICE_USDG6', 'KEEPER_PREMIUM_MARGIN_BPS', 'KEEPER_STRIKE_OTM_BPS', 'KEEPER_ARM_LEAD_S', 'KEEPER_NYSE_HOLIDAYS', 'KEEPER_RETRY_STRANDED_MS', 'ALERT_WEBHOOK_TOKEN'];
+  // The vol keys do nothing in the fixed mode pinned above, but an out-of-range value left in the
+  // shell would still abort the keeper's boot.
+  const unsetForKeeper = [
+    'RH_RPC_2',
+    'KEEPER_UNIT_PRICE_USDG6',
+    'KEEPER_PREMIUM_MARGIN_BPS',
+    'KEEPER_STRIKE_OTM_BPS',
+    'KEEPER_ARM_LEAD_S',
+    'KEEPER_NYSE_HOLIDAYS',
+    'KEEPER_RETRY_STRANDED_MS',
+    'ALERT_WEBHOOK_TOKEN',
+    'KEEPER_TARGET_DELTA',
+    'KEEPER_PRICE_EDGE_BPS',
+    'KEEPER_STRIKE_BAND_BUFFER_BPS',
+    'KEEPER_VOL_URL',
+    'KEEPER_VOL_ROOT',
+    'KEEPER_VOL_MAX_AGE_S',
+    'KEEPER_VOL_MAX_SPOT_DIVERGENCE_BPS',
+    'KEEPER_VOL_TIMEOUT_MS',
+    'KEEPER_VOL_MAX_BYTES',
+    'KEEPER_VOL_REPRICE_UP_BPS',
+  ];
   for (const key of unsetForKeeper) delete process.env[key];
   Object.assign(process.env, keeperEnv, { KEEPER_PORT: String(HEALTH_PORT), KEEPER_LOG_LEVEL: process.env.KEEPER_LOG_LEVEL ?? 'info' });
 

@@ -29,6 +29,9 @@ delete process.env.KEEPER_UNIT_PRICE_USDG6;
 delete process.env.KEEPER_PREMIUM_MARGIN_BPS; // the default (100) unless a test passes the seam
 delete process.env.KEEPER_STRIKE_OTM_BPS;
 delete process.env.RH_RPC_2;
+// Every test in this file pins the FIXED rule (the launch maths). The vol mode, the default, has
+// its own file: policy.vol.test.ts.
+process.env.KEEPER_PRICING_MODE = 'fixed';
 
 const { BPS } = await import('./config.js');
 const {

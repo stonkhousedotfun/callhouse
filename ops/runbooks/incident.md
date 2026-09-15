@@ -74,9 +74,12 @@ so a strike outside the band now means spot moved *after* the arm, not that the 
 normal and is **not** an incident: a rally makes the listing unfillable (§10), a sell-off makes it
 cheap to the buyer but still inside what the vault accepted.
 
-The real incident is a strike inside the band that the keeper should not have chosen (a
-misconfigured `KEEPER_STRIKE_OTM_BPS`, a wrong window), or a keeper that armed while a human had
-decided to skip the week.
+The real incident is a strike inside the band that the keeper should not have chosen (in fixed
+mode a misconfigured `KEEPER_STRIKE_OTM_BPS`; in vol mode a wrong `KEEPER_TARGET_DELTA` or a market
+record that disagrees with the listed chain: compare `cycles.pricing_json` / `/orders` → `pricing`
+(`deltaAtStrike`, `deltaStrikeUsdg6`, `strikeClamped`, `chainTimestamp`) with Cboe's chain; a wrong
+window), or a keeper that armed while a human had decided to skip the week. If Cboe's data itself is
+the problem, set `KEEPER_PRICING_MODE=fixed` before the next arm.
 
 ### Do
 Kill the listing first, then stop the bleeding.
@@ -553,8 +556,11 @@ This is the gate working: the vault re-prices the floor and the band floor **at 
 listing priced at Monday's spot is refused on Tuesday's rally rather than sold cheap.
 
 - `PremiumBelowFloorAtFill` → **reprice**: `cancelListing(components)`, then `approveListing` at
-  the new floor (plus `KEEPER_PREMIUM_MARGIN_BPS`). The keeper does this on its own, within the
-  vault's 3 authorisations per cycle (cancelled or not; there is no separate keeper budget). Once
+  the new floor (plus `KEEPER_PREMIUM_MARGIN_BPS`; in vol mode never below the market's fair value
+  plus `KEEPER_PRICE_EDGE_BPS`, from fresh data or the previous listing's record). The keeper does
+  this on its own, within the vault's 3 authorisations per cycle (cancelled or not; there is no
+  separate keeper budget), and in vol mode only once the replacement is priced: a `fill_sim_revert`
+  saying the replacement `cannot be priced (vol-…)` means it left the live listing in place. Once
   they are spent, the week stays listed at the last price and fills only if spot comes back.
 - `StrikeBelowBand` → the strike is now under the band floor. A reprice cannot fix a strike;
   cancel the listing (or leave it: it cannot fill while the condition holds) and publish

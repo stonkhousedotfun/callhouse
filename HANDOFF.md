@@ -33,6 +33,7 @@ Canary runbook: `ops/runbooks/canary-week.md`.
 
 - Own Clear via `DeployClear.s.sol`. **`feeTo` = a 1-of-1 Safe owned by `0x7A3a8C3F6331f63107D5b3aEeA0515e799022C32`** (personal wallet, given 2026-09-14; EOA, 0.27 ETH on 4663, nonce 0). Vault admin stays hot-wallet account 0 until handover. `HandoverAdmin` does not move `feeTo`.
 - `KEEPER_PREMIUM_MARGIN_BPS=50`. Guardian = mnemonic account 2 `0x29741A8d…6F39`. Cap 20 NVDA, raise weekly. No alerts for the canary.
+- Keeper pricing (branch `feat/vol-aware-pricing`): `KEEPER_PRICING_MODE=vol` is the default. Strike at delta 0.15 from Cboe's free delayed NVDA quotes, clamped 200 bps above the band floor. Ask = max(floor + margin, fair value + 10%). Unusable market data skips the week with a `vol-*` reason. `KEEPER_PRICING_MODE=fixed` (spot + `KEEPER_STRIKE_OTM_BPS`, floor + margin) is the operator fallback. See `keeper/README.md` → Market data.
 - Merge+push both repos when gates and the fork rehearsal are green (authorised). Tag contracts `v1.0.0-rc1`.
 - Funded on 4663: admin `0xEb82c3D0…19d9b` 0.05 ETH, keeper `0x06c131cf…FC1d2` 0.02 ETH, guardian 0.01 ETH.
 - Canary token buy deferred a few hours; runbook is `ops/runbooks/canary-week.md`.

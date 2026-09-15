@@ -163,10 +163,18 @@ cast call $VAULT "policy()(uint16,uint16,uint16,uint16,uint16,uint64)" --rpc-url
 # -> (minOtmBps, maxOtmBps, minPremiumBps, maxUtilizationBps, protocolFeeBps, maxContractsCap)
 ```
 
-The keeper targets a configured OTM distance inside the band (`KEEPER_STRIKE_OTM_BPS` and friends,
-`keeper/README.md` → Environment) and rounds to a whole-dollar strike. Both bounds are checked at
-arm; **only the floor is re-checked at every fill** (`StrikeBelowBand`), so a rally after the arm
-makes the listing unfillable until the keeper reprices (step 9), while a sell-off does not.
+The keeper picks the strike by `KEEPER_PRICING_MODE` (`keeper/README.md` → Choosing the week):
+
+- `vol` (default): the listed NVDA call for the cycle's close day at `KEEPER_TARGET_DELTA` (0.15),
+  from Cboe's free delayed quotes, mapped to the token by `spot6 / shareSpot`, rounded to a whole
+  USDG and clamped into `[band floor + KEEPER_STRIKE_BAND_BUFFER_BPS (200), band ceiling − 50 bps]`.
+  Missing, stale or inconsistent market data is a skipped week with a `vol-*` reason, never a guess.
+- `fixed`: `round(spot6 × (1 + KEEPER_STRIKE_OTM_BPS/1e4))` to a whole USDG (default 500 = 5%). This is
+  the operator fallback when the feed is unusable.
+
+Both bounds are checked at arm; **only the floor is re-checked at every fill** (`StrikeBelowBand`),
+so a rally after the arm beyond the room left makes the listing unfillable (no reprice moves a
+strike), while a sell-off does not.
 
 **If no whole-dollar strike falls inside the band, write nothing.** Publish `no eligible strike,
 unfilled, 0`.
@@ -300,9 +308,18 @@ cast call $SEAPORT "getCounter(address)(uint256)" $VAULT --rpc-url $RH_RPC
 ```
 minGrossUsdg = spot6 * N * minPremiumBps / 10000      # launch: 0.40% of spot notional per week
 floorUnit6   = ceil(minGrossUsdg / N)                 # plus the Valorem fee valued at spot when that fee is on
-unitPrice6   = ceil(floorUnit6 * (10000 + KEEPER_PREMIUM_MARGIN_BPS) / 10000)   # default margin 100 = 1%
+marginUnit6  = ceil(floorUnit6 * (10000 + KEEPER_PREMIUM_MARGIN_BPS) / 10000)   # default margin 100 = 1%
+unitPrice6   = marginUnit6                                                      # fixed mode
+unitPrice6   = max(marginUnit6, ceil(fair6 * (10000 + KEEPER_PRICE_EDGE_BPS) / 10000))   # vol mode, edge 1000 = 10%
 gross        = unitPrice6 * N                          # must divide by N exactly
 ```
+
+`fair6` is Cboe's listed mid interpolated at the armed strike (in share terms) and mapped to the
+token, rounded up. The keeper's `/orders` serves every figure behind the ask as `pricing`. In vol
+mode a reprice without fresh data uses the previous listing's (or the arm's) fair value, a
+still-fillable listing is repriced **up** when fresh data puts the market-based ask more than
+`KEEPER_VOL_REPRICE_UP_BPS` (2500) above it and a slot would remain, and `KEEPER_UNIT_PRICE_USDG6`
+can only raise the ask.
 
 - `gross % N == 0` or `approveListing` reverts `PremiumNotDivisibleByOrderSize`. Round **per
   contract, then multiply**. Seaport scales a partial fill's consideration by the fill fraction and

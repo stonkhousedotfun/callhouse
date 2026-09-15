@@ -102,6 +102,13 @@ export type ListingRow = {
   endTime?: string;
   salt?: string;
   counter?: string;
+  /**
+   * The keeper's pricing report for this order (strike selection, market fair value, floor), as
+   * served on /orders and passed through by lib/keeperOrders.ts only when
+   * lib/cycleTerms.ts `keeperPricingFigures` accepts it. DISPLAY ONLY: keeper-reported, never read
+   * by the hash, the listing check or the fill path. Parse it with `keeperPricingFigures` before use.
+   */
+  pricing?: Record<string, string | number | boolean | null> | null;
 };
 
 const DECIMAL = /^[0-9]+$/;

@@ -517,10 +517,11 @@ table disagrees. Split for Railway:
 | `POLL_INTERVAL_MS` | `60000` | default |
 | `CLEARINGHOUSE` | leave unset unless the vault was built on our own Clear (§13) | default is Overcall's unmodified instance; the boot cross-check against `vault.clear()` catches a mismatch either way |
 | `CHAIN_ID`, `SEAPORT`, `USDG`, `ASSET`, `MULTICALL3`, `SEAPORT_CONDUIT_KEY` | leave unset | recon-confirmed defaults in `config.ts`; override only for a fork or a second market. `SEAPORT_ZONE` is gone: the zone is the vault |
-| `KEEPER_STRIKE_OTM_BPS` and the other strike-selection keys | see `keeper/README.md` | the keeper chooses the strike (there is no ladder any more); the vault's arm gate refuses anything outside the band |
+| `KEEPER_PRICING_MODE` | leave unset (`vol`) | `vol`: strike at `KEEPER_TARGET_DELTA` (0.15) from Cboe's free delayed NVDA quotes, ask at `max(floor + margin, fair value + KEEPER_PRICE_EDGE_BPS)`; unusable market data skips the week with a `vol-*` reason. Set `fixed` as the operator fallback when Cboe is unusable: strike `spot + KEEPER_STRIKE_OTM_BPS`, ask floor + margin. The container needs outbound https to `cdn.cboe.com` in vol mode |
+| `KEEPER_STRIKE_OTM_BPS`, `KEEPER_TARGET_DELTA`, `KEEPER_PRICE_EDGE_BPS`, `KEEPER_STRIKE_BAND_BUFFER_BPS`, `KEEPER_VOL_*` | leave unset | see `keeper/README.md` → Environment; the keeper chooses the strike (there is no ladder any more); the vault's arm gate refuses anything outside the band |
 | `PREMIUM_MARGIN_BPS` | owner decision, default `0` | cushion above the policy floor. Under write on fill the floor is re-priced at every fill, so `0` makes the listing unfillable on the first upward tick until the keeper reprices; `50` absorbs a normal tick |
 | `KEEPER_MAX_RELISTS` | `1` (default) | reprices per cycle after a rally, under the vault's 3 authorisations per cycle |
-| `KEEPER_UNIT_PRICE_USDG6` | leave unset | a manual ask override for one unusual cycle. Remove it afterwards or every week is priced by hand |
+| `KEEPER_UNIT_PRICE_USDG6` | leave unset | a manual ask override for one unusual cycle. Remove it afterwards or every week is priced by hand. In vol mode it can only raise the ask |
 | everything else in `keeper/README.md` | leave unset | defaults |
 
 There is no `REGISTRY`, no `OVERCALL_*`, no `SEAPORT_ZONE` and no `OVERCALL_FEE_RECIPIENT` any

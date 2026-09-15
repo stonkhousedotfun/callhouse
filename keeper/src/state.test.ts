@@ -27,7 +27,7 @@ process.env.KEEPER_PK = `0x${'11'.repeat(32)}`;
 process.env.KEEPER_DB_PATH = join(scratch, 'default', 'keeper.db');
 process.env.KEEPER_LOG_LEVEL = 'fatal';
 
-const { KeeperStore, applyMigrations, bigintReplacer, cycleTapeRow, splitGross, store } = await import('./state.js');
+const { KeeperStore, applyMigrations, bigintReplacer, cycleTapeRow, parsePricingJson, splitGross, store } = await import('./state.js');
 const { EMPTY_SIGNATURE, buildOrderComponents, componentsFromJson, componentsToJson, localOrderHash } =
   await import('./seaport.js');
 type ListingRow = import('./state.js').ListingRow;
@@ -329,8 +329,9 @@ function columnsOf(db: Database.Database): string[] {
 }
 
 test('migration: the write-on-fill schema is the first release; the mechanism adds a column only when it is missing', () => {
-  // No keeper database predates this schema, so MIGRATIONS is empty: opening a file this keeper
-  // wrote is a no-op, and the listings table carries no Overcall-shaped column at all.
+  // SCHEMA is the first release's; later columns (pricing_json) arrive through MIGRATIONS, on a
+  // fresh file exactly as on the production one. The listings table carries no Overcall-shaped
+  // column at all.
   const path = join(scratch, 'first-release', 'keeper.db');
   const fresh = new KeeperStore(path);
   const freshColumns = columnsOf(fresh.db);
@@ -346,14 +347,14 @@ test('migration: the write-on-fill schema is the first release; the mechanism ad
   }
   assert.deepEqual(
     listingColumns,
-    ['order_hash', 'cycle_number', 'seq', 'option_id', 'contracts', 'unit_price6', 'gross_usdg6', 'end_time', 'counter', 'salt', 'components_json', 'signature', 'approve_tx', 'cancel_tx', 'status', 'seaport_total_filled', 'seaport_total_size', 'seaport_cancelled', 'created_at', 'updated_at'],
-    'the listing row is exactly what /orders and cancelListing need',
+    ['order_hash', 'cycle_number', 'seq', 'option_id', 'contracts', 'unit_price6', 'gross_usdg6', 'end_time', 'counter', 'salt', 'components_json', 'signature', 'approve_tx', 'cancel_tx', 'status', 'seaport_total_filled', 'seaport_total_size', 'seaport_cancelled', 'created_at', 'updated_at', 'pricing_json'],
+    'the listing row is exactly what /orders and cancelListing need, plus the pricing record (appended by migration)',
   );
 
   // Reopening applies no migration and changes no column.
   const reopened = new KeeperStore(path);
   try {
-    assert.deepEqual(columnsOf(reopened.db), freshColumns, 'an empty migration list changes nothing');
+    assert.deepEqual(columnsOf(reopened.db), freshColumns, 'a file that has every migration gets none twice');
     assert.equal(reopened.getCycle(3)?.gross_usdg6, '2044079259', 'the row survived');
     assert.equal(reopened.getCycle(3)?.assets_returned, null, 'not recorded: NULL, not 0');
   } finally {
@@ -372,6 +373,46 @@ test('migration: the write-on-fill schema is the first release; the mechanism ad
   } finally {
     raw.close();
   }
+});
+
+test('migration: a first-release file (no pricing_json) gains the column on open, keeps its rows, and a second open adds nothing', () => {
+  // Build the production file as the first release left it: the same tables without the column.
+  const path = join(scratch, 'pre-vol', 'keeper.db');
+  const seed = new KeeperStore(path);
+  seed.ensureCycle(1, 'open');
+  seed.insertListing(listingRow());
+  seed.db.exec('ALTER TABLE listings DROP COLUMN pricing_json');
+  seed.db.exec('ALTER TABLE cycles DROP COLUMN pricing_json');
+  const listingCols = (db: Database.Database) => (db.prepare('PRAGMA table_info(listings)').all() as Array<{ name: string }>).map((c) => c.name);
+  assert.ok(!listingCols(seed.db).includes('pricing_json'));
+  assert.ok(!columnsOf(seed.db).includes('pricing_json'));
+  seed.close();
+
+  const upgraded = new KeeperStore(path);
+  try {
+    assert.ok(listingCols(upgraded.db).includes('pricing_json'), 'listings.pricing_json added');
+    assert.ok(columnsOf(upgraded.db).includes('pricing_json'), 'cycles.pricing_json added');
+    assert.equal(upgraded.getListing(orderHash)?.pricing_json, null, 'an existing listing reads NULL: not recorded');
+    assert.equal(upgraded.getListing(orderHash)?.unit_price6, '873192', 'and keeps everything else');
+    // The new column is written and read back through the ordinary paths.
+    const record = JSON.stringify({ mode: 'vol', fairUnit6: '860864', unitPrice6: '946951' });
+    upgraded.insertListing(listingRow({ order_hash: `0x${'bb'.repeat(32)}`, seq: 2, pricing_json: record }));
+    assert.equal(upgraded.getListing(`0x${'bb'.repeat(32)}`)?.pricing_json, record);
+    upgraded.updateCycle(1, { pricing_json: record });
+    assert.equal(upgraded.getCycle(1)?.pricing_json, record);
+  } finally {
+    upgraded.close();
+  }
+
+  const again = new KeeperStore(path);
+  try {
+    assert.equal(listingCols(again.db).filter((c) => c === 'pricing_json').length, 1, 'idempotent: no duplicate column');
+    assert.equal(again.getCycle(1)?.pricing_json, JSON.stringify({ mode: 'vol', fairUnit6: '860864', unitPrice6: '946951' }));
+  } finally {
+    again.close();
+  }
+  assert.equal(parsePricingJson('{"fairUnit6":"1"}')?.fairUnit6, '1');
+  for (const bad of [null, undefined, '', 'nope', '[1]', '42', 'null']) assert.equal(parsePricingJson(bad), null, `refuses ${String(bad)}`);
 });
 
 test('cycleTapeRow / splitGross: premium = gross - strike proceeds, null wherever either is unknown', () => {

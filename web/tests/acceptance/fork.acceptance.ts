@@ -952,6 +952,9 @@ async function main(): Promise<void> {
       KEEPER_LOG_LEVEL,
       KEEPER_FALLBACK_DIR: join(OUT, "fallback"),
       KEEPER_PREMIUM_MARGIN_BPS: "50",
+      // The fork's clock is warped and no live Cboe chain lists its expiries, so vol pricing (the
+      // keeper default) would skip every arm with a vol-* reason. Fixed mode, as in keeper/src/dryrun*.ts.
+      KEEPER_PRICING_MODE: "fixed",
       KEEPER_RETRY_STRANDED_MS: "1000",
       ALERT_WEBHOOK: `${alertSink.url}/alerts`,
     });

@@ -105,6 +105,10 @@ export interface CycleRow {
   strand_gen: string | null;
   /** The `retryStrandedClaim` transaction that recovered it; NULL until it has. */
   retry_tx: string | null;
+  /** The arm's PricingRecord (policy.ts) as JSON: how the strike was picked and the first ask
+   *  priced. NULL for a cycle armed before the column existed or adopted from chain. Added by
+   *  migration, so typed optional for rows built in code; a row read back always carries it. */
+  pricing_json?: string | null;
   created_at: number;
   updated_at: number;
 }
@@ -134,6 +138,10 @@ export interface ListingRow {
   seaport_total_filled: string | null;
   seaport_total_size: string | null;
   seaport_cancelled: number | null;
+  /** This listing's PricingRecord (policy.ts) as JSON: strike, spot, floor, fair value, edge,
+   *  delta, iv and where the ask came from. /orders and /state serve it parsed. NULL for a row
+   *  written before the column existed. Added by migration; optional on insert. */
+  pricing_json?: string | null;
   created_at: number;
   updated_at: number;
 }
@@ -260,15 +268,21 @@ CREATE TABLE IF NOT EXISTS meta (
  * rows read NULL: "not recorded", which is the truth for a week closed before the column existed.
  * Append only; never reorder or remove.
  *
- * EMPTY AT THE FIRST RELEASE. The SCHEMA above is the write-on-fill schema of 2026-09-14 and no
- * keeper database exists yet that predates it: the columns the pre-redesign keeper had grown by
+ * The first release shipped this list EMPTY. The SCHEMA above is the write-on-fill schema of
+ * 2026-09-14 and no keeper database predates it: the columns the pre-redesign keeper had grown by
  * migration (`assets_returned`, `usdg_from_assignment`, `strand_gen`, `retry_tx`) are in the
  * table from the start, and the Overcall-shaped listing columns it carried (`to_vault6`,
  * `to_overcall6`, `api_status`, `api_error`, `posted_at`, `visible_at`, `filled_numerator`,
- * `filled_denominator`) are gone rather than dragged along as always-NULL. The mechanism stays,
- * tested through {applyMigrations}, for the first column the next release adds.
+ * `filled_denominator`) are gone rather than dragged along as always-NULL. SCHEMA stays frozen at
+ * that release; every later column arrives here, so a fresh file and the production file on the
+ * volume take the same path to the same table.
  */
-const MIGRATIONS: ReadonlyArray<Migration> = [];
+const MIGRATIONS: ReadonlyArray<Migration> = [
+  // 2026-09-15, volatility-aware pricing: every number behind a strike and an ask, per listing
+  // (served by /orders and /state) and per cycle (the arm's decision).
+  { table: 'listings', column: 'pricing_json', type: 'TEXT' },
+  { table: 'cycles', column: 'pricing_json', type: 'TEXT' },
+];
 
 export interface Migration {
   table: string;
@@ -316,6 +330,7 @@ const CYCLE_COLUMNS = new Set<keyof CycleRow>([
   'closed_at',
   'strand_gen',
   'retry_tx',
+  'pricing_json',
 ]);
 
 const LISTING_COLUMNS = new Set<keyof ListingRow>([
@@ -447,21 +462,22 @@ export class KeeperStore {
   /*----------------------------- listings -----------------------------*/
 
   insertListing(row: Omit<ListingRow, 'created_at' | 'updated_at'>): void {
+    // pricing_json is optional on the way in; the named binding is not.
     const now = Date.now();
     this.db
       .prepare(
         `INSERT INTO listings (
            order_hash, cycle_number, seq, option_id, contracts, unit_price6, gross_usdg6,
            end_time, counter, salt, components_json, signature, approve_tx, cancel_tx, status,
-           seaport_total_filled, seaport_total_size, seaport_cancelled, created_at, updated_at
+           seaport_total_filled, seaport_total_size, seaport_cancelled, pricing_json, created_at, updated_at
          ) VALUES (
            @order_hash, @cycle_number, @seq, @option_id, @contracts, @unit_price6, @gross_usdg6,
            @end_time, @counter, @salt, @components_json, @signature, @approve_tx, @cancel_tx, @status,
-           @seaport_total_filled, @seaport_total_size, @seaport_cancelled, @created_at, @updated_at
+           @seaport_total_filled, @seaport_total_size, @seaport_cancelled, @pricing_json, @created_at, @updated_at
          )
          ON CONFLICT(order_hash) DO NOTHING`,
       )
-      .run({ ...row, created_at: now, updated_at: now });
+      .run({ ...row, pricing_json: row.pricing_json ?? null, created_at: now, updated_at: now });
   }
 
   getListing(orderHash: string): ListingRow | null {
@@ -675,6 +691,18 @@ function normalise(value: unknown): SqlValue {
   if (typeof value === 'bigint') return value.toString();
   if (typeof value === 'number' || typeof value === 'string') return value;
   return JSON.stringify(value, bigintReplacer);
+}
+
+/** A stored pricing_json as an object, or null: NULL, unparseable or not an object. What /orders
+ *  and /state serve, so a corrupt row degrades to "not recorded" rather than a 500. */
+export function parsePricingJson(json: string | null | undefined): Record<string, unknown> | null {
+  if (!json) return null;
+  try {
+    const parsed: unknown = JSON.parse(json);
+    return parsed !== null && typeof parsed === 'object' && !Array.isArray(parsed) ? (parsed as Record<string, unknown>) : null;
+  } catch {
+    return null;
+  }
 }
 
 export function bigintReplacer(_key: string, value: unknown): unknown {

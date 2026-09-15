@@ -55,25 +55,30 @@ The runner is `tsx --test`, not `node --test --experimental-strip-types`: strip-
 compile `enum Phase` in roll.ts (or any `.js`-suffixed import of a `.ts` file), and a glob that
 matches no files exits 0. The test files sit next to the modules they test and are typechecked by
 `pnpm typecheck` with everything else. None of them dials a network: the RPC in the test
-environment is a discard port, and the tick tests replace the keeper's own viem client methods
-with in-process stubs.
+environment is a discard port, the tick tests replace the keeper's own viem client methods
+with in-process stubs, and the Cboe chain comes from `src/fixtures/cboe-nvda-2026-09-14.json`
+(the real NVDA chain after the close on 14 Sep 2026, trimmed to the 18 Sep and 25 Sep expiries)
+through `fetchCboeChain`'s fetch seam and `roll.ts`'s `volSource`.
 
 What is pinned, because each of these is a week of premium when it drifts:
 
 | File | Pins |
 |---|---|
-| `policy.test.ts` | the OTM band, `maxContracts`, capacity (`Policy.maxContracts(totalAssets) − contractsWritten`), the fill floor with the engine fee valued at spot, `withPremiumMargin`, `planWeek` / `priceListing` / `fillVerdict`, all to Policy.sol's and ValoremLib.sol's integer maths on the real Chainlink print |
+| `policy.test.ts` | the OTM band, `maxContracts`, capacity (`Policy.maxContracts(totalAssets) − contractsWritten`), the fill floor with the engine fee valued at spot, `withPremiumMargin`, `planWeek` / `priceListing` / `fillVerdict`, all to Policy.sol's and ValoremLib.sol's integer maths on the real Chainlink print (fixed mode) |
+| `vol.test.ts` | Cboe option symbols, the chain's two clocks (timestamp UTC, `last_trade_time` New York) and freshness, including the latest settled NYSE session (weekends, holidays, DST, early closes), the wrong-root and changed-format refusals, exact-expiry selection, the quote filter (spread, overflow), the quote-window consistency checks (gap, rising delta, vertical and butterfly arbitrage), the share-to-token spot ratio and its divergence limit, `strikeForDelta` (0.15 on 18 Sep lands at 220), its out-of-range flag and its single-crossing rule, `fairCallPrice` interpolation and round-up, and `fetchCboeChain` refusing non-https, off-host redirects, a timeout (headers or body), an oversize body, bad JSON and a wrong shape |
+| `policy.vol.test.ts` | vol-mode `planWeek` on the fixture: every vault gate holds (band at the arm spot, `unit ≤ strike`, `unit ≥` floor with margin, `gross % N == 0`), the band clamp both ways with both buffers, every `vol-*` skip reason, broken chains refused (gapped grid, inverted or non-convex quote, corrupt delta, delta far from target, overflowing quote, a thrown getter), the 200 bps default buffer's rally room, fixed mode ignoring the chain, the raise-only override, and reprices with and without fresh data (never below the last market-based ask) |
+| `roll.vol.test.ts` | vol mode through `tick()`: a failed or stale fetch is a remembered skip and an alert with nothing simulated, an empty vault fetches nothing, one fetch arms the delta strike and prices its listing, the pricing record reaches the rows, the alerts, `/orders` and `/state`, a reprice on a dark feed falls back to the previous fair value or, with none, leaves the live listing in place, a rally reprices a fillable listing UP (not without a spare slot, below the threshold, more than every 30 minutes, or for a non-vol listing), the first listing falls back to the arm's fair value, and `/state` serves no pricing while Idle |
 | `calendar.test.ts` | the NYSE Friday 16:00 ET close through the DST switch, a Friday holiday rolling to Thursday, the arm lead and the vault's `MIN_LEAD` floor |
 | `optionType.test.ts` | the option id derivation (`keccak` of the six-field tuple, upper 160 bits `<< 96`) against five real NVDA ids the real Clear emitted; the whole-USDG strike rounding |
 | `seaport.test.ts` | the PARTIAL_RESTRICTED order shape (zone == vault, one USDG item, empty signature), and the local struct hash and EIP-712 digest **byte for byte** against two real orders on 4663; JSON round-trips of 256-bit fields |
-| `state.test.ts` | the SQLite store on a real file: components JSON round-trip of a 77-digit option id, the column allowlists, `/orders` hiding rows past `endTime`, tx recovery by kind and cycle, reopening the file after close, and the migration mechanism on a first-release schema |
+| `state.test.ts` | the SQLite store on a real file: components JSON round-trip of a 77-digit option id, the column allowlists, `/orders` hiding rows past `endTime`, tx recovery by kind and cycle, reopening the file after close, the migration mechanism on a first-release schema, and `pricing_json` added to a first-release file idempotently |
 | `abi.test.ts` | that `abi.ts` names **all 92** custom errors of Vault + SeaportOrderLib + ValoremLib + Policy (pinned, and re-derived from `contracts/out` when present; 36 of them are raised inside the linked libraries and are absent from `Vault.json`), that its functions and events match `Vault.json`, and that `describeError` / `revertName` report them by name |
 | `roll.test.ts` | the pure verdicts: `seaportVerdict`, `resolveContractsAssigned`, `decodeRollClose` / `decodeClaimStranded`, the `roll_close` wording incl. the stranded suffix, `describeInterval` |
 | `roll.close.test.ts` | `contractsAssignedAt` (the 1e18 divisor, the Clear read, null on a revert) and both close paths through `tick()`: the keeper's own `rollClose` and the reconstruction of a close it never witnessed, with `assets_returned` / `usdg_from_assignment` and `/cycles` |
 | `roll.idle.test.ts` | the Idle tick: `settleQueue` then a fresh snapshot before the plan; `phase_stuck` on the head block's clock; a stranded claim (no arm attempted, `claim_stranded` once, `strand_retry_failed` on `StillStranded`, `strand_recovered` closing the row) |
 | `roll.relist.test.ts` | a Listed tick with `listingHash == 0` retires every still-offered row of the cycle — Seaport-cancelled, counter-invalidated (never `isCancelled`), or filled before the cancel — and leaves `/orders` serving none of them |
 | `alerts.test.ts` | the cooldown clock: a failed webhook delivery retries after five minutes, a successful one suppresses for the full `KEEPER_ALERT_COOLDOWN_MS` |
-| `config.test.ts` | the schema's hard edges: bigint fields reject `-1` loudly, `KEEPER_PREMIUM_MARGIN_BPS` in 0..1000, the week's knobs, no registry or Overcall key |
+| `config.test.ts` | the schema's hard edges: bigint fields reject `-1` loudly, `KEEPER_PREMIUM_MARGIN_BPS` in 0..1000, the week's knobs, the vol pricing keys' defaults and bounds (`KEEPER_VOL_URL` https only), no registry or Overcall key |
 | `health.test.ts` | the HTTP server answers on `127.0.0.1` and on `::1` (Railway's private network is IPv6) |
 
 ### Dry run against a fork
@@ -283,7 +288,7 @@ All of these are cross-checked against the deployed vault at boot (`asset`, `usd
 
 | Key | Default | Notes |
 |---|---|---|
-| `KEEPER_STRIKE_OTM_BPS` | `500` | The strike is `round(spot × (1 + bps/1e4))` to a whole USDG. It must sit inside the vault's policy band at the spot of the arm (launch 3%–12%); outside it the keeper declines the week before spending gas. |
+| `KEEPER_STRIKE_OTM_BPS` | `500` | **Fixed mode only.** The strike is `round(spot × (1 + bps/1e4))` to a whole USDG. It must sit inside the vault's policy band at the spot of the arm (launch 3%–12%); outside it the keeper declines the week before spending gas. |
 | `KEEPER_ARM_LEAD_S` | `21600` (6 h) | The keeper's own minimum distance to the Friday close when it arms; at least the vault's `MIN_LEAD` (3600). Closer than this means the following Friday. |
 | `KEEPER_NYSE_HOLIDAYS` | built-in 2026–2027 table | Full-day NYSE closures as `YYYY-MM-DD,…`. A Friday holiday rolls the close back to Thursday 16:00 ET. Set it once the table runs out. |
 
@@ -291,8 +296,19 @@ All of these are cross-checked against the deployed vault at boot (`asset`, `usd
 
 | Key | Default | Notes |
 |---|---|---|
+| `KEEPER_PRICING_MODE` | `vol` | `vol`: strike at `KEEPER_TARGET_DELTA` and ask at the market's fair value plus `KEEPER_PRICE_EDGE_BPS`, from Cboe's free delayed option quotes, never below the fill floor with the margin and never above the strike (see [Choosing the week](#choosing-the-week)). Missing, stale or inconsistent market data skips the week with a named `vol-*` reason; it never falls back to `fixed`. `fixed`: the launch rule, `KEEPER_STRIKE_OTM_BPS` and the fill floor with the margin. |
+| `KEEPER_TARGET_DELTA` | `0.15` | Vol mode. The call delta the strike targets, `0.05`–`0.40`: linear interpolation between the two listed strikes of the cycle's expiry that bracket it, mapped to the token by moneyness, rounded to a whole USDG half up. A target the quoted deltas do not reach skips (`vol-delta-out-of-range`). |
+| `KEEPER_PRICE_EDGE_BPS` | `1000` (10%) | Vol mode. `volAsk = ceil(fair × (10000 + edge) / 10000)`, where `fair` is the listed mid interpolated at the armed strike and mapped to the token. The ask is `max(fill floor with the margin, volAsk)`. `0`–`5000`. |
+| `KEEPER_STRIKE_BAND_BUFFER_BPS` | `200` | Vol mode. The delta strike is clamped into `[ceil(spot × (1 + (minOtmBps + buffer)/1e4)), floor(spot × (1 + (maxOtmBps − 50)/1e4))]` in whole USDG, and the clamp is recorded. The buffer keeps the strike off the band floor, which the fill gate re-checks at every fill (`StrikeBelowBand` after a rally of more than the room left, and no reprice can move a strike). A delta-0.15 strike on a two- to four-day expiry lands close to the floor, so the default is the room the fixed rule has (a 5% strike over a 3% floor). The fixed 50 bps under the ceiling covers a spot drop between the plan and the two arm transactions. `0`–`1000`. |
+| `KEEPER_VOL_REPRICE_UP_BPS` | `2500` | Vol mode. A live listing the fill gate still accepts is cancelled and relisted UP when fresh, fully checked market data puts the market-based ask more than this many bps above the live ask (a rally raises a 0.15-delta call's fair value far faster than the vault's floor, which is the only thing a floor reprice watches). Only for listings priced in vol mode, at most every 30 minutes per listing, and only while a listing slot would remain for a floor reprice; otherwise `fill_sim_revert` (`reprice-up-no-slot`). `0` turns it off. `0`–`50000`. |
+| `KEEPER_VOL_URL` | Cboe's NVDA delayed chain | Vol mode. `https://cdn.cboe.com/api/global/delayed_quotes/options/NVDA.json`. https only; redirects are followed only to the same https host. |
+| `KEEPER_VOL_ROOT` | `NVDA` | Vol mode. The option root the chain must report in `data.symbol`; any other ticker's file is `vol-inconsistent`. |
+| `KEEPER_VOL_MAX_AGE_S` | `345600` (4 days) | Vol mode. The oldest last trade (and file) the keeper prices on: the vault's own `maxPriceAge`, so a Saturday arm reads Friday's close and a long weekend still fits. `3600`–`1209600`. |
+| `KEEPER_VOL_MAX_SPOT_DIVERGENCE_BPS` | `300` | Vol mode. `|tokenSpot / shareSpot − 1|` limit, where `tokenSpot` is `vault.spotUsdg()` and `shareSpot` the feed's `current_price`. The token multiplier is ~8 bps; beyond the limit one of the two spots is wrong or from another day (`vol-spot-divergence`). `1`–`2000`. |
+| `KEEPER_VOL_TIMEOUT_MS` | `10000` | Vol mode. One deadline for the whole fetch: connect, headers and body. `1000`–`60000`. |
+| `KEEPER_VOL_MAX_BYTES` | `8000000` | Vol mode. Body byte cap, enforced while streaming (the NVDA chain is ~1.9 MB). `100000`–`64000000`. |
 | `KEEPER_PREMIUM_MARGIN_BPS` | `100` (1%) | Basis points added to the vault's **fill-time** premium floor when pricing a listing: `unit = ceil(floor × (10000 + margin) / 10000)`. The fill gate re-derives the floor from the spot of the FILL (`PremiumBelowFloorAtFill`), so a listing priced exactly at today's floor is refused by the first buyer after any uptick; a margin of `m` bps absorbs a rise of up to `m` bps before the keeper has to reprice, and each reprice spends one of the vault's three listings a week. Trade-off: higher margin, fewer reprices, slightly higher ask. `0`–`1000`. Not applied to `KEEPER_UNIT_PRICE_USDG6`. |
-| `KEEPER_UNIT_PRICE_USDG6` | — | Manual per-contract ask override, USDG base units. For one unusual cycle. Still floored at the live fill floor and capped at the strike. Leave unset normally. |
+| `KEEPER_UNIT_PRICE_USDG6` | — | Manual per-contract ask override, USDG base units. For one unusual cycle. Still floored at the live fill floor and capped at the strike. In vol mode it can only **raise** the ask: the listing stays at or above `max(fill floor with the margin, fair value with the edge)`, and nothing is armed or listed without a market-based fair value. To sell below the market, switch to `KEEPER_PRICING_MODE=fixed`. Leave unset normally. |
 | `KEEPER_FALLBACK_DIR` | — | Mirrors each authorised order payload to disk. The payload is always in SQLite and served from `/orders`; this is belt and braces. |
 
 ### Stranded claims
@@ -330,9 +346,9 @@ of it has to come out right on the next tick.
 |---|---|---|
 | `Idle` | `queuedShares > 0` | `settleQueue()` (permissionless), then re-read the vault before deciding anything else |
 | `Idle` | `isStranded()` | no arm (`rollOpen` would revert `StillStranded`); `retryStrandedClaim()` on the `KEEPER_RETRY_STRANDED_MS` timer, simulated first; `claim_stranded` once, `strand_retry_failed` while it reverts, `strand_recovered` when it lands |
-| `Idle` | flat, capacity > 0 | window = next NYSE Friday 16:00 ET (+24 h expiry); strike = `round(spot × 1.05)`; option id = `keccak(tuple)`; `clear.tokenType(id)`: reuse if it exists, else `clear.newOptionType(asset, 1e18, usdg, strike, exercise, expiry)`; `rollOpen(id)` (arms only); then `approveListing` at capacity in the same tick |
-| `Idle` | anything refuses the arm (halted, no role, fee on and not accepted, oracle paused or stale, strike outside the band, no capacity) | write nothing; remember the reason; `cycle_not_created` when the Friday goes by |
-| `Listed` | every tick | `contractsWritten` (== sold) and Seaport's fill fraction: publish each fill; mirror the fill gate at live spot (`fillVerdict`) and **reprice** (cancel + approve, within the vault's three) when the ask fell under the fill floor; alert `fill_sim_revert` when it cannot (strike under the band floor, budget spent, stale feed) |
+| `Idle` | flat, capacity > 0 | window = next NYSE Friday 16:00 ET (+24 h expiry); vol mode: fetch the Cboe chain once; strike = the target-delta call clamped into the buffered band (fixed mode: `round(spot × 1.05)`); option id = `keccak(tuple)`; `clear.tokenType(id)`: reuse if it exists, else `clear.newOptionType(asset, 1e18, usdg, strike, exercise, expiry)`; `rollOpen(id)` (arms only); then `approveListing` at capacity in the same tick |
+| `Idle` | anything refuses the arm (halted, no role, fee on and not accepted, oracle paused or stale, strike outside the band, no capacity, market data missing / stale / inconsistent) | write nothing; remember the reason; `cycle_not_created` when the Friday goes by (and at once, per reason, for a stale oracle or a `vol-*` reason) |
+| `Listed` | every tick | `contractsWritten` (== sold) and Seaport's fill fraction: publish each fill; mirror the fill gate at live spot (`fillVerdict`) and **reprice** (cancel + approve, within the vault's three) when the ask fell under the fill floor — in vol mode only after the replacement has been priced, on one fresh fetch or the previous listing's fair value; in vol mode also **reprice up** a still-fillable listing the market has left more than `KEEPER_VOL_REPRICE_UP_BPS` behind, keeping one slot in reserve; alert `fill_sim_revert` when it cannot (strike under the band floor, budget spent, stale feed, no price for the replacement, no spare slot to reprice up) |
 | `Listed` | the listing sold out and deposits added capacity | cancel the filled order and list the remainder, within the three |
 | `Listed` | `listingHash == 0` (a guardian `cancelListing` / `invalidateAllListings`) | retire every still-offered row of the cycle (`cancelled`, or `filled` if Seaport says so) so `/orders` stops serving it, then relist within the three |
 | `Listed` | `now >= cycleExerciseTs` | `lockBook()` (permissionless) |
@@ -349,13 +365,24 @@ keeper deploy. Then:
 ```
 window     = next NYSE Friday 16:00 America/New_York (DST-correct; Thursday on a Friday holiday),
              at least KEEPER_ARM_LEAD_S away, else the Friday after; expiry = exercise + 24 h
-strike     = round(spot * (1 + KEEPER_STRIKE_OTM_BPS/1e4)) to a whole USDG, inside
-             [spot * (1 + minOtmBps/1e4), spot * (1 + maxOtmBps/1e4)]   (floor division, as on chain)
+band       = [spot * (1 + minOtmBps/1e4), spot * (1 + maxOtmBps/1e4)]   (floor division, as on chain)
+strike     fixed: round(spot * (1 + KEEPER_STRIKE_OTM_BPS/1e4)) to a whole USDG, inside the band
+           vol:   the KEEPER_TARGET_DELTA strike of the listed calls expiring on the close day
+                  (linear between the bracketing strikes), * tokenSpot / shareSpot, whole USDG
+                  half up, clamped into [ceil(spot * (1 + (minOtmBps + KEEPER_STRIKE_BAND_BUFFER_BPS)/1e4)),
+                  floor(spot * (1 + (maxOtmBps - 50)/1e4))] and checked against the band again; an
+                  unclamped strike whose Cboe delta is more than 0.05 from the target skips
 optionId   = uint256(uint160(bytes20(keccak256(abi.encode(asset, 1e18, usdg, strike, exercise, expiry))))) << 96
 capacity   = min(floor(totalAssets * maxUtilizationBps / 1e4 / 1e18), maxContractsCap) - contractsWritten
 floorUnit  = ceil((spot * N * minPremiumBps / 1e4 + engineFee(N) * spot / 1e18) / N)
              (the engine fee term only while Valorem's fee switch is on)
-unitPrice  = ceil(floorUnit * (10000 + KEEPER_PREMIUM_MARGIN_BPS) / 10000), never above the strike
+marginUnit = ceil(floorUnit * (10000 + KEEPER_PREMIUM_MARGIN_BPS) / 10000)
+unitPrice  fixed: marginUnit
+           vol:   max(marginUnit, ceil(fair * (10000 + KEEPER_PRICE_EDGE_BPS) / 10000)), where fair is
+                  the listed mid interpolated at strike * shareSpot / tokenSpot, * tokenSpot / shareSpot,
+                  rounded UP to a base unit
+           both:  never above the strike; KEEPER_UNIT_PRICE_USDG6 replaces it, lifted to floorUnit
+                  (fixed), or raises it and never lowers it (vol)
 gross      = unitPrice * N                            (so gross % N == 0, and a partial fill of k pays k * unitPrice)
 ```
 
@@ -369,6 +396,89 @@ integer so a refusal is a computed decision, not a revert on Friday.
 If the strike would fall outside the band, or there is no capacity, the keeper writes nothing and
 says so. That is a legitimate outcome and it stays one all week: the keeper keeps re-evaluating
 until the Friday goes by.
+
+#### Market data (vol mode)
+
+`vol.ts` reads Cboe's free delayed chain, `GET https://cdn.cboe.com/api/global/delayed_quotes/options/NVDA.json`,
+once per decision (an arm and its first listing share one fetch; a reprice makes one), never
+more often than every five minutes (`VOL_MIN_REFETCH_MS`: a keeper declining a week tick after tick
+reuses the last answer or failure instead of pulling ~1.9 MB from Cboe every poll; freshness is
+still judged on the chain's own clocks at each use), and treats it as untrusted: https only, one deadline, a streamed byte cap, same-host redirects only, strict
+UTF-8 and a schema over only the fields it reads. Option symbols are `NVDA` + `YYMMDD` + `C|P` +
+strike × 1000 in 8 digits; prices are per share.
+
+The feed's two clocks are undocumented and were measured on 2026-09-15: the top-level
+`timestamp` is **UTC**, the time Cboe generated the file (NVDA's read `2026-09-15 05:57:42` against
+an HTTP `Last-Modified` of `05:57:45 GMT`; TSLA, AAPL and `_SPX` matched their own `Last-Modified`
+within seconds too), and `data.last_trade_time` is the **New York** wall clock of the underlying's
+last trade (`15:59:59` for stocks, `16:14:59` for `_SPX`). The chain is fresh when both are within
+`KEEPER_VOL_MAX_AGE_S` of the head block, neither is in the future, the last trade is not newer
+than the file (an hour of skew tolerated), and the last trade belongs to the latest NYSE session
+that has closed: the latest weekday outside `KEEPER_NYSE_HOLIDAYS` whose 16:00 ET close is at
+least 12 hours old, less 4 hours for early closes. Cboe regenerates each ticker's file on its own
+schedule, so a stuck file is stale on a Saturday arm even when Wednesday's close is only 72 hours
+old.
+
+The chain must be for `KEEPER_VOL_ROOT`, and at most half its option rows may fail to parse (more
+is a changed feed format: `vol-inconsistent` with the count and the first failing field, not
+`vol-no-expiry`). Only the calls whose expiry is exactly the cycle's close day are used (a holiday
+Thursday close needs a Thursday listing; there is no interpolation across expiries). A quote is
+usable when `bid > 0`, `ask ≥ bid`, both under 1,000,000, `0 < delta < 1`, iv is finite, and the
+spread is at most `max(0.05, 30% of mid)`. Where the keeper interpolates (the delta bracket, and
+the price bracket at the armed strike) the chain must also be sane: the call deltas cross the
+target once, downwards; the two bracketing strikes are at most `max(2.5, 2.5% of the lower
+strike)` apart; and across those quotes and one neighbour each side the delta does not rise with
+the strike, no higher strike is bid above a lower strike's ask, and no call is bid above the
+strike-weighted asks of its neighbours (both would be free money in the quotes, which a real
+market does not offer). Every refusal is a named skip, remembered and alerted:
+
+| Reason | Meaning |
+|---|---|
+| `vol-unavailable` | the fetch failed (timeout, HTTP status, redirect, oversize, bad JSON or shape); the error is in the alert |
+| `vol-stale` | the last trade or the file is older than `KEEPER_VOL_MAX_AGE_S`, or the last trade predates the latest settled NYSE session |
+| `vol-inconsistent` | a clock does not parse, the file is dated in the future, the last trade is newer than the file, the chain is for another root, most rows do not parse, the strike grid is gapped or the quotes around the bracket are non-monotone or arbitrageable, the armed delta is far from the target, or the data could not be evaluated at all; `data.why` says which |
+| `vol-no-expiry` | no listed call expires on the close day |
+| `vol-no-quotes` | fewer than two usable quotes on that expiry |
+| `vol-spot-divergence` | the vault's token spot and the feed's share spot differ by more than `KEEPER_VOL_MAX_SPOT_DIVERGENCE_BPS` |
+| `vol-delta-out-of-range` | the target delta is outside the quoted deltas (never extrapolated) |
+| `vol-strike-unquoted` | the armed strike maps outside the quoted strikes, so there is no fair value |
+
+A reprice (the strike is fixed all week) prices at the armed strike on fresh data when it has it;
+without it, at `max(marginUnit, ceil(previousFair × (1 + edge)))` using the fair value stored with
+the cycle's previous listing (or, for the cycle's first listing, the arm's), so a reprice never
+undercuts the last market-based ask. With neither, the live listing is left in place rather than
+cancelled for a relist that cannot be priced.
+
+A floor reprice only fires when the ask falls under the vault's floor, and after a rally the fair
+value at the armed strike rises far faster than that floor. So in vol mode a listing that is still
+fillable is also checked against fresh data at most every 30 minutes, and cancelled and relisted
+at the market when the market-based ask is more than `KEEPER_VOL_REPRICE_UP_BPS` above it, as long
+as a slot would still remain for a floor reprice. Stale or unusable data never moves an ask up.
+
+Every listing stores its pricing record (`listings.pricing_json`; the arm's is on
+`cycles.pricing_json`), and `/orders` (per order) and `/state` (the live cycle's latest listing;
+`null` while the vault is Idle, so a closed or skipped week's figures never read as current) serve
+it as `pricing`:
+
+```json
+{
+  "mode": "vol", "source": "cboe-delayed", "priceSource": "vol-fair", "volPath": "fresh",
+  "volUnavailableReason": null, "targetDelta": 0.15, "deltaAtStrike": 0.1464, "ivAtStrike": 0.3266,
+  "strikeUsdg6": "225000000", "strikeOtmBps": 602, "deltaStrikeUsdg6": "225000000",
+  "strikeClamped": null, "bandBufferBps": 200,
+  "fairUnit6": "860864", "volUnit6": "946951", "floorUnit6": "848840", "marginUnit6": "857329",
+  "unitPrice6": "946951", "edgeBps": 1000, "marginBps": 100,
+  "shareSpot": 212.0404, "tokenSpot": 212.21, "spotUsdg6": "212210000",
+  "expiry": "2026-09-25", "chainTimestamp": "2026-09-15 05:57:42", "lastTradeTime": "2026-09-14T15:59:59"
+}
+```
+
+`priceSource` is `fill-floor` (the floor with the margin was binding), `vol-fair`,
+`vol-previous-fair` or `manual-override`; `strikeClamped` is `null`, `band-floor` or
+`band-ceiling`. The record is order figures only, nothing annualised and nothing framed as a
+return. Rows written before the column existed serve `pricing: null`. The fork dry runs pin
+`KEEPER_PRICING_MODE=fixed`: their clock is warped weeks ahead, where no live chain lists the
+fork's expiries.
 
 ### The listing and `/orders`
 
@@ -409,7 +519,8 @@ verification for a validated order on every later fill.
         "zoneHash": "0x00…00", "salt": "<256-bit decimal>", "conduitKey": "0x00…00",
         "totalOriginalConsiderationItems": "1"
       },
-      "signature": "0x"
+      "signature": "0x",
+      "pricing": { "mode": "vol", "unitPrice6": "856189", "…": "see Market data (vol mode)" }
     }
   ]
 }
@@ -505,9 +616,9 @@ source of truth for the names; `ops/alerts.md` is the runbook for them.
 | Kind | Severity | What it means and what to do |
 |---|---|---|
 | `tx_revert` | error | A simulation or a receipt came back reverted. The message carries the decoded custom error and its arguments — `rollOpen would revert: … StrikeBelowBand(226000000, 231750000)` — for every error the vault and its two linked libraries can throw. Nothing was sent if it was a simulation. |
-| `cycle_not_created` | warn | A Friday passed without the vault being armed; `data.reason` says why (`strike-outside-band`, `no-capacity`, `writes-halted`, `no-keeper-role`, `valorem-fees-enabled`, `oracle-paused`, `stale-oracle: …`, `option-type-failed`, `rollOpen-would-revert`). The `stale-oracle` variant pages while the week can still be saved. An honest skipped week: unfilled, 0. |
+| `cycle_not_created` | warn | A Friday passed without the vault being armed; `data.reason` says why (`strike-outside-band`, `no-capacity`, `writes-halted`, `no-keeper-role`, `valorem-fees-enabled`, `oracle-paused`, `stale-oracle: …`, `option-type-failed`, `rollOpen-would-revert`, and in vol mode `vol-unavailable`, `vol-stale`, `vol-inconsistent`, `vol-no-expiry`, `vol-no-quotes`, `vol-spot-divergence`, `vol-delta-out-of-range`, `vol-strike-unquoted`). The `stale-oracle` and `vol-*` variants page while the week can still be saved (once per reason per week, then the cooldown). An honest skipped week: unfilled, 0. |
 | `option_type_failed` | error | `clear.newOptionType` would revert, did not confirm, or its `NewOptionType` log did not name the id the keeper derived. The week cannot be armed. |
-| `fill_sim_revert` | warn | The live listing would be refused at the fill gate and the keeper cannot or may not reprice: the strike is under the band floor after a rally (no price fixes it), the vault's three listings are spent, or the feed is stale. Also: the vault authorises a hash this keeper has no row for (it invalidates it and relists), or has not approved Seaport to move its tokens. |
+| `fill_sim_revert` | warn | The live listing would be refused at the fill gate and the keeper cannot or may not reprice: the strike is under the band floor after a rally (no price fixes it), the vault's three listings are spent, the feed is stale, or (vol mode) the replacement cannot be priced, in which case the live listing is left in place. Also raised when vol mode cannot price a listing at all (`vol-*` reason; retried each tick), and when a listing the market has left behind cannot be repriced up without spending the slot kept for a floor reprice (`reprice-up-no-slot`). Also: the vault authorises a hash this keeper has no row for (it invalidates it and relists), or has not approved Seaport to move its tokens. |
 | `claim_stranded` | error, forced | `rollClose` could not redeem the Valorem claim (USDG paused/frozen, NVDA blocklist). The vault is Idle with the claim kept; deposits and instant redemption are shut; the keeper retries on `KEEPER_RETRY_STRANDED_MS`. `ops/runbooks/incident.md` §9. |
 | `strand_retry_failed` | warn | `retryStrandedClaim` still reverts (`StillStranded`); the cause has not cleared. |
 | `strand_recovered` | info, forced | The retry went through; both legs are home and the cycle row is closed. |
@@ -605,6 +716,7 @@ it picks the listing back up from `seaport.getOrderStatus` and carries on.
 | `seaport.ts` | Order construction in exactly the shape `SeaportOrderLib` authorises, local hash derivation, Seaport reads. |
 | `roll.ts` | The state machine, the transaction plumbing, the stranded-claim handling, and the boot reconciliation. |
 | `health.ts` | `/health`, `/state`, `/orders`, `/cycles`. |
+| `vol.ts` | Cboe delayed option chain: the hardened fetch, parsing, freshness, expiry and quote selection, strike by delta, fair value by strike. |
 | `alerts.ts` | Webhook alerting with per-kind cooldown. |
 | `index.ts` | Wiring, the poll loop, graceful shutdown. |
 | `dryrun.ts` | The production keeper driven through three weeks against an anvil fork (unfilled; filled + exercised; stranded by a USDG freeze and recovered) and a fourth arm, with assertions. `DRYRUN.md` is the recorded run. |

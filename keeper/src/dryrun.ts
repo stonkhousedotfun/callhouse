@@ -239,9 +239,30 @@ async function main(): Promise<void> {
   process.env.KEEPER_FALLBACK_DIR = join(OUT, 'fallback');
   process.env.KEEPER_RETRY_STRANDED_MS = String(RETRY_MS);
   process.env.ALERT_WEBHOOK = alerts.url;
+  // The fork warps time by weeks, so Cboe's live delayed chain never lists the fork's expiries and
+  // vol mode would (correctly) skip every week. The rehearsal pins the fixed rule it asserts.
+  process.env.KEEPER_PRICING_MODE = 'fixed';
   // The keeper's own defaults price and time the week; a shell override would break the
-  // "priced at the fill floor plus the default margin" and "next NYSE Friday" assertions.
-  for (const key of ['KEEPER_UNIT_PRICE_USDG6', 'KEEPER_PREMIUM_MARGIN_BPS', 'KEEPER_STRIKE_OTM_BPS', 'KEEPER_ARM_LEAD_S', 'KEEPER_NYSE_HOLIDAYS', 'ALERT_WEBHOOK_TOKEN']) {
+  // "priced at the fill floor plus the default margin" and "next NYSE Friday" assertions. The vol
+  // keys do nothing in fixed mode, but an out-of-range value left in the shell would abort boot.
+  for (const key of [
+    'KEEPER_UNIT_PRICE_USDG6',
+    'KEEPER_PREMIUM_MARGIN_BPS',
+    'KEEPER_STRIKE_OTM_BPS',
+    'KEEPER_ARM_LEAD_S',
+    'KEEPER_NYSE_HOLIDAYS',
+    'ALERT_WEBHOOK_TOKEN',
+    'KEEPER_TARGET_DELTA',
+    'KEEPER_PRICE_EDGE_BPS',
+    'KEEPER_STRIKE_BAND_BUFFER_BPS',
+    'KEEPER_VOL_URL',
+    'KEEPER_VOL_ROOT',
+    'KEEPER_VOL_MAX_AGE_S',
+    'KEEPER_VOL_MAX_SPOT_DIVERGENCE_BPS',
+    'KEEPER_VOL_TIMEOUT_MS',
+    'KEEPER_VOL_MAX_BYTES',
+    'KEEPER_VOL_REPRICE_UP_BPS',
+  ]) {
     delete process.env[key];
   }
 

@@ -7,10 +7,15 @@
  *                 problems a restart cannot fix (low gas, a lagging RPC) are `status:
  *                 "degraded"` on a 200, and page through the alert webhook instead.
  *   GET /state    the keeper's full view of the current cycle, for a human or a dashboard:
- *                 the vault, the next week it would arm, capacity, the stranded claim if any.
+ *                 the vault, the next week it would arm, capacity, the stranded claim if any,
+ *                 and `pricing`: how the LIVE cycle's latest listing was priced (policy.ts
+ *                 PricingRecord: strike, spot, floor, fair value, edge, delta, iv). null while
+ *                 the vault is Idle (between weeks, or a skipped week: the last record belongs to
+ *                 a closed cycle and must not read as current), and when there is no listing.
  *   GET /orders   the vault's live, on-chain-authorised Seaport order(s), with OrderParameters
  *                 and the EMPTY signature. This is the book: the web fill page reads it, and any
- *                 Seaport 1.6 client can fill it directly. There is no other venue.
+ *                 Seaport 1.6 client can fill it directly. There is no other venue. Each order
+ *                 carries `pricing`, the record it was priced on, or null for an older row.
  *   GET /cycles   the last few cycles as the keeper recorded them, unfilled weeks included. Each
  *                 row also carries `premium_gross_usdg6` (gross minus strike proceeds) and
  *                 `strike_proceeds_usdg6`, so an assigned week's returned principal is not read
@@ -31,8 +36,8 @@ import { describeInstant } from './calendar.js';
 import { config } from './config.js';
 import { log } from './logger.js';
 import { MAX_LISTINGS_PER_CYCLE } from './policy.js';
-import { PHASE_NAMES, getLastSnapshot, getTickStartedAt, listingFilled, nextWindow, snapshotCapacity } from './roll.js';
-import { cycleTapeRow, store } from './state.js';
+import { PHASE_NAMES, Phase, getLastSnapshot, getTickStartedAt, listingFilled, nextWindow, snapshotCapacity } from './roll.js';
+import { cycleTapeRow, parsePricingJson, store } from './state.js';
 import { toOrderParametersJson, componentsFromJson, type OrderComponentsJson } from './seaport.js';
 
 const startedAt = Date.now();
@@ -126,6 +131,9 @@ export function buildApp(): Hono {
 
     const cycle = store.getCycle(snap.vaultCycleNumber) ?? store.latestCycle();
     const listings = cycle ? store.listingsForCycle(cycle.cycle_number) : [];
+    // Only a cycle the vault is still in has a current price.
+    const live = snap.phase !== Phase.Idle && cycle !== null && cycle.cycle_number === snap.vaultCycleNumber;
+    const latestListing = live && listings.length > 0 ? listings[listings.length - 1] : undefined;
     let week: Record<string, unknown> | null = null;
     try {
       const w = nextWindow(snap);
@@ -176,6 +184,7 @@ export function buildApp(): Hono {
       nextWeek: week,
       keeperView: cycle,
       listings,
+      pricing: parsePricingJson(latestListing?.pricing_json),
     });
   });
 
@@ -206,6 +215,7 @@ export function buildApp(): Hono {
         status: row.status,
         parameters: toOrderParametersJson(components),
         signature: row.signature,
+        pricing: parsePricingJson(row.pricing_json),
       };
     });
     return c.json({ orders });

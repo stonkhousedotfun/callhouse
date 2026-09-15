@@ -81,6 +81,63 @@ test('the week: strike target 500 bps, arm lead 6 h and never under the vault’
   assert.equal(loadConfig({ ...VALID, KEEPER_RETRY_STRANDED_MS: '1000' }).KEEPER_RETRY_STRANDED_MS, 1000, 'the floor a rehearsal drives');
 });
 
+test('vol pricing: the defaults, and every bound refused at boot', () => {
+  const parsed = loadConfig(VALID);
+  assert.equal(parsed.KEEPER_PRICING_MODE, 'vol');
+  assert.equal(parsed.KEEPER_TARGET_DELTA, 0.15);
+  assert.equal(parsed.KEEPER_PRICE_EDGE_BPS, 1000);
+  assert.equal(parsed.KEEPER_VOL_URL, 'https://cdn.cboe.com/api/global/delayed_quotes/options/NVDA.json');
+  assert.equal(parsed.KEEPER_VOL_MAX_AGE_S, 345_600);
+  assert.equal(parsed.KEEPER_VOL_MAX_SPOT_DIVERGENCE_BPS, 300);
+  assert.equal(parsed.KEEPER_VOL_TIMEOUT_MS, 10_000);
+  assert.equal(parsed.KEEPER_VOL_MAX_BYTES, 8_000_000);
+  assert.equal(parsed.KEEPER_STRIKE_BAND_BUFFER_BPS, 200, 'the fixed rule’s rally room: a 5% strike over a 3% floor');
+  assert.equal(parsed.KEEPER_VOL_REPRICE_UP_BPS, 2500);
+  assert.equal(parsed.KEEPER_VOL_ROOT, 'NVDA');
+  assert.equal(loadConfig({ ...VALID, KEEPER_VOL_REPRICE_UP_BPS: '0' }).KEEPER_VOL_REPRICE_UP_BPS, 0, '0 turns it off');
+  assert.equal(loadConfig({ ...VALID, KEEPER_VOL_ROOT: 'AAPL' }).KEEPER_VOL_ROOT, 'AAPL');
+
+  assert.equal(loadConfig({ ...VALID, KEEPER_PRICING_MODE: 'fixed' }).KEEPER_PRICING_MODE, 'fixed');
+  assert.equal(loadConfig({ ...VALID, KEEPER_TARGET_DELTA: '0.05' }).KEEPER_TARGET_DELTA, 0.05);
+  assert.equal(loadConfig({ ...VALID, KEEPER_TARGET_DELTA: '0.4' }).KEEPER_TARGET_DELTA, 0.4);
+  assert.equal(loadConfig({ ...VALID, KEEPER_PRICE_EDGE_BPS: '0' }).KEEPER_PRICE_EDGE_BPS, 0);
+  assert.equal(loadConfig({ ...VALID, KEEPER_PRICE_EDGE_BPS: '5000' }).KEEPER_PRICE_EDGE_BPS, 5000);
+  const bad: Array<[string, string]> = [
+    ['KEEPER_PRICING_MODE', 'auto'],
+    ['KEEPER_TARGET_DELTA', '0.04'],
+    ['KEEPER_TARGET_DELTA', '0.41'],
+    ['KEEPER_TARGET_DELTA', 'fifteen'],
+    ['KEEPER_PRICE_EDGE_BPS', '5001'],
+    ['KEEPER_PRICE_EDGE_BPS', '-1'],
+    ['KEEPER_PRICE_EDGE_BPS', '10.5'],
+    ['KEEPER_VOL_MAX_AGE_S', '0'],
+    ['KEEPER_VOL_MAX_SPOT_DIVERGENCE_BPS', '0'],
+    ['KEEPER_VOL_TIMEOUT_MS', '999'],
+    ['KEEPER_VOL_MAX_BYTES', '10'],
+    ['KEEPER_STRIKE_BAND_BUFFER_BPS', '1001'],
+    ['KEEPER_VOL_REPRICE_UP_BPS', '-1'],
+    ['KEEPER_VOL_REPRICE_UP_BPS', '50001'],
+    ['KEEPER_VOL_ROOT', 'nvda'],
+    ['KEEPER_VOL_ROOT', 'NVDA.json'],
+  ];
+  for (const [key, value] of bad) {
+    assert.throws(() => loadConfig({ ...VALID, [key]: value }), new RegExp(`${key}:`), `refuses ${key}=${value}`);
+  }
+});
+
+test('KEEPER_VOL_URL: https only, and never echoed', () => {
+  assert.equal(loadConfig({ ...VALID, KEEPER_VOL_URL: 'https://mirror.example/NVDA.json?k=1' }).KEEPER_VOL_URL, 'https://mirror.example/NVDA.json?k=1');
+  assert.throws(() => loadConfig({ ...VALID, KEEPER_VOL_URL: 'http://cdn.cboe.com/api/global/delayed_quotes/options/NVDA.json' }), /KEEPER_VOL_URL: not an https URL/);
+  assert.throws(
+    () => loadConfig({ ...VALID, KEEPER_VOL_URL: 'not a url SECRET123' }),
+    (err: unknown) => {
+      assert.match(String(err), /KEEPER_VOL_URL: not a URL/);
+      assert.ok(!String(err).includes('SECRET123'));
+      return true;
+    },
+  );
+});
+
 test('KEEPER_NYSE_HOLIDAYS: unset is the built-in table; a list must be dates', () => {
   assert.deepEqual(loadConfig(VALID).KEEPER_NYSE_HOLIDAYS, NYSE_HOLIDAYS_2026_2027);
   assert.deepEqual(loadConfig({ ...VALID, KEEPER_NYSE_HOLIDAYS: '2028-01-17, 2028-02-21' }).KEEPER_NYSE_HOLIDAYS, ['2028-01-17', '2028-02-21']);

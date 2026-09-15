@@ -86,9 +86,12 @@ Sequence, from `contracts/docs/DEPLOY.md` path A with our own clearinghouse. **O
 5. `Verify.s.sol` with `EXPECTED_CLEAR_FEE_TO` = the Safe (bootstrap), `Configure.s.sol` (keeper = account 1, guardian = account 2), `Verify.s.sol` again.
 6. Sourcify verification for the Clear, both libraries and the vault; import on Blockscout.
 7. `ops/addresses.json` filled in; Railway variables set per `ops/deploy.md`, including
-   `KEEPER_PREMIUM_MARGIN_BPS=50`, `KEEPER_STRIKE_OTM_BPS=500`, `CLEARINGHOUSE` = our Clear on every
-   service, no `ALERT_WEBHOOK` for the canary. Web and indexer deployed; the keeper service created but
-   **not started** until step D is done.
+   `KEEPER_PREMIUM_MARGIN_BPS=50`, `CLEARINGHOUSE` = our Clear on every service, no `ALERT_WEBHOOK`
+   for the canary. Pricing is `KEEPER_PRICING_MODE=vol` by default (strike at delta 0.15 from Cboe's
+   delayed quotes, ask at the market's fair value plus 10%, never under the floor with the margin);
+   `KEEPER_PRICING_MODE=fixed` with `KEEPER_STRIKE_OTM_BPS=500` is the fallback if the feed is
+   unusable (see `keeper/README.md` → Choosing the week). Web and indexer deployed; the keeper
+   service created but **not started** until step D is done.
 
 Record here after deploy:
 
@@ -113,10 +116,17 @@ Deposit first so the keeper's first listing already has capacity for one contrac
 Start the keeper service during US market hours (Mon–Fri 09:30–16:00 ET) so the feed is fresh. Within
 one poll (60 s) it should:
 
-1. compute the Friday close and a strike about 5% above spot, rounded to a whole USDG;
+1. compute the Friday close; in vol mode fetch Cboe's delayed NVDA chain and take the listed call
+   for that close at delta 0.15, clamped to at least 5% above spot (the 3% band floor plus the 200 bps
+   buffer) and at most 11.5%, rounded to a whole USDG (fixed mode: about 5% above spot);
 2. call `newOptionType` on our Clear;
 3. call `rollOpen(optionId)` (arms only, writes nothing);
-4. call `approveListing` for **1 contract** at the floor plus 0.5%.
+4. call `approveListing` for **1 contract** at max(the floor plus 0.5%, the market's fair value plus
+   10%) (fixed mode: the floor plus 0.5%).
+
+If the keeper logs `not arming this tick` with a `vol-*` reason (a `cycle_not_created` alert in
+SQLite), the market data is missing, stale or inconsistent and the week is not armed on a guess.
+Read `data.why` / `data.error`; if Cboe stays unusable, set `KEEPER_PRICING_MODE=fixed` and restart.
 
 Check with `GET /health` and `GET /orders` on the keeper, the cycle page, and on chain:
 `phase() == 1` (Listed), `listingHash() != 0`, `contractsWritten() == 0`.
@@ -124,7 +134,8 @@ Check with `GET /health` and `GET /orders` on the keeper, the cycle page, and on
 ## F. Fill one contract (owner)
 
 1. Open `https://app.callhouse.finance/vault/nvda/cycle` with the **buyer** wallet.
-2. The page shows the listing, capacity 1, the unit price (about 0.86 USDG at today's spot), and the
+2. The page shows the listing, capacity 1, the unit price (about 0.86 USDG at the floor at today's
+   spot; higher in vol mode when the market pays more), and the
    pre-flight result. If it says the fill would be refused after a price move, wait one or two minutes
    for the keeper to reprice and reload.
 3. Approve USDG to Seaport, then fill 1. Expect about 460,000 gas for this first fill.

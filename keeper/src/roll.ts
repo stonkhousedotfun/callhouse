@@ -7,7 +7,9 @@
  * a listing worth authorising, and to close the week.
  *
  *   phase Idle, flat
- *     -> next NYSE Friday close -> strike = spot + KEEPER_STRIKE_OTM_BPS (whole USDG) -> the
+ *     -> next NYSE Friday close -> (vol mode) fetch the delayed option chain once -> strike =
+ *        the KEEPER_TARGET_DELTA call clamped into the band (fixed mode: spot +
+ *        KEEPER_STRIKE_OTM_BPS), whole USDG -> the
  *        option id is precomputed; created on Clear if it does not exist -> rollOpen(id)
  *        (ARMS ONLY, writes nothing) -> approveListing(PARTIAL_RESTRICTED, zone = vault, one
  *        USDG item, amount = capacity) -> served from /orders with an empty signature
@@ -50,7 +52,7 @@ import {
 import { alert, clearAlert } from './alerts.js';
 import { describeInstant, nextWeekWindow, type WeekWindow } from './calendar.js';
 import { account, logClient, publicClient, walletClient } from './clients.js';
-import { config } from './config.js';
+import { BPS, config } from './config.js';
 import { log } from './logger.js';
 import { TOKEN_TYPE_OPTION, optionIdFor, weeklyTuple, type OptionTuple } from './optionType.js';
 import {
@@ -60,7 +62,11 @@ import {
   planWeek,
   priceListing,
   readPolicy,
+  storedFairUnit6,
+  storedStrikeContext,
   type PolicyParams,
+  type PricingRecord,
+  type StrikeContext,
 } from './policy.js';
 import {
   EMPTY_SIGNATURE,
@@ -78,6 +84,7 @@ import {
   type SeaportOrderStatus,
 } from './seaport.js';
 import { splitGross, store, type CycleRow, type ListingStatus, type TxKind } from './state.js';
+import { closeDayOf, fetchCboeChain, type CboeChain, type FetchChainOptions, type VolContext } from './vol.js';
 
 /*//////////////////////////////////////////////////////////////
                               TYPES
@@ -950,6 +957,118 @@ async function raiseHealthAlerts(snap: ChainSnapshot): Promise<void> {
 }
 
 /*//////////////////////////////////////////////////////////////
+                           MARKET DATA
+//////////////////////////////////////////////////////////////*/
+
+/** SEAM for tests: the one network call vol mode makes. Replace `fetch` with mock.method. */
+export const volSource: { fetch: (url: string, options: FetchChainOptions) => Promise<CboeChain> } = {
+  fetch: (url, options) => fetchCboeChain(url, options),
+};
+
+/**
+ * The least time between two downloads of the chain, wall clock. A keeper that keeps declining a
+ * week (a persistent `vol-*` reason, a Cboe outage) would otherwise pull ~1.9 MB from Cboe every
+ * POLL_INTERVAL_MS for days, which is how a free feed gets an IP blocked. The delayed feed is 15
+ * minutes behind the market and does not move at all outside the session, so a five-minute-old
+ * answer (or failure) is reused instead. Reuse never makes data look fresher: every decision
+ * judges the chain's own clocks against its own head block.
+ */
+export const VOL_MIN_REFETCH_MS = 5 * 60_000;
+
+let volCache: { at: number; url: string; chain: CboeChain | null; error: string | null } | null = null;
+
+/**
+ * The least time between two upward-reprice checks of a live, fillable vol listing, wall clock.
+ * Those checks are the only reason a quiet Listed week downloads the chain at all; every half hour
+ * catches a gap at the open within one delayed-feed refresh without pulling the file every minute.
+ */
+export const VOL_REPRICE_UP_CHECK_MS = 30 * 60_000;
+
+const repriceUpCheckedAt = new Map<string, number>();
+
+/** SEAM for tests: forget the last download and the last upward-reprice checks. */
+export function resetVolCache(): void {
+  volCache = null;
+  repriceUpCheckedAt.clear();
+}
+
+/** The market-based fair value to fall back on when fresh data is not usable: the listing's own
+ *  record, or, for the first listing of a cycle (none yet, or the arm's listing never landed),
+ *  the record the arm was priced on. */
+function fallbackFairUnit6(cycleNumber: number, listingPricingJson: string | null | undefined): bigint | null {
+  return storedFairUnit6(listingPricingJson) ?? storedFairUnit6(store.getCycle(cycleNumber)?.pricing_json);
+}
+
+/**
+ * The option chain for ONE decision (an arm, a listing, a reprice). Bounded by
+ * KEEPER_VOL_TIMEOUT_MS and KEEPER_VOL_MAX_BYTES, throttled by VOL_MIN_REFETCH_MS, and never
+ * throws: a failure is a VolContext with no chain, which policy.ts turns into 'vol-unavailable' —
+ * a skipped decision with a reason, not a crashed tick. `nowSeconds` is the head block's clock,
+ * like every other decision here.
+ */
+export async function loadVol(closeDay: string, nowSeconds: number): Promise<VolContext> {
+  const url = config.KEEPER_VOL_URL;
+  if (volCache !== null && volCache.url === url && Date.now() - volCache.at < VOL_MIN_REFETCH_MS) {
+    return {
+      chain: volCache.chain,
+      error: volCache.error === null ? null : `${volCache.error} (last attempt ${Math.round((Date.now() - volCache.at) / 1000)}s ago; retried after ${VOL_MIN_REFETCH_MS / 1000}s)`,
+      closeDay,
+      nowSeconds,
+    };
+  }
+  try {
+    const chain = await volSource.fetch(url, {
+      timeoutMs: config.KEEPER_VOL_TIMEOUT_MS,
+      maxBytes: config.KEEPER_VOL_MAX_BYTES,
+    });
+    volCache = { at: Date.now(), url, chain, error: null };
+    log.roll.debug(
+      { closeDay, chainTimestamp: chain.timestamp, lastTradeTime: chain.lastTradeTime, options: chain.options.length, skippedRows: chain.skippedRows },
+      'fetched the option chain',
+    );
+    return { chain, error: null, closeDay, nowSeconds };
+  } catch (error) {
+    const reason = describeError(error);
+    volCache = { at: Date.now(), url, chain: null, error: reason };
+    log.roll.warn({ closeDay, err: reason }, 'could not fetch the option chain');
+    return { chain: null, error: reason, closeDay, nowSeconds };
+  }
+}
+
+/** The figures an operator reads first, for alert data and log lines. */
+function pricingSummary(p: PricingRecord): Record<string, unknown> {
+  return {
+    pricingMode: p.mode,
+    strikeUsdg: formatUsdg(BigInt(p.strikeUsdg6)),
+    strikeOtmBps: p.strikeOtmBps,
+    targetDelta: p.targetDelta,
+    deltaAtStrike: p.deltaAtStrike,
+    ivAtStrike: p.ivAtStrike,
+    fairUnitUsdg: p.fairUnit6 === null ? null : formatUsdg(BigInt(p.fairUnit6)),
+    unitPriceUsdg: formatUsdg(BigInt(p.unitPrice6)),
+    floorUnitUsdg: formatUsdg(BigInt(p.floorUnit6)),
+    priceSource: p.priceSource,
+    volPath: p.volPath,
+    strikeClamped: p.strikeClamped,
+    expiry: p.expiry,
+    chainTimestamp: p.chainTimestamp,
+  };
+}
+
+/** One human line for alerts: "+602 bps over spot 212.21, delta 0.146 (target 0.15), Cboe iv 32.7,
+ *  fair 0.860864" in vol mode; the distance over spot alone in fixed mode. */
+function pricingPhrase(p: PricingRecord): string {
+  const parts = [`${p.strikeOtmBps >= 0 ? '+' : ''}${p.strikeOtmBps} bps over spot ${formatUsdg(BigInt(p.spotUsdg6))}`];
+  if (p.mode === 'vol') {
+    if (p.deltaAtStrike !== null) parts.push(`delta ${p.deltaAtStrike.toFixed(3)} (target ${p.targetDelta ?? '?'})`);
+    if (p.ivAtStrike !== null) parts.push(`Cboe iv ${(p.ivAtStrike * 100).toFixed(1)}`);
+    if (p.fairUnit6 !== null) parts.push(`fair ${formatUsdg(BigInt(p.fairUnit6))}${p.volPath === 'previous-fair' ? ' (previous listing)' : ''}`);
+    if (p.strikeClamped !== null) parts.push(`delta strike ${p.deltaStrikeUsdg6 === null ? '?' : formatUsdg(BigInt(p.deltaStrikeUsdg6))} clamped to the ${p.strikeClamped}`);
+  }
+  return parts.join(', ');
+}
+
+/*//////////////////////////////////////////////////////////////
                               TICK
 //////////////////////////////////////////////////////////////*/
 
@@ -1086,6 +1205,12 @@ async function onIdle(initial: ChainSnapshot): Promise<void> {
     return;
   }
 
+  // Vol mode reads the market once for this decision, and only when there is something to sell:
+  // planWeek checks capacity before it asks for the chain, so an empty vault costs no request.
+  const vol =
+    config.KEEPER_PRICING_MODE === 'vol' && snapshotCapacity(snap) > 0n
+      ? await loadVol(window.closeDay, Number(snap.blockTimestamp))
+      : undefined;
   const plan = planWeek({
     policy: snap.policy,
     spotUsdg6: snap.spotUsdg6,
@@ -1093,9 +1218,10 @@ async function onIdle(initial: ChainSnapshot): Promise<void> {
     contractsWritten: snap.contractsWritten,
     feesEnabled: snap.valoremFeesEnabled,
     feeBps: snap.valoremFeeBps,
+    vol,
   });
   if (!plan.ok) {
-    await remember(window, plan.reason);
+    await remember(window, plan.reason, plan.detail);
     log.roll.info({ exerciseTs: window.exerciseTs, reason: plan.reason, ...plan.detail }, 'not arming this tick');
     return;
   }
@@ -1146,13 +1272,15 @@ async function onIdle(initial: ChainSnapshot): Promise<void> {
     lot_size: tuple.underlyingAmount.toString(),
     roll_open_tx: receipt.transactionHash,
     opened_at: Date.now(),
+    pricing_json: JSON.stringify(plan.pricing),
   });
   store.setMeta(WEEK_ARMED_KEY, String(window.exerciseTs));
 
   await alert(
     'roll_open',
     `cycle ${cycleNumber}: armed strike ${formatUsdg(plan.strikeUsdg6)} USDG for the ${window.friday} close ` +
-      `(${describeInstant(window.exerciseTs)}); capacity ${plan.contracts} contracts, nothing written yet`,
+      `(${describeInstant(window.exerciseTs)}); ${pricingPhrase(plan.pricing)}; planned ask ${formatUsdg(plan.unitPrice6)} ` +
+      `(${plan.priceSource}); capacity ${plan.contracts} contracts, nothing written yet`,
     {
       cycleNumber,
       optionId: optionId.toString(),
@@ -1163,13 +1291,16 @@ async function onIdle(initial: ChainSnapshot): Promise<void> {
       closeDay: window.closeDay,
       spotUsdg: formatUsdg(plan.spotUsdg6),
       tx: receipt.transactionHash,
+      ...pricingSummary(plan.pricing),
     },
     { force: true },
   );
 
   // List in the same tick: every minute between arming and listing is a minute nothing can sell.
+  // The same chain prices the listing: one fetch per decision, and the arm and its first ask
+  // must not read two different markets.
   const after = await snapshot();
-  await createListing(after);
+  await createListing(after, vol);
 }
 
 /**
@@ -1258,8 +1389,19 @@ async function ensureOptionType(tuple: OptionTuple): Promise<bigint | null> {
  * exercise timestamp the arm would have used: there is no cycle number for a week that was
  * never armed.
  */
-async function remember(window: WeekWindow, reason: string): Promise<void> {
+async function remember(window: WeekWindow, reason: string, detail: Record<string, string> = {}): Promise<void> {
   store.setMeta(SKIP_REASON_KEY(window.exerciseTs), reason);
+  if (reason.startsWith('vol-')) {
+    // Market data missing, stale or inconsistent: the week is skipped rather than armed on a
+    // guess. Like a stale oracle it is usually temporary (a dark feed, a CDN hiccup), so it warns
+    // while there is time to act — once per reason per week, then the alert cooldown.
+    await alert(
+      'cycle_not_created',
+      `week of ${window.friday}: not arming (${reason}); the option chain cannot price this week yet`,
+      { exerciseTs: window.exerciseTs, closeDay: window.closeDay, reason, ...detail },
+      { dedupeKey: `${window.exerciseTs}:${reason}` },
+    );
+  }
   if (reason.startsWith('stale-oracle')) {
     // A stale feed silently blocks every arm for as long as it lasts. Surfacing it only when the
     // week rolls by means hearing about it once the week is already lost, so it warns while
@@ -1649,6 +1791,7 @@ async function pollLiveListing(snap: ChainSnapshot): Promise<void> {
   );
   if (verdict.fillable) {
     clearAlert('fill_sim_revert', `${row.order_hash}:strike-below-band`);
+    await maybeRepriceUp(snap, row, remainingCapacity);
     return;
   }
 
@@ -1677,6 +1820,33 @@ async function pollLiveListing(snap: ChainSnapshot): Promise<void> {
     );
     return;
   }
+  // Vol mode: read the market once for this reprice and make sure the replacement CAN be priced
+  // before the live listing is cancelled. A cancel followed by an unpriceable relist would leave
+  // the week with nothing offered and a slot spent.
+  let vol: VolContext | undefined;
+  if (config.KEEPER_PRICING_MODE === 'vol') {
+    vol = await loadVol(closeDayOf(snap.vaultExerciseTs), Number(snap.blockTimestamp));
+    const check = priceListing({
+      policy: snap.policy,
+      spotUsdg6: snap.spotUsdg6,
+      strikeUsdg6: snap.vaultStrikeUsdg6,
+      contracts: remainingCapacity,
+      feesEnabled: snap.valoremFeesEnabled,
+      feeBps: snap.valoremFeeBps,
+      vol,
+      previousFairUnit6: fallbackFairUnit6(snap.vaultCycleNumber, row.pricing_json),
+    });
+    if (!check.ok) {
+      await alert(
+        'fill_sim_revert',
+        `listing ${row.order_hash}: ask is under the fill floor ${formatUsdg(verdict.floorUnit6)} at spot ${formatUsdg(snap.spotUsdg6)}, ` +
+          `but a replacement cannot be priced (${check.reason}); leaving the listing in place`,
+        { orderHash: row.order_hash, reason: check.reason, ...check.detail },
+        { dedupeKey: `${row.order_hash}:reprice-${check.reason}` },
+      );
+      return;
+    }
+  }
   log.roll.warn(
     { orderHash: row.order_hash, ...verdict.detail, floorUnit6: verdict.floorUnit6.toString() },
     'the live listing would be refused at the fill floor; repricing',
@@ -1684,7 +1854,89 @@ async function pollLiveListing(snap: ChainSnapshot): Promise<void> {
   const cancelled = await cancelLiveListing(snap, row.order_hash, 'repricing after a spot move');
   if (!cancelled) return;
   const after = await snapshot();
-  await createListing(after);
+  await createListing(after, vol);
+}
+
+/**
+ * vol mode: a live listing the fill gate still accepts, but whose ask the market has left behind.
+ *
+ * The floor reprice only ever fires when the ask drops UNDER the vault's floor. After a rally the
+ * fair value at the armed strike rises far faster than that floor (a delta-0.15 call gains ~35% on
+ * a 1% move), so without this the week keeps selling at the old market's price while every fill
+ * still clears. When fresh, fully checked data puts the vol ask more than KEEPER_VOL_REPRICE_UP_BPS
+ * above the live ask, the listing is cancelled and relisted at the market, from the same chain.
+ *
+ * Bounded three ways: only listings that were themselves priced in vol mode (a record with
+ * mode 'vol'); at most one check per listing per VOL_REPRICE_UP_CHECK_MS (so a quiet week costs
+ * Cboe two downloads an hour, not sixty); and only while a listing slot would remain AFTER the
+ * relist, kept in reserve for a floor reprice. Without that slot it alerts and leaves the listing.
+ * Stale or unusable data never moves the ask up: the fallback to a previous fair value is for
+ * keeping a floor reprice honest, not for chasing a market it cannot see.
+ */
+async function maybeRepriceUp(snap: ChainSnapshot, row: { order_hash: string; pricing_json?: string | null }, remainingCapacity: bigint): Promise<void> {
+  const thresholdBps = config.KEEPER_VOL_REPRICE_UP_BPS;
+  if (config.KEEPER_PRICING_MODE !== 'vol' || thresholdBps === 0) return;
+  if (snap.spotUsdg6 === null || remainingCapacity <= 0n || snap.listingAmount <= 0n) return;
+  if (snap.blockTimestamp >= snap.vaultExerciseTs) return;
+  if (parsePricingMode(row.pricing_json) !== 'vol') return;
+  const lastCheck = repriceUpCheckedAt.get(row.order_hash);
+  if (lastCheck !== undefined && Date.now() - lastCheck < VOL_REPRICE_UP_CHECK_MS) return;
+  repriceUpCheckedAt.set(row.order_hash, Date.now());
+
+  const liveUnit6 = snap.listingGrossUsdg6 / snap.listingAmount;
+  const vol = await loadVol(closeDayOf(snap.vaultExerciseTs), Number(snap.blockTimestamp));
+  const priced = priceListing({
+    policy: snap.policy,
+    spotUsdg6: snap.spotUsdg6,
+    strikeUsdg6: snap.vaultStrikeUsdg6,
+    contracts: remainingCapacity,
+    feesEnabled: snap.valoremFeesEnabled,
+    feeBps: snap.valoremFeeBps,
+    vol,
+    // Fresh data only: see above.
+    previousFairUnit6: null,
+  });
+  if (!priced.ok || priced.pricing.volPath !== 'fresh') {
+    log.roll.debug({ orderHash: row.order_hash, reason: priced.ok ? priced.pricing.volPath : priced.reason }, 'no fresh market price to check the live ask against');
+    return;
+  }
+  if (priced.unitPrice6 * BPS <= liveUnit6 * (BPS + BigInt(thresholdBps))) return;
+
+  const context = {
+    orderHash: row.order_hash,
+    liveUnitUsdg: formatUsdg(liveUnit6),
+    marketUnitUsdg: formatUsdg(priced.unitPrice6),
+    thresholdBps,
+    listingsThisCycle: snap.listingsThisCycle,
+    ...pricingSummary(priced.pricing),
+  };
+  // One slot must be left after the relist: a floor reprice later in the week needs it more.
+  if (snap.listingsThisCycle + 1 >= MAX_LISTINGS_PER_CYCLE) {
+    await alert(
+      'fill_sim_revert',
+      `listing ${row.order_hash}: ask ${formatUsdg(liveUnit6)} is under the market-based ask ${formatUsdg(priced.unitPrice6)} at spot ` +
+        `${formatUsdg(snap.spotUsdg6)} (${priced.priceSource}), but repricing up would spend the last listing slot kept for a floor reprice; leaving it`,
+      { ...context, reason: 'reprice-up-no-slot' },
+      { dedupeKey: `${row.order_hash}:reprice-up-no-slot` },
+    );
+    return;
+  }
+  log.roll.warn(context, 'the live ask is well under the market; repricing up');
+  const cancelled = await cancelLiveListing(snap, row.order_hash, 'repricing up to the market');
+  if (!cancelled) return;
+  const after = await snapshot();
+  await createListing(after, vol);
+}
+
+/** `mode` from a stored pricing record, or null. */
+function parsePricingMode(pricingJson: string | null | undefined): string | null {
+  if (!pricingJson) return null;
+  try {
+    const parsed = JSON.parse(pricingJson) as { mode?: unknown };
+    return typeof parsed.mode === 'string' ? parsed.mode : null;
+  } catch {
+    return null;
+  }
 }
 
 /*//////////////////////////////////////////////////////////////
@@ -1696,12 +1948,15 @@ async function pollLiveListing(snap: ChainSnapshot): Promise<void> {
  *
  *   1. size = the vault's remaining capacity (Policy.maxContracts(totalAssets) − contractsWritten)
  *   2. price = the fill floor per contract at this spot (fee valued at spot when the switch is
- *      on) lifted by KEEPER_PREMIUM_MARGIN_BPS, never above the strike
+ *      on) lifted by KEEPER_PREMIUM_MARGIN_BPS, never above the strike; in vol mode the higher
+ *      of that and the market's fair value at the armed strike lifted by KEEPER_PRICE_EDGE_BPS
+ *      (the chain the caller already fetched for this decision, or one fetch here), falling
+ *      back to the previous listing's fair value when fresh data is not usable
  *   3. components: PARTIAL_RESTRICTED, zone = vault, one USDG item, counter read live
  *   4. cross-check our hash against seaport.getOrderHash, simulate, send approveListing
  *   5. the row is what /orders serves, with an empty signature
  */
-async function createListing(snap: ChainSnapshot): Promise<boolean> {
+async function createListing(snap: ChainSnapshot, prefetchedVol?: VolContext): Promise<boolean> {
   const cycleNumber = snap.vaultCycleNumber;
   if (snap.phase !== Phase.Listed || snap.blockTimestamp >= snap.vaultExerciseTs) return false;
   if (snap.listingHash !== ZERO_HASH) {
@@ -1728,6 +1983,12 @@ async function createListing(snap: ChainSnapshot): Promise<boolean> {
     log.roll.warn({ cycleNumber, err: snap.spotError }, 'cannot price a listing without spot; the feed is stale');
     return false;
   }
+  const vol =
+    config.KEEPER_PRICING_MODE === 'vol'
+      ? (prefetchedVol ?? (await loadVol(closeDayOf(snap.vaultExerciseTs), Number(snap.blockTimestamp))))
+      : undefined;
+  const previous = store.latestListingForCycle(cycleNumber);
+  const strikeContext: StrikeContext | undefined = storedStrikeContext(store.getCycle(cycleNumber)?.pricing_json);
   const priced = priceListing({
     policy: snap.policy,
     spotUsdg6: snap.spotUsdg6,
@@ -1735,12 +1996,24 @@ async function createListing(snap: ChainSnapshot): Promise<boolean> {
     contracts,
     feesEnabled: snap.valoremFeesEnabled,
     feeBps: snap.valoremFeeBps,
+    vol,
+    previousFairUnit6: fallbackFairUnit6(cycleNumber, previous?.pricing_json),
+    strikeContext,
   });
   if (!priced.ok) {
     log.roll.warn({ cycleNumber, reason: priced.reason, ...priced.detail }, 'cannot price a listing');
+    if (priced.reason.startsWith('vol-')) {
+      await alert(
+        'fill_sim_revert',
+        `cycle ${cycleNumber}: no listing authorised: the option chain cannot price one (${priced.reason}); retrying each tick`,
+        { cycleNumber, reason: priced.reason, ...priced.detail },
+        { dedupeKey: `${cycleNumber}:listing-${priced.reason}` },
+      );
+    }
     return false;
   }
   const unitPrice6 = priced.unitPrice6;
+  log.roll.info({ cycleNumber, contracts: contracts.toString(), ...pricingSummary(priced.pricing) }, 'priced a listing');
 
   const counter = await readCounter(config.VAULT);
   const components = buildOrderComponents({
@@ -1803,6 +2076,7 @@ async function createListing(snap: ChainSnapshot): Promise<boolean> {
     seaport_total_filled: null,
     seaport_total_size: null,
     seaport_cancelled: null,
+    pricing_json: JSON.stringify(priced.pricing),
   });
   if (seq > 1) {
     const row = store.getCycle(cycleNumber);
@@ -1813,17 +2087,16 @@ async function createListing(snap: ChainSnapshot): Promise<boolean> {
   await alert(
     'listing',
     `cycle ${cycleNumber}: listing ${seq}/${MAX_LISTINGS_PER_CYCLE} authorised: ${contracts} contracts at ` +
-      `${formatUsdg(unitPrice6)} USDG each (floor ${formatUsdg(priced.floorUnit6)} at spot ${formatUsdg(snap.spotUsdg6)}, ${priced.priceSource}); served from /orders`,
+      `${formatUsdg(unitPrice6)} USDG each (floor ${formatUsdg(priced.floorUnit6)} at spot ${formatUsdg(snap.spotUsdg6)}, ${priced.priceSource}); ` +
+      `strike ${formatUsdg(snap.vaultStrikeUsdg6)}, ${pricingPhrase(priced.pricing)}; served from /orders`,
     {
       cycleNumber,
       orderHash: onChainHash,
       seq,
       contracts: contracts.toString(),
-      unitPriceUsdg: formatUsdg(unitPrice6),
-      floorUnitUsdg: formatUsdg(priced.floorUnit6),
       spotUsdg: formatUsdg(snap.spotUsdg6),
-      priceSource: priced.priceSource,
       tx: receipt.transactionHash,
+      ...pricingSummary(priced.pricing),
     },
     { force: true },
   );
