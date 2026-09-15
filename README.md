@@ -6,7 +6,7 @@ Let your stonks work for you. Deposit NVDA into your own account, choose how muc
 
 Chain: Robinhood Chain (`4663`)  
 App: `app.stonkhouse.fun/account` (deposit) and `/book` (buy)  
-Factory: `0x7850Ae4ac03b651263cE78EC5FcED11b0d0e05A7`
+Factory: `0xc4A5Cd0DE91CaB7F5Ebe2114bc63Fbb43E642BBb`
 
 > Premium is paid only if a buyer fills the listing.
 > Assignment can take the tokens at the strike.

@@ -324,6 +324,45 @@ export const writerAccountAbi = [
   },
   {
     "type": "function",
+    "name": "listedAskUsdg",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "listedExerciseTs",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "uint40",
+        "internalType": "uint40"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "listedExpiryTs",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "uint40",
+        "internalType": "uint40"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
     "name": "listedLots",
     "inputs": [],
     "outputs": [
@@ -331,6 +370,19 @@ export const writerAccountAbi = [
         "name": "",
         "type": "uint64",
         "internalType": "uint64"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "listedStrikeUsdg",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "uint256",
+        "internalType": "uint256"
       }
     ],
     "stateMutability": "view"
@@ -700,6 +752,19 @@ export const writerAccountAbi = [
   },
   {
     "type": "function",
+    "name": "transferOwnership",
+    "inputs": [
+      {
+        "name": "newOwner",
+        "type": "address",
+        "internalType": "address"
+      }
+    ],
+    "outputs": [],
+    "stateMutability": "nonpayable"
+  },
+  {
+    "type": "function",
     "name": "usdg",
     "inputs": [],
     "outputs": [
@@ -921,6 +986,25 @@ export const writerAccountAbi = [
   },
   {
     "type": "event",
+    "name": "OwnershipTransferred",
+    "inputs": [
+      {
+        "name": "from",
+        "type": "address",
+        "indexed": true,
+        "internalType": "address"
+      },
+      {
+        "name": "to",
+        "type": "address",
+        "indexed": true,
+        "internalType": "address"
+      }
+    ],
+    "anonymous": false
+  },
+  {
+    "type": "event",
     "name": "Settled",
     "inputs": [
       {
@@ -1037,17 +1121,12 @@ export const writerAccountAbi = [
   },
   {
     "type": "error",
-    "name": "NoOpenClaim",
-    "inputs": []
-  },
-  {
-    "type": "error",
     "name": "NoWeek",
     "inputs": []
   },
   {
     "type": "error",
-    "name": "NotKeeper",
+    "name": "NotAuthorized",
     "inputs": []
   },
   {
@@ -1110,6 +1189,11 @@ export const writerAccountAbi = [
   {
     "type": "error",
     "name": "WritesAreHalted",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "ZeroAddr",
     "inputs": []
   },
   {

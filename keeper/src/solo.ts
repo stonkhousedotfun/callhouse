@@ -13,14 +13,28 @@ import { log } from './logger.js';
 const factoryAbi = [
   {
     type: 'function',
-    name: 'accountCount',
+    name: 'pendingCount',
     stateMutability: 'view',
     inputs: [],
     outputs: [{ type: 'uint256' }],
   },
   {
     type: 'function',
-    name: 'accounts',
+    name: 'pendingAt',
+    stateMutability: 'view',
+    inputs: [{ type: 'uint256' }],
+    outputs: [{ type: 'address' }],
+  },
+  {
+    type: 'function',
+    name: 'liveCount',
+    stateMutability: 'view',
+    inputs: [],
+    outputs: [{ type: 'uint256' }],
+  },
+  {
+    type: 'function',
+    name: 'liveAt',
     stateMutability: 'view',
     inputs: [{ type: 'uint256' }],
     outputs: [{ type: 'address' }],
@@ -145,29 +159,39 @@ export async function tickSolo(): Promise<void> {
 
   await ensureWeek(factory);
 
-  const count = await publicClient.readContract({
+  const pending = await publicClient.readContract({
     address: factory,
     abi: factoryAbi,
-    functionName: 'accountCount',
+    functionName: 'pendingCount',
   });
-
-  for (let i = 0n; i < count; i++) {
+  const max = pending > 25n ? 25n : pending;
+  for (let i = 0n; i < max; i++) {
     const writer = await publicClient.readContract({
       address: factory,
       abi: factoryAbi,
-      functionName: 'accounts',
+      functionName: 'pendingAt',
+      args: [0n],
+    });
+    const owner = await publicClient.readContract({
+      address: writer,
+      abi: accountAbi,
+      functionName: 'owner',
+    });
+    await send('listFor', { address: factory, abi: factoryAbi, functionName: 'listFor', args: [owner] });
+  }
+
+  const live = await publicClient.readContract({
+    address: factory,
+    abi: factoryAbi,
+    functionName: 'liveCount',
+  });
+  for (let i = 0n; i < live; i++) {
+    const writer = await publicClient.readContract({
+      address: factory,
+      abi: factoryAbi,
+      functionName: 'liveAt',
       args: [i],
     });
-    const [owner, requested, listed] = await Promise.all([
-      publicClient.readContract({ address: writer, abi: accountAbi, functionName: 'owner' }),
-      publicClient.readContract({ address: writer, abi: accountAbi, functionName: 'requestedLots' }),
-      publicClient.readContract({ address: writer, abi: accountAbi, functionName: 'listedLots' }),
-    ]);
-
-    if (requested > 0n && listed === 0n) {
-      await send('listFor', { address: factory, abi: factoryAbi, functionName: 'listFor', args: [owner] });
-    }
-
     try {
       await publicClient.simulateContract({
         address: writer,
@@ -177,7 +201,7 @@ export async function tickSolo(): Promise<void> {
       });
       await send('settle', { address: writer, abi: accountAbi, functionName: 'settle' });
     } catch {
-      // TooEarly until expiry, or nothing to settle.
+      // TooEarly until this account's pinned expiry.
     }
   }
 }

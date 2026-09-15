@@ -87,6 +87,8 @@ export const EXPLAINED: Record<string, string | ((args: readonly unknown[]) => s
   TooManyLots: "That is more than this account can offer this week.",
   ZeroAmount: "Enter an amount above zero.",
   AlreadyHasAccount: "This wallet already has an account.",
+  Occupied: "That wallet already has an account.",
+  NotAuthorized: "Not allowed.",
   NoAccount: "Create an account first.",
   WritesAreHalted: "New sales are paused. Try again later.",
   // Vault._depositRefused, every reason a depositor can meet. "Assignment pending" is left out on

@@ -44,7 +44,7 @@ export const VAULT = fromEnv("NEXT_PUBLIC_VAULT", process.env.NEXT_PUBLIC_VAULT)
 export const FACTORY = fromEnv(
   "NEXT_PUBLIC_FACTORY",
   process.env.NEXT_PUBLIC_FACTORY,
-  getAddress("0x7850Ae4ac03b651263cE78EC5FcED11b0d0e05A7"),
+  getAddress("0xc4A5Cd0DE91CaB7F5Ebe2114bc63Fbb43E642BBb"),
 )!;
 
 /** NVDA Stock Token, 18 decimals, proxy. The vault's `asset`. */

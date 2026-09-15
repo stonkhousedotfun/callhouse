@@ -87,7 +87,7 @@ export default function BookPage() {
   const countRead = useReadContract({
     address: FACTORY,
     abi: accountFactoryAbi as unknown as Abi,
-    functionName: "accountCount",
+    functionName: "liveCount",
   });
   const count = typeof countRead.data === "bigint" ? Number(countRead.data) : 0;
 
@@ -96,7 +96,7 @@ export default function BookPage() {
     return Array.from({ length: count }, (_, i) => ({
       address: FACTORY,
       abi: accountFactoryAbi as unknown as Abi,
-      functionName: "accounts" as const,
+      functionName: "liveAt" as const,
       args: [BigInt(i)],
     }));
   }, [count]);
