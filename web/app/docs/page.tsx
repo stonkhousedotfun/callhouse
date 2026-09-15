@@ -435,6 +435,7 @@ export default function DocsPage() {
             </RiskItem>
             <RiskItem>
               <strong>This vault is unaudited.</strong> The Stonkhouse vault and its libraries have had no external audit.
+              An external audit is pending, with no report yet.
               The project&apos;s own internal reviews and its test suite are the whole gate; the latest review, on
               2026-09-14, reported no critical, high or medium findings, and its one low finding is fixed. Valorem&apos;s repository, at the
               commit the Clear deployed here is built from (valorem-core 6436c823, November 2023), carries a March 2022
