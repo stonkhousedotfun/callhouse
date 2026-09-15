@@ -1,39 +1,49 @@
-# Handoff — 2026-09-13 (redesign)
+# Handoff — 2026-09-14 (write-on-fill port, launch)
 
-Callhouse is **not deployed and not audited** (owner decision D14: no external audit; the gate is the
-test suite). The contracts were redesigned on 2026-09-13 (branch
-`redesign/a2-own-strikes-2026-09-13`, head `ca0e985`; report:
-`~/Desktop/robinhood-dev/projects/callhouse/handoff-2026-09-13/REDESIGN-REPORT-2026-09-13.md`):
-**write on fill**, **no Overcall registry or order book**, a **stranded-claim state machine**, split
-payout legs, honest NAV, and chain 4663's real **98,304 B** code limit. The app is being ported to
-it on branch `redesign/app-write-on-fill` (keeper, indexer, web, ops+docs lanes). The pre-redesign
-integration WIP is preserved on `wip/pre-redesign-integration-2026-09-13`. The public site and the
-GitBook docs are live but describe the pre-redesign product until pass 2 lands. The live launch
-sequence is `docs/LAUNCH-PLAN.md`. The full tracker is `tasks.md`.
+Callhouse is **not deployed**. Owner decision D14: no external audit; the gate is the test suite.
+An internal review of `redesign/a2-own-strikes-2026-09-13` @ `79cee08` on 2026-09-14 found no
+Critical/High/Medium; Low L-01 (in-fill deposit) is fixed at `bec4dbd`. Tip is `165b4ab` (script-only:
+Clear `feeTo` must be the admin Safe). Report:
+`~/Desktop/robinhood-dev/projects/callhouse/handoff-2026-09-13/AUDIT-FINDINGS-2026-09-14.md`.
+Canary runbook: `ops/runbooks/canary-week.md`.
 
-**Four private repositories:**
+**Four private repositories (nothing of the redesign is on `main` / live yet):**
 
-| Repo | Holds | Live at |
-|---|---|---|
-| `leekzor/callhouse` (this) | `web/`, `keeper/`, `indexer/`, `relay/`, `ops/`, `docs/`, trackers; `contracts/` is a git submodule pinned to `ca0e985` | app.callhouse.finance (Railway service `web`; no vault yet) |
-| `leekzor/callhouse-contracts` | the Foundry project, deploy/verify/handover scripts, `docs/AUDIT-SCOPE.md`, `docs/ACCOUNTING.md`, `docs/DEPLOY.md`, `SECURITY.md` | not deployed |
-| `leekzor/callhouse-site` | the landing, standalone | https://callhouse.finance (push-to-deploy) |
-| `leekzor/callhouse-docs` | GitBook Git Sync source | https://docs.callhouse.finance (push-to-publish; `main` unprotected, so work on a branch) |
+| Repo | Branch (local) | Pin / head | Live |
+|---|---|---|---|
+| `leekzor/callhouse` | `redesign/app-write-on-fill` | submodule `contracts/` = `165b4ab` | app.callhouse.finance still the old app; no vault |
+| `leekzor/callhouse-contracts` | `redesign/a2-own-strikes-2026-09-13` | `165b4ab` | not deployed |
+| `leekzor/callhouse-site` | `redesign/write-on-fill` | `a6eb0bf` | callhouse.finance still the old copy until this branch is merged |
+| `leekzor/callhouse-docs` | `redesign/pass-2` | `4c16b58` | docs.callhouse.finance still the old copy (`main` unprotected — do not push this branch by accident) |
 
-Clone with `git clone --recurse-submodules`.
-
-## State of the gates
+## State of the gates (measured 2026-09-14)
 
 | Gate | State |
 |---|---|
-| Contracts (`ca0e985`) | `forge fmt --check` clean; **399 unit/regression/invariant tests, 23 suites** (13 invariants at 64 runs × depth 600); **20 fork tests** vs live 4663; Vault runtime **25,470 B** (chain limit 98,304 B; forge's EIP-170 line is noise), ValoremLib 5,993 B, SeaportOrderLib 5,170 B; deploy rehearsal with real Safes and our own Clear passes (`script/rehearse-deploy.sh`, Verify 63/69/72/71, fork block 62533535). A small follow-up commit (AF-05 share-price floor) may land on the branch; the ABI is unchanged by it, the size moves to ~25,765 B |
-| ABIs | `ops/abis/{Vault,ValoremLib,SeaportOrderLib,Policy}.json` regenerated from `ca0e985`; indexer and web generators merge the 36 library-only errors (92 total); the keeper hand ABI carries all 92 |
-| Keeper | being ported (keeper lane): `newOptionType` → `rollOpen(id)`, `PARTIAL_RESTRICTED` orders with the vault as zone, fill simulation + reprice, `isStranded` / `retryStrandedClaim`, no Overcall. `keeper/DRYRUN.md` records the **pre-redesign** run and must be re-run |
-| Indexer | being ported (indexer lane): `CallsWritten` per fill summed per `claimKey`, the new events, no registry; X-11 fork sync to re-run |
-| Web | being ported (web lane): fill page pre-flight for orderType 3 + empty signature, `DepositsClosed` / `maxDeposit == 0`, stranded banner + Retry, Settle queue; W-13 acceptance to re-run |
-| Relay | 38 tests; unchanged (its `kind` is not an enum, so the new alert kinds arrive) |
-| Ops + docs | this lane: runbooks, alerts, deploy, addresses, safes, publish template, go-live script, architecture, wiring, trackers rewritten for the redesign |
-| CI on GitHub | **proves nothing**: every Actions run on the account dies `startup_failure` (billing). The local gates are the gates |
+| Contracts (`165b4ab`) | L-01 in `bec4dbd` (Vault 25,775 B). Offline suite **405** passed / 24 suites; fork **20/20**. ABI byte-identical to `79cee08`. `foundry.toml` now `isolate = true` (transient `_fillArmed`). Script-only `165b4ab`: Verify requires `EXPECTED_CLEAR_FEE_TO` on our Clear |
+| Keeper | typecheck clean; **96/96**. Both fork dry runs passed 2026-09-14 (`keeper/DRYRUN.md`). Review-fixes committed (`recoveryLegs`, adopt lost `rollOpen`, no listing while Valorem fee on and unaccepted) |
+| Indexer | typecheck clean; **79** tests. Fork-sync reads keeper `cycle1`..`cycleN` and accepts a still-open last week. **X-11 not re-run on this tree yet** |
+| Web | lint, typecheck, copy-lint (59 files, 0), build, **185** tests. Fill-state/guards in `web/lib/vaultStatus.ts`. **W-13 not re-run on this tree yet** |
+| Relay | 38 tests; unchanged |
+| Site | `redesign/write-on-fill`: lint, typecheck, copy-lint (45 files, 0), build |
+| Docs | `redesign/pass-2` committed locally, including `product/buying-calls.md` |
+| CI on GitHub | **proves nothing**: Actions `startup_failure` (billing) |
+
+## Owner decisions (2026-09-14)
+
+- Own Clear via `DeployClear.s.sol`. **`feeTo` = a 1-of-1 Safe owned by the owner's personal wallet** (address still needed). Vault admin stays hot-wallet account 0 until handover. `HandoverAdmin` does not move `feeTo`.
+- `KEEPER_PREMIUM_MARGIN_BPS=50`. Guardian = mnemonic account 2 `0x29741A8d…6F39`. Cap 20 NVDA, raise weekly. No alerts for the canary.
+- Merge+push both repos when gates and the fork rehearsal are green (authorised). Tag contracts `v1.0.0-rc1`.
+- Funded on 4663: admin `0xEb82c3D0…19d9b` 0.05 ETH, keeper `0x06c131cf…FC1d2` 0.02 ETH, guardian 0.01 ETH.
+- Canary token buy deferred a few hours; runbook is `ops/runbooks/canary-week.md`.
+
+## Next, in order
+
+1. **X-11** (`pnpm --filter @callhouse/indexer fork:sync`) and **W-13** (`pnpm --filter @callhouse/web acceptance:fork`) on a fresh anvil `--code-size-limit 98304`.
+2. Production-parameter deploy rehearsal with `CLEAR_FEE_TO` = a Safe (script already rehearses this).
+3. Owner: personal wallet address that will own the 1-of-1 admin Safe.
+4. Merge+push contracts then app (already authorised once 1–2 are green). Create the Safe, then mainnet deploy. Site/docs branches stay unpublished until the owner says so.
+5. Canary week per `ops/runbooks/canary-week.md`. Keeper stays stopped until the 1.06 NVDA deposit lands.
 
 ## Done on 2026-09-13
 
@@ -57,35 +67,10 @@ Clone with `git clone --recurse-submodules`.
   re-derived at `ca0e985`, `ops/go-live-app.sh` re-ported, `docs/ARCHITECTURE.md`, `docs/WIRING.md`,
   Eastern-Time cycle wording everywhere a UTC hour was hard-coded.
 
-## Decisions only you can make
-
-1. **`PREMIUM_MARGIN_BPS`**: defaults to 0 (list at the floor). Under write on fill the floor is
-   re-priced at every fill, so 0 makes the listing unfillable on the first upward tick until the
-   keeper reprices; 50 absorbs a normal tick.
-2. **Which clearinghouse** the vault is constructed with: Overcall's unmodified instance (default;
-   its `feeTo` key holds the 15 bps switch) or our own from `DeployClear.s.sol` (path A0).
-3. **Legal residue**: operating entity, governing law, GDPR controller (`ops/launch-legal.md` §2).
-4. **Keys**: Admin Safe 2/3 signers, fee Safe, guardian hardware (`ops/safes.md`). Until the
-   handover one deployer key holds every admin power with no timelock (SECURITY §3 mitigations,
-   timelock / higher compiled floors / listing start delay / vol-model pricing / no deposits
-   before handover, are all open).
-5. **GitBook pass 2** (D-02) content for the redesign; work on a branch.
-
-## Next, in order
-
-1. Finish the app port on `redesign/app-write-on-fill` (keeper, indexer, web lanes), each package's
-   gate green, then re-run the keeper dry run, X-11 and W-13 against the redesigned vault on an
-   anvil fork with `--code-size-limit 98304`.
-2. Re-pin `contracts/` at the branch tip if the follow-up commit landed (ABI unchanged; sizes move),
-   merge to `main`, push.
-3. Keys (L-02, L-03). 4. Mainnet deploy + handover (`contracts/docs/DEPLOY.md` path A, Sourcify).
-5. `ops/go-live-app.sh` (after upgrading the Railway CLI ≥ 5.47.2); seal the secrets; the web → keeper
-   private-network check; the two external monitors and the P7-02 third-party-key alert set.
-6. One real 1-contract fill through the fill page, then four published weeks.
-
 **Dropped:** L-04 (a real Overcall listing) and L-1 (a real keeper signature). There is no Overcall
 listing, no EIP-1271 and no signature: the vault pre-validates its restricted order and the fill
-page is the venue (D2 = b).
+page is the venue (D2 = b). Legal residue (entity / governing law / GDPR controller) remains open
+and is ignored for the canary.
 
 ## Traps
 
