@@ -23,12 +23,12 @@ Three facts frame everything below:
 
 | Process | Package | Default port | Public name | What it is |
 |---|---|---|---|---|
-| `site` | `leekzor/callhouse-site` (separate repo) | 3001 | `stonkhouse.fun` | static marketing; **no fetches, no wallet, no chain reads, ever** |
+| `site` | `stonkhousedotfun/callhouse-site` (separate repo) | 3001 | `stonkhouse.fun` | static marketing; **no fetches, no wallet, no chain reads, ever** |
 | `web` | `web/` | 3000 | `app.stonkhouse.fun` | the dapp; Next.js SSR + browser wagmi; hosts the fill page |
 | indexer | `indexer/` | 42069 | a Railway domain (W-19) | Ponder: event indexer + the `/v1/*` read API |
 | keeper | `keeper/` | 8787 | none (operator-only) | the roll bot; serves `/health` `/state` `/cycles` `/orders` |
 | relay | `relay/` | 8080 | none (private network) | keeper alert webhook → Discord / Telegram |
-| — | `contracts/` (git submodule → `leekzor/callhouse-contracts`) | — | — | the Vault on chain 4663; not deployed yet |
+| — | `contracts/` (git submodule → `stonkhousedotfun/callhouse-contracts`) | — | — | the Vault on chain 4663; not deployed yet |
 
 `site` builds and deploys from its own repository; nothing in this one builds, imports or
 deploys it.
@@ -137,7 +137,7 @@ shows as "unfilled, 0" against a live API, check first that the indexer sums `Ca
 
 ## 5. ABIs flow one way
 
-`forge build` in `leekzor/callhouse-contracts` → the `contracts/` submodule pin →
+`forge build` in `stonkhousedotfun/callhouse-contracts` → the `contracts/` submodule pin →
 `ops/abis/*.json` → generated copies. After any contract change: `forge build` in the contracts
 repo, bump the submodule pin here, refresh `ops/abis/` (`jq --indent 1 '.abi'` from
 `contracts/out/Vault.sol/Vault.json`, `ValoremLib.sol/ValoremLib.json`,

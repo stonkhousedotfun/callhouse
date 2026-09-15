@@ -41,11 +41,11 @@ That is the whole app.
 
 ## Domains
 
-Two frontends, two domains, two repositories. `stonkhouse.fun` is the public landing: static, no wallet code, no chain reads, indexed. `app.stonkhouse.fun` is the dapp, `noindex`, reached by link from the landing. Each is a separate Railway service: the dapp deploys from this repository (runbook: [`ops/deploy.md`](ops/deploy.md)), the landing from `leekzor/callhouse-site` (runbook: that repository's README).
+Two frontends, two domains, two repositories. `stonkhouse.fun` is the public landing: static, no wallet code, no chain reads, indexed. `app.stonkhouse.fun` is the dapp, `noindex`, reached by link from the landing. Each is a separate Railway service: the dapp deploys from this repository (runbook: [`ops/deploy.md`](ops/deploy.md)), the landing from `stonkhousedotfun/callhouse-site` (runbook: that repository's README).
 
 | Domain | Code | What it is |
 |---|---|---|
-| `stonkhouse.fun` | `leekzor/callhouse-site` | explains the product. No wallet, no live numbers. Indexed |
+| `stonkhouse.fun` | `stonkhousedotfun/callhouse-site` | explains the product. No wallet, no live numbers. Indexed |
 | `app.stonkhouse.fun` | `/web` (this repo) | deposit, cycle tape, claim USDG, **the fill page**. Noindex, reached by link |
 
 ---
@@ -56,15 +56,15 @@ Stonkhouse is four private repositories, split out of one on 2026-09-13:
 
 | Repository | What lives there |
 |---|---|
-| `leekzor/callhouse` (this one) | the app: `web/`, `keeper/`, `indexer/`, `relay/`, `ops/`, `docs/ARCHITECTURE.md`, `docs/WIRING.md`. Railway `web`, `keeper`, `indexer` and `relay` deploy from here |
-| `leekzor/callhouse-contracts` | the Foundry project, plus `docs/AUDIT-SCOPE.md`, `docs/ACCOUNTING.md`, `docs/DEPLOY.md` and `SECURITY.md` (the full threat model, the 2026-09-12 review and the 2026-09-13 audit findings with their fixes) |
-| `leekzor/callhouse-site` | the marketing landing at `stonkhouse.fun` |
-| `leekzor/callhouse-docs` | the GitBook source for `docs.stonkhouse.fun` (pass 2 for the redesign is pending; a push to its `main` publishes immediately) |
+| `stonkhousedotfun/callhouse` (this one) | the app: `web/`, `keeper/`, `indexer/`, `relay/`, `ops/`, `docs/ARCHITECTURE.md`, `docs/WIRING.md`. Railway `web`, `keeper`, `indexer` and `relay` deploy from here |
+| `stonkhousedotfun/callhouse-contracts` | the Foundry project, plus `docs/AUDIT-SCOPE.md`, `docs/ACCOUNTING.md`, `docs/DEPLOY.md` and `SECURITY.md` (the full threat model, the 2026-09-12 review and the 2026-09-13 audit findings with their fixes) |
+| `stonkhousedotfun/callhouse-site` | the marketing landing at `stonkhouse.fun` |
+| `stonkhousedotfun/callhouse-docs` | the GitBook source for `docs.stonkhouse.fun` (pass 2 for the redesign is pending; a push to its `main` publishes immediately) |
 
 The contracts repository is mounted here as a git submodule at `contracts/`, so every `contracts/...` path in these docs resolves inside a full checkout. Clone with it:
 
 ```bash
-git clone --recurse-submodules git@github.com:leekzor/callhouse.git
+git clone --recurse-submodules git@github.com:stonkhousedotfun/callhouse.git
 git submodule update --init --recursive     # an existing clone, or an empty contracts/
 ```
 
@@ -103,7 +103,7 @@ If the close cannot redeem the claim (USDG paused or frozen, the vault blocklist
 ## Repo
 
 ```
-/contracts    git submodule → leekzor/callhouse-contracts. Foundry — Vault, Policy, Valorem + Seaport adapters, Distributor
+/contracts    git submodule → stonkhousedotfun/callhouse-contracts. Foundry — Vault, Policy, Valorem + Seaport adapters, Distributor
 /keeper       Node 22 — weekly roll state machine; serves the fill payload at /orders
 /indexer      Ponder — vault / Valorem / Seaport / token events, the public cycle tape
 /web          Next.js — the dapp at app.stonkhouse.fun: deposit, cycle tape, claim USDG, the fill page
@@ -112,7 +112,7 @@ If the close cannot redeem the claim (USDG paused or frozen, the vault blocklist
 /docs         architecture, runtime wiring, launch plan
 ```
 
-The landing at `stonkhouse.fun` is not in this tree; it is `leekzor/callhouse-site`.
+The landing at `stonkhouse.fun` is not in this tree; it is `stonkhousedotfun/callhouse-site`.
 
 | Read this | For |
 |---|---|
@@ -129,7 +129,7 @@ The landing at `stonkhouse.fun` is not in this tree; it is `leekzor/callhouse-si
 | [`indexer/README.md`](indexer/README.md) | the schema, the API, backfilling |
 | [`web/README.md`](web/README.md) | routes, the fill page, and the copy rules CI enforces |
 | [`relay/README.md`](relay/README.md) | the alert relay's HTTP contract |
-| `leekzor/callhouse-site` README | the landing: what it must never grow, its Railway service and the apex-domain DNS step |
+| `stonkhousedotfun/callhouse-site` README | the landing: what it must never grow, its Railway service and the apex-domain DNS step |
 | [`ops/deploy.md`](ops/deploy.md) | the four Railway services, every variable, and the contracts → app hand-off |
 | [`ops/recon/`](ops/recon/) | the on-chain recon every integration fact in this repo rests on (some of it, the Overcall parts, is now history) |
 
@@ -221,7 +221,7 @@ pnpm --filter @callhouse/web dev
 ```
 
 The two frontends run side by side: web on port 3000 from this checkout, the landing on 3001 from
-a checkout of `leekzor/callhouse-site`. Nothing is shared between them at runtime, so a CTA on the
+a checkout of `stonkhousedotfun/callhouse-site`. Nothing is shared between them at runtime, so a CTA on the
 landing is an absolute link to `app.stonkhouse.fun`, not a route.
 
 `SeaportOrderLib` and `ValoremLib` are linked public libraries. Foundry deploys and links them automatically in tests and scripts. **Anvil needs `--code-size-limit 98304`** for the vault.
@@ -272,7 +272,7 @@ Not allowed on the marketing surface: APY, "10% weekly," projected yield, "backe
 
 Required disclosures: Stock Token legal form, assignment, empty-book weeks, deposits during an open week share that week's assignment, geographic restrictions, unaudited.
 
-`scripts/copy-lint.mjs` enforces both lists on **both** frontends (`web/` here, and the landing through its twin copy in `leekzor/callhouse-site`) with no per-package exemption, and it fails CI in each repository. The forbidden list must stay identical in both copies: change it in paired commits to both repos.
+`scripts/copy-lint.mjs` enforces both lists on **both** frontends (`web/` here, and the landing through its twin copy in `stonkhousedotfun/callhouse-site`) with no per-package exemption, and it fails CI in each repository. The forbidden list must stay identical in both copies: change it in paired commits to both repos.
 
 ---
 

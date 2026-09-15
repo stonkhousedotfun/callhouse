@@ -1,5 +1,5 @@
 /**
- * App chrome, in the Daylight layout stonkhouse.fun uses (leekzor/callhouse-site:
+ * App chrome, in the Daylight layout stonkhouse.fun uses (stonkhousedotfun/callhouse-site:
  * components/Nav.tsx): brand, the link row, and on the right the one control in the chrome — here
  * the wallet button rather than "Open the app".
  *

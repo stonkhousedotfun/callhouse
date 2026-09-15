@@ -46,7 +46,7 @@ set -euo pipefail
 
 RW_PROJECT=9988a803-0b8f-4b0e-8ada-ba71e5a505ae     # Railway project "callhouse"
 RW_ENV=319fcb44-0e25-4367-947c-09351a349d2e         # production
-REPO=leekzor/callhouse
+REPO=stonkhousedotfun/callhouse
 CHAIN_ID=4663
 RPC=${RH_RPC:-https://rpc.mainnet.chain.robinhood.com}
 APP_URL=${APP_URL:-https://app.stonkhouse.fun}

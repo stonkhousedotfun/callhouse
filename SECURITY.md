@@ -2,7 +2,7 @@
 
 The threat model, the properties the contracts enforce, what a compromise of each key buys, and
 the record of what the 2026-09-12 adversarial review found now live with the contracts, in
-**[`contracts/SECURITY.md`](contracts/SECURITY.md)** (repository `leekzor/callhouse-contracts`,
+**[`contracts/SECURITY.md`](contracts/SECURITY.md)** (repository `stonkhousedotfun/callhouse-contracts`,
 mounted here as a git submodule at `contracts/`). Run `git submodule update --init --recursive`
 if that link is empty.
 
@@ -18,7 +18,7 @@ If you believe you have found a vulnerability, do not open a public issue. Send 
 **security@stonkhouse.fun**. The same address is published, machine-readably, at
 `https://stonkhouse.fun/.well-known/security.txt` (RFC 9116) and on
 `https://stonkhouse.fun/legal#reporting`. Both read `NEXT_PUBLIC_SECURITY_CONTACT_EMAIL` from
-`lib/legal.ts` in the landing repository, `leekzor/callhouse-site`; the variable was set and the
+`lib/legal.ts` in the landing repository, `stonkhousedotfun/callhouse-site`; the variable was set and the
 site rebuilt on 2026-09-13, and the mailbox is a Cloudflare Email Routing forward to the
 operator.
 

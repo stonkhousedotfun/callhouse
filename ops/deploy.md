@@ -4,7 +4,7 @@
 and the three things that go wrong. The other Railway services this repository deploys have their
 own sections: keeper §10, indexer §11, alert relay §12. The contracts are deployed from the
 contracts repository with its own runbook; §13 is the hand-off between the two. The landing
-(`stonkhouse.fun`) deploys from `leekzor/callhouse-site`, and that repository's README is its
+(`stonkhouse.fun`) deploys from `stonkhousedotfun/callhouse-site`, and that repository's README is its
 runbook.
 
 **Who runs it.** Anyone with write access to the Railway project. Nothing in this runbook touches
@@ -33,7 +33,7 @@ redeploy.
 ## 0. The shape of it
 
 ```
-stonkhouse.fun             ->  Railway service "site"  ->  leekzor/callhouse-site (its own repo,
+stonkhouse.fun             ->  Railway service "site"  ->  stonkhousedotfun/callhouse-site (its own repo,
                            its own Dockerfile and build context). Not covered here.
 
 app.stonkhouse.fun         ->  Railway service "web"   ->  web/Dockerfile   ->  web/server.js
@@ -55,7 +55,7 @@ shared origin. Every "go and do something" control on `stonkhouse.fun` is a plai
 ## 1. Railway service settings
 
 Create the `web` service from this GitHub repository. (The `site` service's source is
-`leekzor/callhouse-site`; its settings are in that repository's README.)
+`stonkhousedotfun/callhouse-site`; its settings are in that repository's README.)
 
 | Setting | `web` |
 |---|---|
@@ -135,7 +135,7 @@ The split below is the most important thing in this file.
 >
 > **Changing any of these requires a REBUILD, not a restart.**
 
-The `site` service's variables are documented in `leekzor/callhouse-site`; the rule above applies
+The `site` service's variables are documented in `stonkhousedotfun/callhouse-site`; the rule above applies
 to it identically.
 
 ### `web` — build-time
@@ -222,7 +222,7 @@ few minutes. If CAA records are ever added to the zone, allow `letsencrypt.org` 
 ### `stonkhouse.fun` and `www` — the landing's records, documented with the landing
 
 The apex and `www` attach to the `site` service, and the full step is in the
-`leekzor/callhouse-site` README. One fact is repeated here because it lives in the same DNS zone as
+`stonkhousedotfun/callhouse-site` README. One fact is repeated here because it lives in the same DNS zone as
 the record above: **a `CNAME` at the apex is not valid DNS**, so the apex needs Cloudflare's CNAME
 flattening (DNS only), never an A record pinned to an IP you resolved yourself. (`www` currently
 answers 200 on its own rather than redirecting; whether it should 301 is the landing repo's call.)
@@ -259,7 +259,7 @@ The second cause is a `PORT` mismatch: Railway probes `$PORT` and `server.js` re
 curl -sI https://app.stonkhouse.fun/        | head -1     # HTTP/2 200
 
 # 2-4. The landing's checks (no wallet code, absolute CTAs into the app, its four routes)
-#      moved with the landing to the leekzor/callhouse-site README.
+#      moved with the landing to the stonkhousedotfun/callhouse-site README.
 
 # 5. THE ONE THAT MATTERS: which vault did this image get baked with?
 curl -s https://app.stonkhouse.fun/vault/nvda | grep -oiE '0x[0-9a-f]{40}' | sort -u
@@ -273,7 +273,7 @@ Then look at the page itself: the vault card renders, an unfilled week shows as 
 rather than an error, and the layout does not scroll sideways at 400px.
 
 `scripts/copy-lint.mjs` is a CI gate on `web/`, not a deploy gate; its twin gates the landing in
-`leekzor/callhouse-site` the same way. A deploy cannot introduce a copy violation that CI did not
+`stonkhousedotfun/callhouse-site` the same way. A deploy cannot introduce a copy violation that CI did not
 already see, because CI and the image build from the same commit.
 
 ---
@@ -335,7 +335,7 @@ bare COPY error. If you see that message, read the next section.
 
 2. **A `CNAME` at the apex is invalid DNS.** `stonkhouse.fun` needs Cloudflare's CNAME
    flattening. Do not pin an A record to an IP you resolved yourself. (The landing's record; the
-   full step is in the `leekzor/callhouse-site` README, §4 here has the summary.)
+   full step is in the `stonkhousedotfun/callhouse-site` README, §4 here has the summary.)
 
 3. **`HOSTNAME=0.0.0.0`.** Remove it and standalone binds localhost, unreachable from outside the
    container, and every healthcheck times out. This is the first thing to check on a failing
@@ -430,7 +430,7 @@ bare COPY error. If you see that message, read the next section.
 | File | What it covers |
 |---|---|
 | [`../web/Dockerfile`](../web/Dockerfile) | The dapp image. The build-arg block is commented at length |
-| `leekzor/callhouse-site` README | The landing: its image, Railway service, variables and the apex-domain DNS step |
+| `stonkhousedotfun/callhouse-site` README | The landing: its image, Railway service, variables and the apex-domain DNS step |
 | [`../.dockerignore`](../.dockerignore) | What reaches the build context, and what must stay in |
 | [`../web/.env.example`](../web/.env.example) | Authoritative list of what `web/` reads |
 | [`addresses.json`](addresses.json) | The address book. Diff §5 step 5 against it |
@@ -891,7 +891,7 @@ docker run --rm callhouse-relay
 
 ## 13. Contracts → app hand-off
 
-The contract-side runbook is `contracts/docs/DEPLOY.md` (leekzor/callhouse-contracts), deployed
+The contract-side runbook is `contracts/docs/DEPLOY.md` (stonkhousedotfun/callhouse-contracts), deployed
 from the release tag on branch `redesign/a2-own-strikes-2026-09-13` or its successor. The parts an
 app operator needs to know, so the two runbooks agree:
 

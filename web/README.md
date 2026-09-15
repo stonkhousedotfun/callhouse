@@ -3,7 +3,7 @@
 `app.stonkhouse.fun` — the Stonkhouse dapp. Next.js App Router, React 19, wagmi 3, viem. No custody,
 no private keys, no server-side signing. Unaudited, and it says so on every page.
 
-The marketing landing is a separate repository, `leekzor/callhouse-site`, served at
+The marketing landing is a separate repository, `stonkhousedotfun/callhouse-site`, served at
 `stonkhouse.fun`. It carries no wallet code at all and it is not a copy of anything here; the two
 domains share a palette, nothing else at runtime.
 
@@ -212,7 +212,7 @@ from `prefers-color-scheme` (no toggle), Schibsted Grotesk / Figtree / Geist Mon
 `next/font` (downloaded at build time, so the Docker build needs to reach Google Fonts).
 
 - **Tokens.** `app/globals.css` from `@import "tailwindcss"` through the `link` utility is copied
-  verbatim from `app/globals.css` in `leekzor/callhouse-site`. It is duplicated rather than
+  verbatim from `app/globals.css` in `stonkhousedotfun/callhouse-site`. It is duplicated rather than
   imported because the landing has to build and deploy with no dependency on this package. **Change
   a token in one and change it in the other in paired commits to both repos**, and diff the two
   blocks whenever either changes. App-only base rules go in the marked tail at the bottom of the

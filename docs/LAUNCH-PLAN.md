@@ -11,7 +11,7 @@ State at the start (verified 2026-09-13 ~13:10 PT):
 | Railway project `callhouse` | one service, `site`, healthy at `site-production-bea7.up.railway.app`, deployed by `railway up` (not repo-connected). Custom domains `callhouse.finance` + `www` attached, waiting on DNS. No `web`, `keeper`, `indexer` services |
 | GitHub CI | site and contracts green; **app repo red** (pnpm version specified twice) |
 | `callhouse-contracts` | GitHub `main` at `2a9bb59` (two docs commits by another session); 8 local commits **not pushed**, including both 2026-09-13 contract fixes (lot size, queue fairness) |
-| Docs | `leekzor/callhouse-docs` pushed; GitBook sync in progress; `docs.` CNAME target comes from GitBook |
+| Docs | `stonkhousedotfun/callhouse-docs` pushed; GitBook sync in progress; `docs.` CNAME target comes from GitBook |
 
 Status (2026-09-13 ~14:30 PT):
 
@@ -38,7 +38,7 @@ Status (2026-09-13 ~14:30 PT):
 | 1.1 Read Railway's required CNAME targets for both custom domains from the API (do not trust notes) | Claude | targets printed from Railway |
 | 1.2 Create `CNAME stonkhouse.fun → <target>` and `CNAME www → <target>`, **DNS only** (Cloudflare flattens the apex) | Claude if the Cloudflare token has Zone DNS:Edit; otherwise the owner in the dashboard | `dig` resolves both |
 | 1.3 Wait for Railway to issue TLS | — | `https://stonkhouse.fun` and `https://www.stonkhouse.fun` return 200 with a valid certificate |
-| 1.4 Connect the `site` service to `leekzor/callhouse-site` (Settings → Source) for push-to-deploy | owner (the CLI/API repo-link mutation was rejected for this account) | a push to `main` triggers a deploy |
+| 1.4 Connect the `site` service to `stonkhousedotfun/callhouse-site` (Settings → Source) for push-to-deploy | owner (the CLI/API repo-link mutation was rejected for this account) | a push to `main` triggers a deploy |
 | 1.5 `docs.stonkhouse.fun`: CNAME to the target GitBook shows (DNS only) | owner reads the target in GitBook; Claude or owner adds it | GitBook marks the domain verified |
 
 ## 2. Correct live site copy that the code contradicts
@@ -54,7 +54,7 @@ it is rewritten; nothing is softened into something vaguer than the truth.
 | Deposit cap "20–50 NVDA" | `Deploy.s.sol` `LAUNCH_DEPOSIT_CAP = 20e18` | 20 NVDA |
 
 Done when: site builds, copy-lint passes, the four statements are gone from the live site after a
-redeploy, and the matching wording is consistent with `leekzor/callhouse-docs`.
+redeploy, and the matching wording is consistent with `stonkhousedotfun/callhouse-docs`.
 
 ## 3. Contracts on GitHub, app pinned to them
 
@@ -122,7 +122,7 @@ the handover). Rehearsed end to end on a fork with negative checks.
    - `relay`: Discord/Telegram target as a runtime secret.
    - `web`: every `NEXT_PUBLIC_*` as a build variable before the first build
      (`NEXT_PUBLIC_VAULT`, `NEXT_PUBLIC_VAULT_FROM_BLOCK`, `NEXT_PUBLIC_API_URL` = indexer URL).
-   - Connect each service to `leekzor/callhouse` with its `railway.json` path.
+   - Connect each service to `stonkhousedotfun/callhouse` with its `railway.json` path.
 6. **DNS**: `app.stonkhouse.fun` CNAME to the web service target (DNS only); indexer on a Railway
    domain or `api.` if the web app needs a stable name.
 7. **Monitors**: keeper `/health`, indexer health, site, app — external uptime checks alerting the same

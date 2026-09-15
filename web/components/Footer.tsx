@@ -1,5 +1,5 @@
 /**
- * App footer, in the layout stonkhouse.fun uses (leekzor/callhouse-site: components/Footer.tsx).
+ * App footer, in the layout stonkhouse.fun uses (stonkhousedotfun/callhouse-site: components/Footer.tsx).
  * Server component: nothing here hydrates.
  *
  * Three rows, in this order:

@@ -9,7 +9,7 @@ import { Providers } from "./providers";
 import "./globals.css";
 
 /**
- * Daylight type, the same three faces as stonkhouse.fun (leekzor/callhouse-site:
+ * Daylight type, the same three faces as stonkhouse.fun (stonkhousedotfun/callhouse-site:
  * app/layout.tsx). next/font downloads them at BUILD time and serves them from this origin, so a
  * visitor's browser never contacts Google; the build itself does need to reach Google Fonts. Each
  * exposes a CSS variable on <html> that app/globals.css maps into font-display / font-body /

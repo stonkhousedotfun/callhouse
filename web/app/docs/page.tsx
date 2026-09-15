@@ -3,7 +3,7 @@
  *
  * This page is a condensation, not the source of truth. The canonical documents are
  * docs/ARCHITECTURE.md at the repo root, contracts/README.md, contracts/SECURITY.md and
- * contracts/docs/ACCOUNTING.md (the contracts submodule, leekzor/callhouse-contracts) and the
+ * contracts/docs/ACCOUNTING.md (the contracts submodule, stonkhousedotfun/callhouse-contracts) and the
  * operator material in ops/runbooks/. Where this page and those disagree, this page is the one
  * that is wrong.
  *

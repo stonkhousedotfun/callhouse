@@ -362,7 +362,7 @@ cast call $VAULT "pendingFeeUsdg()(uint256)" --rpc-url $RH_RPC   # before close:
 
 ## 7. Deploy-day checklist
 
-**The checks below are automated.** `script/Verify.s.sol` in `contracts/` (leekzor/callhouse-contracts)
+**The checks below are automated.** `script/Verify.s.sol` in `contracts/` (stonkhousedotfun/callhouse-contracts)
 performs every one of them and more: the vault's and both libraries' bytecode byte for byte against the
 audited build, every immutable, the policy field by field, roles for the admin phase, and the Safe's
 build, threshold, owners, modules and guard. Run it, per `contracts/docs/DEPLOY.md`, instead of the

@@ -13,7 +13,7 @@
    grow this file into a class library.
 
    TWIN BLOCK. Everything from `@import "tailwindcss"` down to the end of the `link` utility is
-   copied verbatim from leekzor/callhouse-site: app/globals.css. The two domains sit one click apart
+   copied verbatim from stonkhousedotfun/callhouse-site: app/globals.css. The two domains sit one click apart
    and must not drift: change a token in paired commits to both repos, and diff the two blocks
    whenever either changes. App-only rules go in the tail at the bottom, never inside the block.
 

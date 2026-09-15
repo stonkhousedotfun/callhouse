@@ -8,7 +8,7 @@
 # the install has to be workspace-aware. Without this file the daemon uploads node_modules,
 # every .next cache and the contracts/ submodule (with its own Foundry submodules) on every
 # deploy — hundreds of megabytes, to produce the same image. The landing (stonkhouse.fun) builds
-# from its own repository, leekzor/callhouse-site, since the 2026-09-13 split.
+# from its own repository, stonkhousedotfun/callhouse-site, since the 2026-09-13 split.
 #
 # WHAT MUST STAY IN, and why:
 #   package.json, pnpm-lock.yaml, pnpm-workspace.yaml  — the workspace install reads all three.

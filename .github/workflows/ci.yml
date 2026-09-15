@@ -6,7 +6,7 @@ on:
   pull_request:
 
 jobs:
-  # The Solidity jobs (build, fmt, unit + invariant, fork 4663) live in leekzor/callhouse-contracts
+  # The Solidity jobs (build, fmt, unit + invariant, fork 4663) live in stonkhousedotfun/callhouse-contracts
   # since the 2026-09-13 repo split. This repository mounts that repo at contracts/ as a git
   # submodule pinned to one commit; the js job below does not check it out (a private submodule
   # needs a read token secret), and keeper's artifact cross-check test skips without contracts/out.
@@ -50,5 +50,5 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with: {node-version: 22}
-      - name: forbidden + required copy (web; the landing is linted in leekzor/callhouse-site)
+      - name: forbidden + required copy (web; the landing is linted in stonkhousedotfun/callhouse-site)
         run: node scripts/copy-lint.mjs

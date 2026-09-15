@@ -25,7 +25,7 @@ plus two rebuilds.
 ## 0. The shape of it
 
 ```
-leekzor/callhouse-site (the landing's own repository):
+stonkhousedotfun/callhouse-site (the landing's own repository):
 lib/legal.ts                  one constant per operator fact, read from NEXT_PUBLIC_*, no defaults
 app/terms/page.tsx            Terms of Use, adopted v1-2026-09-13, renders the gaps
 app/privacy/page.tsx          Privacy notice, adopted v1-2026-09-13, renders the gaps
@@ -33,11 +33,11 @@ app/legal/page.tsx            links /terms; "Reporting a vulnerability" section 
 app/.well-known/security.txt/route.ts
                               RFC 9116; 404 until a security contact exists
 
-this repository (leekzor/callhouse):
+this repository (stonkhousedotfun/callhouse):
 web/lib/site.ts               TERMS_URL / PRIVACY_URL, links into the site; nothing duplicated
 SECURITY.md "Reporting"       points at security.txt and says it is unset
 
-leekzor/callhouse-contracts (the contracts/ submodule here):
+stonkhousedotfun/callhouse-contracts (the contracts/ submodule here):
 SECURITY.md §6                the same reporting paragraph, carried with the threat model
 ```
 
@@ -69,7 +69,7 @@ The states above were measured on `callhouse.finance`, the domain before the 202
 `security@`, the three contact variables on the Railway `site` service, and a rebuild.
 
 What the privacy notice says the system does is grounded file by file in the header comment of
-`app/privacy/page.tsx` in `leekzor/callhouse-site`. If counsel wants a sentence changed, check that comment first: the
+`app/privacy/page.tsx` in `stonkhousedotfun/callhouse-site`. If counsel wants a sentence changed, check that comment first: the
 sentence may be describing a fact rather than a policy.
 
 ---
@@ -223,7 +223,7 @@ Do these in order. Step 1 is the long one and it is not ours.
 
 7. **Update the reporting paragraph in both places** to drop the sentence saying the address is
    unset. *Done 2026-09-13, paired: this repository's `SECURITY.md` "Reporting" and
-   `contracts/SECURITY.md` §6 in leekzor/callhouse-contracts both now name
+   `contracts/SECURITY.md` §6 in stonkhousedotfun/callhouse-contracts both now name
    `security@callhouse.finance`. On 2026-09-15 this repository's copy moved to
    `security@stonkhouse.fun`; the contracts copy still names the old address until a paired commit
    lands there.*

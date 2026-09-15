@@ -2,7 +2,7 @@
  * Daylight primitives for the app. Import from "@/components/ui".
  *
  * Brand, Container, ExternalLink, Eyebrow, Figure and SectionHead are copied unchanged from
- * leekzor/callhouse-site: components/ui; Button, Chip, icons, Notice and Panel are copied and
+ * stonkhousedotfun/callhouse-site: components/ui; Button, Chip, icons, Notice and Panel are copied and
  * extended (see each file's header). Stat, Rows, Field, Table, PageHead and CodeBlock are the app's
  * own, for the figures, forms and ledgers the marketing site never renders.
  */
