@@ -20,7 +20,7 @@ const ROADMAP = [
     when: "Now",
     title: "Beta, NVDA first",
     current: true,
-    body: `Public beta. ${MARKET} first. You write 1-lot covered calls on your own stock. ${STATUS.audit}.`,
+    body: `Public beta. ${MARKET} first. You choose how much of yours is for sale each week. ${STATUS.audit}.`,
   },
   {
     when: "Next",
@@ -49,7 +49,7 @@ export default function HomePage() {
         eyebrow="Robinhood Chain"
         title={
           <>
-            Covered calls on tokenised stocks.{" "}
+            Let your stonks work for you.{" "}
             <span className="text-accent-text">{MARKET} first.</span>
           </>
         }
@@ -62,9 +62,8 @@ export default function HomePage() {
               <Chip tone="warn">{STATUS.audit}</Chip>
             </div>
             <p>
-              Stonkhouse is 1-lot covered calls on tokenised stocks. You deposit {MARKET}, choose how many of yours to
-              write, and a fill writes only those lots. Premium goes to you. Assignment cannot take someone else&apos;s
-              stock. More stocks follow, one book each.
+              Put your {MARKET} in. Each week someone can pay you for the chance to buy it at a set price. If they
+              don&apos;t, you keep the stock. Only the amount you offer can be sold.
             </p>
           </>
         }
@@ -89,24 +88,24 @@ export default function HomePage() {
                   Live first
                 </Chip>
                 <h2 className="mt-3 text-[26px] font-extrabold tracking-[-0.02em]">
-                  {MARKET} 1-lots
+                  {MARKET}
                 </h2>
                 <p className="mt-1.5 max-w-[36em] text-[15.5px] text-ink-2">
-                  Deposit your {MARKET}. Request N lots. Each lot is one full Seaport order of 1 contract. A fill
-                  writes your stock and pays you the premium. Unfilled lots come back.
+                  Deposit your {MARKET}. Choose how much is for sale this week. If someone pays, you get USDG. If they
+                  don&apos;t, you keep the stock.
                 </p>
               </div>
             </div>
             <dl className="grid grid-cols-2 gap-3 sm:grid-cols-4">
-              <Figure label="Lot" value="1" unit={MARKET} />
-              <Figure label="You receive" value="USDG" tone="usdg" />
-              <Figure label="Protocol fee" value="5% of premium" />
-              <Figure label="Per-account cap" value="20" unit={MARKET} />
+              <Figure label="First stock" value={MARKET} />
+              <Figure label="You get paid in" value="USDG" tone="usdg" />
+              <Figure label="Our fee" value="5%" />
+              <Figure label="Cap" value="20" unit={MARKET} />
             </dl>
             <div className="flex flex-wrap gap-3 border-t border-line pt-5">
-              <Button href={ACCOUNT_HREF}>Deposit and write</Button>
+              <Button href={ACCOUNT_HREF}>Put {MARKET} in</Button>
               <Button variant="ghost" href={BOOK_HREF}>
-                Buy a lot
+                Buy this week
               </Button>
             </div>
           </Card>

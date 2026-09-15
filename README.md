@@ -2,14 +2,11 @@
 
 Renamed from Callhouse (callhouse.finance) to Stonkhouse (stonkhouse.fun) on 2026-09-15. Repo, package, service, env and on-chain names still say callhouse.
 
-Pooled covered-call account for Robinhood Chain Stock Tokens.
+Let your stonks work for you. Deposit NVDA into your own account, choose how much is for sale this week, and get paid in USDG if someone buys. Unsold stock comes back. Only your offered stock can be sold.
 
-You deposit one tokenized stock. Each week a keeper arms an out-of-the-money call on it and lists it for USDG on the vault's own fill page; every fill writes exactly the contracts it buys, and depositors are paid whatever premium actually fills. There is no protocol token at launch. Yield is USDG or it is nothing.
-
-Vault share ticker (first market): **cNVDA**  
 Chain: Robinhood Chain (`4663`)  
-Settlement: Valorem Clear (the vault's own instance or Overcall's unmodified one) + Seaport 1.6  
-Venue: the self-hosted fill page at `app.stonkhouse.fun/vault/nvda/cycle`, or any Seaport 1.6 fulfil function
+App: `app.stonkhouse.fun/account` (deposit) and `/book` (buy)  
+Factory: `0x7850Ae4ac03b651263cE78EC5FcED11b0d0e05A7`
 
 > Premium is paid only if a buyer fills the listing.
 > Assignment can take the tokens at the strike.
@@ -20,14 +17,13 @@ Venue: the self-hosted fill page at `app.stonkhouse.fun/vault/nvda/cycle`, or an
 
 ## What this is
 
-An ERC-4626-style vault plus a weekly keeper.
+One account per user. No shared vault.
 
-1. User deposits NVDA Stock Tokens, receives `cNVDA` shares.
-2. Each week the keeper creates an option type on the clearinghouse (strike inside the policy band, window anchored on the US close), **arms** it on the vault (`rollOpen` writes nothing), and authorises one restricted Seaport listing with the vault as zone.
-3. A buyer fills on the fill page. Inside that fill Seaport calls the vault's `authorizeOrder`, which re-checks the band and the premium floor at live spot and **writes exactly the filled contracts** into Valorem; Seaport moves them to the buyer and the USDG to the vault. `written == sold`, always.
-4. After expiry the keeper (or, an hour later, anyone) closes. OTM → NVDA back. ITM and exercised → leftover NVDA + strike USDG. Unsold → nothing to redeem.
-5. 5% of the premium goes to the fee Safe. The rest, including any strike USDG in full, is claimable pro-rata.
-6. Withdrawals while a call is open are queued until the close; a queue that forms while flat can be settled by anyone.
+1. User deposits NVDA into their own account.
+2. They choose how many NVDA are for sale this week.
+3. The keeper lists one order per NVDA on that account.
+4. A buyer pays that user. Only that user's stock can be taken.
+5. Unsold stock comes back. 5% of the premium is the protocol fee.
 
 That is the whole app.
 
