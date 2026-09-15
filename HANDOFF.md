@@ -39,8 +39,7 @@ Canary runbook: `ops/runbooks/canary-week.md`.
 
 ## Next, in order
 
-1. Create the 1-of-1 admin Safe on 4663 from account 0, owner = `0x7A3a8C3F6331f63107D5b3aEeA0515e799022C32`. Then merge+push contracts then app (already authorised; X-11, W-13 and the Safe-feeTo deploy rehearsal are green). Then mainnet deploy. Site/docs branches stay unpublished until the owner says so.
-2. Canary week per `ops/runbooks/canary-week.md`. Keeper stays stopped until the 1.06 NVDA deposit lands.
+1. **Canary week** per `ops/runbooks/canary-week.md`. Vault is live at `0x88a98931E3682137E7e4D3426f623247f4A4ecbb`. Keeper stays stopped until the 1.06 NVDA deposit lands. Site/docs branches stay unpublished until the owner says so.
 
 Deploy rehearsal (2026-09-14, fork block 63400155): **REHEARSAL PASSED**. Path A on our Clear with `feeTo` = admin Safe 2/3; Verify's missing/wrong-holder checks have teeth; handover; path B on Overcall's Clear with Safe from block one.
 

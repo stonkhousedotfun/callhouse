@@ -94,11 +94,11 @@ Record here after deploy:
 
 | Contract | Address | Block |
 |---|---|---|
-| Admin Safe (1-of-1, holds Clear `feeTo`) | | |
-| Clear (ours) | | |
-| SeaportOrderLib | | |
-| ValoremLib | | |
-| Vault | | |
+| Admin Safe (1-of-1, holds Clear `feeTo`) | `0xff1454009F024507f3E455eb2027E98fAF4ccF61` | Safe create tx `0x69fbef45…` |
+| Clear (ours) | `0x53d7A6d0489Daf3d67b9A314e0eAB2B78Acab9C6` | DeployClear 2026-09-15 |
+| SeaportOrderLib | `0x6B617a0B578Ef6EDCD07774468f08b3778272D8A` | 63467831 |
+| ValoremLib | `0xd3CB94893EAb55e425cCd77Db98458b38D75Fa3d` | 63467856 |
+| Vault | `0x88a98931E3682137E7e4D3426f623247f4A4ecbb` | **63467882** |
 
 ## D. Deposit (owner)
 
