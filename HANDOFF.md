@@ -23,7 +23,7 @@ Canary runbook: `ops/runbooks/canary-week.md`.
 | Contracts (`165b4ab`) | L-01 in `bec4dbd` (Vault 25,775 B). Offline suite **405** passed / 24 suites; fork **20/20**. ABI byte-identical to `79cee08`. `foundry.toml` now `isolate = true` (transient `_fillArmed`). Script-only `165b4ab`: Verify requires `EXPECTED_CLEAR_FEE_TO` on our Clear |
 | Keeper | typecheck clean; **96/96**. Both fork dry runs passed 2026-09-14 (`keeper/DRYRUN.md`). Review-fixes committed (`recoveryLegs`, adopt lost `rollOpen`, no listing while Valorem fee on and unaccepted) |
 | Indexer | typecheck clean; **79** tests. **X-11 PASSED** 2026-09-14 (2010/2010 API assertions, 107 run.json/chain cross-checks; dry run 33.7s + sync 10.6s) |
-| Web | lint, typecheck, copy-lint (59 files, 0), build, **185** tests. Fill-state/guards in `web/lib/vaultStatus.ts`. **W-13 still the pre-redesign script** (`web/tests/acceptance/fork.acceptance.ts` says so at the top) and has not been rewritten |
+| Web | lint, typecheck, copy-lint (59 files, 0), build, **185** tests. Fill-state/guards in `web/lib/vaultStatus.ts`. **W-13 PASSED** 2026-09-14 (write-on-fill: tamper rejected, page fill 2 + raw fill 3, queue, exercise 2, assigned close, activity agrees; 24s) |
 | Relay | 38 tests; unchanged |
 | Site | `redesign/write-on-fill`: lint, typecheck, copy-lint (45 files, 0), build |
 | Docs | `redesign/pass-2` committed locally, including `product/buying-calls.md` |
@@ -39,11 +39,11 @@ Canary runbook: `ops/runbooks/canary-week.md`.
 
 ## Next, in order
 
-1. **W-13 rewrite** for write-on-fill (the checked-in `fork.acceptance.ts` still describes Overcall/registry/EIP-1271). X-11 is green.
-2. Production-parameter deploy rehearsal with `CLEAR_FEE_TO` = a Safe (script already rehearses this).
-3. Owner: personal wallet address that will own the 1-of-1 admin Safe.
-4. Merge+push contracts then app (already authorised once 1–2 are green). Create the Safe, then mainnet deploy. Site/docs branches stay unpublished until the owner says so.
-5. Canary week per `ops/runbooks/canary-week.md`. Keeper stays stopped until the 1.06 NVDA deposit lands.
+1. Owner: personal wallet address that will own the 1-of-1 admin Safe.
+2. Merge+push contracts then app (already authorised; X-11, W-13 and the Safe-feeTo deploy rehearsal are green). Create the Safe, then mainnet deploy. Site/docs branches stay unpublished until the owner says so.
+3. Canary week per `ops/runbooks/canary-week.md`. Keeper stays stopped until the 1.06 NVDA deposit lands.
+
+Deploy rehearsal (2026-09-14, fork block 63400155): **REHEARSAL PASSED**. Path A on our Clear with `feeTo` = admin Safe 2/3; Verify's missing/wrong-holder checks have teeth; handover; path B on Overcall's Clear with Safe from block one.
 
 ## Done on 2026-09-13
 

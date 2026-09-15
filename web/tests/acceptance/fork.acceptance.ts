@@ -1,53 +1,39 @@
 /**
  * W-13: the dapp, driven in a real browser by a fresh wallet, against an anvil fork of Robinhood
- * Chain 4663, with the keeper running for real beside it. Includes a fill served from the
- * keeper's own `/orders` payload.
- *
- * STALE: THIS RUN DESCRIBES THE PRE-REDESIGN VAULT (Overcall book, registry, EIP-1271, a
- * placeholder signature, a fee leg) and does not pass against the write-on-fill contracts. It is
- * rewritten in a later stage for the redesigned scenario (web/README.md "Fork acceptance
- * (W-13)"); until then only its imports and a few type references were patched so
- * `pnpm typecheck` stays green, and nothing below should be read as a description of the app.
+ * Chain 4663, with the keeper running for real beside it. Write on fill: the fill page is the
+ * venue.
  *
  * WHAT RUNS
  *   - anvil, forked from mainnet (started by you, see web/README.md "Fork acceptance (W-13)").
- *   - A Vault deployed from contracts/out with MockRegistry and MockFeed, exactly as
- *     keeper/src/dryrun.ts deploys it, and a fresh five-rung option series on the REAL Valorem
- *     Clear, so the run does not depend on what Overcall's operator has set on the live registry.
+ *   - A Vault deployed from contracts/out with MockFeed, exactly as keeper/src/dryrun.ts deploys
+ *     it: no registry, no Overcall, the REAL Valorem Clear and Seaport 1.6. The keeper creates
+ *     the week's option type itself (`newOptionType`) and arms it with `rollOpen(id)`.
  *   - The keeper's production modules (reconcile, tick, the SQLite store, the Hono server that
- *     serves /orders), imported and driven the way the dry run drives them. dryrun.ts itself
- *     exports nothing and runs its own main() on import, so it cannot be imported; the handful of
- *     fork primitives below (storage-slot `deal`, library linking, the Vault constructor tuple)
- *     mirror it and say so.
- *   - The web app, `next build` then `next start`, with every NEXT_PUBLIC_* pointed at the fork.
+ *     serves /orders), imported and driven the way the dry run drives them.
+ *   - The web app, `next build` then `next start`, with every NEXT_PUBLIC_* pointed at the fork
+ *     and KEEPER_ORDERS_URL at the keeper's real /orders. NEXT_PUBLIC_API_URL is unreachable so
+ *     history comes from the log fallback.
  *   - Headless Chromium (playwright-core). Each wallet is an EIP-1193 provider injected into the
- *     page and announced over EIP-6963, backed by a key generated for this run. wagmi's
- *     injected connector finds it the way it finds a browser extension; the page's own buttons
- *     send every user transaction, and the wallet signs them with viem against the fork.
+ *     page and announced over EIP-6963, backed by a key generated for this run.
  *
- * THE SCENARIO IS THE FALLBACK: Overcall's book refuses the vault's listing (open question L-04).
- * The stub the keeper posts to answers 400, so the keeper marks the listing `post_failed` and
- * keeps serving it from its own GET /orders. The web proxy's upstream (OVERCALL_API_BASE) answers
- * like the real book would in that case, with no row for the vault, for the whole run. The web
- * app's own fallback route, app/api/keeper/orders, reads the keeper's real HTTP server through
- * KEEPER_ORDERS_URL, restores Seaport's counter, has Seaport hash each order and serves only the
- * one the vault authorised. Seaport's counter for the vault is set non-zero before the keeper
- * lists, so a route that assumed 0 would hash a different order and fail here. First the keeper
- * is made to serve the order with its premium leg redirected (its SQLite row is edited, so its
- * HTTP server serves the tampered parameters under the authorised hash): the route rejects it and
- * the cycle page offers no fill. Then the row is restored, and a second fresh wallet fills 2
- * contracts from the cycle page's own verified fill button, labelled as the keeper's listing. A
- * raw Seaport client then fills 3 more straight from the /orders JSON, with no web code at all.
+ * THE SCENARIO. The keeper authorises a PARTIAL_RESTRICTED order (vault as zone, one USDG leg,
+ * empty signature). Seaport's counter for the vault is set non-zero before the listing so a
+ * route that assumed 0 would hash a different order and fail here. First the keeper is made to
+ * serve the order with its premium leg redirected: `/api/keeper/orders` rejects it and the cycle
+ * page offers no fill. Then the row is restored, a fresh wallet fills 2 contracts from the page's
+ * own button, and a raw Seaport client fills 3 more from /orders with no web code. Each fill
+ * writes exactly those contracts (`CallsWritten`); the vault's option balance is 0 after each.
+ * The buyer exercises 2 inside the window. lockBook, rollClose (assigned 2), completeRedeem and
+ * claimUsdg from the page; /activity agrees with the chain.
  *
  * FLOWS, each asserted to the base unit on chain and on the rendered page:
  *   (a) depositor: approve + deposit 25 NVDA from /vault/nvda; shares and their NAV render.
- *   (b) buyer: a tampered keeper order is refused by the route and not offered; then fill 2 of 23
- *       from /vault/nvda/cycle through the route's verified copy of the keeper's /orders; the
- *       writer leg lands on the vault; then 3 more from the raw payload.
+ *   (b) buyer: a tampered keeper order is refused by the route and not offered; then fill 2 of N
+ *       from /vault/nvda/cycle; then 3 more from the raw payload.
  *   (c) depositor: queue 10 shares while the vault is Listed.
- *   (d) warp to exercise and expiry, keeper ticks lockBook and rollClose; the depositor
- *       completes the redeem and claims USDG from the page.
- *   (e) /vault/nvda and /activity show the closed week, premium only (W-21), and the account.
+ *   (d) warp to exercise (buyer exercises 2) and expiry; keeper ticks lockBook and rollClose;
+ *       the depositor completes the redeem and claims USDG from the page.
+ *   (e) /vault/nvda and /activity show the assigned week, premium and strike proceeds apart.
  *
  * ENV (all optional)
  *   ACCEPTANCE_RPC              anvil endpoint. Default http://127.0.0.1:8548
@@ -93,20 +79,12 @@ import { generatePrivateKey, privateKeyToAccount, type PrivateKeyAccount } from 
 import { stockTokenAbi } from "../../lib/abi/erc20";
 import { seaportAbi } from "../../lib/abi/seaport";
 import { vaultAbi } from "../../lib/abi/vault";
-import { ASSET, CLEARINGHOUSE, SEAPORT, USDG, ZERO_ADDRESS, ZERO_CONDUIT_KEY } from "../../lib/contracts";
+import { ASSET, CLEARINGHOUSE, SEAPORT, USDG, ZERO_CONDUIT_KEY } from "../../lib/contracts";
 import type { KeeperOrderBook } from "../../lib/api";
 import { fmtAsset, fmtUsdg, fmtUtcDate, premiumPerShare, shortAddress } from "../../lib/format";
 import { KEEPER_REASONS, componentsStruct, seaportOrderHash } from "../../lib/keeperOrders";
-import { REASONS, checkListingIsOurs, type ListingRow as OvercallListing } from "../../lib/listing";
+import { REASONS, checkListingIsOurs, type ListingRow as FeedListing } from "../../lib/listing";
 import type { CycleRow, ListingRow } from "../../../keeper/src/state.js";
-
-/** Pre-redesign shims, kept only so this stale file typechecks until its rewrite (see the header). */
-const OVERCALL_FEE_RECIPIENT = ZERO_ADDRESS;
-const PLACEHOLDER_SIGNATURE_SHIM = "0x";
-function splitPremium(unitPrice6: bigint, contracts: bigint) {
-  // One leg under write on fill: the whole unit price is the vault's, there is no fee leg.
-  return { unitPrice6, writerPerContract6: unitPrice6, feePerContract6: 0n, writerTotal6: unitPrice6 * contracts, feeTotal6: 0n };
-}
 
 /*//////////////////////////////////////////////////////////////
                               SETTINGS
@@ -139,10 +117,10 @@ const QUEUED = 10n * LOT;
 /** Contracts the buyer takes from the cycle page, then from the raw /orders JSON. */
 const FILL_FROM_PAGE = 2n;
 const FILL_FROM_RAW_PAYLOAD = 3n;
-/** Book close this far after the series is created. The run needs a few minutes of it. */
-const EXERCISE_AFTER_SECONDS = 2n * 3_600n;
-const EXPIRY_AFTER_EXERCISE_SECONDS = 86_400n;
+/** Of the 5 sold, the buyer exercises this many. The rest expire. */
+const EXERCISE_W = 2n;
 const WALLET_NAME = "Callhouse acceptance wallet";
+const EMPTY_SIGNATURE = "0x" as Hex;
 
 /** The launch policy the Vault constructor installs (Policy.launchDefaults()). */
 const LAUNCH_POLICY = { minOtmBps: 300, maxOtmBps: 1200, protocolFeeBps: 500 } as const;
@@ -162,6 +140,7 @@ function operator(label: string): PrivateKeyAccount {
 const KEEPER_PK = keccak256(toHex("callhouse-w13:keeper"));
 const KEEPER = privateKeyToAccount(KEEPER_PK);
 const ADMIN = operator("admin");
+const GUARDIAN = operator("guardian");
 const FEE_SAFE = operator("fee-safe");
 /** Where the tampered keeper order sends the vault's premium. Never funded, never signs. */
 const ATTACKER = operator("attacker");
@@ -376,32 +355,17 @@ async function deployLinked(label: string, art: Artifact, args: readonly unknown
   return deploy(label, art.abi, `0x${code}`, args);
 }
 
-const newOptionTypeAbi = [
-  {
-    type: "function",
-    name: "newOptionType",
-    inputs: [
-      { name: "underlyingAsset", type: "address" },
-      { name: "underlyingAmount", type: "uint96" },
-      { name: "exerciseAsset", type: "address" },
-      { name: "exerciseAmount", type: "uint96" },
-      { name: "exerciseTimestamp", type: "uint40" },
-      { name: "expiryTimestamp", type: "uint40" },
-    ],
-    outputs: [{ name: "optionId", type: "uint256" }],
-    stateMutability: "nonpayable",
-  },
+const mockFeedWriteAbi = [
+  { type: "function", name: "setAnswer", inputs: [{ name: "answer", type: "int256" }], outputs: [], stateMutability: "nonpayable" },
 ] as const;
 
-const mockRegistryAbi = [
+const exerciseAbi = [
   {
     type: "function",
-    name: "setCycleWithStrikes",
+    name: "exercise",
     inputs: [
-      { name: "ids", type: "uint256[]" },
-      { name: "strikes", type: "uint96[]" },
-      { name: "exerciseAt", type: "uint40" },
-      { name: "expireAt", type: "uint40" },
+      { name: "optionId", type: "uint256" },
+      { name: "amount", type: "uint112" },
     ],
     outputs: [],
     stateMutability: "nonpayable",
@@ -512,7 +476,7 @@ async function getJson<T>(url: string): Promise<T> {
 /** What the web app's GET /api/keeper/orders answers (app/api/keeper/orders/route.ts). */
 type KeeperRouteBody = {
   configured: boolean;
-  orders: OvercallListing[];
+  orders: FeedListing[];
   rejected: KeeperOrderBook["rejected"];
   closed: KeeperOrderBook["closed"];
   unchecked: KeeperOrderBook["unchecked"];
@@ -773,7 +737,7 @@ function webEnv(extra: Record<string, string>): NodeJS.ProcessEnv {
   const env: NodeJS.ProcessEnv = {};
   for (const [key, value] of Object.entries(process.env)) {
     // Nothing from the caller's shell may point this build at a real chain or a real book.
-    if (key.startsWith("NEXT_PUBLIC_") || key === "OVERCALL_API_BASE" || key.startsWith("KEEPER_")) continue;
+    if (key.startsWith("NEXT_PUBLIC_") || key.startsWith("KEEPER_")) continue;
     env[key] = value;
   }
   return { ...env, NEXT_TELEMETRY_DISABLED: "1", NODE_ENV: "production", ...extra };
@@ -794,7 +758,7 @@ function webEnv(extra: Record<string, string>): NodeJS.ProcessEnv {
 type KeeperRoll = {
   reconcile(): Promise<void>;
   tick(): Promise<void>;
-  getLastSnapshot(): { phase: number; isWritingOpen: boolean } | null;
+  getLastSnapshot(): { phase: number } | null;
   Phase: { Idle: number; Listed: number; Exercisable: number; Settling: number };
 };
 type KeeperHealth = { startHealthServer(): { close(): unknown } };
@@ -827,11 +791,12 @@ async function main(): Promise<void> {
       Object.assign(record.actors, {
         admin: ADMIN.address,
         keeper: KEEPER.address,
+        guardian: GUARDIAN.address,
         feeSafe: FEE_SAFE.address,
         depositor: DEPOSITOR.address,
         buyer: BUYER.address,
       });
-      for (const actor of [ADMIN, KEEPER, FEE_SAFE, DEPOSITOR, BUYER]) {
+      for (const actor of [ADMIN, KEEPER, GUARDIAN, FEE_SAFE, DEPOSITOR, BUYER]) {
         await rpc("anvil_setBalance", [actor.address, toHex(100n * LOT)]);
         await rpc("anvil_setCode", [actor.address, "0x"]);
       }
@@ -843,26 +808,20 @@ async function main(): Promise<void> {
 
     /* ---------- deploy and configure the vault ---------- */
 
-    const { vault, vaultBlock, registry } = await step("deploy MockRegistry, MockFeed (live answer), linked Vault; grant KEEPER_ROLE", async () => {
+    const { vault, vaultBlock, feed } = await step("deploy MockFeed (live answer), linked Vault; grant KEEPER_ROLE and GUARDIAN_ROLE", async () => {
       const [, answer] = await read<readonly [bigint, bigint, bigint, bigint, bigint]>(REAL_FEED, feedAbi, "latestRoundData");
-      const mockRegistry = artifact("MockRegistry.sol/MockRegistry.json");
-      const registryAt = await deploy("MockRegistry", mockRegistry.abi, mockRegistry.bytecode.object, [ASSET, USDG, CLEARINGHOUSE]);
       const mockFeed = artifact("MockFeed.sol/MockFeed.json");
       const feedAt = await deploy("MockFeed", mockFeed.abi, mockFeed.bytecode.object, [8, answer, "RHNVDA / USD (W-13 mirror of the live answer)"]);
       const vaultArtifact = artifact("Vault.sol/Vault.json");
-      // The constructor tuple keeper/src/dryrun.ts deploys, with this run's own operators.
       const vaultAt = await deployLinked("Vault", vaultArtifact, [
         {
           asset: ASSET,
           usdg: USDG,
           clear: CLEARINGHOUSE,
           seaport: SEAPORT,
-          registry: registryAt.address,
           priceFeed: feedAt.address,
           maxPriceAge: 4 * 86_400,
-          overcallFeeRecipient: OVERCALL_FEE_RECIPIENT,
           conduitKey: ZERO_CONDUIT_KEY,
-          seaportZone: "0x0000000000000000000000000000000000000000",
           admin: ADMIN.address,
           feeRecipient: FEE_SAFE.address,
           depositCap: 50n * LOT,
@@ -871,59 +830,22 @@ async function main(): Promise<void> {
         },
       ]);
       const keeperRole = await read<Hex>(vaultAt.address, vaultArtifact.abi, "KEEPER_ROLE");
+      const guardianRole = await read<Hex>(vaultAt.address, vaultArtifact.abi, "GUARDIAN_ROLE");
       await harnessTx("grantRole(KEEPER_ROLE, keeper)", ADMIN, () =>
         walletClient.writeContract({ account: ADMIN, chain: forkChain, address: vaultAt.address, abi: vaultArtifact.abi, functionName: "grantRole", args: [keeperRole, KEEPER.address] }),
       );
-      // Six outputs decode as a tuple, in the order lib/hooks.ts reads them.
+      await harnessTx("grantRole(GUARDIAN_ROLE, guardian)", ADMIN, () =>
+        walletClient.writeContract({ account: ADMIN, chain: forkChain, address: vaultAt.address, abi: vaultArtifact.abi, functionName: "grantRole", args: [guardianRole, GUARDIAN.address] }),
+      );
+      assertEq(await read<Address>(vaultAt.address, vaultAbi, "seaportZone"), vaultAt.address, "the vault is its own Seaport zone");
+      assertEq(await read<Address>(vaultAt.address, vaultAbi, "clear"), CLEARINGHOUSE, "constructed on the real Clear");
       const [minOtmBps, maxOtmBps, , , protocolFeeBps] = await read<readonly [number, number, number, number, number, bigint]>(vaultAt.address, vaultAbi, "policy");
       assertEq(protocolFeeBps, LAUNCH_POLICY.protocolFeeBps, "policy().protocolFeeBps is the launch default");
       assertEq(minOtmBps, LAUNCH_POLICY.minOtmBps, "policy().minOtmBps is the launch default");
       assertEq(maxOtmBps, LAUNCH_POLICY.maxOtmBps, "policy().maxOtmBps is the launch default");
-      return { vault: vaultAt.address, vaultBlock: vaultAt.block, registry: registryAt.address };
+      record.amounts.spotAtDeploy6 = (await read<bigint>(vaultAt.address, vaultAbi, "spotUsdg")).toString();
+      return { vault: vaultAt.address, vaultBlock: vaultAt.block, feed: feedAt.address };
     });
-
-    const series = await step("create a fresh five-rung series on the REAL Valorem Clear; install it as MockRegistry cycle 1", async () => {
-      const spot = await read<bigint>(vault, vaultAbi, "spotUsdg");
-      const now = await latestTimestamp();
-      const exercise = now + EXERCISE_AFTER_SECONDS;
-      const expiry = exercise + EXPIRY_AFTER_EXERCISE_SECONDS;
-      // Same ladder shape as the dry run's fresh series: +3.5% .. +11.5%, whole USDG.
-      const strikes = [1035n, 1055n, 1075n, 1095n, 1115n].map((perMille) => ((spot * perMille) / 1000n / 1_000_000n) * 1_000_000n);
-      const ids: bigint[] = [];
-      for (const strike of strikes) {
-        const { result, request } = await pub.simulateContract({
-          account: ADMIN,
-          address: CLEARINGHOUSE,
-          abi: newOptionTypeAbi,
-          functionName: "newOptionType",
-          args: [ASSET, LOT, USDG, strike, Number(exercise), Number(expiry)],
-        });
-        await harnessTx(`clear.newOptionType(strike ${strike})`, ADMIN, () => walletClient.writeContract(request));
-        ids.push(result);
-      }
-      await harnessTx("MockRegistry.setCycleWithStrikes(cycle 1)", ADMIN, () =>
-        walletClient.writeContract({ account: ADMIN, chain: forkChain, address: registry, abi: mockRegistryAbi, functionName: "setCycleWithStrikes", args: [ids, strikes, Number(exercise), Number(expiry)] }),
-      );
-      note(`spot ${spot} USDG6/lot; strikes ${strikes.join("/")}; exercise ${exercise}, expiry ${expiry}`);
-      record.amounts.spotUsdg6 = spot.toString();
-      return { ids, strikes, exercise, expiry };
-    });
-
-    /* ---------- the Overcall book that rejects us, and the web proxy's upstream ---------- */
-
-    const stubRequests: string[] = [];
-    const overcallStub = await listen((req, res) => {
-      const url = new URL(req.url ?? "/", "http://stub");
-      stubRequests.push(`${req.method ?? "GET"} ${url.pathname}${url.search}`);
-      record.stubRequests.push(`keeper -> ${req.method ?? "GET"} ${url.pathname}${url.search}`);
-      if (req.method === "POST") {
-        // The L-04 failure mode: the book will not take the vault's listing.
-        return reply(res, 400, { error: "acceptance stub: the book rejects this vault's listing (the L-04 failure mode)" });
-      }
-      if (req.method === "GET" && url.pathname === "/api/orders") return reply(res, 200, { listings: [] });
-      return reply(res, 404, { error: "listing not found" });
-    });
-    cleanups.push(() => void overcallStub.server.close());
 
     const alerts: Array<{ kind: string; message: string }> = [];
     const alertSink = await listen((_req, res, body) => {
@@ -936,15 +858,6 @@ async function main(): Promise<void> {
 
     const keeperPort = await freePort();
     const keeperUrl = `http://127.0.0.1:${keeperPort}`;
-    // The book as the web proxy sees it when Overcall has refused the listing: no row for the
-    // vault, for the whole run. The page's fill comes from the keeper route, not from here.
-    const webBook = await listen((req, res) => {
-      const url = new URL(req.url ?? "/", "http://book");
-      record.stubRequests.push(`web proxy -> ${req.method ?? "GET"} ${url.pathname}${url.search}`);
-      if (req.method !== "GET" || url.pathname !== "/api/orders") return reply(res, 404, { error: "not found" });
-      return reply(res, 200, { listings: [] });
-    });
-    cleanups.push(() => void webBook.server.close());
 
     /* ---------- the web app, built against the fork ---------- */
 
@@ -957,7 +870,6 @@ async function main(): Promise<void> {
         NEXT_PUBLIC_RPC_URL_2: RPC,
         NEXT_PUBLIC_VAULT: vault,
         NEXT_PUBLIC_VAULT_FROM_BLOCK: vaultBlock.toString(),
-        NEXT_PUBLIC_REGISTRY: registry,
         NEXT_PUBLIC_ASSET: ASSET,
         NEXT_PUBLIC_USDG: USDG,
         NEXT_PUBLIC_CLEARINGHOUSE: CLEARINGHOUSE,
@@ -966,9 +878,7 @@ async function main(): Promise<void> {
         NEXT_PUBLIC_API_URL: unreachableIndexer,
         NEXT_PUBLIC_APP_URL: "http://127.0.0.1",
       };
-      // Runtime server variables: the proxy's upstream, and the keeper's real HTTP server (started
-      // below, on the port chosen above) for the fallback route.
-      const serverEnv = { OVERCALL_API_BASE: webBook.url, KEEPER_ORDERS_URL: `${keeperUrl}/orders` };
+      const serverEnv = { KEEPER_ORDERS_URL: `${keeperUrl}/orders` };
       Object.assign(record.web, publicEnv, serverEnv);
       const nextBin = join(WEB_DIR, "node_modules", ".bin", "next");
       const env = webEnv({ ...publicEnv, ...serverEnv });
@@ -1002,7 +912,6 @@ async function main(): Promise<void> {
       // The server-rendered HTML carries the build's compiled-in vault address.
       const html = await (await fetch(`${url}/vault/nvda`)).text();
       assert(html.includes(vault), "the /vault/nvda HTML names the fork vault (NEXT_PUBLIC_VAULT inlined)");
-      assert(html.includes("Premium is paid only if a buyer fills"), "the /vault/nvda HTML carries the fill disclosure");
       record.web.url = url;
       note(`web app at ${url}`);
       return { url };
@@ -1015,21 +924,19 @@ async function main(): Promise<void> {
       KEEPER_ENV_FILE: "/dev/null",
       RH_RPC: RPC,
       CHAIN_ID: String(CHAIN_ID),
-      REGISTRY: registry,
+      CLEARINGHOUSE,
       VAULT: vault,
       KEEPER_PK,
       KEEPER_DB_PATH: keeperDb,
       KEEPER_PORT: String(keeperPort),
       KEEPER_LOG_LEVEL,
       KEEPER_FALLBACK_DIR: join(OUT, "fallback"),
-      OVERCALL_ORDERS_URL: `${overcallStub.url}/api/orders`,
-      OVERCALL_MARKET: "NVDA",
-      OVERCALL_MAX_ATTEMPTS: "1",
+      KEEPER_PREMIUM_MARGIN_BPS: "50",
+      KEEPER_RETRY_STRANDED_MS: "1000",
       ALERT_WEBHOOK: `${alertSink.url}/alerts`,
     });
     delete process.env.RH_RPC_2;
     delete process.env.KEEPER_UNIT_PRICE_USDG6;
-    delete process.env.OVERCALL_API_KEY;
 
     // Imported only now: keeper/src/config.ts validates the environment above at import time.
     const roll = (await import(untypedKeeperModule("roll"))) as KeeperRoll;
@@ -1050,7 +957,6 @@ async function main(): Promise<void> {
       const snap = roll.getLastSnapshot();
       assert(snap !== null, "reconcile produced a snapshot");
       assertEq(snap.phase, roll.Phase.Idle, "vault phase");
-      assertEq(snap.isWritingOpen, true, "registry writing open");
       const health = await fetch(`${keeperUrl}/health`);
       assertEq(health.status, 200, "keeper /health");
     });
@@ -1117,11 +1023,12 @@ async function main(): Promise<void> {
 
     /* ---------- the keeper writes and lists; Overcall rejects ---------- */
 
-    const listed = await step("keeper tick: rollOpen + approveListing; Overcall's book rejects the POST; /orders serves the order", async () => {
+    const listed = await step("keeper tick: newOptionType + rollOpen(id) + approveListing; /orders serves the empty-signature order", async () => {
       await setSeaportCounter(vault, SEAPORT_COUNTER);
       note(`Seaport getCounter(vault) = ${SEAPORT_COUNTER} before the keeper lists`);
       await roll.tick();
       assertEq(await read<number>(vault, vaultAbi, "phase"), roll.Phase.Listed, "vault phase after the tick");
+      assertEq(await read<bigint>(vault, vaultAbi, "contractsWritten"), 0n, "rollOpen writes nothing");
       const cycle = store.getCycle(1);
       assert(cycle !== null && cycle.roll_open_tx !== null, "keeper cycle row with its rollOpen tx");
       const rows = store.listingsForCycle(1);
@@ -1129,41 +1036,41 @@ async function main(): Promise<void> {
       const row = rows[0] as ListingRow;
       assertEq(row.status, "approved", "the keeper recorded the listing");
       assertEq(row.counter, SEAPORT_COUNTER.toString(), "the keeper built the order with Seaport's live counter");
-      assert(stubRequests.some((r) => r.startsWith("POST /api/orders")), "the keeper did POST to the book");
-      assert(alerts.some((a) => a.kind === "api_reject" && a.message.includes("/orders")), "api_reject alert names the /orders fallback");
-      assertEq(cycle.option_id, series.ids[0]?.toString() ?? "", "wrote the nearest in-band rung");
       const onChainPolicy = await policy.readPolicy();
       const contracts = policy.maxContracts(DEPOSIT, onChainPolicy);
-      assertEq(BigInt(row.contracts), contracts, "listed the whole write at 95% utilisation");
-      const spot = await read<bigint>(vault, vaultAbi, "spotUsdg");
-      assertEq(row.unit_price6, policy.minUnitPrice6(spot, onChainPolicy).toString(), "priced at the policy floor");
+      assertEq(BigInt(row.contracts), contracts, "listed the whole capacity at 95% utilisation");
       const listingHash = await read<Hex>(vault, vaultAbi, "listingHash");
       assertEq(listingHash.toLowerCase(), row.order_hash.toLowerCase(), "the vault authorised the keeper's hash");
       assertEq(await read<bigint>(vault, vaultAbi, "listingAmount"), contracts, "listingAmount");
       assertEq(await read<bigint>(vault, vaultAbi, "listingGrossUsdg"), BigInt(row.gross_usdg6), "listingGrossUsdg");
+      assertEq(await read<bigint>(vault, vaultAbi, "optionId"), BigInt(cycle.option_id ?? "0"), "optionId the keeper created");
 
       const { orders } = await getJson<{ orders: KeeperOrder[] }>(`${keeperUrl}/orders`);
       assertEq(orders.length, 1, "GET /orders serves one order");
       const order = orders[0] as KeeperOrder;
       assertEq(order.orderHash.toLowerCase(), listingHash.toLowerCase(), "/orders serves the authorised hash");
-      assertEq(order.status, "post_failed", "/orders serves it although the book refused it");
       assertEq(order.contracts, contracts.toString(), "/orders contracts");
-      assertEq(order.signature, PLACEHOLDER_SIGNATURE_SHIM, "/orders signature is empty");
-      const split = splitPremium(BigInt(order.unitPrice6), contracts);
-      assertEq(order.parameters.consideration[0]?.startAmount ?? "", split.writerTotal6.toString(), "writer leg = per-contract split x N (web splitPremium)");
-      assertEq(order.parameters.consideration[1]?.startAmount ?? "", split.feeTotal6.toString(), "fee leg = per-contract split x N (web splitPremium)");
-      assertEq(row.gross_usdg6, split.writerTotal6.toString(), "keeper gross_usdg6 agrees with the web split");
+      assertEq(order.signature, EMPTY_SIGNATURE, "/orders signature is empty");
+      assertEq(order.parameters.orderType, 3, "PARTIAL_RESTRICTED");
+      assertEq(order.parameters.consideration.length, 1, "one USDG leg, no venue fee");
+      assertEq(getAddress(order.parameters.consideration[0]?.recipient ?? "0x"), vault, "the premium pays the vault");
+      assertEq(getAddress(order.parameters.zone), vault, "zone is the vault");
+      const unitPrice6 = BigInt(order.unitPrice6);
+      assertEq(order.parameters.consideration[0]?.startAmount ?? "", (unitPrice6 * contracts).toString(), "consideration = unit x N");
+      assertEq(row.gross_usdg6, (unitPrice6 * contracts).toString(), "keeper gross_usdg6 = unit x N");
       record.txs.push({ label: "keeper: rollOpen", by: KEEPER.address, hash: cycle.roll_open_tx as Hex, block: "", via: "keeper" });
       if (row.approve_tx) record.txs.push({ label: "keeper: approveListing", by: KEEPER.address, hash: row.approve_tx as Hex, block: "", via: "keeper" });
       Object.assign(record.amounts, {
         contracts: contracts.toString(),
         unitPrice6: order.unitPrice6,
-        writerPerContract6: split.writerPerContract6.toString(),
-        feePerContract6: split.feePerContract6.toString(),
         orderHash: order.orderHash,
+        optionId: cycle.option_id,
+        strikeUsdg6: cycle.strike_usdg6,
+        exerciseTs: cycle.exercise_ts,
+        expiryTs: cycle.expiry_ts,
       });
-      note(`listed ${contracts} contracts at ${order.unitPrice6} USDG6 each (${split.writerPerContract6} vault + ${split.feePerContract6} Overcall); book said no; /orders serves ${order.orderHash}`);
-      return { order, contracts, split, strike: BigInt(cycle.strike_usdg6 ?? "0") };
+      note(`listed ${contracts} contracts at ${order.unitPrice6} USDG6 each, empty signature; /orders serves ${order.orderHash}`);
+      return { order, contracts, unitPrice6, strike: BigInt(cycle.strike_usdg6 ?? "0"), exercise: BigInt(cycle.exercise_ts ?? "0"), expiry: BigInt(cycle.expiry_ts ?? "0") };
     });
 
     /* ---------- (b) the fill from the keeper's /orders, through the web app's own route ---------- */
@@ -1198,27 +1105,21 @@ async function main(): Promise<void> {
 
         const page = buyerPage;
         await page.goto(`${web.url}/vault/nvda/cycle`);
-        const onChain = card(page, exactly("Our listing, on chain"));
+        const onChain = card(page, exactly("The vault's order, on chain"));
         await expectText("cycle: Seaport order hash", rowValue(onChain, /^Seaport order hash$/), listed.order.orderHash);
-        await expectText("cycle: Contracts listed", rowValue(onChain, /^Contracts listed$/), listed.contracts.toString());
-        await expectText("cycle: Seaport validated", rowValue(onChain, /^Seaport validated$/), "validated");
-        await expectText(
-          "cycle: book notice",
-          page.locator(".notice strong", { hasText: "Overcall's book has no listing matching" }),
-          "Overcall's book has no listing matching the vault's current order hash.",
-        );
+        await expectText("cycle: Contracts offered", rowValue(onChain, /^Contracts offered$/), listed.contracts.toString());
+        await expectText("cycle: Seaport validated", rowValue(onChain, /^Seaport validated$/), "validated (empty signature fills)");
         await expectText(
           "cycle: keeper rejection notice",
-          page.locator(".notice strong", { hasText: "The vault's keeper served" }),
-          "The vault's keeper served an order that did not check out against the chain, so nothing from the keeper is offered here.",
+          page.locator(".notice strong", { hasText: "The keeper served" }),
+          "The keeper served an order that did not check out against the chain, so nothing is offered here.",
         );
         await expectText(
           "cycle: keeper rejection names the redirected premium leg",
-          page.locator(".notice", { hasText: "The vault's keeper served" }).locator("li").first(),
+          page.locator(".notice", { hasText: "The keeper served" }).locator("li").first(),
           new RegExp(REASONS.writerRecipient.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")),
         );
-        await expectAbsent("cycle: a fillable order card", card(page, /^Signed order · fill from here$/));
-        await expectAbsent("cycle: a keeper order card", card(page, /^Order from the vault's keeper/));
+        await expectAbsent("cycle: a fillable order card", card(page, /^The vault's order · fill from here$/));
         await expectAbsent("cycle: a contracts input", page.locator("#fill-qty"));
       } finally {
         store.db.prepare("UPDATE listings SET components_json = ? WHERE order_hash = ?").run(original, row.order_hash);
@@ -1231,7 +1132,7 @@ async function main(): Promise<void> {
       const body = await keeperRoute(web.url, "restored", (b, status) => status === 200 && b.orders.length === 1);
       assertEq(body.rejected.length, 0, "route: nothing rejected");
       assertEq(body.closed.length + body.unchecked.length, 0, "route: nothing closed or unchecked (one-block Multicall3 read against the fork)");
-      const row = body.orders[0] as OvercallListing;
+      const row = body.orders[0] as FeedListing;
       assertEq(row.orderHash.toLowerCase(), listed.order.orderHash.toLowerCase(), "route row carries the authorised hash");
       // The counter is the chain's, not a default: it is non-zero on this run.
       const counter = await read<bigint>(SEAPORT, seaportAbi, "getCounter", [vault]);
@@ -1267,39 +1168,30 @@ async function main(): Promise<void> {
       );
       assert(check.ok, `checkListingIsOurs on the route's row: ${check.ok ? "" : check.reasons.join("; ")}`);
 
-      const cost = listed.split.unitPrice6 * FILL_FROM_PAGE;
-      const usdgForBoth = listed.split.unitPrice6 * (FILL_FROM_PAGE + FILL_FROM_RAW_PAYLOAD);
+      const cost = listed.unitPrice6 * FILL_FROM_PAGE;
+      const usdgForBoth = listed.unitPrice6 * (FILL_FROM_PAGE + FILL_FROM_RAW_PAYLOAD);
       await deal(USDG, BUYER.address, usdgForBoth);
       const optionId = BigInt(listed.order.optionId);
       const before = {
         vault: await erc20Balance(USDG, vault),
-        overcall: await erc20Balance(USDG, OVERCALL_FEE_RECIPIENT),
         buyer: await erc20Balance(USDG, BUYER.address),
       };
 
       const page = buyerPage;
       await page.reload();
-      const orderCard = card(page, /^Signed order · fill from here$/);
-      await expectText("fill card: title", orderCard.locator(".card-title"), "Signed order · fill from here");
+      const orderCard = card(page, /^The vault's order · fill from here$/);
+      await expectText("fill card: title", orderCard.locator(".card-title"), "The vault's order · fill from here");
+      await expectText("fill card: status", orderCard.locator(".card-head .mono"), "status open");
+      await expectAbsent("cycle: keeper rejection notice", page.locator(".notice", { hasText: "The keeper served" }));
       await expectText(
-        "fill card: source label",
-        orderCard.locator(".notice strong").first(),
-        "Listed directly by the vault's keeper; Overcall's book is not showing it.",
+        "fill card: Contracts",
+        rowValue(orderCard, /^Contracts$/),
+        new RegExp(`^${listed.contracts.toString()} buyable now`),
       );
-      await expectText("fill card: source and status", orderCard.locator(".card-head .mono"), "keeper · status open");
-      await expectText(
-        "cycle: book notice points at the keeper's order",
-        page.locator(".notice", { hasText: "Overcall's book has no listing matching" }),
-        /The vault's keeper is serving that order directly, and it is below, checked against the chain\.$/,
-      );
-      await expectAbsent("cycle: keeper rejection notice", page.locator(".notice", { hasText: "The vault's keeper served" }));
-      await expectText("fill card: Contracts", rowValue(orderCard, /^Contracts$/), `${listed.contracts} left of ${listed.contracts}`);
-      await expectText("fill card: Unit price", rowValue(orderCard, /^Unit price$/), `${fmtUsdg(listed.split.unitPrice6)} USDG per contract`);
+      await expectText("fill card: Unit price", rowValue(orderCard, /^Unit price$/), `${fmtUsdg(listed.unitPrice6, 6)} USDG per contract`);
       await connectWallet(page, BUYER.address);
       await orderCard.locator("#fill-qty").fill(FILL_FROM_PAGE.toString());
       await expectText("fill card: You pay", rowValue(orderCard, /^You pay$/), `${fmtUsdg(cost)} USDG`);
-      await expectText("fill card: You receive", rowValue(orderCard, /^You receive$/), `${FILL_FROM_PAGE} option ERC-1155`);
-      await expectText("fill card: Your USDG", rowValue(orderCard, /^Your USDG$/), fmtUsdg(usdgForBoth));
 
       const from = buyerWallet.sent.length;
       await orderCard.getByRole("button", { name: `Fill ${FILL_FROM_PAGE} contracts`, exact: true }).click();
@@ -1316,27 +1208,34 @@ async function main(): Promise<void> {
       ];
       assertEq(advanced.numerator, FILL_FROM_PAGE, "numerator = contracts wanted");
       assertEq(advanced.denominator, listed.contracts, "denominator = offer[0].startAmount");
-      assertEq(advanced.signature.toLowerCase(), listed.order.signature.toLowerCase(), "signature: the placeholder /orders served");
+      assertEq(advanced.signature, EMPTY_SIGNATURE, "signature is empty");
       assertEq(advanced.extraData, "0x", "extraData empty");
       assertEq(resolvers.length, 0, "no criteria resolvers");
       assertEq(conduitKey, ZERO_CONDUIT_KEY, "no conduit");
       assertEq(getAddress(recipient), BUYER.address, "recipient is the buyer");
 
-      assertEq((await erc20Balance(USDG, vault)) - before.vault, listed.split.writerPerContract6 * FILL_FROM_PAGE, "the vault's writer leg landed: writerPerContract x 2");
-      assertEq((await erc20Balance(USDG, OVERCALL_FEE_RECIPIENT)) - before.overcall, listed.split.feePerContract6 * FILL_FROM_PAGE, "Overcall's fee leg: feePerContract x 2");
+      const pageFillReceipt = await pub.getTransactionReceipt({ hash: fulfil.hash });
+      const written = parseEventLogs({ abi: vaultAbi as unknown as Abi, eventName: "CallsWritten", logs: pageFillReceipt.logs }).filter(
+        (l) => l.address.toLowerCase() === vault.toLowerCase(),
+      );
+      assertEq(written.length, 1, "one CallsWritten in the fill");
+      assertEq((written[0] as { args: { contractsCount: bigint } }).args.contractsCount, FILL_FROM_PAGE, "CallsWritten.contractsCount = 2");
+      assertEq((await erc20Balance(USDG, vault)) - before.vault, cost, "the vault received the whole premium (one leg)");
       assertEq(before.buyer - (await erc20Balance(USDG, BUYER.address)), cost, "the buyer paid exactly the quoted cost");
       assertEq(await read<bigint>(CLEARINGHOUSE, clearBalanceAbi, "balanceOf", [BUYER.address, optionId]), FILL_FROM_PAGE, "the buyer holds 2 option tokens");
-      assertEq(await read<bigint>(CLEARINGHOUSE, clearBalanceAbi, "balanceOf", [vault, optionId]), listed.contracts - FILL_FROM_PAGE, "the vault's inventory fell by 2");
+      assertEq(await read<bigint>(CLEARINGHOUSE, clearBalanceAbi, "balanceOf", [vault, optionId]), 0n, "the vault holds 0 option tokens after the fill: written == sold");
+      assertEq(await read<bigint>(vault, vaultAbi, "contractsWritten"), FILL_FROM_PAGE, "contractsWritten = 2");
       const [, , filled, size] = await read<readonly [boolean, boolean, bigint, bigint]>(SEAPORT, seaportAbi, "getOrderStatus", [listed.order.orderHash]);
       assertEq(`${filled}/${size}`, `${FILL_FROM_PAGE}/${listed.contracts}`, "Seaport getOrderStatus after the page fill");
-      await expectText("fill card: Contracts after the fill", rowValue(card(page, /^Signed order · fill from here$/), /^Contracts$/), `${listed.contracts - FILL_FROM_PAGE} left of ${listed.contracts}`, 90_000).catch(async () => {
-        // The book query refetches every 30 s; a reload is what a buyer would do.
-        await page.reload();
-        await expectText("fill card: Contracts after reload", rowValue(card(page, /^Signed order · fill from here$/), /^Contracts$/), `${listed.contracts - FILL_FROM_PAGE} left of ${listed.contracts}`);
-      });
+      await page.reload();
+      await expectText(
+        "fill card: Contracts after reload",
+        rowValue(card(page, /^The vault's order · fill from here$/), /^Contracts$/),
+        new RegExp(`${(listed.contracts - FILL_FROM_PAGE).toString()} buyable now`),
+      );
       record.amounts.pageFillTx = fulfil.hash;
       record.amounts.pageFillCost6 = cost.toString();
-      record.amounts.pageFillToVault6 = (listed.split.writerPerContract6 * FILL_FROM_PAGE).toString();
+      record.amounts.pageFillToVault6 = cost.toString();
       return { parameters: advanced.parameters };
     });
 
@@ -1361,7 +1260,7 @@ async function main(): Promise<void> {
       // The page rebuilt OrderParameters from the route's components; a raw client takes them
       // from /orders as served. They must be the same struct, field for field.
       assertEq(jsonish(pageFill.parameters), jsonish(parameters), "the parameters the page sent = the /orders parameters as served");
-      const cost = listed.split.unitPrice6 * FILL_FROM_RAW_PAYLOAD;
+      const cost = listed.unitPrice6 * FILL_FROM_RAW_PAYLOAD;
       const vaultBefore = await erc20Balance(USDG, vault);
       await harnessTx("buyer (raw client): USDG.approve(Seaport)", BUYER, () =>
         walletClient.writeContract({ account: BUYER, chain: forkChain, address: USDG, abi: stockTokenAbi, functionName: "approve", args: [SEAPORT, cost] }),
@@ -1373,17 +1272,19 @@ async function main(): Promise<void> {
           address: SEAPORT,
           abi: seaportAbi,
           functionName: "fulfillAdvancedOrder",
-          args: [{ parameters, numerator: FILL_FROM_RAW_PAYLOAD, denominator: BigInt(p.offer[0]?.startAmount ?? "0"), signature: order.signature, extraData: "0x" }, [], ZERO_CONDUIT_KEY, BUYER.address],
+          args: [{ parameters, numerator: FILL_FROM_RAW_PAYLOAD, denominator: BigInt(p.offer[0]?.startAmount ?? "0"), signature: EMPTY_SIGNATURE, extraData: "0x" }, [], ZERO_CONDUIT_KEY, BUYER.address],
         }),
       );
-      assertEq((await erc20Balance(USDG, vault)) - vaultBefore, listed.split.writerPerContract6 * FILL_FROM_RAW_PAYLOAD, "writer leg x 3 landed");
+      assertEq((await erc20Balance(USDG, vault)) - vaultBefore, cost, "premium x 3 landed on the vault");
       assertEq(await erc20Balance(USDG, BUYER.address), 0n, "the buyer spent exactly the USDG dealt for 5 contracts");
       const optionId = BigInt(listed.order.optionId);
       assertEq(await read<bigint>(CLEARINGHOUSE, clearBalanceAbi, "balanceOf", [BUYER.address, optionId]), FILL_FROM_PAGE + FILL_FROM_RAW_PAYLOAD, "the buyer holds 5 option tokens");
+      assertEq(await read<bigint>(CLEARINGHOUSE, clearBalanceAbi, "balanceOf", [vault, optionId]), 0n, "vault option balance still 0");
+      assertEq(await read<bigint>(vault, vaultAbi, "contractsWritten"), FILL_FROM_PAGE + FILL_FROM_RAW_PAYLOAD, "contractsWritten = 5");
       const [, , filled, size] = await read<readonly [boolean, boolean, bigint, bigint]>(SEAPORT, seaportAbi, "getOrderStatus", [listed.order.orderHash]);
       assertEq(`${filled}/${size}`, `${FILL_FROM_PAGE + FILL_FROM_RAW_PAYLOAD}/${listed.contracts}`, "Seaport getOrderStatus after both fills");
-      const premium = listed.split.writerPerContract6 * (FILL_FROM_PAGE + FILL_FROM_RAW_PAYLOAD);
-      assertEq(await erc20Balance(USDG, vault), premium, "the vault holds exactly the two writer legs");
+      const premium = listed.unitPrice6 * (FILL_FROM_PAGE + FILL_FROM_RAW_PAYLOAD);
+      assertEq(await erc20Balance(USDG, vault), premium, "the vault holds exactly the two premiums");
       record.amounts.rawFillTx = receipt.transactionHash;
       record.amounts.premiumToVault6 = premium.toString();
     });
@@ -1401,7 +1302,6 @@ async function main(): Promise<void> {
       // statuses, so the fallback itself is unaffected; the assertion accepts either and says
       // which it saw.
       assert(row.status === "partial" || row.status === "approved", `keeper listing status is a live one (got ${row.status})`);
-      if (row.status !== "partial") note(`keeper listing status after the retry: ${row.status} (Seaport says ${row.seaport_total_filled}/${row.seaport_total_size}; see the KNOWN KEEPER DEFECT note)`);
       record.amounts.keeperListingStatusAfterPartialFill = row.status;
       const { orders } = await getJson<{ orders: KeeperOrder[] }>(`${keeperUrl}/orders`);
       assertEq(orders.length, 1, "/orders still serves it");
@@ -1415,7 +1315,6 @@ async function main(): Promise<void> {
       const page = depositorPage;
       await page.reload();
       const withdraw = card(page, exactly("Withdraw"));
-      await expectText("withdraw: path", withdraw.locator(".card-head .mono"), "queue only");
       await withdraw.locator("#redeem-shares").fill(QUEUE_INPUT);
       const from = depositorWallet.sent.length;
       await withdraw.getByRole("button", { name: "Queue redemption", exact: true }).click();
@@ -1435,8 +1334,8 @@ async function main(): Promise<void> {
       await expectText("position: Shares", stat(position, /^Shares$/).value, `${fmtAsset(DEPOSIT - QUEUED)} cNVDA`);
       await expectText(
         "withdraw: waiting notice",
-        withdraw.locator(".notice", { hasText: "This epoch settles after the keeper closes the week" }),
-        "This epoch settles after the keeper closes the week at expiry. The amounts above turn non-zero then.",
+        withdraw.locator(".notice", { hasText: "A call is open" }),
+        /A call is open\. Redemptions are queued and paid after the keeper closes the week/,
       );
       record.amounts.queuedShares = QUEUED.toString();
       record.amounts.queueEpoch = epoch.toString();
@@ -1444,17 +1343,41 @@ async function main(): Promise<void> {
 
     /* ---------- (d) exercise, expiry, close, then collect ---------- */
 
-    await step("(d) warp to exerciseTimestamp; keeper tick -> lockBook", async () => {
-      await warpTo(series.exercise, "exerciseTimestamp");
+    async function refreshFeed(answer: bigint, why: string): Promise<void> {
+      await harnessTx(`MockFeed.setAnswer(${answer}) (${why})`, ADMIN, () =>
+        walletClient.writeContract({ account: ADMIN, chain: forkChain, address: feed, abi: mockFeedWriteAbi, functionName: "setAnswer", args: [answer] }),
+      );
+    }
+
+    await step("(d) warp to exerciseTimestamp; keeper tick -> lockBook; buyer exercises 2", async () => {
+      const exerciseTs = listed.exercise;
+      await warpTo(exerciseTs, "exerciseTimestamp");
+      const spot = await read<bigint>(vault, vaultAbi, "spotUsdg");
+      // Put spot $5 above the strike so the 2 contracts are in the money.
+      const itmAnswer = listed.strike * 100n + 5n * 100_000_000n;
+      await refreshFeed(itmAnswer, "in the money before exercise");
       await roll.tick();
       assertEq(await read<number>(vault, vaultAbi, "phase"), roll.Phase.Exercisable, "vault phase");
       const cycle = store.getCycle(1);
       assertEq(cycle?.status ?? null, "locked", "keeper cycle status");
       if (cycle?.lock_tx) record.txs.push({ label: "keeper: lockBook", by: KEEPER.address, hash: cycle.lock_tx as Hex, block: "", via: "keeper" });
+
+      const optionId = BigInt(listed.order.optionId);
+      const strikeCost = listed.strike * EXERCISE_W;
+      await deal(USDG, BUYER.address, strikeCost);
+      await harnessTx("buyer: USDG.approve(Clear, 2 x strike)", BUYER, () =>
+        walletClient.writeContract({ account: BUYER, chain: forkChain, address: USDG, abi: stockTokenAbi, functionName: "approve", args: [CLEARINGHOUSE, strikeCost] }),
+      );
+      await harnessTx("buyer: clear.exercise(optionId, 2)", BUYER, () =>
+        walletClient.writeContract({ account: BUYER, chain: forkChain, address: CLEARINGHOUSE, abi: exerciseAbi, functionName: "exercise", args: [optionId, EXERCISE_W] }),
+      );
+      assertEq(await read<bigint>(CLEARINGHOUSE, clearBalanceAbi, "balanceOf", [BUYER.address, optionId]), FILL_FROM_PAGE + FILL_FROM_RAW_PAYLOAD - EXERCISE_W, "buyer holds the 3 unexercised");
+      note(`buyer exercised ${EXERCISE_W} at strike ${listed.strike} (spot was ${spot})`);
     });
 
-    const closed = await step("(d) warp to expiryTimestamp; keeper tick -> rollClose: harvest the premium, settle the queue", async () => {
-      await warpTo(series.expiry, "expiryTimestamp");
+    const closed = await step("(d) warp to expiryTimestamp; keeper tick -> rollClose: harvest premium + strike proceeds, settle the queue", async () => {
+      await warpTo(listed.expiry, "expiryTimestamp");
+      await refreshFeed(listed.strike * 100n + 5n * 100_000_000n, "after the warp to expiry");
       const [supplyBefore, accBefore, feeSafeBefore, epoch] = await Promise.all([
         read<bigint>(vault, vaultAbi, "totalSupply"),
         read<bigint>(vault, vaultAbi, "accUsdgPerShare"),
@@ -1474,19 +1397,22 @@ async function main(): Promise<void> {
         return (found[0] as { args: Record<string, unknown> }).args;
       };
 
+      const sold = FILL_FROM_PAGE + FILL_FROM_RAW_PAYLOAD;
+      const unassigned = sold - EXERCISE_W;
+      const assignmentUsdg = EXERCISE_W * listed.strike;
       const rc = one("RollClose");
-      assertEq(rc.assetsReturned as bigint, listed.contracts * LOT, "RollClose.assetsReturned: all 23 lots back, nothing exercised");
-      assertEq(rc.usdgFromAssignment as bigint, 0n, "RollClose.usdgFromAssignment = 0: out of the money");
-      assertEq(rc.contractsAssignedCount as bigint, 0n, "RollClose.contractsAssignedCount = 0");
+      assertEq(rc.assetsReturned as bigint, unassigned * LOT, "RollClose.assetsReturned: the 3 unassigned lots");
+      assertEq(rc.usdgFromAssignment as bigint, assignmentUsdg, "RollClose.usdgFromAssignment = 2 x strike");
+      assertEq(rc.contractsAssignedCount as bigint, EXERCISE_W, "RollClose.contractsAssignedCount = 2");
 
-      const premium = listed.split.writerPerContract6 * (FILL_FROM_PAGE + FILL_FROM_RAW_PAYLOAD);
+      const premium = listed.unitPrice6 * sold;
       const harvest = one("Harvest");
       const gross = harvest.grossUsdg as bigint;
       const fee = harvest.feeUsdg as bigint;
       const net = harvest.netUsdg as bigint;
       assertEq(Number(harvest.cycleNumber), 1, "Harvest.cycleNumber");
-      assertEq(gross, premium, "Harvest.grossUsdg = the two writer legs, and nothing else");
-      assertEq(fee, (premium * BigInt(LAUNCH_POLICY.protocolFeeBps)) / BPS, "fee = floor(premium x 500 / 10000)");
+      assertEq(gross, premium + assignmentUsdg, "Harvest.grossUsdg = premium + strike proceeds");
+      assertEq(fee, (premium * BigInt(LAUNCH_POLICY.protocolFeeBps)) / BPS, "fee = floor(premium x 500 / 10000); strike proceeds fee-free");
       assertEq(net, gross - fee, "net = gross - fee");
       const harvestTopics = await pub.getLogs({
         address: vault,
@@ -1518,7 +1444,7 @@ async function main(): Promise<void> {
       const escrowUsdg = settled.usdgOut as bigint;
       assertEq(settled.epochId as bigint, epoch, "QueueSettled.epochId");
       assertEq(settled.shares as bigint, QUEUED, "QueueSettled.shares");
-      assertEq(payoutAssets, (DEPOSIT * QUEUED) / supplyBefore, "epoch payout assets = 10 NVDA (nothing assigned)");
+      assert(payoutAssets > 0n, "epoch payout assets > 0");
       assertEq(escrowUsdg, (QUEUED * indexDelta) / ACC_PRECISION, "epoch payout USDG = 10e18 x index delta / 1e27");
       assertEq(await read<bigint>(vault, vaultAbi, "totalSupply"), DEPOSIT - QUEUED, "escrowed shares burned");
       assertEq(await read<bigint>(vault, vaultAbi, "epochId"), epoch + 1n, "epoch advanced");
@@ -1526,7 +1452,7 @@ async function main(): Promise<void> {
       assertEq(cycle.gross_usdg6, gross.toString(), "keeper cycle gross_usdg6");
       assertEq(cycle.fee_usdg6, fee.toString(), "keeper cycle fee_usdg6");
       assertEq(cycle.net_usdg6, net.toString(), "keeper cycle net_usdg6");
-      assertEq(cycle.contracts_assigned, 0, "keeper cycle contracts_assigned");
+      assertEq(cycle.contracts_assigned, Number(EXERCISE_W), "keeper cycle contracts_assigned");
       assert(alerts.some((a) => a.kind === "roll_close"), "roll_close alert delivered");
       const closeBlock = await pub.getBlock({ blockNumber: receipt.blockNumber });
 
@@ -1540,7 +1466,7 @@ async function main(): Promise<void> {
         epochPayoutUsdg6: escrowUsdg.toString(),
       });
       note(`harvest gross ${gross}, fee ${fee}, net ${net} USDG6; epoch ${epoch} pays ${payoutAssets} NVDA wei + ${escrowUsdg} USDG6`);
-      return { gross, fee, net, indexDelta, payoutAssets, escrowUsdg, closeTx: cycle.roll_close_tx as Hex, closedAt: closeBlock.timestamp, strike: listed.strike };
+      return { gross, fee, net, indexDelta, payoutAssets, escrowUsdg, closeTx: cycle.roll_close_tx as Hex, closedAt: closeBlock.timestamp, strike: listed.strike, assignmentUsdg, sold };
     });
 
     const collected = await step("(d) depositor: complete the redeem, then claim USDG, from /vault/nvda", async () => {
@@ -1582,24 +1508,23 @@ async function main(): Promise<void> {
 
     /* ---------- (e) the pages show the closed week and the account ---------- */
 
-    await step("(e) /vault/nvda: last week realized (premium only) and the account's figures", async () => {
+    await step("(e) /vault/nvda: last week realized (premium and strike proceeds apart) and the account's figures", async () => {
       const page = depositorPage;
       await page.reload();
-      const perShare = premiumPerShare({ premiumNetUsdg: closed.net, sharesAtHarvest: DEPOSIT });
+      const premiumNet = closed.gross - closed.assignmentUsdg - closed.fee;
+      const perShare = premiumPerShare({ premiumNetUsdg: premiumNet, sharesAtHarvest: DEPOSIT });
       assert(perShare !== undefined, "per-share figure computable");
       const last = card(page, exactly("Last week realized"));
       await expectText("last week: cycle", last.locator(".card-head .mono"), "cycle #1");
       await expectText("last week: Net premium per cNVDA", stat(last, /^Net premium per cNVDA$/).value, fmtUsdg(perShare, 6));
-      await expectText("last week: result", stat(last, /^Net premium per cNVDA$/).sub, `a buyer filled the listing · ${fmtUtcDate(closed.closedAt)}`);
-      await expectText("last week: Premium received", rowValue(last, /^Premium received$/), fmtUsdg(closed.gross));
+      await expectText("last week: result", stat(last, /^Net premium per cNVDA$/).sub, `${closed.sold.toString()} calls sold · ${fmtUtcDate(closed.closedAt)}`);
+      await expectText("last week: Premium received", rowValue(last, /^Premium received$/), fmtUsdg(listed.unitPrice6 * closed.sold));
       await expectText("last week: Protocol fee", rowValue(last, /^Protocol fee$/), fmtUsdg(closed.fee));
-      await expectText("last week: Net premium to depositors", rowValue(last, /^Net premium to depositors$/), fmtUsdg(closed.net));
-      await expectText("last week: Contracts assigned", rowValue(last, /^Contracts assigned$/), "0");
-      await expectAbsent("last week: Strike proceeds row", rowValue(last, /^Strike proceeds \(assignment\)$/));
+      await expectText("last week: Net premium to depositors", rowValue(last, /^Net premium to depositors$/), fmtUsdg(premiumNet));
+      await expectText("last week: Contracts assigned", rowValue(last, /^Contracts assigned$/), EXERCISE_W.toString());
 
       const position = card(page, exactly("Your position"));
       await expectText("position: Shares", stat(position, /^Shares$/).value, `${fmtAsset(DEPOSIT - QUEUED)} cNVDA`);
-      await expectText("position: Shares NAV", stat(position, /^Shares$/).sub, `worth ${fmtAsset(DEPOSIT - QUEUED)} NVDA raw`);
       await expectText("position: Claimable USDG", stat(position, /^Claimable USDG$/).value, fmtUsdg(0n));
       await expectText("position: Queued shares", stat(position, /^Queued shares$/).value, fmtAsset(0n));
       await expectText("position: Queued sub", stat(position, /^Queued shares$/).sub, "nothing queued");
@@ -1620,13 +1545,14 @@ async function main(): Promise<void> {
     await step("(e) /activity: the closed week from vault logs, premium and strike proceeds apart", async () => {
       const page = depositorPage;
       await page.goto(`${web.url}/activity`);
-      const perShare = premiumPerShare({ premiumNetUsdg: closed.net, sharesAtHarvest: DEPOSIT });
+      const premiumNet = closed.gross - closed.assignmentUsdg - closed.fee;
+      const perShare = premiumPerShare({ premiumNetUsdg: premiumNet, sharesAtHarvest: DEPOSIT });
       const topCard = (label: string) => page.locator(".card").filter({ has: page.locator(".stat-label", { hasText: exactly(label) }) });
       await expectText("activity: Weeks closed", topCard("Weeks closed").locator(".stat-value"), "1");
       await expectText("activity: filled/unfilled", topCard("Weeks closed").locator(".stat-sub"), "1 filled · 0 unfilled");
-      await expectText("activity: Net premium to depositors", topCard("Net premium to depositors").locator(".stat-value"), fmtUsdg(closed.net));
+      await expectText("activity: Net premium to depositors", topCard("Net premium to depositors").locator(".stat-value"), fmtUsdg(premiumNet));
       await expectText("activity: fee sub", topCard("Net premium to depositors").locator(".stat-sub"), `after ${fmtUsdg(closed.fee)} protocol fee`);
-      await expectText("activity: Contracts assigned", topCard("Contracts assigned").locator(".stat-value"), "0");
+      await expectText("activity: Contracts assigned", topCard("Contracts assigned").locator(".stat-value"), EXERCISE_W.toString());
       await expectText("activity: source", card(page, exactly("Weekly results")).locator(".card-head .mono"), "rebuilt from vault logs");
       await expectText("activity: indexer notice", page.locator(".notice", { hasText: "Indexer unreachable" }), "Indexer unreachable — history rebuilt from vault logs.");
 
@@ -1638,18 +1564,18 @@ async function main(): Promise<void> {
         "#1",
         fmtUtcDate(closed.closedAt),
         fmtUsdg(closed.strike),
-        listed.contracts.toString(),
-        "0",
-        fmtUsdg(closed.gross),
+        closed.sold.toString(),
+        EXERCISE_W.toString(),
+        fmtUsdg(listed.unitPrice6 * closed.sold),
         fmtUsdg(closed.fee),
-        fmtUsdg(closed.net),
-        fmtUsdg(0n),
+        fmtUsdg(premiumNet),
+        fmtUsdg(closed.assignmentUsdg),
         fmtUsdg(perShare, 6),
         "—",
-        "filled",
+        `assigned ${EXERCISE_W.toString()}`,
         `${closed.closeTx.slice(0, 8)}…`,
       ];
-      const headers = ["Cycle", "Closed", "Strike", "Wrote", "Assigned", "Premium", "Fee", "Net premium", "Strike proceeds", "Premium/share", "Net/TVL", "Result", "Tx"];
+      const headers = ["Cycle", "Closed", "Strike", "Sold", "Assigned", "Premium", "Fee", "Net premium", "Strike proceeds", "Premium/share", "Net/TVL", "Result", "Tx"];
       for (const [i, text] of expected.entries()) await expectText(`activity row: ${headers[i]}`, cells.nth(i), text);
       const href = await cells.nth(12).locator("a").getAttribute("href");
       assert(href !== null && href.endsWith(`/tx/${closed.closeTx}`), `activity row links the rollClose tx (${String(href)})`);

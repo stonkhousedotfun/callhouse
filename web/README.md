@@ -281,11 +281,10 @@ hand either.
 ## Fork acceptance (W-13)
 
 `tests/acceptance/fork.acceptance.ts` drives this app in a real browser, from wallets created for
-the run, against an anvil fork of 4663 with the keeper running beside it. **The file in the tree
-is the pre-redesign run and does not pass against the write-on-fill contracts**; it is typechecked
-(`pnpm typecheck` runs it under `tests/acceptance/tsconfig.json`) and is rewritten in the stage
-after the keeper lane lands. It is not part of `pnpm test` or CI: it needs anvil, a network fork
-and a Chromium.
+the run, against an anvil fork of 4663 with the keeper running beside it. Write on fill: the
+keeper creates the week's option type, arms with `rollOpen(id)`, and the fill page is the venue.
+It is typechecked (`pnpm typecheck` runs it under `tests/acceptance/tsconfig.json`). It is not
+part of `pnpm test` or CI: it needs anvil, a network fork and a Chromium.
 
 ```bash
 anvil --fork-url https://rpc.mainnet.chain.robinhood.com --chain-id 4663 --port 8548 --code-size-limit 98304   # own terminal
@@ -304,34 +303,27 @@ and a screenshot plus DOM of each page on failure), `ACCEPTANCE_HEADFUL=1`,
 once. **The run overwrites `web/.next` with a build pointed at the fork**; rebuild before serving
 anything else from the checkout. It refuses any RPC that is not anvil on chain 4663 and loopback.
 
-**The redesigned scenario the rewrite runs.** DeployClear (or the upstream Clear) → Deploy → Verify →
-Configure on the fork; wallets funded by storage writes; the keeper's production modules driven
-beside the app (`next build` + `next start` with every `NEXT_PUBLIC_*` on the fork,
-`NEXT_PUBLIC_API_URL` unreachable so history comes from the log fallback, and `KEEPER_ORDERS_URL`
-pointed at the keeper's real `/orders`). Three weeks under `evm_increaseTime`:
+**What the run proves.** MockFeed + linked Vault on the real Clear (no registry); wallets funded
+by storage writes; the keeper's production modules driven beside the app (`next build` +
+`next start` with every `NEXT_PUBLIC_*` on the fork, `NEXT_PUBLIC_API_URL` unreachable so history
+comes from the log fallback, and `KEEPER_ORDERS_URL` pointed at the keeper's real `/orders`).
+One filled, assigned week under `evm_increaseTime`:
 
-1. **A filled, assigned week.** The keeper creates the option type on the clearinghouse
-   (`newOptionType`, six fields, the id read back), `rollOpen` arms it (nothing written, no claim,
-   the vault holds 0 option tokens), `approveListing` authorises a `PARTIAL_RESTRICTED` order with
-   the vault as zone and an empty signature. **Tamper first:** the keeper's SQLite row is edited so
-   `/orders` serves the payment leg to an attacker under the authorised hash; `/api/keeper/orders`
-   returns no order and one rejection naming the hash mismatch and the redirected leg, and the
-   cycle page renders no fill card. **Then the row is restored** and two buyers fill 2 and 3 of N
-   from the page's own button: `approve(Seaport, k × unit)` then `fulfillAdvancedOrder(k, N, "0x")`;
-   the vault emits one `CallsWritten` per fill, `contractsWritten == 5`, the vault's option balance
-   is 0, the USDG landed. A deposit in Listed goes through with the risk notice on screen; a queued
-   redemption is escrowed. The buyer exercises 2 on Clear inside the window; `lockBook`;
-   `rollClose` → assignment 2, strike proceeds fee-free, `completeRedeem` / `claimUsdg` /
-   `sweepFee` to the base unit; "Last week realized" and the `/activity` row agree with the chain.
-2. **An unfilled week.** Armed and listed, nobody fills; the sale window closes
-   (`WriteWindowClosed` on a late simulation); `rollClose` closes flat, instant redemption reopens,
-   `settleQueue` from the page settles an entry queued while flat.
-3. **A stranded week.** Fills, then USDG's `ASSET_PROTECTION` EOA (impersonated on the fork, as the
-   contracts' fork test does) freezes the vault; `rollClose` reaches Idle with the claim kept
-   (`ClaimStranded`, `EpochStrandShare` for the queued epoch); every page shows the stranded banner
-   with the queuer's pending share, `DepositForm` is closed with the stranded reason, `rollOpen` is
-   refused; unfreeze; the Retry button sends `retryStrandedClaim` → `StrandedClaimRecovered`,
-   payouts to the base unit, `/activity` says "claim stranded, recovered".
+The keeper creates the option type (`newOptionType`), `rollOpen` arms it (nothing written),
+`approveListing` authorises a `PARTIAL_RESTRICTED` order with the vault as zone and an empty
+signature. **Tamper first:** the keeper's SQLite row is edited so `/orders` serves the payment
+leg to an attacker under the authorised hash; `/api/keeper/orders` returns no order and one
+rejection, and the cycle page renders no fill card. **Then the row is restored** and a buyer
+fills 2 of N from the page's own button (`approve` then `fulfillAdvancedOrder(k, N, "0x")`); a
+raw Seaport client fills 3 more from `/orders` with no web code. Each fill emits `CallsWritten`
+for exactly those contracts; `contractsWritten == 5`; the vault's option balance is 0. A queued
+redemption is escrowed while Listed. The buyer exercises 2 on Clear inside the window;
+`lockBook`; `rollClose` → assignment 2, strike proceeds fee-free, `completeRedeem` / `claimUsdg`
+to the base unit; "Last week realized" and the `/activity` row agree with the chain (premium and
+strike proceeds in separate columns).
+
+Unfilled and stranded weeks are covered by the keeper dry run (`pnpm --filter @callhouse/keeper
+dryrun`) and X-11, not by this browser run.
 
 Each wallet is an EIP-1193 provider injected into headless Chromium and announced over EIP-6963;
 wagmi's `injected()` connector lists it like an extension, it exposes no account until the page's
