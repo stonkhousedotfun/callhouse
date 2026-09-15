@@ -4,25 +4,30 @@
  *
  *   pnpm --filter @callhouse/indexer fork:sync
  *
- * 1. Starts `anvil --fork-url <FORK_URL> --chain-id 4663` on its own port (or uses FORK_SYNC_RPC).
- * 2. Runs `pnpm --filter @callhouse/keeper dryrun` against it: a vault deployed on the fork,
- *    cycle 1 filled out of the money, cycle 2 adopted and unfilled, cycle 3 filled with 9 of 23
- *    assigned and a queued redeem. Reads its run.json.
+ * 1. Starts `anvil --fork-url <FORK_URL> --chain-id 4663 --code-size-limit 98304` on its own port
+ *    (or uses FORK_SYNC_RPC). The code-size flag is not optional: chain 4663's real limit is
+ *    98,304 B and the Vault is ~25.8 KB, which a default anvil refuses to deploy.
+ * 2. Runs `pnpm --filter @callhouse/keeper dryrun` against it: the vault and its own Clear
+ *    deployed on the fork, then three cycles armed on option types the keeper created itself —
+ *    one unfilled, one bought in several fills with some contracts assigned, one stranded by a
+ *    USDG freeze at its close and recovered by `retryStrandedClaim`. Reads its run.json.
  * 3. Reads the fork directly (logs and views, never the indexer) for everything run.json does not
  *    record, and cross-checks the two.
  * 4. Starts `ponder start` against the same anvil: chain 4663 via the RPC override, the dry run's
- *    vault and MockRegistry, START_BLOCK = the vault's deploy block, END_BLOCK = the last dry-run
- *    block, a throwaway PGlite database. Waits until /v1/health reports the index head at END_BLOCK.
- * 5. Queries /v1/vault, /v1/cycles, /v1/cycles/:n, /v1/account/:depositor, /v1/listings,
- *    /v1/activity, /v1/health and /graphql, and compares every expected leaf exactly.
+ *    vault, START_BLOCK = the vault's deploy block, END_BLOCK = the last dry-run block, a
+ *    throwaway PGlite database. Waits until /v1/health reports the index head at END_BLOCK.
+ * 5. Queries /v1/vault, /v1/cycles, /v1/cycles/:n for every cycle, /v1/account/:depositor,
+ *    /v1/listings, /v1/activity (terminal and all), /v1/strands, /v1/health and /graphql, and
+ *    compares every expected leaf exactly.
  * 6. Prints a summary (exit 0) or the diff (exit 1). Stops every process it started.
  *
  * ENV (all optional)
- *   FORK_SYNC_RPC          use this anvil instead of starting one. Must be a fresh fork unless
- *                          FORK_SYNC_RUN_JSON is also set.
+ *   FORK_SYNC_RPC          use this anvil instead of starting one. Loopback only; must be a fresh
+ *                          fork unless FORK_SYNC_RUN_JSON is also set.
  *   FORK_SYNC_RUN_JSON     skip the dry run and use this run.json; the anvil at FORK_SYNC_RPC must
  *                          be the one that dry run drove, untouched since.
- *   FORK_SYNC_FORK_URL     default https://rpc.mainnet.chain.robinhood.com
+ *   FORK_SYNC_FORK_URL     default https://rpc.mainnet.chain.robinhood.com (anvil's upstream ONLY;
+ *                          nothing here sends a transaction anywhere but the local fork)
  *   FORK_SYNC_ANVIL_PORT   default 8547 (not 8545, so a developer's own anvil is never touched)
  *   FORK_SYNC_API_PORT     default 42169 (the indexer under test)
  *   FORK_SYNC_KEEPER_PORT  default 18797 (the dry run's keeper health server)
@@ -34,6 +39,11 @@
  * blocks (keeper/DRYRUN.md, "Two failures first"). Anvil fetches untouched slots at the fork block
  * lazily, so the fork must be used within minutes of starting it. Starting it in the same process
  * as the run is the only way to guarantee that.
+ *
+ * WHAT run.json MUST CARRY. `scripts/fork-sync/expected.ts` names the fields (`RunJson`,
+ * `RunCycle`): `addresses.Vault`, `actors.{admin,keeper,depositor}`, `blocks.{vaultDeployBlock,
+ * lastBlock}`, and one `cycles[]` entry per armed cycle with its option, its transactions, its
+ * fills, its terminal harvest and what its claim returned. A missing field fails loudly by path.
  */
 import { spawn, type ChildProcess } from "node:child_process";
 import { createWriteStream, mkdirSync, readFileSync, writeFileSync } from "node:fs";
@@ -43,11 +53,13 @@ import { formatUnits, getAddress } from "viem";
 
 import { readChainFacts, type ChainFacts } from "./fork-sync/chain.ts";
 import { compare, formatMismatches, type Json } from "./fork-sync/diff.ts";
-import { buildExpectations, graphqlQuery, routesFor, runBlocks, type RunJson } from "./fork-sync/expected.ts";
+import { buildExpectations, graphqlQuery, routesFor, runBlocks, runValue, type RunJson } from "./fork-sync/expected.ts";
 
 const INDEXER_DIR = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const REPO_ROOT = resolve(INDEXER_DIR, "..");
 const CHAIN_ID = 4663;
+/** Chain 4663's real contract code limit (decision D17). anvil defaults to EIP-170's 24,576 and would refuse the Vault. */
+const CODE_SIZE_LIMIT = 98_304;
 const MULTICALL3 = "0xcA11bde05977b3631167028862bE2a173976CA11";
 
 const envOr = (name: string, fallback: string): string => {
@@ -65,6 +77,19 @@ const RUN_JSON = process.env.FORK_SYNC_RUN_JSON?.trim() || undefined;
 const OUT = resolve(envOr("FORK_SYNC_OUT", join(INDEXER_DIR, ".ponder", "fork-sync", new Date().toISOString().replace(/[:.]/g, "-"))));
 const RPC = EXTERNAL_RPC ?? `http://127.0.0.1:${ANVIL_PORT}`;
 const API = `http://127.0.0.1:${API_PORT}`;
+
+/**
+ * Every RPC this script drives must be a local anvil. It warps time, writes storage and sends
+ * transactions from unlocked accounts; pointed at anything but loopback it would be doing that
+ * to a real node. The fork URL is the one exception, and it is only ever anvil's upstream.
+ */
+function requireLoopback(url: string): void {
+  const host = new URL(url).hostname;
+  if (host !== "127.0.0.1" && host !== "localhost" && host !== "[::1]" && host !== "::1") {
+    throw new Error(`refusing to run against ${url}: the fork sync only drives a loopback anvil (127.0.0.1 / localhost)`);
+  }
+}
+requireLoopback(RPC);
 
 const t0 = Date.now();
 const elapsed = () => `${((Date.now() - t0) / 1000).toFixed(1)}s`;
@@ -178,8 +203,13 @@ async function main(): Promise<number> {
   if (EXTERNAL_RPC === undefined) {
     const inUse = await rpc<string>("web3_clientVersion").then(() => true, () => false);
     if (inUse) throw new Error(`port ${ANVIL_PORT} already answers JSON-RPC. Stop that node, set FORK_SYNC_ANVIL_PORT, or point FORK_SYNC_RPC at it deliberately.`);
-    say(`starting anvil --fork-url ${FORK_URL} --chain-id ${CHAIN_ID} --port ${ANVIL_PORT}`);
-    const anvil = start("anvil", "anvil", ["--fork-url", FORK_URL, "--chain-id", String(CHAIN_ID), "--port", String(ANVIL_PORT)], { cwd: OUT, env: process.env, log: join(OUT, "anvil.log") });
+    say(`starting anvil --fork-url ${FORK_URL} --chain-id ${CHAIN_ID} --port ${ANVIL_PORT} --code-size-limit ${CODE_SIZE_LIMIT}`);
+    const anvil = start(
+      "anvil",
+      "anvil",
+      ["--fork-url", FORK_URL, "--chain-id", String(CHAIN_ID), "--port", String(ANVIL_PORT), "--code-size-limit", String(CODE_SIZE_LIMIT)],
+      { cwd: OUT, env: process.env, log: join(OUT, "anvil.log") },
+    );
     await waitFor("anvil to answer", 60_000, async () => ((await rpc<string>("eth_chainId")) ? true : undefined), anvil);
   }
   const clientVersion = await rpc<string>("web3_clientVersion");
@@ -204,22 +234,24 @@ async function main(): Promise<number> {
   }
   const run = JSON.parse(readFileSync(runPath, "utf8")) as RunJson;
   if (run.error !== null) throw new Error(`run.json records a failed dry run: ${run.error}`);
-  const vault = getAddress(run.addresses.Vault ?? "");
-  const registry = getAddress(run.addresses.MockRegistry ?? "");
-  const depositor = getAddress(run.actors.depositor ?? "");
-  const { vaultDeployBlock, registryDeployBlock, lastBlock } = runBlocks(run);
+  const vault = getAddress(String(runValue(run, "addresses.Vault")));
+  const depositor = getAddress(String(runValue(run, "actors.depositor")));
+  const { vaultDeployBlock, lastBlock } = runBlocks(run);
   const head = BigInt(await rpc<string>("eth_blockNumber"));
   if (head !== lastBlock) {
     throw new Error(`the fork head is ${head} but the dry run's last transaction is in block ${lastBlock}: something else used this anvil`);
   }
   const endBlock = head;
-  say(`dry run: fork block ${run.forkBlock}, vault ${vault} (block ${vaultDeployBlock}), MockRegistry ${registry} (block ${registryDeployBlock}), last block ${endBlock}`);
+  const cycleNumbers = (runValue(run, "cycles") as Array<{ cycleNumber: number }>).map((c) => c.cycleNumber);
+  say(`dry run: fork block ${run.forkBlock}, vault ${vault} (block ${vaultDeployBlock}), cycles ${cycleNumbers.join(", ")}, last block ${endBlock}`);
 
   /* ---- 3. the chain's own record ---- */
   const multicallCode = await rpc<string>("eth_getCode", [MULTICALL3, "latest"]);
   if (multicallCode === "0x") throw new Error(`no Multicall3 at ${MULTICALL3} on the fork; the API's live reads need it`);
-  const chain: ChainFacts = await readChainFacts({ rpc: RPC, vault, depositor, startBlock: vaultDeployBlock, registryStartBlock: registryDeployBlock, endBlock });
-  say(`chain: ${chain.cycles.length} cycles, ${chain.harvests.length} Harvest logs, ${chain.listings.length} listings, ${chain.queue.settled.length} queue settlement(s)`);
+  const chain: ChainFacts = await readChainFacts({ rpc: RPC, vault, depositor, startBlock: vaultDeployBlock, endBlock });
+  say(
+    `chain: ${chain.cycles.length} cycles, ${chain.harvests.length} Harvest logs, ${chain.listings.length} listings, ${chain.strands.length} stranded claim(s), ${chain.queue.settled.length} queue settlement(s)`,
+  );
 
   /* ---- 4. the indexer ---- */
   const pgliteDir = join(OUT, "pglite");
@@ -228,22 +260,18 @@ async function main(): Promise<number> {
     PONDER_RPC_URL_4663: RPC,
     VAULT_ADDRESS: vault,
     START_BLOCK: vaultDeployBlock.toString(),
-    REGISTRY_START_BLOCK: registryDeployBlock.toString(),
     END_BLOCK: endBlock.toString(),
     // Every address the dry run used, from the deployed vault's own immutables, so a stray
     // indexer/.env.local (which Ponder loads) cannot point any source at a different contract.
-    REGISTRY: registry,
     CLEARINGHOUSE: chain.immutables.clear,
     SEAPORT: chain.immutables.seaport,
     USDG: chain.immutables.usdg,
     ASSET: chain.immutables.asset,
-    OVERCALL_FEE_RECIPIENT: chain.immutables.overcallFeeRecipient,
     MULTICALL3,
     PGLITE_DIRECTORY: pgliteDir,
     DATABASE_SCHEMA: "fork_sync",
     // Ponder reads PORT before --port, and .env.example (copied to .env.local) sets it.
     PORT: String(API_PORT),
-    KEEPER_HMAC_SECRET: "",
     LIVE_READ_TIMEOUT_MS: "8000",
   };
   delete ponderEnv.VAULT;
@@ -252,7 +280,7 @@ async function main(): Promise<number> {
 
   const apiInUse = await fetch(`${API}/health`).then(() => true, () => false);
   if (apiInUse) throw new Error(`port ${API_PORT} is already serving HTTP; set FORK_SYNC_API_PORT`);
-  say(`ponder start: START_BLOCK=${vaultDeployBlock} END_BLOCK=${endBlock} REGISTRY_START_BLOCK=${registryDeployBlock}, PGlite at ${pgliteDir}, API ${API}`);
+  say(`ponder start: START_BLOCK=${vaultDeployBlock} END_BLOCK=${endBlock}, PGlite at ${pgliteDir}, API ${API}`);
   const syncStarted = Date.now();
   const ponder = start("ponder", join(INDEXER_DIR, "node_modules", ".bin", "ponder"), ["start", "--schema", "fork_sync", "--port", String(API_PORT), "--log-format", "json"], {
     cwd: INDEXER_DIR,
@@ -284,7 +312,17 @@ async function main(): Promise<number> {
     statuses[route] = res.status;
     responses[route] = (await res.json()) as Json;
   };
-  for (const route of [routes.vault, routes.cycles, routes.cycle(1), routes.cycle(2), routes.cycle(3), routes.listings, routes.account, routes.activity, routes.activityAll, routes.health]) {
+  for (const route of [
+    routes.vault,
+    routes.cycles,
+    ...cycleNumbers.map((n) => routes.cycle(n)),
+    routes.listings,
+    routes.account,
+    routes.activity,
+    routes.activityAll,
+    routes.strands,
+    routes.health,
+  ]) {
     await get(route);
   }
   {
@@ -306,7 +344,6 @@ async function main(): Promise<number> {
     forkBlock: run.forkBlock,
     anvil: clientVersion,
     vault,
-    registry,
     startBlock: vaultDeployBlock.toString(),
     endBlock: endBlock.toString(),
     syncSeconds,
@@ -338,13 +375,14 @@ async function main(): Promise<number> {
     "",
     "FORK SYNC PASSED",
     `  fork       block ${run.forkBlock}, ${clientVersion}, chain ${chainId}`,
-    `  vault      ${vault} (deployed block ${vaultDeployBlock}); MockRegistry ${registry}`,
+    `  vault      ${vault} (deployed block ${vaultDeployBlock}); clear ${chain.immutables.clear}`,
     `  indexed    blocks ${vaultDeployBlock}..${endBlock} (${endBlock - vaultDeployBlock + 1n}) in ${syncSeconds.toFixed(1)}s on PGlite; /v1/health head ${synced}`,
     ...built.weeks.map(
       (w) =>
-        `  cycle ${w.cycleNumber}    ${w.status.padEnd(8)} sold ${w.sold}/${w.contracts} at ${u(w.strike)}, assigned ${w.assigned}, gross ${u(w.gross)}, fee ${u(w.fee)}, premiumNet ${u(w.premiumNet)}, strikeProceeds ${u(w.strikeProceeds)}, credited ${u(w.net)}, premiumNetPerShare ${u(w.premiumNetPerShare)}`,
+        `  cycle ${w.cycleNumber}    ${w.status.padEnd(8)} sold ${w.sold} in ${w.fillCount} fill(s) at ${u(w.strike)}${w.stranded ? " (stranded" + (w.strand?.recovered ? ", recovered)" : ")") : ""}, assigned ${w.assigned}, gross ${u(w.gross)}, fee ${u(w.fee)}, premiumNet ${u(w.premiumNet)}, strikeProceeds ${u(w.strikeProceeds)}, credited ${u(w.net)}, premiumNetPerShare ${u(w.premiumNetPerShare)}`,
     ),
     ...chain.queue.settled.map((s) => `  epoch ${s.epochId}    ${formatUnits(s.shares, 18)} shares -> ${formatUnits(s.assets, 18)} NVDA + ${u(s.usdgOut)} USDG`),
+    ...built.strands.map((s) => `  strand ${s.gen}   cycle ${s.cycleNumber}, queue share ${formatUnits(s.epochWad, 18)}, ${s.recovered ? `recovered ${formatUnits(s.assetsIn, 18)} NVDA + ${u(s.usdgIn)} USDG` : "still stranded"}`),
     `  checked    ${passed} of ${built.expectations.length} API assertions across ${Object.keys(responses).length} routes, ${built.crossChecks} run.json/chain cross-checks`,
     `  output     ${OUT}`,
     "",

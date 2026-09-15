@@ -24,10 +24,15 @@ app.use(honoLogger());
 
 const PHASE_NAMES = ["Idle", "Listed", "Exercisable", "Settling"] as const;
 
-const CYCLE_STATUSES = ["listed", "filled", "unfilled", "assigned", "closed", "stranded"] as const;
+/**
+ * The `?status=` values the list routes accept: exactly the schema's enums (X-2). Exported so
+ * `src/api/index.test.ts` can pin them to `ponder.schema.ts`; a value added to one side without
+ * the other is either unreachable through the API or a 400 for a status the tape really uses.
+ */
+export const CYCLE_STATUSES = ["listed", "filled", "unfilled", "assigned", "closed", "stranded"] as const;
 type CycleStatus = (typeof CYCLE_STATUSES)[number];
 
-const LISTING_STATUSES = ["approved", "partially_filled", "filled", "cancelled"] as const;
+export const LISTING_STATUSES = ["approved", "partially_filled", "filled", "cancelled"] as const;
 type ListingStatus = (typeof LISTING_STATUSES)[number];
 
 const ONE = 10n ** 18n;
@@ -401,6 +406,9 @@ app.get("/v1/vault", cache15s, async (c) => {
         // unclaimed assignment, stranded claim, unbacked reserve, share-price floor.
         depositsOpen: live.maxDeposit === null ? null : live.maxDeposit > 0n,
         valoremFeeAccepted: live.valoremFeeAccepted ?? state?.valoremFeeAccepted ?? false,
+        // Clear's own fee switch, live. On, and not accepted above, means no arm and no fill
+        // until governance flips one of the two; null when the clearinghouse could not be read.
+        clearFeesEnabled: live.clearFeesEnabled,
         // The issuer's two levers. A paused oracle makes `rollOpen` and every fill revert — no
         // price, no write. A transfer pause freezes the token itself and stops deposits,
         // redemptions and settlement alike; nothing in this system can route around that.

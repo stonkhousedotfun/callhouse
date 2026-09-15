@@ -57,7 +57,9 @@ vi.mock("ponder", async (importOriginal) => {
 });
 
 import { ZERO_HARVEST_TOTALS, addHarvest, splitHarvest, type HarvestEvent } from "../../lib/harvest";
-import { cycleJson, harvestJson, listingJson, strandJson } from "./index";
+import { closeStatus, endedListingStatus, recoveredStatus, type HarvestOrigin } from "../../lib/lifecycle";
+import { cycleStatus, epochStatus, harvestOrigin, listingStatus } from "../../ponder.schema";
+import { CYCLE_STATUSES, LISTING_STATUSES, cycleJson, harvestJson, listingJson, strandJson } from "./index";
 import { toJson } from "./serialize";
 
 type CycleRow = typeof schema.cycle.$inferSelect;
@@ -603,6 +605,44 @@ describe("listingJson", () => {
     expect(j.status).toBe("filled");
     expect(j.endReason).toBe("filled");
     expect("writerUsdg" in j).toBe(false);
+  });
+});
+
+/**
+ * X-2: no enum value the handlers never produce, and none they produce that the API cannot
+ * filter on. Each schema enum is pinned to the set of values the code actually writes: the two
+ * statuses the handlers assign by hand (`listed` at RollOpen, `filled` at the first
+ * OrderFulfilled; `approved` at ListingApproved, `filled` at a complete fill) plus everything the
+ * pure lifecycle helpers can return. The fixtures above are the four terminal cycle outcomes; the
+ * tape's `status` column can hold nothing else.
+ */
+describe("every enum value is produced, and every produced value is an enum value (X-2)", () => {
+  it("cycle_status", () => {
+    const produced = new Set<string>(["listed", "filled"]);
+    for (const stranded of [false, true]) {
+      for (const sold of [0n, 12n]) {
+        for (const assigned of [0n, 5n]) produced.add(closeStatus({ stranded, sold, assigned }));
+      }
+    }
+    for (const assigned of [0n, 5n]) produced.add(recoveredStatus({ assigned }));
+    expect([...produced].sort()).toEqual([...cycleStatus.enumValues].sort());
+    expect([...CYCLE_STATUSES].sort()).toEqual([...cycleStatus.enumValues].sort());
+  });
+
+  it("listing_status", () => {
+    const produced = new Set<string>(["approved", "filled", endedListingStatus(0n), endedListingStatus(3n)]);
+    expect([...produced].sort()).toEqual([...listingStatus.enumValues].sort());
+    expect([...LISTING_STATUSES].sort()).toEqual([...listingStatus.enumValues].sort());
+  });
+
+  it("harvest_origin", () => {
+    const origins: HarvestOrigin[] = ["rollClose", "checkpoint", "retry"];
+    expect([...origins].sort()).toEqual([...harvestOrigin.enumValues].sort());
+  });
+
+  it("epoch_status", () => {
+    // `open` is the row default at the first QueueRedeem / EpochStrandShare; `settled` is QueueSettled.
+    expect(["open", "settled"].sort()).toEqual([...epochStatus.enumValues].sort());
   });
 });
 

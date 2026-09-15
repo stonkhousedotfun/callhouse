@@ -7,8 +7,16 @@
  * expectation builder (expected.ts) cross-checks the two before either is compared to the API.
  *
  * Under write on fill the vault is the clock: a cycle is a `RollOpen`, its writes are the
- * `CallsWritten` on that option id (one per fill), and a stranded close is a `ClaimStranded` in
- * the `rollClose` transaction. There is no registry to read.
+ * `CallsWritten` on that option id (one per fill), a stranded close is a `ClaimStranded` in the
+ * `rollClose` transaction and its recovery a `StrandedClaimRecovered` in a later
+ * `retryStrandedClaim`. There is no registry to read.
+ *
+ * ONE TRANSACTION PER BLOCK. anvil auto-mines every transaction into its own block, and two
+ * figures below lean on that: the share supply a harvest was indexed against is `totalSupply()`
+ * one block earlier (the harvest runs before the mint of a deposit and before the burn of a
+ * settlement), and a checkpoint harvest counts towards its week when its block precedes the
+ * close block. Where the chain carries the same figure in a log (`UsdgDistributed.totalSupply`)
+ * the log is preferred and the block read is cross-checked against it in expected.ts.
  */
 import {
   createPublicClient,
@@ -28,27 +36,47 @@ import { vaultAbi } from "../../abis/vault.ts";
 
 export type ChainCycle = {
   cycleNumber: number;
-  /** `RollOpen`, plus the option's window read from the vault at that block. */
+  /** `RollOpen`, plus the option's window from `clear.option(optionId)` at that block. */
   open: { txHash: Hex; block: bigint; timestamp: bigint; optionId: bigint; strike: bigint; exerciseTs: bigint; expiryTs: bigint } | null;
   /** Every `CallsWritten` on this cycle's option id: one per fill. */
-  writes: Array<{ txHash: Hex; timestamp: bigint; claimKey: bigint; contracts: bigint; collateral: bigint }>;
+  writes: Array<{ txHash: Hex; block: bigint; timestamp: bigint; claimKey: bigint; contracts: bigint; collateral: bigint }>;
   locked: { txHash: Hex; timestamp: bigint } | null;
   close: { txHash: Hex; block: bigint; timestamp: bigint; assetsReturned: bigint; usdgFromAssignment: bigint; contractsAssignedCount: bigint } | null;
   /** `ClaimStranded` in the close transaction, if the redeem reverted. */
-  stranded: { gen: bigint; claimKey: bigint } | null;
-  /** `accUsdgPerShare()` at the close block: the index the terminal harvest left behind. */
-  accAfterClose: bigint | null;
-  /** `totalSupply()` in the block before the close: the supply the terminal harvest indexed against. */
-  supplyBeforeClose: bigint | null;
-  /** `UsdgDistributed.totalSupply` in the close transaction, when the harvest distributed anything. */
-  distributedSupply: bigint | null;
+  stranded: { gen: bigint; claimKey: bigint; txHash: Hex } | null;
+  /**
+   * The vault's `ClaimRedeemed` for this cycle's claim: inside `rollClose` on an ordinary close,
+   * inside `retryStrandedClaim` after a strand, absent while the claim is still stranded and on
+   * an unfilled week (no claim was ever opened).
+   */
+  redeemed: { txHash: Hex; block: bigint; timestamp: bigint; underlyingReturned: bigint; exerciseReceived: bigint } | null;
   /** Valorem `BucketWrittenInto` for this cycle's claim, emitted inside its first fill. */
   bucketIndex: bigint | null;
   bucketAssigned: bigint;
   marketExercised: bigint;
 };
 
-export type ChainHarvest = { cycleNumber: number; txHash: Hex; block: bigint; timestamp: bigint; gross: bigint; fee: bigint; net: bigint };
+export type HarvestOrigin = "rollClose" | "checkpoint" | "retry";
+
+export type ChainHarvest = {
+  cycleNumber: number;
+  txHash: Hex;
+  block: bigint;
+  timestamp: bigint;
+  gross: bigint;
+  fee: bigint;
+  net: bigint;
+  /** Decided by the transaction's other logs: a `RollClose` makes it terminal, a `StrandedClaimRecovered` the retry's, anything else a checkpoint. */
+  origin: HarvestOrigin;
+  /** `UsdgDistributed.totalSupply` in the same transaction when the harvest distributed anything, else `totalSupply()` one block earlier. */
+  supply: bigint;
+  /** Whether `UsdgDistributed` supplied `supply` (so expected.ts can cross-check it against the block read). */
+  supplyFromLog: boolean;
+  /** `totalSupply()` one block earlier, always. */
+  supplyBefore: bigint;
+  /** `accUsdgPerShare()` at the harvest block: the index this sweep left behind. */
+  accAfter: bigint;
+};
 
 export type ChainListing = {
   orderHash: Hex;
@@ -60,7 +88,7 @@ export type ChainListing = {
   approvedBlock: bigint;
   approvedTimestamp: bigint;
   /** Seaport fills: the contracts moved and the one USDG consideration item, to the vault. */
-  fills: Array<{ txHash: Hex; timestamp: bigint; contracts: bigint; toVault: bigint }>;
+  fills: Array<{ txHash: Hex; block: bigint; timestamp: bigint; contracts: bigint; toVault: bigint }>;
   /** ListingCancelled for this hash, and what else the same transaction did (the end reason). */
   cancelled: { txHash: Hex; timestamp: bigint; reason: "cancelled" | "counter" | "lockBook" | "rollClose" } | null;
 };
@@ -70,8 +98,13 @@ export type ChainStrand = {
   cycleNumber: number;
   claimKey: bigint;
   strandedTx: Hex;
+  strandedBlock: bigint;
+  strandedTimestamp: bigint;
+  /** `EpochStrandShare` of this generation: the epochs that settled while it was stranded. */
   epochShares: Array<{ epochId: bigint; wad: bigint }>;
-  recovered: { txHash: Hex; assets: bigint; usdgOut: bigint; queueWad: bigint } | null;
+  recovered: { txHash: Hex; block: bigint; timestamp: bigint; assets: bigint; usdgOut: bigint; queueWad: bigint } | null;
+  /** `StrandShareSettled` of this generation: owners whose share became assets and USDG. */
+  shareSettlements: Array<{ owner: Address; wad: bigint; assets: bigint; usdgOut: bigint }>;
 };
 
 export type ChainFacts = {
@@ -88,12 +121,19 @@ export type ChainFacts = {
   listings: ChainListing[];
   strands: ChainStrand[];
   queue: {
-    redeems: Array<{ owner: Address; shares: bigint; epochId: bigint }>;
-    settled: Array<{ epochId: bigint; shares: bigint; assets: bigint; usdgOut: bigint; txHash: Hex; timestamp: bigint }>;
-    entries: Array<{ owner: Address; epochId: bigint; shares: bigint; assets: bigint; usdgOut: bigint }>;
-    completes: Array<{ owner: Address; shares: bigint; assets: bigint; usdgOut: bigint }>;
+    redeems: Array<{ owner: Address; shares: bigint; epochId: bigint; block: bigint }>;
+    settled: Array<{ epochId: bigint; shares: bigint; assets: bigint; usdgOut: bigint; txHash: Hex; block: bigint; timestamp: bigint }>;
+    /** In log order: the drawdown of an epoch's strand share depends on it. */
+    entries: Array<{ owner: Address; epochId: bigint; shares: bigint; assets: bigint; usdgOut: bigint; block: bigint }>;
+    completes: Array<{ owner: Address; receiver: Address; shares: bigint; assets: bigint; usdgOut: bigint; block: bigint }>;
+    /** `UsdgLegDeferred`: a payout whose USDG leg could not move (AF-03). */
+    deferred: Array<{ owner: Address; receiver: Address; usdgOwed: bigint; block: bigint }>;
+    /** `ReserveHaircut`: a settled redeemer paid less than booked (AF-05). */
+    haircuts: Array<{ owner: Address; booked: bigint; paid: bigint; block: bigint }>;
   };
   deposits: Array<{ owner: Address; assets: bigint; shares: bigint; timestamp: bigint }>;
+  /** Instant redemptions (`Withdraw`), only possible while flat. */
+  withdraws: Array<{ owner: Address; assets: bigint; shares: bigint; timestamp: bigint }>;
   claims: Array<{ account: Address; amount: bigint }>;
   feeSwept: bigint;
   usdgDistributed: bigint;
@@ -111,6 +151,7 @@ export type ChainFacts = {
     writesHalted: boolean;
     canRedeemInstantly: boolean;
     valoremFeeAccepted: boolean;
+    clearFeesEnabled: boolean;
     totalAssets: bigint;
     idleAssets: bigint;
     lockedAssets: bigint;
@@ -226,6 +267,7 @@ export async function readChainFacts(opts: {
         (closeLog === undefined || l.blockNumber <= closeLog.blockNumber),
     );
     const firstWrite = writeLogs[0];
+    const claimKey = firstWrite?.args.claimKey;
     const bucketLog =
       firstWrite === undefined
         ? undefined
@@ -241,13 +283,31 @@ export async function readChainFacts(opts: {
       }
       if (l.eventName === "OptionsExercised" && l.args.optionId === openLog.args.optionId) marketExercised += BigInt(l.args.amount);
     }
-    const distributed =
-      closeLog === undefined ? undefined : ofEvent("UsdgDistributed").find((l) => l.transactionHash === closeLog.transactionHash);
+    // The vault's own ClaimRedeemed for the claim the fills wrote into: in the close on an
+    // ordinary week, in the retry after a strand.
+    const redeemLog = claimKey === undefined ? undefined : ofEvent("ClaimRedeemed").find((l) => l.args.claimKey === claimKey);
 
     const writes: ChainCycle["writes"] = [];
     for (const w of writeLogs) {
-      writes.push({ txHash: w.transactionHash, timestamp: await tsOf(w.blockNumber), claimKey: w.args.claimKey, contracts: BigInt(w.args.contractsCount), collateral: w.args.collateral });
+      writes.push({
+        txHash: w.transactionHash,
+        block: w.blockNumber,
+        timestamp: await tsOf(w.blockNumber),
+        claimKey: w.args.claimKey,
+        contracts: BigInt(w.args.contractsCount),
+        collateral: w.args.collateral,
+      });
     }
+
+    // The option tuple is immutable in Valorem, so it reads the same at any block from the
+    // type's creation on; the open block is used so a pruned fork state cannot answer for it.
+    const option = await client.readContract({
+      address: clear,
+      abi: valoremClearAbi,
+      functionName: "option",
+      args: [openLog.args.optionId],
+      blockNumber: openLog.blockNumber,
+    });
 
     cycles.push({
       cycleNumber: n,
@@ -257,8 +317,8 @@ export async function readChainFacts(opts: {
         timestamp: await tsOf(openLog.blockNumber),
         optionId: openLog.args.optionId,
         strike: openLog.args.strikeUsdg,
-        exerciseTs: BigInt(await readAt<bigint | number>("cycleExerciseTs", [], openLog.blockNumber)),
-        expiryTs: BigInt(await readAt<bigint | number>("cycleExpiryTs", [], openLog.blockNumber)),
+        exerciseTs: BigInt(option.exerciseTimestamp),
+        expiryTs: BigInt(option.expiryTimestamp),
       },
       writes,
       locked: lockLog === undefined ? null : { txHash: lockLog.transactionHash, timestamp: await tsOf(lockLog.blockNumber) },
@@ -273,10 +333,17 @@ export async function readChainFacts(opts: {
               usdgFromAssignment: closeLog.args.usdgFromAssignment,
               contractsAssignedCount: closeLog.args.contractsAssignedCount,
             },
-      stranded: strandLog === undefined ? null : { gen: strandLog.args.gen, claimKey: strandLog.args.claimKey },
-      accAfterClose: closeLog === undefined ? null : await readAt<bigint>("accUsdgPerShare", [], closeLog.blockNumber),
-      supplyBeforeClose: closeLog === undefined ? null : await readAt<bigint>("totalSupply", [], closeLog.blockNumber - 1n),
-      distributedSupply: distributed === undefined ? null : distributed.args.totalSupply,
+      stranded: strandLog === undefined ? null : { gen: strandLog.args.gen, claimKey: strandLog.args.claimKey, txHash: strandLog.transactionHash },
+      redeemed:
+        redeemLog === undefined
+          ? null
+          : {
+              txHash: redeemLog.transactionHash,
+              block: redeemLog.blockNumber,
+              timestamp: await tsOf(redeemLog.blockNumber),
+              underlyingReturned: redeemLog.args.underlyingReturned,
+              exerciseReceived: redeemLog.args.exerciseReceived,
+            },
       bucketIndex,
       bucketAssigned,
       marketExercised,
@@ -285,8 +352,14 @@ export async function readChainFacts(opts: {
   cycles.sort((a, b) => a.cycleNumber - b.cycleNumber);
 
   /* ---- harvests ---- */
+  const closeTxs = new Set(ofEvent("RollClose").map((l) => lower(l.transactionHash)));
+  const retryTxs = new Set(ofEvent("StrandedClaimRecovered").map((l) => lower(l.transactionHash)));
   const harvests: ChainHarvest[] = [];
   for (const l of ofEvent("Harvest")) {
+    const tx = lower(l.transactionHash);
+    const origin: HarvestOrigin = closeTxs.has(tx) ? "rollClose" : retryTxs.has(tx) ? "retry" : "checkpoint";
+    const distributed = ofEvent("UsdgDistributed").find((d) => d.transactionHash === l.transactionHash);
+    const supplyBefore = await readAt<bigint>("totalSupply", [], l.blockNumber - 1n);
     harvests.push({
       cycleNumber: Number(l.args.cycleNumber),
       txHash: l.transactionHash,
@@ -295,6 +368,11 @@ export async function readChainFacts(opts: {
       gross: l.args.grossUsdg,
       fee: l.args.feeUsdg,
       net: l.args.netUsdg,
+      origin,
+      supply: distributed === undefined ? supplyBefore : distributed.args.totalSupply,
+      supplyFromLog: distributed !== undefined,
+      supplyBefore,
+      accAfter: await readAt<bigint>("accUsdgPerShare", [], l.blockNumber),
     });
   }
 
@@ -310,7 +388,7 @@ export async function readChainFacts(opts: {
       for (const item of s.args.consideration) {
         if (item.itemType === 1 && lower(item.token) === lower(usdg) && lower(item.recipient) === lower(vault)) toVault += item.amount;
       }
-      fills.push({ txHash: s.transactionHash, timestamp: await tsOf(s.blockNumber), contracts, toVault });
+      fills.push({ txHash: s.transactionHash, block: s.blockNumber, timestamp: await tsOf(s.blockNumber), contracts, toVault });
     }
     const cancelLog = ofEvent("ListingCancelled").find((c) => c.args.orderHash === l.args.orderHash);
     let cancelled: ChainListing["cancelled"] = null;
@@ -340,26 +418,39 @@ export async function readChainFacts(opts: {
   }
 
   /* ---- stranded claims ---- */
-  const strands: ChainStrand[] = ofEvent("ClaimStranded").map((l) => {
+  const strands: ChainStrand[] = [];
+  for (const l of ofEvent("ClaimStranded")) {
     const recoveredLog = ofEvent("StrandedClaimRecovered").find((r) => r.args.gen === l.args.gen);
-    return {
+    strands.push({
       gen: l.args.gen,
       cycleNumber: Number(l.args.cycleNumber),
       claimKey: l.args.claimKey,
       strandedTx: l.transactionHash,
+      strandedBlock: l.blockNumber,
+      strandedTimestamp: await tsOf(l.blockNumber),
       epochShares: ofEvent("EpochStrandShare")
         .filter((e) => e.args.gen === l.args.gen)
         .map((e) => ({ epochId: e.args.epochId, wad: e.args.wad })),
       recovered:
         recoveredLog === undefined
           ? null
-          : { txHash: recoveredLog.transactionHash, assets: recoveredLog.args.assets, usdgOut: recoveredLog.args.usdgOut, queueWad: recoveredLog.args.queueWad },
-    };
-  });
+          : {
+              txHash: recoveredLog.transactionHash,
+              block: recoveredLog.blockNumber,
+              timestamp: await tsOf(recoveredLog.blockNumber),
+              assets: recoveredLog.args.assets,
+              usdgOut: recoveredLog.args.usdgOut,
+              queueWad: recoveredLog.args.queueWad,
+            },
+      shareSettlements: ofEvent("StrandShareSettled")
+        .filter((s) => s.args.gen === l.args.gen)
+        .map((s) => ({ owner: s.args.owner, wad: s.args.wad, assets: s.args.assets, usdgOut: s.args.usdgOut })),
+    });
+  }
 
   /* ---- queue, deposits, claims, fees, roles ---- */
   const queue: ChainFacts["queue"] = {
-    redeems: ofEvent("QueueRedeem").map((l) => ({ owner: l.args.owner, shares: l.args.shares, epochId: l.args.epochId })),
+    redeems: ofEvent("QueueRedeem").map((l) => ({ owner: l.args.owner, shares: l.args.shares, epochId: l.args.epochId, block: l.blockNumber })),
     settled: await Promise.all(
       ofEvent("QueueSettled").map(async (l) => ({
         epochId: l.args.epochId,
@@ -367,14 +458,34 @@ export async function readChainFacts(opts: {
         assets: l.args.assets,
         usdgOut: l.args.usdgOut,
         txHash: l.transactionHash,
+        block: l.blockNumber,
         timestamp: await tsOf(l.blockNumber),
       })),
     ),
-    entries: ofEvent("QueueEntrySettled").map((l) => ({ owner: l.args.owner, epochId: l.args.epochId, shares: l.args.shares, assets: l.args.assets, usdgOut: l.args.usdgOut })),
-    completes: ofEvent("CompleteRedeem").map((l) => ({ owner: l.args.owner, shares: l.args.shares, assets: l.args.assets, usdgOut: l.args.usdgOut })),
+    entries: ofEvent("QueueEntrySettled").map((l) => ({
+      owner: l.args.owner,
+      epochId: l.args.epochId,
+      shares: l.args.shares,
+      assets: l.args.assets,
+      usdgOut: l.args.usdgOut,
+      block: l.blockNumber,
+    })),
+    completes: ofEvent("CompleteRedeem").map((l) => ({
+      owner: l.args.owner,
+      receiver: l.args.receiver,
+      shares: l.args.shares,
+      assets: l.args.assets,
+      usdgOut: l.args.usdgOut,
+      block: l.blockNumber,
+    })),
+    deferred: ofEvent("UsdgLegDeferred").map((l) => ({ owner: l.args.owner, receiver: l.args.receiver, usdgOwed: l.args.usdgOwed, block: l.blockNumber })),
+    haircuts: ofEvent("ReserveHaircut").map((l) => ({ owner: l.args.owner, booked: l.args.booked, paid: l.args.paid, block: l.blockNumber })),
   };
   const deposits = await Promise.all(
     ofEvent("Deposit").map(async (l) => ({ owner: l.args.owner, assets: l.args.assets, shares: l.args.shares, timestamp: await tsOf(l.blockNumber) })),
+  );
+  const withdraws = await Promise.all(
+    ofEvent("Withdraw").map(async (l) => ({ owner: l.args.owner, assets: l.args.assets, shares: l.args.shares, timestamp: await tsOf(l.blockNumber) })),
   );
   const claims = ofEvent("ClaimUsdg").map((l) => ({ account: l.args.account, amount: l.args.amount }));
   const feeSwept = ofEvent("FeeSwept").reduce((s, l) => s + l.args.amount, 0n);
@@ -386,14 +497,28 @@ export async function readChainFacts(opts: {
   }
 
   // The indexer's `lastBlock` moves on the handlers that patch vault state: most vault events
-  // (not share Transfer/Approval, Deposit, Withdraw, QueueEntrySettled, StrandShareSettled or the
-  // role events), token transfers in or out of the vault, Seaport fills and counters for it, and
-  // Valorem writes by it. The latest of those is what /v1/health reports as last activity.
-  const noLastBlock = new Set(["Transfer", "Approval", "Deposit", "Withdraw", "QueueEntrySettled", "StrandShareSettled", "RoleGranted", "RoleRevoked", "RoleAdminChanged"]);
+  // (not share Transfer/Approval, Deposit, Withdraw, QueueEntrySettled, StrandShareSettled,
+  // UsdgLegDeferred or the role events), token transfers in or out of the vault, Seaport fills
+  // and counter bumps for it, and Valorem writes by it. The latest of those is what /v1/health
+  // reports as last activity.
+  const noLastBlock = new Set([
+    "Transfer",
+    "Approval",
+    "Deposit",
+    "Withdraw",
+    "QueueEntrySettled",
+    "StrandShareSettled",
+    "UsdgLegDeferred",
+    "RoleGranted",
+    "RoleRevoked",
+    "RoleAdminChanged",
+  ]);
   const activity: bigint[] = [
     ...vaultLogs.filter((l) => !noLastBlock.has(l.eventName)).map((l) => l.blockNumber),
     ...clearLogs.filter((l) => l.eventName === "OptionsWritten" && lower(l.args.writer) === lower(vault)).map((l) => l.blockNumber),
-    ...seaportLogs.filter((l) => "offerer" in l.args && lower(l.args.offerer as string) === lower(vault)).map((l) => l.blockNumber),
+    ...seaportLogs
+      .filter((l) => (l.eventName === "OrderFulfilled" || l.eventName === "CounterIncremented") && lower(l.args.offerer) === lower(vault))
+      .map((l) => l.blockNumber),
     ...[...parseEventLogs({ abi: erc20Abi, logs: [...assetLogsRaw, ...usdgLogsRaw], eventName: "Transfer" })]
       .filter((l) => lower(l.args.from) === lower(vault) || lower(l.args.to) === lower(vault))
       .map((l) => l.blockNumber),
@@ -443,6 +568,7 @@ export async function readChainFacts(opts: {
     writesHalted: await read<boolean>("writesHalted"),
     canRedeemInstantly: await read<boolean>("canRedeemInstantly"),
     valoremFeeAccepted: await read<boolean>("valoremFeeAccepted"),
+    clearFeesEnabled: await client.readContract({ address: clear, abi: valoremClearAbi, functionName: "feesEnabled", ...at }),
     totalAssets: await read<bigint>("totalAssets"),
     idleAssets: await read<bigint>("idleAssets"),
     lockedAssets: await read<bigint>("lockedAssets"),
@@ -516,6 +642,7 @@ export async function readChainFacts(opts: {
     strands,
     queue,
     deposits,
+    withdraws,
     claims,
     feeSwept,
     usdgDistributed,

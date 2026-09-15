@@ -1,17 +1,34 @@
 /**
  * The expectation builder on a hand-built fixture shaped like the three-week keeper dry run under
- * write on fill: 23 contracts a week at 0.873192 USDG per contract (20.083416 gross, ONE
- * consideration item, all of it to the vault), 5% of premium to the protocol, cycle 2 unfilled
- * with its listing invalidated at lockBook, cycle 3 assigned 9 at 225 with 10 of 25 shares queued.
+ * write on fill. One depositor, 25 NVDA in at block 105, listings at 0.873192 USDG per contract,
+ * 5% of premium to the protocol, one transaction per block (anvil):
+ *
+ *   cycle 1  unfilled. Listed 23, nobody bought, the listing invalidated at lockBook, a zero
+ *            harvest against 25 shares.
+ *   cycle 2  assigned. Listed 23; buyer A took 2 (1.746384), a 5 NVDA deposit while Listed
+ *            checkpointed that premium against 25 shares, buyer B took 3 (2.619576); the
+ *            depositor queued 10 shares; 2 exercised; the close redeemed 3 lots and 450 of
+ *            strike USDG, harvested 452.619576 against 30 shares (fee on the 2.619576 only),
+ *            settled the epoch, and the depositor collected and claimed.
+ *   cycle 3  stranded, then recovered. Listed 20; buyer A took 4 (3.492768); the depositor queued
+ *            4 shares; 1 exercised; USDG frozen, so the close stranded the claim (generation 1),
+ *            harvested the 3.492768 of premium against 20 shares and gave the settling epoch 0.2
+ *            of the claim; unfrozen, the retry redeemed 3 lots and 225 of strike USDG, 0.2 of
+ *            each to the queue, the live 180 through a fee-free harvest against 16 shares; the
+ *            depositor collected the epoch (its 0.6 NVDA + 45 USDG share included) and claimed.
+ *
  * The fixture is written out rather than recorded so every figure below can be checked by hand.
+ * Figures the builder merely copies from a log (a queue payout, an index value) are declared;
+ * figures it derives (sums, splits, per-share, statuses) are asserted against hand arithmetic.
  */
 import type { Address, Hex } from "viem";
 import { describe, expect, it } from "vitest";
 
-import type { ChainCycle, ChainFacts, ChainListing } from "./chain.ts";
-import { buildExpectations, capacityOf, isoOf, runBlocks, type RunJson } from "./expected.ts";
+import type { ChainCycle, ChainFacts, ChainHarvest, ChainListing, ChainStrand } from "./chain.ts";
+import { buildExpectations, capacityOf, epochStrandDrawdown, isoOf, runBlocks, type RunJson } from "./expected.ts";
 
 const LOT = 10n ** 18n;
+const WAD = 10n ** 18n;
 const hash = (n: number): Hex => `0x${n.toString(16).padStart(64, "0")}`;
 const addr = (n: number): Address => `0x${n.toString(16).padStart(40, "0")}` as Address;
 
@@ -22,103 +39,177 @@ const KEEPER = addr(0x4ee);
 const FEE_SAFE = addr(0xfee);
 const KEEPER_ROLE = "0xfc8737ab85eb45125971625a9ebdb75cc78e01d5c1fa80c4c6e5203f47bc4fab" as Hex;
 
+/** One transaction per block: a block number names its transaction. */
 const TS = (block: bigint) => 1_790_000_000n + block;
+const at = (block: number) => ({ txHash: hash(block), block: BigInt(block), timestamp: TS(BigInt(block)) });
 
-/** 23 × 0.873192 = 20.083416 gross; fee = floor(20_083416 × 500 / 10_000) = 1_004170; net = 19_079246. */
-const GROSS = 20_083416n;
-const FEE = 1_004170n;
-const NET = 19_079246n;
-
-type Week = { n: 1 | 2 | 3; strike: bigint; filled: boolean; assigned: bigint; gross: bigint; fee: bigint; net: bigint; assetsReturned: bigint; strikeProceeds: bigint; acc: bigint };
-const WEEKS: Week[] = [
-  { n: 1, strike: 226_000000n, filled: true, assigned: 0n, gross: GROSS, fee: FEE, net: NET, assetsReturned: 23n * LOT, strikeProceeds: 0n, acc: 763169840000000n },
-  // Unfilled: nothing written, so nothing to return.
-  { n: 2, strike: 225_000000n, filled: false, assigned: 0n, gross: 0n, fee: 0n, net: 0n, assetsReturned: 0n, strikeProceeds: 0n, acc: 763169840000000n },
-  // 9 assigned at 225: 2025 of strike proceeds on top of the premium; gross 2045.083416, fee on the premium only.
-  { n: 3, strike: 225_000000n, filled: true, assigned: 9n, gross: GROSS + 2025_000000n, fee: FEE, net: NET + 2025_000000n, assetsReturned: 14n * LOT, strikeProceeds: 2025_000000n, acc: 82526339680000000n },
-];
-/** Block layout per week: open 11n, approve 12n, fill 13n, lock 14n, close 15n (+ 10 per week). */
-const B = (w: Week, k: number) => BigInt(100 + w.n * 10 + k);
+const UNIT = 873192n;
 
 function fixture(): { run: RunJson; chain: ChainFacts } {
-  const cycles: ChainCycle[] = WEEKS.map((w) => ({
-    cycleNumber: w.n,
-    open: { txHash: hash(w.n * 100 + 11), block: B(w, 1), timestamp: TS(B(w, 1)), optionId: BigInt(w.n * 1000 + 1), strike: w.strike, exerciseTs: 1_800_000_000n + BigInt(w.n), expiryTs: 1_800_086_400n + BigInt(w.n) },
-    // One fill, one write, in the fill's own transaction.
-    writes: w.filled ? [{ txHash: hash(w.n * 100 + 13), timestamp: TS(B(w, 3)), claimKey: BigInt(w.n * 1000 + 2), contracts: 23n, collateral: 23n * LOT }] : [],
-    locked: { txHash: hash(w.n * 100 + 14), timestamp: TS(B(w, 4)) },
-    close: { txHash: hash(w.n * 100 + 15), block: B(w, 5), timestamp: TS(B(w, 5)), assetsReturned: w.assetsReturned, usdgFromAssignment: w.strikeProceeds, contractsAssignedCount: w.assigned },
-    stranded: null,
-    accAfterClose: w.acc,
-    supplyBeforeClose: 25n * LOT,
-    distributedSupply: w.net === 0n ? null : 25n * LOT,
-    bucketIndex: w.filled ? 0n : null,
-    bucketAssigned: w.assigned,
-    marketExercised: w.assigned,
-  }));
+  const cycles: ChainCycle[] = [
+    {
+      cycleNumber: 1,
+      open: { ...at(111), optionId: 1001n, strike: 226_000000n, exerciseTs: 1_800_000_001n, expiryTs: 1_800_086_401n },
+      writes: [],
+      locked: { txHash: hash(114), timestamp: TS(114n) },
+      close: { ...at(115), assetsReturned: 0n, usdgFromAssignment: 0n, contractsAssignedCount: 0n },
+      stranded: null,
+      redeemed: null,
+      bucketIndex: null,
+      bucketAssigned: 0n,
+      marketExercised: 0n,
+    },
+    {
+      cycleNumber: 2,
+      open: { ...at(121), optionId: 2001n, strike: 225_000000n, exerciseTs: 1_800_000_002n, expiryTs: 1_800_086_402n },
+      writes: [
+        { ...at(123), claimKey: 2002n, contracts: 2n, collateral: 2n * LOT },
+        { ...at(125), claimKey: 2002n, contracts: 3n, collateral: 3n * LOT },
+      ],
+      locked: { txHash: hash(128), timestamp: TS(128n) },
+      close: { ...at(129), assetsReturned: 3n * LOT, usdgFromAssignment: 450_000000n, contractsAssignedCount: 2n },
+      stranded: null,
+      redeemed: { ...at(129), underlyingReturned: 3n * LOT, exerciseReceived: 450_000000n },
+      bucketIndex: 0n,
+      bucketAssigned: 2n,
+      marketExercised: 2n,
+    },
+    {
+      cycleNumber: 3,
+      open: { ...at(141), optionId: 3001n, strike: 225_000000n, exerciseTs: 1_800_000_003n, expiryTs: 1_800_086_403n },
+      writes: [{ ...at(143), claimKey: 3002n, contracts: 4n, collateral: 4n * LOT }],
+      locked: { txHash: hash(146), timestamp: TS(146n) },
+      close: { ...at(147), assetsReturned: 0n, usdgFromAssignment: 0n, contractsAssignedCount: 1n },
+      stranded: { gen: 1n, claimKey: 3002n, txHash: hash(147) },
+      redeemed: { ...at(148), underlyingReturned: 3n * LOT, exerciseReceived: 225_000000n },
+      bucketIndex: 0n,
+      bucketAssigned: 1n,
+      marketExercised: 1n,
+    },
+  ];
 
-  const listings: ChainListing[] = WEEKS.map((w) => ({
-    orderHash: hash(w.n * 100 + 99),
-    optionId: BigInt(w.n * 1000 + 1),
-    amount: 23n,
-    grossUsdg: GROSS,
+  /**
+   * By hand. Cycle 2's checkpoint: fee = floor(1_746384 × 500 / 10_000) = 87319, net 1_659065,
+   * index +1_659065e27 / 25e18 = 66_362_600_000_000. Its terminal: gross 2_619576 + 450_000000,
+   * fee = floor(2_619576 × 500 / 10_000) = 130978, net 452_488598, index +15_082_953_266_666_666.
+   * Cycle 3's terminal: fee = floor(3_492768 × 500 / 10_000) = 174638, net 3_318130, index
+   * +165_906_500_000_000. Its retry: 225 back, 0.2 to the queue (45), the live 180 fee-free,
+   * index +180_000000e27 / 16e18 = 11_250_000_000_000_000.
+   */
+  const harvests: ChainHarvest[] = [
+    { cycleNumber: 1, ...at(115), gross: 0n, fee: 0n, net: 0n, origin: "rollClose", supply: 25n * LOT, supplyFromLog: false, supplyBefore: 25n * LOT, accAfter: 0n },
+    { cycleNumber: 2, ...at(124), gross: 1_746384n, fee: 87319n, net: 1_659065n, origin: "checkpoint", supply: 25n * LOT, supplyFromLog: true, supplyBefore: 25n * LOT, accAfter: 66_362_600_000_000n },
+    { cycleNumber: 2, ...at(129), gross: 452_619576n, fee: 130978n, net: 452_488598n, origin: "rollClose", supply: 30n * LOT, supplyFromLog: true, supplyBefore: 30n * LOT, accAfter: 15_149_315_866_666_666n },
+    { cycleNumber: 3, ...at(147), gross: 3_492768n, fee: 174638n, net: 3_318130n, origin: "rollClose", supply: 20n * LOT, supplyFromLog: true, supplyBefore: 20n * LOT, accAfter: 15_315_222_366_666_666n },
+    { cycleNumber: 3, ...at(148), gross: 180_000000n, fee: 0n, net: 180_000000n, origin: "retry", supply: 16n * LOT, supplyFromLog: true, supplyBefore: 16n * LOT, accAfter: 26_565_222_366_666_666n },
+  ];
+
+  const listing = (n: number, approveBlock: number, amount: bigint, fills: ChainListing["fills"], cancelBlock: number): ChainListing => ({
+    orderHash: hash(1000 + n),
+    optionId: BigInt(n * 1000 + 1),
+    amount,
+    grossUsdg: amount * UNIT,
     seq: 1,
-    approvedTx: hash(w.n * 100 + 12),
-    approvedBlock: B(w, 2),
-    approvedTimestamp: TS(B(w, 2)),
-    fills: w.filled ? [{ txHash: hash(w.n * 100 + 13), timestamp: TS(B(w, 3)), contracts: 23n, toVault: GROSS }] : [],
-    cancelled: w.filled ? null : { txHash: hash(w.n * 100 + 14), timestamp: TS(B(w, 4)), reason: "lockBook" },
-  }));
+    approvedTx: hash(approveBlock),
+    approvedBlock: BigInt(approveBlock),
+    approvedTimestamp: TS(BigInt(approveBlock)),
+    fills,
+    cancelled: { txHash: hash(cancelBlock), timestamp: TS(BigInt(cancelBlock)), reason: "lockBook" },
+  });
+  const listings: ChainListing[] = [
+    listing(1, 112, 23n, [], 114),
+    listing(2, 122, 23n, [{ ...at(123), contracts: 2n, toVault: 2n * UNIT }, { ...at(125), contracts: 3n, toVault: 3n * UNIT }], 128),
+    listing(3, 142, 20n, [{ ...at(143), contracts: 4n, toVault: 4n * UNIT }], 146),
+  ];
+
+  const strands: ChainStrand[] = [
+    {
+      gen: 1n,
+      cycleNumber: 3,
+      claimKey: 3002n,
+      strandedTx: hash(147),
+      strandedBlock: 147n,
+      strandedTimestamp: TS(147n),
+      // The 4-share epoch settled at the stranded close took 4 / 20 of the claim.
+      epochShares: [{ epochId: 2n, wad: 2n * 10n ** 17n }],
+      recovered: { ...at(148), assets: 3n * LOT, usdgOut: 225_000000n, queueWad: 2n * 10n ** 17n },
+      // The depositor was the epoch's only entry, so it took the whole 0.2: 0.6 NVDA and 45 USDG.
+      shareSettlements: [{ owner: DEPOSITOR, wad: 2n * 10n ** 17n, assets: 6n * 10n ** 17n, usdgOut: 45_000000n }],
+    },
+  ];
 
   const settings = { feeRecipient: FEE_SAFE, depositCap: 50n * LOT, maxPriceAge: 345600, protocolFeeBps: 500, maxUtilizationBps: 9500, maxContractsCap: 50n };
 
   const chain: ChainFacts = {
     rpc: "http://127.0.0.1:8547",
     chainId: 4663,
-    startBlock: 100n,
-    endBlock: 140n,
+    startBlock: 104n,
+    endBlock: 150n,
     vault: VAULT,
     depositor: DEPOSITOR,
     immutables: { asset: addr(0xa55e7), usdg: addr(0x05d6), clear: addr(0xc1ea), seaport: addr(0x5ea) },
     settings,
     cycles,
-    harvests: WEEKS.map((w) => ({ cycleNumber: w.n, txHash: hash(w.n * 100 + 15), block: B(w, 5), timestamp: TS(B(w, 5)), gross: w.gross, fee: w.fee, net: w.net })),
+    harvests,
     listings,
-    strands: [],
+    strands,
     queue: {
-      redeems: [{ owner: DEPOSITOR, shares: 10n * LOT, epochId: 1n }],
-      settled: [{ epochId: 1n, shares: 10n * LOT, assets: 6_400000000000000000n, usdgOut: 817_631698n, txHash: hash(315), timestamp: TS(135n) }],
-      entries: [{ owner: DEPOSITOR, epochId: 1n, shares: 10n * LOT, assets: 6_400000000000000000n, usdgOut: 817_631698n }],
-      completes: [{ owner: DEPOSITOR, shares: 10n * LOT, assets: 6_400000000000000000n, usdgOut: 817_631698n }],
+      redeems: [
+        { owner: DEPOSITOR, shares: 10n * LOT, epochId: 1n, block: 126n },
+        { owner: DEPOSITOR, shares: 4n * LOT, epochId: 2n, block: 144n },
+      ],
+      settled: [
+        { epochId: 1n, shares: 10n * LOT, assets: 9_333333333333333333n, usdgOut: 150_829532n, ...at(129) },
+        { epochId: 2n, shares: 4n * LOT, assets: 2_933333333333333333n, usdgOut: 663626n, ...at(147) },
+      ],
+      entries: [
+        { owner: DEPOSITOR, epochId: 1n, shares: 10n * LOT, assets: 9_333333333333333333n, usdgOut: 150_829532n, block: 130n },
+        { owner: DEPOSITOR, epochId: 2n, shares: 4n * LOT, assets: 2_933333333333333333n, usdgOut: 663626n, block: 149n },
+      ],
+      completes: [
+        { owner: DEPOSITOR, receiver: DEPOSITOR, shares: 10n * LOT, assets: 9_333333333333333333n, usdgOut: 150_829532n, block: 130n },
+        // The epoch's 2.9333 NVDA + 0.663626 USDG plus the recovered strand share's 0.6 NVDA + 45 USDG.
+        { owner: DEPOSITOR, receiver: DEPOSITOR, shares: 4n * LOT, assets: 3_533333333333333333n, usdgOut: 45_663626n, block: 149n },
+      ],
+      deferred: [],
+      haircuts: [],
     },
-    deposits: [{ owner: DEPOSITOR, assets: 25n * LOT, shares: 25n * LOT, timestamp: TS(101n) }],
-    claims: [
-      { account: DEPOSITOR, amount: NET },
-      { account: DEPOSITOR, amount: 1226_447547n },
+    deposits: [
+      { owner: DEPOSITOR, assets: 25n * LOT, shares: 25n * LOT, timestamp: TS(105n) },
+      { owner: DEPOSITOR, assets: 5n * LOT, shares: 5n * LOT, timestamp: TS(124n) },
     ],
-    feeSwept: 2n * FEE,
-    usdgDistributed: 2063_158492n,
+    withdraws: [],
+    // 25 × 66362.6 + 20 × 15_082_953.27 = 1_659065 + 301_659065 after cycle 2; 16 × 11_415_906.5 after cycle 3.
+    claims: [
+      { account: DEPOSITOR, amount: 303_318130n },
+      { account: DEPOSITOR, amount: 182_654504n },
+    ],
+    // 87319 + 130978 pushed at cycle 2's close; 174638 could not move under the freeze and was
+    // pushed by the retry's harvest.
+    feeSwept: 218297n + 174638n,
+    usdgDistributed: 1_659065n + 452_488598n + 3_318130n + 180_000000n,
     roles: [
       { role: hash(0), account: ADMIN, granted: true },
       { role: KEEPER_ROLE, account: KEEPER, granted: true },
     ],
-    lastVaultActivityBlock: 140n,
-    lastVaultActivityTimestamp: TS(140n),
-    endBlockTimestamp: TS(140n),
-    depositorFirstSeen: TS(101n),
-    depositorLastActivity: TS(140n),
+    lastVaultActivityBlock: 150n,
+    lastVaultActivityTimestamp: TS(150n),
+    endBlockTimestamp: TS(150n),
+    depositorFirstSeen: TS(105n),
+    depositorLastActivity: TS(150n),
     views: {
       phase: 0,
       cycleNumber: 3,
       writesHalted: false,
       canRedeemInstantly: true,
       valoremFeeAccepted: false,
-      totalAssets: 9_600000000000000000n,
-      idleAssets: 9_600000000000000000n,
+      clearFeesEnabled: false,
+      totalAssets: 14_133333333333333334n,
+      idleAssets: 14_133333333333333334n,
       lockedAssets: 0n,
       reservedAssets: 0n,
-      totalSupply: 15n * LOT,
-      maxDepositZero: 40_400000000000000000n,
+      totalSupply: 16n * LOT,
+      maxDepositZero: 35_866666666666666666n,
       uiMultiplier: 1_000775159164630595n,
       spotUsdg: 230_000000n,
       listingHash: hash(0),
@@ -128,10 +219,11 @@ function fixture(): { run: RunJson; chain: ChainFacts } {
       queuedShares: 0n,
       usdgReservedForQueue: 0n,
       usdgUnallocated: 0n,
-      accUsdgPerShare: 82526339680000000n,
-      totalUsdgDistributed: 2063_158492n,
-      totalUsdgClaimed: 2063_158491n,
-      epochId: 2n,
+      accUsdgPerShare: 26_565_222_366_666_666n,
+      totalUsdgDistributed: 637_465793n,
+      // Two claims plus the two escrow takes; one base unit of dust behind the distributed total.
+      totalUsdgClaimed: 303_318130n + 182_654504n + 150_829532n + 663626n,
+      epochId: 3n,
       contractsAssigned: 0n,
       contractsWritten: 0n,
       optionId: 0n,
@@ -140,83 +232,153 @@ function fixture(): { run: RunJson; chain: ChainFacts } {
       cycleExerciseTs: 1_800_000_003n,
       cycleExpiryTs: 1_800_086_403n,
       isStranded: false,
-      strandGen: 0n,
-      lastResolvedGen: 0n,
+      strandGen: 1n,
+      lastResolvedGen: 1n,
       strandedRemainingWad: 0n,
       pendingFeeUsdg: 0n,
       usdgBalance: 1n,
-      assetBalance: 9_600000000000000000n,
-      seaportCounter: 42n,
+      assetBalance: 14_133333333333333334n,
+      // Three lockBooks over a live listing, one counter bump each.
+      seaportCounter: 3n,
       oraclePaused: false,
     },
-    account: { shares: 15n * LOT, sharesAsAssets: 9_600000000000000000n, claimableUsdg: 0n, queuedShares: 0n, queuedEpoch: 0n, previewAssets: 0n, previewUsdg: 0n, owedStrandWad: 0n, owedStrandGen: 0n },
+    account: {
+      shares: 16n * LOT,
+      sharesAsAssets: 14_133333333333333334n,
+      claimableUsdg: 0n,
+      queuedShares: 0n,
+      queuedEpoch: 0n,
+      previewAssets: 0n,
+      previewUsdg: 0n,
+      owedStrandWad: 0n,
+      owedStrandGen: 0n,
+    },
   };
-
-  const cycleRecord = (w: Week): Record<string, unknown> => ({
-    optionId: String(w.n * 1000 + 1),
-    exerciseTimestamp: 1_800_000_000 + w.n,
-    expiryTimestamp: 1_800_086_400 + w.n,
-    contracts: w.filled ? "23" : "0",
-    strikeUsdg6: w.strike.toString(),
-    orderHash: hash(w.n * 100 + 99),
-    rollCloseTx: hash(w.n * 100 + 15),
-    ...(w.filled ? { gross6: GROSS.toString() } : {}),
-    harvest: { gross: w.gross.toString(), fee: w.fee.toString(), net: w.net.toString(), ...(w.n === 1 ? { depositorReceived: NET.toString() } : {}) },
-  });
 
   const run: RunJson = {
     forkBlock: "99",
     chainId: 4663,
     error: null,
-    actors: { keeper: KEEPER, admin: ADMIN, feeSafe: FEE_SAFE, depositor: DEPOSITOR, buyer: addr(0xb0) },
-    addresses: { Vault: VAULT },
-    cycle1: cycleRecord(WEEKS[0]!),
-    cycle2: cycleRecord(WEEKS[1]!),
-    cycle3: {
-      ...cycleRecord(WEEKS[2]!),
-      claimKey: "3002",
-      contractsExercised: "9",
-      harvest: { gross: (GROSS + 2025_000000n).toString(), fee: FEE.toString(), net: (NET + 2025_000000n).toString(), premium: GROSS.toString(), usdgFromAssignment: "2025000000", assetsReturned: "14000000000000000000", contractsAssigned: 9 },
-      queue: { sharesQueued: "10000000000000000000", epoch: "1", payoutAssets: "6400000000000000000", escrowUsdg: "817631698", assetsOut: "6400000000000000000", usdgOut: "817631698" },
-      claimed: "1226447547",
-      usdgLeftInVault: { remainder: "1" },
-      final: { totalSupply: "15000000000000000000", idleAssets: "9600000000000000000", depositorShares: "15000000000000000000" },
-    },
-    harnessTxs: [
-      { label: "deploy Vault", by: ADMIN, hash: hash(2), block: "104" },
-      { label: "vault.claimUsdg (depositor)", by: DEPOSITOR, hash: hash(3), block: "140" },
+    actors: { admin: ADMIN, keeper: KEEPER, guardian: addr(0x6a), depositor: DEPOSITOR, buyerA: addr(0xb0a), buyerB: addr(0xb0b) },
+    addresses: { Vault: VAULT, Clear: addr(0xc1ea) },
+    blocks: { vaultDeployBlock: "104", lastBlock: "150" },
+    cycles: [
+      {
+        cycleNumber: 1,
+        optionId: "1001",
+        strikeUsdg6: "226000000",
+        exerciseTimestamp: 1_800_000_001,
+        expiryTimestamp: 1_800_086_401,
+        rollOpenTx: hash(111),
+        lockTx: hash(114),
+        rollCloseTx: hash(115),
+        fills: [],
+        contractsAssigned: 0,
+        harvest: { gross: "0", fee: "0", net: "0" },
+        stranded: false,
+        retryTx: null,
+        assetsReturned: "0",
+        usdgFromAssignment: "0",
+      },
+      {
+        cycleNumber: 2,
+        optionId: "2001",
+        strikeUsdg6: "225000000",
+        exerciseTimestamp: "1800000002",
+        expiryTimestamp: "1800086402",
+        rollOpenTx: hash(121),
+        lockTx: hash(128),
+        rollCloseTx: hash(129),
+        fills: [
+          { txHash: hash(123), contracts: 2, grossUsdg6: "1746384" },
+          { txHash: hash(125), contracts: "3", grossUsdg6: 2619576 },
+        ],
+        contractsAssigned: "2",
+        harvest: { gross: "452619576", fee: "130978", net: "452488598" },
+        stranded: false,
+        retryTx: null,
+        assetsReturned: "3000000000000000000",
+        usdgFromAssignment: "450000000",
+      },
+      {
+        cycleNumber: 3,
+        optionId: "3001",
+        strikeUsdg6: "225000000",
+        exerciseTimestamp: "1800000003",
+        expiryTimestamp: "1800086403",
+        rollOpenTx: hash(141),
+        lockTx: hash(146),
+        rollCloseTx: hash(147),
+        fills: [{ txHash: hash(143), contracts: 4, grossUsdg6: "3492768" }],
+        contractsAssigned: 1,
+        harvest: { gross: "3492768", fee: "174638", net: "3318130" },
+        stranded: true,
+        retryTx: hash(148),
+        assetsReturned: "3000000000000000000",
+        usdgFromAssignment: "225000000",
+      },
     ],
-    db: {
-      cycles: WEEKS.map((w) => ({
-        cycle_number: w.n,
-        option_id: String(w.n * 1000 + 1),
-        strike_usdg6: w.strike.toString(),
-        contracts: w.filled ? 23 : 0,
-        status: "closed",
-        roll_open_tx: hash(w.n * 100 + 11),
-        lock_tx: hash(w.n * 100 + 14),
-        roll_close_tx: hash(w.n * 100 + 15),
-        gross_usdg6: w.gross.toString(),
-        fee_usdg6: w.fee.toString(),
-        net_usdg6: w.net.toString(),
-        contracts_assigned: Number(w.assigned),
-        assets_returned: w.assetsReturned.toString(),
-        usdg_from_assignment: w.strikeProceeds.toString(),
-      })),
-      listings: WEEKS.map((w) => ({
-        order_hash: hash(w.n * 100 + 99),
-        cycle_number: w.n,
-        seq: 1,
-        option_id: String(w.n * 1000 + 1),
-        contracts: "23",
-        unit_price6: "873192",
-        gross_usdg6: GROSS.toString(),
-        status: w.filled ? "filled" : "cancelled",
-        approve_tx: hash(w.n * 100 + 12),
-      })),
-      txs: [{ hash: hash(3), block_number: 140 }],
-    },
   };
+  return { run, chain };
+}
+
+/** The same run cut off at the stranded close: the retry, the collection and the last claim never happened. */
+function stillStranded(): { run: RunJson; chain: ChainFacts } {
+  const { run, chain } = fixture();
+  chain.endBlock = 147n;
+  chain.endBlockTimestamp = TS(147n);
+  chain.lastVaultActivityBlock = 147n;
+  chain.lastVaultActivityTimestamp = TS(147n);
+  chain.depositorLastActivity = TS(144n);
+  chain.harvests = chain.harvests.filter((h) => h.block <= 147n);
+  chain.cycles[2]!.redeemed = null;
+  chain.strands[0]!.recovered = null;
+  chain.strands[0]!.shareSettlements = [];
+  chain.queue.entries = chain.queue.entries.filter((e) => e.block <= 147n);
+  chain.queue.completes = chain.queue.completes.filter((c) => c.block <= 147n);
+  chain.claims = chain.claims.slice(0, 1);
+  chain.feeSwept = 218297n;
+  chain.usdgDistributed = 1_659065n + 452_488598n + 3_318130n;
+  chain.views = {
+    ...chain.views,
+    // 14.6667 idle less the 2.9333 reserved, plus 0.8 of the 3 lots still in the claim.
+    totalAssets: 14_133333333333333334n,
+    idleAssets: 11_733333333333333334n,
+    lockedAssets: 3n * LOT,
+    reservedAssets: 2_933333333333333333n,
+    maxDepositZero: 0n,
+    usdgReservedForQueue: 663626n,
+    accUsdgPerShare: 15_315_222_366_666_666n,
+    totalUsdgDistributed: 1_659065n + 452_488598n + 3_318130n,
+    totalUsdgClaimed: 303_318130n + 150_829532n + 663626n,
+    contractsAssigned: 1n,
+    contractsWritten: 4n,
+    optionId: 3001n,
+    claimKey: 3002n,
+    isStranded: true,
+    strandGen: 1n,
+    lastResolvedGen: 0n,
+    strandedRemainingWad: 8n * 10n ** 17n,
+    pendingFeeUsdg: 174638n,
+    usdgBalance: 174639n,
+    assetBalance: 14_666666666666666667n,
+  };
+  chain.account = {
+    shares: 16n * LOT,
+    sharesAsAssets: 11_733333333333333334n,
+    claimableUsdg: 0n,
+    queuedShares: 4n * LOT,
+    queuedEpoch: 2n,
+    previewAssets: 2_933333333333333333n,
+    previewUsdg: 663626n,
+    owedStrandWad: 0n,
+    owedStrandGen: 0n,
+  };
+  run.blocks.lastBlock = "147";
+  const c3 = run.cycles[2]!;
+  c3.retryTx = null;
+  c3.assetsReturned = "0";
+  c3.usdgFromAssignment = "0";
   return { run, chain };
 }
 
@@ -231,122 +393,322 @@ describe("buildExpectations on the dry run's three weeks", () => {
     const { run, chain } = fixture();
     const built = buildExpectations(run, chain);
     expect(built.disagreements).toEqual([]);
-    expect(built.crossChecks).toBeGreaterThan(100);
-  });
-
-  it("publishes the assigned week's premium and strike proceeds apart (W-21), and its one write", () => {
-    const { run, chain } = fixture();
-    const built = buildExpectations(run, chain);
-    const r = "GET /v1/cycles/3";
-    expect(expectedAt(built, r, "cycle.status")).toBe("assigned");
-    expect(expectedAt(built, r, "cycle.written.contracts")).toBe("23");
-    expect(expectedAt(built, r, "cycle.written.writeCount")).toBe(1);
-    expect(expectedAt(built, r, "cycle.written.claimKey")).toBe("3002");
-    expect(expectedAt(built, r, "cycle.written.firstWriteAt")).toBe(isoOf(TS(133n)));
-    expect(expectedAt(built, r, "cycle.fill.contractsSold")).toBe("23");
-    expect(expectedAt(built, r, "cycle.fill.premiumGross.raw")).toBe("20083416");
-    expect(expectedAt(built, r, "cycle.harvest.grossUsdg.raw")).toBe("2045083416");
-    expect(expectedAt(built, r, "cycle.harvest.premiumGross.raw")).toBe("20083416");
-    expect(expectedAt(built, r, "cycle.harvest.strikeProceedsUsdg.raw")).toBe("2025000000");
-    expect(expectedAt(built, r, "cycle.harvest.strikeProceedsUsdg.formatted")).toBe("2025");
-    expect(expectedAt(built, r, "cycle.harvest.fee.raw")).toBe("1004170");
-    expect(expectedAt(built, r, "cycle.harvest.premiumNet.raw")).toBe("19079246");
-    expect(expectedAt(built, r, "cycle.harvest.creditedUsdg.raw")).toBe("2044079246");
-    // Per whole share over the 25e18 supply before the close (the escrowed 10e18 still counts).
-    expect(expectedAt(built, r, "cycle.harvest.premiumNetPerShare.raw")).toBe("763169");
-    expect(expectedAt(built, r, "cycle.harvest.usdgPerShare.raw")).toBe("81763169");
-    expect(expectedAt(built, r, "cycle.settlement.contractsAssigned")).toBe("9");
-    expect(expectedAt(built, r, "cycle.settlement.assetsReturned.raw")).toBe("14000000000000000000");
-    expect(expectedAt(built, r, "cycle.settlement.bucketIndex")).toBe("0");
-    expect(expectedAt(built, r, "cycle.settlement.bucketAssigned")).toBe("9");
-    expect(expectedAt(built, r, "cycle.settlement.strand")).toBeNull();
-    expect(expectedAt(built, r, "cycle.option.exerciseTimestamp")).toBe("1800000003");
-    expect(expectedAt(built, r, "harvests[0].origin")).toBe("rollClose");
+    expect(built.crossChecks).toBeGreaterThan(60);
+    expect(built.weeks.map((w) => w.status)).toEqual(["unfilled", "assigned", "assigned"]);
   });
 
   it("publishes the unfilled week as a row of zeros with nothing written, its listing ended by lockBook", () => {
     const { run, chain } = fixture();
     const built = buildExpectations(run, chain);
-    const r = "GET /v1/cycles/2";
+    const r = "GET /v1/cycles/1";
     expect(expectedAt(built, r, "cycle.status")).toBe("unfilled");
+    expect(expectedAt(built, r, "cycle.stranded")).toBe(false);
     expect(expectedAt(built, r, "cycle.fill.contractsSold")).toBe("0");
     expect(expectedAt(built, r, "cycle.written.contracts")).toBe("0");
     expect(expectedAt(built, r, "cycle.written.claimKey")).toBeNull();
     expect(expectedAt(built, r, "cycle.written.collateral.raw")).toBe("0");
+    expect(expectedAt(built, r, "cycle.written.txOpen")).toBe(hash(111));
     expect(expectedAt(built, r, "cycle.settlement.assetsReturned.raw")).toBe("0");
     expect(expectedAt(built, r, "cycle.harvest.premiumNet.raw")).toBe("0");
-    expect(expectedAt(built, r, "cycle.harvest.strikeProceedsUsdg.raw")).toBe("0");
-    expect(expectedAt(built, r, "cycle.written.txOpen")).toBe(hash(211));
+    expect(expectedAt(built, r, "cycle.harvest.supplyAtHarvest.raw")).toBe((25n * LOT).toString());
+    expect(expectedAt(built, r, "cycle.settlement.strand")).toBeNull();
+    expect(expectedAt(built, r, "listings.length")).toBe(1);
     expect(expectedAt(built, r, "listings[0].status")).toBe("cancelled");
     expect(expectedAt(built, r, "listings[0].endReason")).toBe("lockBook");
-    expect(expectedAt(built, r, "listings[0].endedTx")).toBe(hash(214));
+    expect(expectedAt(built, r, "listings[0].endedTx")).toBe(hash(114));
+    expect(expectedAt(built, r, "harvests.length")).toBe(1);
+    expect(expectedAt(built, r, "strands.length")).toBe(0);
   });
 
-  it("pins the queued redeem, the depositor, the lifetime sums and the capacity", () => {
+  it("publishes the assigned week from two fills and two harvests: written == sold per fill, premium and strike proceeds apart (W-21)", () => {
     const { run, chain } = fixture();
     const built = buildExpectations(run, chain);
-    expect(expectedAt(built, "POST /graphql", "data.queueEpochs.items.length")).toBe(2);
-    expect(expectedAt(built, "POST /graphql", "data.queueEpochs.items[0].status")).toBe("settled");
-    expect(expectedAt(built, "POST /graphql", "data.queueEpochs.items[0].cycleNumber")).toBe(3);
-    expect(expectedAt(built, "POST /graphql", "data.queueEpochs.items[0].assetsSettled")).toBe("6400000000000000000");
-    expect(expectedAt(built, "POST /graphql", "data.queueEpochs.items[0].usdgSettled")).toBe("817631698");
-    expect(expectedAt(built, "POST /graphql", "data.queueEpochs.items[0].strandGen")).toBeNull();
-    expect(expectedAt(built, "POST /graphql", "data.queueEpochs.items[1].status")).toBe("open");
-    const acct = `GET /v1/account/${DEPOSITOR}`;
-    expect(expectedAt(built, acct, "lifetime.claimedUsdg.raw")).toBe("1245526793");
-    expect(expectedAt(built, acct, "lifetime.redeemedAssets.raw")).toBe("6400000000000000000");
-    expect(expectedAt(built, acct, "lifetime.redeemedUsdg.formatted")).toBe("817.631698");
-    expect(expectedAt(built, acct, "position.claimableUsdg.raw")).toBe("0");
-    expect(expectedAt(built, acct, "strand")).toBeNull();
+    const r = "GET /v1/cycles/2";
+    expect(expectedAt(built, r, "cycle.status")).toBe("assigned");
+    expect(expectedAt(built, r, "cycle.written.contracts")).toBe("5");
+    expect(expectedAt(built, r, "cycle.written.writeCount")).toBe(2);
+    expect(expectedAt(built, r, "cycle.written.claimKey")).toBe("2002");
+    expect(expectedAt(built, r, "cycle.written.firstWriteAt")).toBe(isoOf(TS(123n)));
+    expect(expectedAt(built, r, "cycle.written.lastWriteAt")).toBe(isoOf(TS(125n)));
+    expect(expectedAt(built, r, "cycle.fill.contractsSold")).toBe("5");
+    expect(expectedAt(built, r, "cycle.fill.fillCount")).toBe(2);
+    // 2 × 0.873192 + 3 × 0.873192 = 4.365960, and the unit price recovers exactly.
+    expect(expectedAt(built, r, "cycle.fill.premiumGross.raw")).toBe("4365960");
+    expect(expectedAt(built, r, "cycle.fill.unitPriceUsdg.raw")).toBe("873192");
+    expect(expectedAt(built, r, "cycle.listing.count")).toBe(1);
+    expect(expectedAt(built, r, "cycle.listing.orderHash")).toBe(hash(1002));
+    // The checkpoint (1.746384 against 25 shares) plus the terminal (2.619576 + 450 against 30).
+    expect(expectedAt(built, r, "cycle.harvest.grossUsdg.raw")).toBe("454365960");
+    expect(expectedAt(built, r, "cycle.harvest.premiumGross.raw")).toBe("4365960");
+    expect(expectedAt(built, r, "cycle.harvest.strikeProceedsUsdg.raw")).toBe("450000000");
+    expect(expectedAt(built, r, "cycle.harvest.fee.raw")).toBe("218297"); // 87319 + 130978
+    expect(expectedAt(built, r, "cycle.harvest.premiumNet.raw")).toBe("4147663"); // 1659065 + 2488598
+    expect(expectedAt(built, r, "cycle.harvest.creditedUsdg.raw")).toBe("454147663");
+    // Per share, summed per sweep: 1659065 / 25 → 66362, plus 2488598 / 30 → 82953.
+    expect(expectedAt(built, r, "cycle.harvest.premiumNetPerShare.raw")).toBe("149315");
+    // 66362 + floor(452488598 / 30) = 66362 + 15082953.
+    expect(expectedAt(built, r, "cycle.harvest.usdgPerShare.raw")).toBe("15149315");
+    expect(expectedAt(built, r, "cycle.harvest.supplyAtHarvest.raw")).toBe((30n * LOT).toString());
+    expect(expectedAt(built, r, "cycle.harvest.harvestedAt")).toBe(isoOf(TS(129n)));
+    expect(expectedAt(built, r, "cycle.settlement.contractsAssigned")).toBe("2");
+    expect(expectedAt(built, r, "cycle.settlement.assignmentUsdg.raw")).toBe("450000000");
+    expect(expectedAt(built, r, "cycle.settlement.assetsReturned.raw")).toBe((3n * LOT).toString());
+    expect(expectedAt(built, r, "cycle.settlement.bucketAssigned")).toBe("2");
+    expect(expectedAt(built, r, "cycle.settlement.strand")).toBeNull();
+    // Sized to capacity, 5 of 23 taken, the rest invalidated at lockBook: a partial fill is the story.
+    expect(expectedAt(built, r, "listings[0].status")).toBe("partially_filled");
+    expect(expectedAt(built, r, "listings[0].endReason")).toBe("lockBook");
+    expect(expectedAt(built, r, "listings[0].fill.contractsFilled")).toBe("5");
+    expect(expectedAt(built, r, "listings[0].fill.fillCount")).toBe(2);
+    expect(expectedAt(built, r, "listings[0].fill.lastFillTx")).toBe(hash(125));
+    // Newest first: the terminal harvest, then the checkpoint that saw only the first fill.
+    expect(expectedAt(built, r, "harvests.length")).toBe(2);
+    expect(expectedAt(built, r, "harvests[0].origin")).toBe("rollClose");
+    expect(expectedAt(built, r, "harvests[0].terminal")).toBe(true);
+    expect(expectedAt(built, r, "harvests[0].contractsAssigned")).toBe("2");
+    expect(expectedAt(built, r, "harvests[0].assignmentUsdg.raw")).toBe("450000000");
+    expect(expectedAt(built, r, "harvests[0].strikeProceedsUsdg.raw")).toBe("450000000");
+    expect(expectedAt(built, r, "harvests[1].origin")).toBe("checkpoint");
+    expect(expectedAt(built, r, "harvests[1].terminal")).toBe(false);
+    expect(expectedAt(built, r, "harvests[1].filled")).toBe(true);
+    expect(expectedAt(built, r, "harvests[1].contractsSold")).toBe("2");
+    expect(expectedAt(built, r, "harvests[1].contractsAssigned")).toBe("0");
+    expect(expectedAt(built, r, "harvests[1].assignmentUsdg.raw")).toBe("0");
+    expect(expectedAt(built, r, "harvests[1].premiumNetPerShare.raw")).toBe("66362");
+    expect(expectedAt(built, r, "harvests[1].supply.raw")).toBe((25n * LOT).toString());
+  });
+
+  it("publishes the stranded-then-recovered week: the retry's legs, the fee-free retry harvest, the strand drained", () => {
+    const { run, chain } = fixture();
+    const built = buildExpectations(run, chain);
+    const r = "GET /v1/cycles/3";
+    expect(expectedAt(built, r, "cycle.status")).toBe("assigned");
+    expect(expectedAt(built, r, "cycle.stranded")).toBe(true);
+    expect(expectedAt(built, r, "cycle.settlement.strand.gen")).toBe("1");
+    expect(expectedAt(built, r, "cycle.settlement.strand.recovered")).toBe(true);
+    expect(expectedAt(built, r, "cycle.settlement.strand.recoveredAt")).toBe(isoOf(TS(148n)));
+    expect(expectedAt(built, r, "cycle.settlement.strand.recoveredTx")).toBe(hash(148));
+    // The close reported zero legs; the retry's ClaimRedeemed supplies the real ones.
+    expect(expectedAt(built, r, "cycle.settlement.contractsAssigned")).toBe("1");
+    expect(expectedAt(built, r, "cycle.settlement.assignmentUsdg.raw")).toBe("225000000");
+    expect(expectedAt(built, r, "cycle.settlement.assetsReturned.raw")).toBe((3n * LOT).toString());
+    // 3.492768 of premium at the close (fee 174638) plus the live shares' 180 through the retry.
+    expect(expectedAt(built, r, "cycle.harvest.grossUsdg.raw")).toBe("183492768");
+    expect(expectedAt(built, r, "cycle.harvest.premiumGross.raw")).toBe("3492768");
+    expect(expectedAt(built, r, "cycle.harvest.strikeProceedsUsdg.raw")).toBe("180000000");
+    expect(expectedAt(built, r, "cycle.harvest.fee.raw")).toBe("174638");
+    expect(expectedAt(built, r, "cycle.harvest.premiumNet.raw")).toBe("3318130");
+    expect(expectedAt(built, r, "cycle.harvest.creditedUsdg.raw")).toBe("183318130");
+    // 3318130 / 20 → 165906 at the close; 180000000 / 16 = 11250000 at the retry.
+    expect(expectedAt(built, r, "cycle.harvest.premiumNetPerShare.raw")).toBe("165906");
+    expect(expectedAt(built, r, "cycle.harvest.usdgPerShare.raw")).toBe("11415906");
+    expect(expectedAt(built, r, "cycle.harvest.supplyAtHarvest.raw")).toBe((16n * LOT).toString());
+    expect(expectedAt(built, r, "cycle.harvest.harvestedAt")).toBe(isoOf(TS(147n)));
+    expect(expectedAt(built, r, "harvests.length")).toBe(2);
+    expect(expectedAt(built, r, "harvests[0].origin")).toBe("retry");
+    expect(expectedAt(built, r, "harvests[0].terminal")).toBe(false);
+    expect(expectedAt(built, r, "harvests[0].premiumGross.raw")).toBe("0");
+    expect(expectedAt(built, r, "harvests[0].strikeProceedsUsdg.raw")).toBe("180000000");
+    expect(expectedAt(built, r, "harvests[0].assignmentUsdg.raw")).toBe("225000000");
+    expect(expectedAt(built, r, "harvests[0].contractsSold")).toBe("4");
+    expect(expectedAt(built, r, "harvests[1].origin")).toBe("rollClose");
+    expect(expectedAt(built, r, "harvests[1].strikeProceedsUsdg.raw")).toBe("0");
+    expect(expectedAt(built, r, "harvests[1].assignmentUsdg.raw")).toBe("0");
+    expect(expectedAt(built, r, "harvests[1].contractsAssigned")).toBe("1");
+    expect(expectedAt(built, r, "strands.length")).toBe(1);
+    expect(expectedAt(built, r, "strands[0].gen")).toBe("1");
+    expect(expectedAt(built, r, "strands[0].claimKey")).toBe("3002");
+    expect(expectedAt(built, r, "strands[0].epochWad")).toBe("200000000000000000");
+    expect(expectedAt(built, r, "strands[0].epochCount")).toBe(1);
+    expect(expectedAt(built, r, "strands[0].queueWad")).toBe("200000000000000000");
+    expect(expectedAt(built, r, "strands[0].assetsIn.raw")).toBe((3n * LOT).toString());
+    expect(expectedAt(built, r, "strands[0].usdgIn.raw")).toBe("225000000");
+    // The depositor's entry took the whole queue share: nothing left of the 0.6 NVDA / 45 USDG.
+    expect(expectedAt(built, r, "strands[0].wadLeft")).toBe("0");
+    expect(expectedAt(built, r, "strands[0].assetsLeft.raw")).toBe("0");
+    expect(expectedAt(built, r, "strands[0].usdgLeft.raw")).toBe("0");
+    expect(expectedAt(built, r, "strands[0].settledCount")).toBe(1);
+  });
+
+  it("pins the vault, the tape, the strands, the depositor and the queue epochs", () => {
+    const { run, chain } = fixture();
+    const built = buildExpectations(run, chain);
     const v = "GET /v1/vault";
-    expect(expectedAt(built, v, "lifetime.premiumGross.raw")).toBe("40166832");
-    expect(expectedAt(built, v, "lifetime.premiumNet.raw")).toBe("38158492");
-    expect(expectedAt(built, v, "lifetime.strikeProceedsUsdg.raw")).toBe("2025000000");
-    expect(expectedAt(built, v, "lifetime.creditedUsdg.raw")).toBe("2063158492");
-    expect(expectedAt(built, v, "lifetime.protocolFee.raw")).toBe("2008340");
+    expect(expectedAt(built, v, "lifetime.premiumGross.raw")).toBe("7858728"); // 4365960 + 3492768
+    expect(expectedAt(built, v, "lifetime.protocolFee.raw")).toBe("392935"); // 218297 + 174638
+    expect(expectedAt(built, v, "lifetime.premiumNet.raw")).toBe("7465793"); // 4147663 + 3318130
+    expect(expectedAt(built, v, "lifetime.strikeProceedsUsdg.raw")).toBe("630000000"); // 450 + the live 180
+    expect(expectedAt(built, v, "lifetime.creditedUsdg.raw")).toBe("637465793");
+    // The whole strike USDG the claims returned, the queue's 45 included: above the harvested 630.
+    expect(expectedAt(built, v, "lifetime.assignmentUsdg.raw")).toBe("675000000");
     expect(expectedAt(built, v, "lifetime.cyclesArmed")).toBe(3);
-    expect(expectedAt(built, v, "usdg.claimed.raw")).toBe("2063158491");
-    expect(expectedAt(built, v, "usdg.protocolFeeBps")).toBe(500);
-    expect(expectedAt(built, v, "usdg.feeRecipient")).toBe(FEE_SAFE.toLowerCase());
+    expect(expectedAt(built, v, "lifetime.cyclesFilled")).toBe(2);
+    expect(expectedAt(built, v, "lifetime.cyclesUnfilled")).toBe(1);
+    expect(expectedAt(built, v, "lifetime.cyclesAssigned")).toBe(2);
+    expect(expectedAt(built, v, "lifetime.cyclesStranded")).toBe(1);
     expect(expectedAt(built, v, "stranded.stranded")).toBe(false);
+    expect(expectedAt(built, v, "stranded.gen")).toBe("1");
+    expect(expectedAt(built, v, "stranded.lastResolvedGen")).toBe("1");
+    expect(expectedAt(built, v, "stranded.cycle")).toBeNull();
+    expect(expectedAt(built, v, "stranded.claimKey")).toBeNull();
+    expect(expectedAt(built, v, "stranded.lockedAssets")).toBeNull();
+    expect(expectedAt(built, v, "phase.clearFeesEnabled")).toBe(false);
     expect(expectedAt(built, v, "queue.canSettle")).toBe(false);
-    expect(expectedAt(built, v, "week.listing.hash")).toBeNull();
-    // 9.6 NVDA at 95% utilisation = 9.12 lots → 9 contracts, nothing written: capacity 9.
-    expect(expectedAt(built, v, "week.assignmentLive.capacity")).toBe("9");
+    expect(expectedAt(built, v, "queue.epochId")).toBe("3");
+    expect(expectedAt(built, v, "usdg.claimed.raw")).toBe("637465792");
+    expect(expectedAt(built, v, "usdg.feeRecipient")).toBe(FEE_SAFE.toLowerCase());
+    expect(expectedAt(built, v, "week.cycle.cycle")).toBe(3);
     expect(expectedAt(built, v, "week.option.optionId")).toBe("3001");
+    expect(expectedAt(built, v, "week.option.claimKey")).toBe("3002");
+    expect(expectedAt(built, v, "week.listing.hash")).toBeNull();
+    // 14.1333 NVDA at 95% = 13.43 lots → 13 contracts, nothing written.
+    expect(expectedAt(built, v, "week.assignmentLive.capacity")).toBe("13");
+    // X-3: the last TERMINAL harvest is cycle 3's close, not the retry that came after it.
+    expect(expectedAt(built, v, "lastHarvest.origin")).toBe("rollClose");
+    expect(expectedAt(built, v, "lastHarvest.txHash")).toBe(hash(147));
+    expect(expectedAt(built, v, "lastHarvest.grossUsdg.raw")).toBe("3492768");
     expect(expectedAt(built, v, "lastClosedCycle.cycle")).toBe(3);
-    expect(expectedAt(built, "GET /v1/strands", "count")).toBe(0);
+
+    expect(expectedAt(built, "GET /v1/cycles", "count")).toBe(3);
+    expect(expectedAt(built, "GET /v1/cycles", "totals.stranded")).toBe(1);
+    expect(expectedAt(built, "GET /v1/cycles", "cycles[0].cycle")).toBe(3);
+    expect(expectedAt(built, "GET /v1/activity", "count")).toBe(3);
+    expect(expectedAt(built, "GET /v1/activity", "harvests[0].txHash")).toBe(hash(147));
+    expect(expectedAt(built, "GET /v1/activity?include=all", "count")).toBe(5);
+    expect(expectedAt(built, "GET /v1/activity?include=all", "harvests[0].origin")).toBe("retry");
+    expect(expectedAt(built, "GET /v1/activity?include=all", "harvests[3].origin")).toBe("checkpoint");
+    expect(expectedAt(built, "GET /v1/listings", "count")).toBe(3);
+    expect(expectedAt(built, "GET /v1/listings", "listings[0].orderHash")).toBe(hash(1003));
+    expect(expectedAt(built, "GET /v1/strands", "count")).toBe(1);
+    expect(expectedAt(built, "GET /v1/strands", "stranded")).toBe(false);
+    expect(expectedAt(built, "GET /v1/strands", "strands[0].recovered")).toBe(true);
+
+    const acct = `GET /v1/account/${DEPOSITOR}`;
+    expect(expectedAt(built, acct, "lifetime.deposited.raw")).toBe((30n * LOT).toString());
+    expect(expectedAt(built, acct, "lifetime.depositCount")).toBe(2);
+    expect(expectedAt(built, acct, "lifetime.redeemedAssets.raw")).toBe("12866666666666666666");
+    expect(expectedAt(built, acct, "lifetime.redeemedUsdg.raw")).toBe("196493158");
+    expect(expectedAt(built, acct, "lifetime.claimedUsdg.raw")).toBe("485972634");
+    expect(expectedAt(built, acct, "lifetime.withdrawn.raw")).toBe("0");
+    expect(expectedAt(built, acct, "queue.epochId")).toBe("0");
+    expect(expectedAt(built, acct, "queue.settled")).toBe(false);
+    expect(expectedAt(built, acct, "queue.claimable")).toBe(false);
+    expect(expectedAt(built, acct, "queue.deferredUsdg.raw")).toBe("0");
+    expect(expectedAt(built, acct, "strand")).toBeNull();
+
+    const g = "POST /graphql";
+    expect(expectedAt(built, g, "data.queueEpochs.items.length")).toBe(3);
+    expect(expectedAt(built, g, "data.queueEpochs.items[0].status")).toBe("settled");
+    expect(expectedAt(built, g, "data.queueEpochs.items[0].cycleNumber")).toBe(2);
+    expect(expectedAt(built, g, "data.queueEpochs.items[0].strandGen")).toBeNull();
+    expect(expectedAt(built, g, "data.queueEpochs.items[0].sharesClaimed")).toBe((10n * LOT).toString());
+    expect(expectedAt(built, g, "data.queueEpochs.items[1].cycleNumber")).toBe(3);
+    expect(expectedAt(built, g, "data.queueEpochs.items[1].strandGen")).toBe("1");
+    expect(expectedAt(built, g, "data.queueEpochs.items[1].strandWad")).toBe("200000000000000000");
+    expect(expectedAt(built, g, "data.queueEpochs.items[1].strandWadClaimed")).toBe("200000000000000000");
+    expect(expectedAt(built, g, "data.queueEpochs.items[1].assetsSettled")).toBe("2933333333333333333");
+    expect(expectedAt(built, g, "data.queueEpochs.items[2].status")).toBe("open");
+    expect(expectedAt(built, g, "data.queueEpochs.items[2].cycleNumber")).toBeNull();
+    expect(expectedAt(built, g, "data.vaultState.cyclesStranded")).toBe(1);
+    expect(expectedAt(built, g, "data.vaultState.stranded")).toBe(false);
+    expect(expectedAt(built, g, "data.vaultState.strandedCycleNumber")).toBeNull();
+    expect(expectedAt(built, g, "data.vaultState.optionId")).toBeNull();
+    expect(expectedAt(built, g, "data.vaultState.claimKey")).toBeNull();
+    expect(expectedAt(built, g, "data.vaultState.lockedCollateral")).toBe("0");
+    expect(expectedAt(built, g, "data.vaultState.totalFeeSwept")).toBe("392935");
+    expect(expectedAt(built, g, "data.vaultState.lifetimeAssignmentUsdg")).toBe("675000000");
+  });
+
+  it("a run cut off at the stranded close publishes the week as stranded and the depositor's pending share", () => {
+    const { run, chain } = stillStranded();
+    const built = buildExpectations(run, chain);
+    expect(built.disagreements).toEqual([]);
+    const r = "GET /v1/cycles/3";
+    expect(expectedAt(built, r, "cycle.status")).toBe("stranded");
+    expect(expectedAt(built, r, "cycle.settlement.strand.recovered")).toBe(false);
+    expect(expectedAt(built, r, "cycle.settlement.strand.recoveredTx")).toBeNull();
+    expect(expectedAt(built, r, "cycle.settlement.assignmentUsdg.raw")).toBe("0");
+    expect(expectedAt(built, r, "cycle.settlement.assetsReturned.raw")).toBe("0");
+    expect(expectedAt(built, r, "cycle.harvest.strikeProceedsUsdg.raw")).toBe("0");
+    expect(expectedAt(built, r, "cycle.harvest.supplyAtHarvest.raw")).toBe((20n * LOT).toString());
+    expect(expectedAt(built, r, "harvests.length")).toBe(1);
+    expect(expectedAt(built, r, "strands[0].recovered")).toBe(false);
+    expect(expectedAt(built, r, "strands[0].queueWad")).toBe("0");
+    expect(expectedAt(built, r, "strands[0].epochWad")).toBe("200000000000000000");
+
+    const v = "GET /v1/vault";
+    expect(expectedAt(built, v, "stranded.stranded")).toBe(true);
+    expect(expectedAt(built, v, "stranded.cycle")).toBe(3);
+    expect(expectedAt(built, v, "stranded.claimKey")).toBe("3002");
+    expect(expectedAt(built, v, "stranded.since")).toBe(isoOf(TS(147n)));
+    expect(expectedAt(built, v, "stranded.lockedAssets.raw")).toBe((3n * LOT).toString());
+    expect(expectedAt(built, v, "stranded.remainingWad")).toBe("800000000000000000");
+    expect(expectedAt(built, v, "week.option.optionId")).toBe("3001");
+    expect(expectedAt(built, v, "phase.depositsOpen")).toBe(false);
+    expect(expectedAt(built, v, "lifetime.strikeProceedsUsdg.raw")).toBe("450000000");
+    expect(expectedAt(built, v, "lifetime.assignmentUsdg.raw")).toBe("450000000");
+    expect(expectedAt(built, "GET /v1/strands", "stranded")).toBe(true);
+
+    const acct = `GET /v1/account/${DEPOSITOR}`;
+    expect(expectedAt(built, acct, "queue.epochId")).toBe("2");
+    expect(expectedAt(built, acct, "queue.settled")).toBe(true);
+    expect(expectedAt(built, acct, "queue.claimable")).toBe(true);
+    expect(expectedAt(built, acct, "queue.epochSettledAt")).toBe(isoOf(TS(147n)));
+    expect(expectedAt(built, acct, "strand.gen")).toBe("1");
+    expect(expectedAt(built, acct, "strand.wad")).toBe("0");
+    expect(expectedAt(built, acct, "strand.epochWad")).toBe("200000000000000000");
+    expect(expectedAt(built, acct, "strand.recovered")).toBe(false);
+    expect(expectedAt(built, acct, "strand.strand.gen")).toBe("1");
+    expect(expectedAt(built, acct, "strand.strand.assetsIn.raw")).toBe("0");
+
+    const g = "POST /graphql";
+    expect(expectedAt(built, g, "data.vaultState.stranded")).toBe(true);
+    expect(expectedAt(built, g, "data.vaultState.strandedCycleNumber")).toBe(3);
+    expect(expectedAt(built, g, "data.vaultState.optionId")).toBe("3001");
+    expect(expectedAt(built, g, "data.vaultState.claimKey")).toBe("3002");
+    expect(expectedAt(built, g, "data.vaultState.lockedCollateral")).toBe((4n * LOT).toString());
+    expect(expectedAt(built, g, "data.queueEpochs.items[1].strandWadClaimed")).toBe("0");
   });
 
   it("reports a run.json figure the chain contradicts instead of choosing one", () => {
     const { run, chain } = fixture();
-    chain.harvests[2] = { ...chain.harvests[2]!, net: 2044_079245n };
-    chain.queue.settled[0] = { ...chain.queue.settled[0]!, usdgOut: 817_631699n };
+    chain.harvests[2] = { ...chain.harvests[2]!, net: 452_488597n };
+    run.cycles[2]!.retryTx = null;
     const built = buildExpectations(run, chain);
     expect(built.disagreements).toEqual([
-      "cycle 3 Harvest.netUsdg: run.json says 2044079246, the chain says 2044079245",
-      "cycle 3 queue USDG: run.json says 817631698, the chain says 817631699",
+      "cycle 2 Harvest.netUsdg: run.json says 452488598, the chain says 452488597",
+      `cycle 3 retry tx: run.json says null, the chain says ${hash(148)}`,
     ]);
   });
 
   it("reports a write that does not match its fill: written must equal sold, per fill", () => {
     const { run, chain } = fixture();
-    chain.cycles[0]!.writes[0] = { ...chain.cycles[0]!.writes[0]!, contracts: 22n, collateral: 22n * LOT };
+    chain.cycles[1]!.writes[0] = { ...chain.cycles[1]!.writes[0]!, contracts: 1n };
     const built = buildExpectations(run, chain);
-    expect(built.disagreements).toContain("cycle 1 contracts sold = sum of CallsWritten: run.json says 23, the chain says 22");
-    expect(built.disagreements).toContain("cycle 1 contracts sold (Seaport) = written (CallsWritten): run.json says 23, the chain says 22");
+    expect(built.disagreements).toContain("cycle 2 contracts sold (Seaport) = written (CallsWritten): run.json says 5, the chain says 4");
+    expect(built.disagreements).toContain("cycle 2 collateral = contracts x lot: run.json says 4000000000000000000, the chain says 5000000000000000000");
   });
 
-  it("refuses a dry run that did not finish", () => {
+  it("reports a keeper that did not notice its week stranded", () => {
     const { run, chain } = fixture();
-    delete (run.cycle3 as Record<string, unknown>).queue;
-    expect(() => buildExpectations(run, chain)).toThrow(/run\.json has no cycle3\.queue/);
+    run.cycles[2]!.stranded = false;
+    const built = buildExpectations(run, chain);
+    expect(built.disagreements).toContain("cycle 3 stranded: run.json says false, the chain says true");
+  });
+
+  it("refuses a run.json that did not record what it must", () => {
+    const { run, chain } = fixture();
+    delete (run.blocks as Partial<RunJson["blocks"]>).lastBlock;
+    expect(() => buildExpectations(run, chain)).toThrow(/run\.json has no blocks\.lastBlock/);
+    const bare = fixture();
+    delete (bare.run as Partial<RunJson>).cycles;
+    expect(() => buildExpectations(bare.run, bare.chain)).toThrow(/run\.json has no cycles/);
   });
 });
 
 describe("helpers", () => {
-  it("runBlocks reads the vault's deploy block and the last block any transaction landed in", () => {
-    expect(runBlocks(fixture().run)).toEqual({ vaultDeployBlock: 104n, lastBlock: 140n });
+  it("runBlocks reads the vault's deploy block and the run's last block", () => {
+    expect(runBlocks(fixture().run)).toEqual({ vaultDeployBlock: 104n, lastBlock: 150n });
   });
 
   it("isoOf mirrors the API: 0 and null are null", () => {
@@ -360,5 +722,16 @@ describe("helpers", () => {
     expect(capacityOf(p, 25n * LOT, 0n)).toBe(23n);
     expect(capacityOf(p, 25n * LOT, 23n)).toBe(0n);
     expect(capacityOf(p, 1000n * LOT, 10n)).toBe(40n);
+  });
+
+  it("epochStrandDrawdown is Vault._settleEpochEntry: pro rata, the last claimant taking the rest", () => {
+    // An epoch of 10 shares owning 0.4 of a claim; entries of 6 then 4.
+    const taken = epochStrandDrawdown(10n * WAD, 4n * 10n ** 17n, [{ shares: 6n * WAD }, { shares: 4n * WAD }]);
+    expect(taken).toEqual([24n * 10n ** 16n, 16n * 10n ** 16n]);
+    // Awkward amounts leave nothing behind.
+    const awkward = epochStrandDrawdown(7n * WAD + 3n, 123_456_789_012_345_678n, [{ shares: 2n * WAD + 1n }, { shares: 3n * WAD }, { shares: 2n * WAD + 2n }]);
+    expect(awkward.reduce((s, x) => s + x, 0n)).toBe(123_456_789_012_345_678n);
+    // No share, nothing drawn.
+    expect(epochStrandDrawdown(10n * WAD, 0n, [{ shares: 10n * WAD }])).toEqual([0n]);
   });
 });

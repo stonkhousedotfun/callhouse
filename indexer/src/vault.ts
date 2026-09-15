@@ -1,9 +1,10 @@
 import { ponder } from "ponder:registry";
 import schema from "ponder:schema";
 
+import { valoremClearAbi } from "../abis/valoremClear";
 import { vaultAbi } from "../abis/vault";
 import { constructorSettings } from "../lib/deployment";
-import { VAULT, WAD } from "../lib/env";
+import { CLEARINGHOUSE, VAULT, WAD } from "../lib/env";
 import { addHarvest, splitHarvest } from "../lib/harvest";
 import {
   PHASE,
@@ -27,6 +28,7 @@ import {
   endedListingStatus,
   entryStrandShare,
   harvestOrigin,
+  optionIdAfterClose,
   recoveredStatus,
   settlementCycle,
   strandRecovery,
@@ -117,8 +119,9 @@ ponder.on("Vault:Transfer", async ({ event, context }) => {
  * has to attribute the flow to the receiver and stamp a snapshot.
  *
  * Deposits are refused (`DepositsClosed`, `maxDeposit() == 0`) outside Idle and Listed, after
- * the exercise timestamp, with unclaimed assignment proceeds, while a claim is stranded, and
- * while the reserve is unbacked — none of which is an event; the API reads `maxDeposit` live.
+ * the exercise timestamp, with unclaimed assignment proceeds, while a claim is stranded, while
+ * the reserve is unbacked, and below the share-price floor — none of which is an event; the API
+ * reads `maxDeposit` live.
  */
 ponder.on("Vault:Deposit", async ({ event, context }) => {
   const { owner, assets } = event.args;
@@ -378,9 +381,10 @@ ponder.on("Vault:ReserveHaircut", async ({ event, context }) => {
 ponder.on("Vault:UsdgLegDeferred", async ({ event, context }) => {
   const { owner, receiver, usdgOwed } = event.args;
 
-  const u = await getUser(context.db, owner, event);
+  // `getUser` stamps the owner's last activity; the row itself is patched with the figure the
+  // contract still owes, which is the whole USDG leg (the leg moves entirely or not at all).
+  await getUser(context.db, owner, event);
   await context.db.update(schema.user, { address: owner }).set({ deferredUsdg: usdgOwed });
-  void u;
 
   // USDG_LEG_DEFERRED: a stablecoin-side action is holding a redeemer's USDG.
   log.warn({ owner, receiver, usdgOwed, txHash: event.transaction.hash }, "usdg leg of a redemption deferred");
@@ -430,9 +434,10 @@ ponder.on("Vault:CompleteRedeem", async ({ event, context }) => {
  * every write is reported by its own `CallsWritten` from inside the Seaport fill that sold it.
  *
  * The vault numbers its own cycles (no registry), so this is what creates the week's row. The
- * option's window is read from the vault at this block (`cycleExerciseTs` / `cycleExpiryTs`,
- * both set before the emit): the tuple is immutable in Valorem, so the read is as deterministic
- * as a log and reproducible on a backfill.
+ * option's window is the tuple Valorem holds for the id — `clear.option(optionId)`, immutable
+ * from `newOptionType` on, so the read is as deterministic as a log and reproducible on a
+ * backfill. The vault's own `cycleExerciseTs` / `cycleExpiryTs` (its snapshot of that tuple, set
+ * before the emit) are the fallback for a clearinghouse that does not answer at this block.
  */
 ponder.on("Vault:RollOpen", async ({ event, context }) => {
   const { cycleNumber, optionId, contractsCount, strikeUsdg } = event.args;
@@ -446,8 +451,22 @@ ponder.on("Vault:RollOpen", async ({ event, context }) => {
       return 0n;
     }
   };
-  const exerciseTimestamp = await readTs("cycleExerciseTs");
-  const expiryTimestamp = await readTs("cycleExpiryTs");
+  let exerciseTimestamp = 0n;
+  let expiryTimestamp = 0n;
+  try {
+    const option = await context.client.readContract({
+      abi: valoremClearAbi,
+      address: CLEARINGHOUSE,
+      functionName: "option",
+      args: [optionId],
+    });
+    exerciseTimestamp = BigInt(option.exerciseTimestamp);
+    expiryTimestamp = BigInt(option.expiryTimestamp);
+  } catch {
+    log.warn({ cycleNumber, optionId, txHash: event.transaction.hash }, "clear.option() unreadable at RollOpen; falling back to the vault's snapshot of the window");
+  }
+  if (exerciseTimestamp === 0n) exerciseTimestamp = await readTs("cycleExerciseTs");
+  if (expiryTimestamp === 0n) expiryTimestamp = await readTs("cycleExpiryTs");
   if (exerciseTimestamp === 0n || expiryTimestamp === 0n) {
     log.warn({ cycleNumber, optionId, txHash: event.transaction.hash }, "option window unreadable at RollOpen; timestamps stay 0 on the index");
   }
@@ -658,6 +677,11 @@ ponder.on("Vault:RollClose", async ({ event, context }) => {
     // A stranded claim keeps its collateral locked; `Vault:ClaimRedeemed` clears it otherwise
     // (one log earlier) and clears it again when the retry lands.
     lockedCollateral: state.stranded ? state.lockedCollateral : 0n,
+    // The armed type survives the close only while its claim is stranded: an unfilled week
+    // forgets it on chain (`optionId = 0`, no claim to redeem) and a redeemed one already had
+    // it cleared by `Vault:ClaimRedeemed`. Mirrored here so the vault row never names an
+    // option the contract has let go of.
+    optionId: optionIdAfterClose(state),
     lifetimeAssignmentUsdg: state.lifetimeAssignmentUsdg + usdgFromAssignment,
     // Read by the Harvest and QueueSettled handlers, a few logs later in this same transaction.
     rollCloseTx: event.transaction.hash,

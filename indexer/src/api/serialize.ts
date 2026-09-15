@@ -4,8 +4,8 @@ import { ASSET_DECIMALS, USDG_DECIMALS } from "../../lib/env";
 
 /**
  * JSON cannot carry a bigint, and a uint256 cannot survive `Number`. Every integer that
- * crosses this API is therefore a DECIMAL STRING in base units — the same convention
- * Overcall's own API uses for uint values.
+ * crosses this API is therefore a DECIMAL STRING in base units, the convention viem and every
+ * Seaport client already use for uint values, so a consumer never has to guess a scale.
  */
 export type Json = string | number | boolean | null | Json[] | { [k: string]: Json };
 

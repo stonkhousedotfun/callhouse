@@ -2,73 +2,86 @@
  * What every API route must say, built from the keeper dry run's record (run.json) and the fork's
  * own logs and views (chain.ts). Pure: no network, no Ponder.
  *
- * Precedence. A figure the dry run recorded — and asserted on chain while it ran — is taken from
- * run.json, and the chain's copy of it is cross-checked into `disagreements`. A figure the dry run
- * never recorded (supply at harvest, block timestamps, the Seaport counter, Valorem's bucket, the
- * live views the API layers on top) comes from the chain. Nothing is ever taken from the indexer.
+ * Precedence. The chain is the authority for every figure the API publishes: the expectations are
+ * derived from logs and views the way the product defines them (README "The money columns the
+ * site quotes"), never copied from the indexer's lib/harvest.ts, so an arithmetic slip in the
+ * indexer cannot agree with itself. run.json is the keeper's own account of what it drove, and
+ * every figure it records is cross-checked against the chain into `disagreements`; the run fails
+ * on any of them, because a dry run that misdescribes its own week is not a dry run.
  *
- * Every expected money figure is derived here the way the product defines it (README "The money
- * columns the site quotes"), not copied from the indexer's lib/harvest.ts, so an arithmetic slip
- * in the indexer cannot agree with itself.
+ * THE DRY RUN THIS EXPECTS (write on fill, no registry): cycles armed with `rollOpen(id)` on option
+ * types the keeper created itself, closed in order, each one of
  *
- * THE DRY RUN THIS EXPECTS (write on fill, no registry): three cycles armed with `rollOpen(id)` on
- * option types the keeper created itself; cycle 1 filled in full and expired out of the money;
- * cycle 2 listed and unfilled, its listing invalidated at `lockBook`; cycle 3 filled in full with
- * 9 of 23 assigned at the strike and 10 of 25 shares queued and settled at the close; the
- * depositor claimed USDG and collected the queue; no claim stranded. The run.json fields read are
- * the `KeeperCycleRow` / `KeeperListingRow` / `RunJson` types below and the `cycleN.*` paths
- * named in `deriveWeek`; `runValue` fails loudly on a missing one.
+ *   unfilled    listed, nobody bought, the listing invalidated at `lockBook`, a zero harvest;
+ *   assigned    bought in several fills (each fill its own `CallsWritten`), some contracts
+ *               exercised and assigned at the strike, a deposit while Listed (a checkpoint
+ *               harvest), a queued redeem settled at the close and collected;
+ *   stranded    bought, then the USDG issuer froze the vault so `rollClose` could not redeem
+ *               the claim (`ClaimStranded`, zero legs, the queue's epoch taking its share), then
+ *               unfrozen and `retryStrandedClaim` redeemed it (`StrandedClaimRecovered`, the
+ *               retry's `Harvest` under the stranded cycle's number) and the shares were paid.
+ *
+ * Nothing here assumes which cycle number is which scenario: every week is derived from what its
+ * logs say, and the scenario-specific checks switch on the logs (a `ClaimStranded` present, a
+ * fill present). The run.json fields read are exactly the `RunJson` / `RunCycle` types below;
+ * `runValue` fails loudly on a missing one, naming the path, so a keeper that changes its
+ * record shape is caught before a single expectation is compared.
  */
 import { formatUnits, keccak256, toHex } from "viem";
 
-import type { ChainCycle, ChainFacts, ChainHarvest, ChainListing } from "./chain.ts";
+import type { ChainCycle, ChainFacts, ChainHarvest, ChainListing, ChainStrand } from "./chain.ts";
 import type { Expectation, Json } from "./diff.ts";
 
 /*//////////////////////////////////////////////////////////////
                        run.json (the fields read)
 //////////////////////////////////////////////////////////////*/
 
-export type KeeperCycleRow = {
-  cycle_number: number;
-  option_id: string;
-  strike_usdg6: string;
-  /** Contracts SOLD, which under write on fill is also the number written. 0 on an unfilled week. */
-  contracts: number;
-  status: string;
-  roll_open_tx: string | null;
-  lock_tx: string | null;
-  roll_close_tx: string | null;
-  gross_usdg6: string | null;
-  fee_usdg6: string | null;
-  net_usdg6: string | null;
-  contracts_assigned: number;
-  assets_returned?: string | null;
-  usdg_from_assignment?: string | null;
+/** One Seaport fill of the cycle's listing, as the keeper saw it land. */
+export type RunFill = {
+  txHash: string;
+  /** Contracts moved; equals the fill's `CallsWritten.contractsCount`. */
+  contracts: string | number;
+  /** The one USDG consideration item, to the vault. */
+  grossUsdg6: string | number;
 };
 
-export type KeeperListingRow = {
-  order_hash: string;
-  cycle_number: number;
-  seq: number;
-  option_id: string;
-  contracts: string;
-  unit_price6: string;
-  gross_usdg6: string;
-  status: string;
-  approve_tx: string | null;
+/** One cycle, as the keeper recorded it. Every field is cross-checked against the chain. */
+export type RunCycle = {
+  cycleNumber: number;
+  /** The armed Valorem option id, decimal. */
+  optionId: string;
+  strikeUsdg6: string | number;
+  exerciseTimestamp: string | number;
+  expiryTimestamp: string | number;
+  rollOpenTx: string;
+  /** Null when nobody called `lockBook` (a `rollClose` from Listed is legal). */
+  lockTx: string | null;
+  rollCloseTx: string;
+  /** In order. Empty on an unfilled week. */
+  fills: RunFill[];
+  /** `RollClose.contractsAssignedCount`, read before the redeem so it is real on a stranded close too. */
+  contractsAssigned: string | number;
+  /** The terminal `Harvest` inside `rollClose`, from its receipt. */
+  harvest: { gross: string | number; fee: string | number; net: string | number };
+  /** True when the close could not redeem the claim (`ClaimStranded` in the rollClose receipt). */
+  stranded: boolean;
+  /** The `retryStrandedClaim` transaction that redeemed it; null when never stranded or still stranded. */
+  retryTx: string | null;
+  /** What the claim returned: `RollClose`'s legs on an ordinary close, `ClaimRedeemed`'s at the retry, 0 while stranded. */
+  assetsReturned: string | number;
+  usdgFromAssignment: string | number;
 };
 
 export type RunJson = {
   forkBlock: string;
   chainId: number;
   error: string | null;
-  actors: Record<string, string>;
-  addresses: Record<string, string>;
-  cycle1: Record<string, unknown>;
-  cycle2: Record<string, unknown>;
-  cycle3: Record<string, unknown>;
-  harnessTxs: Array<{ label: string; by: string; hash: string; block: string }>;
-  db: { cycles: KeeperCycleRow[]; listings: KeeperListingRow[]; txs: Array<{ hash: string; block_number: number | null }> };
+  /** `admin` and `keeper` hold the two roles; `depositor` is the account `/v1/account` is checked for. */
+  actors: { admin: string; keeper: string; depositor: string } & Record<string, string>;
+  addresses: { Vault: string } & Record<string, string>;
+  /** The vault's deploy block (START_BLOCK) and the block of the run's last transaction (END_BLOCK). */
+  blocks: { vaultDeployBlock: string | number; lastBlock: string | number };
+  cycles: RunCycle[];
 };
 
 /** Walk `a.b.c` into run.json and fail loudly if the dry run did not record it. */
@@ -76,28 +89,24 @@ export function runValue(run: RunJson, path: string): unknown {
   let cur: unknown = run;
   for (const key of path.split(".")) {
     if (cur === null || typeof cur !== "object" || !(key in (cur as object))) {
-      throw new Error(`run.json has no ${path}. Did the dry run finish all three cycles? (run.error: ${run.error ?? "none"})`);
+      throw new Error(`run.json has no ${path}. Did the dry run finish every cycle? (run.error: ${run.error ?? "none"})`);
     }
     cur = (cur as Record<string, unknown>)[key];
   }
   return cur;
 }
 
-const runBig = (run: RunJson, path: string): bigint => {
-  const v = runValue(run, path);
-  if (typeof v !== "string" && typeof v !== "number" && typeof v !== "bigint") throw new Error(`run.json ${path} is not a number: ${JSON.stringify(v)}`);
+const big = (v: unknown, what: string): bigint => {
+  if (typeof v !== "string" && typeof v !== "number" && typeof v !== "bigint") throw new Error(`run.json ${what} is not a number: ${JSON.stringify(v)}`);
   return BigInt(v);
 };
 
-/** Block bounds of the dry run: the vault's deploy block and the last tx. */
+/** Block bounds of the dry run: the vault's deploy block and the last transaction's block. */
 export function runBlocks(run: RunJson): { vaultDeployBlock: bigint; lastBlock: bigint } {
-  const deploy = run.harnessTxs.find((t) => t.label === "deploy Vault");
-  if (deploy === undefined) throw new Error('run.json harnessTxs has no "deploy Vault"');
-  const blocks = [
-    ...run.harnessTxs.map((t) => BigInt(t.block)),
-    ...run.db.txs.filter((t) => t.block_number !== null).map((t) => BigInt(t.block_number as number)),
-  ];
-  return { vaultDeployBlock: BigInt(deploy.block), lastBlock: blocks.reduce((m, b) => (b > m ? b : m), 0n) };
+  return {
+    vaultDeployBlock: big(runValue(run, "blocks.vaultDeployBlock"), "blocks.vaultDeployBlock"),
+    lastBlock: big(runValue(run, "blocks.lastBlock"), "blocks.lastBlock"),
+  };
 }
 
 /*//////////////////////////////////////////////////////////////
@@ -108,6 +117,7 @@ const USDG_DECIMALS = 6;
 const ASSET_DECIMALS = 18;
 const ONE = 10n ** 18n;
 const LOT = 10n ** 18n;
+const WAD = 10n ** 18n;
 const ZERO_HASH = `0x${"0".repeat(64)}`;
 
 /** The API's `iso()`: unix seconds to ISO 8601, and 0 / null to null. */
@@ -115,6 +125,9 @@ export const isoOf = (secs: bigint | null | undefined): string | null =>
   secs === null || secs === undefined || secs === 0n ? null : new Date(Number(secs) * 1000).toISOString();
 
 const lower = (s: string) => s.toLowerCase();
+const min = (a: bigint, b: bigint) => (a < b ? a : b);
+const sum = <T>(xs: readonly T[], f: (x: T) => bigint) => xs.reduce((s, x) => s + f(x), 0n);
+const perShare = (amount: bigint, supply: bigint) => (supply === 0n ? 0n : (amount * ONE) / supply);
 
 /** `Policy.maxContracts(totalAssets) − contractsWritten`, as the API publishes `week.assignmentLive.capacity`. */
 export const capacityOf = (p: { maxUtilizationBps: number; maxContractsCap: bigint }, totalAssets: bigint, written: bigint): bigint => {
@@ -122,6 +135,25 @@ export const capacityOf = (p: { maxUtilizationBps: number; maxContractsCap: bigi
   const max = byUtilization < p.maxContractsCap ? byUtilization : p.maxContractsCap;
   return max > written ? max - written : 0n;
 };
+
+/**
+ * How an epoch's share of a stranded claim is drawn down as its entries settle, exactly as
+ * `Vault._settleEpochEntry` does it: pro rata by shares against what the epoch still holds, the
+ * last claimant (`shares == sharesRemaining`) taking the rest. Returns the WAD each entry took, in
+ * order, so both `queue_epoch.strandWadClaimed` and an owner's staged share can be expected.
+ */
+export function epochStrandDrawdown(sharesSettled: bigint, strandWad: bigint, entries: readonly { shares: bigint }[]): bigint[] {
+  let remaining = sharesSettled;
+  let wad = strandWad;
+  const taken: bigint[] = [];
+  for (const e of entries) {
+    const mine = wad === 0n ? 0n : e.shares >= remaining ? wad : (wad * e.shares) / remaining;
+    taken.push(mine);
+    wad -= mine;
+    remaining = remaining > e.shares ? remaining - e.shares : 0n;
+  }
+  return taken;
+}
 
 class Builder {
   readonly expectations: Expectation[] = [];
@@ -176,51 +208,30 @@ type RouteWriter = ReturnType<Builder["route"]>;
                          THE WEEK, DERIVED
 //////////////////////////////////////////////////////////////*/
 
-/** One week as the product defines it, every figure derived rather than copied. */
-export type WeekTruth = {
+/** One `Harvest` as the API publishes it: the event's amounts and the split the product defines. */
+export type HarvestTruth = {
   cycleNumber: number;
-  status: "closed" | "unfilled" | "assigned";
-  exerciseTimestamp: bigint;
-  expiryTimestamp: bigint;
-  optionId: bigint;
-  /** Null on an unfilled week: nothing was written, so no claim was opened. */
-  claimKey: bigint | null;
-  strike: bigint;
-  /** Contracts written == sold: the sum of the fills' `CallsWritten`. */
-  contracts: bigint;
-  collateral: bigint;
-  writeCount: number;
-  firstWriteAt: bigint | null;
-  lastWriteAt: bigint | null;
-  openedAt: bigint;
-  txOpen: string;
-  listing: ListingTruth;
-  sold: bigint;
-  fillCount: number;
-  premiumGross: bigint;
-  firstFillAt: bigint | null;
-  lastFillAt: bigint | null;
-  lockedAt: bigint;
-  assigned: bigint;
-  assetsReturned: bigint;
-  marketExercised: bigint;
-  bucketIndex: bigint | null;
-  bucketAssigned: bigint;
-  closedAt: bigint;
-  txClose: string;
-  /** Harvest gross / fee / net of the one terminal harvest. */
+  origin: "rollClose" | "checkpoint" | "retry";
+  txHash: string;
+  block: bigint;
+  timestamp: bigint;
+  /** The cycle had sold something when this harvest landed. */
+  filled: boolean;
   gross: bigint;
   fee: bigint;
   net: bigint;
+  /** The part of `gross` that is strike proceeds: `RollClose.usdgFromAssignment` on the terminal harvest, the live shares' part of the recovered claim on the retry's, 0 on a checkpoint. */
   strikeProceeds: bigint;
-  harvestPremiumGross: bigint;
+  premiumGross: bigint;
   premiumNet: bigint;
+  /** The cycle's figures as the tape held them when this harvest landed. */
+  assignmentUsdg: bigint;
+  contractsSold: bigint;
+  contractsAssigned: bigint;
   supply: bigint;
   premiumNetPerShare: bigint;
   usdgPerShare: bigint;
   accAfter: bigint;
-  harvestTx: string;
-  harvestAt: bigint;
 };
 
 export type ListingTruth = {
@@ -245,28 +256,86 @@ export type ListingTruth = {
   endReason: string | null;
 };
 
-const perShare = (amount: bigint, supply: bigint) => (supply === 0n ? 0n : (amount * ONE) / supply);
+export type StrandTruth = {
+  gen: bigint;
+  cycleNumber: number;
+  claimKey: bigint;
+  strandedAt: bigint;
+  strandedTx: string;
+  epochWad: bigint;
+  epochCount: number;
+  recovered: boolean;
+  recoveredAt: bigint | null;
+  recoveredTx: string | null;
+  assetsIn: bigint;
+  usdgIn: bigint;
+  queueWad: bigint;
+  wadLeft: bigint;
+  assetsLeft: bigint;
+  usdgLeft: bigint;
+  settledCount: number;
+};
 
-function deriveListing(b: Builder, run: RunJson, cycle: number, chain: ChainListing): ListingTruth {
-  const k = run.db.listings.find((l) => l.cycle_number === cycle);
-  if (k === undefined) throw new Error(`run.json db.listings has no row for cycle ${cycle}`);
-  const contracts = BigInt(k.contracts);
-  const gross = BigInt(k.gross_usdg6);
-  const unitPrice = BigInt(k.unit_price6);
-  b.agree(`cycle ${cycle} listing order hash`, k.order_hash, chain.orderHash);
-  b.agree(`cycle ${cycle} listing contracts`, contracts, chain.amount);
-  b.agree(`cycle ${cycle} listing gross`, gross, chain.grossUsdg);
-  b.agree(`cycle ${cycle} listing unit price`, unitPrice * contracts, chain.grossUsdg);
-  b.agree(`cycle ${cycle} listing approve tx`, k.approve_tx, chain.approvedTx);
-  b.agree(`cycle ${cycle} listing seq`, k.seq, chain.seq);
+/** One week as the product defines it, every figure derived rather than copied. */
+export type WeekTruth = {
+  cycleNumber: number;
+  status: "stranded" | "closed" | "unfilled" | "assigned";
+  exerciseTimestamp: bigint;
+  expiryTimestamp: bigint;
+  optionId: bigint;
+  /** Null on an unfilled week: nothing was written, so no claim was opened. */
+  claimKey: bigint | null;
+  strike: bigint;
+  /** Contracts written == sold: the sum of the fills' `CallsWritten`. */
+  contracts: bigint;
+  collateral: bigint;
+  writeCount: number;
+  firstWriteAt: bigint | null;
+  lastWriteAt: bigint | null;
+  openedAt: bigint;
+  txOpen: string;
+  /** Every listing the vault authorised this cycle, by `seq` ascending. */
+  listings: ListingTruth[];
+  sold: bigint;
+  fillCount: number;
+  premiumGross: bigint;
+  firstFillAt: bigint | null;
+  lastFillAt: bigint | null;
+  lockedAt: bigint | null;
+  assigned: bigint;
+  /** What the claim returned, once it did: `RollClose`'s legs, or the retry's `ClaimRedeemed` after a strand. 0 while stranded. */
+  assetsReturned: bigint;
+  assignmentUsdg: bigint;
+  marketExercised: bigint;
+  bucketIndex: bigint | null;
+  bucketAssigned: bigint;
+  closedAt: bigint;
+  txClose: string;
+  stranded: boolean;
+  strand: StrandTruth | null;
+  /** Every `Harvest` carrying this cycle's number, newest first (what `/v1/cycles/:n` lists). */
+  allHarvests: HarvestTruth[];
+  /** The harvests that accumulate onto the cycle row: checkpoints while open, the terminal one, the retry's. */
+  harvests: HarvestTruth[];
+  terminal: HarvestTruth;
+  /** The row's harvest columns, summed over `harvests`. */
+  gross: bigint;
+  fee: bigint;
+  net: bigint;
+  strikeProceeds: bigint;
+  harvestPremiumGross: bigint;
+  premiumNet: bigint;
+  premiumNetPerShare: bigint;
+  usdgPerShare: bigint;
+  supplyAtHarvest: bigint;
+};
 
-  const contractsFilled = chain.fills.reduce((s, f) => s + f.contracts, 0n);
-  const proceeds = chain.fills.reduce((s, f) => s + f.toVault, 0n);
+function deriveListing(cycle: number, chain: ChainListing): ListingTruth {
+  const contracts = chain.amount;
+  const contractsFilled = sum(chain.fills, (f) => f.contracts);
+  const proceeds = sum(chain.fills, (f) => f.toVault);
   const lastFill = chain.fills.at(-1) ?? null;
   const complete = contractsFilled >= contracts && contracts > 0n;
-  b.agree(`cycle ${cycle} keeper listing status`, k.status === "filled", complete);
-  // One consideration item: every fill pays exactly unitPrice × contracts to the vault.
-  b.agree(`cycle ${cycle} fill proceeds = unit price x filled`, unitPrice * contractsFilled, proceeds);
 
   let status: ListingTruth["status"] = "approved";
   let endedAt: bigint | null = null;
@@ -287,14 +356,15 @@ function deriveListing(b: Builder, run: RunJson, cycle: number, chain: ChainList
   }
 
   return {
-    orderHash: lower(k.order_hash),
+    orderHash: lower(chain.orderHash),
     cycle,
-    seq: k.seq,
+    seq: chain.seq,
     status,
-    optionId: BigInt(k.option_id),
+    optionId: chain.optionId,
     contracts,
-    gross,
-    unitPrice,
+    gross: chain.grossUsdg,
+    // The contract has proved `grossUsdg % amount == 0` at approval.
+    unitPrice: contracts === 0n ? 0n : chain.grossUsdg / contracts,
     contractsFilled,
     fillCount: chain.fills.length,
     proceeds,
@@ -309,139 +379,238 @@ function deriveListing(b: Builder, run: RunJson, cycle: number, chain: ChainList
   };
 }
 
-function deriveWeek(b: Builder, run: RunJson, chain: ChainFacts, n: 1 | 2 | 3): WeekTruth {
-  const r = `cycle${n}`;
-  const c: ChainCycle | undefined = chain.cycles.find((x) => x.cycleNumber === n);
-  const k = run.db.cycles.find((x) => x.cycle_number === n);
-  if (c === undefined || c.open === null || c.locked === null || c.close === null) {
-    throw new Error(`the chain has no complete cycle ${n} (RollOpen, BookLocked, RollClose)`);
+export function deriveStrand(b: Builder, s: ChainStrand): StrandTruth {
+  const epochWad = sum(s.epochShares, (e) => e.wad);
+  const r = s.recovered;
+  if (r !== null) {
+    // The queue's part at recovery is exactly what the epochs took while it was stranded.
+    b.agree(`strand ${s.gen} queueWad = sum of EpochStrandShare`, epochWad, r.queueWad);
   }
-  if (k === undefined) throw new Error(`run.json db.cycles has no row for cycle ${n}`);
+  const queueAssets = r === null ? 0n : (r.assets * r.queueWad) / WAD;
+  const queueUsdg = r === null ? 0n : (r.usdgOut * r.queueWad) / WAD;
+  return {
+    gen: s.gen,
+    cycleNumber: s.cycleNumber,
+    claimKey: s.claimKey,
+    strandedAt: s.strandedTimestamp,
+    strandedTx: lower(s.strandedTx),
+    epochWad,
+    epochCount: s.epochShares.length,
+    recovered: r !== null,
+    recoveredAt: r?.timestamp ?? null,
+    recoveredTx: r === null ? null : lower(r.txHash),
+    assetsIn: r?.assets ?? 0n,
+    usdgIn: r?.usdgOut ?? 0n,
+    queueWad: r?.queueWad ?? 0n,
+    wadLeft: (r?.queueWad ?? 0n) - sum(s.shareSettlements, (x) => x.wad),
+    assetsLeft: queueAssets - sum(s.shareSettlements, (x) => x.assets),
+    usdgLeft: queueUsdg - sum(s.shareSettlements, (x) => x.usdgOut),
+    settledCount: s.shareSettlements.length,
+  };
+}
 
-  const optionId = runBig(run, `${r}.optionId`);
-  b.agree(`cycle ${n} option id`, optionId, c.open.optionId);
-  b.agree(`cycle ${n} keeper row option id`, k.option_id, c.open.optionId);
-  const exerciseTimestamp = runBig(run, `${r}.exerciseTimestamp`);
-  const expiryTimestamp = runBig(run, `${r}.expiryTimestamp`);
-  b.agree(`cycle ${n} exercise timestamp`, exerciseTimestamp, c.open.exerciseTs);
-  b.agree(`cycle ${n} expiry timestamp`, expiryTimestamp, c.open.expiryTs);
+/** The live shares' part of a recovered claim's USDG: what the retry's harvest sweeps, fee-free. */
+const liveUsdgOf = (r: NonNullable<ChainStrand["recovered"]>): bigint => r.usdgOut - (r.usdgOut * r.queueWad) / WAD;
 
-  const strike = runBig(run, `${r}.strikeUsdg6`);
-  b.agree(`cycle ${n} strike`, strike, c.open.strike);
-  if (k.roll_open_tx !== null) b.agree(`cycle ${n} rollOpen tx`, k.roll_open_tx, c.open.txHash);
-  b.agree(`cycle ${n} lockBook tx`, k.lock_tx, c.locked.txHash);
-  const txClose = String(runValue(run, `${r}.rollCloseTx`));
-  b.agree(`cycle ${n} rollClose tx`, txClose, c.close.txHash);
-  b.agree(`cycle ${n} keeper row rollClose tx`, k.roll_close_tx, c.close.txHash);
-  b.agree(`cycle ${n} did not strand`, null, c.stranded);
+function deriveHarvest(
+  b: Builder,
+  h: ChainHarvest,
+  c: ChainCycle & { close: NonNullable<ChainCycle["close"]> },
+  fills: readonly { block: bigint; contracts: bigint }[],
+  strand: ChainStrand | null,
+): HarvestTruth {
+  if (h.supplyFromLog) {
+    // One transaction per block on anvil: the supply UsdgDistributed reports is the supply the
+    // block before, because the harvest runs before a deposit's mint and before a settlement's burn.
+    b.agree(`Harvest ${h.txHash} supply: UsdgDistributed.totalSupply = totalSupply() the block before`, h.supply, h.supplyBefore);
+  }
+  const closed = h.block >= c.close.block;
+  const recovered = strand?.recovered ?? null;
+  const recoveredBy = recovered !== null && h.block >= recovered.block;
+  const soldAt = sum(
+    fills.filter((f) => f.block <= h.block),
+    (f) => f.contracts,
+  );
+  const strikeProceeds =
+    h.origin === "rollClose" ? min(c.close.usdgFromAssignment, h.gross) : h.origin === "retry" && recovered !== null ? min(liveUsdgOf(recovered), h.gross) : 0n;
+  const premiumGross = h.gross - strikeProceeds;
+  const premiumNet = premiumGross > h.fee ? premiumGross - h.fee : 0n;
+  // The cycle row's figures when this harvest landed: nothing before the close; RollClose's legs
+  // at the close (zero on a stranded one); the redeemed figures from the retry on.
+  const assignmentUsdg = !closed ? 0n : c.stranded === null ? c.close.usdgFromAssignment : recoveredBy && c.redeemed !== null ? c.redeemed.exerciseReceived : 0n;
+  return {
+    cycleNumber: h.cycleNumber,
+    origin: h.origin,
+    txHash: lower(h.txHash),
+    block: h.block,
+    timestamp: h.timestamp,
+    filled: soldAt > 0n,
+    gross: h.gross,
+    fee: h.fee,
+    net: h.net,
+    strikeProceeds,
+    premiumGross,
+    premiumNet,
+    assignmentUsdg,
+    contractsSold: soldAt,
+    contractsAssigned: closed ? c.close.contractsAssignedCount : 0n,
+    supply: h.supply,
+    premiumNetPerShare: perShare(premiumNet, h.supply),
+    usdgPerShare: perShare(h.net, h.supply),
+    accAfter: h.accAfter,
+  };
+}
 
-  // Written == sold, per fill. run.json's `contracts` is what sold; the chain's writes must sum to it.
-  const contracts = runBig(run, `${r}.contracts`);
-  const written = c.writes.reduce((s, w) => s + w.contracts, 0n);
-  const collateral = c.writes.reduce((s, w) => s + w.collateral, 0n);
-  b.agree(`cycle ${n} contracts sold = sum of CallsWritten`, contracts, written);
-  b.agree(`cycle ${n} keeper row contracts`, k.contracts, written);
-  b.agree(`cycle ${n} collateral = contracts x lot`, contracts * LOT, collateral);
-  const claimKey = c.writes[0]?.claimKey ?? null;
-  for (const w of c.writes) b.agree(`cycle ${n} every fill writes into one claim`, claimKey, w.claimKey);
-  if (n === 3) b.agree("cycle 3 claim key", runBig(run, "cycle3.claimKey"), claimKey);
+function deriveWeek(b: Builder, chain: ChainFacts, k: RunCycle, strands: StrandTruth[]): WeekTruth {
+  const n = k.cycleNumber;
+  const found = chain.cycles.find((x) => x.cycleNumber === n);
+  if (found === undefined || found.open === null || found.close === null) {
+    throw new Error(`the chain has no closed cycle ${n} (RollOpen and RollClose)`);
+  }
+  const c = found as ChainCycle & { open: NonNullable<ChainCycle["open"]>; close: NonNullable<ChainCycle["close"]> };
+  const w = `cycle ${n}`;
 
-  const chainListing = chain.listings.find((l) => l.optionId === c.open!.optionId);
-  if (chainListing === undefined) throw new Error(`the chain has no ListingApproved for cycle ${n}`);
-  const listing = deriveListing(b, run, n, chainListing);
-  b.agree(`cycle ${n} order hash`, String(runValue(run, `${r}.orderHash`)), listing.orderHash);
+  /* ---- the armed type ---- */
+  b.agree(`${w} option id`, k.optionId, c.open.optionId);
+  b.agree(`${w} strike`, big(k.strikeUsdg6, `cycles[].strikeUsdg6`), c.open.strike);
+  b.agree(`${w} exercise timestamp`, big(k.exerciseTimestamp, "cycles[].exerciseTimestamp"), c.open.exerciseTs);
+  b.agree(`${w} expiry timestamp`, big(k.expiryTimestamp, "cycles[].expiryTimestamp"), c.open.expiryTs);
+  b.agree(`${w} rollOpen tx`, k.rollOpenTx, c.open.txHash);
+  b.agree(`${w} lockBook tx`, k.lockTx, c.locked?.txHash ?? null);
+  b.agree(`${w} rollClose tx`, k.rollCloseTx, c.close.txHash);
 
-  const sold = listing.contractsFilled;
-  const premiumGross = listing.proceeds;
-  b.agree(`cycle ${n} contracts sold (Seaport) = written (CallsWritten)`, sold, written);
+  /* ---- listings and fills ---- */
+  const chainListings = chain.listings.filter((l) => l.optionId === c.open.optionId).sort((x, y) => x.seq - y.seq);
+  const listings = chainListings.map((l) => deriveListing(n, l));
+  const fills = chainListings
+    .flatMap((l) => l.fills)
+    .sort((x, y) => (x.block < y.block ? -1 : x.block > y.block ? 1 : 0));
+  const fillLine = (txHash: string, contracts: bigint | string | number, gross: bigint | string | number) => `${lower(txHash)}:${contracts}:${gross}`;
+  b.agree(
+    `${w} fills (tx:contracts:usdg to the vault)`,
+    k.fills.map((f) => fillLine(f.txHash, f.contracts, f.grossUsdg6)),
+    fills.map((f) => fillLine(f.txHash, f.contracts, f.toVault)),
+  );
+
+  /* ---- written == sold, per fill ---- */
+  const written = sum(c.writes, (x) => x.contracts);
+  const collateral = sum(c.writes, (x) => x.collateral);
+  const sold = sum(fills, (f) => f.contracts);
+  const premiumGross = sum(fills, (f) => f.toVault);
+  b.agree(`${w} contracts sold (Seaport) = written (CallsWritten)`, sold, written);
+  b.agree(`${w} collateral = contracts x lot`, written * LOT, collateral);
   // Each fill's write sits in the fill's own transaction.
-  b.agree(`cycle ${n} one write per fill`, chainListing.fills.map((f) => lower(f.txHash)), c.writes.map((w) => lower(w.txHash)));
-  if (sold > 0n) b.agree(`cycle ${n} fill gross`, runBig(run, `${r}.gross6`), premiumGross);
+  b.agree(`${w} one write per fill`, fills.map((f) => lower(f.txHash)), c.writes.map((x) => lower(x.txHash)));
+  const claimKey = c.writes[0]?.claimKey ?? null;
+  for (const x of c.writes) b.agree(`${w} every fill writes into one claim`, claimKey, x.claimKey);
 
-  // The week's money, from the dry run's record.
-  const gross = runBig(run, `${r}.harvest.gross`);
-  const fee = runBig(run, `${r}.harvest.fee`);
-  const net = runBig(run, `${r}.harvest.net`);
-  const harvests: ChainHarvest[] = chain.harvests.filter((h) => h.cycleNumber === n);
-  b.agree(`cycle ${n} Harvest events`, 1, harvests.length);
-  const h = harvests.find((x) => lower(x.txHash) === lower(c.close!.txHash));
-  if (h === undefined) throw new Error(`the chain has no Harvest in cycle ${n}'s rollClose transaction`);
-  b.agree(`cycle ${n} Harvest.grossUsdg`, gross, h.gross);
-  b.agree(`cycle ${n} Harvest.feeUsdg`, fee, h.fee);
-  b.agree(`cycle ${n} Harvest.netUsdg`, net, h.net);
-
-  const strikeProceeds = n === 3 ? runBig(run, "cycle3.harvest.usdgFromAssignment") : BigInt(k.usdg_from_assignment ?? "0");
-  const assetsReturned = n === 3 ? runBig(run, "cycle3.harvest.assetsReturned") : BigInt(k.assets_returned ?? "-1");
-  const assigned = BigInt(k.contracts_assigned);
-  b.agree(`cycle ${n} RollClose.usdgFromAssignment`, strikeProceeds, c.close.usdgFromAssignment);
-  b.agree(`cycle ${n} RollClose.assetsReturned`, assetsReturned, c.close.assetsReturned);
-  b.agree(`cycle ${n} RollClose.contractsAssignedCount`, assigned, c.close.contractsAssignedCount);
-  if (n === 3) {
-    b.agree("cycle 3 premium leg", runBig(run, "cycle3.harvest.premium"), gross - strikeProceeds);
-    b.agree("cycle 3 contracts assigned (harness)", runBig(run, "cycle3.harvest.contractsAssigned"), assigned);
-    b.agree("cycle 3 contracts exercised", runBig(run, "cycle3.contractsExercised"), c.marketExercised);
-  } else {
-    b.agree(`cycle ${n} market exercise`, 0n, c.marketExercised);
-  }
+  /* ---- the close ---- */
+  const assigned = c.close.contractsAssignedCount;
+  b.agree(`${w} contracts assigned`, big(k.contractsAssigned, "cycles[].contractsAssigned"), assigned);
   // The vault is the only writer of each of these private option types, so every exercised
   // contract lands in its one bucket.
-  b.agree(`cycle ${n} bucket assignment = contracts assigned`, assigned, c.bucketAssigned);
+  b.agree(`${w} bucket assignment = contracts assigned`, assigned, c.bucketAssigned);
+  b.agree(`${w} stranded`, k.stranded, c.stranded !== null);
+
+  const strand = c.stranded === null ? null : (strands.find((s) => s.gen === c.stranded!.gen) ?? null);
+  const chainStrand = c.stranded === null ? null : (chain.strands.find((s) => s.gen === c.stranded!.gen) ?? null);
+  if (c.stranded !== null) {
+    if (strand === null || chainStrand === null) throw new Error(`the chain has a ClaimStranded for ${w} (gen ${c.stranded.gen}) but no strand record`);
+    b.agree(`${w} strand belongs to this cycle`, n, strand.cycleNumber);
+    b.agree(`${w} stranded claim key`, claimKey, c.stranded.claimKey);
+    // A stranded close reports zero legs; the real figures arrive with the retry.
+    b.agree(`${w} stranded close reports zero legs`, "0:0", `${c.close.assetsReturned}:${c.close.usdgFromAssignment}`);
+  }
+  b.agree(`${w} retry tx`, k.retryTx, chainStrand?.recovered?.txHash ?? null);
+
+  // What the claim returned, once it did.
+  let assetsReturned = c.close.assetsReturned;
+  let assignmentUsdg = c.close.usdgFromAssignment;
+  if (c.stranded !== null) {
+    const r = chainStrand?.recovered ?? null;
+    if (r !== null) {
+      if (c.redeemed === null) throw new Error(`${w} recovered (${r.txHash}) but the vault emitted no ClaimRedeemed for its claim`);
+      b.agree(`${w} StrandedClaimRecovered legs = ClaimRedeemed legs`, `${r.assets}:${r.usdgOut}`, `${c.redeemed.underlyingReturned}:${c.redeemed.exerciseReceived}`);
+      b.agree(`${w} recovered in the retry tx`, r.txHash, c.redeemed.txHash);
+      assetsReturned = c.redeemed.underlyingReturned;
+      assignmentUsdg = c.redeemed.exerciseReceived;
+    }
+  }
+  b.agree(`${w} assetsReturned`, big(k.assetsReturned, "cycles[].assetsReturned"), assetsReturned);
+  b.agree(`${w} usdgFromAssignment`, big(k.usdgFromAssignment, "cycles[].usdgFromAssignment"), assignmentUsdg);
   // Nothing sold means nothing written, no claim, and no collateral to bring home.
-  if (sold === 0n) b.agree(`cycle ${n} unfilled: nothing to return`, 0n, c.close.assetsReturned);
+  if (sold === 0n) {
+    b.agree(`${w} unfilled: no claim`, null, claimKey);
+    b.agree(`${w} unfilled: nothing to return`, 0n, assetsReturned);
+    b.agree(`${w} unfilled: nothing assigned`, 0n, assigned);
+  }
 
-  // Supply at harvest: the share count the terminal sweep indexed against. Pre-close, so the
-  // queued shares escrowed in cycle 3 still count. Cross-checked against UsdgDistributed and
-  // against the dry run's deposit (every share ever minted is still outstanding before cycle 3's close).
-  const supply = c.supplyBeforeClose ?? 0n;
-  if (c.distributedSupply !== null) b.agree(`cycle ${n} UsdgDistributed.totalSupply`, supply, c.distributedSupply);
-  const minted = runBig(run, "cycle3.final.totalSupply") + runBig(run, "cycle3.queue.sharesQueued");
-  b.agree(`cycle ${n} supply before close = shares minted`, minted, supply);
+  /* ---- harvests ---- */
+  const allChain = chain.harvests.filter((h) => h.cycleNumber === n);
+  const terminalChain = allChain.find((h) => h.origin === "rollClose");
+  if (terminalChain === undefined || lower(terminalChain.txHash) !== lower(c.close.txHash)) {
+    throw new Error(`the chain has no Harvest in ${w}'s rollClose transaction`);
+  }
+  b.agree(`${w} one terminal Harvest`, 1, allChain.filter((h) => h.origin === "rollClose").length);
+  b.agree(`${w} Harvest.grossUsdg`, big(k.harvest.gross, "cycles[].harvest.gross"), terminalChain.gross);
+  b.agree(`${w} Harvest.feeUsdg`, big(k.harvest.fee, "cycles[].harvest.fee"), terminalChain.fee);
+  b.agree(`${w} Harvest.netUsdg`, big(k.harvest.net, "cycles[].harvest.net"), terminalChain.net);
+  b.agree(`${w} retry Harvest present iff recovered`, chainStrand?.recovered !== null && chainStrand?.recovered !== undefined, allChain.some((h) => h.origin === "retry"));
 
-  const harvestPremiumGross = gross - strikeProceeds;
-  const premiumNet = harvestPremiumGross - fee;
-  const status: WeekTruth["status"] = sold === 0n ? "unfilled" : assigned > 0n ? "assigned" : "closed";
+  const all = allChain.map((h) => deriveHarvest(b, h, c, fills, chainStrand));
+  const terminal = all.find((h) => h.origin === "rollClose")!;
+  // A checkpoint that lands after the close (a deposit or a flat settleQueue still carrying the
+  // closed cycle's number) keeps its row but must not restate a published week.
+  const touching = all.filter((h) => h.origin === "rollClose" || h.origin === "retry" || h.block < c.close.block);
+  const last = touching.reduce((m, h) => (h.block > m.block ? h : m), touching[0]!);
+
+  const status: WeekTruth["status"] =
+    c.stranded !== null && chainStrand?.recovered === null ? "stranded" : assigned > 0n ? "assigned" : sold > 0n ? "closed" : "unfilled";
 
   return {
     cycleNumber: n,
     status,
-    exerciseTimestamp,
-    expiryTimestamp,
-    optionId,
+    exerciseTimestamp: c.open.exerciseTs,
+    expiryTimestamp: c.open.expiryTs,
+    optionId: c.open.optionId,
     claimKey,
-    strike,
+    strike: c.open.strike,
     contracts: written,
     collateral,
     writeCount: c.writes.length,
     firstWriteAt: c.writes[0]?.timestamp ?? null,
     lastWriteAt: c.writes.at(-1)?.timestamp ?? null,
     openedAt: c.open.timestamp,
-    txOpen: lower(k.roll_open_tx ?? c.open.txHash),
-    listing,
+    txOpen: lower(c.open.txHash),
+    listings,
     sold,
-    fillCount: listing.fillCount,
+    fillCount: fills.length,
     premiumGross,
-    firstFillAt: chainListing.fills[0]?.timestamp ?? null,
-    lastFillAt: chainListing.fills.at(-1)?.timestamp ?? null,
-    lockedAt: c.locked.timestamp,
+    firstFillAt: fills[0]?.timestamp ?? null,
+    lastFillAt: fills.at(-1)?.timestamp ?? null,
+    lockedAt: c.locked?.timestamp ?? null,
     assigned,
     assetsReturned,
+    assignmentUsdg,
     marketExercised: c.marketExercised,
     bucketIndex: c.bucketIndex,
     bucketAssigned: c.bucketAssigned,
     closedAt: c.close.timestamp,
-    txClose: lower(txClose),
-    gross,
-    fee,
-    net,
-    strikeProceeds,
-    harvestPremiumGross,
-    premiumNet,
-    supply,
-    premiumNetPerShare: perShare(premiumNet, supply),
-    usdgPerShare: perShare(net, supply),
-    accAfter: c.accAfterClose ?? 0n,
-    harvestTx: lower(h.txHash),
-    harvestAt: h.timestamp,
+    txClose: lower(c.close.txHash),
+    stranded: c.stranded !== null,
+    strand,
+    allHarvests: [...all].sort((x, y) => (x.block > y.block ? -1 : x.block < y.block ? 1 : 0)),
+    harvests: touching,
+    terminal,
+    gross: sum(touching, (h) => h.gross),
+    fee: sum(touching, (h) => h.fee),
+    net: sum(touching, (h) => h.net),
+    strikeProceeds: sum(touching, (h) => h.strikeProceeds),
+    harvestPremiumGross: sum(touching, (h) => h.premiumGross),
+    premiumNet: sum(touching, (h) => h.premiumNet),
+    premiumNetPerShare: sum(touching, (h) => h.premiumNetPerShare),
+    usdgPerShare: sum(touching, (h) => h.usdgPerShare),
+    supplyAtHarvest: last.supply,
   };
 }
 
@@ -451,80 +620,88 @@ function deriveWeek(b: Builder, run: RunJson, chain: ChainFacts, n: 1 | 2 | 3): 
 
 function expectCycle(w: RouteWriter, t: WeekTruth) {
   w.eq("cycle", t.cycleNumber);
-  w.eq("status", t.status);
+  w.eq("status", t.status, "ClaimStranded unrecovered → stranded; else assigned / closed / unfilled by what sold and was assigned");
   w.eq("filled", t.sold > 0n);
   w.eq("assigned", t.assigned > 0n);
-  w.eq("stranded", false);
+  w.eq("stranded", t.stranded, "a ClaimStranded in the rollClose tx; stays true as history after recovery");
 
   const op = w.at("option");
-  op.eq("exerciseTimestamp", t.exerciseTimestamp.toString(), "run.json cycleN.exerciseTimestamp / cycleExerciseTs() at RollOpen");
+  op.eq("exerciseTimestamp", t.exerciseTimestamp.toString(), "clear.option(optionId).exerciseTimestamp");
   op.eq("exerciseAt", isoOf(t.exerciseTimestamp));
-  op.eq("expiryTimestamp", t.expiryTimestamp.toString(), "run.json cycleN.expiryTimestamp / cycleExpiryTs() at RollOpen");
+  op.eq("expiryTimestamp", t.expiryTimestamp.toString(), "clear.option(optionId).expiryTimestamp");
   op.eq("expiryAt", isoOf(t.expiryTimestamp));
 
   const wr = w.at("written");
-  wr.eq("optionId", t.optionId.toString(), "run.json cycleN.optionId");
+  wr.eq("optionId", t.optionId.toString(), "RollOpen.optionId");
   wr.eq("claimKey", t.claimKey === null ? null : t.claimKey.toString(), "CallsWritten.claimKey (null when nothing sold)");
-  wr.usdg("strikeUsdg", t.strike, "run.json cycleN.strikeUsdg6");
+  wr.usdg("strikeUsdg", t.strike, "RollOpen.strikeUsdg");
   wr.eq("contracts", t.contracts.toString(), "sum of CallsWritten.contractsCount");
   wr.asset("collateral", t.collateral, "sum of CallsWritten.collateral");
   wr.eq("writeCount", t.writeCount, "CallsWritten events");
   wr.eq("openedAt", isoOf(t.openedAt), "RollOpen block timestamp");
-  wr.eq("txOpen", t.txOpen, "run.json db.cycles roll_open_tx");
+  wr.eq("txOpen", t.txOpen, "run.json cycles[].rollOpenTx");
   wr.eq("firstWriteAt", isoOf(t.firstWriteAt));
   wr.eq("lastWriteAt", isoOf(t.lastWriteAt));
 
   const li = w.at("listing");
-  li.eq("count", 1);
-  li.eq("orderHash", t.listing.orderHash, "run.json cycleN.orderHash");
-  li.eq("contracts", t.listing.contracts.toString(), "run.json db.listings contracts");
-  li.usdg("grossUsdg", t.listing.gross, "run.json db.listings gross_usdg6");
-  li.usdg("unitPriceUsdg", t.listing.unitPrice, "run.json db.listings unit_price6");
-  li.eq("listedAt", isoOf(t.listing.approvedAt), "ListingApproved block timestamp");
+  const latest = t.listings.at(-1) ?? null;
+  li.eq("count", t.listings.length, "ListingApproved.seq of the latest listing");
+  li.eq("orderHash", latest === null ? null : latest.orderHash, "the latest ListingApproved.orderHash");
+  li.eq("contracts", (latest?.contracts ?? 0n).toString(), "ListingApproved.amount");
+  li.usdg("grossUsdg", latest?.gross ?? 0n, "ListingApproved.grossUsdg");
+  li.usdg("unitPriceUsdg", latest?.unitPrice ?? 0n, "grossUsdg / amount");
+  li.eq("listedAt", isoOf(latest?.approvedAt ?? null), "ListingApproved block timestamp");
 
   const fi = w.at("fill");
-  fi.eq("contractsSold", t.sold.toString(), "Seaport OrderFulfilled offer");
-  fi.eq("fillCount", t.fillCount);
-  fi.usdg("premiumGross", t.premiumGross, "run.json cycleN.gross6 (0 when unfilled)");
+  fi.eq("contractsSold", t.sold.toString(), "Seaport OrderFulfilled offer items");
+  fi.eq("fillCount", t.fillCount, "OrderFulfilled events");
+  fi.usdg("premiumGross", t.premiumGross, "sum of the one USDG consideration item per fill");
   fi.usdg("unitPriceUsdg", t.sold === 0n ? 0n : t.premiumGross / t.sold);
   fi.eq("firstFillAt", isoOf(t.firstFillAt));
   fi.eq("lastFillAt", isoOf(t.lastFillAt));
 
   const se = w.at("settlement");
   se.eq("lockedAt", isoOf(t.lockedAt), "BookLocked block timestamp");
-  se.eq("contractsAssigned", t.assigned.toString(), "run.json db.cycles contracts_assigned");
-  se.usdg("assignmentUsdg", t.strikeProceeds, "RollClose.usdgFromAssignment");
-  se.asset("assetsReturned", t.assetsReturned, "run.json RollClose.assetsReturned");
+  se.eq("contractsAssigned", t.assigned.toString(), "RollClose.contractsAssignedCount");
+  se.usdg("assignmentUsdg", t.assignmentUsdg, "RollClose.usdgFromAssignment, or ClaimRedeemed.exerciseReceived at the retry");
+  se.asset("assetsReturned", t.assetsReturned, "RollClose.assetsReturned, or ClaimRedeemed.underlyingReturned at the retry");
   se.eq("marketExercised", t.marketExercised.toString(), "Valorem OptionsExercised");
   se.eq("bucketIndex", t.bucketIndex === null ? null : t.bucketIndex.toString(), "Valorem BucketWrittenInto in this cycle's first fill");
   se.eq("bucketAssigned", t.bucketAssigned.toString(), "Valorem BucketAssignedExercise on that bucket");
   se.eq("closedAt", isoOf(t.closedAt), "RollClose block timestamp");
-  se.eq("txClose", t.txClose, "run.json cycleN.rollCloseTx");
-  se.eq("strand", null, "no ClaimStranded in this run");
+  se.eq("txClose", t.txClose, "run.json cycles[].rollCloseTx");
+  if (t.strand === null) se.eq("strand", null, "no ClaimStranded for this cycle");
+  else {
+    const st = se.at("strand");
+    st.eq("gen", t.strand.gen.toString(), "ClaimStranded.gen");
+    st.eq("recovered", t.strand.recovered, "a StrandedClaimRecovered for that gen");
+    st.eq("recoveredAt", isoOf(t.strand.recoveredAt));
+    st.eq("recoveredTx", t.strand.recoveredTx, "run.json cycles[].retryTx");
+  }
 
   const hv = w.at("harvest");
   hv.eq("harvested", true);
-  hv.usdg("grossUsdg", t.gross, "run.json cycleN.harvest.gross");
-  hv.usdg("premiumGross", t.harvestPremiumGross, "gross - strike proceeds");
-  hv.usdg("strikeProceedsUsdg", t.strikeProceeds, "run.json cycle3.harvest.usdgFromAssignment / RollClose");
-  hv.usdg("fee", t.fee, "run.json cycleN.harvest.fee");
-  hv.usdg("premiumNet", t.premiumNet, "gross - strike proceeds - fee");
-  hv.usdg("creditedUsdg", t.net, "run.json cycleN.harvest.net");
-  hv.usdg("premiumNetPerShare", t.premiumNetPerShare, "premiumNet x 1e18 / supply before close");
-  hv.usdg("usdgPerShare", t.usdgPerShare, "net x 1e18 / supply before close");
-  hv.asset("supplyAtHarvest", t.supply, "totalSupply() at rollClose block - 1");
-  hv.eq("harvestedAt", isoOf(t.closedAt));
+  hv.usdg("grossUsdg", t.gross, "sum of Harvest.grossUsdg over the cycle's checkpoints, its terminal harvest and its retry");
+  hv.usdg("premiumGross", t.harvestPremiumGross, "gross - strike proceeds, per harvest");
+  hv.usdg("strikeProceedsUsdg", t.strikeProceeds, "RollClose.usdgFromAssignment on the terminal harvest + the live shares' part of a recovered claim on the retry");
+  hv.usdg("fee", t.fee, "sum of Harvest.feeUsdg");
+  hv.usdg("premiumNet", t.premiumNet, "gross - strike proceeds - fee, per harvest");
+  hv.usdg("creditedUsdg", t.net, "sum of Harvest.netUsdg");
+  hv.usdg("premiumNetPerShare", t.premiumNetPerShare, "sum over harvests of premiumNet x 1e18 / supply at that harvest");
+  hv.usdg("usdgPerShare", t.usdgPerShare, "sum over harvests of net x 1e18 / supply at that harvest");
+  hv.asset("supplyAtHarvest", t.supplyAtHarvest, "totalSupply() the block before the last harvest that touched the cycle");
+  hv.eq("harvestedAt", isoOf(t.terminal.timestamp), "the terminal harvest's block timestamp");
 }
 
 function expectListing(w: RouteWriter, l: ListingTruth) {
   w.eq("orderHash", l.orderHash);
   w.eq("cycle", l.cycle);
-  w.eq("seq", l.seq);
+  w.eq("seq", l.seq, "ListingApproved.seq");
   w.eq("status", l.status, "Seaport fills / vault ListingCancelled");
   w.eq("optionId", l.optionId.toString());
   w.eq("contracts", l.contracts.toString());
-  w.usdg("grossUsdg", l.gross, "run.json db.listings gross_usdg6");
-  w.usdg("unitPriceUsdg", l.unitPrice, "run.json db.listings unit_price6");
+  w.usdg("grossUsdg", l.gross, "ListingApproved.grossUsdg");
+  w.usdg("unitPriceUsdg", l.unitPrice, "grossUsdg / amount");
   const f = w.at("fill");
   f.eq("contractsFilled", l.contractsFilled.toString());
   f.eq("fillCount", l.fillCount);
@@ -532,32 +709,52 @@ function expectListing(w: RouteWriter, l: ListingTruth) {
   f.eq("lastFillAt", isoOf(l.lastFillAt));
   f.eq("lastFillTx", l.lastFillTx === null ? null : lower(l.lastFillTx));
   w.eq("approvedAt", isoOf(l.approvedAt));
-  w.eq("approvedTx", lower(l.approvedTx), "run.json db.listings approve_tx");
+  w.eq("approvedTx", lower(l.approvedTx), "ListingApproved tx");
   w.eq("endedAt", isoOf(l.endedAt));
   w.eq("endedTx", l.endedTx === null ? null : lower(l.endedTx));
   w.eq("endReason", l.endReason, "filled / cancelled / counter / lockBook / rollClose, from the same tx's other events");
 }
 
-function expectHarvest(w: RouteWriter, t: WeekTruth) {
+function expectHarvest(w: RouteWriter, t: HarvestTruth) {
   w.eq("cycle", t.cycleNumber);
-  w.eq("terminal", true);
-  w.eq("origin", "rollClose");
-  w.eq("filled", t.sold > 0n);
-  w.usdg("grossUsdg", t.gross, "run.json cycleN.harvest.gross");
-  w.usdg("fee", t.fee, "run.json cycleN.harvest.fee");
-  w.usdg("netUsdg", t.net, "run.json cycleN.harvest.net");
-  w.usdg("premiumGross", t.harvestPremiumGross);
+  w.eq("terminal", t.origin === "rollClose");
+  w.eq("origin", t.origin, "RollClose in the tx → rollClose; StrandedClaimRecovered → retry; else checkpoint");
+  w.eq("filled", t.filled);
+  w.usdg("grossUsdg", t.gross, "Harvest.grossUsdg");
+  w.usdg("fee", t.fee, "Harvest.feeUsdg");
+  w.usdg("netUsdg", t.net, "Harvest.netUsdg");
+  w.usdg("premiumGross", t.premiumGross);
   w.usdg("strikeProceedsUsdg", t.strikeProceeds);
   w.usdg("premiumNet", t.premiumNet);
-  w.usdg("assignmentUsdg", t.strikeProceeds);
-  w.eq("contractsSold", t.sold.toString());
-  w.eq("contractsAssigned", t.assigned.toString());
+  w.usdg("assignmentUsdg", t.assignmentUsdg, "the cycle's assignment USDG as of this harvest");
+  w.eq("contractsSold", t.contractsSold.toString());
+  w.eq("contractsAssigned", t.contractsAssigned.toString());
   w.usdg("premiumNetPerShare", t.premiumNetPerShare);
   w.usdg("usdgPerShare", t.usdgPerShare);
-  w.asset("supply", t.supply);
-  w.eq("accUsdgPerShare", t.accAfter.toString(), "accUsdgPerShare() at the close block");
-  w.eq("at", isoOf(t.harvestAt));
-  w.eq("txHash", t.harvestTx, "run.json cycleN.rollCloseTx");
+  w.asset("supply", t.supply, "UsdgDistributed.totalSupply / totalSupply() the block before");
+  w.eq("accUsdgPerShare", t.accAfter.toString(), "accUsdgPerShare() at the harvest block");
+  w.eq("at", isoOf(t.timestamp));
+  w.eq("txHash", t.txHash);
+}
+
+function expectStrand(w: RouteWriter, s: StrandTruth) {
+  w.eq("gen", s.gen.toString(), "ClaimStranded.gen");
+  w.eq("cycle", s.cycleNumber, "ClaimStranded.cycleNumber");
+  w.eq("claimKey", s.claimKey.toString(), "ClaimStranded.claimKey");
+  w.eq("strandedAt", isoOf(s.strandedAt));
+  w.eq("strandedTx", s.strandedTx);
+  w.eq("epochWad", s.epochWad.toString(), "sum of EpochStrandShare.wad");
+  w.eq("epochCount", s.epochCount, "EpochStrandShare events");
+  w.eq("recovered", s.recovered);
+  w.eq("recoveredAt", isoOf(s.recoveredAt));
+  w.eq("recoveredTx", s.recoveredTx, "StrandedClaimRecovered tx");
+  w.asset("assetsIn", s.assetsIn, "StrandedClaimRecovered.assets");
+  w.usdg("usdgIn", s.usdgIn, "StrandedClaimRecovered.usdgOut");
+  w.eq("queueWad", s.queueWad.toString(), "StrandedClaimRecovered.queueWad");
+  w.eq("wadLeft", s.wadLeft.toString(), "queueWad - sum of StrandShareSettled.wad");
+  w.asset("assetsLeft", s.assetsLeft, "floor(assets x queueWad / 1e18) - sum of StrandShareSettled.assets");
+  w.usdg("usdgLeft", s.usdgLeft, "floor(usdgOut x queueWad / 1e18) - sum of StrandShareSettled.usdgOut");
+  w.eq("settledCount", s.settledCount, "StrandShareSettled events");
 }
 
 /*//////////////////////////////////////////////////////////////
@@ -607,36 +804,61 @@ export const graphqlQuery = (vault: string) => `{
   }
 }`;
 
-export type Built = { expectations: Expectation[]; disagreements: string[]; crossChecks: number; weeks: WeekTruth[] };
+export type Built = { expectations: Expectation[]; disagreements: string[]; crossChecks: number; weeks: WeekTruth[]; strands: StrandTruth[] };
 
 export function buildExpectations(run: RunJson, chain: ChainFacts): Built {
   const b = new Builder();
-  const depositor = run.actors.depositor;
-  if (depositor === undefined) throw new Error("run.json actors.depositor is missing");
+  const depositor = String(runValue(run, "actors.depositor"));
   const routes = routesFor(depositor);
 
-  b.agree("vault address", run.addresses.Vault, chain.vault);
+  b.agree("vault address", runValue(run, "addresses.Vault"), chain.vault);
   b.agree("chain id", run.chainId, chain.chainId);
   const { lastBlock } = runBlocks(run);
   b.agree("last dry-run block = END_BLOCK", lastBlock, chain.endBlock);
   if (run.error !== null) b.disagreements.push(`the dry run recorded an error: ${run.error}`);
-  b.agree("no claim stranded in this run", 0, chain.strands.length);
+  const runCycles = runValue(run, "cycles");
+  if (!Array.isArray(runCycles) || runCycles.length === 0) throw new Error("run.json cycles is not a non-empty array");
+  b.agree("cycles armed", runCycles.length, chain.cycles.length);
 
-  const weeks = ([1, 2, 3] as const).map((n) => deriveWeek(b, run, chain, n));
+  const strands = chain.strands.map((s) => deriveStrand(b, s));
+  const weeks = (runCycles as RunCycle[]).map((k) => deriveWeek(b, chain, k, strands));
   const byNumberDesc = [...weeks].sort((x, y) => y.cycleNumber - x.cycleNumber);
-  const w3 = weeks[2]!;
+  const latestWeek = byNumberDesc[0]!;
+  const views = chain.views;
 
-  /* ---------------- per-cycle and list routes ---------------- */
+  // Strand generations are the vault's own counter; each one is a cycle that stranded.
+  b.agree("strandGen() = claims ever stranded", strands.length, views.strandGen);
+  b.agree("lastResolvedGen() = claims recovered", strands.filter((s) => s.recovered).length, views.lastResolvedGen);
+  const openStrand = strands.find((s) => !s.recovered) ?? null;
+  b.agree("isStranded() = an unrecovered strand", openStrand !== null, views.isStranded);
+  b.agree("cycles stranded = weeks with a ClaimStranded", weeks.filter((t) => t.stranded).length, strands.length);
+
+  const allHarvests = chain.harvests.map((h) => {
+    const c = chain.cycles.find((x) => x.cycleNumber === h.cycleNumber);
+    if (c === undefined || c.close === null || c.open === null) throw new Error(`Harvest for cycle ${h.cycleNumber} but that cycle never closed`);
+    const cc = c as ChainCycle & { close: NonNullable<ChainCycle["close"]> };
+    const fills = chain.listings.filter((l) => l.optionId === c.open!.optionId).flatMap((l) => l.fills);
+    const strand = c.stranded === null ? null : (chain.strands.find((s) => s.gen === c.stranded!.gen) ?? null);
+    return deriveHarvest(b, h, cc, fills, strand);
+  });
+  const harvestsDesc = [...allHarvests].sort((x, y) => (x.block > y.block ? -1 : x.block < y.block ? 1 : 0));
+  const terminalsDesc = harvestsDesc.filter((h) => h.origin === "rollClose");
+
+  /* ---------------- per-cycle routes ---------------- */
   for (const t of weeks) {
     const r = b.route(routes.cycle(t.cycleNumber));
     expectCycle(r.at("cycle"), t);
-    r.eq("listings.length", 1);
-    expectListing(r.at("listings[0]"), t.listing);
-    r.eq("harvests.length", 1);
-    expectHarvest(r.at("harvests[0]"), t);
-    r.eq("strands.length", 0);
+    const listingsDesc = [...t.listings].sort((x, y) => y.seq - x.seq);
+    r.eq("listings.length", listingsDesc.length, "ListingApproved events for this option id");
+    listingsDesc.forEach((l, i) => expectListing(r.at(`listings[${i}]`), l));
+    r.eq("harvests.length", t.allHarvests.length, "every Harvest carrying this cycle's number");
+    t.allHarvests.forEach((h, i) => expectHarvest(r.at(`harvests[${i}]`), h));
+    const cycleStrands = strands.filter((s) => s.cycleNumber === t.cycleNumber).sort((x, y) => (x.gen > y.gen ? -1 : 1));
+    r.eq("strands.length", cycleStrands.length, "ClaimStranded events for this cycle");
+    cycleStrands.forEach((s, i) => expectStrand(r.at(`strands[${i}]`), s));
   }
 
+  /* ---------------- list routes ---------------- */
   const list = b.route(routes.cycles);
   list.eq("count", weeks.length);
   list.eq("cycles.length", weeks.length);
@@ -644,29 +866,32 @@ export function buildExpectations(run: RunJson, chain: ChainFacts): Built {
   list.eq("totals.filled", weeks.filter((t) => t.sold > 0n).length);
   list.eq("totals.unfilled", weeks.filter((t) => t.sold === 0n).length);
   list.eq("totals.assigned", weeks.filter((t) => t.assigned > 0n).length);
-  list.eq("totals.stranded", 0);
+  list.eq("totals.stranded", weeks.filter((t) => t.stranded).length);
   byNumberDesc.forEach((t, i) => expectCycle(list.at(`cycles[${i}]`), t));
 
   const listings = b.route(routes.listings);
-  const listingsDesc = [...weeks].sort((x, y) => Number(y.listing.approvedBlock - x.listing.approvedBlock));
-  listings.eq("count", listingsDesc.length);
-  listings.eq("listings.length", listingsDesc.length);
-  listings.eq("liveHash", chain.views.listingHash === ZERO_HASH ? null : lower(chain.views.listingHash), "listingHash() (zero = none)");
-  listings.eq("seaportCounter", chain.views.seaportCounter.toString(), "seaport.getCounter(vault)");
-  listingsDesc.forEach((t, i) => expectListing(listings.at(`listings[${i}]`), t.listing));
+  const allListings = weeks.flatMap((t) => t.listings).sort((x, y) => Number(y.approvedBlock - x.approvedBlock));
+  listings.eq("count", allListings.length);
+  listings.eq("listings.length", allListings.length);
+  listings.eq("liveHash", views.listingHash === ZERO_HASH ? null : lower(views.listingHash), "listingHash() (zero = none, X-1)");
+  listings.eq("seaportCounter", views.seaportCounter.toString(), "seaport.getCounter(vault)");
+  allListings.forEach((l, i) => expectListing(listings.at(`listings[${i}]`), l));
 
   const activity = b.route(routes.activity);
   activity.eq("include", "terminal");
-  activity.eq("count", weeks.length);
-  byNumberDesc.forEach((t, i) => expectHarvest(activity.at(`harvests[${i}]`), t));
+  activity.eq("count", terminalsDesc.length, "one terminal Harvest per rollClose");
+  terminalsDesc.forEach((h, i) => expectHarvest(activity.at(`harvests[${i}]`), h));
   const activityAll = b.route(routes.activityAll);
   activityAll.eq("include", "all");
-  activityAll.eq("count", chain.harvests.length, "every Harvest log on chain");
+  activityAll.eq("count", harvestsDesc.length, "every Harvest log on chain");
+  harvestsDesc.forEach((h, i) => expectHarvest(activityAll.at(`harvests[${i}]`), h));
 
-  const strands = b.route(routes.strands);
-  strands.eq("stranded", false);
-  strands.eq("count", 0);
-  strands.eq("strands.length", 0);
+  const strandsRoute = b.route(routes.strands);
+  const strandsDesc = [...strands].sort((x, y) => (x.gen > y.gen ? -1 : 1));
+  strandsRoute.eq("stranded", views.isStranded, "isStranded()");
+  strandsRoute.eq("count", strandsDesc.length);
+  strandsRoute.eq("strands.length", strandsDesc.length);
+  strandsDesc.forEach((s, i) => expectStrand(strandsRoute.at(`strands[${i}]`), s));
 
   /* ---------------- /v1/vault ---------------- */
   const v = b.route(routes.vault);
@@ -680,41 +905,34 @@ export function buildExpectations(run: RunJson, chain: ChainFacts): Built {
   v.eq("live", true);
   v.eq("blockNumber", chain.endBlock.toString());
 
-  const views = chain.views;
   v.eq("phase.code", views.phase);
   v.eq("phase.name", ["Idle", "Listed", "Exercisable", "Settling"][views.phase] ?? "Unknown");
   v.eq("phase.writesHalted", views.writesHalted);
   v.eq("phase.canRedeemInstantly", views.canRedeemInstantly);
   v.eq("phase.depositsOpen", views.maxDepositZero > 0n, "maxDeposit(0) > 0");
   v.eq("phase.valoremFeeAccepted", views.valoremFeeAccepted);
+  v.eq("phase.clearFeesEnabled", views.clearFeesEnabled, "clear.feesEnabled()");
   v.eq("phase.oraclePaused", views.oraclePaused);
   v.eq("phase.tokenPaused", false);
   v.eq("phase.maxPriceAgeSeconds", chain.settings.maxPriceAge, "maxPriceAge()");
 
-  b.agree("not stranded at the end", false, views.isStranded);
-  b.agree("strand generations resolved", views.strandGen, views.lastResolvedGen);
   const st = v.at("stranded");
   st.eq("stranded", views.isStranded, "isStranded()");
   st.eq("gen", views.strandGen.toString(), "strandGen()");
   st.eq("lastResolvedGen", views.lastResolvedGen.toString(), "lastResolvedGen()");
   st.eq("remainingWad", views.strandedRemainingWad.toString(), "strandedRemainingWad()");
-  st.eq("wad", ONE.toString());
-  st.eq("cycle", null);
-  st.eq("claimKey", null);
-  st.eq("since", null);
-  st.eq("lockedAssets", null);
+  st.eq("wad", WAD.toString());
+  st.eq("cycle", openStrand === null ? null : openStrand.cycleNumber, "the unrecovered strand's cycle, else null");
+  st.eq("claimKey", openStrand === null ? null : openStrand.claimKey.toString());
+  st.eq("since", openStrand === null ? null : isoOf(openStrand.strandedAt));
+  if (openStrand === null) st.eq("lockedAssets", null);
+  else st.asset("lockedAssets", views.lockedAssets, "lockedAssets() while stranded");
 
-  const finalIdle = runBig(run, "cycle3.final.idleAssets");
-  const finalSupply = runBig(run, "cycle3.final.totalSupply");
-  b.agree("final idleAssets", finalIdle, views.idleAssets);
-  b.agree("final totalSupply", finalSupply, views.totalSupply);
-  b.agree("final totalAssets = idle (nothing locked)", finalIdle, views.totalAssets);
-  b.agree("nothing written after the close", 0n, views.contractsWritten);
-  v.asset("tvl.totalAssets", views.totalAssets, "run.json cycle3.final.idleAssets");
-  v.asset("tvl.idleAssets", views.idleAssets, "run.json cycle3.final.idleAssets");
-  v.asset("tvl.lockedAssets", views.lockedAssets);
-  v.asset("tvl.reservedAssets", views.reservedAssets);
-  v.asset("tvl.totalShares", views.totalSupply, "run.json cycle3.final.totalSupply");
+  v.asset("tvl.totalAssets", views.totalAssets, "totalAssets()");
+  v.asset("tvl.idleAssets", views.idleAssets, "idleAssets()");
+  v.asset("tvl.lockedAssets", views.lockedAssets, "lockedAssets()");
+  v.asset("tvl.reservedAssets", views.reservedAssets, "reservedAssets() (the indexed reserve must agree)");
+  v.asset("tvl.totalShares", views.totalSupply, "totalSupply()");
   v.asset("tvl.pricePerShare", views.totalSupply === 0n ? ONE : (views.totalAssets * ONE) / views.totalSupply);
   v.asset("tvl.depositCap", chain.settings.depositCap, "depositCap()");
   v.asset("tvl.maxDeposit", views.maxDepositZero, "maxDeposit(0)");
@@ -724,29 +942,28 @@ export function buildExpectations(run: RunJson, chain: ChainFacts): Built {
   if (views.spotUsdg === null) v.eq("tvl.spotUsdg", null);
   else v.usdg("tvl.spotUsdg", views.spotUsdg, "spotUsdg()");
 
-  const remainder = runBig(run, "cycle3.usdgLeftInVault.remainder");
-  b.agree("USDG left in the vault", remainder, views.usdgBalance);
+  const claimedOnChain = sum(chain.claims, (c) => c.amount) + sum(chain.queue.settled, (s) => s.usdgOut);
+  b.agree("sum of ClaimUsdg + queue escrow takes = totalUsdgClaimed()", claimedOnChain, views.totalUsdgClaimed);
   b.agree("sum of UsdgDistributed = totalUsdgDistributed()", chain.usdgDistributed, views.totalUsdgDistributed);
-  v.usdg("usdg.balance", views.usdgBalance, "run.json cycle3.usdgLeftInVault.remainder");
+  v.usdg("usdg.balance", views.usdgBalance, "usdg.balanceOf(vault) (the indexed balance must agree)");
   v.usdg("usdg.distributed", views.totalUsdgDistributed, "totalUsdgDistributed()");
   v.usdg("usdg.claimed", views.totalUsdgClaimed, "totalUsdgClaimed(): ClaimUsdg plus the queue escrow's take at settlement");
-  v.usdg("usdg.reservedForQueue", views.usdgReservedForQueue);
-  v.usdg("usdg.unallocated", views.usdgUnallocated);
+  v.usdg("usdg.reservedForQueue", views.usdgReservedForQueue, "usdgReservedForQueue()");
+  v.usdg("usdg.unallocated", views.usdgUnallocated, "usdgUnallocated()");
   v.eq("usdg.accUsdgPerShare", views.accUsdgPerShare.toString(), "accUsdgPerShare()");
   v.eq("usdg.accUsdgPerSharePrecision", (10n ** 27n).toString());
   v.eq("usdg.protocolFeeBps", chain.settings.protocolFeeBps, "policy().protocolFeeBps");
   v.eq("usdg.feeRecipient", lower(chain.settings.feeRecipient), "feeRecipient() (set in the constructor, no event)");
-  b.agree("fee recipient = the dry run's fee Safe", run.actors.feeSafe, chain.settings.feeRecipient);
-  v.asset("queue.queuedShares", views.queuedShares);
+  v.asset("queue.queuedShares", views.queuedShares, "queuedShares()");
   v.eq("queue.epochId", views.epochId.toString(), "epochId()");
   v.eq("queue.canSettle", views.phase === 0 && views.queuedShares > 0n, "Idle with shares queued");
 
-  expectCycle(v.at("week.cycle"), w3);
+  expectCycle(v.at("week.cycle"), latestWeek);
   const wo = v.at("week.option");
-  // After the close the vault forgets the armed type (`optionId` 0 → null on the wire) but keeps
-  // the strike and the window until the next `rollOpen`.
-  wo.eq("optionId", views.optionId === 0n ? w3.optionId.toString() : views.optionId.toString(), "optionId(), or the cycle row once cleared");
-  wo.eq("claimKey", views.claimKey === 0n ? (w3.claimKey === null ? null : w3.claimKey.toString()) : views.claimKey.toString(), "claimKey(), or the cycle row once cleared");
+  // After a close the vault forgets the armed type (`optionId` 0 → the cycle row's) unless the
+  // claim is stranded, and keeps the strike and the window until the next `rollOpen`.
+  wo.eq("optionId", views.optionId === 0n ? latestWeek.optionId.toString() : views.optionId.toString(), "optionId(), or the cycle row once cleared");
+  wo.eq("claimKey", views.claimKey === 0n ? (latestWeek.claimKey === null ? null : latestWeek.claimKey.toString()) : views.claimKey.toString(), "claimKey(), or the cycle row once cleared");
   wo.usdg("strikeUsdg", views.cycleStrikeUsdg, "cycleStrikeUsdg()");
   wo.eq("exerciseTimestamp", views.cycleExerciseTs.toString(), "cycleExerciseTs()");
   wo.eq("exerciseAt", isoOf(views.cycleExerciseTs));
@@ -761,32 +978,35 @@ export function buildExpectations(run: RunJson, chain: ChainFacts): Built {
   v.eq("week.assignmentLive.contractsWritten", views.contractsWritten.toString());
   v.eq("week.assignmentLive.capacity", capacityOf(chain.settings, views.totalAssets, views.contractsWritten).toString(), "Policy.maxContracts(totalAssets) - contractsWritten");
 
-  expectHarvest(v.at("lastHarvest"), w3);
-  expectCycle(v.at("lastClosedCycle"), w3);
+  // X-3: the last TERMINAL harvest, which is not the last harvest when a retry or a checkpoint
+  // came after it; and the last closed week whole.
+  expectHarvest(v.at("lastHarvest"), terminalsDesc[0]!);
+  expectCycle(v.at("lastClosedCycle"), latestWeek);
 
-  const sum = (f: (t: WeekTruth) => bigint) => weeks.reduce((s, t) => s + f(t), 0n);
   const lifetime = {
-    premiumGross: sum((t) => t.premiumGross),
-    assignmentUsdg: sum((t) => t.strikeProceeds),
-    protocolFee: sum((t) => t.fee),
-    premiumNet: sum((t) => t.premiumNet),
-    strikeProceeds: sum((t) => t.strikeProceeds),
-    credited: sum((t) => t.net),
+    premiumGross: sum(weeks, (t) => t.premiumGross),
+    // Strike USDG the claims returned, stranded recoveries included, whoever it went to.
+    assignmentUsdg: sum(chain.cycles, (c) => c.close?.usdgFromAssignment ?? 0n) + sum(chain.strands, (s) => s.recovered?.usdgOut ?? 0n),
+    // The harvest tallies run over EVERY Harvest log, post-close checkpoints included.
+    protocolFee: sum(allHarvests, (h) => h.fee),
+    premiumNet: sum(allHarvests, (h) => h.premiumNet),
+    strikeProceeds: sum(allHarvests, (h) => h.strikeProceeds),
+    credited: sum(allHarvests, (h) => h.net),
+    haircut: sum(chain.queue.haircuts, (h) => h.booked - h.paid),
   };
-  b.agree("fee swept = fee accrued", lifetime.protocolFee, chain.feeSwept);
-  b.agree("pendingFeeUsdg", 0n, views.pendingFeeUsdg);
-  v.eq("lifetime.cyclesArmed", weeks.length);
+  b.agree("pendingFeeUsdg = fee accrued - fee swept", lifetime.protocolFee - chain.feeSwept, views.pendingFeeUsdg);
+  v.eq("lifetime.cyclesArmed", weeks.length, "RollOpen events");
   v.eq("lifetime.cyclesFilled", weeks.filter((t) => t.sold > 0n).length);
   v.eq("lifetime.cyclesUnfilled", weeks.filter((t) => t.sold === 0n).length);
   v.eq("lifetime.cyclesAssigned", weeks.filter((t) => t.assigned > 0n).length);
-  v.eq("lifetime.cyclesStranded", 0);
+  v.eq("lifetime.cyclesStranded", weeks.filter((t) => t.stranded).length, "ClaimStranded events");
   v.usdg("lifetime.premiumGross", lifetime.premiumGross, "sum of fills (one consideration item)");
-  v.usdg("lifetime.assignmentUsdg", lifetime.assignmentUsdg, "sum of RollClose.usdgFromAssignment");
-  v.usdg("lifetime.protocolFee", lifetime.protocolFee, "sum of run.json harvest fees");
-  v.usdg("lifetime.premiumNet", lifetime.premiumNet, "sum of (gross - strike proceeds - fee)");
-  v.usdg("lifetime.strikeProceedsUsdg", lifetime.strikeProceeds);
-  v.usdg("lifetime.creditedUsdg", lifetime.credited, "sum of run.json harvest nets");
-  v.asset("lifetime.haircutAssets", 0n);
+  v.usdg("lifetime.assignmentUsdg", lifetime.assignmentUsdg, "sum of RollClose.usdgFromAssignment + StrandedClaimRecovered.usdgOut");
+  v.usdg("lifetime.protocolFee", lifetime.protocolFee, "sum of Harvest.feeUsdg");
+  v.usdg("lifetime.premiumNet", lifetime.premiumNet, "sum over every Harvest of (gross - strike proceeds - fee)");
+  v.usdg("lifetime.strikeProceedsUsdg", lifetime.strikeProceeds, "sum over every Harvest of its strike-proceeds part");
+  v.usdg("lifetime.creditedUsdg", lifetime.credited, "sum of Harvest.netUsdg");
+  v.asset("lifetime.haircutAssets", lifetime.haircut, "sum of ReserveHaircut booked - paid");
 
   const holders = (role: string) => chain.roles.filter((r) => r.granted && lower(role) === lower(r.role)).map((r) => lower(r.account));
   // Role hashes: keccak256 of the name, and 0x00 for the admin (OpenZeppelin AccessControl).
@@ -796,50 +1016,104 @@ export function buildExpectations(run: RunJson, chain: ChainFacts): Built {
   v.eq("roles.admin", holders(ROLE_ADMIN), "RoleGranted logs");
   v.eq("roles.keeper", holders(ROLE_KEEPER), "RoleGranted logs");
   v.eq("roles.guardian", holders(ROLE_GUARDIAN), "RoleGranted logs");
-  b.agree("admin role holder", [lower(run.actors.admin ?? "")], holders(ROLE_ADMIN));
-  b.agree("keeper role holder", [lower(run.actors.keeper ?? "")], holders(ROLE_KEEPER));
+  b.agree("admin role holder", [lower(String(runValue(run, "actors.admin")))], holders(ROLE_ADMIN));
+  b.agree("keeper role holder", [lower(String(runValue(run, "actors.keeper")))], holders(ROLE_KEEPER));
 
   v.eq("indexedAt.blockNumber", chain.lastVaultActivityBlock.toString(), "last block with a vault-state event");
   v.eq("indexedAt.timestamp", chain.lastVaultActivityTimestamp.toString());
   v.eq("indexedAt.at", isoOf(chain.lastVaultActivityTimestamp));
 
+  /* ---------------- the redeem queue, replayed ---------------- */
+  // Every epoch the index has a row for: queued into, settled, or opened after a settlement.
+  const epochIds = new Set<bigint>([
+    ...chain.queue.redeems.map((q) => q.epochId),
+    ...chain.queue.settled.flatMap((s) => [s.epochId, s.epochId + 1n]),
+    ...chain.strands.flatMap((s) => s.epochShares.map((e) => e.epochId)),
+  ]);
+  const epochs = [...epochIds].sort((x, y) => (x < y ? -1 : 1));
+  type EpochTruth = {
+    id: bigint;
+    settled: ChainFacts["queue"]["settled"][number] | null;
+    cycleNumber: number | null;
+    redeems: ChainFacts["queue"]["redeems"];
+    entries: ChainFacts["queue"]["entries"];
+    strandGen: bigint | null;
+    strandWad: bigint;
+    strandWadClaimed: bigint;
+  };
+  const epochTruths: EpochTruth[] = epochs.map((id) => {
+    const settled = chain.queue.settled.find((s) => s.epochId === id) ?? null;
+    const settledIn = settled === null ? undefined : weeks.find((t) => t.txClose === lower(settled.txHash));
+    const entries = chain.queue.entries.filter((q) => q.epochId === id);
+    const share = chain.strands.flatMap((s) => s.epochShares.filter((e) => e.epochId === id).map((e) => ({ gen: s.gen, wad: e.wad })))[0] ?? null;
+    const taken = share === null ? [] : epochStrandDrawdown(settled?.shares ?? 0n, share.wad, entries);
+    return {
+      id,
+      settled,
+      cycleNumber: settledIn === undefined ? null : settledIn.cycleNumber,
+      redeems: chain.queue.redeems.filter((q) => q.epochId === id),
+      entries,
+      strandGen: share === null ? null : share.gen,
+      strandWad: share?.wad ?? 0n,
+      strandWadClaimed: sum(taken, (x) => x),
+    };
+  });
+
   /* ---------------- /v1/account/:depositor ---------------- */
   const a = b.route(routes.account);
   const acct = chain.account;
-  const deposited = chain.deposits.filter((d) => lower(d.owner) === lower(depositor)).reduce((s, d) => s + d.assets, 0n);
-  const claimedOnChain = chain.claims.filter((c) => lower(c.account) === lower(depositor)).reduce((s, c) => s + c.amount, 0n);
-  const completes = chain.queue.completes.filter((c) => lower(c.owner) === lower(depositor));
-  const claimedUsdg = runBig(run, "cycle1.harvest.depositorReceived") + runBig(run, "cycle3.claimed");
-  const redeemedAssets = runBig(run, "cycle3.queue.assetsOut");
-  const redeemedUsdg = runBig(run, "cycle3.queue.usdgOut");
-  b.agree("depositor shares", runBig(run, "cycle3.final.depositorShares"), acct.shares);
-  b.agree("depositor deposit = shares minted", finalSupply + runBig(run, "cycle3.queue.sharesQueued"), deposited);
-  b.agree("depositor USDG claimed", claimedUsdg, claimedOnChain);
-  b.agree("depositor redeemed assets", redeemedAssets, completes.reduce((s, c) => s + c.assets, 0n));
-  b.agree("depositor redeemed USDG", redeemedUsdg, completes.reduce((s, c) => s + c.usdgOut, 0n));
-  b.agree("depositor holds no strand share", 0n, acct.owedStrandWad);
+  const mine = (owner: string) => lower(owner) === lower(depositor);
+  const deposited = sum(chain.deposits.filter((d) => mine(d.owner)), (d) => d.assets);
+  const withdrawn = sum(chain.withdraws.filter((d) => mine(d.owner)), (d) => d.assets);
+  const completes = chain.queue.completes.filter((c) => mine(c.owner));
+  const claimedUsdg = sum(chain.claims.filter((c) => mine(c.account)), (c) => c.amount);
+  const haircut = sum(chain.queue.haircuts.filter((h) => mine(h.owner)), (h) => h.booked - h.paid);
+  // A deferred USDG leg stays on record until a later payout moves USDG for the same owner.
+  let deferredUsdg = 0n;
+  for (const ev of [
+    ...chain.queue.deferred.filter((d) => mine(d.owner)).map((d) => ({ block: d.block, kind: "defer" as const, amount: d.usdgOwed })),
+    ...completes.map((c) => ({ block: c.block, kind: "pay" as const, amount: c.usdgOut })),
+  ].sort((x, y) => (x.block < y.block ? -1 : x.block > y.block ? 1 : x.kind === "defer" ? -1 : 1))) {
+    if (ev.kind === "defer") deferredUsdg = ev.amount;
+    else if (ev.amount > 0n) deferredUsdg = 0n;
+  }
+  const queuedEpoch = acct.queuedEpoch;
+  const epoch = queuedEpoch === 0n ? null : (epochTruths.find((e) => e.id === queuedEpoch) ?? null);
+  const epochStrandWad = epoch === null || epoch.strandGen === null ? 0n : epoch.strandWad - epoch.strandWadClaimed;
+  const pendingGen = acct.owedStrandWad > 0n ? acct.owedStrandGen : (epoch?.strandGen ?? null);
+  const pendingStrand = pendingGen === null || pendingGen === 0n ? null : (strands.find((s) => s.gen === pendingGen) ?? null);
+
   a.eq("address", depositor);
   a.eq("live", true);
   a.eq("known", true);
-  a.asset("position.shares", acct.shares, "run.json cycle3.final.depositorShares");
+  a.asset("position.shares", acct.shares, "balanceOf(depositor)");
   a.asset("position.sharesAsAssets", acct.sharesAsAssets, "convertToAssets(shares)");
   a.usdg("position.claimableUsdg", acct.claimableUsdg, "claimableUsdg(depositor)");
-  a.asset("queue.queuedShares", acct.queuedShares);
+  a.asset("queue.queuedShares", acct.queuedShares, "queuedSharesOf(depositor)");
   a.eq("queue.epochId", acct.queuedEpoch.toString(), "queuedEpochOf(depositor)");
-  a.eq("queue.settled", false);
-  a.eq("queue.claimable", false);
-  a.asset("queue.previewAssets", acct.previewAssets);
-  a.usdg("queue.previewUsdg", acct.previewUsdg);
-  a.eq("queue.epochSettledAt", null);
-  a.usdg("queue.deferredUsdg", 0n);
-  a.eq("strand", null, "owedStrandWad(depositor) == 0 and no epoch share");
+  a.eq("queue.settled", epoch !== null && epoch.settled !== null, "the epoch's QueueSettled");
+  a.eq("queue.claimable", queuedEpoch !== 0n && queuedEpoch < views.epochId, "queued epoch < epochId()");
+  a.asset("queue.previewAssets", acct.previewAssets, "previewCompleteRedeem(depositor)");
+  a.usdg("queue.previewUsdg", acct.previewUsdg, "previewCompleteRedeem(depositor)");
+  a.eq("queue.epochSettledAt", epoch === null ? null : isoOf(epoch.settled?.timestamp ?? null));
+  a.usdg("queue.deferredUsdg", deferredUsdg, "UsdgLegDeferred not yet paid by a later CompleteRedeem");
+  if (acct.owedStrandWad === 0n && epochStrandWad === 0n) a.eq("strand", null, "owedStrandWad(depositor) == 0 and no epoch share pending");
+  else {
+    const s = a.at("strand");
+    s.eq("gen", pendingGen === null ? null : pendingGen.toString(), "owedStrandGen(depositor), or the queued epoch's generation");
+    s.eq("wad", acct.owedStrandWad.toString(), "owedStrandWad(depositor)");
+    s.eq("epochWad", epochStrandWad.toString(), "the queued epoch's EpochStrandShare.wad less what its settled entries took");
+    s.eq("recovered", pendingStrand?.recovered ?? false);
+    if (pendingStrand === null) s.eq("strand", null);
+    else expectStrand(s.at("strand"), pendingStrand);
+  }
   a.asset("lifetime.deposited", deposited, "Deposit logs");
-  a.asset("lifetime.withdrawn", 0n);
-  a.asset("lifetime.redeemedAssets", redeemedAssets, "run.json cycle3.queue.assetsOut");
-  a.usdg("lifetime.redeemedUsdg", redeemedUsdg, "run.json cycle3.queue.usdgOut");
-  a.usdg("lifetime.claimedUsdg", claimedUsdg, "run.json cycle1.harvest.depositorReceived + cycle3.claimed");
-  a.asset("lifetime.haircutAssets", 0n);
-  a.eq("lifetime.depositCount", chain.deposits.filter((d) => lower(d.owner) === lower(depositor)).length);
+  a.asset("lifetime.withdrawn", withdrawn, "Withdraw logs (instant redemptions)");
+  a.asset("lifetime.redeemedAssets", sum(completes, (c) => c.assets), "CompleteRedeem.assets");
+  a.usdg("lifetime.redeemedUsdg", sum(completes, (c) => c.usdgOut), "CompleteRedeem.usdgOut");
+  a.usdg("lifetime.claimedUsdg", claimedUsdg, "ClaimUsdg logs");
+  a.asset("lifetime.haircutAssets", haircut, "ReserveHaircut booked - paid");
+  a.eq("lifetime.depositCount", chain.deposits.filter((d) => mine(d.owner)).length);
   a.eq("lifetime.firstSeenAt", isoOf(chain.depositorFirstSeen));
   a.eq("lifetime.lastActivityAt", isoOf(chain.depositorLastActivity));
 
@@ -859,52 +1133,42 @@ export function buildExpectations(run: RunJson, chain: ChainFacts): Built {
   hl.eq("vault.phaseName", ["Idle", "Listed", "Exercisable", "Settling"][views.phase] ?? "Unknown");
   hl.eq("vault.cycle", views.cycleNumber, "cycleNumber()");
   hl.eq("vault.writesHalted", views.writesHalted);
-  hl.eq("vault.stranded", false);
+  hl.eq("vault.stranded", views.isStranded, "isStranded()");
   hl.eq("vault.lastActivityBlock", chain.lastVaultActivityBlock.toString());
   hl.eq("vault.lastActivityAt", isoOf(chain.lastVaultActivityTimestamp));
 
   /* ---------------- GraphQL: epochs and the vault row ---------------- */
   const g = b.route(routes.graphql);
-  const epochIds = new Set<bigint>([...chain.queue.redeems.map((q) => q.epochId), ...chain.queue.settled.flatMap((s) => [s.epochId, s.epochId + 1n])]);
-  const epochs = [...epochIds].sort((x, y) => (x < y ? -1 : 1));
-  g.eq("data.queueEpochs.items.length", epochs.length, "epochs queued into, settled, and the one opened after each settlement");
-  const queueSettled = chain.queue.settled;
-  b.agree("cycle 3 queue shares", runBig(run, "cycle3.queue.sharesQueued"), queueSettled[0]?.shares ?? null);
-  b.agree("cycle 3 queue assets", runBig(run, "cycle3.queue.payoutAssets"), queueSettled[0]?.assets ?? null);
-  b.agree("cycle 3 queue USDG", runBig(run, "cycle3.queue.escrowUsdg"), queueSettled[0]?.usdgOut ?? null);
-  b.agree("cycle 3 queue epoch", runBig(run, "cycle3.queue.epoch"), queueSettled[0]?.epochId ?? null);
-  epochs.forEach((id, i) => {
-    const e = g.at(`data.queueEpochs.items[${i}]`);
-    const settled = queueSettled.find((s) => s.epochId === id);
-    const redeems = chain.queue.redeems.filter((q) => q.epochId === id);
-    const entries = chain.queue.entries.filter((q) => q.epochId === id);
-    const settledIn = settled === undefined ? undefined : weeks.find((t) => t.txClose === lower(settled.txHash));
-    e.eq("epochId", id.toString());
-    e.eq("status", settled === undefined ? "open" : "settled");
-    e.eq("cycleNumber", settledIn === undefined ? null : settledIn.cycleNumber, "the cycle whose rollClose settled it");
-    e.eq("sharesQueued", redeems.reduce((s, q) => s + q.shares, 0n).toString(), "run.json cycle3.queue.sharesQueued");
-    e.eq("queueCount", redeems.length);
-    e.eq("sharesSettled", (settled?.shares ?? 0n).toString(), "run.json cycle3.queue.sharesQueued");
-    e.eq("assetsSettled", (settled?.assets ?? 0n).toString(), "run.json cycle3.queue.payoutAssets");
-    e.eq("usdgSettled", (settled?.usdgOut ?? 0n).toString(), "run.json cycle3.queue.escrowUsdg");
-    e.eq("sharesClaimed", entries.reduce((s, q) => s + q.shares, 0n).toString());
-    e.eq("assetsClaimed", entries.reduce((s, q) => s + q.assets, 0n).toString(), "run.json cycle3.queue.assetsOut");
-    e.eq("usdgClaimed", entries.reduce((s, q) => s + q.usdgOut, 0n).toString(), "run.json cycle3.queue.usdgOut");
-    e.eq("claimCount", entries.length);
-    e.eq("strandGen", null);
-    e.eq("strandWad", "0");
-    e.eq("strandWadClaimed", "0");
-    e.eq("settledTx", settled === undefined ? null : lower(settled.txHash));
+  g.eq("data.queueEpochs.items.length", epochTruths.length, "epochs queued into, settled, and the one opened after each settlement");
+  epochTruths.forEach((e, i) => {
+    const w = g.at(`data.queueEpochs.items[${i}]`);
+    w.eq("epochId", e.id.toString());
+    w.eq("status", e.settled === null ? "open" : "settled");
+    w.eq("cycleNumber", e.cycleNumber, "the cycle whose rollClose settled it; null for a flat settleQueue()");
+    w.eq("sharesQueued", sum(e.redeems, (q) => q.shares).toString(), "QueueRedeem.shares");
+    w.eq("queueCount", e.redeems.length);
+    w.eq("sharesSettled", (e.settled?.shares ?? 0n).toString(), "QueueSettled.shares");
+    w.eq("assetsSettled", (e.settled?.assets ?? 0n).toString(), "QueueSettled.assets");
+    w.eq("usdgSettled", (e.settled?.usdgOut ?? 0n).toString(), "QueueSettled.usdgOut");
+    w.eq("sharesClaimed", sum(e.entries, (q) => q.shares).toString(), "QueueEntrySettled.shares");
+    w.eq("assetsClaimed", sum(e.entries, (q) => q.assets).toString(), "QueueEntrySettled.assets");
+    w.eq("usdgClaimed", sum(e.entries, (q) => q.usdgOut).toString(), "QueueEntrySettled.usdgOut");
+    w.eq("claimCount", e.entries.length);
+    w.eq("strandGen", e.strandGen === null ? null : e.strandGen.toString(), "EpochStrandShare.gen");
+    w.eq("strandWad", e.strandWad.toString(), "EpochStrandShare.wad");
+    w.eq("strandWadClaimed", e.strandWadClaimed.toString(), "the entries' pro-rata draw on it, last claimant taking the rest");
+    w.eq("settledTx", e.settled === null ? null : lower(e.settled.txHash));
   });
 
   const vs = g.at("data.vaultState");
+  const openClaim = views.claimKey !== 0n;
   vs.eq("phase", views.phase);
   vs.eq("cycleNumber", views.cycleNumber);
   vs.eq("writesHalted", views.writesHalted);
-  vs.eq("claimKey", null, "claimKey() = 0 after the close");
-  vs.eq("optionId", null);
+  vs.eq("claimKey", openClaim ? views.claimKey.toString() : null, "claimKey() (0 → null)");
+  vs.eq("optionId", views.optionId === 0n ? null : views.optionId.toString(), "optionId() (0 → null; forgotten at an unfilled close, cleared at a redeem, kept while stranded)");
   vs.eq("listingHash", views.listingHash === ZERO_HASH ? null : lower(views.listingHash));
-  vs.eq("lockedCollateral", views.lockedAssets.toString());
+  vs.eq("lockedCollateral", (openClaim ? latestWeek.collateral : 0n).toString(), "the open claim's CallsWritten.collateral, 0 once redeemed");
   vs.eq("contractsWritten", views.contractsWritten.toString());
   vs.eq("assetBalance", views.assetBalance.toString(), "asset.balanceOf(vault)");
   vs.eq("usdgBalance", views.usdgBalance.toString(), "usdg.balanceOf(vault)");
@@ -929,18 +1193,18 @@ export function buildExpectations(run: RunJson, chain: ChainFacts): Built {
   vs.eq("lifetimePremiumNet", lifetime.premiumNet.toString());
   vs.eq("lifetimeStrikeProceeds", lifetime.strikeProceeds.toString());
   vs.eq("lifetimeCreditedUsdg", lifetime.credited.toString());
-  vs.eq("lifetimeHaircutAssets", "0");
+  vs.eq("lifetimeHaircutAssets", lifetime.haircut.toString());
   vs.eq("cyclesWritten", weeks.length);
   vs.eq("cyclesFilled", weeks.filter((t) => t.sold > 0n).length);
   vs.eq("cyclesUnfilled", weeks.filter((t) => t.sold === 0n).length);
   vs.eq("cyclesAssigned", weeks.filter((t) => t.assigned > 0n).length);
-  vs.eq("cyclesStranded", 0);
-  vs.eq("stranded", false);
-  vs.eq("strandGen", "0");
-  vs.eq("lastResolvedGen", "0");
-  vs.eq("strandedRemainingWad", "0");
-  vs.eq("strandedCycleNumber", null);
+  vs.eq("cyclesStranded", weeks.filter((t) => t.stranded).length);
+  vs.eq("stranded", views.isStranded);
+  vs.eq("strandGen", views.strandGen.toString());
+  vs.eq("lastResolvedGen", views.lastResolvedGen.toString());
+  vs.eq("strandedRemainingWad", views.strandedRemainingWad.toString());
+  vs.eq("strandedCycleNumber", openStrand === null ? null : openStrand.cycleNumber);
   vs.eq("lastBlock", chain.lastVaultActivityBlock.toString());
 
-  return { expectations: b.expectations, disagreements: b.disagreements, crossChecks: b.crossChecks, weeks };
+  return { expectations: b.expectations, disagreements: b.disagreements, crossChecks: b.crossChecks, weeks, strands };
 }

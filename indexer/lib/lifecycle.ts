@@ -78,6 +78,20 @@ export function recoveredStatus(c: { assigned: bigint }): "assigned" | "closed" 
   return c.assigned > 0n ? "assigned" : "closed";
 }
 
+/**
+ * The armed option id the vault still holds after `RollClose`.
+ *
+ * `rollClose` forgets the type on an unfilled week (`optionId = 0`: no claim, nothing to redeem)
+ * and `_tryRedeemClaim` clears it on a redeemed one (`Vault:ClaimRedeemed`, one log earlier), so
+ * after the close the id survives ONLY while the claim is stranded, where `lockedAssets()` and
+ * `retryStrandedClaim` still need it. The index mirrors that: null unless stranded. Before this
+ * helper an unfilled week left the id on `vaultState` until the next `rollOpen`, which made the
+ * vault row disagree with `optionId()` on chain for the week the tape most often publishes.
+ */
+export function optionIdAfterClose(state: { stranded: boolean; optionId: bigint | null }): bigint | null {
+  return state.stranded ? state.optionId : null;
+}
+
 /*//////////////////////////////////////////////////////////////
                            QUEUE SETTLEMENT
 //////////////////////////////////////////////////////////////*/

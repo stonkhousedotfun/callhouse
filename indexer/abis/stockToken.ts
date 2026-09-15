@@ -2,7 +2,7 @@
 // Robinhood Chain Stock Token: ERC-20 plus ERC-8056 scaled UI amount, recovered from the
 // deployed implementation's bytecode and verified live (see ops/abis/StockToken.json).
 // `uiMultiplier()` is DISPLAY ONLY — the vault never rebases and its share maths use raw
-// balances. `oraclePaused()` gates writes: a paused oracle blocks rollOpen.
+// balances. `oraclePaused()` gates writes: a paused oracle blocks rollOpen and every fill.
 export const stockTokenAbi = [
   {
     "type": "function",

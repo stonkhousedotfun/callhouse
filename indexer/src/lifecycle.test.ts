@@ -14,6 +14,7 @@ import {
   endedListingStatus,
   entryStrandShare,
   harvestOrigin,
+  optionIdAfterClose,
   recoveredStatus,
   settlementCycle,
   strandRecovery,
@@ -64,6 +65,20 @@ describe("closeStatus / recoveredStatus", () => {
     expect(closeStatus({ stranded: true, sold: 12n, assigned: 0n })).toBe("stranded");
     expect(recoveredStatus({ assigned: 5n })).toBe("assigned");
     expect(recoveredStatus({ assigned: 0n })).toBe("closed");
+  });
+});
+
+describe("optionIdAfterClose (Vault.rollClose)", () => {
+  it("forgets the armed type on an unfilled close, exactly as `optionId = 0` does on chain", () => {
+    expect(optionIdAfterClose({ stranded: false, optionId: 3001n })).toBeNull();
+  });
+
+  it("a redeemed close already had it cleared by Vault:ClaimRedeemed; null stays null", () => {
+    expect(optionIdAfterClose({ stranded: false, optionId: null })).toBeNull();
+  });
+
+  it("keeps it while the claim is stranded: retryStrandedClaim and lockedAssets() still need it", () => {
+    expect(optionIdAfterClose({ stranded: true, optionId: 3001n })).toBe(3001n);
   });
 });
 

@@ -31,6 +31,16 @@ import { log } from "../lib/log";
  * `OptionsExercised` / `BucketAssignedExercise` event arguments are raw uint112 counts.
  * Mixing the two is an 18-order-of-magnitude error, so anything sourced from `claim()` is
  * divided by VALOREM_SCALAR and anything sourced from an event is not.
+ *
+ * NOT INDEXED, on purpose (Ponder only fetches the events that have a handler, so these cost
+ * nothing): `NewOptionType` — the keeper, or anyone, may create types the vault never arms, and
+ * `Vault:RollOpen` is the record of the one it did; `FeeSwitchUpdated` / `FeeToUpdated` /
+ * `FeeAccrued` / `FeeSwept` — Clear's own fee, which the vault refuses to pay unless governance
+ * accepts it (`Vault:ValoremFeeAccepted`); whether the switch is ON is read live by the API
+ * (`phase.clearFeesEnabled`) rather than reduced from a log the keeper already alerts on;
+ * `TransferSingle` / `TransferBatch` / `ApprovalForAll` / `URI` / `TokenURIGeneratorUpdated` —
+ * ERC-1155 plumbing; the vault holds no option token outside a fill (`validateOrder`), so the
+ * fill's `OrderFulfilled` is the only movement worth a row.
  */
 
 /**

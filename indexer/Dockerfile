@@ -39,8 +39,9 @@
 #     `0.0.0.0` when it does not. Pinning 0.0.0.0 would make the service unreachable over Railway's
 #     IPv6 private network (`indexer.railway.internal`) while changing nothing for the public edge.
 #   - No port flag. Ponder reads $PORT itself and it wins over `--port`; Railway injects it.
-#   - No DATABASE_URL, RPC URL or KEEPER_HMAC_SECRET as an ARG. Everything the indexer reads is a
-#     RUNTIME variable; a build ARG is written into image metadata and the build log.
+#   - No DATABASE_URL or RPC URL as an ARG. Everything the indexer reads is a RUNTIME variable; a
+#     build ARG is written into image metadata and the build log. (There is no secret at all any
+#     more: the HMAC-guarded Overcall relay route went with the registry.)
 #   - No HEALTHCHECK instruction. Railway owns it (indexer/railway.json → /ready).
 #   - No `.env`. The root .dockerignore refuses every .env* into every build context, and Ponder's
 #     own `dotenv.config({ path: ".env.local" })` therefore finds nothing in the image.

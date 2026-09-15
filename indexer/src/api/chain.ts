@@ -2,8 +2,9 @@ import { publicClients } from "ponder:api";
 import type { Address } from "viem";
 
 import { stockTokenAbi } from "../../abis/stockToken";
+import { valoremClearAbi } from "../../abis/valoremClear";
 import { vaultAbi } from "../../abis/vault";
-import { ASSET, CHAIN_NAME, LIVE_READ_TIMEOUT_MS, MULTICALL3, VAULT } from "../../lib/env";
+import { ASSET, CHAIN_NAME, CLEARINGHOUSE, LIVE_READ_TIMEOUT_MS, MULTICALL3, VAULT } from "../../lib/env";
 
 /**
  * Live chain reads for the API.
@@ -158,6 +159,13 @@ export type LiveVault = {
   lastResolvedGen: bigint | null;
   strandedRemainingWad: bigint | null;
   policy: LivePolicy | null;
+  /**
+   * Clear's own fee switch (`feesEnabled()`, 15 bps of notional on every fill). While it is on
+   * and `valoremFeeAccepted` is false the vault refuses to arm and every fill reverts
+   * (`ValoremFeesEnabled` in the arm and fill gates), so the two bits are published side by
+   * side. Read live: the switch flips by Clear governance, not by anything this vault emits.
+   */
+  clearFeesEnabled: boolean | null;
 };
 
 export async function readVaultLive(): Promise<LiveVault> {
@@ -199,21 +207,24 @@ export async function readVaultLive(): Promise<LiveVault> {
   ] as const;
 
   // `maxDeposit(address)` is the only one that takes an argument. The zero address is the
-  // right probe: the vault's cap is global, not per-account.
+  // right probe: the vault's cap is global, not per-account. Clear's fee switch rides in the
+  // same batch, after the vault's views, so it costs no extra round trip.
   const [batch, blockNumber] = await Promise.all([
-    multiread(
-      names.map((functionName) => ({
+    multiread([
+      ...names.map((functionName) => ({
         abi: vaultAbi,
         address: VAULT,
         functionName,
         args: functionName === "maxDeposit" ? [ZERO] : [],
       })),
-    ),
+      { abi: valoremClearAbi, address: CLEARINGHOUSE, functionName: "feesEnabled" },
+    ]),
     safe(c.getBlockNumber()),
   ]);
 
   const at = <T>(name: (typeof names)[number]): T | null =>
     (batch[names.indexOf(name)] ?? null) as T | null;
+  const clearFeesEnabled = (batch[names.length] ?? null) as boolean | null;
   const big = (name: (typeof names)[number]): bigint | null => {
     const v = at<bigint | number>(name);
     return v === null ? null : BigInt(v);
@@ -267,6 +278,7 @@ export async function readVaultLive(): Promise<LiveVault> {
             protocolFeeBps: Number(policyRaw[4]),
             maxContractsCap: BigInt(policyRaw[5]),
           },
+    clearFeesEnabled,
   };
 }
 
