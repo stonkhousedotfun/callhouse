@@ -1375,7 +1375,7 @@ async function main(): Promise<void> {
       const metaKeys = (store.db.prepare('SELECT key FROM meta ORDER BY key').all() as Array<{ key: string }>).map((m) => m.key);
       assert(metaKeys.includes('strand_alerted:1') && metaKeys.includes('strand_retry_ms') && metaKeys.includes('clear_fees_enabled') && metaKeys.includes('last_heartbeat_ms'), `meta keys: ${metaKeys.join(',')}`);
       const before = dumpDb();
-      record.blocks.lastBlock = (await pub.getBlockNumber()).toString();
+      record.blocks.lastBlock = (await pub.getBlockNumber({ cacheTime: 0 })).toString();
       record.health.final = (await health.get('/health')).body;
       stopServers();
       store.close();

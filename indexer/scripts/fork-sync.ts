@@ -242,10 +242,15 @@ async function main(): Promise<number> {
   if (head < lastBlock) {
     throw new Error(`the fork head is ${head} but the dry run's last transaction is in block ${lastBlock}`);
   }
-  if (head > lastBlock) {
-    say(`fork head ${head} is ${head - lastBlock} past the dry run's last tx ${lastBlock}; indexing through the dry run`);
+  // The dry run's publicClient can cache getBlockNumber(); week 4's txs have been six
+  // blocks past that cached value. When we started this anvil, the head is ours — index it.
+  if (EXTERNAL_RPC === undefined && head > lastBlock) {
+    say(`fork head ${head} is ${head - lastBlock} past run.json lastBlock ${lastBlock} (cached); indexing through the head`);
   }
-  const endBlock = lastBlock;
+  if (EXTERNAL_RPC !== undefined && head !== lastBlock) {
+    throw new Error(`the fork head is ${head} but the dry run's last transaction is in block ${lastBlock}: something else used this anvil`);
+  }
+  const endBlock = EXTERNAL_RPC === undefined ? head : lastBlock;
   const weeksRun = runCycles(run);
   const cycleNumbers = weeksRun.map((c) => c.cycleNumber);
   say(`dry run: fork block ${run.forkBlock}, vault ${vault} (block ${vaultDeployBlock}), cycles ${cycleNumbers.join(", ")}, last block ${endBlock}`);
