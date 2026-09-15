@@ -54,7 +54,7 @@ import { formatUnits, getAddress } from "viem";
 
 import { readChainFacts, type ChainFacts } from "./fork-sync/chain.ts";
 import { compare, formatMismatches, type Json } from "./fork-sync/diff.ts";
-import { buildExpectations, graphqlQuery, routesFor, runBlocks, runValue, type RunJson } from "./fork-sync/expected.ts";
+import { buildExpectations, graphqlQuery, routesFor, runBlocks, runCycles, runValue, type RunJson } from "./fork-sync/expected.ts";
 
 const INDEXER_DIR = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const REPO_ROOT = resolve(INDEXER_DIR, "..");
@@ -239,11 +239,15 @@ async function main(): Promise<number> {
   const depositor = getAddress(String(runValue(run, "actors.depositor")));
   const { vaultDeployBlock, lastBlock } = runBlocks(run);
   const head = BigInt(await rpc<string>("eth_blockNumber"));
-  if (head !== lastBlock) {
-    throw new Error(`the fork head is ${head} but the dry run's last transaction is in block ${lastBlock}: something else used this anvil`);
+  if (head < lastBlock) {
+    throw new Error(`the fork head is ${head} but the dry run's last transaction is in block ${lastBlock}`);
   }
-  const endBlock = head;
-  const cycleNumbers = (runValue(run, "cycles") as Array<{ cycleNumber: number }>).map((c) => c.cycleNumber);
+  if (head > lastBlock) {
+    say(`fork head ${head} is ${head - lastBlock} past the dry run's last tx ${lastBlock}; indexing through the dry run`);
+  }
+  const endBlock = lastBlock;
+  const weeksRun = runCycles(run);
+  const cycleNumbers = weeksRun.map((c) => c.cycleNumber);
   say(`dry run: fork block ${run.forkBlock}, vault ${vault} (block ${vaultDeployBlock}), cycles ${cycleNumbers.join(", ")}, last block ${endBlock}`);
 
   /* ---- 3. the chain's own record ---- */
