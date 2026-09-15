@@ -18,27 +18,15 @@ const BOOK_HREF = "/book";
 const ROADMAP = [
   {
     when: "Now",
-    title: "Beta, NVDA first",
+    title: MARKET,
     current: true,
-    body: `${MARKET} first.`,
-  },
-  {
-    when: "Next",
-    title: "External audit",
-    current: false,
-    body: "An external audit of the contracts. The report is published. The cap stays until then.",
-  },
-  {
-    when: "Then",
-    title: "Four published weeks",
-    current: false,
-    body: "Four closed weeks on the public record, zeros included, before the cap moves.",
+    body: "Robinhood Chain",
   },
   {
     when: "Later",
-    title: "More stock books",
+    title: "More stocks",
     current: false,
-    body: "Additional Stock Token books, one underlying each, same week and the same rules.",
+    body: "We will not name the next ticker until we are building it.",
   },
 ] as const;
 
@@ -126,10 +114,9 @@ export default function HomePage() {
           <SectionHead
             id="roadmap-h"
             eyebrow="Roadmap"
-            title="Where Stonkhouse is going."
-            intro="Product steps, not a return. Nothing here is a date, a ticker we have not started, or a figure for a week that has not closed."
+            title="Where StonkHouse is going."
           />
-          <ol className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-4">
+          <ol className="grid grid-cols-1 gap-3 sm:grid-cols-2">
             {ROADMAP.map((step) => (
               <li
                 key={step.title}

@@ -58,17 +58,17 @@ const mono = Geist_Mono({
  */
 export const metadata: Metadata = {
   metadataBase: new URL(APP_URL),
-  title: "Stonkhouse — pooled covered calls on Robinhood Chain",
+  title: "StonkHouse — let your stonks work for you",
   description:
-    "Pooled covered calls on tokenised stocks. The first vault is NVDA; more stocks follow. Each week the vault lists calls and writes them only when a buyer fills. Beta, pending audit.",
+    "Put your NVDA in. Each week someone can pay you for the chance to buy it at a set price. If they don't, you keep the stock.",
   // Per-page canonicals override this where a route sets one; the default is the app root.
   alternates: { canonical: "/" },
   openGraph: {
-    title: "Stonkhouse — pooled covered calls on Robinhood Chain",
+    title: "StonkHouse — let your stonks work for you",
     description:
-      "Pooled covered calls on tokenised stocks. The first vault is NVDA; more stocks follow. Each week the vault lists calls and writes them only when a buyer fills. Beta, pending audit.",
+      "Put your NVDA in. Each week someone can pay you for the chance to buy it at a set price. If they don't, you keep the stock.",
     url: APP_URL,
-    siteName: "Stonkhouse",
+    siteName: "StonkHouse",
     type: "website",
   },
   twitter: { card: "summary_large_image" },

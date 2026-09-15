@@ -2,12 +2,13 @@
 
 import { useMemo, useState } from "react";
 import type { Abi, Address, Hex } from "viem";
-import { useAccount, useReadContract, useReadContracts, useWriteContract } from "wagmi";
+import { useAccount, usePublicClient, useReadContract, useReadContracts, useWriteContract } from "wagmi";
 
 import { ConnectButton } from "@/components/ConnectButton";
 import { useTxRunner } from "@/components/TxToast";
 import { Button, Card, CardHead, CardTitle, Notice, PageHead, Row, Rows } from "@/components/ui";
 import {
+  CLEARINGHOUSE,
   FACTORY,
   MARKET,
   SEAPORT,
@@ -16,6 +17,7 @@ import {
   accountFactoryAbi,
   seaportAbi,
   stockTokenAbi,
+  valoremClearAbi,
   writerAccountAbi,
 } from "@/lib/contracts";
 import { fmtUsdg, shortAddress } from "@/lib/format";
@@ -81,6 +83,7 @@ function toJson(c: LotOrder): OrderComponentsJson {
 export default function BookPage() {
   const { address, isConnected } = useAccount();
   const { writeContractAsync } = useWriteContract();
+  const publicClient = usePublicClient();
   const run = useTxRunner();
   const [busy, setBusy] = useState(false);
 
@@ -215,6 +218,41 @@ export default function BookPage() {
     return (d as { askUsdg?: bigint }).askUsdg;
   })();
 
+  const optionIdRead = useReadContracts({
+    contracts: accounts.map((account) => ({
+      address: account,
+      abi: writerAccountAbi as unknown as Abi,
+      functionName: "optionId" as const,
+    })),
+    query: { enabled: accounts.length > 0 },
+  });
+
+  const holdRead = useReadContracts({
+    contracts:
+      address && optionIdRead.data
+        ? accounts.map((_, i) => {
+            const id = optionIdRead.data[i]?.status === "success" ? (optionIdRead.data[i].result as bigint) : 0n;
+            return {
+              address: CLEARINGHOUSE,
+              abi: valoremClearAbi as unknown as Abi,
+              functionName: "balanceOf" as const,
+              args: [address, id] as const,
+            };
+          })
+        : [],
+    query: { enabled: Boolean(address) && Boolean(optionIdRead.data) },
+  });
+
+  const heldRows = useMemo(() => {
+    const out: Array<{ optionId: bigint; balance: bigint }> = [];
+    accounts.forEach((_, i) => {
+      const id = optionIdRead.data?.[i]?.status === "success" ? (optionIdRead.data[i].result as bigint) : 0n;
+      const bal = holdRead.data?.[i]?.status === "success" ? (holdRead.data[i].result as bigint) : 0n;
+      if (id !== 0n && bal > 0n) out.push({ optionId: id, balance: bal });
+    });
+    return out;
+  }, [accounts, optionIdRead.data, holdRead.data]);
+
   const liveRows = useMemo(() => {
     const out: Array<{ order: LotOrder; owner?: Address }> = [];
     (lotsRead.data ?? []).forEach((row, i) => {
@@ -230,6 +268,44 @@ export default function BookPage() {
     });
     return out;
   }, [lotsRead.data, statusRead.data, ownerRead.data, accounts, lotCalls]);
+
+  async function exercise(optionId: bigint, amount: bigint) {
+    if (!address || !publicClient) return;
+    setBusy(true);
+    try {
+      const opt = (await publicClient.readContract({
+        address: CLEARINGHOUSE,
+        abi: valoremClearAbi as unknown as Abi,
+        functionName: "option",
+        args: [optionId],
+      })) as { exerciseAmount: bigint };
+      const cost = opt.exerciseAmount * amount;
+      const approved = await run(
+        () =>
+          writeContractAsync({
+            address: USDG,
+            abi: stockTokenAbi as unknown as Abi,
+            functionName: "approve",
+            args: [CLEARINGHOUSE, cost],
+          }),
+        { pending: "Approve USDG", success: "Approved" },
+      );
+      if (!approved) return;
+      await run(
+        () =>
+          writeContractAsync({
+            address: CLEARINGHOUSE,
+            abi: valoremClearAbi as unknown as Abi,
+            functionName: "exercise",
+            args: [optionId, amount],
+          }),
+        { pending: "Exercise", success: "Exercised" },
+      );
+      void holdRead.refetch();
+    } finally {
+      setBusy(false);
+    }
+  }
 
   async function fill(order: LotOrder) {
     if (!address) return;
@@ -279,6 +355,26 @@ export default function BookPage() {
           </p>
         }
       />
+
+      {heldRows.length > 0 ? (
+        <div className="mb-6 grid gap-3">
+          <h2 className="text-lg font-bold tracking-[-0.015em]">Yours to exercise</h2>
+          {heldRows.map((row) => (
+            <Card key={row.optionId.toString()}>
+              <CardHead>
+                <CardTitle>
+                  {row.balance.toString()} {MARKET} call
+                </CardTitle>
+              </CardHead>
+              <div className="mt-3">
+                <Button disabled={busy} onClick={() => void exercise(row.optionId, row.balance)}>
+                  Exercise
+                </Button>
+              </div>
+            </Card>
+          ))}
+        </div>
+      ) : null}
 
       {weekId === 0 ? (
         <Notice tone="info">Nothing is for sale yet this week.</Notice>

@@ -16,8 +16,8 @@ import Link from "next/link";
 
 import { Container, ExternalLink } from "@/components/ui";
 import { EXPLORER_URL, addressUrl } from "@/lib/chain";
-import { MARKET, SHARE_TICKER, VAULT } from "@/lib/contracts";
-import { DOCS_URL, PRIVACY_URL, SITE_URL, STATUS, TERMS_URL } from "@/lib/site";
+import { FACTORY, MARKET } from "@/lib/contracts";
+import { DOCS_URL, PRIVACY_URL, SITE_URL, TERMS_URL } from "@/lib/site";
 
 const LINK = "rounded-sm text-ink-2 no-underline transition-colors duration-150 hover:text-ink";
 
@@ -30,13 +30,14 @@ export function Footer() {
       <Container>
         <div className="grid gap-3.5 border-t border-line pb-12 pt-8 text-[13.5px] text-ink-3">
           <p>
-            <span className="font-display font-bold text-ink-2">Stonkhouse</span> · <span className="num">{SHARE_TICKER}</span> ·{" "}
+            <span className="font-display font-bold text-ink-2">StonkHouse</span>
+            {" · "}
             {MARKET} on Robinhood Chain <span className="num">4663</span>
-            {VAULT ? (
+            {FACTORY ? (
               <>
                 {" · "}
-                <ExternalLink href={addressUrl(VAULT)} arrow className={LINK}>
-                  vault contract
+                <ExternalLink href={addressUrl(FACTORY)} arrow className={LINK}>
+                  factory
                 </ExternalLink>
               </>
             ) : null}
@@ -81,8 +82,8 @@ export function Footer() {
             </ul>
           </nav>
           <p className="max-w-[70em]">
-            Not affiliated with Robinhood Markets, Robinhood Assets (Jersey) Limited or Valorem. {STATUS.phase}.{" "}
-            {STATUS.auditLine} Nothing here is financial advice or an offer of securities.
+            Not affiliated with Robinhood Markets, Robinhood Assets (Jersey) Limited or Valorem. Nothing here is
+            financial advice or an offer of securities.
           </p>
         </div>
       </Container>
