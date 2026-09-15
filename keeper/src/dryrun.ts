@@ -1256,8 +1256,10 @@ async function main(): Promise<void> {
       assertEq(cycle.strand_gen, '1', 'strand_gen kept');
       assertEq(cycle.gross_usdg6, (stranded.premium + usdgReturned - queueUsdg).toString(), 'gross_usdg6 = the premium harvest at the close + the retry harvest, summed over cycle 3');
       assertEq(cycle.fee_usdg6, stranded.fee.toString(), 'fee on the premium only');
-      assertEq(cycle.assets_returned, assetsReturned.toString(), 'assets_returned from StrandedClaimRecovered');
-      assertEq(cycle.usdg_from_assignment, usdgReturned.toString(), 'usdg_from_assignment from StrandedClaimRecovered');
+      // The row records the LIVE SHARES' part (recoveryLegs): premium = gross - proceeds must
+      // come out as the close-time premium, not as premium minus the queue's share of the redeem.
+      assertEq(cycle.assets_returned, (assetsReturned - queueAssets).toString(), 'assets_returned = live shares (full redeem minus queueWad)');
+      assertEq(cycle.usdg_from_assignment, (usdgReturned - queueUsdg).toString(), 'usdg_from_assignment = live shares (Harvest.gross of the retry)');
       assertEq(alerts.since(alertsBefore).join(','), 'strand_recovered', 'the recovery announced; nothing armed in the same tick');
       const announced = alerts.last('strand_recovered');
       assertEq(String(announced.data.gen), '1', 'strand_recovered gen');
