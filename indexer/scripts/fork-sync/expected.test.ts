@@ -288,12 +288,13 @@ function fixture(): { run: RunJson; chain: ChainFacts } {
         { tx: hash(125), contracts: "3", premium: 2619576 },
       ],
       harvest: {
-        gross: "452619576",
-        fee: "130978",
-        net: "452488598",
+        gross: "454365960",
+        fee: "218297",
+        net: "454147663",
         assetsReturned: "3000000000000000000",
         usdgFromAssignment: "450000000",
         contractsAssigned: "2",
+        harvestEvents: 2,
       },
     },
     cycle3: {
@@ -307,12 +308,13 @@ function fixture(): { run: RunJson; chain: ChainFacts } {
       contracts: "4",
       fills: [{ tx: hash(143), contracts: 4, premium: "3492768" }],
       harvest: {
-        gross: "3492768",
+        gross: "183492768",
         fee: "174638",
-        net: "3318130",
+        net: "183318130",
         assetsReturned: "3000000000000000000",
         usdgFromAssignment: "225000000",
         contractsAssigned: 1,
+        harvestEvents: 2,
       },
       strand: { rollCloseTx: hash(147), gen: 1, claimKey: "3002" },
       recovery: {
@@ -381,7 +383,15 @@ function stillStranded(): { run: RunJson; chain: ChainFacts } {
   run.blocks.lastBlock = "147";
   const c3 = run.cycle3!;
   delete c3.recovery;
-  c3.harvest = { ...c3.harvest!, assetsReturned: "0", usdgFromAssignment: "0" };
+  c3.harvest = {
+    gross: "3492768",
+    fee: "174638",
+    net: "3318130",
+    assetsReturned: "0",
+    usdgFromAssignment: "0",
+    contractsAssigned: 1,
+    harvestEvents: 1,
+  };
   return { run, chain };
 }
 
@@ -679,7 +689,7 @@ describe("buildExpectations on the dry run's three weeks", () => {
     delete run.cycle3!.recovery;
     const built = buildExpectations(run, chain);
     expect(built.disagreements).toEqual([
-      "cycle 2 Harvest.netUsdg: run.json says 452488598, the chain says 452488597",
+      "cycle 2 Harvest.netUsdg: run.json says 454147663, the chain says 454147662",
       `cycle 3 retry tx: run.json says null, the chain says ${hash(148)}`,
     ]);
   });

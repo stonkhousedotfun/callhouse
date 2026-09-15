@@ -802,9 +802,6 @@ function deriveWeek(b: Builder, chain: ChainFacts, k: RunCycle, strands: StrandT
     throw new Error(`the chain has no Harvest in ${w}'s rollClose transaction`);
   }
   b.agree(`${w} one terminal Harvest`, 1, allChain.filter((h) => h.origin === "rollClose").length);
-  b.agree(`${w} Harvest.grossUsdg`, big(close.harvest.gross, `cycle${n}.harvest.gross`), terminalChain.gross);
-  b.agree(`${w} Harvest.feeUsdg`, big(close.harvest.fee, `cycle${n}.harvest.fee`), terminalChain.fee);
-  b.agree(`${w} Harvest.netUsdg`, big(close.harvest.net, `cycle${n}.harvest.net`), terminalChain.net);
   b.agree(`${w} retry Harvest present iff recovered`, chainStrand?.recovered !== null && chainStrand?.recovered !== undefined, allChain.some((h) => h.origin === "retry"));
 
   const all = allChain.map((h) => deriveHarvest(b, h, c, fills, chainStrand));
@@ -813,6 +810,11 @@ function deriveWeek(b: Builder, chain: ChainFacts, k: RunCycle, strands: StrandT
   // closed cycle's number) keeps its row but must not restate a published week.
   const touching = all.filter((h) => h.origin === "rollClose" || h.origin === "retry" || h.block < c.close.block);
   const last = touching.reduce((m, h) => (h.block > m.block ? h : m), touching[0]!);
+  // The keeper's cycle row (and run.json harvest) is harvestForCycle: every Harvest from the
+  // rollOpen block through the close or the retry, summed. Not the terminal event alone.
+  b.agree(`${w} Harvest.grossUsdg`, big(close.harvest.gross, `cycle${n}.harvest.gross`), sum(touching, (h) => h.gross));
+  b.agree(`${w} Harvest.feeUsdg`, big(close.harvest.fee, `cycle${n}.harvest.fee`), sum(touching, (h) => h.fee));
+  b.agree(`${w} Harvest.netUsdg`, big(close.harvest.net, `cycle${n}.harvest.net`), sum(touching, (h) => h.net));
 
   const status: WeekTruth["status"] =
     c.stranded !== null && chainStrand?.recovered === null ? "stranded" : assigned > 0n ? "assigned" : sold > 0n ? "closed" : "unfilled";
