@@ -313,6 +313,23 @@ export default function AccountPage() {
               >
                 Set amount
               </Button>
+              <Button
+                disabled={busy || requestedAmt === 0n || listedAmt !== 0n || weekId === 0}
+                onClick={() =>
+                  send(
+                    () =>
+                      writeContractAsync({
+                        address: account!,
+                        abi: writerAccountAbi as unknown as Abi,
+                        functionName: "list",
+                      }),
+                    "List",
+                    "Listed",
+                  )
+                }
+              >
+                List this week
+              </Button>
               {listedAmt > 0n || writtenAmt > 0n ? (
                 <Button
                   variant="ghost"
