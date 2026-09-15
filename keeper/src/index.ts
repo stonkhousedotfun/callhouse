@@ -50,6 +50,8 @@ async function main(): Promise<void> {
   log.boot.info(
     {
       vault: config.VAULT,
+      factory: config.FACTORY,
+      windDown: config.WIND_DOWN,
       clearinghouse: config.CLEARINGHOUSE,
       keeper: account.address,
       chainId: config.CHAIN_ID,
