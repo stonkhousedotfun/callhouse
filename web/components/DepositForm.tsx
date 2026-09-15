@@ -19,6 +19,7 @@ import {
   type DepositsClosedReason,
 } from "@/lib/format";
 import { useNow, type AccountPosition, type VaultSnapshot } from "@/lib/hooks";
+import { Button, Card, CardHead, CardMeta, CardTitle, Field, Notice, Row, Rows, Unit } from "@/components/ui";
 import { ConnectButton } from "./ConnectButton";
 import { useTxRunner } from "./TxToast";
 
@@ -149,126 +150,128 @@ export function DepositForm({
   }
 
   return (
-    <div className="card">
-      <div className="card-head">
-        <span className="card-title">Deposit</span>
-        <span className="tiny faint mono">
+    <Card>
+      <CardHead>
+        <CardTitle>Deposit</CardTitle>
+        <CardMeta>
           {closed
             ? "closed"
             : capFull
               ? "cap full"
               : `cap headroom ${headroom === undefined ? "—" : `${fmtAsset(headroom)} ${MARKET}`}`}
-        </span>
-      </div>
+        </CardMeta>
+      </CardHead>
 
-      <div className="field">
-        <label htmlFor="deposit-amount">Amount</label>
-        <div className="input-wrap">
-          <input
-            id="deposit-amount"
-            type="text"
-            inputMode="decimal"
-            placeholder="0.0"
-            value={raw}
-            autoComplete="off"
-            onChange={(e) => setRaw(e.target.value)}
-          />
-          <span className="suffix">{MARKET}</span>
-        </div>
-      </div>
+      <Field
+        id="deposit-amount"
+        label="Amount"
+        suffix={MARKET}
+        inputMode="decimal"
+        placeholder="0.0"
+        value={raw}
+        autoComplete="off"
+        onChange={(e) => setRaw(e.target.value)}
+      />
 
-      <div className="rows" style={{ marginTop: 12 }}>
-        <div className="row">
-          <span className="k">Wallet balance</span>
-          <span className="v">
-            {fmtAsset(balance)} {MARKET}
-            {balance !== undefined ? (
-              <>
-                {" "}
-                <button
-                  data-size="sm"
-                  data-variant="ghost"
-                  style={{ marginLeft: 6 }}
-                  onClick={() => {
-                    const cap = headroom !== undefined && headroom < balance ? headroom : balance;
-                    setRaw(fmtAssetExact(cap));
-                  }}
-                >
-                  max
-                </button>
-              </>
-            ) : null}
-          </span>
-        </div>
-        <div className="row">
-          <span className="k">You receive</span>
-          <span className="v">
-            {previewShares === undefined ? "—" : fmtShares(previewShares)} {SHARE_TICKER}
-          </span>
-        </div>
+      <Rows className="mt-3">
+        <Row
+          k="Wallet balance"
+          v={
+            <>
+              {fmtAsset(balance)} <Unit>{MARKET}</Unit>
+              {balance !== undefined ? (
+                <>
+                  {" "}
+                  <Button
+                    variant="ghost"
+                    size="xs"
+                    className="align-baseline"
+                    onClick={() => {
+                      const cap = headroom !== undefined && headroom < balance ? headroom : balance;
+                      setRaw(fmtAssetExact(cap));
+                    }}
+                  >
+                    max
+                  </Button>
+                </>
+              ) : null}
+            </>
+          }
+        />
+        <Row
+          k="You receive"
+          v={
+            <>
+              {previewShares === undefined ? "—" : fmtShares(previewShares)} <Unit>{SHARE_TICKER}</Unit>
+            </>
+          }
+        />
         {multiplierIsActive(snapshot.uiMultiplier) && amount !== null ? (
-          <div className="row">
-            <span className="k">
-              {MARKET}-eq <span className="faint">(display only)</span>
-            </span>
-            <span className="v">{fmtAsset(toNvdaEq(amount, snapshot.uiMultiplier))}</span>
-          </div>
+          <Row
+            k={
+              <>
+                {MARKET}-eq <span className="text-ink-3">(display only)</span>
+              </>
+            }
+            v={fmtAsset(toNvdaEq(amount, snapshot.uiMultiplier))}
+          />
         ) : null}
-        <div className="row">
-          <span className="k">Allowance</span>
-          <span className="v">{fmtAsset(allowance)}</span>
-        </div>
+        <Row k="Allowance" v={fmtAsset(allowance)} />
+      </Rows>
+
+      <div className="mt-4 grid gap-3 empty:hidden">
+        {gate.kind === "closed" ? (
+          <Notice tone="warn" title="Deposits are closed right now.">
+            {" "}
+            {closedCopy(gate.reason, snapshot)}
+          </Notice>
+        ) : gate.kind === "capFull" ? (
+          <Notice tone="info" title="The deposit cap is full.">
+            {" "}
+            {capFullCopy(gate.cap, gate.held)}
+          </Notice>
+        ) : null}
+        {risk !== "none" ? (
+          <Notice tone={risk === "near" ? "danger" : "warn"}>
+            {risk === "near" ? (
+              <>
+                <strong className="block font-semibold text-ink">{MARKET} is at or near this week&apos;s strike.</strong> Spot is {fmtUsdg(snapshot.spotUsdg)} USDG
+                against a strike of {fmtUsdg(snapshot.cycleStrikeUsdg)} USDG. If it finishes above the strike, the calls
+                sold are exercised and part of the vault&apos;s {MARKET} is swapped for USDG at the strike. A deposit made
+                now shares that outcome in full.{" "}
+              </>
+            ) : (
+              <>
+                A call is armed this week
+                {snapshot.cycleStrikeUsdg ? <> at a strike of {fmtUsdg(snapshot.cycleStrikeUsdg)} USDG</> : null}
+                {(snapshot.contractsWritten ?? 0n) > 0n ? <>, and {snapshot.contractsWritten!.toString()} contracts have been sold</> : null}. If{" "}
+                {MARKET} finishes above the strike, part of the vault&apos;s {MARKET} is sold at the strike, and a deposit
+                made now shares that outcome.{" "}
+              </>
+            )}
+            Shares are priced as if the open call were worth nothing, so the loss is spread over every share, including
+            new ones, and every later fill this week is sized against a balance that includes your deposit. Premium
+            already paid into the vault before your deposit is not shared with you. A deposit made while the vault is
+            Idle enters before the week&apos;s call is armed.
+          </Notice>
+        ) : null}
+        {overBalance ? (
+          <Notice tone="danger" role="status">
+            That is more than the wallet holds.
+          </Notice>
+        ) : null}
+        {overCap && !overBalance && gate.kind === "open" ? (
+          <Notice tone="danger" role="status">
+            That is past the vault&apos;s deposit cap. The cap is deliberately small at launch.
+          </Notice>
+        ) : null}
       </div>
 
-      {gate.kind === "closed" ? (
-        <div className="notice" data-tone="warn" style={{ marginTop: 12 }}>
-          <strong>Deposits are closed right now.</strong> {closedCopy(gate.reason, snapshot)}
-        </div>
-      ) : gate.kind === "capFull" ? (
-        <div className="notice" data-tone="info" style={{ marginTop: 12 }}>
-          <strong>The deposit cap is full.</strong> {capFullCopy(gate.cap, gate.held)}
-        </div>
-      ) : null}
-      {risk !== "none" ? (
-        <div className="notice" data-tone={risk === "near" ? "bad" : "warn"} style={{ marginTop: 12 }}>
-          {risk === "near" ? (
-            <>
-              <strong>{MARKET} is at or near this week&apos;s strike.</strong> Spot is {fmtUsdg(snapshot.spotUsdg)} USDG
-              against a strike of {fmtUsdg(snapshot.cycleStrikeUsdg)} USDG. If it finishes above the strike, the calls
-              sold are exercised and part of the vault&apos;s {MARKET} is swapped for USDG at the strike. A deposit made
-              now shares that outcome in full.{" "}
-            </>
-          ) : (
-            <>
-              A call is armed this week
-              {snapshot.cycleStrikeUsdg ? <> at a strike of {fmtUsdg(snapshot.cycleStrikeUsdg)} USDG</> : null}
-              {(snapshot.contractsWritten ?? 0n) > 0n ? <>, and {snapshot.contractsWritten!.toString()} contracts have been sold</> : null}. If{" "}
-              {MARKET} finishes above the strike, part of the vault&apos;s {MARKET} is sold at the strike, and a deposit
-              made now shares that outcome.{" "}
-            </>
-          )}
-          Shares are priced as if the open call were worth nothing, so the loss is spread over every share, including
-          new ones, and every later fill this week is sized against a balance that includes your deposit. Premium
-          already paid into the vault before your deposit is not shared with you. A deposit made while the vault is
-          Idle enters before the week&apos;s call is armed.
-        </div>
-      ) : null}
-      {overBalance ? (
-        <div className="notice" data-tone="bad" style={{ marginTop: 12 }}>
-          That is more than the wallet holds.
-        </div>
-      ) : null}
-      {overCap && !overBalance && gate.kind === "open" ? (
-        <div className="notice" data-tone="bad" style={{ marginTop: 12 }}>
-          That is past the vault&apos;s deposit cap. The cap is deliberately small at launch.
-        </div>
-      ) : null}
-
-      <div style={{ marginTop: 14 }}>
+      <div className="mt-5">
         {!isConnected ? (
-          <ConnectButton />
+          <ConnectButton block />
         ) : (
-          <button data-variant="primary" style={{ width: "100%" }} disabled={disabled} onClick={submit}>
+          <Button variant="primary" className="w-full" disabled={disabled} onClick={submit}>
             {busy
               ? "Working…"
               : closed
@@ -278,10 +281,10 @@ export function DepositForm({
                   : needsApproval
                     ? `Approve and deposit`
                     : "Deposit"}
-          </button>
+          </Button>
         )}
       </div>
-    </div>
+    </Card>
   );
 }
 

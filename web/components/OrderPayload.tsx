@@ -20,6 +20,8 @@ import { explainRevert } from "@/lib/revert";
 import { useNow, type VaultSnapshot } from "@/lib/hooks";
 import { checkListingIsOurs, type ListingRow } from "@/lib/listing";
 import { advancedOrderFor, fillableContracts, seaportRemaining, type SeaportFillStatus } from "@/lib/seaportOrder";
+import { Button, Card, CardHead, CardMeta, CardTitle, CodeBlock, ExternalLink, Field, Notice, Row, Rows, Unit } from "@/components/ui";
+import { cn } from "@/lib/cn";
 import { ConnectButton } from "./ConnectButton";
 import { useNotice, useTxRunner } from "./TxToast";
 
@@ -316,171 +318,254 @@ export function OrderPayload({
   const insufficient = usdgBalance !== undefined && cost > usdgBalance;
 
   return (
-    <div className="card">
-      <div className="card-head">
-        <span className="card-title">
+    <Card lift className="@container">
+      <CardHead className="gap-y-1!">
+        <CardTitle>
           {verified
             ? "The vault's order · fill from here"
             : checking
               ? "The vault's order · checking against the chain"
               : "Order from the keeper · unverified"}
-        </span>
-        <span className="tiny faint mono">status {listing.status}</span>
-      </div>
+        </CardTitle>
+        <CardMeta>status {listing.status}</CardMeta>
+      </CardHead>
 
       {!check.ok ? (
-        <div className="notice" data-tone="bad" style={{ marginBottom: 12 }}>
-          <strong>This order did not check out against the chain, so it cannot be filled from here.</strong>
-          <ul style={{ margin: "6px 0 0", paddingLeft: 18 }}>
+        <Notice
+          tone="danger"
+          className="mb-4"
+          title={<>This order did not check out against the chain, so it cannot be filled from here.</>}
+        >
+          <ul className="mt-1.5 list-disc space-y-1 pl-5">
             {check.reasons.map((reason) => (
               <li key={reason}>{reason}</li>
             ))}
           </ul>
-        </div>
+        </Notice>
       ) : null}
 
-      <div className="rows">
-        <div className="row">
-          <span className="k">Order hash</span>
-          <span className="v">{shortHash(listing.orderHash)}</span>
-        </div>
-        <div className="row">
-          <span className="k">Contracts</span>
-          <span className="v">
-            {remaining.toString()} buyable now · {seaportLeft.toString()} of {total.toString()} unsold per Seaport
-            {capacity !== undefined ? ` · vault capacity ${capacity.toString()}` : ""}
-          </span>
-        </div>
-        <div className="row">
-          <span className="k">Unit price</span>
-          <span className="v">{fmtUsdg(unitPrice6, 6)} USDG per contract</span>
-        </div>
+      <Rows>
+        <Row k="Order hash" v={shortHash(listing.orderHash)} />
+        <Row
+          k="Contracts"
+          mono={false}
+          className={cn(STACK[480], SENTENCE_WORDS)}
+          v={
+            <>
+              {/* Each clause keeps its leading separator, so a wrapped line starts with "·" and
+                  never ends on one. */}
+              <span className="whitespace-nowrap">
+                <span className="num text-ink">{remaining.toString()}</span> buyable now
+              </span>{" "}
+              <span className="whitespace-nowrap">
+                · <span className="num text-ink">{seaportLeft.toString()}</span> of{" "}
+                <span className="num text-ink">{total.toString()}</span> unsold per Seaport
+              </span>
+              {capacity !== undefined ? (
+                <>
+                  {" "}
+                  <span className="whitespace-nowrap">
+                    · vault capacity <span className="num text-ink">{capacity.toString()}</span>
+                  </span>
+                </>
+              ) : (
+                ""
+              )}
+            </>
+          }
+        />
+        <Row
+          k="Unit price"
+          v={
+            <>
+              {fmtUsdg(unitPrice6, 6)} <Unit>USDG per contract</Unit>
+            </>
+          }
+        />
         {/* The recipient is printed from OUR constant when the listing is verified — the check
             has already proven it equal — and from the row, marked as such, when it is not. */}
-        <div className="row">
-          <span className="k">Payment leg · consideration[0]</span>
-          <span className="v">
-            {fmtUsdg(gross)} USDG →{" "}
-            {verified
-              ? `the vault ${shortAddress(VAULT)}`
-              : `${shortAddress(listing.components.consideration[0]?.recipient)} (as served)`}
-          </span>
-        </div>
-        <div className="row">
-          <span className="k">Order type · zone</span>
-          <span className="v">
-            {listing.components.orderType === 3 ? "PARTIAL_RESTRICTED" : `type ${listing.components.orderType}`} ·{" "}
-            {verified ? "the vault" : `${shortAddress(listing.components.zone)} (as served)`}
-          </span>
-        </div>
-      </div>
+        <Row
+          k="Payment leg · consideration[0]"
+          mono={false}
+          className={cn(STACK[480], SENTENCE_WORDS)}
+          v={
+            <>
+              <span className="num text-ink">{fmtUsdg(gross)}</span> USDG →{" "}
+              {verified ? (
+                <>
+                  the vault <span className="num text-ink">{shortAddress(VAULT)}</span>
+                </>
+              ) : (
+                <>
+                  <span className="num text-ink">{shortAddress(listing.components.consideration[0]?.recipient)}</span> (as served)
+                </>
+              )}
+            </>
+          }
+        />
+        <Row
+          k="Order type · zone"
+          mono={false}
+          className={STACK[360]}
+          v={
+            <>
+              {listing.components.orderType === 3 ? "PARTIAL_RESTRICTED" : `type ${listing.components.orderType}`} ·{" "}
+              {verified ? (
+                "the vault"
+              ) : (
+                <>
+                  <span className="num">{shortAddress(listing.components.zone)}</span> (as served)
+                </>
+              )}
+            </>
+          }
+        />
+      </Rows>
 
       {verified ? (
         <>
-          <hr className="hr" />
+          <div className="mt-5 border-t border-line pt-5">
+            <Field
+              id="fill-qty"
+              label={<>Contracts to buy</>}
+              inputMode="numeric"
+              value={quantity}
+              onChange={(e) => setQuantity(e.target.value.replace(/[^0-9]/g, ""))}
+              aria-describedby="fill-qty-range"
+              suffix={<span id="fill-qty-range">of {remaining.toString()}</span>}
+            />
 
-          <div className="field">
-            <label htmlFor="fill-qty">Contracts to buy</label>
-            <div className="input-wrap">
-              <input
-                id="fill-qty"
-                type="text"
-                inputMode="numeric"
-                value={quantity}
-                onChange={(e) => setQuantity(e.target.value.replace(/[^0-9]/g, ""))}
+            <Rows className="mt-3 rounded-md bg-surface-2 px-4 py-1">
+              <Row
+                k="You pay"
+                v={
+                  <>
+                    <span className="text-[22px] font-semibold leading-none sm:text-[24px]">{fmtUsdg(cost)}</span>{" "}
+                    <small className="text-[12.5px] font-medium text-ink-3">USDG</small>
+                  </>
+                }
+                className="py-3.5! [&>dt]:font-semibold [&>dt]:text-ink"
               />
-              <span className="suffix">of {remaining.toString()}</span>
-            </div>
-          </div>
-
-          <div className="rows" style={{ marginTop: 12 }}>
-            <div className="row">
-              <span className="k">You pay</span>
-              <span className="v">{fmtUsdg(cost)} USDG</span>
-            </div>
-            <div className="row">
-              <span className="k">You receive</span>
-              <span className="v">{want.toString()} option ERC-1155, written for you inside the fill</span>
-            </div>
-            <div className="row" title="Policy.minPremium at the feed's current spot, the floor the vault's fill hook applies to this size. Valorem's engine fee, off on the deployed clearinghouse, would be added on top.">
-              <span className="k">Vault floor for this size, live</span>
-              <span className="v">
-                {liveFloor === undefined
-                  ? snapshot.spotStale
-                    ? "spot stale — the vault will not sell"
-                    : "—"
-                  : `${fmtUsdg(liveFloor)} USDG${cost < liveFloor ? " · above what this fill pays" : ""}`}
-              </span>
-            </div>
-            <div className="row">
-              <span className="k">Your USDG</span>
-              <span className="v">{fmtUsdg(usdgBalance)}</span>
-            </div>
+              <Row
+                k="You receive"
+                mono={false}
+                className={cn(STACK[410], SENTENCE_WORDS)}
+                v={
+                  <>
+                    <span className="num text-ink">{want.toString()}</span> option ERC-1155, written for you inside the fill
+                  </>
+                }
+                dense
+              />
+              <Row
+                title="Policy.minPremium at the feed's current spot, the floor the vault's fill hook applies to this size. Valorem's engine fee, off on the deployed clearinghouse, would be added on top."
+                k="Vault floor for this size, live"
+                v={
+                  liveFloor === undefined
+                    ? snapshot.spotStale
+                      ? "spot stale — the vault will not sell"
+                      : "—"
+                    : (
+                      <>
+                        {fmtUsdg(liveFloor)} <Unit>USDG</Unit>
+                        {cost < liveFloor ? <span className="font-body">{" · above what this fill pays"}</span> : ""}
+                      </>
+                    )
+                }
+                dense
+              />
+              <Row k="Your USDG" v={fmtUsdg(usdgBalance)} dense />
+            </Rows>
           </div>
 
           {/* One sentence source with the decoded revert (lib/revert.ts StrikeBelowBand): the strike
               is fixed for the week, so only spot falling back clears this, never a reprice. */}
           {strikeBelowFloor ? (
-            <div className="notice" data-tone="warn" style={{ marginTop: 12 }}>
+            <Notice tone="warn" className="mt-4">
               {explainRevert("StrikeBelowBand", [snapshot.cycleStrikeUsdg, snapshot.band?.min])} The fill hook re-checks
               that floor at every sale.
-            </div>
+            </Notice>
           ) : null}
 
           <PreflightNotice verdict={verdict} pending={simulating} placeholder={address === undefined} />
 
           {insufficient ? (
-            <div className="notice" data-tone="bad" style={{ marginTop: 12 }}>
+            <Notice tone="danger" className="mt-4">
               Not enough USDG in the wallet for that many contracts.
-            </div>
+            </Notice>
           ) : null}
 
-          <div className="btn-row" style={{ marginTop: 14 }}>
+          <div className="mt-5 grid items-center gap-2.5 sm:grid-cols-[minmax(0,1fr)_auto]">
             {!isConnected ? (
-              <ConnectButton />
+              <div className="min-w-0">
+                <ConnectButton block />
+              </div>
             ) : (
-              <button
-                data-variant="primary"
+              <Button
+                className="w-full"
                 disabled={busy || want === 0n || insufficient || !canFill || listing.status === "cancelled"}
                 onClick={fill}
               >
                 {busy ? "Working…" : `Fill ${want.toString()} contract${want === 1n ? "" : "s"}`}
-              </button>
+              </Button>
             )}
-            <button data-variant="ghost" onClick={copyPayload}>
+            <Button variant="ghost" onClick={copyPayload}>
               Copy order JSON
-            </button>
+            </Button>
           </div>
 
-          <p className="tiny faint" style={{ marginTop: 12 }}>
+          <p className="mt-4 text-[12.5px] leading-[1.55] text-ink-3">
             {fillGasSentence(firstFill)} This calls Seaport 1.6 directly at{" "}
-            <a href={addressUrl(SEAPORT)} target="_blank" rel="noreferrer noopener">
+            <ExternalLink href={addressUrl(SEAPORT)} className="link num">
               {shortAddress(SEAPORT)}
-            </a>{" "}
+            </ExternalLink>{" "}
             with an empty signature and no conduit: the vault validated the order on chain. The exercise window closes at
             the option&apos;s expiry; after that an unexercised call is worth nothing.
           </p>
         </>
       ) : checking ? (
-        <p className="tiny faint" style={{ marginTop: 12 }}>
+        <p className="mt-4 text-[12.5px] leading-[1.55] text-ink-3">
           Checking this order against the chain…
         </p>
       ) : (
-        <p className="tiny faint" style={{ marginTop: 12 }}>
+        <p className="mt-4 text-[12.5px] leading-[1.55] text-ink-3">
           Nothing on this card sends a transaction. The payload below is shown as the keeper served it, for the
           record; it has not been verified against the vault and should not be filled.
         </p>
       )}
 
-      <details style={{ marginTop: 12 }}>
-        <summary className="small muted" style={{ cursor: "pointer" }}>
+      <details className="group mt-5 border-t border-line pt-4">
+        <summary className="flex w-fit cursor-pointer list-none items-center gap-1.5 rounded-sm text-[13.5px] font-medium text-ink-2 transition-colors hover:text-ink [&::-webkit-details-marker]:hidden">
+          <ChevronIcon className="shrink-0 text-ink-3 transition-transform duration-150 group-open:rotate-90" />
           {verified ? "Raw order payload" : checking ? "Raw payload from the keeper" : "Raw payload from the keeper (unverified)"}
         </summary>
-        <pre className="payload" style={{ marginTop: 10 }}>
-          {payloadJson}
-        </pre>
+        <CodeBlock className="mt-3">{payloadJson}</CodeBlock>
       </details>
-    </div>
+    </Card>
+  );
+}
+
+/**
+ * Ledger rows whose value is a sentence. When the card (the `@container`) is narrower than the
+ * label and the sentence need side by side, the value goes under the label, left-aligned, instead
+ * of the Row default of a right-aligned value breaking mid-run. Keyed by that width in px, measured
+ * on the live order; the quote rows add the inset's 32px.
+ */
+const STACK = {
+  480: "@max-[480px]:flex-col @max-[480px]:items-start! @max-[480px]:gap-y-1 @max-[480px]:[&>dd]:ml-0 @max-[480px]:[&>dd]:text-left",
+  410: "@max-[410px]:flex-col @max-[410px]:items-start! @max-[410px]:gap-y-1 @max-[410px]:[&>dd]:ml-0 @max-[410px]:[&>dd]:text-left",
+  360: "@max-[360px]:flex-col @max-[360px]:items-start! @max-[360px]:gap-y-1 @max-[360px]:[&>dd]:ml-0 @max-[360px]:[&>dd]:text-left",
+} as const;
+
+/** In a value that mixes figures and words, the words step back to ink-2; the figures stay ink. */
+const SENTENCE_WORDS = "[&>dd]:text-ink-2";
+
+/** The disclosure chevron beside the raw payload's summary. components/ui has no chevron icon. */
+function ChevronIcon({ className }: { className?: string }) {
+  return (
+    <svg width={14} height={14} viewBox="0 0 16 16" aria-hidden="true" focusable="false" className={className}>
+      <path fill="currentColor" d="M5.47 3.47a.75.75 0 0 1 1.06 0l4 4a.75.75 0 0 1 0 1.06l-4 4a.75.75 0 0 1-1.06-1.06L8.94 8 5.47 4.53a.75.75 0 0 1 0-1.06Z" />
+    </svg>
   );
 }
 
@@ -488,7 +573,7 @@ export function OrderPayload({
 function PreflightNotice({ verdict, pending, placeholder }: { verdict: PreflightVerdict | undefined; pending: boolean; placeholder: boolean }) {
   if (verdict === undefined) {
     return pending ? (
-      <p className="tiny faint" style={{ marginTop: 12 }}>
+      <p className="mt-4 text-[12.5px] leading-[1.55] text-ink-3">
         Simulating this fill against the chain… The button turns on once the simulation says the vault accepts it.
       </p>
     ) : null;
@@ -496,49 +581,65 @@ function PreflightNotice({ verdict, pending, placeholder }: { verdict: Preflight
   switch (verdict.kind) {
     case "ok":
       return (
-        <div className="notice" data-tone="info" style={{ marginTop: 12 }}>
-          <strong>Simulation passed.</strong> The vault accepts this size at today&apos;s spot and Seaport would deliver the
-          contracts.
-        </div>
+        <Notice tone="info" className="mt-4" title={<>Simulation passed.</>}>
+          {" "}
+          The vault accepts this size at today&apos;s spot and Seaport would deliver the contracts.
+        </Notice>
       );
     case "buyerSide":
       return (
-        <div className="notice" data-tone="info" style={{ marginTop: 12 }}>
-          <strong>The vault&apos;s checks pass at today&apos;s spot.</strong>{" "}
+        <Notice tone="info" className="mt-4" title={<>The vault&apos;s checks pass at today&apos;s spot.</>}>
+          {" "}
           {placeholder
             ? "The simulation ran from a placeholder address, so the payment step failed as expected; connect a wallet for a full check."
             : `${verdict.decoded.text} Approve USDG to Seaport (the first step of the button below) and the fill should go through.`}
-        </div>
+        </Notice>
       );
     case "vaultRefused":
       return (
-        <div className="notice" data-tone="bad" style={{ marginTop: 12 }}>
-          <strong>The vault would refuse this fill right now{verdict.decoded.name ? ` (${verdict.decoded.name})` : ""}.</strong>{" "}
+        <Notice
+          tone="danger"
+          className="mt-4"
+          title={<>The vault would refuse this fill right now{verdict.decoded.name ? ` (${verdict.decoded.name})` : ""}.</>}
+        >
+          {" "}
           {verdict.decoded.text} The button stays off until a simulation passes; this page re-simulates every few
           seconds.
-        </div>
+        </Notice>
       );
     case "seaportRefused":
       return (
-        <div className="notice" data-tone="warn" style={{ marginTop: 12 }}>
-          <strong>Seaport would refuse this fill{verdict.decoded.name ? ` (${verdict.decoded.name})` : ""}.</strong>{" "}
+        <Notice
+          tone="warn"
+          className="mt-4"
+          title={<>Seaport would refuse this fill{verdict.decoded.name ? ` (${verdict.decoded.name})` : ""}.</>}
+        >
+          {" "}
           {verdict.decoded.text}
-        </div>
+        </Notice>
       );
     case "tokenRefused":
       return (
-        <div className="notice" data-tone="bad" style={{ marginTop: 12 }}>
-          <strong>USDG would not move for this fill{verdict.decoded.name ? ` (${verdict.decoded.name})` : ""}.</strong>{" "}
+        <Notice
+          tone="danger"
+          className="mt-4"
+          title={<>USDG would not move for this fill{verdict.decoded.name ? ` (${verdict.decoded.name})` : ""}.</>}
+        >
+          {" "}
           {verdict.decoded.text} The vault&apos;s own checks were not the problem; the button stays off until USDG
           moves again, and this page re-simulates every few seconds.
-        </div>
+        </Notice>
       );
     case "inconclusive":
       return (
-        <div className="notice" data-tone="warn" style={{ marginTop: 12 }}>
-          <strong>The simulation could not say whether the vault would accept this fill.</strong> {verdict.text} The
-          button is left on; your wallet will show the real outcome before you sign.
-        </div>
+        <Notice
+          tone="warn"
+          className="mt-4"
+          title={<>The simulation could not say whether the vault would accept this fill.</>}
+        >
+          {" "}
+          {verdict.text} The button is left on; your wallet will show the real outcome before you sign.
+        </Notice>
       );
   }
 }

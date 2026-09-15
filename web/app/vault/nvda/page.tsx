@@ -10,6 +10,7 @@ import { PositionSplit } from "@/components/PositionSplit";
 import { RedeemQueue } from "@/components/RedeemQueue";
 import { StrandedBanner } from "@/components/StrandedBanner";
 import { UsdgClaim } from "@/components/UsdgClaim";
+import { Card, CardHead, CardMeta, CardTitle, ExternalLink, Notice, PageHead, Row, Rows, Stat, Unit } from "@/components/ui";
 import { addressUrl } from "@/lib/chain";
 import { ASSET, MARKET, SHARE_TICKER, VAULT } from "@/lib/contracts";
 import {
@@ -56,255 +57,290 @@ export default function VaultPage() {
 
   return (
     <>
-      <div className="page-head">
-        <div className="eyebrow">Vault · {MARKET}</div>
-        <h1>
-          {SHARE_TICKER} — deposit, withdraw, claim
-        </h1>
-        <p className="lede">
-          Deposit {MARKET} Stock Tokens and receive {SHARE_TICKER}. Premium arrives as USDG and is
-          claimed separately; it is never folded into the share price.
-        </p>
-      </div>
-
-      {/* The three disclosures below are required, verbatim, by scripts/copy-lint.mjs. They are
-          compliance text from README "Frontend copy" and TECHSPEC 7.3 — do not reword them. */}
-      <div className="notice" data-tone="warn">
-        <strong>Premium is paid only if a buyer fills the vault&apos;s listing.</strong>
-        Nothing is written until someone buys, so an empty week means zero for the week. Assignment can take your
-        tokens at the strike, and the upside above it is gone for that week. Stock Tokens are debt securities issued
-        by Robinhood Assets (Jersey) Limited, not equity in the underlying company: no vote, no claim on the company,
-        and the issuer can freeze transfers. The vault is unaudited. See <Link href="/legal">Legal</Link> and{" "}
-        <Link href="/docs">Docs</Link> for the full risk list.
-      </div>
-
-      {!VAULT ? (
-        <div className="notice" data-tone="bad" style={{ marginTop: 16 }}>
-          <strong>No vault address configured.</strong>
-          Set <code>NEXT_PUBLIC_VAULT</code> before this page can read or write anything.
-        </div>
-      ) : null}
-
-      {chainReadFailed ? (
-        <div className="notice" data-tone="warn" style={{ marginTop: 16 }}>
-          <strong>Chain reads are failing right now.</strong>
-          The vault could not be read from the RPC. Balances and phase below are missing rather
-          than zero, and a transaction sent now may revert on a rule this page could not check.
-        </div>
-      ) : null}
-
-      <StrandedBanner snapshot={v} position={position} onDone={refresh} />
-
-      <div className="card" style={{ marginTop: 16 }}>
-        <div className="card-head">
-          <span className="card-title">Your position</span>
-          <VaultPhaseBadge snapshot={v} nowSeconds={nowSeconds} />
-        </div>
-
-        {!address ? (
-          <p className="small muted" style={{ marginBottom: 0 }}>
-            Connect a wallet to see your shares, your queued redemption and your claimable USDG.
-          </p>
-        ) : (
+      <PageHead
+        eyebrow={<>Vault · {MARKET}</>}
+        title={
           <>
-            <div className="grid grid-3">
-              <div className="stat">
-                <div className="stat-label">Shares</div>
-                <div className="stat-value">
-                  {fmtAsset(position.shares)} <span className="faint">{SHARE_TICKER}</span>
-                </div>
-                <div className="stat-sub">
-                  worth {fmtAsset(position.sharesValueAssets)} {MARKET} raw
-                </div>
-              </div>
-              <div className="stat">
-                <div className="stat-label">Claimable USDG</div>
-                <div className="stat-value">{fmtUsdg(position.claimableUsdg)}</div>
-                <div className="stat-sub">premium on filled weeks, strike proceeds on assigned weeks</div>
-              </div>
-              <div className="stat">
-                <div className="stat-label">Queued shares</div>
-                <div className="stat-value">{fmtAsset(position.queuedShares)}</div>
-                <div className="stat-sub">
-                  {(position.queuedShares ?? 0n) === 0n
-                    ? "nothing queued"
-                    : `epoch ${position.queuedEpoch?.toString() ?? "—"}`}
-                </div>
-              </div>
-            </div>
-
-            <hr className="hr" />
-
-            {/* Raw vs display-adjusted. The uiMultiplier line is labelled display-only because
-                nothing in the vault's maths, and nothing in a transaction built on this page,
-                ever uses it. */}
-            <div className="rows">
-              <div className="row">
-                <span className="k">Wallet {MARKET}, raw</span>
-                <span className="v">{fmtAsset(position.assetBalance)}</span>
-              </div>
-              <div className="row">
-                <span className="k">
-                  Wallet {MARKET}-eq <span className="faint">(display only, ×{fmtMultiplier(v.uiMultiplier)})</span>
-                </span>
-                <span className="v">{fmtAsset(toNvdaEq(position.assetBalance, v.uiMultiplier))}</span>
-              </div>
-              <div className="row">
-                <span className="k">Share value {MARKET}-eq <span className="faint">(display only)</span></span>
-                <span className="v">{fmtAsset(toNvdaEq(position.sharesValueAssets, v.uiMultiplier))}</span>
-              </div>
-              <div className="row">
-                <span className="k">Wallet USDG</span>
-                <span className="v">{fmtUsdg(position.usdgBalance)}</span>
-              </div>
-            </div>
+            {SHARE_TICKER} — deposit, withdraw, claim
           </>
-        )}
-      </div>
+        }
+        lede={
+          <p>
+            Deposit {MARKET} Stock Tokens and receive {SHARE_TICKER}. Premium arrives as USDG and is
+            claimed separately; it is never folded into the share price.
+          </p>
+        }
+      />
 
-      <div className="grid grid-2" style={{ marginTop: 16 }}>
-        <DepositForm snapshot={v} position={position} onDone={refresh} />
-        <RedeemQueue snapshot={v} position={position} onDone={refresh} />
-      </div>
+      <div className="grid gap-4 sm:gap-5">
+        {/* The three disclosures below are required, verbatim, by scripts/copy-lint.mjs. They are
+            compliance text from README "Frontend copy" and TECHSPEC 7.3 — do not reword them. */}
+        <Notice
+          tone="warn"
+          className="lg:[&>div]:max-w-[88ch]"
+          title={<>Premium is paid only if a buyer fills the vault&apos;s listing.</>}
+        >
+          Nothing is written until someone buys, so an empty week means zero for the week. Assignment can take your
+          tokens at the strike, and the upside above it is gone for that week. Stock Tokens are debt securities issued
+          by Robinhood Assets (Jersey) Limited, not equity in the underlying company: no vote, no claim on the company,
+          and the issuer can freeze transfers. The vault is unaudited. See{" "}
+          <Link href="/legal" className="link">
+            Legal
+          </Link>{" "}
+          and{" "}
+          <Link href="/docs" className="link">
+            Docs
+          </Link>{" "}
+          for the full risk list.
+        </Notice>
 
-      <div className="grid grid-2" style={{ marginTop: 16 }}>
-        <UsdgClaim snapshot={v} position={position} onDone={refresh} />
+        {!VAULT ? (
+          <Notice tone="danger" title="No vault address configured.">
+            Set <code className="num text-[0.95em] text-ink">NEXT_PUBLIC_VAULT</code> before this page can read or
+            write anything.
+          </Notice>
+        ) : null}
 
-        <div className="card">
-          <div className="card-head">
-            <span className="card-title">Last week realized</span>
-            <span className="tiny faint mono">{last ? `cycle #${last.cycle}` : "no closed week"}</span>
-          </div>
-          {last ? (
-            <>
-              <div className="stat">
-                <div className="stat-label">Net premium per {SHARE_TICKER}</div>
-                <div className="stat-value">
-                  {lastPerShare === undefined ? "—" : fmtUsdg(lastPerShare, 6)}
-                </div>
-                <div className="stat-sub">
-                  {last.filled
-                    ? `${(last.contractsSold ?? last.contracts ?? 0n).toString()} calls sold`
-                    : unfilledWeekResult(last).short}
-                  {last.stranded ? (last.strandRecovered === true ? " · claim stranded at the close, since recovered" : " · claim stranded at the close") : ""} ·{" "}
-                  {fmtUtcDate(last.closedAt)}
-                </div>
-              </div>
-              <div className="rows" style={{ marginTop: 12 }}>
-                <div className="row" title="USDG buyers paid the vault for this week's calls, before the protocol fee. Strike proceeds excluded.">
-                  <span className="k">Premium received</span>
-                  <span className="v">{fmtUsdg(last.premiumGrossUsdg)}</span>
-                </div>
-                <div className="row">
-                  <span className="k">Protocol fee</span>
-                  <span className="v">{fmtUsdg(last.feeUsdg ?? 0n)}</span>
-                </div>
-                <div className="row">
-                  <span className="k">Net premium to depositors</span>
-                  <span className="v">{fmtUsdg(last.premiumNetUsdg)}</span>
-                </div>
-                <div className="row">
-                  <span className="k">Net premium / collateral at harvest</span>
-                  <span className="v">{fmtRealizedWeek(last.premiumNetUsdg, lastTvl)}</span>
-                </div>
-                <div className="row">
-                  <span className="k">Contracts assigned</span>
-                  <span className="v">{(last.contractsAssigned ?? 0n).toString()}</span>
-                </div>
-                {lastWasAssigned ? (
-                  <div className="row" title="USDG received for collateral taken at the strike. Returned principal, not premium.">
-                    <span className="k">Strike proceeds (assignment)</span>
-                    <span className="v">{fmtUsdg(last.strikeProceedsUsdg)}</span>
-                  </div>
-                ) : null}
-              </div>
-              <p className="tiny faint" style={{ marginTop: 10, marginBottom: 0 }}>
-                One week is one week. This figure is never multiplied out to a longer period
-                anywhere on this site. <Link href="/activity">See every week</Link>.
-              </p>
-              {lastWasAssigned ? (
-                <p className="tiny faint" style={{ marginTop: 6, marginBottom: 0 }}>
-                  Strike proceeds are the USDG your {MARKET} was sold for at the strike when the
-                  calls were exercised. They are credited to holders and claimable with the
-                  premium, but they are returned collateral, not earnings, and no premium figure
-                  above includes them.
-                </p>
-              ) : null}
-            </>
-          ) : (
-            <p className="small muted" style={{ marginBottom: 0 }}>
-              No week has closed yet. The first result — filled or zero — publishes after the first
-              expiry.
+        {chainReadFailed ? (
+          <Notice tone="warn" title="Chain reads are failing right now.">
+            The vault could not be read from the RPC. Balances and phase below are missing rather
+            than zero, and a transaction sent now may revert on a rule this page could not check.
+          </Notice>
+        ) : null}
+
+        <StrandedBanner snapshot={v} position={position} onDone={refresh} />
+
+        <Card>
+          <CardHead>
+            <CardTitle>Your position</CardTitle>
+            <VaultPhaseBadge snapshot={v} nowSeconds={nowSeconds} />
+          </CardHead>
+
+          {!address ? (
+            <p className="rounded-md bg-surface-2 px-4 py-3.5 text-[14.5px] leading-[1.55] text-ink-2">
+              Connect a wallet to see your shares, your queued redemption and your claimable USDG.
             </p>
-          )}
-        </div>
-      </div>
-
-      <div style={{ marginTop: 16 }}>
-        <CycleTape snapshot={v} />
-      </div>
-
-      <div className="card" style={{ marginTop: 16 }}>
-        <div className="card-head">
-          <span className="card-title">Vault collateral</span>
-          <GuardBadges snapshot={v} />
-        </div>
-        <PositionSplit idle={split.idle} sold={split.sold} assigned={split.assigned} />
-        <div className="rows" style={{ marginTop: 14 }}>
-          <div className="row" title="Contracts written this cycle. Every one was sold in the transaction that wrote it.">
-            <span className="k">Calls sold this week</span>
-            <span className="v">
-              {v.contractsWritten === undefined ? "—" : v.contractsWritten.toString()}
-              {cap !== undefined ? ` of at most ${cap.toString()}` : ""}
-            </span>
-          </div>
-          <div className="row" title="Policy.maxContracts(totalAssets) − contractsWritten: what the vault can still write this cycle. Re-sized at every fill.">
-            <span className="k">Capacity remaining</span>
-            <span className="v">{v.capacity === undefined ? "—" : `${v.capacity.toString()} contracts`}</span>
-          </div>
-          <div className="row">
-            <span className="k">Deposit cap</span>
-            <span className="v">
-              {fmtAsset(v.depositCap)} {MARKET}
-            </span>
-          </div>
-          <div className="row">
-            <span className="k">Reserved for the redeem queue</span>
-            <span className="v">
-              {fmtAsset(v.reservedAssets)} {MARKET} · {fmtUsdg(v.usdgReservedForQueue)} USDG
-            </span>
-          </div>
-          <div className="row">
-            <span className="k">Instant redemption</span>
-            <span className="v">{v.canRedeemInstantly ? "open" : "queue only"}</span>
-          </div>
-          <div className="row">
-            <span className="k">Deposits</span>
-            <span className="v">
-              {deposits.kind === "unknown" ? "—" : deposits.kind === "capFull" ? "cap full" : deposits.kind}
-            </span>
-          </div>
-          <div className="row">
-            <span className="k">Protocol fee on harvested premium</span>
-            <span className="v">
-              {v.policy ? `${(v.policy.protocolFeeBps / 100).toFixed(2)}%` : "—"}
-            </span>
-          </div>
-        </div>
-        <p className="tiny faint" style={{ marginTop: 12, marginBottom: 0 }}>
-          Stock Token{" "}
-          <a href={addressUrl(ASSET)} target="_blank" rel="noreferrer noopener">
-            {ASSET}
-          </a>
-          {VAULT ? (
+          ) : (
             <>
-              {" · vault "}
-              <a href={addressUrl(VAULT)} target="_blank" rel="noreferrer noopener">
-                {VAULT}
-              </a>
+              <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">
+                <Stat
+                  className="rounded-md bg-surface-2 p-4 sm:col-span-2 sm:p-5 lg:col-span-1"
+                  label="Shares"
+                  value={fmtAsset(position.shares)}
+                  unit={SHARE_TICKER}
+                  sub={
+                    <>
+                      worth {fmtAsset(position.sharesValueAssets)} {MARKET} raw
+                    </>
+                  }
+                />
+                <Stat
+                  className="rounded-md bg-surface-2 p-4 sm:p-5"
+                  label="Claimable USDG"
+                  value={fmtUsdg(position.claimableUsdg)}
+                  tone="usdg"
+                  sub="premium on filled weeks, strike proceeds on assigned weeks"
+                />
+                <Stat
+                  className="rounded-md bg-surface-2 p-4 sm:p-5"
+                  label="Queued shares"
+                  value={fmtAsset(position.queuedShares)}
+                  sub={
+                    (position.queuedShares ?? 0n) === 0n
+                      ? "nothing queued"
+                      : `epoch ${position.queuedEpoch?.toString() ?? "—"}`
+                  }
+                />
+              </div>
+
+              {/* Raw vs display-adjusted. The uiMultiplier line is labelled display-only because
+                  nothing in the vault's maths, and nothing in a transaction built on this page,
+                  ever uses it. */}
+              <Rows className="mt-4 lg:grid-cols-2 lg:gap-x-10 lg:[&>[data-slot=row]:nth-last-child(2)]:border-b-0">
+                <Row k={<>Wallet {MARKET}, raw</>} v={fmtAsset(position.assetBalance)} />
+                <Row
+                  k={
+                    <>
+                      Wallet {MARKET}-eq{" "}
+                      <span className="text-ink-3">(display only, ×{fmtMultiplier(v.uiMultiplier)})</span>
+                    </>
+                  }
+                  v={fmtAsset(toNvdaEq(position.assetBalance, v.uiMultiplier))}
+                />
+                <Row
+                  k={
+                    <>
+                      Share value {MARKET}-eq <span className="text-ink-3">(display only)</span>
+                    </>
+                  }
+                  v={fmtAsset(toNvdaEq(position.sharesValueAssets, v.uiMultiplier))}
+                />
+                <Row k="Wallet USDG" v={fmtUsdg(position.usdgBalance)} />
+              </Rows>
             </>
-          ) : null}
-        </p>
+          )}
+        </Card>
+
+        <div className="grid grid-cols-1 items-start gap-4 sm:gap-5 lg:grid-cols-2">
+          <DepositForm snapshot={v} position={position} onDone={refresh} />
+          <RedeemQueue snapshot={v} position={position} onDone={refresh} />
+        </div>
+
+        <div className="grid grid-cols-1 gap-4 sm:gap-5 lg:grid-cols-2">
+          <UsdgClaim snapshot={v} position={position} onDone={refresh} />
+
+          <Card>
+            <CardHead>
+              <CardTitle>Last week realized</CardTitle>
+              <CardMeta>{last ? `cycle #${last.cycle}` : "no closed week"}</CardMeta>
+            </CardHead>
+            {last ? (
+              <>
+                <Stat
+                  size="lg"
+                  className="rounded-md bg-surface-2 p-4 sm:p-5"
+                  label={<>Net premium per {SHARE_TICKER}</>}
+                  value={lastPerShare === undefined ? "—" : fmtUsdg(lastPerShare, 6)}
+                  sub={
+                    <>
+                      {last.filled
+                        ? `${(last.contractsSold ?? last.contracts ?? 0n).toString()} calls sold`
+                        : unfilledWeekResult(last).short}
+                      {last.stranded ? (last.strandRecovered === true ? " · claim stranded at the close, since recovered" : " · claim stranded at the close") : ""} ·{" "}
+                      {fmtUtcDate(last.closedAt)}
+                    </>
+                  }
+                />
+                <Rows className="mt-4">
+                  <Row
+                    title="USDG buyers paid the vault for this week's calls, before the protocol fee. Strike proceeds excluded."
+                    k="Premium received"
+                    v={fmtUsdg(last.premiumGrossUsdg)}
+                  />
+                  <Row k="Protocol fee" v={fmtUsdg(last.feeUsdg ?? 0n)} />
+                  <Row k="Net premium to depositors" v={fmtUsdg(last.premiumNetUsdg)} />
+                  <Row k="Net premium / collateral at harvest" v={fmtRealizedWeek(last.premiumNetUsdg, lastTvl)} />
+                  <Row k="Contracts assigned" v={(last.contractsAssigned ?? 0n).toString()} />
+                  {lastWasAssigned ? (
+                    <Row
+                      title="USDG received for collateral taken at the strike. Returned principal, not premium."
+                      k="Strike proceeds (assignment)"
+                      v={fmtUsdg(last.strikeProceedsUsdg)}
+                    />
+                  ) : null}
+                </Rows>
+                <p className="mt-3 text-[12.5px] leading-[1.55] text-ink-3">
+                  One week is one week. This figure is never multiplied out to a longer period
+                  anywhere on this site.{" "}
+                  <Link href="/activity" className="link">
+                    See every week
+                  </Link>
+                  .
+                </p>
+                {lastWasAssigned ? (
+                  <p className="mt-2 text-[12.5px] leading-[1.55] text-ink-3">
+                    Strike proceeds are the USDG your {MARKET} was sold for at the strike when the
+                    calls were exercised. They are credited to holders and claimable with the
+                    premium, but they are returned collateral, not earnings, and no premium figure
+                    above includes them.
+                  </p>
+                ) : null}
+              </>
+            ) : (
+              <p className="rounded-md bg-surface-2 px-4 py-3.5 text-[14.5px] leading-[1.55] text-ink-2">
+                No week has closed yet. The first result — filled or zero — publishes after the first
+                expiry.
+              </p>
+            )}
+          </Card>
+        </div>
+
+        <CycleTape snapshot={v} />
+
+        <Card>
+          <CardHead>
+            <CardTitle>Vault collateral</CardTitle>
+            <GuardBadges snapshot={v} />
+          </CardHead>
+          <div className="lg:grid lg:grid-cols-[minmax(0,5fr)_minmax(0,7fr)] lg:gap-x-10">
+            <div className="lg:col-start-1 lg:row-start-1">
+              <PositionSplit idle={split.idle} sold={split.sold} assigned={split.assigned} />
+            </div>
+            <Rows className="mt-4 lg:col-start-2 lg:row-span-2 lg:row-start-1 lg:mt-0">
+              <Row
+                title="Contracts written this cycle. Every one was sold in the transaction that wrote it."
+                k="Calls sold this week"
+                v={
+                  <>
+                    {v.contractsWritten === undefined ? "—" : v.contractsWritten.toString()}
+                    {cap !== undefined ? (
+                      <>
+                        {" "}
+                        <Unit>of at most</Unit> {cap.toString()}
+                      </>
+                    ) : (
+                      ""
+                    )}
+                  </>
+                }
+              />
+              <Row
+                title="Policy.maxContracts(totalAssets) − contractsWritten: what the vault can still write this cycle. Re-sized at every fill."
+                k="Capacity remaining"
+                v={
+                  v.capacity === undefined ? (
+                    "—"
+                  ) : (
+                    <>
+                      {v.capacity.toString()} <Unit>contracts</Unit>
+                    </>
+                  )
+                }
+              />
+              <Row
+                k="Deposit cap"
+                v={
+                  <>
+                    {fmtAsset(v.depositCap)} <Unit>{MARKET}</Unit>
+                  </>
+                }
+              />
+              <Row
+                k="Reserved for the redeem queue"
+                v={
+                  <>
+                    {fmtAsset(v.reservedAssets)} <Unit>{MARKET}</Unit> · {fmtUsdg(v.usdgReservedForQueue)} <Unit>USDG</Unit>
+                  </>
+                }
+              />
+              <Row k="Instant redemption" v={v.canRedeemInstantly ? "open" : "queue only"} />
+              <Row
+                k="Deposits"
+                v={deposits.kind === "unknown" ? "—" : deposits.kind === "capFull" ? "cap full" : deposits.kind}
+              />
+              <Row
+                k="Protocol fee on harvested premium"
+                v={v.policy ? `${(v.policy.protocolFeeBps / 100).toFixed(2)}%` : "—"}
+              />
+            </Rows>
+            <p className="mt-4 grid gap-1 border-t border-line pt-4 text-[12.5px] leading-[1.55] text-ink-3 sm:block lg:col-start-1 lg:row-start-2 lg:grid lg:self-end">
+              <span>
+                Stock Token{" "}
+                <ExternalLink href={addressUrl(ASSET)} className="link num [overflow-wrap:anywhere]">
+                  {ASSET}
+                </ExternalLink>
+              </span>
+              {VAULT ? (
+                <span>
+                  {" · vault "}
+                  <ExternalLink href={addressUrl(VAULT)} className="link num [overflow-wrap:anywhere]">
+                    {VAULT}
+                  </ExternalLink>
+                </span>
+              ) : null}
+            </p>
+          </div>
+        </Card>
       </div>
     </>
   );

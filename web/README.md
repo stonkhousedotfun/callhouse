@@ -205,14 +205,28 @@ If a forbidden phrase genuinely belongs inside an explicit negation on the docs 
 - No price chart. No candlesticks on a vault share.
 - Must work at 400px wide.
 
-## Design tokens are duplicated into the landing
+## Design: Daylight, shared with the landing
 
-`app/globals.css` owns the palette, the radii and the two font stacks, and that token block is
-copied verbatim into `app/globals.css` in `leekzor/callhouse-site`. It is duplicated rather than
-imported because the landing has to build and deploy with no dependency on this package: two
-Railway services, two containers, two repositories. **Change a token in one and change it in the
-other in paired commits to both repos.** Otherwise the two domains drift and a reader sees the
-seam on the click through from `callhouse.finance`.
+The app uses the same "Daylight" design as `callhouse.finance`: Tailwind CSS v4, light and dark
+from `prefers-color-scheme` (no toggle), Schibsted Grotesk / Figtree / Geist Mono through
+`next/font` (downloaded at build time, so the Docker build needs to reach Google Fonts).
+
+- **Tokens.** `app/globals.css` from `@import "tailwindcss"` through the `link` utility is copied
+  verbatim from `app/globals.css` in `leekzor/callhouse-site`. It is duplicated rather than
+  imported because the landing has to build and deploy with no dependency on this package. **Change
+  a token in one and change it in the other in paired commits to both repos**, and diff the two
+  blocks whenever either changes. App-only base rules go in the marked tail at the bottom of the
+  file. The default Tailwind palette is off: every colour is a token.
+- **Primitives.** `components/ui` holds the building blocks (import from `@/components/ui`).
+  Brand, Container, ExternalLink, Eyebrow, Figure and SectionHead are the site's files unchanged;
+  Button, Chip, icons, Notice and Panel are the site's, extended; Card heads, Stat, Rows/Row,
+  Field, Table, PageHead, CodeBlock and Unit are the app's own. Pages style with Tailwind classes on
+  those primitives; there is no class library.
+- **Test hooks.** The primitives stamp `data-slot` attributes (`card`, `card-title`, `card-meta`,
+  `stat`, `stat-label`, `stat-value`, `stat-sub`, `row`, `k`, `v`, `notice`; `topbar` on the
+  header). The fork acceptance run (W-13) finds elements only by those, ids and ARIA names, never by
+  class names, so a restyle cannot move a selector. Keep them when you change markup.
+- **Browser chrome** (`viewport.themeColor`) and the favicon (`app/icon.svg`) match the site's.
 
 ## Environment
 

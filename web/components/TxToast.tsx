@@ -13,7 +13,9 @@ import { BaseError, ContractFunctionRevertedError, UserRejectedRequestError, typ
 import { useConfig } from "wagmi";
 import { waitForTransactionReceipt } from "wagmi/actions";
 
+import { ExternalLink, Panel } from "@/components/ui";
 import { txUrl } from "@/lib/chain";
+import { cn } from "@/lib/cn";
 import { shortHash } from "@/lib/format";
 import { decodeRevertData, explainRevert } from "@/lib/revert";
 
@@ -94,28 +96,59 @@ function useToastContext(): ToastContextValue {
   return ctx;
 }
 
+/** The stripe down a toast's left edge says its state before the words do. */
+const STRIPE: Record<ToastTone, string> = {
+  pending: "bg-usdg",
+  success: "bg-accent",
+  error: "bg-danger",
+};
+
 function ToastHost() {
   const { toasts, dismiss } = useToastContext();
   if (toasts.length === 0) return null;
   return (
-    <div className="toast-host" role="status" aria-live="polite">
+    <div
+      className="pointer-events-none fixed inset-x-3 bottom-3 z-60 flex flex-col gap-2 sm:left-auto sm:right-5 sm:bottom-5 sm:w-[380px]"
+      role="status"
+      aria-live="polite"
+    >
       {toasts.map((t) => (
-        <div key={t.id} className="toast" data-tone={t.tone}>
-          <div className="toast-title">
-            <span>{t.title}</span>
-            <button className="toast-close" onClick={() => dismiss(t.id)} aria-label="Dismiss">
+        <Panel
+          key={t.id}
+          lift
+          pad="none"
+          data-tone={t.tone}
+          className="pointer-events-auto relative overflow-hidden py-3 pl-[18px] pr-3 text-sm ring-1 ring-line"
+        >
+          <span aria-hidden="true" className={cn("absolute inset-y-0 left-0 w-1", STRIPE[t.tone])} />
+          <div className="flex items-baseline justify-between gap-3">
+            <span className="flex items-center gap-2 font-semibold text-ink">
+              {t.tone === "pending" ? (
+                <span
+                  aria-hidden="true"
+                  className="size-3 shrink-0 animate-spin rounded-full border-2 border-usdg/30 border-t-usdg"
+                />
+              ) : null}
+              {t.title}
+            </span>
+            <button
+              type="button"
+              className="-my-1 cursor-pointer rounded-sm px-1.5 text-lg leading-none text-ink-3 transition-colors hover:text-ink"
+              onClick={() => dismiss(t.id)}
+              aria-label="Dismiss"
+            >
               ×
             </button>
           </div>
-          {t.body ? <div className="toast-body">{t.body}</div> : null}
+          {t.body ? <div className="mt-0.5 text-ink-2 [overflow-wrap:anywhere]">{t.body}</div> : null}
           {t.hash ? (
-            <div className="toast-body">
-              <a href={txUrl(t.hash)} target="_blank" rel="noreferrer noopener">
-                {shortHash(t.hash)} ↗
-              </a>
+            <div className="mt-1">
+              <ExternalLink href={txUrl(t.hash)} arrow className="link num text-[13px] text-usdg">
+                {shortHash(t.hash)}
+              </ExternalLink>
             </div>
           ) : null}
-        </div>
+        </Panel>
       ))}
     </div>
   );

@@ -1,5 +1,6 @@
 "use client";
 
+import { Card, CardHead, CardMeta, CardTitle, Row, Stat } from "@/components/ui";
 import { fmtCountdown, fmtEastern, fmtUtc, windowProgress } from "@/lib/format";
 import { useNow, type VaultSnapshot } from "@/lib/hooks";
 
@@ -52,32 +53,37 @@ export function CycleTape({ snapshot }: { snapshot: VaultSnapshot }) {
       : 0;
 
   return (
-    <div className="card">
-      <div className="card-head">
-        <span className="card-title">Cycle tape</span>
-        <span className="tiny faint mono">
+    <Card>
+      <CardHead>
+        <CardTitle>Cycle tape</CardTitle>
+        <CardMeta>
           cycle #{cycleNumber ?? "—"} · {state}
-        </span>
+        </CardMeta>
+      </CardHead>
+
+      <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+        <Stat
+          label="Sale window closes in"
+          value={now === 0 || !armed ? "—" : fmtCountdown(exerciseTs, now)}
+          sub={armed ? `${fmtUtc(exerciseTs)} · ${fmtEastern(exerciseTs)}` : "nothing armed"}
+          className="rounded-md bg-surface-2 p-4 sm:p-5"
+        />
+        <Stat
+          label="Expiry in"
+          value={now === 0 || !armed ? "—" : fmtCountdown(expiryTs, now)}
+          sub={armed ? `${fmtUtc(expiryTs)} · ${fmtEastern(expiryTs)}` : "nothing armed"}
+          className="rounded-md bg-surface-2 p-4 sm:p-5"
+        />
       </div>
 
-      <div className="grid grid-2">
-        <div className="stat">
-          <div className="stat-label">Sale window closes in</div>
-          <div className="stat-value">{now === 0 || !armed ? "—" : fmtCountdown(exerciseTs, now)}</div>
-          <div className="stat-sub">{armed ? `${fmtUtc(exerciseTs)} · ${fmtEastern(exerciseTs)}` : "nothing armed"}</div>
+      <div className="mt-6">
+        <div aria-hidden="true" className="relative h-2 overflow-hidden rounded-full bg-surface-2">
+          <div
+            className="absolute inset-y-0 left-0 rounded-full bg-linear-to-r from-accent-soft to-accent"
+            style={{ width: `${(progress * 100).toFixed(1)}%` }}
+          />
         </div>
-        <div className="stat">
-          <div className="stat-label">Expiry in</div>
-          <div className="stat-value">{now === 0 || !armed ? "—" : fmtCountdown(expiryTs, now)}</div>
-          <div className="stat-sub">{armed ? `${fmtUtc(expiryTs)} · ${fmtEastern(expiryTs)}` : "nothing armed"}</div>
-        </div>
-      </div>
-
-      <div style={{ marginTop: 14 }}>
-        <div className="rail">
-          <div className="rail-fill" style={{ width: `${(progress * 100).toFixed(1)}%` }} />
-        </div>
-        <div className="tiny faint" style={{ marginTop: 6 }}>
+        <div className="mt-3 max-w-[60em] text-[12.5px] leading-[1.55] text-ink-3">
           The sale window closes at the option&apos;s exercise time: the last moment a fill can write a call. The keeper
           creates each week&apos;s type to open its exercise window at the NYSE close (16:00 Eastern, so the UTC hour
           moves with daylight time) and to expire a day later; the times shown are the chain&apos;s, not a
@@ -85,7 +91,7 @@ export function CycleTape({ snapshot }: { snapshot: VaultSnapshot }) {
           window. After expiry the keeper reclaims, harvests and settles the queue.
         </div>
       </div>
-    </div>
+    </Card>
   );
 }
 
@@ -96,11 +102,9 @@ export function CycleTapeInline({ snapshot }: { snapshot: VaultSnapshot }) {
   const expiryTs = snapshot.cycleExpiryTs;
   const armed = exerciseTs !== undefined && exerciseTs > 0;
   return (
-    <div className="row tiny">
-      <span className="k">Sale window closes</span>
-      <span className="v">{now === 0 || !armed ? "—" : fmtCountdown(exerciseTs, now)}</span>
-      <span className="k">Expiry</span>
-      <span className="v">{now === 0 || !armed ? "—" : fmtCountdown(expiryTs, now)}</span>
-    </div>
+    <>
+      <Row k="Sale window closes" v={now === 0 || !armed ? "—" : fmtCountdown(exerciseTs, now)} />
+      <Row k="Expiry" v={now === 0 || !armed ? "—" : fmtCountdown(expiryTs, now)} />
+    </>
   );
 }

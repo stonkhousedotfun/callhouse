@@ -1,0 +1,24 @@
+<!--
+  Favicon for app.callhouse.finance, identical to callhouse.finance's (leekzor/callhouse-site: app/icon.svg). Next serves this via the app/icon file convention and emits the
+  <link rel="icon"> itself, so nothing imports it and nothing should.
+
+  THE MARK (Daylight): an emerald rounded square carrying a white base rule, the strike, with a
+  rising line above it. It is the same drawing as BrandMark in components/ui/Brand.tsx, on the same
+  26 unit grid, so the tab icon and the nav mark are one shape. Change them together. One optical
+  adjustment: the rising line carries a 0.7 unit stroke in its own colour. At 16px the nav mark's
+  hairline rise drops below one pixel and greys out; the stroke keeps it a white line in the tab.
+
+  CONSTRAINTS THIS FILE IS BUILT AROUND:
+    - Two colours, written as literals because a favicon cannot read CSS variables: the light
+      accent token (#0a7f55) and the light accent-ink token (#ffffff) from app/globals.css. No
+      gradient and no opacity: a favicon is composited against unknown browser chrome, light or
+      dark, and anything translucent goes muddy. Emerald with white reads on both.
+    - No dark variant. Safari ignores media queries inside SVG favicons, and the emerald square
+      already carries its own ground, so one version is correct everywhere.
+    - No text, and nothing that imitates another brand's mark (no feather, no neon green).
+-->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 26 26" width="32" height="32">
+  <rect width="26" height="26" rx="8" fill="#0a7f55" />
+  <rect x="6" y="16.5" width="14" height="2.5" rx="1" fill="#ffffff" />
+  <path d="M7 15 12.04 8.7 14.68 11.58 19 6v1.98l-4.08 6.12-2.76-2.88L8.44 15Z" fill="#ffffff" stroke="#ffffff" stroke-width="0.7" stroke-linejoin="round" />
+</svg>

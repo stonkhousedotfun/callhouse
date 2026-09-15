@@ -1,73 +1,40 @@
-"use client";
-
 /**
- * Site chrome. The link order is the depositor's journey: land on the vault, deposit, watch the
- * cycle, audit the tape, then read the docs and the legal text.
+ * App chrome, in the Daylight layout callhouse.finance uses (leekzor/callhouse-site:
+ * components/Nav.tsx): brand, the link row, and on the right the one control in the chrome — here
+ * the wallet button rather than "Open the app".
  *
- * One link leaves the app entirely: callhouse.finance, the marketing site. It is LAST, and it is
- * deliberately not part of LINKS — it is a plain <a>, not next/link, because next/link is for
- * routes this app owns and prefetching another origin is meaningless. It is also never
- * "active": there is no pathname in this app that corresponds to it, so the exact-match test
- * above would be a lie if it were in the array.
+ * Server component. The two client islands are the link list (components/NavLinks.tsx, for the
+ * active link) and ConnectButton. From 960px everything is one row; below it the links drop to
+ * their own full-width row under the brand and the wallet button, and scroll sideways rather than
+ * wrap, so the button stays reachable without a menu and every link stays one tap away at 390px.
+ * The scroll row is `relative` so the absolutely positioned sr-only note inside the new-tab link
+ * (ExternalLink) is contained by it; without that it escapes to the page and scrolls a 390px screen
+ * sideways.
+ *
+ * The brand points at "/". Inside the app, home is the vault, not the marketing site; the link row
+ * ends with callhouse.finance for anyone who wants that.
+ *
+ * TEST HOOK: `data-slot="topbar"` on the header. The W-13 run connects its wallet through it.
  */
-import Link from "next/link";
-import { usePathname } from "next/navigation";
-
-import { SITE_URL } from "@/lib/site";
-import { ConnectButton } from "./ConnectButton";
-
-const LINKS = [
-  { href: "/", label: "Vault" },
-  { href: "/vault/nvda", label: "Deposit" },
-  { href: "/vault/nvda/cycle", label: "Cycle" },
-  { href: "/activity", label: "Activity" },
-  { href: "/docs", label: "Docs" },
-  { href: "/legal", label: "Legal" },
-];
+import { ConnectButton } from "@/components/ConnectButton";
+import { NavLinks } from "@/components/NavLinks";
+import { Brand, Container } from "@/components/ui";
 
 export function Nav() {
-  const pathname = usePathname();
   return (
-    <header className="topbar">
-      <div className="topbar-inner">
-        {/* The brand still points at "/". Inside the app, home is the vault — not the
-            marketing site. Someone who wants callhouse.finance uses the last nav link. */}
-        <Link href="/" className="brand">
-          call<span>house</span>
-        </Link>
-        <nav className="nav">
-          {LINKS.map((link) => (
-            <Link
-              key={link.href}
-              href={link.href}
-              // Exact match only: /vault/nvda and /vault/nvda/cycle are separate destinations and
-              // a prefix test would highlight both at once.
-              data-active={pathname === link.href}
-            >
-              {link.label}
-            </Link>
-          ))}
-          {/* Off-site, so: plain anchor, new tab, noreferrer, and the same ↗ the footer and the
-              explorer links use. Dimmed a step below the in-app links and separated by a rule so
-              it does not read as a seventh route of this app. */}
-          <a
-            href={SITE_URL}
-            target="_blank"
-            rel="noreferrer noopener"
-            data-external="true"
-            style={{
-              color: "var(--fg-faint)",
-              marginLeft: 6,
-              paddingLeft: 12,
-              borderLeft: "1px solid var(--line)",
-              borderRadius: 0,
-            }}
-          >
-            callhouse.finance ↗
-          </a>
+    <header data-slot="topbar">
+      <Container className="flex flex-wrap items-center gap-x-7 gap-y-2 pb-3 pt-4 lg:py-[22px]">
+        <Brand className="order-1" />
+        <nav
+          aria-label="App"
+          className="relative order-3 -mx-4 w-[calc(100%+2rem)] overflow-x-auto px-4 [scrollbar-width:none] sm:-mx-5 sm:w-[calc(100%+2.5rem)] sm:px-5 max-lg:[mask-image:linear-gradient(to_right,#000_88%,transparent)] lg:order-2 lg:mx-0 lg:mr-auto lg:w-auto lg:overflow-visible lg:px-0 lg:[mask-image:none]"
+        >
+          <NavLinks />
         </nav>
-        <ConnectButton />
-      </div>
+        <div className="order-2 ml-auto lg:order-3 lg:ml-0">
+          <ConnectButton />
+        </div>
+      </Container>
     </header>
   );
 }

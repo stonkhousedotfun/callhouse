@@ -7,6 +7,7 @@ import { useAccount, useWriteContract } from "wagmi";
 import { MARKET, VAULT, vaultAbi } from "@/lib/contracts";
 import { WAD, fmtAsset, fmtUsdg, fmtWadPercent } from "@/lib/format";
 import type { AccountPosition, VaultSnapshot } from "@/lib/hooks";
+import { Button, Notice, Row, Rows, Unit } from "@/components/ui";
 import { useTxRunner } from "./TxToast";
 
 /**
@@ -43,11 +44,15 @@ export function StrandedBanner({
   position,
   onDone,
   compact = false,
+  className,
 }: {
   snapshot: VaultSnapshot;
   position?: AccountPosition;
   onDone?: () => void;
   compact?: boolean;
+  /** Presentational: extra classes on the notice box. The banner sets no outer margin of its own;
+   *  the pages stack their sections with a gap. */
+  className?: string;
 }) {
   const { address, isConnected } = useAccount();
   const { writeContractAsync } = useWriteContract();
@@ -99,66 +104,83 @@ export function StrandedBanner({
   }
 
   return (
-    <div className="notice" data-tone="bad" style={{ marginTop: compact ? 0 : 16 }}>
-      <strong>
-        A claim is stranded{snapshot.cycleNumber !== undefined ? ` (cycle #${snapshot.cycleNumber})` : ""}: the week closed, but Valorem
-        could not return its collateral.
-      </strong>{" "}
-      The close tried to redeem the week&apos;s Valorem claim and the redeem reverted: a USDG pause or freeze, or the
-      Stock Token issuer blocklisting the vault. The premium was harvested and the vault went to Idle with the claim
-      kept, so {fmtAsset(snapshot.lockedAssets)} {MARKET} (plus the strike USDG for anything assigned) is still inside
-      Valorem. While that holds, deposits and instant redemption are closed and no new week can be armed. The queue
-      still settles, booking each entry&apos;s share of the idle balance and of the claim, but paying it out moves
-      tokens: a Stock Token blocklist of the vault holds the {MARKET} leg back until it lifts, and a USDG pause or
-      freeze defers the USDG leg.
+    <Notice
+      tone="danger"
+      className={className}
+      title={
+        <>
+          A claim is stranded{snapshot.cycleNumber !== undefined ? ` (cycle #${snapshot.cycleNumber})` : ""}: the week closed, but Valorem
+          could not return its collateral.
+        </>
+      }
+    >
+      {" "}
+      {/* A readable measure: the banner spans the page, the sentence should not. */}
+      <p className="max-w-[78ch]">
+        The close tried to redeem the week&apos;s Valorem claim and the redeem reverted: a USDG pause or freeze, or the
+        Stock Token issuer blocklisting the vault. The premium was harvested and the vault went to Idle with the claim
+        kept, so <span className="num text-[0.92em] font-medium text-ink">{fmtAsset(snapshot.lockedAssets)} {MARKET}</span> (plus the strike USDG for anything assigned) is still inside
+        Valorem. While that holds, deposits and instant redemption are closed and no new week can be armed. The queue
+        still settles, booking each entry&apos;s share of the idle balance and of the claim, but paying it out moves
+        tokens: a Stock Token blocklist of the vault holds the {MARKET} leg back until it lifts, and a USDG pause or
+        freeze defers the USDG leg.
+      </p>
       {!compact ? (
         <>
-          <div className="rows" style={{ marginTop: 10 }}>
-            <div className="row">
-              <span className="k">Claim still owned by live shares</span>
-              <span className="v">{fmtWadPercent(liveWad)}</span>
-            </div>
-            <div className="row">
-              <span className="k">Claim owed to settled queue epochs</span>
-              <span className="v">{fmtWadPercent(queueWad)}</span>
-            </div>
-            <div className="row">
-              <span className="k">Strand generation</span>
-              <span className="v">
-                #{snapshot.strandGen?.toString() ?? "—"}
-                {snapshot.lastResolvedGen !== undefined ? ` · last resolved #${snapshot.lastResolvedGen.toString()}` : ""}
-              </span>
-            </div>
+          <Rows className="mt-3 max-w-[720px] border-t border-danger/20">
+            <Row k="Claim still owned by live shares" v={fmtWadPercent(liveWad)} dense className="border-danger/15!" />
+            <Row k="Claim owed to settled queue epochs" v={fmtWadPercent(queueWad)} dense className="border-danger/15!" />
+            <Row
+              k="Strand generation"
+              v={
+                <>
+                  #{snapshot.strandGen?.toString() ?? "—"}
+                  {snapshot.lastResolvedGen !== undefined ? ` · last resolved #${snapshot.lastResolvedGen.toString()}` : ""}
+                </>
+              }
+              dense
+              className="border-danger/15!"
+            />
             {address && position?.ready ? (
               <>
-                <div className="row" title="Your queue entry's share of the stranded claim, staged or in your settled epoch. Paid with completeRedeem once the claim is redeemed.">
-                  <span className="k">Your pending claim share (queue)</span>
-                  <span className="v">{fmtWadPercent(pendingWad)}</span>
-                </div>
-                <div className="row" title="Your live shares' slice of what the claim still owes live shares. It comes back as NAV and, for strike USDG, through the harvest when the claim is redeemed.">
-                  <span className="k">Your live shares&apos; slice</span>
-                  <span className="v">{fmtWadPercent(liveShareWad)}</span>
-                </div>
-                <div className="row">
-                  <span className="k">Collectable now (previewCompleteRedeem)</span>
-                  <span className="v">
-                    {fmtAsset(position.pendingAssets)} {MARKET} · {fmtUsdg(position.pendingUsdg)} USDG
-                  </span>
-                </div>
+                <Row
+                  title="Your queue entry's share of the stranded claim, staged or in your settled epoch. Paid with completeRedeem once the claim is redeemed."
+                  k="Your pending claim share (queue)"
+                  v={fmtWadPercent(pendingWad)}
+                  dense
+                  className="border-danger/15!"
+                />
+                <Row
+                  title="Your live shares' slice of what the claim still owes live shares. It comes back as NAV and, for strike USDG, through the harvest when the claim is redeemed."
+                  k={<>Your live shares&apos; slice</>}
+                  v={fmtWadPercent(liveShareWad)}
+                  dense
+                  className="border-danger/15!"
+                />
+                <Row
+                  k="Collectable now (previewCompleteRedeem)"
+                  v={
+                    <>
+                      {fmtAsset(position.pendingAssets)} <Unit>{MARKET}</Unit> · {fmtUsdg(position.pendingUsdg)} <Unit>USDG</Unit>
+                    </>
+                  }
+                  dense
+                  className="border-danger/15!"
+                />
               </>
             ) : null}
-          </div>
-          <div className="btn-row" style={{ marginTop: 12 }}>
-            <button data-variant="primary" disabled={busy || !isConnected || !VAULT} onClick={retry}>
+          </Rows>
+          <div className="mt-3 flex max-w-[720px] flex-wrap items-center gap-x-4 gap-y-2">
+            <Button size="sm" disabled={busy || !isConnected || !VAULT} onClick={retry}>
               {busy ? "Working…" : "Retry claim"}
-            </button>
-            <span className="tiny faint">
+            </Button>
+            <span className="min-w-0 flex-1 basis-60 text-[12.5px] leading-snug text-ink-3">
               Anyone can send this. It reverts StillStranded while the cause persists and settles the claim the
               first time Valorem lets it through; nothing here needs the keeper.
             </span>
           </div>
         </>
       ) : null}
-    </div>
+    </Notice>
   );
 }

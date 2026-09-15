@@ -6,26 +6,41 @@ import { CycleTape } from "@/components/CycleTape";
 import { OrderPayload } from "@/components/OrderPayload";
 import { GuardBadges, VaultPhaseBadge } from "@/components/PhaseBadge";
 import { StrandedBanner } from "@/components/StrandedBanner";
+import { Card, CardHead, CardMeta, CardTitle, ExternalLink, Notice as NoticeBox, PageHead, Row, Rows, Table, Unit } from "@/components/ui";
 import { fetchKeeperOrderBook } from "@/lib/api";
+import { cn } from "@/lib/cn";
 import { addressUrl } from "@/lib/chain";
 import { CLEARINGHOUSE, MARKET, MAX_LISTINGS_PER_CYCLE, SEAPORT, VAULT } from "@/lib/contracts";
 import { feedNotice, listingNotice, shouldAskFeed, type CycleListingState, type Notice } from "@/lib/cycleNotices";
 import { fmtEastern, fmtUsdg, fmtUtc, maxContracts, shortHash, unitPriceUsdg } from "@/lib/format";
 import { useCycleOption, useNow, useOrderStatus, useVaultSnapshot } from "@/lib/hooks";
 
+/**
+ * Ledger rows whose value cannot sit beside its label in a narrow card put the value under the
+ * label, left-aligned, instead of the Row default (a right-aligned value that breaks mid-run). The
+ * width is the card's own (the cards below are `@container`), so it tracks the two-column layout.
+ */
+const STACK_540 =
+  "@max-[540px]:flex-col @max-[540px]:items-start! @max-[540px]:gap-y-1 @max-[540px]:[&>dd]:ml-0 @max-[540px]:[&>dd]:text-left";
+const STACK_420 =
+  "@max-[420px]:flex-col @max-[420px]:items-start! @max-[420px]:gap-y-1 @max-[420px]:[&>dd]:ml-0 @max-[420px]:[&>dd]:text-left";
+/** Always under its label: the full order hash, balanced over its lines. */
+const STACK_HASH =
+  "flex-col items-start! gap-y-1 [&>dd]:ml-0 [&>dd]:text-left [&>dd]:break-all [&>dd]:text-balance [&>dd]:text-[12.5px] [&>dd]:leading-snug [&>dd]:text-ink-2";
+
+/** A cycle notice from lib/cycleNotices, in the Daylight notice box. Only integrity is red. */
 function NoticeBlock({ notice }: { notice: Notice }) {
   return (
-    <div className="notice" data-tone={notice.tone}>
-      <strong>{notice.heading}</strong>
+    <NoticeBox tone={notice.tone === "bad" ? "danger" : notice.tone} title={notice.heading}>
       {notice.body}
       {notice.items !== undefined ? (
-        <ul style={{ margin: "6px 0 0", paddingLeft: 18 }}>
+        <ul className="mt-1.5 list-disc space-y-1 pl-5">
           {notice.items.map((item, i) => (
             <li key={i}>{item}</li>
           ))}
         </ul>
       ) : null}
-    </div>
+    </NoticeBox>
   );
 }
 
@@ -95,263 +110,357 @@ export default function CyclePage() {
 
   return (
     <>
-      <div className="page-head">
-        <div className="eyebrow">Cycle · {MARKET}</div>
-        <h1>This week&apos;s call, and where to buy it</h1>
-        <p className="lede">
-          Each week the keeper creates one out-of-the-money option type on the clearinghouse and the vault arms it after
-          checking the strike, the lot and the window itself. The vault then authorises one Seaport order for it; this
-          page is where that order is filled. Nothing is written until you buy: the fill itself writes exactly the
-          contracts you take, so the vault never holds an unsold call. Everything below is read from the chain, and
-          the order&apos;s parameters from the vault&apos;s keeper, checked against the chain first.
-        </p>
-      </div>
-
-      {/* An RPC failure must never read as "the vault is empty". Every figure below comes from
-          one multicall batch; if that batch failed, say so instead of printing em dashes that
-          look like facts. */}
-      {chainReadFailed ? (
-        <div className="notice" data-tone="warn">
-          <strong>Chain reads are failing right now.</strong>
-          The vault could not be read from the RPC, so the figures below are missing rather than zero. They fill in by
-          themselves when the node answers again.
-        </div>
-      ) : null}
-
-      {clearMismatch ? (
-        <div className="notice" data-tone="bad">
-          <strong>This build names a different clearinghouse from the vault.</strong>
-          The vault was constructed with {v.clear}; NEXT_PUBLIC_CLEARINGHOUSE is {CLEARINGHOUSE}. Every check on this
-          page follows the vault&apos;s, so the order below is still checked correctly, but the build should be fixed
-          before anything else is read from it.
-        </div>
-      ) : null}
-
-      <StrandedBanner snapshot={v} compact />
-
-      <div style={{ marginTop: v.isStranded ? 16 : 0 }}>
-        <CycleTape snapshot={v} />
-      </div>
-
-      <div className="card" style={{ marginTop: 16 }}>
-        <div className="card-head">
-          <span className="card-title">This week&apos;s option · vault cycle #{v.cycleNumber ?? "—"}</span>
-          <VaultPhaseBadge snapshot={v} nowSeconds={nowSeconds} />
-        </div>
-
-        {v.phase === 0 || v.optionId === undefined || v.optionId === 0n ? (
-          <p className="small muted" style={{ marginBottom: 0 }}>
-            {!v.ready
-              ? "Reading the vault…"
-              : "Nothing is armed right now. The keeper arms the week's option type with rollOpen; the strike, exercise time and expiry appear here when it does."}
+      <PageHead
+        eyebrow={<>Cycle · {MARKET}</>}
+        title={<>This week&apos;s call, and where to buy it</>}
+        lede={
+          <p>
+            Each week the keeper creates one out-of-the-money option type on the clearinghouse and the vault arms it after
+            checking the strike, the lot and the window itself. The vault then authorises one Seaport order for it; this
+            page is where that order is filled. Nothing is written until you buy: the fill itself writes exactly the
+            contracts you take, so the vault never holds an unsold call. Everything below is read from the chain, and
+            the order&apos;s parameters from the vault&apos;s keeper, checked against the chain first.
           </p>
-        ) : (
-          <>
-            <div className="rows">
-              <div className="row">
-                <span className="k">Strike, per contract</span>
-                <span className="v">
-                  {fmtUsdg(v.cycleStrikeUsdg)} USDG
-                  {option?.otmBps !== undefined
-                    ? ` · ${option.otmBps >= 0 ? "+" : ""}${(option.otmBps / 100).toFixed(2)}% vs spot`
-                    : ""}
-                </span>
-              </div>
-              <div className="row" title="The band the vault applies at today's spot. Both bounds are checked when a cycle is armed; the floor is re-checked at every fill, so a rally can make the vault refuse a sale until the keeper reprices.">
-                <span className="k">Band at today&apos;s spot</span>
-                <span className="v">
-                  {v.band
-                    ? `${fmtUsdg(v.band.min)} – ${fmtUsdg(v.band.max)} USDG${
-                        v.cycleStrikeUsdg !== undefined && v.cycleStrikeUsdg < v.band.min ? " · strike now below the floor" : ""
-                      }`
-                    : v.spotStale
-                      ? "spot stale — the vault will not sell"
-                      : "—"}
-                </span>
-              </div>
-              <div className="row" title="The option type's exercise and expiry timestamps, snapshotted by the vault at rollOpen. The keeper targets the NYSE close, 16:00 Eastern, and 24 hours later; the figures are the chain's.">
-                <span className="k">Sale window closes</span>
-                <span className="v">
-                  {fmtUtc(v.cycleExerciseTs)} · {fmtEastern(v.cycleExerciseTs)}
-                </span>
-              </div>
-              <div className="row">
-                <span className="k">Expiry</span>
-                <span className="v">
-                  {fmtUtc(v.cycleExpiryTs)} · {fmtEastern(v.cycleExpiryTs)}
-                </span>
-              </div>
-              <div className="row">
-                <span className="k">Lot</span>
-                <span className="v">
-                  {option?.underlyingAmount === undefined
-                    ? optionLoading
-                      ? "reading the clearinghouse…"
-                      : "—"
-                    : `${option.underlyingAmount === 10n ** 18n ? "1.0000" : option.underlyingAmount.toString()} ${MARKET} per contract`}
-                </span>
-              </div>
-              <div className="row" title="contractsWritten(): every contract was written inside the fill that sold it, so this is also the number sold.">
-                <span className="k">Calls sold this week</span>
-                <span className="v">
-                  {v.contractsWritten === undefined ? "—" : v.contractsWritten.toString()}
-                  {cap !== undefined ? ` of at most ${cap.toString()}` : ""}
-                </span>
-              </div>
-              <div className="row" title="Policy.maxContracts(totalAssets) − contractsWritten. The hook re-sizes every fill against NAV, so a listing approved at capacity can still be refused at the margin if NAV fell.">
-                <span className="k">Capacity remaining</span>
-                <span className="v">{v.capacity === undefined ? "—" : `${v.capacity.toString()} contracts`}</span>
-              </div>
-              <div className="row">
-                <span className="k">Feed spot, one lot</span>
-                <span className="v">{v.spotStale ? "stale — the vault will not sell" : `${fmtUsdg(v.spotUsdg)} USDG`}</span>
-              </div>
-              <div className="row">
-                <span className="k">Option id</span>
-                <span className="v mono" title={v.optionId.toString()}>
-                  {shortHash(`0x${v.optionId.toString(16).padStart(64, "0")}`)}
-                </span>
-              </div>
-            </div>
+        }
+      />
 
-            {tupleMismatch ? (
-              <div className="notice" data-tone="bad" style={{ marginTop: 12 }}>
-                <strong>The clearinghouse&apos;s tuple for this option id does not match the vault&apos;s snapshot.</strong>
-                Strike, exercise or expiry differ between clearinghouse.option() and the vault&apos;s cycle. That
-                should be impossible (the tuple is immutable and the vault read it at rollOpen); do not buy until it
-                is understood.
-              </div>
+      <div className="grid min-w-0 gap-4 sm:gap-5">
+        {/* An RPC failure must never read as "the vault is empty". Every figure below comes from
+            one multicall batch; if that batch failed, say so instead of printing em dashes that
+            look like facts. */}
+        {chainReadFailed ? (
+          <NoticeBox tone="warn" title={<>Chain reads are failing right now.</>}>
+            The vault could not be read from the RPC, so the figures below are missing rather than zero. They fill in by
+            themselves when the node answers again.
+          </NoticeBox>
+        ) : null}
+
+        {clearMismatch ? (
+          <NoticeBox tone="danger" title={<>This build names a different clearinghouse from the vault.</>}>
+            The vault was constructed with {v.clear}; NEXT_PUBLIC_CLEARINGHOUSE is {CLEARINGHOUSE}. Every check on this
+            page follows the vault&apos;s, so the order below is still checked correctly, but the build should be fixed
+            before anything else is read from it.
+          </NoticeBox>
+        ) : null}
+
+        <StrandedBanner snapshot={v} compact />
+
+        <div className="min-w-0">
+          <CycleTape snapshot={v} />
+        </div>
+
+        {/* Two columns from 960px: the week and its on-chain order on the left, the buy side (the
+            chain and feed notices, then the fill card) on the right. The DOM order is the reading
+            order, so below 960px it is one column in the same sequence. When the buy side renders
+            nothing, the left column takes the full width. */}
+        <div className="grid min-w-0 grid-cols-1 items-start gap-4 sm:gap-5 lg:grid-cols-[minmax(0,1fr)_minmax(0,410px)] xl:grid-cols-[minmax(0,1fr)_minmax(0,450px)] lg:has-[>div:last-child:empty]:grid-cols-1">
+          <div className="grid min-w-0 gap-4 sm:gap-5">
+            <Card className="@container">
+              <CardHead>
+                <CardTitle>This week&apos;s option · vault cycle #{v.cycleNumber ?? "—"}</CardTitle>
+                <VaultPhaseBadge snapshot={v} nowSeconds={nowSeconds} />
+              </CardHead>
+
+              {v.phase === 0 || v.optionId === undefined || v.optionId === 0n ? (
+                <p className="rounded-md bg-surface-2 px-4 py-3.5 text-[14.5px] leading-[1.55] text-ink-2">
+                  {!v.ready
+                    ? "Reading the vault…"
+                    : "Nothing is armed right now. The keeper arms the week's option type with rollOpen; the strike, exercise time and expiry appear here when it does."}
+                </p>
+              ) : (
+                <>
+                  <Rows>
+                    <Row
+                      k="Strike, per contract"
+                      className={STACK_420}
+                      v={
+                        <>
+                          {fmtUsdg(v.cycleStrikeUsdg)} <Unit>USDG</Unit>
+                          {option?.otmBps !== undefined ? (
+                            <span className="text-ink-3">
+                              {` · ${option.otmBps >= 0 ? "+" : ""}${(option.otmBps / 100).toFixed(2)}% vs spot`}
+                            </span>
+                          ) : (
+                            ""
+                          )}
+                        </>
+                      }
+                    />
+                    <Row
+                      title="The band the vault applies at today's spot. Both bounds are checked when a cycle is armed; the floor is re-checked at every fill, so a rally can make the vault refuse a sale until the keeper reprices."
+                      k={<>Band at today&apos;s spot</>}
+                      className={STACK_420}
+                      v={
+                        v.band ? (
+                          <>
+                            {fmtUsdg(v.band.min)} – {fmtUsdg(v.band.max)} <Unit>USDG</Unit>
+                            {v.cycleStrikeUsdg !== undefined && v.cycleStrikeUsdg < v.band.min ? (
+                              <span className="font-body">{" · strike now below the floor"}</span>
+                            ) : (
+                              ""
+                            )}
+                          </>
+                        ) : v.spotStale ? (
+                          <span className="font-body">spot stale — the vault will not sell</span>
+                        ) : (
+                          "—"
+                        )
+                      }
+                    />
+                    <Row
+                      title="The option type's exercise and expiry timestamps, snapshotted by the vault at rollOpen. The keeper targets the NYSE close, 16:00 Eastern, and 24 hours later; the figures are the chain's."
+                      k="Sale window closes"
+                      className={STACK_540}
+                      v={
+                        <>
+                          <span className="whitespace-nowrap">{fmtUtc(v.cycleExerciseTs)}</span> ·{" "}
+                          <span className="whitespace-nowrap">{fmtEastern(v.cycleExerciseTs)}</span>
+                        </>
+                      }
+                    />
+                    <Row
+                      k="Expiry"
+                      className={STACK_540}
+                      v={
+                        <>
+                          <span className="whitespace-nowrap">{fmtUtc(v.cycleExpiryTs)}</span> ·{" "}
+                          <span className="whitespace-nowrap">{fmtEastern(v.cycleExpiryTs)}</span>
+                        </>
+                      }
+                    />
+                    <Row
+                      k="Lot"
+                      v={
+                        option?.underlyingAmount === undefined
+                          ? optionLoading
+                            ? "reading the clearinghouse…"
+                            : "—"
+                          : (
+                            <>
+                              {option.underlyingAmount === 10n ** 18n ? "1.0000" : option.underlyingAmount.toString()}{" "}
+                              <Unit>{MARKET} per contract</Unit>
+                            </>
+                          )
+                      }
+                    />
+                    <Row
+                      title="contractsWritten(): every contract was written inside the fill that sold it, so this is also the number sold."
+                      k="Calls sold this week"
+                      v={
+                        <>
+                          {v.contractsWritten === undefined ? "—" : v.contractsWritten.toString()}
+                          {cap !== undefined ? (
+                            <>
+                              {" "}
+                              <Unit>of at most</Unit> {cap.toString()}
+                            </>
+                          ) : (
+                            ""
+                          )}
+                        </>
+                      }
+                    />
+                    <Row
+                      title="Policy.maxContracts(totalAssets) − contractsWritten. The hook re-sizes every fill against NAV, so a listing approved at capacity can still be refused at the margin if NAV fell."
+                      k="Capacity remaining"
+                      v={
+                        v.capacity === undefined ? (
+                          "—"
+                        ) : (
+                          <>
+                            {v.capacity.toString()} <Unit>contracts</Unit>
+                          </>
+                        )
+                      }
+                    />
+                    <Row
+                      k="Feed spot, one lot"
+                      v={
+                        v.spotStale ? (
+                          <span className="font-body">stale — the vault will not sell</span>
+                        ) : (
+                          <>
+                            {fmtUsdg(v.spotUsdg)} <Unit>USDG</Unit>
+                          </>
+                        )
+                      }
+                    />
+                    <Row
+                      k="Option id"
+                      v={
+                        <span title={v.optionId.toString()}>
+                          {shortHash(`0x${v.optionId.toString(16).padStart(64, "0")}`)}
+                        </span>
+                      }
+                    />
+                  </Rows>
+
+                  {tupleMismatch ? (
+                    <NoticeBox
+                      tone="danger"
+                      className="mt-4"
+                      title={<>The clearinghouse&apos;s tuple for this option id does not match the vault&apos;s snapshot.</>}
+                    >
+                      Strike, exercise or expiry differ between clearinghouse.option() and the vault&apos;s cycle. That
+                      should be impossible (the tuple is immutable and the vault read it at rollOpen); do not buy until it
+                      is understood.
+                    </NoticeBox>
+                  ) : null}
+
+                  <p className="mt-4 border-t border-line pt-4 text-[12.5px] leading-[1.55] text-ink-3">
+                    The strike, window and lot are read back from the clearinghouse&apos;s own tuple for this id and
+                    cross-checked against the vault&apos;s snapshot. There is no registry: the vault validates the type
+                    itself at rollOpen. Settlement never reads a price feed — the spot above is a gate and a display
+                    number only.
+                  </p>
+                </>
+              )}
+            </Card>
+
+            <Card className="@container">
+              <CardHead>
+                <CardTitle>The vault&apos;s order, on chain</CardTitle>
+                <GuardBadges snapshot={v} />
+              </CardHead>
+
+              {hasOnChainListing ? (
+                <Rows>
+                  <Row
+                    k="Seaport order hash"
+                    v={v.listingHash}
+                    className={STACK_HASH}
+                  />
+                  <Row
+                    title="listingAmount(): the whole offer. At approval it was at most the vault's capacity."
+                    k="Contracts offered"
+                    v={(v.listingAmount ?? 0n).toString()}
+                  />
+                  <Row
+                    k="Gross premium asked"
+                    mono={false}
+                    className={cn(STACK_420, "[&>dd]:text-ink-2")}
+                    v={
+                      <>
+                        <span className="num text-ink">{fmtUsdg(v.listingGrossUsdg)}</span> USDG · one leg, to the vault
+                      </>
+                    }
+                  />
+                  <Row
+                    k="Per contract"
+                    v={
+                      unitPrice === undefined ? (
+                        "—"
+                      ) : (
+                        <>
+                          {fmtUsdg(unitPrice, 6)} <Unit>USDG</Unit>
+                        </>
+                      )
+                    }
+                  />
+                  <Row
+                    k="Seaport validated"
+                    mono={false}
+                    className={STACK_420}
+                    v={
+                      orderStatus === undefined
+                        ? "—"
+                        : orderStatus.isCancelled
+                          ? "cancelled"
+                          : orderStatus.isValidated
+                            ? "validated (empty signature fills)"
+                            : "not validated"
+                    }
+                  />
+                  <Row
+                    k="Filled fraction, per Seaport"
+                    v={
+                      orderStatus?.totalSize !== undefined && orderStatus.totalSize > 0n
+                        ? `${orderStatus.totalFilled?.toString()} / ${orderStatus.totalSize.toString()}`
+                        : "0 / 0"
+                    }
+                  />
+                  <Row
+                    title="approveListing calls this cycle, cancelled or not. A relist is a reprice."
+                    k="Listings authorised this cycle"
+                    v={
+                      <>
+                        {v.listingsThisCycle ?? 0} / {MAX_LISTINGS_PER_CYCLE}
+                      </>
+                    }
+                  />
+                </Rows>
+              ) : (
+                <p className="rounded-md bg-surface-2 px-4 py-3.5 text-[14.5px] leading-[1.55] text-ink-2">
+                  {/* `undefined` is "we have not read the vault", `0x00…00` is "the vault has no live
+                      listing". They are different claims and only the second one is ours to make. */}
+                  {v.listingHash === undefined
+                    ? "The vault's listing slot has not been read yet."
+                    : "No listing is authorised on chain right now. The vault authorises an order by hash with approveListing() after arming a cycle, so an empty hash here means nothing has been listed yet."}
+                </p>
+              )}
+
+              {/* Each label travels with its address, so a line never ends on a label or a separator. */}
+              <p className="mt-4 flex flex-wrap gap-x-[0.4em] gap-y-1 border-t border-line pt-4 text-[12.5px] leading-[1.55] text-ink-3 [overflow-wrap:anywhere]">
+                <span className="min-w-0">
+                  Clearinghouse (the vault&apos;s <code>clear()</code>){" "}
+                  <ExternalLink href={addressUrl(clearinghouse)} className="link num">
+                    {clearinghouse}
+                  </ExternalLink>
+                </span>{" "}
+                <span className="min-w-0">
+                  · Seaport{" "}
+                  <ExternalLink href={addressUrl(SEAPORT)} className="link num">
+                    {SEAPORT}
+                  </ExternalLink>
+                </span>
+                {VAULT ? (
+                  <>
+                    {" "}
+                    <span className="min-w-0">
+                      · zone = the vault{" "}
+                      <ExternalLink href={addressUrl(VAULT)} className="link num">
+                        {shortHash(VAULT)}
+                      </ExternalLink>
+                    </span>
+                  </>
+                ) : null}
+              </p>
+            </Card>
+          </div>
+
+          <div className="grid min-w-0 gap-4 empty:hidden sm:gap-5">
+            {chainNotice !== null ? <NoticeBlock notice={chainNotice} /> : null}
+
+            {orderFeedNotice === "loading" ? (
+              <Card pad="sm">
+                <span className="text-sm text-ink-2">Reading the order from the keeper…</span>
+              </Card>
+            ) : orderFeedNotice !== null ? (
+              <NoticeBlock notice={orderFeedNotice} />
             ) : null}
 
-            <p className="tiny faint" style={{ marginTop: 10, marginBottom: 0 }}>
-              The strike, window and lot are read back from the clearinghouse&apos;s own tuple for this id and
-              cross-checked against the vault&apos;s snapshot. There is no registry: the vault validates the type
-              itself at rollOpen. Settlement never reads a price feed — the spot above is a gate and a display
-              number only.
-            </p>
-          </>
-        )}
-      </div>
-
-      <div className="card" style={{ marginTop: 16 }}>
-        <div className="card-head">
-          <span className="card-title">The vault&apos;s order, on chain</span>
-          <GuardBadges snapshot={v} />
-        </div>
-
-        {hasOnChainListing ? (
-          <div className="rows">
-            <div className="row">
-              <span className="k">Seaport order hash</span>
-              <span className="v kv-mono">{v.listingHash}</span>
-            </div>
-            <div className="row" title="listingAmount(): the whole offer. At approval it was at most the vault's capacity.">
-              <span className="k">Contracts offered</span>
-              <span className="v">{(v.listingAmount ?? 0n).toString()}</span>
-            </div>
-            <div className="row">
-              <span className="k">Gross premium asked</span>
-              <span className="v">{fmtUsdg(v.listingGrossUsdg)} USDG · one leg, to the vault</span>
-            </div>
-            <div className="row">
-              <span className="k">Per contract</span>
-              <span className="v">{unitPrice === undefined ? "—" : `${fmtUsdg(unitPrice, 6)} USDG`}</span>
-            </div>
-            <div className="row">
-              <span className="k">Seaport validated</span>
-              <span className="v">
-                {orderStatus === undefined
-                  ? "—"
-                  : orderStatus.isCancelled
-                    ? "cancelled"
-                    : orderStatus.isValidated
-                      ? "validated (empty signature fills)"
-                      : "not validated"}
-              </span>
-            </div>
-            <div className="row">
-              <span className="k">Filled fraction, per Seaport</span>
-              <span className="v">
-                {orderStatus?.totalSize !== undefined && orderStatus.totalSize > 0n
-                  ? `${orderStatus.totalFilled?.toString()} / ${orderStatus.totalSize.toString()}`
-                  : "0 / 0"}
-              </span>
-            </div>
-            <div className="row" title="approveListing calls this cycle, cancelled or not. A relist is a reprice.">
-              <span className="k">Listings authorised this cycle</span>
-              <span className="v">
-                {v.listingsThisCycle ?? 0} / {MAX_LISTINGS_PER_CYCLE}
-              </span>
-            </div>
+            {/* The vault's order, through the one fill path. It is only ever a row whose hash is the
+                vault's listingHash, and OrderPayload refuses to render a fill button until the row
+                matches every value in the vault's own slot and a simulated fill passes. */}
+            {feedListing !== undefined ? (
+              <div key={`order-${feedListing.orderHash}`} className="min-w-0">
+                <OrderPayload listing={feedListing} snapshot={v} seaportStatus={seaportStatus} />
+              </div>
+            ) : null}
           </div>
-        ) : (
-          <p className="small muted" style={{ marginBottom: 0 }}>
-            {/* `undefined` is "we have not read the vault", `0x00…00` is "the vault has no live
-                listing". They are different claims and only the second one is ours to make. */}
-            {v.listingHash === undefined
-              ? "The vault's listing slot has not been read yet."
-              : "No listing is authorised on chain right now. The vault authorises an order by hash with approveListing() after arming a cycle, so an empty hash here means nothing has been listed yet."}
-          </p>
-        )}
-
-        <p className="tiny faint" style={{ marginTop: 12, marginBottom: 0 }}>
-          Clearinghouse (the vault&apos;s <code>clear()</code>){" "}
-          <a href={addressUrl(clearinghouse)} target="_blank" rel="noreferrer noopener">
-            {clearinghouse}
-          </a>{" "}
-          · Seaport{" "}
-          <a href={addressUrl(SEAPORT)} target="_blank" rel="noreferrer noopener">
-            {SEAPORT}
-          </a>
-          {VAULT ? (
-            <>
-              {" "}
-              · zone = the vault{" "}
-              <a href={addressUrl(VAULT)} target="_blank" rel="noreferrer noopener">
-                {shortHash(VAULT)}
-              </a>
-            </>
-          ) : null}
-        </p>
-      </div>
-
-      {chainNotice !== null ? (
-        <div style={{ marginTop: 16 }}>
-          <NoticeBlock notice={chainNotice} />
         </div>
-      ) : null}
 
-      {orderFeedNotice === "loading" ? (
-        <div className="card" style={{ marginTop: 16 }}>
-          <span className="small muted">Reading the order from the keeper…</span>
-        </div>
-      ) : orderFeedNotice !== null ? (
-        <div style={{ marginTop: 16 }}>
-          <NoticeBlock notice={orderFeedNotice} />
-        </div>
-      ) : null}
-
-      {/* The vault's order, through the one fill path. It is only ever a row whose hash is the
-          vault's listingHash, and OrderPayload refuses to render a fill button until the row
-          matches every value in the vault's own slot and a simulated fill passes. */}
-      {feedListing !== undefined ? (
-        <div key={`order-${feedListing.orderHash}`} style={{ marginTop: 16 }}>
-          <OrderPayload listing={feedListing} snapshot={v} seaportStatus={seaportStatus} />
-        </div>
-      ) : null}
-
-      {feedBook !== undefined && feedBook.closed.some((c) => c.state === "notCurrent") ? (
-        <div className="card" style={{ marginTop: 16 }}>
-          <div className="card-head">
-            <span className="card-title">Earlier orders the keeper still serves</span>
-            <span className="tiny faint mono">{feedBook.closed.filter((c) => c.state === "notCurrent").length}</span>
-          </div>
-          <div className="table-wrap">
-            <table>
+        {feedBook !== undefined && feedBook.closed.some((c) => c.state === "notCurrent") ? (
+          <Card>
+            <CardHead>
+              <CardTitle>Earlier orders the keeper still serves</CardTitle>
+              <CardMeta>{feedBook.closed.filter((c) => c.state === "notCurrent").length}</CardMeta>
+            </CardHead>
+            <Table label="Earlier orders the keeper still serves" bleed minWidth={300}>
               <thead>
                 <tr>
-                  <th>Order hash</th>
-                  <th>State</th>
+                  <th className="w-px pr-8!">Order hash</th>
+                  <th className="text-left!">State</th>
                 </tr>
               </thead>
               <tbody>
@@ -359,30 +468,36 @@ export default function CyclePage() {
                   .filter((c) => c.state === "notCurrent")
                   .map((c, i) => (
                     <tr key={c.orderHash ?? i}>
-                      <td title={c.orderHash ?? undefined}>{shortHash(c.orderHash)}</td>
-                      <td style={{ whiteSpace: "normal" }}>superseded: not the order the vault authorises now</td>
+                      <td title={c.orderHash ?? undefined} className="pr-8!">
+                        {shortHash(c.orderHash)}
+                      </td>
+                      <td className="font-body! text-left! whitespace-normal! text-ink-2!">
+                        superseded: not the order the vault authorises now
+                      </td>
                     </tr>
                   ))}
               </tbody>
-            </table>
-          </div>
-        </div>
-      ) : null}
+            </Table>
+          </Card>
+        ) : null}
 
-      <div className="card" style={{ marginTop: 16 }}>
-        <div className="card-title">How a fill works here</div>
-        <p className="small muted" style={{ marginTop: 8, marginBottom: 0 }}>
-          The order is a PARTIAL_RESTRICTED Seaport 1.6 order whose offerer and zone are both the vault, with one
-          payment leg (USDG, to the vault) and an empty signature. When you fill k of N, Seaport calls the vault
-          before moving anything; the vault re-checks its gate at today&apos;s spot (the strike is still above its
-          floor, the premium clears its floor, the size fits its capacity, the window is open, the oracle is live,
-          writes are not halted) and writes exactly k contracts into Valorem inside your transaction. Seaport then
-          moves them to you and pulls k × the unit price in USDG to the vault, and the vault confirms nothing stayed
-          behind. So a fill can be refused after a rally, and this page simulates yours before the button is live.
-          The order is validated on chain, so the signature is empty; any Seaport 1.6 client can fill it from the
-          raw JSON on the card with fulfillAdvancedOrder(numerator k, denominator N) after approving k × the unit
-          price of USDG to Seaport.
-        </p>
+        <Card>
+          <CardHead>
+            <CardTitle>How a fill works here</CardTitle>
+          </CardHead>
+          <p className="max-w-[78ch] text-[15px] leading-[1.7] text-ink-2">
+            The order is a PARTIAL_RESTRICTED Seaport 1.6 order whose offerer and zone are both the vault, with one
+            payment leg (USDG, to the vault) and an empty signature. When you fill k of N, Seaport calls the vault
+            before moving anything; the vault re-checks its gate at today&apos;s spot (the strike is still above its
+            floor, the premium clears its floor, the size fits its capacity, the window is open, the oracle is live,
+            writes are not halted) and writes exactly k contracts into Valorem inside your transaction. Seaport then
+            moves them to you and pulls k × the unit price in USDG to the vault, and the vault confirms nothing stayed
+            behind. So a fill can be refused after a rally, and this page simulates yours before the button is live.
+            The order is validated on chain, so the signature is empty; any Seaport 1.6 client can fill it from the
+            raw JSON on the card with fulfillAdvancedOrder(numerator k, denominator N) after approving k × the unit
+            price of USDG to Seaport.
+          </p>
+        </Card>
       </div>
     </>
   );

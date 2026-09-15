@@ -1,776 +1,239 @@
-/* Callhouse — one stylesheet, no framework.
-   Design rules: numbers are monospace and right-aligned so columns compare at a glance,
-   every panel is a flat bordered box, and nothing on this site is a chart. */
+/* Callhouse dapp (app.callhouse.finance) — the "Daylight" design, shared with callhouse.finance.
+
+   Tailwind CSS v4. This file holds four things and nothing else:
+     1. the Daylight tokens as plain CSS variables, light on :root, dark under
+        prefers-color-scheme (there is no theme toggle in the app either);
+     2. an @theme inline block that maps those variables onto Tailwind's theme namespaces, so
+        `bg-surface`, `text-ink-2`, `rounded-lg`, `shadow-lift`, `font-display` exist as utilities;
+     3. a small base layer (body, headings, focus ring, reduced motion) and two utilities;
+     4. an app-only tail, after the shared block, for the few elements the marketing site never
+        renders (inline <code>, the native number input's spinners).
+
+   Styling lives in components as Tailwind classes, built on the primitives in components/ui. Do not
+   grow this file into a class library.
+
+   TWIN BLOCK. Everything from `@import "tailwindcss"` down to the end of the `link` utility is
+   copied verbatim from leekzor/callhouse-site: app/globals.css. The two domains sit one click apart
+   and must not drift: change a token in paired commits to both repos, and diff the two blocks
+   whenever either changes. App-only rules go in the tail at the bottom, never inside the block.
+
+   TOKEN NAMES ARE DELIBERATELY DIFFERENT FROM THEME KEYS where the two would collide: the raw
+   shadow values are --elevation-*, not --shadow-*, because @theme inline would otherwise emit
+   `--shadow-lift: var(--shadow-lift)`, a self-reference. Same reason the radii are --r-*.
+
+   The default Tailwind colour palette is switched off (--color-*: initial). Every colour in this
+   app is a Daylight token; `text-gray-500` or `bg-white` silently compiling to an off-palette
+   value is the drift this prevents. `transparent`, `current` and `inherit` still work, and so does
+   an opacity modifier on a token (`bg-danger/10`), which is how the app tints its danger surfaces:
+   the shared palette has no --danger-soft.
+
+   CONTRAST: four values differ from the approved mockup, each nudged just enough to reach WCAG AA
+   (4.5:1) for the small text that uses it. Light --ink-3 #7a8a83 -> #627169 (4.57:1 on surface-2),
+   light --warn #a86400 -> #955800 (5.13:1 on warn-soft), light --usdg #2f6bd8 -> #2a62c9 (5.06:1
+   on surface-2), dark --ink-3 #72837b -> #83948c (4.93:1 on surface-2). Check a new value against
+   ground, surface and surface-2 before changing any of them. */
+
+@import "tailwindcss";
 
 :root {
-  color-scheme: dark;
+  color-scheme: light;
 
-  --bg: #0b0d10;
-  --bg-raised: #12161b;
-  --bg-sunken: #090b0e;
-  --line: #212932;
-  --line-strong: #2f3a46;
+  --ground: #f5f8f6;
+  --surface: #ffffff;
+  --surface-2: #edf3ef;
+  --ink: #0c1a15;
+  --ink-2: #47584f;
+  --ink-3: #627169;
+  --line: #e0e8e3;
+  --line-2: #cfdbd4;
+  --accent: #0a7f55;
+  --accent-hover: #086b47;
+  --accent-ink: #ffffff;
+  --accent-soft: #dff3e9;
+  --accent-text: #08633f;
+  --usdg: #2a62c9;
+  --usdg-soft: #e4edfc;
+  --warn: #955800;
+  --warn-soft: #fff1d9;
+  --danger: #b93a2b;
 
-  --fg: #e8edf2;
-  --fg-muted: #8a97a6;
-  --fg-faint: #5d6874;
+  --elevation-lift: 0 1px 2px rgba(12, 26, 21, 0.05), 0 18px 40px -22px rgba(12, 26, 21, 0.28);
+  --elevation-soft: 0 1px 2px rgba(12, 26, 21, 0.04), 0 6px 18px -12px rgba(12, 26, 21, 0.16);
 
-  --accent: #7ee0a8;
-  --accent-dim: #2f6a4a;
-  --warn: #f0c674;
-  --warn-dim: #6b5525;
-  --danger: #f08a7a;
-  --danger-dim: #6b2f26;
-  --info: #7fb2f0;
-  --info-dim: #294766;
-
-  --radius: 10px;
-  --gap: 16px;
-
-  --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
-  --sans: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  --r-lg: 22px;
+  --r-md: 14px;
+  --r-sm: 9px;
 }
 
-* {
-  box-sizing: border-box;
+@media (prefers-color-scheme: dark) {
+  :root {
+    color-scheme: dark;
+
+    --ground: #0b1511;
+    --surface: #111d18;
+    --surface-2: #172620;
+    --ink: #e8f1ec;
+    --ink-2: #a5b5ad;
+    --ink-3: #83948c;
+    --line: #20302a;
+    --line-2: #2c4038;
+    --accent: #2fbf84;
+    --accent-hover: #4cd198;
+    --accent-ink: #03140c;
+    --accent-soft: #13352a;
+    --accent-text: #6fddae;
+    --usdg: #7ea6f2;
+    --usdg-soft: #18253d;
+    --warn: #e4a94b;
+    --warn-soft: #33260f;
+    --danger: #ee8a7c;
+
+    --elevation-lift: 0 1px 2px rgba(0, 0, 0, 0.3), 0 20px 44px -24px rgba(0, 0, 0, 0.7);
+    --elevation-soft: 0 1px 2px rgba(0, 0, 0, 0.25), 0 8px 20px -14px rgba(0, 0, 0, 0.6);
+  }
 }
 
-html,
-body {
-  margin: 0;
-  padding: 0;
+/* Breakpoints follow the mockup's two media queries: one column at or below 960px, the tightest
+   layouts at or below 560px. `sm` and `lg` are redefined to those widths; md/xl/2xl keep
+   Tailwind's defaults. */
+@theme {
+  --breakpoint-sm: 35rem; /* 560px */
+  --breakpoint-lg: 60rem; /* 960px */
 }
 
-body {
-  background: var(--bg);
-  color: var(--fg);
-  font-family: var(--sans);
-  font-size: 15px;
-  line-height: 1.55;
-  -webkit-font-smoothing: antialiased;
-  /* Addresses and order hashes are single unbreakable tokens. Break them rather than let one
-     push the page into a horizontal scroll at 400px. */
-  overflow-wrap: break-word;
+@theme inline {
+  --color-*: initial;
+  --color-ground: var(--ground);
+  --color-surface: var(--surface);
+  --color-surface-2: var(--surface-2);
+  --color-ink: var(--ink);
+  --color-ink-2: var(--ink-2);
+  --color-ink-3: var(--ink-3);
+  --color-line: var(--line);
+  --color-line-2: var(--line-2);
+  --color-accent: var(--accent);
+  --color-accent-hover: var(--accent-hover);
+  --color-accent-ink: var(--accent-ink);
+  --color-accent-soft: var(--accent-soft);
+  --color-accent-text: var(--accent-text);
+  --color-usdg: var(--usdg);
+  --color-usdg-soft: var(--usdg-soft);
+  --color-warn: var(--warn);
+  --color-warn-soft: var(--warn-soft);
+  --color-danger: var(--danger);
+
+  /* The --font-schibsted-grotesk / --font-figtree / --font-geist-mono variables are set on <html>
+     by next/font in app/layout.tsx. The stacks after them only matter if that class is missing. */
+  --font-display:
+    var(--font-schibsted-grotesk), ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  --font-body: var(--font-figtree), ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  --font-sans: var(--font-figtree), ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  --font-mono: var(--font-geist-mono), ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+
+  --radius-lg: var(--r-lg);
+  --radius-md: var(--r-md);
+  --radius-sm: var(--r-sm);
+
+  --shadow-lift: var(--elevation-lift);
+  --shadow-soft: var(--elevation-soft);
 }
 
-a {
-  color: var(--fg);
-  text-decoration-color: var(--line-strong);
-  text-underline-offset: 3px;
+@layer base {
+  body {
+    background-color: var(--ground);
+    color: var(--ink);
+    font-family: var(--font-body);
+    font-size: 16px;
+    line-height: 1.55;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+    /* Addresses and long tokens break rather than push a 390px page into horizontal scroll. */
+    overflow-wrap: break-word;
+  }
+
+  h1,
+  h2,
+  h3,
+  h4 {
+    font-family: var(--font-display);
+    color: var(--ink);
+    text-wrap: balance;
+  }
+
+  /* Geist Mono sets visibly larger than Figtree at the same px size. An inline <Num> sitting in running
+     text (a paragraph, a list item, a table cell) is scaled down so "15 bps" or "Fri 16:00 ET" does
+     not jump out mid-sentence. Figure slots set their own sizes and are not matched; a utility size
+     on the element still wins, because this is the base layer. */
+  :is(p, li, td, dd, dt, small) > span.num {
+    font-size: 0.92em;
+  }
+
+  ::selection {
+    background-color: var(--accent-soft);
+    color: var(--ink);
+  }
+
+  :focus-visible {
+    outline: 2.5px solid var(--accent);
+    outline-offset: 3px;
+  }
+
+  @media (prefers-reduced-motion: no-preference) {
+    html {
+      scroll-behavior: smooth;
+    }
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    *,
+    *::before,
+    *::after {
+      animation-duration: 0.01ms !important;
+      animation-iteration-count: 1 !important;
+      transition-duration: 0.01ms !important;
+      scroll-behavior: auto !important;
+    }
+  }
 }
 
-a:hover {
-  text-decoration-color: var(--accent);
-}
-
-h1,
-h2,
-h3 {
-  line-height: 1.25;
-  margin: 0;
-  font-weight: 620;
+/* Every number on the site: Geist Mono, tabular figures, a hair of negative tracking. */
+@utility num {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
   letter-spacing: -0.01em;
 }
 
-h1 {
-  font-size: 1.5rem;
-}
-h2 {
-  font-size: 1.1rem;
-}
-h3 {
-  font-size: 0.95rem;
-}
-
-p {
-  margin: 0 0 0.75em;
-}
-
-code,
-.mono {
-  font-family: var(--mono);
-  font-variant-numeric: tabular-nums;
-}
-
-/* ------------------------------------------------------------------ layout ------------- */
-
-.shell {
-  max-width: 940px;
-  margin: 0 auto;
-  padding: 0 16px 72px;
-}
-
-.topbar {
-  border-bottom: 1px solid var(--line);
-  background: var(--bg-sunken);
-  position: sticky;
-  top: 0;
-  z-index: 20;
-}
-
-.topbar-inner {
-  max-width: 940px;
-  margin: 0 auto;
-  padding: 10px 16px;
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  flex-wrap: wrap;
-}
-
-.brand {
-  font-weight: 700;
-  letter-spacing: -0.02em;
-  text-decoration: none;
-  font-size: 1.05rem;
-  white-space: nowrap;
-}
-
-.brand span {
-  color: var(--accent);
-}
-
-.nav {
-  display: flex;
-  gap: 2px;
-  flex-wrap: wrap;
-  flex: 1 1 auto;
-}
-
-.nav a {
-  font-size: 0.86rem;
-  color: var(--fg-muted);
-  text-decoration: none;
-  padding: 5px 9px;
-  border-radius: 7px;
-  white-space: nowrap;
-}
-
-.nav a:hover {
-  color: var(--fg);
-  background: var(--bg-raised);
-}
-
-.nav a[data-active="true"] {
-  color: var(--fg);
-  background: var(--bg-raised);
-  box-shadow: inset 0 0 0 1px var(--line);
-}
-
-.page-head {
-  padding: 28px 0 18px;
-}
-
-.page-head .eyebrow {
-  font-family: var(--mono);
-  font-size: 0.72rem;
-  letter-spacing: 0.14em;
-  text-transform: uppercase;
-  color: var(--fg-faint);
-  margin-bottom: 6px;
-}
-
-.lede {
-  color: var(--fg-muted);
-  max-width: 66ch;
-}
-
-/* ------------------------------------------------------------------ primitives --------- */
-
-.card {
-  background: var(--bg-raised);
-  border: 1px solid var(--line);
-  border-radius: var(--radius);
-  padding: 16px;
-}
-
-.card + .card,
-.stack > * + * {
-  margin-top: var(--gap);
-}
-
-.card-head {
-  display: flex;
-  align-items: baseline;
-  justify-content: space-between;
-  gap: 10px;
-  flex-wrap: wrap;
-  margin-bottom: 12px;
-}
-
-.card-title {
-  font-size: 0.78rem;
-  letter-spacing: 0.12em;
-  text-transform: uppercase;
-  color: var(--fg-faint);
-  font-family: var(--mono);
-}
-
-.grid {
-  display: grid;
-  gap: var(--gap);
-}
-
-.grid-2 {
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-}
-
-.grid-3 {
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-}
-
-@media (max-width: 720px) {
-  .grid-2,
-  .grid-3 {
-    grid-template-columns: minmax(0, 1fr);
+/* Preflight strips link underlines. Inline links inside running prose (legal, terms, risks) use
+   this to get one back; chrome links (nav, footer, buttons) stay bare. */
+@utility link {
+  text-decoration-line: underline;
+  text-decoration-thickness: 1px;
+  text-decoration-color: var(--line-2);
+  text-underline-offset: 3px;
+  &:hover {
+    text-decoration-color: currentColor;
   }
 }
 
-.stat {
-  min-width: 0;
-}
+/* ------------------------------------------------------------------------------------------------
+   APP-ONLY TAIL. Nothing above this line may differ from callhouse-site's app/globals.css.
+   ------------------------------------------------------------------------------------------------ */
 
-.stat-label {
-  font-size: 0.72rem;
-  letter-spacing: 0.09em;
-  text-transform: uppercase;
-  color: var(--fg-faint);
-  font-family: var(--mono);
-  display: flex;
-  align-items: center;
-  gap: 6px;
-}
-
-.stat-value {
-  font-family: var(--mono);
-  font-variant-numeric: tabular-nums;
-  font-size: 1.25rem;
-  letter-spacing: -0.02em;
-  overflow-wrap: anywhere;
-}
-
-.stat-value.sm {
-  font-size: 1rem;
-}
-
-.stat-sub {
-  font-size: 0.78rem;
-  color: var(--fg-muted);
-  overflow-wrap: anywhere;
-}
-
-.rows {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-}
-
-.row {
-  display: flex;
-  justify-content: space-between;
-  align-items: baseline;
-  gap: 12px;
-  font-size: 0.88rem;
-  flex-wrap: wrap;
-}
-
-.row dt,
-.row .k {
-  color: var(--fg-muted);
-}
-
-.row dd,
-.row .v {
-  margin: 0;
-  font-family: var(--mono);
-  font-variant-numeric: tabular-nums;
-  text-align: right;
-  overflow-wrap: anywhere;
-}
-
-.hr {
-  border: 0;
-  border-top: 1px solid var(--line);
-  margin: 14px 0;
-}
-
-.muted {
-  color: var(--fg-muted);
-}
-
-.faint {
-  color: var(--fg-faint);
-}
-
-.small {
-  font-size: 0.82rem;
-}
-
-.tiny {
-  font-size: 0.74rem;
-}
-
-/* ------------------------------------------------------------------ badges ------------- */
-
-.badge {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  font-family: var(--mono);
-  font-size: 0.72rem;
-  letter-spacing: 0.06em;
-  text-transform: uppercase;
-  padding: 3px 8px;
-  border-radius: 999px;
-  border: 1px solid var(--line-strong);
-  color: var(--fg-muted);
-  white-space: nowrap;
-}
-
-.badge .dot {
-  width: 6px;
-  height: 6px;
-  border-radius: 50%;
-  background: currentColor;
-  flex: 0 0 auto;
-}
-
-.badge[data-tone="good"] {
-  color: var(--accent);
-  border-color: var(--accent-dim);
-  background: color-mix(in srgb, var(--accent) 9%, transparent);
-}
-
-.badge[data-tone="warn"] {
-  color: var(--warn);
-  border-color: var(--warn-dim);
-  background: color-mix(in srgb, var(--warn) 9%, transparent);
-}
-
-.badge[data-tone="bad"] {
-  color: var(--danger);
-  border-color: var(--danger-dim);
-  background: color-mix(in srgb, var(--danger) 9%, transparent);
-}
-
-.badge[data-tone="info"] {
-  color: var(--info);
-  border-color: var(--info-dim);
-  background: color-mix(in srgb, var(--info) 9%, transparent);
-}
-
-/* ------------------------------------------------------------------ controls ----------- */
-
-button,
-.btn {
-  font: inherit;
-  font-size: 0.9rem;
-  font-weight: 560;
-  color: var(--fg);
-  background: var(--bg-sunken);
-  border: 1px solid var(--line-strong);
-  border-radius: 8px;
-  padding: 9px 14px;
-  cursor: pointer;
-  text-decoration: none;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  gap: 8px;
-  min-height: 40px;
-}
-
-button:hover:not(:disabled),
-.btn:hover {
-  border-color: var(--fg-faint);
-}
-
-button:disabled {
-  opacity: 0.45;
-  cursor: not-allowed;
-}
-
-button[data-variant="primary"] {
-  background: var(--accent);
-  border-color: var(--accent);
-  color: #06210f;
-}
-
-button[data-variant="primary"]:hover:not(:disabled) {
-  filter: brightness(1.07);
-}
-
-button[data-variant="ghost"] {
-  background: transparent;
-  border-color: var(--line);
-}
-
-button[data-size="sm"] {
-  font-size: 0.8rem;
-  padding: 5px 9px;
-  min-height: 30px;
-}
-
-.btn-row {
-  display: flex;
-  gap: 8px;
-  flex-wrap: wrap;
-}
-
-.btn-row > button {
-  flex: 1 1 140px;
-}
-
-label {
-  display: block;
-  font-size: 0.78rem;
-  letter-spacing: 0.09em;
-  text-transform: uppercase;
-  color: var(--fg-faint);
-  font-family: var(--mono);
-  margin-bottom: 6px;
-}
-
-input[type="text"],
-input[type="number"],
-select {
-  font: inherit;
-  font-family: var(--mono);
-  font-variant-numeric: tabular-nums;
-  width: 100%;
-  background: var(--bg-sunken);
-  border: 1px solid var(--line-strong);
-  border-radius: 8px;
-  color: var(--fg);
-  padding: 10px 12px;
-  min-height: 42px;
-}
-
-input:focus,
-select:focus,
-button:focus-visible,
-a:focus-visible {
-  outline: 2px solid var(--info);
-  outline-offset: 1px;
-}
-
-.field + .field {
-  margin-top: 12px;
-}
-
-.input-wrap {
-  position: relative;
-}
-
-.input-wrap .suffix {
-  position: absolute;
-  right: 10px;
-  top: 50%;
-  transform: translateY(-50%);
-  font-family: var(--mono);
-  font-size: 0.78rem;
-  color: var(--fg-faint);
-}
-
-.input-wrap input {
-  padding-right: 68px;
-}
-
-/* ------------------------------------------------------------------ bars --------------- */
-
-.split {
-  display: flex;
-  width: 100%;
-  height: 12px;
-  border-radius: 999px;
-  overflow: hidden;
-  background: var(--bg-sunken);
-  border: 1px solid var(--line);
-}
-
-.split-seg {
-  height: 100%;
-}
-
-.split-legend {
-  display: flex;
-  gap: 14px;
-  flex-wrap: wrap;
-  margin-top: 10px;
-  font-size: 0.78rem;
-}
-
-.legend-item {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  color: var(--fg-muted);
-}
-
-.legend-swatch {
-  width: 9px;
-  height: 9px;
-  border-radius: 2px;
-  flex: 0 0 auto;
-}
-
-.rail {
-  height: 4px;
-  border-radius: 999px;
-  background: var(--bg-sunken);
-  border: 1px solid var(--line);
-  overflow: hidden;
-}
-
-.rail-fill {
-  height: 100%;
-  background: var(--info);
-}
-
-/* ------------------------------------------------------------------ tables ------------- */
-
-.table-wrap {
-  overflow-x: auto;
-  -webkit-overflow-scrolling: touch;
-}
-
-/* Inside a card, let a wide table bleed to the card's edges so the scroll area is as wide as
-   possible. Only inside a card: a bare .table-wrap sits directly on the page gutter, and the
-   negative margin would push it past the shell padding and scroll the whole document. */
-.card > .table-wrap {
-  margin: 0 -16px;
-  padding: 0 16px;
-}
-
-table {
-  width: 100%;
-  border-collapse: collapse;
-  font-size: 0.86rem;
-  min-width: 520px;
-}
-
-th,
-td {
-  text-align: right;
-  padding: 9px 8px;
-  border-bottom: 1px solid var(--line);
-  white-space: nowrap;
-}
-
-th:first-child,
-td:first-child {
-  text-align: left;
-}
-
-th {
-  font-family: var(--mono);
-  font-size: 0.7rem;
-  letter-spacing: 0.1em;
-  text-transform: uppercase;
-  color: var(--fg-faint);
-  font-weight: 500;
-}
-
-td {
-  font-family: var(--mono);
-  font-variant-numeric: tabular-nums;
-}
-
-tbody tr[data-picked="true"] {
-  background: color-mix(in srgb, var(--accent) 8%, transparent);
-}
-
-tbody tr[data-picked="true"] td {
-  border-bottom-color: var(--accent-dim);
-}
-
-/* ------------------------------------------------------------------ notices ------------ */
-
-.notice {
-  border: 1px solid var(--line-strong);
-  border-left-width: 3px;
-  border-radius: 8px;
-  padding: 11px 13px;
-  font-size: 0.86rem;
-  background: var(--bg-sunken);
-}
-
-.notice[data-tone="warn"] {
-  border-left-color: var(--warn);
-}
-.notice[data-tone="bad"] {
-  border-left-color: var(--danger);
-}
-.notice[data-tone="info"] {
-  border-left-color: var(--info);
-}
-.notice[data-tone="good"] {
-  border-left-color: var(--accent);
-}
-
-.notice strong {
-  display: block;
-  margin-bottom: 2px;
-}
-
-/* ------------------------------------------------------------------ toasts ------------- */
-
-.toast-host {
-  position: fixed;
-  right: 12px;
-  bottom: 12px;
-  left: 12px;
-  z-index: 60;
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-  pointer-events: none;
-}
-
-@media (min-width: 560px) {
-  .toast-host {
-    left: auto;
-    width: 360px;
+@layer base {
+  /* Function names, env vars and error names in running text: Geist Mono, a step smaller, on a
+     surface-2 tint so `rollOpen` reads as code without shouting. */
+  code {
+    font-family: var(--font-mono);
+    font-size: 0.9em;
+    background-color: var(--surface-2);
+    border-radius: 5px;
+    padding: 0.08em 0.32em;
+    overflow-wrap: anywhere;
   }
-}
 
-.toast {
-  pointer-events: auto;
-  background: var(--bg-raised);
-  border: 1px solid var(--line-strong);
-  border-left-width: 3px;
-  border-radius: 8px;
-  padding: 10px 12px;
-  font-size: 0.85rem;
-  box-shadow: 0 10px 30px rgb(0 0 0 / 45%);
-}
-
-.toast[data-tone="pending"] {
-  border-left-color: var(--info);
-}
-.toast[data-tone="success"] {
-  border-left-color: var(--accent);
-}
-.toast[data-tone="error"] {
-  border-left-color: var(--danger);
-}
-
-.toast-title {
-  font-weight: 600;
-  display: flex;
-  justify-content: space-between;
-  gap: 10px;
-  align-items: baseline;
-}
-
-.toast-body {
-  color: var(--fg-muted);
-  overflow-wrap: anywhere;
-  margin-top: 2px;
-}
-
-.toast a {
-  color: var(--info);
-}
-
-.toast-close {
-  background: none;
-  border: 0;
-  color: var(--fg-faint);
-  padding: 0;
-  min-height: 0;
-  font-size: 1rem;
-  line-height: 1;
-  cursor: pointer;
-}
-
-/* ------------------------------------------------------------------ code blocks -------- */
-
-pre.payload {
-  background: var(--bg-sunken);
-  border: 1px solid var(--line);
-  border-radius: 8px;
-  padding: 12px;
-  overflow-x: auto;
-  font-family: var(--mono);
-  font-size: 0.74rem;
-  line-height: 1.5;
-  margin: 0;
-  max-height: 460px;
-  overflow-y: auto;
-}
-
-.kv-mono {
-  font-family: var(--mono);
-  font-size: 0.78rem;
-  overflow-wrap: anywhere;
-}
-
-/* ------------------------------------------------------------------ footer ------------- */
-
-.footer {
-  border-top: 1px solid var(--line);
-  margin-top: 48px;
-  padding: 20px 16px 40px;
-  color: var(--fg-faint);
-  font-size: 0.8rem;
-}
-
-.footer-inner {
-  max-width: 940px;
-  margin: 0 auto;
-  display: flex;
-  gap: 12px;
-  flex-wrap: wrap;
-  justify-content: space-between;
-}
-
-.footer a {
-  color: var(--fg-muted);
-}
-
-ul.tight {
-  margin: 0 0 0.75em;
-  padding-left: 1.15em;
-}
-
-ul.tight li {
-  margin-bottom: 0.35em;
-}
-
-.prose {
-  max-width: 72ch;
-}
-
-.prose h2 {
-  margin-top: 28px;
-  margin-bottom: 8px;
-}
-
-.prose h3 {
-  margin-top: 20px;
-  margin-bottom: 6px;
-}
-
-/* 400px is the floor this site is built to. Nothing below may overflow horizontally. */
-@media (max-width: 420px) {
-  body {
-    font-size: 14.5px;
-  }
-  .shell {
-    padding: 0 12px 56px;
-  }
-  .card {
-    padding: 13px;
-  }
-  .stat-value {
-    font-size: 1.1rem;
-  }
-  .topbar-inner {
-    padding: 9px 12px;
-  }
-  .card > .table-wrap {
-    margin: 0 -13px;
-    padding: 0 13px;
+  /* Placeholder text in the amount inputs sits at ink-3, never the browser's grey. */
+  input::placeholder {
+    color: var(--ink-3);
+    opacity: 1;
   }
 }

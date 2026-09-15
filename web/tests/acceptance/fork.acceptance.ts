@@ -664,17 +664,37 @@ function injectedProviderSource(info: { name: string; uuid: string }): string {
 /** Every page the run opens, so a failure can leave a screenshot and the DOM behind. */
 const OPEN_PAGES: Page[] = [];
 
+/**
+ * The page's test hooks. The Daylight primitives in components/ui stamp `data-slot` on every card,
+ * card head, figure, ledger row and notice, and the nav stamps it on the header; the run finds
+ * things by those, never by Tailwind class names, so a restyle cannot move a selector.
+ */
+const SLOT = {
+  topbar: '[data-slot="topbar"]',
+  card: '[data-slot="card"]',
+  cardTitle: '[data-slot="card-title"]',
+  cardMeta: '[data-slot="card-meta"]',
+  row: '[data-slot="row"]',
+  k: '[data-slot="k"]',
+  v: '[data-slot="v"]',
+  stat: '[data-slot="stat"]',
+  statLabel: '[data-slot="stat-label"]',
+  statValue: '[data-slot="stat-value"]',
+  statSub: '[data-slot="stat-sub"]',
+  notice: '[data-slot="notice"]',
+} as const;
+
 function card(page: Page, title: string | RegExp): Locator {
-  return page.locator(".card").filter({ has: page.locator(".card-title", { hasText: title }) });
+  return page.locator(SLOT.card).filter({ has: page.locator(SLOT.cardTitle, { hasText: title }) });
 }
 
 function rowValue(scope: Locator, key: RegExp): Locator {
-  return scope.locator(".row").filter({ has: scope.page().locator(".k", { hasText: key }) }).locator(".v");
+  return scope.locator(SLOT.row).filter({ has: scope.page().locator(SLOT.k, { hasText: key }) }).locator(SLOT.v);
 }
 
 function stat(scope: Locator, label: RegExp): { value: Locator; sub: Locator } {
-  const box = scope.locator(".stat").filter({ has: scope.page().locator(".stat-label", { hasText: label }) });
-  return { value: box.locator(".stat-value"), sub: box.locator(".stat-sub") };
+  const box = scope.locator(SLOT.stat).filter({ has: scope.page().locator(SLOT.statLabel, { hasText: label }) });
+  return { value: box.locator(SLOT.statValue), sub: box.locator(SLOT.statSub) };
 }
 
 function exactly(text: string): RegExp {
@@ -709,7 +729,7 @@ async function expectAbsent(label: string, locator: Locator): Promise<void> {
 }
 
 async function connectWallet(page: Page, account: Address): Promise<void> {
-  const header = page.locator("header.topbar");
+  const header = page.locator(`header${SLOT.topbar}`);
   await header.getByRole("button", { name: "Connect", exact: true }).click({ timeout: 60_000 });
   await header.getByRole("button", { name: WALLET_NAME, exact: true }).click({ timeout: 30_000 });
   await expectText("header connect button", header.getByRole("button").last(), shortAddress(account));
@@ -1111,12 +1131,12 @@ async function main(): Promise<void> {
         await expectText("cycle: Seaport validated", rowValue(onChain, /^Seaport validated$/), "validated (empty signature fills)");
         await expectText(
           "cycle: keeper rejection notice",
-          page.locator(".notice strong", { hasText: "The keeper served" }),
+          page.locator(`${SLOT.notice} strong`, { hasText: "The keeper served" }),
           "The keeper served an order that did not check out against the chain, so nothing is offered here.",
         );
         await expectText(
           "cycle: keeper rejection names the redirected premium leg",
-          page.locator(".notice", { hasText: "The keeper served" }).locator("li").first(),
+          page.locator(SLOT.notice, { hasText: "The keeper served" }).locator("li").first(),
           new RegExp(REASONS.writerRecipient.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")),
         );
         await expectAbsent("cycle: a fillable order card", card(page, /^The vault's order · fill from here$/));
@@ -1180,9 +1200,9 @@ async function main(): Promise<void> {
       const page = buyerPage;
       await page.reload();
       const orderCard = card(page, /^The vault's order · fill from here$/);
-      await expectText("fill card: title", orderCard.locator(".card-title"), "The vault's order · fill from here");
-      await expectText("fill card: status", orderCard.locator(".card-head .mono"), "status open");
-      await expectAbsent("cycle: keeper rejection notice", page.locator(".notice", { hasText: "The keeper served" }));
+      await expectText("fill card: title", orderCard.locator(SLOT.cardTitle), "The vault's order · fill from here");
+      await expectText("fill card: status", orderCard.locator(SLOT.cardMeta), "status open");
+      await expectAbsent("cycle: keeper rejection notice", page.locator(SLOT.notice, { hasText: "The keeper served" }));
       await expectText(
         "fill card: Contracts",
         rowValue(orderCard, /^Contracts$/),
@@ -1334,7 +1354,7 @@ async function main(): Promise<void> {
       await expectText("position: Shares", stat(position, /^Shares$/).value, `${fmtAsset(DEPOSIT - QUEUED)} cNVDA`);
       await expectText(
         "withdraw: waiting notice",
-        withdraw.locator(".notice", { hasText: "A call is open" }),
+        withdraw.locator(SLOT.notice, { hasText: "A call is open" }),
         /A call is open\. Redemptions are queued and paid after the keeper closes the week/,
       );
       record.amounts.queuedShares = QUEUED.toString();
@@ -1515,7 +1535,7 @@ async function main(): Promise<void> {
       const perShare = premiumPerShare({ premiumNetUsdg: premiumNet, sharesAtHarvest: DEPOSIT });
       assert(perShare !== undefined, "per-share figure computable");
       const last = card(page, exactly("Last week realized"));
-      await expectText("last week: cycle", last.locator(".card-head .mono"), "cycle #1");
+      await expectText("last week: cycle", last.locator(SLOT.cardMeta), "cycle #1");
       await expectText("last week: Net premium per cNVDA", stat(last, /^Net premium per cNVDA$/).value, fmtUsdg(perShare, 6));
       await expectText("last week: result", stat(last, /^Net premium per cNVDA$/).sub, `${closed.sold.toString()} calls sold · ${fmtUtcDate(closed.closedAt)}`);
       await expectText("last week: Premium received", rowValue(last, /^Premium received$/), fmtUsdg(listed.unitPrice6 * closed.sold));
@@ -1547,14 +1567,14 @@ async function main(): Promise<void> {
       await page.goto(`${web.url}/activity`);
       const premiumNet = closed.gross - closed.assignmentUsdg - closed.fee;
       const perShare = premiumPerShare({ premiumNetUsdg: premiumNet, sharesAtHarvest: DEPOSIT });
-      const topCard = (label: string) => page.locator(".card").filter({ has: page.locator(".stat-label", { hasText: exactly(label) }) });
-      await expectText("activity: Weeks closed", topCard("Weeks closed").locator(".stat-value"), "1");
-      await expectText("activity: filled/unfilled", topCard("Weeks closed").locator(".stat-sub"), "1 filled · 0 unfilled");
-      await expectText("activity: Net premium to depositors", topCard("Net premium to depositors").locator(".stat-value"), fmtUsdg(premiumNet));
-      await expectText("activity: fee sub", topCard("Net premium to depositors").locator(".stat-sub"), `after ${fmtUsdg(closed.fee)} protocol fee`);
-      await expectText("activity: Contracts assigned", topCard("Contracts assigned").locator(".stat-value"), EXERCISE_W.toString());
-      await expectText("activity: source", card(page, exactly("Weekly results")).locator(".card-head .mono"), "rebuilt from vault logs");
-      await expectText("activity: indexer notice", page.locator(".notice", { hasText: "Indexer unreachable" }), "Indexer unreachable — history rebuilt from vault logs.");
+      const topCard = (label: string) => page.locator(SLOT.card).filter({ has: page.locator(SLOT.statLabel, { hasText: exactly(label) }) });
+      await expectText("activity: Weeks closed", topCard("Weeks closed").locator(SLOT.statValue), "1");
+      await expectText("activity: filled/unfilled", topCard("Weeks closed").locator(SLOT.statSub), "1 filled · 0 unfilled");
+      await expectText("activity: Net premium to depositors", topCard("Net premium to depositors").locator(SLOT.statValue), fmtUsdg(premiumNet));
+      await expectText("activity: fee sub", topCard("Net premium to depositors").locator(SLOT.statSub), `after ${fmtUsdg(closed.fee)} protocol fee`);
+      await expectText("activity: Contracts assigned", topCard("Contracts assigned").locator(SLOT.statValue), EXERCISE_W.toString());
+      await expectText("activity: source", card(page, exactly("Weekly results")).locator(SLOT.cardMeta), "rebuilt from vault logs");
+      await expectText("activity: indexer notice", page.locator(SLOT.notice, { hasText: "Indexer unreachable" }), "Indexer unreachable — history rebuilt from vault logs.");
 
       const rows = page.locator("tbody tr");
       await expectText("activity: first row", rows.first().locator("td").first(), "#1");

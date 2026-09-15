@@ -1,13 +1,40 @@
 import type { Metadata, Viewport } from "next";
+import { Figtree, Geist_Mono, Schibsted_Grotesk } from "next/font/google";
 
+import { Footer } from "@/components/Footer";
 import { Nav } from "@/components/Nav";
-import Link from "next/link";
-
-import { EXPLORER_URL, addressUrl } from "@/lib/chain";
-import { MARKET, SHARE_TICKER, VAULT } from "@/lib/contracts";
-import { APP_URL, DOCS_URL, PRIVACY_URL, SITE_URL, TERMS_URL } from "@/lib/site";
+import { Container } from "@/components/ui";
+import { APP_URL } from "@/lib/site";
 import { Providers } from "./providers";
 import "./globals.css";
+
+/**
+ * Daylight type, the same three faces as callhouse.finance (leekzor/callhouse-site:
+ * app/layout.tsx). next/font downloads them at BUILD time and serves them from this origin, so a
+ * visitor's browser never contacts Google; the build itself does need to reach Google Fonts. Each
+ * exposes a CSS variable on <html> that app/globals.css maps into font-display / font-body /
+ * font-mono.
+ *
+ * Schibsted Grotesk 500–800 for display, Figtree 400–700 for body, Geist Mono 400–600 for every
+ * number; stay inside those weights.
+ */
+const display = Schibsted_Grotesk({
+  subsets: ["latin"],
+  display: "swap",
+  variable: "--font-schibsted-grotesk",
+});
+
+const body = Figtree({
+  subsets: ["latin"],
+  display: "swap",
+  variable: "--font-figtree",
+});
+
+const mono = Geist_Mono({
+  subsets: ["latin"],
+  display: "swap",
+  variable: "--font-geist-mono",
+});
 
 /**
  * `metadataBase` is app.callhouse.finance because that is where this package is served. Relative
@@ -48,65 +75,38 @@ export const metadata: Metadata = {
   robots: { index: false, follow: true },
 };
 
+/**
+ * Browser chrome follows the page ground in each colour scheme: the --ground token in
+ * app/globals.css, light and dark, the same pair callhouse.finance declares, so moving between the
+ * two domains does not flash a different chrome colour. Change them together.
+ */
 export const viewport: Viewport = {
   width: "device-width",
   initialScale: 1,
-  themeColor: "#0b0d10",
+  themeColor: [
+    { media: "(prefers-color-scheme: light)", color: "#f5f8f6" },
+    { media: "(prefers-color-scheme: dark)", color: "#0b1511" },
+  ],
 };
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {
   return (
-    <html lang="en">
-      <body>
+    <html lang="en" className={`${display.variable} ${body.variable} ${mono.variable}`}>
+      <body className="flex min-h-dvh flex-col">
+        <a
+          href="#main"
+          className="sr-only focus:not-sr-only focus:fixed focus:left-4 focus:top-4 focus:z-50 focus:rounded-[10px] focus:bg-surface focus:px-3.5 focus:py-2.5 focus:text-sm focus:font-semibold focus:text-ink focus:shadow-lift"
+        >
+          Skip to content
+        </a>
         <Providers>
           <Nav />
-          <main className="shell">{children}</main>
-          <footer className="footer">
-            <div className="footer-inner">
-              <div>
-                Callhouse · {SHARE_TICKER} · {MARKET} on Robinhood Chain 4663
-                {VAULT ? (
-                  <>
-                    {" · "}
-                    <a href={addressUrl(VAULT)} target="_blank" rel="noreferrer noopener">
-                      vault contract ↗
-                    </a>
-                  </>
-                ) : null}
-              </div>
-              {/* Second row of links. callhouse.finance sits last because it leaves the app: the
-                  in-app destinations come first, then the external ones. Terms and Privacy are
-                  external too — the documents live on the marketing site only (lib/site.ts). */}
-              <div>
-                <Link href="/legal">Legal</Link> · <Link href="/docs">Docs</Link> ·{" "}
-                <a href={TERMS_URL} target="_blank" rel="noreferrer noopener">
-                  Terms ↗
-                </a>{" "}
-                ·{" "}
-                <a href={PRIVACY_URL} target="_blank" rel="noreferrer noopener">
-                  Privacy ↗
-                </a>{" "}
-                ·{" "}
-                <a href={EXPLORER_URL} target="_blank" rel="noreferrer noopener">
-                  Explorer ↗
-                </a>{" "}
-                ·{" "}
-                <a href={DOCS_URL} target="_blank" rel="noreferrer noopener">
-                  docs.callhouse.finance ↗
-                </a>{" "}
-                ·{" "}
-                <a href={SITE_URL} target="_blank" rel="noreferrer noopener">
-                  callhouse.finance ↗
-                </a>
-              </div>
-            </div>
-            <div className="footer-inner" style={{ marginTop: 10 }}>
-              <div>
-                Not affiliated with Robinhood Markets, Robinhood Assets (Jersey) Limited or Valorem.
-                Unaudited. Nothing here is financial advice or an offer of securities.
-              </div>
-            </div>
-          </footer>
+          {/* One 1160px column for every route, the same width as the site's chrome. Pages lay out
+              their own head and cards inside it. */}
+          <main id="main" className="flex-1">
+            <Container className="pb-16 sm:pb-24">{children}</Container>
+          </main>
+          <Footer />
         </Providers>
       </body>
     </html>

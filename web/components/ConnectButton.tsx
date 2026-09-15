@@ -3,6 +3,7 @@
 import { useEffect, useRef, useState } from "react";
 import { useAccount, useConnect, useConnectors, useDisconnect, useSwitchChain } from "wagmi";
 
+import { Button } from "@/components/ui";
 import { CHAIN_ID } from "@/lib/chain";
 import { shortAddress } from "@/lib/format";
 import { useMounted } from "@/lib/hooks";
@@ -17,8 +18,15 @@ import { describeError, useNotice } from "./TxToast";
  *
  * The app is single-chain: CHAIN_ID is pinned to 4663 (Robinhood Chain). A wallet on any other
  * network gets a switch prompt, never a network picker.
+ *
+ * `block` stretches the button to its container's width and gives it the md size: the forms render
+ * this in place of their submit button when no wallet is connected, and it takes the submit
+ * button's full-width slot at the submit button's height.
  */
-export function ConnectButton() {
+/** The menu under the button: a lifted surface, right-aligned to the button, above the page. */
+const MENU = "absolute right-0 top-[calc(100%+8px)] z-40 rounded-md bg-surface p-2.5 shadow-lift ring-1 ring-line";
+
+export function ConnectButton({ block = false }: { block?: boolean }) {
   const mounted = useMounted();
   const { address, isConnected, chainId } = useAccount();
   const connectors = useConnectors();
@@ -50,17 +58,17 @@ export function ConnectButton() {
   // after mount. The placeholder keeps the header from jumping.
   if (!mounted) {
     return (
-      <button data-size="sm" disabled>
+      <Button size={block ? "md" : "sm"} disabled className={block ? "w-full" : undefined}>
         Connect
-      </button>
+      </Button>
     );
   }
 
   if (isConnected && chainId !== CHAIN_ID) {
     return (
-      <button
-        data-size="sm"
-        data-variant="primary"
+      <Button
+        size={block ? "md" : "sm"}
+        className={block ? "w-full" : undefined}
         disabled={switching}
         onClick={async () => {
           try {
@@ -71,35 +79,37 @@ export function ConnectButton() {
         }}
       >
         {switching ? "Switching…" : `Switch to Robinhood Chain`}
-      </button>
+      </Button>
     );
   }
 
   if (isConnected && address) {
     return (
-      <div ref={wrapRef} style={{ position: "relative" }}>
-        <button data-size="sm" onClick={() => setOpen((v) => !v)} aria-expanded={open}>
-          <span className="mono">{shortAddress(address)}</span>
-        </button>
+      <div ref={wrapRef} className={block ? "relative w-full" : "relative"}>
+        <Button
+          size={block ? "md" : "sm"}
+          variant="ghost"
+          className={block ? "w-full" : undefined}
+          onClick={() => setOpen((v) => !v)}
+          aria-expanded={open}
+        >
+          <span aria-hidden="true" className="size-2 shrink-0 rounded-full bg-accent" />
+          <span className="num">{shortAddress(address)}</span>
+        </Button>
         {open ? (
-          <div
-            className="card"
-            style={{ position: "absolute", right: 0, top: "calc(100% + 6px)", width: 210, padding: 10, zIndex: 40 }}
-          >
-            <div className="tiny faint mono" style={{ overflowWrap: "anywhere", marginBottom: 8 }}>
-              {address}
-            </div>
-            <button
-              data-size="sm"
-              data-variant="ghost"
-              style={{ width: "100%" }}
+          <div className={`${MENU} w-[240px]`}>
+            <p className="num mb-2.5 px-1 text-xs leading-snug text-ink-3 [overflow-wrap:anywhere]">{address}</p>
+            <Button
+              size="sm"
+              variant="ghost"
+              className="w-full"
               onClick={() => {
                 disconnect();
                 setOpen(false);
               }}
             >
               Disconnect
-            </button>
+            </Button>
           </div>
         ) : null}
       </div>
@@ -116,27 +126,24 @@ export function ConnectButton() {
   });
 
   return (
-    <div ref={wrapRef} style={{ position: "relative" }}>
-      <button data-size="sm" data-variant="primary" onClick={() => setOpen((v) => !v)} aria-expanded={open}>
+    <div ref={wrapRef} className={block ? "relative w-full" : "relative"}>
+      <Button size={block ? "md" : "sm"} className={block ? "w-full" : undefined} onClick={() => setOpen((v) => !v)} aria-expanded={open}>
         {connecting ? "Connecting…" : "Connect"}
-      </button>
+      </Button>
       {open ? (
-        <div
-          className="card"
-          style={{ position: "absolute", right: 0, top: "calc(100% + 6px)", width: 230, padding: 10, zIndex: 40 }}
-        >
+        <div className={`${MENU} w-[250px]`}>
           {options.length === 0 ? (
-            <div className="tiny muted">
+            <p className="px-1 py-0.5 text-[13px] text-ink-2">
               No browser wallet detected. Install one, then reload this page.
-            </div>
+            </p>
           ) : (
-            <div className="rows">
+            <div className="grid gap-1.5">
               {options.map((connector) => (
-                <button
+                <Button
                   key={connector.uid}
-                  data-size="sm"
-                  data-variant="ghost"
-                  style={{ width: "100%", justifyContent: "flex-start" }}
+                  size="sm"
+                  variant="ghost"
+                  className="w-full justify-start!"
                   onClick={async () => {
                     setOpen(false);
                     try {
@@ -147,7 +154,7 @@ export function ConnectButton() {
                   }}
                 >
                   {connector.name}
-                </button>
+                </Button>
               ))}
             </div>
           )}

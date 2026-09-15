@@ -7,6 +7,7 @@ import { useAccount, useWriteContract } from "wagmi";
 import { SHARE_TICKER, VAULT, vaultAbi } from "@/lib/contracts";
 import { fmtUsdg } from "@/lib/format";
 import type { AccountPosition, VaultSnapshot } from "@/lib/hooks";
+import { Button, Card, CardHead, CardMeta, CardTitle, Row, Rows, Stat, Unit } from "@/components/ui";
 import { ConnectButton } from "./ConnectButton";
 import { useTxRunner } from "./TxToast";
 
@@ -70,48 +71,65 @@ export function UsdgClaim({
   }
 
   return (
-    <div className="card">
-      <div className="card-head">
-        <span className="card-title">USDG</span>
-        <span className="tiny faint mono">premium on filled weeks, strike proceeds on assigned weeks</span>
-      </div>
+    <Card>
+      <CardHead>
+        <CardTitle>USDG</CardTitle>
+        <CardMeta className="font-body! tracking-normal!">premium on filled weeks, strike proceeds on assigned weeks</CardMeta>
+      </CardHead>
 
-      <div className="stat">
-        <div className="stat-label">Claimable</div>
-        <div className="stat-value">{fmtUsdg(claimable)} USDG</div>
-      </div>
+      <Stat
+        size="lg"
+        tone="usdg"
+        className="rounded-md bg-usdg-soft p-4 sm:p-5"
+        label="Claimable"
+        value={fmtUsdg(claimable)}
+        unit="USDG"
+      />
 
-      <div className="rows" style={{ marginTop: 12 }}>
-        <div className="row" title="Everything credited to one share since launch: premium net of fees plus strike proceeds from assignment. Not a return.">
-          <span className="k">Distributed to date, per {SHARE_TICKER}</span>
-          <span className="v">{lifetimePerShare === undefined ? "—" : `${fmtUsdg(lifetimePerShare, 6)} USDG`}</span>
-        </div>
-        <div className="row">
-          <span className="k">Vault total distributed</span>
-          <span className="v">{fmtUsdg(snapshot.totalUsdgDistributed)} USDG</span>
-        </div>
-      </div>
+      <Rows className="mt-3">
+        <Row
+          title="Everything credited to one share since launch: premium net of fees plus strike proceeds from assignment. Not a return."
+          k={<>Distributed to date, per {SHARE_TICKER}</>}
+          v={
+            lifetimePerShare === undefined ? (
+              "—"
+            ) : (
+              <>
+                {fmtUsdg(lifetimePerShare, 6)} <Unit>USDG</Unit>
+              </>
+            )
+          }
+        />
+        <Row
+          k="Vault total distributed"
+          v={
+            <>
+              {fmtUsdg(snapshot.totalUsdgDistributed)} <Unit>USDG</Unit>
+            </>
+          }
+        />
+      </Rows>
       {/* The Distributor credits strike proceeds through the same index as premium, so these
           two figures include both. Said here so neither reads as earnings (W-21). */}
-      <p className="tiny faint" style={{ marginTop: 8, marginBottom: 0 }}>
+      <p className="mt-2 text-[12.5px] leading-[1.55] text-ink-3">
         Includes strike proceeds from assigned weeks, which are returned collateral rather than
         premium.
       </p>
 
-      <div style={{ marginTop: 14 }}>
+      <div className="mt-5">
         {!isConnected ? (
-          <ConnectButton />
+          <ConnectButton block />
         ) : (
-          <button
-            data-variant={claimable > 0n ? "primary" : undefined}
-            style={{ width: "100%" }}
+          <Button
+            variant={claimable > 0n ? "primary" : "ghost"}
+            className="w-full"
             disabled={busy || claimable === 0n}
             onClick={claim}
           >
             {busy ? "Working…" : claimable === 0n ? "Nothing to claim" : `Claim ${fmtUsdg(claimable)} USDG`}
-          </button>
+          </Button>
         )}
       </div>
-    </div>
+    </Card>
   );
 }

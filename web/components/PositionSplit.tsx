@@ -1,7 +1,9 @@
 "use client";
 
+import { cn } from "@/lib/cn";
 import { fmtAsset } from "@/lib/format";
 
+/** `color` is a Tailwind background token class: the bar and the legend swatch share it. */
 type Segment = { label: string; value: bigint; color: string; hint?: string };
 
 /**
@@ -28,9 +30,9 @@ export function PositionSplit({
   assigned?: bigint;
 }) {
   const segments: Segment[] = [
-    { label: "Idle", value: idle ?? 0n, color: "var(--accent)", hint: "free collateral" },
-    { label: "Sold", value: sold ?? 0n, color: "var(--warn)", hint: "written at its fill, can be assigned" },
-    { label: "Assigned", value: assigned ?? 0n, color: "var(--danger)", hint: "taken at the strike" },
+    { label: "Idle", value: idle ?? 0n, color: "bg-accent", hint: "free collateral" },
+    { label: "Sold", value: sold ?? 0n, color: "bg-warn", hint: "written at its fill, can be assigned" },
+    { label: "Assigned", value: assigned ?? 0n, color: "bg-danger", hint: "taken at the strike" },
   ];
 
   const total = segments.reduce((acc, s) => acc + (s.value > 0n ? s.value : 0n), 0n);
@@ -38,27 +40,25 @@ export function PositionSplit({
 
   return (
     <div>
-      <div className="split" role="img" aria-label="Collateral split">
+      <div role="img" aria-label="Collateral split" className="flex h-2.5 gap-0.5 overflow-hidden rounded-full bg-surface-2">
         {total === 0n ? (
-          <div className="split-seg" style={{ width: "100%", background: "var(--line)" }} />
+          <div className="h-full w-full bg-line" />
         ) : (
           visible.map((s) => (
             <div
               key={s.label}
-              className="split-seg"
-              style={{ width: `${(Number((s.value * 10_000n) / total) / 100).toFixed(2)}%`, background: s.color }}
+              className={cn("h-full rounded-full", s.color)}
+              style={{ width: `${(Number((s.value * 10_000n) / total) / 100).toFixed(2)}%` }}
             />
           ))
         )}
       </div>
-      <div className="split-legend">
+      <div className="mt-3 flex flex-wrap gap-x-6 gap-y-2 text-[13.5px]">
         {segments.map((s) => (
-          <span key={s.label} className="legend-item" title={s.hint}>
-            <span className="legend-swatch" style={{ background: s.color }} />
-            <span>{s.label}</span>
-            <span className="mono" style={{ color: "var(--fg)" }}>
-              {fmtAsset(s.value)}
-            </span>
+          <span key={s.label} className="inline-flex items-center gap-2" title={s.hint}>
+            <span aria-hidden="true" className={cn("size-2.5 shrink-0 rounded-[3px]", s.color)} />
+            <span className="text-ink-2">{s.label}</span>
+            <span className="num font-medium text-ink">{fmtAsset(s.value)}</span>
           </span>
         ))}
       </div>

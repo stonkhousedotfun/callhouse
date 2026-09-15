@@ -7,10 +7,20 @@
  * by the option type the vault armed (its exercise and expiry timestamps), never by the
  * browser's wall clock. A visitor in any timezone sees the same week in the same state.
  */
+import { Chip, type ChipTone } from "@/components/ui";
 import { phaseLabel } from "@/lib/hooks";
 import { deriveFillState, FILL_STATE_COPY, vaultGuards, type FillState } from "@/lib/vaultStatus";
 
 type Tone = "good" | "warn" | "bad" | "info" | "neutral";
+
+/** The phase tones on Daylight's chip palette. Every chip keeps its dot and its words, so colour is never the only signal. */
+const CHIP_TONE: Record<Tone, ChipTone> = {
+  good: "accent",
+  warn: "warn",
+  bad: "danger",
+  info: "usdg",
+  neutral: "neutral",
+};
 
 const FILL_TONE: Record<FillState, Tone> = {
   unknown: "neutral",
@@ -41,10 +51,9 @@ export function Badge({
   children: React.ReactNode;
 }) {
   return (
-    <span className="badge" data-tone={tone === "neutral" ? undefined : tone} title={title}>
-      <span className="dot" />
+    <Chip tone={CHIP_TONE[tone]} dot wrap title={title}>
       {children}
-    </span>
+    </Chip>
   );
 }
 
@@ -73,7 +82,7 @@ export function PhaseBadge({
       ? `${FILL_STATE_COPY[fillState]} · ${sold.toString()} sold`
       : FILL_STATE_COPY[fillState];
   return (
-    <span style={{ display: "inline-flex", gap: 6, flexWrap: "wrap" }}>
+    <span className="inline-flex max-w-full flex-wrap items-center gap-1.5">
       <Badge tone={FILL_TONE[fillState]}>{label}</Badge>
       {showPhase ? <Badge tone="neutral">{phaseLabel(phase)}</Badge> : null}
     </span>
@@ -105,7 +114,7 @@ export function GuardBadges({ snapshot }: { snapshot: Parameters<typeof vaultGua
   const guards = vaultGuards(snapshot);
   if (guards.length === 0) return null;
   return (
-    <span style={{ display: "inline-flex", gap: 6, flexWrap: "wrap" }}>
+    <span className="inline-flex max-w-full flex-wrap items-center gap-1.5">
       {guards.map((g) => (
         <Badge key={g.key} tone={GUARD_TONE[g.tone]} title={g.title}>
           {g.label}
