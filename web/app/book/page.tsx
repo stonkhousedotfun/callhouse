@@ -14,8 +14,8 @@ import {
   USDG,
   ZERO_CONDUIT_KEY,
   accountFactoryAbi,
-  erc20Abi,
   seaportAbi,
+  stockTokenAbi,
   writerAccountAbi,
 } from "@/lib/contracts";
 import { fmtUsdg, shortAddress } from "@/lib/format";
@@ -78,9 +78,6 @@ function toJson(c: LotOrder): OrderComponentsJson {
   };
 }
 
-/**
- * 1-lot book. Each row is one user's full Seaport order of 1 NVDA.
- */
 export default function BookPage() {
   const { address, isConnected } = useAccount();
   const { writeContractAsync } = useWriteContract();
@@ -91,12 +88,11 @@ export default function BookPage() {
     address: FACTORY,
     abi: accountFactoryAbi as unknown as Abi,
     functionName: "accountCount",
-    query: { enabled: FACTORY !== undefined },
   });
   const count = typeof countRead.data === "bigint" ? Number(countRead.data) : 0;
 
   const indexCalls = useMemo(() => {
-    if (!FACTORY || count === 0) return [];
+    if (count === 0) return [];
     return Array.from({ length: count }, (_, i) => ({
       address: FACTORY,
       abi: accountFactoryAbi as unknown as Abi,
@@ -163,13 +159,77 @@ export default function BookPage() {
     query: { enabled: lotCalls.length > 0 },
   });
 
+  const hashCalls = useMemo(() => {
+    return (lotsRead.data ?? []).flatMap((row) => {
+      if (row.status !== "success") return [];
+      return [
+        {
+          address: SEAPORT,
+          abi: seaportAbi as unknown as Abi,
+          functionName: "getOrderHash" as const,
+          args: [row.result as LotOrder],
+        },
+      ];
+    });
+  }, [lotsRead.data]);
+
+  const hashesRead = useReadContracts({
+    contracts: hashCalls,
+    query: { enabled: hashCalls.length > 0 },
+  });
+
+  const statusCalls = useMemo(() => {
+    return (hashesRead.data ?? []).flatMap((row) => {
+      if (row.status !== "success") return [];
+      return [
+        {
+          address: SEAPORT,
+          abi: seaportAbi as unknown as Abi,
+          functionName: "getOrderStatus" as const,
+          args: [row.result as Hex],
+        },
+      ];
+    });
+  }, [hashesRead.data]);
+
+  const statusRead = useReadContracts({
+    contracts: statusCalls,
+    query: { enabled: statusCalls.length > 0 },
+  });
+
   const week = useReadContract({
     address: FACTORY,
     abi: accountFactoryAbi as unknown as Abi,
     functionName: "week",
-    query: { enabled: FACTORY !== undefined },
   });
-  const weekAsk = Array.isArray(week.data) ? (week.data[4] as bigint) : undefined;
+  const weekId = (() => {
+    const d = week.data;
+    if (!d) return 0;
+    if (Array.isArray(d)) return Number(d[0] ?? 0);
+    return Number((d as { id?: number }).id ?? 0);
+  })();
+  const weekAsk = (() => {
+    const d = week.data;
+    if (!d) return undefined;
+    if (Array.isArray(d)) return d[4] as bigint | undefined;
+    return (d as { askUsdg?: bigint }).askUsdg;
+  })();
+
+  const liveRows = useMemo(() => {
+    const out: Array<{ order: LotOrder; owner?: Address }> = [];
+    (lotsRead.data ?? []).forEach((row, i) => {
+      if (row.status !== "success") return;
+      const status = statusRead.data?.[i];
+      if (status?.status === "success") {
+        const [validated, cancelled, filled, size] = status.result as [boolean, boolean, bigint, bigint];
+        if (!validated || cancelled || (size > 0n && filled >= size)) return;
+      }
+      const order = row.result as LotOrder;
+      const owner = ownerRead.data?.[accounts.indexOf(lotCalls[i].address)]?.result as Address | undefined;
+      out.push({ order, owner });
+    });
+    return out;
+  }, [lotsRead.data, statusRead.data, ownerRead.data, accounts, lotCalls]);
 
   async function fill(order: LotOrder) {
     if (!address) return;
@@ -178,16 +238,17 @@ export default function BookPage() {
       const json = toJson(order);
       const advanced = advancedOrderFor(json, 1n, 1n);
       const cost = order.consideration.reduce((sum, item) => sum + item.startAmount, 0n);
-      await run(
+      const approved = await run(
         () =>
           writeContractAsync({
-            address: USDG!,
-            abi: erc20Abi as unknown as Abi,
+            address: USDG,
+            abi: stockTokenAbi as unknown as Abi,
             functionName: "approve",
             args: [SEAPORT, cost],
           }),
         { pending: "Approve USDG", success: "Approved" },
       );
+      if (!approved) return;
       await run(
         () =>
           writeContractAsync({
@@ -196,10 +257,11 @@ export default function BookPage() {
             functionName: "fulfillAdvancedOrder",
             args: [advanced, [], ZERO_CONDUIT_KEY, address],
           }),
-        { pending: "Fill 1 lot", success: "Filled" },
+        { pending: "Buy", success: "Bought" },
       );
       void lotsRead.refetch();
       void liveRead.refetch();
+      void statusRead.refetch();
     } finally {
       setBusy(false);
     }
@@ -208,45 +270,40 @@ export default function BookPage() {
   return (
     <>
       <PageHead
-        eyebrow="1-lot book"
-        title={<>One order per contract.</>}
+        eyebrow={MARKET}
+        title={<>This week.</>}
         lede={
           <p>
-            Each listing is one {MARKET} call from one user. A fill writes that user&apos;s stock and pays that user
-            the premium. Ask this week: {weekAsk !== undefined ? `${fmtUsdg(weekAsk, 3)} USDG` : "—"}.
+            Each offer is one {MARKET} from one person. If you buy, they get paid and you get the call.
+            {weekAsk !== undefined && weekId > 0 ? ` This week: ${fmtUsdg(weekAsk, 3)} USDG each.` : ""}
           </p>
         }
       />
 
-      {FACTORY === undefined ? (
-        <Notice tone="warn">The 1-lot factory is not configured (`NEXT_PUBLIC_FACTORY`).</Notice>
-      ) : lotCalls.length === 0 ? (
-        <Notice tone="info">No live 1-lot orders. Deposit and request a write on Account, then wait for the keeper to list.</Notice>
+      {weekId === 0 ? (
+        <Notice tone="info">Nothing is for sale yet this week.</Notice>
+      ) : liveRows.length === 0 ? (
+        <Notice tone="info">Nothing is for sale right now. Check back after someone offers their {MARKET}.</Notice>
       ) : (
         <div className="grid gap-3">
-          {(lotsRead.data ?? []).map((row, i) => {
-            if (row.status !== "success") return null;
-            const order = row.result as LotOrder;
-            const owner = ownerRead.data?.[accounts.indexOf(lotCalls[i].address)]?.result as Address | undefined;
+          {liveRows.map(({ order, owner }) => {
             const ask = order.consideration.reduce((sum, item) => sum + item.startAmount, 0n);
             return (
-              <Card key={`${order.offerer}-${order.salt}`}>
+              <Card key={`${order.offerer}-${order.salt.toString()}`}>
                 <CardHead>
                   <CardTitle>
                     1 {MARKET} · {fmtUsdg(ask, 3)} USDG
                   </CardTitle>
                 </CardHead>
                 <Rows>
-                  <Row k="Writer" v={shortAddress(owner ?? order.offerer)} />
-                  <Row k="Account" v={shortAddress(order.offerer)} />
-                  <Row k="Salt" v={order.salt.toString()} />
+                  <Row k="From" v={shortAddress(owner ?? order.offerer)} />
                 </Rows>
                 <div className="mt-3">
                   {!isConnected ? (
                     <ConnectButton />
                   ) : (
                     <Button disabled={busy} onClick={() => void fill(order)}>
-                      Buy this lot
+                      Buy
                     </Button>
                   )}
                 </div>

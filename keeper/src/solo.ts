@@ -4,6 +4,8 @@
  */
 import { type Address, type Hex } from 'viem';
 
+import { vaultAbi } from './abi.js';
+import { nextWeekWindow } from './calendar.js';
 import { account, publicClient, walletClient } from './clients.js';
 import { config } from './config.js';
 import { log } from './logger.js';
@@ -28,6 +30,31 @@ const factoryAbi = [
     name: 'listFor',
     stateMutability: 'nonpayable',
     inputs: [{ type: 'address' }],
+    outputs: [],
+  },
+  {
+    type: 'function',
+    name: 'week',
+    stateMutability: 'view',
+    inputs: [],
+    outputs: [
+      { type: 'uint32' },
+      { type: 'uint256' },
+      { type: 'uint40' },
+      { type: 'uint40' },
+      { type: 'uint256' },
+    ],
+  },
+  {
+    type: 'function',
+    name: 'setWeek',
+    stateMutability: 'nonpayable',
+    inputs: [
+      { type: 'uint256' },
+      { type: 'uint40' },
+      { type: 'uint40' },
+      { type: 'uint256' },
+    ],
     outputs: [],
   },
 ] as const;
@@ -81,9 +108,42 @@ async function send(label: string, request: { address: Address; abi: typeof fact
   }
 }
 
+async function ensureWeek(factory: Address): Promise<void> {
+  const week = await publicClient.readContract({
+    address: factory,
+    abi: factoryAbi,
+    functionName: 'week',
+  });
+  const now = Number((await publicClient.getBlock()).timestamp);
+  const baseExpiry = Number(week[3]);
+  if (week[0] !== 0 && now < baseExpiry) return;
+
+  const window = nextWeekWindow(now, config.KEEPER_ARM_LEAD_S, config.KEEPER_NYSE_HOLIDAYS);
+  const spot = await publicClient.readContract({
+    address: config.VAULT,
+    abi: vaultAbi,
+    functionName: 'spotUsdg',
+  });
+  const strike = ((spot * (10_000n + BigInt(config.KEEPER_STRIKE_OTM_BPS))) / 10_000n / 1_000_000n) * 1_000_000n;
+  const minPrem = (spot * 40n) / 10_000n;
+  const ask = minPrem < 1_000_000n ? 1_000_000n : minPrem;
+  if (ask > strike || strike === 0n) {
+    log.roll.warn({ spot: spot.toString(), strike: strike.toString(), ask: ask.toString() }, 'solo setWeek skipped: bad quote');
+    return;
+  }
+  await send('setWeek', {
+    address: factory,
+    abi: factoryAbi,
+    functionName: 'setWeek',
+    args: [strike, window.exerciseTs, window.expiryTs, ask],
+  });
+}
+
 export async function tickSolo(): Promise<void> {
   const factory = config.FACTORY;
   if (!factory) return;
+
+  await ensureWeek(factory);
 
   const count = await publicClient.readContract({
     address: factory,

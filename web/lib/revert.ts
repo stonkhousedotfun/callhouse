@@ -2,7 +2,9 @@ import { decodeErrorResult, type Abi, type Hex } from "viem";
 
 import { usdgErrorsAbi } from "./abi/erc20";
 import { seaportAbi } from "./abi/seaport";
+import { accountFactoryAbi } from "./abi/accountFactory";
 import { vaultAbi } from "./abi/vault";
+import { writerAccountAbi } from "./abi/writerAccount";
 import { fmtEastern, fmtUsdg, fmtUtc } from "./format";
 
 /**
@@ -57,6 +59,8 @@ export const SOLIDITY_ERROR_SELECTOR: Hex = "0x08c379a0";
 export const SOLIDITY_PANIC_SELECTOR: Hex = "0x4e487b71";
 
 const SOURCES: ReadonlyArray<readonly [RevertSource, Abi]> = [
+  ["vault", writerAccountAbi as unknown as Abi],
+  ["vault", accountFactoryAbi as unknown as Abi],
   ["vault", vaultAbi as unknown as Abi],
   ["seaport", seaportAbi as unknown as Abi],
   ["token", usdgErrorsAbi as unknown as Abi],
@@ -73,7 +77,18 @@ const count = (v: unknown): string => String(big(v) ?? "?");
 export const EXPLAINED: Record<string, string | ((args: readonly unknown[]) => string)> = {
   // Deposits and the queue.
   UseQueue: "A call is open, so this redemption has to go through the queue.",
-  DepositCapExceeded: "That would take the vault past its deposit cap.",
+  DepositCapExceeded: "That would take this account past its 20 NVDA cap.",
+  InsufficientIdle: "Not enough idle NVDA in the account for that.",
+  NotOwner: "Only the account owner can do that.",
+  NoWeek: "This week is not open for offers yet.",
+  AlreadyListed: "This week's offers are already listed.",
+  NothingToList: "Choose how much is for sale first.",
+  TooEarly: "The week has not ended yet.",
+  TooManyLots: "That is more than this account can offer this week.",
+  ZeroAmount: "Enter an amount above zero.",
+  AlreadyHasAccount: "This wallet already has an account.",
+  NoAccount: "Create an account first.",
+  WritesAreHalted: "New sales are paused. Try again later.",
   // Vault._depositRefused, every reason a depositor can meet. "Assignment pending" is left out on
   // purpose: nothing can be assigned before cycleExerciseTs, so it only ever holds alongside the
   // sale window, the settling phase or a stranded claim, which are named. A full deposit cap is
@@ -96,8 +111,7 @@ export const EXPLAINED: Record<string, string | ((args: readonly unknown[]) => s
     "The stranded claim still cannot be redeemed: whatever blocked it (a USDG pause or freeze, a Stock Token blocklist) has not cleared yet. Try again later; anyone can.",
   NotStranded: "No claim is stranded, so there is nothing to retry.",
   // The fill gate (Vault.authorizeOrder, ValoremLib.writeOnFill, Policy).
-  WritesAreHalted: "Writes are halted by the guardian. The listing stands, but no fill goes through until the halt is lifted.",
-  NotLiveListing: "That order is not the vault's live listing, so the vault will not write for it.",
+  NotLiveListing: "That order is no longer for sale.",
   NotSeaport: "Only Seaport may call the vault's fill hooks.",
   WriteWindowClosed: (a) =>
     `This week's sale window closed at ${fmtUtc(big(a[0]))} · ${fmtEastern(big(a[0]))}: the exercise window has opened and nothing more can be written.`,

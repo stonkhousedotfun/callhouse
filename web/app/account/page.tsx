@@ -1,7 +1,7 @@
 "use client";
 
 import { useMemo, useState } from "react";
-import type { Abi, Address } from "viem";
+import { formatUnits, type Abi, type Address } from "viem";
 import { useAccount, useReadContract, useWriteContract } from "wagmi";
 
 import { ConnectButton } from "@/components/ConnectButton";
@@ -13,36 +13,38 @@ import {
   FACTORY,
   MARKET,
   USDG,
+  ZERO_ADDRESS,
   accountFactoryAbi,
-  erc20Abi,
   stockTokenAbi,
   writerAccountAbi,
 } from "@/lib/contracts";
 import { fmtAsset, fmtUsdg, parseAmount } from "@/lib/format";
 
-/**
- * Isolated 1-lot account. Your NVDA, your lots, your premium. Not the pooled vault.
- */
 export default function AccountPage() {
   const { address, isConnected } = useAccount();
   const { writeContractAsync } = useWriteContract();
   const run = useTxRunner();
   const [depositRaw, setDepositRaw] = useState("");
-  const [lotsRaw, setLotsRaw] = useState("1");
+  const [offerRaw, setOfferRaw] = useState("1");
   const [busy, setBusy] = useState(false);
-
-  const factoryReady = FACTORY !== undefined;
 
   const accountRead = useReadContract({
     address: FACTORY,
     abi: accountFactoryAbi as unknown as Abi,
     functionName: "accountOf",
     args: address ? [address] : undefined,
-    query: { enabled: factoryReady && Boolean(address) },
+    query: { enabled: Boolean(address) },
   });
   const account = (typeof accountRead.data === "string" ? accountRead.data : undefined) as Address | undefined;
-  const hasAccount = Boolean(account && account !== "0x0000000000000000000000000000000000000000");
+  const hasAccount = Boolean(account && account !== ZERO_ADDRESS);
 
+  const walletNvda = useReadContract({
+    address: ASSET,
+    abi: stockTokenAbi as unknown as Abi,
+    functionName: "balanceOf",
+    args: address ? [address] : undefined,
+    query: { enabled: Boolean(address) },
+  });
   const idle = useReadContract({
     address: account,
     abi: writerAccountAbi as unknown as Abi,
@@ -75,7 +77,7 @@ export default function AccountPage() {
   });
   const usdgBal = useReadContract({
     address: USDG,
-    abi: erc20Abi as unknown as Abi,
+    abi: stockTokenAbi as unknown as Abi,
     functionName: "balanceOf",
     args: account ? [account] : undefined,
     query: { enabled: hasAccount },
@@ -87,9 +89,29 @@ export default function AccountPage() {
     args: address && account ? [address, account] : undefined,
     query: { enabled: hasAccount && Boolean(address) },
   });
+  const week = useReadContract({
+    address: FACTORY,
+    abi: accountFactoryAbi as unknown as Abi,
+    functionName: "week",
+  });
+
+  const weekId =
+    week.data && typeof week.data === "object" && "id" in (week.data as object)
+      ? Number((week.data as { id: number }).id)
+      : Array.isArray(week.data)
+        ? Number(week.data[0])
+        : 0;
+  const idleAmt = typeof idle.data === "bigint" ? idle.data : 0n;
+  const reservedAmt = typeof reserved.data === "bigint" ? reserved.data : 0n;
+  const usdgAmt = typeof usdgBal.data === "bigint" ? usdgBal.data : 0n;
+  const listedAmt = typeof listed.data === "bigint" ? listed.data : 0n;
+  const writtenAmt = typeof written.data === "bigint" ? written.data : 0n;
+  const requestedAmt = typeof requested.data === "bigint" ? requested.data : 0n;
+  const walletAmt = typeof walletNvda.data === "bigint" ? walletNvda.data : 0n;
 
   const refresh = () => {
     void accountRead.refetch();
+    void walletNvda.refetch();
     void idle.refetch();
     void reserved.refetch();
     void requested.refetch();
@@ -100,7 +122,7 @@ export default function AccountPage() {
   };
 
   const depositAmt = useMemo(() => parseAmount(depositRaw, ASSET_DECIMALS), [depositRaw]);
-  const lots = Number.parseInt(lotsRaw, 10);
+  const offerLots = Number.parseInt(offerRaw, 10);
 
   async function send(fn: () => Promise<`0x${string}`>, pending: string, success: string) {
     setBusy(true);
@@ -116,72 +138,89 @@ export default function AccountPage() {
   return (
     <>
       <PageHead
-        eyebrow="1-lot accounts"
-        title={<>Your {MARKET}. Your lots.</>}
+        eyebrow={MARKET}
+        title={<>Your {MARKET}.</>}
         lede={
           <p>
-            Deposit {MARKET}, choose how many 1-contract calls to write this week, and only those lots can be
-            assigned. Unfilled lots come back. This is not the pooled vault.
+            Put {MARKET} in. Choose how much is for sale this week. If someone pays, you get USDG. If they don&apos;t,
+            you keep the stock.
           </p>
         }
       />
 
-      {!factoryReady ? (
-        <Notice tone="warn">The 1-lot factory is not configured (`NEXT_PUBLIC_FACTORY`).</Notice>
-      ) : !isConnected ? (
-        <ConnectButton />
+      {!isConnected ? (
+        <Card>
+          <CardHead>
+            <CardTitle>Connect a wallet</CardTitle>
+          </CardHead>
+          <p className="mb-4 text-ink-2">MetaMask or Phantom, on Robinhood Chain.</p>
+          <ConnectButton block />
+        </Card>
       ) : !hasAccount ? (
         <Card>
           <CardHead>
-            <CardTitle>Create your account</CardTitle>
+            <CardTitle>Open an account</CardTitle>
           </CardHead>
-          <p className="mb-4 text-ink-2">A clone that holds only your {MARKET}. One-time.</p>
+          <p className="mb-4 text-ink-2">One-time. It holds only your {MARKET}.</p>
           <Button
             disabled={busy}
             onClick={() =>
               send(
                 () =>
                   writeContractAsync({
-                    address: FACTORY!,
+                    address: FACTORY,
                     abi: accountFactoryAbi as unknown as Abi,
                     functionName: "createAccount",
                   }),
-                "Create account",
-                "Account created",
+                "Open account",
+                "Account opened",
               )
             }
           >
-            Create account
+            Open account
           </Button>
         </Card>
       ) : (
         <div className="grid gap-4">
+          {weekId === 0 ? (
+            <Notice tone="info">This week is not open for offers yet. You can still deposit.</Notice>
+          ) : null}
+
           <Card>
             <CardHead>
               <CardTitle>Position</CardTitle>
             </CardHead>
             <Rows>
-              <Row k="Account" v={<span className="num">{account}</span>} />
-              <Row k="Idle" v={`${fmtAsset(idle.data as bigint | undefined)} ${MARKET}`} />
-              <Row k="Reserved for listings" v={`${fmtAsset(reserved.data as bigint | undefined)} ${MARKET}`} />
-              <Row k="Requested lots" v={String(requested.data ?? "—")} />
-              <Row k="Listed lots" v={String(listed.data ?? "—")} />
-              <Row k="Written this week" v={String(written.data ?? "—")} />
-              <Row k="USDG in account" v={fmtUsdg(usdgBal.data as bigint | undefined)} />
+              <Row k="In the wallet" v={`${fmtAsset(walletAmt)} ${MARKET}`} />
+              <Row k="In the account" v={`${fmtAsset(idleAmt + reservedAmt)} ${MARKET}`} />
+              <Row k="Available to take out" v={`${fmtAsset(idleAmt)} ${MARKET}`} />
+              <Row k="For sale this week" v={`${requestedAmt.toString()} ${MARKET}`} />
+              <Row k="Listed" v={listedAmt === 0n ? "Not yet" : `${listedAmt.toString()} ${MARKET}`} />
+              <Row k="Sold this week" v={`${writtenAmt.toString()} ${MARKET}`} />
+              <Row k="USDG waiting" v={fmtUsdg(usdgAmt)} />
             </Rows>
           </Card>
 
           <Card>
             <CardHead>
-              <CardTitle>Deposit</CardTitle>
+              <CardTitle>Deposit or take out</CardTitle>
             </CardHead>
             <Field
               id="solo-deposit"
-              label={`Amount`}
+              label="Amount"
               suffix={MARKET}
               value={depositRaw}
               onChange={(e) => setDepositRaw(e.target.value)}
               inputMode="decimal"
+              hint={
+                <button
+                  type="button"
+                  className="link text-[13px]"
+                  onClick={() => setDepositRaw(formatUnits(walletAmt, ASSET_DECIMALS))}
+                >
+                  Max in wallet: {fmtAsset(walletAmt)}
+                </button>
+              }
             />
             <div className="mt-3 flex flex-wrap gap-2">
               <Button
@@ -193,7 +232,7 @@ export default function AccountPage() {
                     const ok = await send(
                       () =>
                         writeContractAsync({
-                          address: ASSET!,
+                          address: ASSET,
                           abi: stockTokenAbi as unknown as Abi,
                           functionName: "approve",
                           args: [account, amt],
@@ -219,7 +258,8 @@ export default function AccountPage() {
                 Deposit
               </Button>
               <Button
-                disabled={busy || depositAmt === null || depositAmt === 0n}
+                variant="ghost"
+                disabled={busy || idleAmt === 0n}
                 onClick={() =>
                   send(
                     () =>
@@ -227,36 +267,36 @@ export default function AccountPage() {
                         address: account!,
                         abi: writerAccountAbi as unknown as Abi,
                         functionName: "withdraw",
-                        args: [depositAmt],
+                        args: [idleAmt],
                       }),
                     "Withdraw",
                     "Withdrawn",
                   )
                 }
               >
-                Withdraw idle
+                Take out available
               </Button>
             </div>
           </Card>
 
           <Card>
             <CardHead>
-              <CardTitle>Write this week</CardTitle>
+              <CardTitle>For sale this week</CardTitle>
             </CardHead>
             <p className="mb-3 text-ink-2">
-              Whole lots only. The keeper posts one full Seaport order per lot. Unfilled lots return at settle.
+              Whole {MARKET} only. Only this amount can be sold. The rest stays yours.
             </p>
             <Field
-              id="solo-lots"
-              label="Lots"
-              suffix="contracts"
-              value={lotsRaw}
-              onChange={(e) => setLotsRaw(e.target.value)}
+              id="solo-offer"
+              label="Amount"
+              suffix={MARKET}
+              value={offerRaw}
+              onChange={(e) => setOfferRaw(e.target.value)}
               inputMode="numeric"
             />
             <div className="mt-3 flex flex-wrap gap-2">
               <Button
-                disabled={busy || !Number.isInteger(lots) || lots < 0}
+                disabled={busy || !Number.isInteger(offerLots) || offerLots < 0 || listedAmt !== 0n}
                 onClick={() =>
                   send(
                     () =>
@@ -264,49 +304,55 @@ export default function AccountPage() {
                         address: account!,
                         abi: writerAccountAbi as unknown as Abi,
                         functionName: "requestWrite",
-                        args: [BigInt(lots)],
+                        args: [BigInt(offerLots)],
                       }),
-                    "Request write",
-                    "Write requested",
+                    "Set amount",
+                    "Amount set",
                   )
                 }
               >
-                Request write
+                Set amount
               </Button>
-              <Button
-                disabled={busy}
-                onClick={() =>
-                  send(
-                    () =>
-                      writeContractAsync({
-                        address: account!,
-                        abi: writerAccountAbi as unknown as Abi,
-                        functionName: "settle",
-                      }),
-                    "Settle",
-                    "Settled",
-                  )
-                }
-              >
-                Settle
-              </Button>
-              <Button
-                disabled={busy}
-                onClick={() =>
-                  send(
-                    () =>
-                      writeContractAsync({
-                        address: account!,
-                        abi: writerAccountAbi as unknown as Abi,
-                        functionName: "claimUsdg",
-                      }),
-                    "Claim USDG",
-                    "Claimed",
-                  )
-                }
-              >
-                Claim USDG
-              </Button>
+              {listedAmt > 0n || writtenAmt > 0n ? (
+                <Button
+                  variant="ghost"
+                  disabled={busy}
+                  onClick={() =>
+                    send(
+                      () =>
+                        writeContractAsync({
+                          address: account!,
+                          abi: writerAccountAbi as unknown as Abi,
+                          functionName: "settle",
+                        }),
+                      "Close the week",
+                      "Week closed",
+                    )
+                  }
+                >
+                  Close the week
+                </Button>
+              ) : null}
+              {usdgAmt > 0n ? (
+                <Button
+                  variant="ghost"
+                  disabled={busy}
+                  onClick={() =>
+                    send(
+                      () =>
+                        writeContractAsync({
+                          address: account!,
+                          abi: writerAccountAbi as unknown as Abi,
+                          functionName: "claimUsdg",
+                        }),
+                      "Collect USDG",
+                      "Collected",
+                    )
+                  }
+                >
+                  Collect USDG
+                </Button>
+              ) : null}
             </div>
           </Card>
         </div>
