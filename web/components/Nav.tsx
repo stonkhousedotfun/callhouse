@@ -11,8 +11,8 @@
  * (ExternalLink) is contained by it; without that it escapes to the page and scrolls a 390px screen
  * sideways.
  *
- * The brand points at "/". Inside the app, home is the vault, not the marketing site; the link row
- * ends with stonkhouse.fun for anyone who wants that.
+ * The brand points at "/". Inside the app, home is the product landing; the NVDA vault is
+ * /vault/nvda. The link row ends with stonkhouse.fun for anyone who wants the marketing site.
  *
  * TEST HOOK: `data-slot="topbar"` on the header. The W-13 run connects its wallet through it.
  */

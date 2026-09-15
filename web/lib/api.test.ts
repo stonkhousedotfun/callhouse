@@ -146,7 +146,7 @@ describe("normaliseCycle reads the indexer's nested shape (ops/fixtures/api/)", 
 
   it("cycle-assigned.json renders premium-only realized figures and a separate strike line", () => {
     const r = normaliseCycle(fixture("cycle-assigned.json"))!;
-    // What `/`, `/vault/nvda` and `/activity` put on screen for this week.
+    // What `/vault/nvda` and `/activity` put on screen for this week.
     expect(fmtUsdg(premiumPerShare(r), 6)).toBe("0.456000");
     expect(fmtUsdg(r.premiumGrossUsdg)).toBe("48.00");
     expect(fmtUsdg(r.premiumNetUsdg)).toBe("45.60");

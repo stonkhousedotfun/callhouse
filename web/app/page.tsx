@@ -1,483 +1,164 @@
-"use client";
-
 /**
- * The landing page: the vault's live state next to the last closed week.
+ * app.stonkhouse.fun/ — the app home. A product landing, not the vault.
  *
- * What is deliberately NOT here is any forecast. Everything shown is the current on-chain state,
- * a realized figure from a week that has already closed (labelled "Last week realized"), or, while
- * the vault is Listed with a live order and its sale window open, that order's own arithmetic as it
- * stands (owner-approved wording, lib/cycleTerms.ts CYCLE_TERMS_LABELS): the order total if every
- * remaining contract sells (price per contract × contracts left to buy) and the protocol fee on that
- * total, which the vault charges at harvest. Contracts left to buy is Seaport's count for the
- * vault's order hash, read here or, failing that, by the order feed route; when neither has one,
- * all three show "—" rather than an estimate. So each figure shown is current order state in exact
- * USDG, not an outcome for anyone: a week in which nobody buys pays nothing. There is no
- * percentage, no figure after the fee, and no week is ever scaled up to a longer period — the
- * wording rules in scripts/copy-lint.mjs exist to keep it that way.
+ * NVDA is the first vault; more Stock Token vaults follow. Live figures, deposits and this week's
+ * call live on /vault/nvda and /vault/nvda/cycle. This page does not read the chain.
+ *
+ * Status matches stonkhouse.fun: beta, pending audit.
  */
 import Link from "next/link";
 
-import { useKeeperOrderBook } from "@/components/CyclePricing";
-import { CycleTapeInline } from "@/components/CycleTape";
-import { GuardBadges, VaultPhaseBadge } from "@/components/PhaseBadge";
-import { PositionSplit } from "@/components/PositionSplit";
-import { StrandedBanner } from "@/components/StrandedBanner";
-import {
-  Button,
-  Card,
-  CardHead,
-  CardTitle,
-  ExternalLink,
-  Notice,
-  PageHead,
-  Row,
-  Rows,
-  Stat,
-  Unit,
-  WarnIcon,
-} from "@/components/ui";
-import { addressUrl } from "@/lib/chain";
-import { MARKET, MAX_LISTINGS_PER_CYCLE, SHARE_TICKER, VAULT } from "@/lib/contracts";
-import { hasOnChainListing, shouldAskFeed, windowClosed, type CycleListingState } from "@/lib/cycleNotices";
-import { CYCLE_TERMS_LABELS, cycleTerms } from "@/lib/cycleTerms";
-import {
-  WAD,
-  fmtAsset,
-  fmtCountdown,
-  fmtRealizedWeek,
-  fmtUsdg,
-  fmtUtcDate,
-  multiplierIsActive,
-  premiumPerShare,
-  shortHash,
-  toNvdaEq,
-  tvlUsdg,
-} from "@/lib/format";
-import { useCycleHistory, lastSettled } from "@/lib/history";
-import { collateralSplit, useNow, useOrderStatus, useVaultSnapshot } from "@/lib/hooks";
-import { fillableForTerms } from "@/lib/orderFillable";
+import { Button, Card, Chip, ExternalLink, Figure, Notice, PageHead, SectionHead } from "@/components/ui";
+import { MARKET, SHARE_TICKER } from "@/lib/contracts";
+import { SITE_URL, STATUS } from "@/lib/site";
+
+const VAULT_HREF = "/vault/nvda";
+
+const ROADMAP = [
+  {
+    when: "Now",
+    title: "Beta, NVDA first",
+    current: true,
+    body: `Public beta. One vault, ${MARKET}. Write-on-fill covered calls. ${STATUS.audit}.`,
+  },
+  {
+    when: "Next",
+    title: "External audit",
+    current: false,
+    body: "An external audit of the vault. The report is published. The cap stays until then.",
+  },
+  {
+    when: "Then",
+    title: "Four published weeks",
+    current: false,
+    body: "Four closed weeks on the public record, zeros included, before the cap moves.",
+  },
+  {
+    when: "Later",
+    title: "More stock vaults",
+    current: false,
+    body: "Additional Stock Token vaults, one underlying each, same week and the same rules.",
+  },
+] as const;
 
 export default function HomePage() {
-  const { data: v, isLoading, isError: chainReadFailed } = useVaultSnapshot();
-  const { rows, source, error: historyError } = useCycleHistory();
-  const nowSeconds = useNow();
-  const last = lastSettled(rows);
-
-  // Share price is collateral only, in raw 18-decimal units. Premium is not folded into it:
-  // USDG accrues per share and is claimed separately (see UsdgClaim).
-  const pps =
-    v.totalAssets !== undefined && v.totalSupply !== undefined && v.totalSupply > 0n
-      ? (v.totalAssets * WAD) / v.totalSupply
-      : undefined;
-
-  const tvl = tvlUsdg(v.totalAssets, v.spotUsdg);
-
-  // Locked collateral is "sold": under write on fill every contract the vault has written was
-  // bought in the same transaction, so there is no unsold inventory to draw.
-  const split = collateralSplit(v);
-
-  // Premium only. On an assigned week the harvest also carried the strike proceeds, which are
-  // the collateral's sale price at the strike, not earnings; they get their own line below.
-  const lastPerShare = last ? premiumPerShare(last) : undefined;
-  const lastTvl = tvlUsdg(last?.assetsAtHarvest, last?.spotUsdgAtHarvest);
-  const lastWasAssigned =
-    last !== undefined && ((last.contractsAssigned ?? 0n) > 0n || (last.strikeProceedsUsdg ?? 0n) > 0n);
-
-  // THIS WEEK'S TERMS (lib/cycleTerms.ts), null while nothing is armed. The order figures exist only
-  // while the vault is Listed with a live listing hash and the sale window open. Contracts left to
-  // buy is Seaport's count for the vault's hash, read here with the same getOrderStatus call the
-  // cycle page makes; while that has no answer, the checked feed row's `remaining` for the hash
-  // (app/api/keeper/orders computes it from its own getOrderStatus read), or 0 when the route
-  // reports that hash sold out, cancelled or expired. With neither, lib/orderFillable.ts gives no
-  // count and the three order rows show "—" with a note: never the whole listing, which overstates
-  // what is left after any fill. The feed query shares the cycle page's cache key
-  // (components/CyclePricing.tsx useKeeperOrderBook).
-  const baseListingState: CycleListingState = {
-    vaultConfigured: VAULT !== undefined,
-    phase: v.phase,
-    listingHash: v.listingHash,
-    listingAmount: v.listingAmount,
-    seaportStatus: undefined,
-    cycleExerciseTs: v.cycleExerciseTs,
-    nowSeconds,
-  };
-  const liveListing = hasOnChainListing(baseListingState);
-  const orderOpen = v.phase === 1 && liveListing && nowSeconds > 0 && !windowClosed(baseListingState);
-  const { data: orderStatus, isLoading: orderStatusLoading } = useOrderStatus(orderOpen ? v.listingHash : undefined);
-  // useOrderStatus fills every field or none.
-  const seaportStatus =
-    orderStatus?.isCancelled !== undefined && orderStatus.totalFilled !== undefined && orderStatus.totalSize !== undefined
-      ? { isCancelled: orderStatus.isCancelled, totalFilled: orderStatus.totalFilled, totalSize: orderStatus.totalSize }
-      : undefined;
-  const listingState: CycleListingState = { ...baseListingState, seaportStatus };
-  const askFeed = orderOpen && shouldAskFeed(listingState);
-  const feed = useKeeperOrderBook(v.listingHash, askFeed);
-  const feedBook = askFeed ? feed.data : undefined;
-  const fillable = orderOpen
-    ? fillableForTerms({
-        phase: v.phase,
-        listingHash: v.listingHash,
-        listingAmount: v.listingAmount,
-        windowClosed: false,
-        seaportStatus,
-        rows: feedBook?.listings,
-        closed: feedBook?.closed,
-      })
-    : undefined;
-  const fillableUnread = orderOpen && fillable === undefined && !orderStatusLoading && !(askFeed && feed.isLoading);
-  const terms = cycleTerms(v, { fillableContracts: fillable?.contracts });
-
   return (
     <>
       <PageHead
-        eyebrow="Robinhood Chain 4663 · Valorem Clear · Seaport 1.6"
+        eyebrow="Robinhood Chain"
         title={
           <>
-            {SHARE_TICKER} — pooled covered calls on {MARKET} Stock Tokens
+            Covered calls on tokenised stocks.{" "}
+            <span className="text-accent-text">{MARKET} first.</span>
           </>
         }
         lede={
-          <p>
-            Deposit one tokenised stock, receive vault shares. Each week a keeper arms one out-of-the-money call on the
-            idle collateral and lists it for USDG on this site&apos;s own fill page. Nothing is written until a buyer
-            fills; each fill writes exactly what it buys. Depositors receive whatever premium actually fills — and
-            nothing at all in a week where nobody buys.
-          </p>
+          <>
+            <div className="mb-3 flex flex-wrap gap-2">
+              <Chip tone="accent" dot>
+                {STATUS.phase}
+              </Chip>
+              <Chip tone="warn">{STATUS.audit}</Chip>
+            </div>
+            <p>
+              Stonkhouse is a pooled vault: you deposit a tokenised stock, and each week it lists covered calls against
+              that stock. A call is written only when a buyer pays for it. You claim whatever premium actually fills, in
+              USDG. The first vault is {MARKET}. More stocks follow, one vault each.
+            </p>
+          </>
+        }
+        aside={
+          <Button href={VAULT_HREF} className="max-sm:w-full">
+            Open the {MARKET} vault
+          </Button>
         }
       />
 
+      <Notice tone="warn" className="mb-6 lg:[&>div]:max-w-[88ch]">
+        Premium is paid only if a buyer fills. Assignment can take the collateral at the strike. Stock Tokens are debt
+        securities, not Nvidia shares. {STATUS.phase}. {STATUS.auditLine}
+      </Notice>
+
       <div className="grid gap-4 sm:gap-5">
-        {!VAULT ? (
-          <Notice tone="warn" title="No vault address configured.">
-            Set <code>NEXT_PUBLIC_VAULT</code> to the deployed Stonkhouse vault on chain 4663. Every
-            other address (clearinghouse, Seaport, USDG, the Stock Token) is compiled in from
-            explorer-confirmed recon and needs no configuration.
-          </Notice>
-        ) : null}
-
-        {/* A failed batch is not an empty vault. Say which one it is. */}
-        {chainReadFailed ? (
-          <Notice tone="warn" title="Chain reads are failing right now.">
-            The vault could not be read from the RPC, so the numbers below are missing rather than zero.
-          </Notice>
-        ) : null}
-
-        <StrandedBanner snapshot={v} compact />
-
-        <Card lift className="grid gap-6">
-          <CardHead className="mb-0!">
-            <CardTitle className="text-[22px]!">
-              {SHARE_TICKER} vault
-              {v.symbol && v.symbol !== SHARE_TICKER ? ` · on-chain symbol ${v.symbol}` : ""}
-            </CardTitle>
-            <div className="flex flex-wrap items-center gap-1.5">
-              <VaultPhaseBadge snapshot={v} nowSeconds={nowSeconds} />
-              <GuardBadges snapshot={v} />
-            </div>
-          </CardHead>
-
-          <div className="grid grid-cols-1 gap-3 min-[680px]:grid-cols-3">
-            <Stat
-              className="rounded-md bg-surface-2 p-4 sm:p-5"
-              label="Collateral"
-              value={fmtAsset(v.totalAssets)}
-              unit={MARKET}
-              sub={tvl === undefined ? "spot unavailable" : `${fmtUsdg(tvl)} USDG at feed spot`}
-            />
-            <Stat
-              className="rounded-md bg-surface-2 p-4 sm:p-5"
-              label="Shares"
-              value={fmtAsset(v.totalSupply)}
-              unit={SHARE_TICKER}
-              sub={pps === undefined ? "—" : `${fmtAsset(pps, 6)} ${MARKET} per share`}
-            />
-            <Stat
-              className="rounded-md bg-surface-2 p-4 sm:p-5"
-              label="This week's strike"
-              value={
-                terms !== null
-                  ? terms.strikeFmt
-                  : v.cycleStrikeUsdg && v.cycleStrikeUsdg > 0n && v.phase !== 0
-                    ? fmtUsdg(v.cycleStrikeUsdg)
-                    : "—"
-              }
-              unit="USDG"
-              sub={
-                v.phase === undefined ? (
-                  "—"
-                ) : v.phase === 0 ? (
-                  "nothing armed this cycle"
-                ) : (
-                  <>
-                    <span className="block">
-                      {`${(v.contractsWritten ?? 0n).toString()} calls sold this week${
-                        v.capacity !== undefined && v.phase === 1 ? ` · capacity for ${v.capacity.toString()} more` : ""
-                      }`}
-                    </span>
-                    {terms !== null ? (
-                      <span data-slot="strike-expiry" className="block">
-                        {CYCLE_TERMS_LABELS.expiry} {terms.expiryEastern}
-                      </span>
-                    ) : null}
-                  </>
-                )
-              }
-            />
-          </div>
-
-          <div>
-            <PositionSplit idle={split.idle} sold={split.sold} assigned={split.assigned} />
-            <p className="mt-3 max-w-[60em] text-[12.5px] leading-[1.55] text-ink-3">
-              Every contract the vault has written was sold in the same transaction that wrote it, so there is no unsold
-              inventory: the vault can only ever be assigned on what it was paid for.
-            </p>
-
-            {multiplierIsActive(v.uiMultiplier) ? (
-              <div className="mt-2 max-w-[60em] text-[12.5px] leading-[1.55] text-ink-3">
-                The Stock Token reports a uiMultiplier other than 1.0. Display-only {MARKET}-eq of the
-                collateral: <span className="num text-ink-2">{fmtAsset(toNvdaEq(v.totalAssets, v.uiMultiplier))}</span>. Share maths uses the
-                raw balance above.
+        <div className="grid grid-cols-1 gap-4 lg:grid-cols-[minmax(0,1.15fr)_minmax(0,0.85fr)]">
+          <Card lift className="grid gap-5">
+            <div className="flex flex-wrap items-start justify-between gap-3">
+              <div>
+                <Chip tone="accent" dot>
+                  Live first
+                </Chip>
+                <h2 className="mt-3 text-[26px] font-extrabold tracking-[-0.02em]">
+                  {MARKET} vault
+                </h2>
+                <p className="mt-1.5 max-w-[36em] text-[15.5px] text-ink-2">
+                  Deposit {MARKET} Stock Tokens, receive {SHARE_TICKER}. Each week the vault lists covered calls and
+                  writes them only when a buyer fills. Claim USDG here; buy the week&apos;s call on the cycle page.
+                </p>
               </div>
-            ) : null}
-          </div>
-
-          <div className="grid grid-cols-1 gap-x-12 gap-y-6 border-t border-line pt-6 lg:grid-cols-2">
-            <div className="min-w-0" data-slot="this-week">
-              <h3 className="mb-1.5 text-base font-bold tracking-[-0.01em]">
-                This week
-              </h3>
-              <Rows>
-                <Row k="Vault cycle" v={<>#{v.cycleNumber ?? "—"}</>} />
-                {terms !== null ? (
-                  <>
-                    <Row
-                      k={CYCLE_TERMS_LABELS.strike}
-                      v={
-                        <>
-                          {terms.strikeFmt} <Unit>USDG</Unit>
-                        </>
-                      }
-                    />
-                    <Row
-                      title="The option's exercise time, snapshotted by the vault when the cycle was armed: the week's NYSE close. The vault refuses every fill from this moment."
-                      k={CYCLE_TERMS_LABELS.exercise}
-                      v={
-                        <>
-                          <span className="whitespace-nowrap">{terms.exerciseUtc}</span> ·{" "}
-                          <span className="whitespace-nowrap">{terms.exerciseEastern}</span>
-                        </>
-                      }
-                    />
-                    <Row
-                      title="The option's expiry, 24 hours after the exercise time, from the vault's snapshot."
-                      k={CYCLE_TERMS_LABELS.expiry}
-                      v={
-                        <>
-                          <span className="whitespace-nowrap">{terms.expiryUtc}</span> ·{" "}
-                          <span className="whitespace-nowrap">{terms.expiryEastern}</span>
-                        </>
-                      }
-                    />
-                    {liveListing && terms.unitPrice6 !== undefined ? (
-                      <Row
-                        k={CYCLE_TERMS_LABELS.unitPrice}
-                        v={
-                          <>
-                            {terms.unitPriceFmt} <Unit>USDG</Unit>
-                          </>
-                        }
-                      />
-                    ) : null}
-                    {orderOpen ? (
-                      <>
-                        <Row k={CYCLE_TERMS_LABELS.fillableContracts} v={terms.fillableContractsFmt} />
-                        <Row
-                          title="Price per contract times contracts left to buy: the order as it stands. If nobody buys, the vault receives nothing."
-                          k={CYCLE_TERMS_LABELS.orderGrossIfAllFill}
-                          v={
-                            terms.orderGrossIfAllFill6 === undefined ? (
-                              "—"
-                            ) : (
-                              <>
-                                {terms.orderGrossIfAllFillFmt} <Unit>USDG</Unit>
-                              </>
-                            )
-                          }
-                        />
-                        <Row
-                          title="policy().protocolFeeBps of that total, rounded down as the vault rounds it. The vault charges the fee once, at harvest, on the week's whole premium."
-                          k={CYCLE_TERMS_LABELS.orderFeeIfAllFill}
-                          v={
-                            terms.orderFeeIfAllFill6 === undefined ? (
-                              "—"
-                            ) : (
-                              <>
-                                {terms.orderFeeIfAllFillFmt} <Unit>USDG</Unit>
-                              </>
-                            )
-                          }
-                        />
-                      </>
-                    ) : null}
-                  </>
-                ) : null}
-                <Row
-                  k="Order hash"
-                  v={
-                    v.listingHash === undefined
-                      ? "—"
-                      : /^0x0+$/.test(v.listingHash)
-                        ? "no live listing"
-                        : (
-                            <Link href="/vault/nvda/cycle" className="link text-accent-text">{shortHash(v.listingHash)}</Link>
-                          )
-                  }
-                />
-                <Row
-                  k="Listings authorised"
-                  v={
-                    <>
-                      {v.listingsThisCycle === undefined ? "—" : v.listingsThisCycle} / {MAX_LISTINGS_PER_CYCLE}
-                    </>
-                  }
-                />
-                {terms !== null ? (
-                  <>
-                    <Row
-                      k="Until the exercise deadline"
-                      v={nowSeconds === 0 ? "—" : fmtCountdown(terms.exerciseTs, nowSeconds)}
-                    />
-                    <Row k="Until expiry" v={nowSeconds === 0 ? "—" : fmtCountdown(terms.expiryTs, nowSeconds)} />
-                  </>
-                ) : (
-                  <CycleTapeInline snapshot={v} />
-                )}
-              </Rows>
-              {fillableUnread ? (
-                <p data-slot="this-week-fill-note" className="mt-2 text-[12.5px] leading-[1.55] text-ink-3">
-                  Seaport&apos;s fill count for this order could not be read, and the order feed did not give one, so
-                  contracts left to buy and the two figures after it are not shown.{" "}
-                  <Link href="/vault/nvda/cycle" className="link">The cycle page</Link> has the order itself.
-                </p>
-              ) : null}
             </div>
-
-            <div className="min-w-0 max-lg:border-t max-lg:border-line max-lg:pt-6">
-              <h3 className="mb-1.5 text-base font-bold tracking-[-0.01em]">
-                Last week realized
-              </h3>
-              {last ? (
-                <Rows>
-                  <Row
-                    k="Cycle"
-                    v={
-                      <>
-                        #{last.cycle} · {fmtUtcDate(last.closedAt)}
-                      </>
-                    }
-                  />
-                  <Row
-                    k={<>Net premium per {SHARE_TICKER}</>}
-                    v={lastPerShare === undefined ? "—" : fmtUsdg(lastPerShare, 6)}
-                  />
-                  <Row k="Net premium to depositors" v={fmtUsdg(last.premiumNetUsdg)} />
-                  <Row k="Net premium / collateral at harvest" v={fmtRealizedWeek(last.premiumNetUsdg, lastTvl)} />
-                  {lastWasAssigned ? (
-                    <Row
-                      title="USDG received for collateral taken at the strike. Returned principal, not premium."
-                      k="Strike proceeds (assignment)"
-                      v={fmtUsdg(last.strikeProceedsUsdg)}
-                    />
-                  ) : null}
-                  <Row
-                    k="Result"
-                    mono={false}
-                    v={
-                      last.stranded && last.strandRecovered !== true
-                        ? "closed, claim stranded"
-                        : last.stranded
-                          ? `claim stranded, recovered${(last.contractsAssigned ?? 0n) > 0n ? `, assigned ${(last.contractsAssigned ?? 0n).toString()}` : ""}`
-                          : last.filled
-                          ? (last.contractsAssigned ?? 0n) > 0n
-                            ? `assigned ${(last.contractsAssigned ?? 0n).toString()}`
-                            : "filled, expired worthless"
-                          : "unfilled, 0"
-                    }
-                  />
-                </Rows>
-              ) : (
-                <p className="rounded-md bg-surface-2 px-4 py-3.5 text-[14.5px] leading-[1.55] text-ink-2">
-                  {/* Do not blame the history service for a missing vault address: with no vault
-                      configured nothing was ever queried. */}
-                  {!VAULT
-                    ? "Set NEXT_PUBLIC_VAULT to load this vault's weekly results."
-                    : isLoading
-                      ? "Loading…"
-                      : source === "none"
-                        ? "No closed week yet, and history is unavailable right now."
-                        : "No week has closed yet. The first result publishes after the first expiry."}
-                </p>
-              )}
-              {historyError ? (
-                <div className="mt-2 text-[12.5px] text-ink-3">
-                  {historyError}
-                </div>
-              ) : null}
+            <dl className="grid grid-cols-2 gap-3 sm:grid-cols-4">
+              <Figure label="Share token" value={SHARE_TICKER} />
+              <Figure label="You claim" value="USDG" tone="usdg" />
+              <Figure label="Protocol fee" value="5% of premium" />
+              <Figure label="Launch cap" value="20" unit={MARKET} />
+            </dl>
+            <div className="flex flex-wrap gap-3 border-t border-line pt-5">
+              <Button href={VAULT_HREF}>Deposit, withdraw, claim</Button>
+              <Button variant="ghost" href="/vault/nvda/cycle">
+                This week&apos;s call
+              </Button>
             </div>
-          </div>
-
-          <div className="flex flex-wrap gap-3 border-t border-line pt-6">
-            <Button href="/vault/nvda" className="max-sm:w-full">
-              Deposit or withdraw
-            </Button>
-            <Button variant="ghost" href="/vault/nvda/cycle" className="max-sm:w-full">
-              This week&apos;s call · buy it
-            </Button>
-            <Button variant="ghost" href="/activity" className="max-sm:w-full">
-              Every week, including the zeros
-            </Button>
-          </div>
-        </Card>
-
-        <div className="grid grid-cols-1 gap-4 sm:gap-5 lg:grid-cols-3">
-          <Card pad="sm" className="grid grid-cols-[26px_minmax(0,1fr)] content-start gap-x-2 gap-y-2">
-            <WarnIcon size={18} className="mt-[5px] text-warn" />
-            <CardTitle className="text-[17px]!">Premium, or nothing</CardTitle>
-            <p className="col-span-2 text-[14.5px] sm:col-span-1 sm:col-start-2 leading-[1.6] text-ink-2">
-              The vault lists a call on <Link href="/vault/nvda/cycle" className="link">its own fill page</Link>, the only venue. If no
-              buyer takes it, the week earns zero. That is the most likely outcome on a thin book and it is published
-              as a row like any other.
-            </p>
           </Card>
-          <Card pad="sm" className="grid grid-cols-[26px_minmax(0,1fr)] content-start gap-x-2 gap-y-2">
-            <WarnIcon size={18} className="mt-[5px] text-warn" />
-            <CardTitle className="text-[17px]!">Assignment is real</CardTitle>
-            <p className="col-span-2 text-[14.5px] sm:col-span-1 sm:col-start-2 leading-[1.6] text-ink-2">
-              If a call the vault sold is exercised, collateral leaves at the strike and comes back as USDG. Upside
-              above the strike is gone for that week. v1 does not buy the token back.
+
+          <Card className="grid content-start gap-4 border-dashed">
+            <Chip>Next</Chip>
+            <h2 className="text-[22px] font-extrabold tracking-[-0.02em] text-ink-2">More stocks</h2>
+            <p className="text-[15.5px] text-ink-2">
+              Additional Stock Token vaults, one underlying each, after {MARKET} is live and the audit report is
+              public. We will not name the next ticker until that vault is being built.
             </p>
-          </Card>
-          <Card pad="sm" className="grid grid-cols-[26px_minmax(0,1fr)] content-start gap-x-2 gap-y-2">
-            <WarnIcon size={18} className="mt-[5px] text-warn" />
-            <CardTitle className="text-[17px]!">Stock Tokens, not shares</CardTitle>
-            <p className="col-span-2 text-[14.5px] sm:col-span-1 sm:col-start-2 leading-[1.6] text-ink-2">
-              The collateral is a debt security issued by Robinhood Assets (Jersey) Limited. No vote,
-              no claim on the company, and the issuer can freeze transfers.{" "}
-              <Link href="/legal" className="link">Read the legal page.</Link>
+            <p className="text-[13.5px] text-ink-3">
+              Same design: deposit the token, weekly covered calls, claim USDG. No basket, no points.
             </p>
           </Card>
         </div>
 
-        {VAULT ? (
-          <p className="text-[12.5px] text-ink-3">
-            Vault{" "}
-            <ExternalLink href={addressUrl(VAULT)} className="link num [overflow-wrap:anywhere]">
-              {VAULT}
-            </ExternalLink>
-            {source === "chain" ? " · history rebuilt from vault logs" : source === "indexer" ? " · history from the indexer" : ""}
-            {" · unaudited"}
-          </p>
-        ) : null}
+        <div>
+          <SectionHead
+            id="roadmap-h"
+            eyebrow="Roadmap"
+            title="Where Stonkhouse is going."
+            intro="Product steps, not a return. Nothing here is a date, a ticker we have not started, or a figure for a week that has not closed."
+          />
+          <ol className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-4">
+            {ROADMAP.map((step) => (
+              <li
+                key={step.title}
+                className={
+                  step.current
+                    ? "rounded-lg border border-accent/30 bg-accent-soft p-5"
+                    : "rounded-lg border border-line bg-surface p-5"
+                }
+              >
+                <p className="text-[12.5px] font-bold uppercase tracking-[0.1em] text-accent-text">{step.when}</p>
+                <h3 className="mt-3 text-[17px] font-bold tracking-[-0.015em]">{step.title}</h3>
+                <p className="mt-2 text-[14.5px] text-ink-2">{step.body}</p>
+              </li>
+            ))}
+          </ol>
+        </div>
+
+        <p className="text-[13.5px] text-ink-3">
+          How a week runs, the policy limits and the risks are on{" "}
+          <Link href="/docs" className="link">
+            Docs
+          </Link>{" "}
+          and on{" "}
+          <ExternalLink href={`${SITE_URL}/how-it-works`} className="link">
+            stonkhouse.fun
+          </ExternalLink>
+          .
+        </p>
       </div>
     </>
   );

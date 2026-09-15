@@ -5,6 +5,7 @@ import { useAccount } from "wagmi";
 
 import { CycleTape } from "@/components/CycleTape";
 import { DepositForm } from "@/components/DepositForm";
+import { VaultOverview } from "@/components/VaultOverview";
 import { GuardBadges, VaultPhaseBadge } from "@/components/PhaseBadge";
 import { PositionSplit } from "@/components/PositionSplit";
 import { RedeemQueue } from "@/components/RedeemQueue";
@@ -58,7 +59,7 @@ export default function VaultPage() {
   return (
     <>
       <PageHead
-        eyebrow={<>Vault · {MARKET}</>}
+        eyebrow={<>Vault · {MARKET} · Beta</>}
         title={
           <>
             {SHARE_TICKER} — deposit, withdraw, claim
@@ -109,6 +110,8 @@ export default function VaultPage() {
         ) : null}
 
         <StrandedBanner snapshot={v} position={position} onDone={refresh} />
+
+        <VaultOverview />
 
         <Card>
           <CardHead>

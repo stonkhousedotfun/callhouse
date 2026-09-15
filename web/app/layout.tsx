@@ -60,13 +60,13 @@ export const metadata: Metadata = {
   metadataBase: new URL(APP_URL),
   title: "Stonkhouse — pooled covered calls on Robinhood Chain",
   description:
-    "Deposit one tokenised stock, receive vault shares. Each week the vault sells one call against it and pays depositors whatever premium actually fills.",
+    "Pooled covered calls on tokenised stocks. The first vault is NVDA; more stocks follow. Each week the vault lists calls and writes them only when a buyer fills. Beta, pending audit.",
   // Per-page canonicals override this where a route sets one; the default is the app root.
   alternates: { canonical: "/" },
   openGraph: {
     title: "Stonkhouse — pooled covered calls on Robinhood Chain",
     description:
-      "Deposit one tokenised stock, receive vault shares. Each week the vault sells one call against it and pays depositors whatever premium actually fills.",
+      "Pooled covered calls on tokenised stocks. The first vault is NVDA; more stocks follow. Each week the vault lists calls and writes them only when a buyer fills. Beta, pending audit.",
     url: APP_URL,
     siteName: "Stonkhouse",
     type: "website",

@@ -108,9 +108,9 @@ export default function DocsPage() {
             <Step>
               <strong>The option type.</strong> The keeper creates it on the clearinghouse with{" "}
               <code>newOptionType</code> (permissionless): {MARKET} in, USDG out, one token per contract, an exercise time
-              at the NYSE close on the cycle&apos;s Friday (16:00 Eastern, which is 20:00 UTC in daylight time and 21:00
+              at the NYSE close on the cycle&apos;s Friday (4:00pm New York, which is 8:00pm UTC in daylight time and 9:00pm
               UTC from November; the Thursday before a Friday market holiday) and an expiry 24 hours later. The cycle page
-              prints those two instants from the chain, in UTC and on the Eastern clock.
+              prints those two instants from the chain, in UTC and on the New York clock.
             </Step>
             <Step>
               <strong>Arm.</strong> <code>rollOpen(optionId)</code> reads the type back from the clearinghouse and

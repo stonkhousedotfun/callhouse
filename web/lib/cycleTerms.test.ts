@@ -84,11 +84,11 @@ describe("cycleTerms: an armed week", () => {
     expect(t.strikeAboveSpotUsdg).toBe(9_654_322n);
     expect(t.strikeAboveSpotFmt).toBe("9.654322");
     expect(t.exerciseTs).toBe(SEP_EXERCISE);
-    expect(t.exerciseUtc).toBe("2026-09-18 20:00 UTC");
-    expect(t.exerciseEastern).toBe("2026-09-18 16:00 EDT");
+    expect(t.exerciseUtc).toBe("Fri 18 Sep, 8:00pm UTC");
+    expect(t.exerciseEastern).toBe("Fri 18 Sep, 4:00pm EDT");
     expect(t.expiryTs).toBe(SEP_EXPIRY);
-    expect(t.expiryUtc).toBe("2026-09-19 20:00 UTC");
-    expect(t.expiryEastern).toBe("2026-09-19 16:00 EDT");
+    expect(t.expiryUtc).toBe("Sat 19 Sep, 8:00pm UTC");
+    expect(t.expiryEastern).toBe("Sat 19 Sep, 4:00pm EDT");
     expect(t.contractsSold).toBe(6n);
     expect(t.contractsSoldFmt).toBe("6");
     expect(t.fillableContracts).toBe(17n);
@@ -111,7 +111,7 @@ describe("cycleTerms: an armed week", () => {
     expect(t.strikeAboveSpotUsdg).toBeUndefined();
     expect(t.strikeAboveSpotFmt).toBe("—");
     expect(t.strikeFmt).toBe("222.00");
-    expect(t.exerciseEastern).toBe("2026-09-18 16:00 EDT");
+    expect(t.exerciseEastern).toBe("Fri 18 Sep, 4:00pm EDT");
     expect(t.orderGrossIfAllFill6).toBe(17n * 414_137n);
   });
 
@@ -128,16 +128,16 @@ describe("cycleTerms: an armed week", () => {
   it("deadlines across the end of daylight time: the Eastern hour holds, the UTC hour moves", () => {
     // Friday 2026-10-30 close, still EDT (daylight time ends Sunday 2026-11-01).
     const before = cycleTerms(armed({ cycleExerciseTs: 1793390400, cycleExpiryTs: 1793476800 }))!;
-    expect(before.exerciseUtc).toBe("2026-10-30 20:00 UTC");
-    expect(before.exerciseEastern).toBe("2026-10-30 16:00 EDT");
-    expect(before.expiryUtc).toBe("2026-10-31 20:00 UTC");
-    expect(before.expiryEastern).toBe("2026-10-31 16:00 EDT");
+    expect(before.exerciseUtc).toBe("Fri 30 Oct, 8:00pm UTC");
+    expect(before.exerciseEastern).toBe("Fri 30 Oct, 4:00pm EDT");
+    expect(before.expiryUtc).toBe("Sat 31 Oct, 8:00pm UTC");
+    expect(before.expiryEastern).toBe("Sat 31 Oct, 4:00pm EDT");
     // Friday 2026-11-06 close, EST.
     const after = cycleTerms(armed({ cycleExerciseTs: 1793998800, cycleExpiryTs: 1794085200 }))!;
-    expect(after.exerciseUtc).toBe("2026-11-06 21:00 UTC");
-    expect(after.exerciseEastern).toBe("2026-11-06 16:00 EST");
-    expect(after.expiryUtc).toBe("2026-11-07 21:00 UTC");
-    expect(after.expiryEastern).toBe("2026-11-07 16:00 EST");
+    expect(after.exerciseUtc).toBe("Fri 6 Nov, 9:00pm UTC");
+    expect(after.exerciseEastern).toBe("Fri 6 Nov, 4:00pm EST");
+    expect(after.expiryUtc).toBe("Sat 7 Nov, 9:00pm UTC");
+    expect(after.expiryEastern).toBe("Sat 7 Nov, 4:00pm EST");
   });
 });
 
@@ -307,8 +307,8 @@ describe("keeperPricingFigures: the keeper's documented record", () => {
     expect(f.expiryDate).toBe("2026-09-25");
     // Cboe's file timestamp is UTC, its last trade time the New York wall clock (measured,
     // keeper/README.md): both are converted, not left as two unzoned strings.
-    expect(f.chainTime).toEqual({ raw: "2026-09-15 05:57:42", ts: CHAIN_TS, utc: "2026-09-15 05:57 UTC", eastern: "2026-09-15 01:57 EDT" });
-    expect(f.lastTradeTime).toEqual({ raw: "2026-09-14T15:59:59", ts: LAST_TRADE_TS, utc: "2026-09-14 19:59 UTC", eastern: "2026-09-14 15:59 EDT" });
+    expect(f.chainTime).toEqual({ raw: "2026-09-15 05:57:42", ts: CHAIN_TS, utc: "Tue 15 Sep, 5:57am UTC", eastern: "Tue 15 Sep, 1:57am EDT" });
+    expect(f.lastTradeTime).toEqual({ raw: "2026-09-14T15:59:59", ts: LAST_TRADE_TS, utc: "Mon 14 Sep, 7:59pm UTC", eastern: "Mon 14 Sep, 3:59pm EDT" });
     // No figure is a percent string.
     for (const value of Object.values(f)) if (typeof value === "string") expect(value).not.toMatch(/%/);
   });
@@ -322,14 +322,14 @@ describe("keeperPricingFigures: the keeper's documented record", () => {
       const f = parsed({ ...README_RECORD, chainTimestamp, lastTradeTime });
       expect(f.chainTime?.ts).toBe(CHAIN_TS);
       expect(f.lastTradeTime?.ts).toBe(LAST_TRADE_TS);
-      expect(f.lastTradeTime?.eastern).toBe("2026-09-14 15:59 EDT");
+      expect(f.lastTradeTime?.eastern).toBe("Mon 14 Sep, 3:59pm EDT");
     }
   });
 
   it("a New York last trade under standard time converts with the EST offset", () => {
     const f = parsed({ ...README_RECORD, lastTradeTime: "2026-11-06T15:59:59", chainTimestamp: "2026-11-07 05:57:42" });
-    expect(f.lastTradeTime?.utc).toBe("2026-11-06 20:59 UTC");
-    expect(f.lastTradeTime?.eastern).toBe("2026-11-06 15:59 EST");
+    expect(f.lastTradeTime?.utc).toBe("Fri 6 Nov, 8:59pm UTC");
+    expect(f.lastTradeTime?.eastern).toBe("Fri 6 Nov, 3:59pm EST");
   });
 
   it("a zone-less time from another source is kept as reported, never converted on a guess", () => {

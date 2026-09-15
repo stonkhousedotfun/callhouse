@@ -4,7 +4,7 @@
  * The app nav's link list: the whole client island in the chrome besides the wallet button.
  * "use client" buys exactly one thing, usePathname, for aria-current on the active link.
  *
- * The link order is the depositor's journey: land on the vault, deposit, watch the cycle, audit
+ * The link order is the depositor's journey: land on home, open the vault, watch the cycle, audit
  * the tape, then read the docs and the legal text.
  *
  * One link leaves the app: stonkhouse.fun, the marketing site. It is LAST, it is deliberately
@@ -23,8 +23,8 @@ import { cn } from "@/lib/cn";
 import { SITE_URL } from "@/lib/site";
 
 const LINKS = [
-  { href: "/", label: "Vault" },
-  { href: "/vault/nvda", label: "Deposit" },
+  { href: "/", label: "Home" },
+  { href: "/vault/nvda", label: "Vault" },
   { href: "/vault/nvda/cycle", label: "Cycle" },
   { href: "/activity", label: "Activity" },
   { href: "/docs", label: "Docs" },

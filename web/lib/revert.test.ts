@@ -58,7 +58,7 @@ describe("decodeRevertData", () => {
     expect(decodeRevertData(vault("NotStranded"))!.text).toBe("No claim is stranded, so there is nothing to retry.");
     // 1_789_000_000 is 2026-09-10T00:26:40Z, 20:26 on the 9th in New York (EDT, UTC−4): the
     // sentence carries the close on both clocks, as every other deadline on the site does.
-    expect(decodeRevertData(vault("WriteWindowClosed", [1_789_000_000]))!.text).toContain("2026-09-10 00:26 UTC · 2026-09-09 20:26 EDT");
+    expect(decodeRevertData(vault("WriteWindowClosed", [1_789_000_000]))!.text).toContain("Thu 10 Sep, 12:26am UTC · Wed 9 Sep, 8:26pm EDT");
     expect(decodeRevertData(vault("UsdgLegBlocked", [12_000000n]))!.text).toContain("USDG stays owed");
   });
 

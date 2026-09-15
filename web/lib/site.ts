@@ -31,6 +31,16 @@ export const DOCS_URL = clean(process.env.NEXT_PUBLIC_DOCS_URL, "https://docs.st
 export const APP_URL = clean(process.env.NEXT_PUBLIC_APP_URL, "https://app.stonkhouse.fun");
 
 /**
+ * Public product status. Same strings as leekzor/callhouse-site `lib/site.ts`, so the two domains
+ * cannot disagree on whether we are in beta or whether an audit has landed.
+ */
+export const STATUS = {
+  phase: "Beta",
+  audit: "Pending audit",
+  auditLine: "The Stonkhouse contracts have not been audited. An external audit is pending.",
+} as const;
+
+/**
  * The two legal documents. They live on the marketing site ONLY and are linked from here, not
  * duplicated: this domain is noindex, the disclosures get one address, and the operator facts
  * they render (entity, governing law, contact) are build-time constants of the landing

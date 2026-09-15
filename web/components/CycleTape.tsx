@@ -85,7 +85,7 @@ export function CycleTape({ snapshot }: { snapshot: VaultSnapshot }) {
         </div>
         <div className="mt-3 max-w-[60em] text-[12.5px] leading-[1.55] text-ink-3">
           The sale window closes at the option&apos;s exercise time: the last moment a fill can write a call. The keeper
-          creates each week&apos;s type to open its exercise window at the NYSE close (16:00 Eastern, so the UTC hour
+          creates each week&apos;s type to open its exercise window at the NYSE close (4:00pm New York, so the UTC hour
           moves with daylight time) and to expire a day later; the times shown are the chain&apos;s, not a
           calendar&apos;s. Between exercise and expiry the calls sold are exercisable, so assignment happens in that
           window. After expiry the keeper reclaims, harvests and settles the queue.
@@ -95,7 +95,7 @@ export function CycleTape({ snapshot }: { snapshot: VaultSnapshot }) {
   );
 }
 
-/** The same two deadlines, compressed to one line for the home card. */
+/** The same two deadlines, compressed to one line for the vault overview. */
 export function CycleTapeInline({ snapshot }: { snapshot: VaultSnapshot }) {
   const now = useNow();
   const exerciseTs = snapshot.cycleExerciseTs;

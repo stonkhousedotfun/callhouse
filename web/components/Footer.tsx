@@ -17,7 +17,7 @@ import Link from "next/link";
 import { Container, ExternalLink } from "@/components/ui";
 import { EXPLORER_URL, addressUrl } from "@/lib/chain";
 import { MARKET, SHARE_TICKER, VAULT } from "@/lib/contracts";
-import { DOCS_URL, PRIVACY_URL, SITE_URL, TERMS_URL } from "@/lib/site";
+import { DOCS_URL, PRIVACY_URL, SITE_URL, STATUS, TERMS_URL } from "@/lib/site";
 
 const LINK = "rounded-sm text-ink-2 no-underline transition-colors duration-150 hover:text-ink";
 
@@ -81,8 +81,8 @@ export function Footer() {
             </ul>
           </nav>
           <p className="max-w-[70em]">
-            Not affiliated with Robinhood Markets, Robinhood Assets (Jersey) Limited or Valorem. Unaudited. Nothing here is
-            financial advice or an offer of securities.
+            Not affiliated with Robinhood Markets, Robinhood Assets (Jersey) Limited or Valorem. {STATUS.phase}.{" "}
+            {STATUS.auditLine} Nothing here is financial advice or an offer of securities.
           </p>
         </div>
       </Container>

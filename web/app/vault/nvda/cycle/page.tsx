@@ -245,7 +245,7 @@ export default function CyclePage() {
                       }
                     />
                     <Row
-                      title="The option type's exercise and expiry timestamps, snapshotted by the vault at rollOpen. The keeper targets the NYSE close, 16:00 Eastern, and 24 hours later; the figures are the chain's."
+                      title="The option type's exercise and expiry timestamps, snapshotted by the vault at rollOpen. The keeper targets the NYSE close, 4:00pm New York, and 24 hours later; the figures are the chain's."
                       k="Sale window closes"
                       className={STACK_540}
                       v={

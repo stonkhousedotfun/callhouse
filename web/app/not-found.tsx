@@ -20,8 +20,8 @@ export const metadata: Metadata = {
 };
 
 const ROUTES = [
-  { href: "/", label: "Vault", what: "The vault at a glance: this week, and last week realized" },
-  { href: "/vault/nvda", label: "Deposit", what: "Deposit, withdraw, and claim USDG" },
+  { href: "/", label: "Home", what: "What Stonkhouse is: NVDA first, more stocks later" },
+  { href: "/vault/nvda", label: "Vault", what: "Deposit, withdraw, claim, and this week's call" },
   { href: "/vault/nvda/cycle", label: "Cycle", what: "This week's call, and where to buy it" },
   { href: "/activity", label: "Activity", what: "Every week, including the zeros" },
   { href: "/docs", label: "Docs", what: "How the weekly cycle works, and what can go wrong" },
@@ -41,14 +41,13 @@ export default function NotFound() {
           There is nothing <span className="text-accent-text">at this address.</span>
         </h1>
         <p className="mt-5 max-w-[34em] text-[17.5px] leading-[1.6] text-ink-2 sm:text-[18.5px]">
-          The link is old or mistyped. This app has six pages: the vault, deposits and withdrawals,
-          this week&apos;s call, the history of every week, the docs and the legal text. Pick
-          one, or go back to the vault.
+          The link is old or mistyped. This app has a home, the NVDA vault, this week&apos;s call, the
+          history of every week, the docs and the legal text. Pick one, or go back home.
         </p>
         <div className="mt-7 flex flex-wrap gap-2.5 sm:gap-3">
-          <Button href="/">Back to the vault</Button>
+          <Button href="/">Back to home</Button>
           <Button variant="ghost" href="/vault/nvda">
-            Deposit
+            Vault
           </Button>
           <Button variant="ghost" href="/activity">
             Activity

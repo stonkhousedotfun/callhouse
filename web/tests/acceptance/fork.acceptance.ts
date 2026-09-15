@@ -1443,19 +1443,19 @@ async function main(): Promise<void> {
       await expectAbsent("pricing: target delta row", pricing.locator(SLOT.k, { hasText: /^Target delta$/ }));
       await expectAbsent("pricing: mismatch notice", pricing.locator('[data-slot="pricing-mismatch"]'));
 
-      await page.goto(`${web.url}/`);
-      await expectText("home: This week's strike", stat(page.locator("main"), /^This week's strike$/).value, expected.strike);
-      await expectText("home: strike expiry (Eastern)", page.locator('[data-slot="strike-expiry"]'), `${CYCLE_TERMS_LABELS.expiry} ${expected.expiryEastern}`);
+      await page.goto(`${web.url}/vault/nvda`);
+      await expectText("vault: This week's strike", stat(page.locator("main"), /^This week's strike$/).value, expected.strike);
+      await expectText("vault: strike expiry (Eastern)", page.locator('[data-slot="strike-expiry"]'), `${CYCLE_TERMS_LABELS.expiry} ${expected.expiryEastern}`);
       const thisWeek = page.locator('[data-slot="this-week"]');
-      await expectText("home this week: strike", rowValue(thisWeek, exactly(CYCLE_TERMS_LABELS.strike)), expected.strike);
-      await expectText("home this week: exercise deadline", rowValue(thisWeek, exactly(CYCLE_TERMS_LABELS.exercise)), expected.exercise);
-      await expectText("home this week: expiry", rowValue(thisWeek, exactly(CYCLE_TERMS_LABELS.expiry)), expected.expiry);
-      await expectText("home this week: price per contract", rowValue(thisWeek, exactly(CYCLE_TERMS_LABELS.unitPrice)), expected.unitPrice);
-      await expectText("home this week: contracts left to buy", rowValue(thisWeek, exactly(CYCLE_TERMS_LABELS.fillableContracts)), expected.left);
-      await expectText("home this week: order total", rowValue(thisWeek, exactly(CYCLE_TERMS_LABELS.orderGrossIfAllFill)), expected.gross);
-      await expectText("home this week: protocol fee on it", rowValue(thisWeek, exactly(CYCLE_TERMS_LABELS.orderFeeIfAllFill)), expected.fee);
-      // The count is Seaport's (read on the home page too), so the no-count note is not shown.
-      await expectAbsent("home this week: no-count note", thisWeek.locator('[data-slot="this-week-fill-note"]'));
+      await expectText("vault this week: strike", rowValue(thisWeek, exactly(CYCLE_TERMS_LABELS.strike)), expected.strike);
+      await expectText("vault this week: exercise deadline", rowValue(thisWeek, exactly(CYCLE_TERMS_LABELS.exercise)), expected.exercise);
+      await expectText("vault this week: expiry", rowValue(thisWeek, exactly(CYCLE_TERMS_LABELS.expiry)), expected.expiry);
+      await expectText("vault this week: price per contract", rowValue(thisWeek, exactly(CYCLE_TERMS_LABELS.unitPrice)), expected.unitPrice);
+      await expectText("vault this week: contracts left to buy", rowValue(thisWeek, exactly(CYCLE_TERMS_LABELS.fillableContracts)), expected.left);
+      await expectText("vault this week: order total", rowValue(thisWeek, exactly(CYCLE_TERMS_LABELS.orderGrossIfAllFill)), expected.gross);
+      await expectText("vault this week: protocol fee on it", rowValue(thisWeek, exactly(CYCLE_TERMS_LABELS.orderFeeIfAllFill)), expected.fee);
+      // The count is Seaport's (read on the vault page too), so the no-count note is not shown.
+      await expectAbsent("vault this week: no-count note", thisWeek.locator('[data-slot="this-week-fill-note"]'));
 
       Object.assign(record.amounts, {
         termsStrike: expected.strike,

@@ -275,54 +275,96 @@ export function scaleToContracts(scaled: bigint | undefined): bigint | undefined
  * "Friday 20:00". The keeper chooses the type; the vault records it; a wall clock knows neither.
  * ----------------------------------------------------------------------------------------- */
 
-export function fmtUtc(ts: number | bigint | undefined | null): string {
-  if (ts === undefined || ts === null) return "—";
+function pad2(n: number): string {
+  return String(n).padStart(2, "0");
+}
+
+/** 16:00 → "4:00pm". Minutes always shown. */
+function hour12(hour: number, minute: number): string {
+  const h = hour % 12 || 12;
+  return `${h}:${pad2(minute)}${hour < 12 ? "am" : "pm"}`;
+}
+
+type ClockBag = {
+  weekday: string;
+  day: string;
+  month: string;
+  year: string;
+  hour: number;
+  minute: number;
+  zone: string;
+};
+
+function clockBag(timeZone: string, date: Date): ClockBag {
+  const fmt = new Intl.DateTimeFormat("en-US", {
+    timeZone,
+    weekday: "short",
+    year: "numeric",
+    month: "short",
+    day: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+    hourCycle: "h23",
+    timeZoneName: "short",
+  });
+  const got: Partial<Record<Intl.DateTimeFormatPartTypes, string>> = {};
+  for (const part of fmt.formatToParts(date)) {
+    if (part.type !== "literal") got[part.type] = part.value;
+  }
+  const hourRaw = got.hour === "24" ? "0" : (got.hour ?? "0");
+  return {
+    weekday: got.weekday ?? "",
+    day: got.day ?? "",
+    month: got.month ?? "",
+    year: got.year ?? "",
+    hour: Number(hourRaw),
+    minute: Number(got.minute ?? "0"),
+    zone: got.timeZoneName ?? "",
+  };
+}
+
+function formatClock(ts: number, timeZone: string, zoneFallback: string): string {
+  const bag = clockBag(timeZone, new Date(ts * 1000));
+  const zone = bag.zone || zoneFallback;
+  return `${bag.weekday} ${bag.day} ${bag.month}, ${hour12(bag.hour, bag.minute)} ${zone}`;
+}
+
+function toSeconds(ts: number | bigint | undefined | null): number | undefined {
+  if (ts === undefined || ts === null) return undefined;
   const seconds = typeof ts === "bigint" ? Number(ts) : ts;
-  if (!Number.isFinite(seconds) || seconds <= 0) return "—";
-  const d = new Date(seconds * 1000);
-  const pad = (n: number) => String(n).padStart(2, "0");
-  return (
-    `${d.getUTCFullYear()}-${pad(d.getUTCMonth() + 1)}-${pad(d.getUTCDate())} ` +
-    `${pad(d.getUTCHours())}:${pad(d.getUTCMinutes())} UTC`
-  );
+  if (!Number.isFinite(seconds) || seconds <= 0) return undefined;
+  return seconds;
+}
+
+/** "Fri 18 Sep, 8:00pm UTC" */
+export function fmtUtc(ts: number | bigint | undefined | null): string {
+  const seconds = toSeconds(ts);
+  if (seconds === undefined) return "—";
+  return formatClock(seconds, "UTC", "UTC");
 }
 
 /**
  * The same instant in New York, the clock the keeper builds the week's option type against: the
- * exercise time is the NYSE close, 16:00 America/New_York (a Thursday before a Friday market
- * holiday), and expiry is 24 hours later. That is 20:00 UTC while daylight time holds and 21:00
+ * exercise time is the NYSE close, 4:00pm America/New_York (a Thursday before a Friday market
+ * holiday), and expiry is 24 hours later. That is 8:00pm UTC while daylight time holds and 9:00pm
  * UTC from November, which is why the UTC figure alone reads as if the close moved. Rendered
  * beside the UTC figure, never instead of it, and always with the zone name (EDT or EST) so the
  * offset in force is on screen. Display only: the timestamp itself is the chain's.
+ *
+ * "Fri 18 Sep, 4:00pm EDT"
  */
 export function fmtEastern(ts: number | bigint | undefined | null): string {
-  if (ts === undefined || ts === null) return "—";
-  const seconds = typeof ts === "bigint" ? Number(ts) : ts;
-  if (!Number.isFinite(seconds) || seconds <= 0) return "—";
-  const parts = new Intl.DateTimeFormat("en-US", {
-    timeZone: "America/New_York",
-    year: "numeric",
-    month: "2-digit",
-    day: "2-digit",
-    hour: "2-digit",
-    minute: "2-digit",
-    hour12: false,
-    timeZoneName: "short",
-  }).formatToParts(new Date(seconds * 1000));
-  const get = (type: Intl.DateTimeFormatPartTypes) => parts.find((p) => p.type === type)?.value ?? "";
-  // Intl renders midnight as "24" under hour12: false in some ICU builds; the chain's clock is
-  // 0..23 and so is this.
-  const hour = get("hour") === "24" ? "00" : get("hour");
-  return `${get("year")}-${get("month")}-${get("day")} ${hour}:${get("minute")} ${get("timeZoneName")}`;
+  const seconds = toSeconds(ts);
+  if (seconds === undefined) return "—";
+  return formatClock(seconds, "America/New_York", "ET");
 }
 
+/** "18 Sep 2026", UTC calendar date of the instant. */
 export function fmtUtcDate(ts: number | bigint | undefined | null): string {
-  if (ts === undefined || ts === null) return "—";
-  const seconds = typeof ts === "bigint" ? Number(ts) : ts;
-  if (!Number.isFinite(seconds) || seconds <= 0) return "—";
-  const d = new Date(seconds * 1000);
-  const pad = (n: number) => String(n).padStart(2, "0");
-  return `${d.getUTCFullYear()}-${pad(d.getUTCMonth() + 1)}-${pad(d.getUTCDate())}`;
+  const seconds = toSeconds(ts);
+  if (seconds === undefined) return "—";
+  const bag = clockBag("UTC", new Date(seconds * 1000));
+  return `${bag.day} ${bag.month} ${bag.year}`;
 }
 
 /** "2d 04h 11m 07s", or "elapsed" once the deadline is behind us. */

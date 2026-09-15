@@ -144,28 +144,28 @@ describe("canSettleQueue", () => {
 });
 
 describe("fmtEastern renders the chain's timestamp on the NYSE clock, beside the UTC figure", () => {
-  it("a September Friday close is 16:00 EDT = 20:00 UTC (cycle-assigned.json's exercise time)", () => {
-    expect(fmtUtc(1789761600)).toBe("2026-09-18 20:00 UTC");
-    expect(fmtEastern(1789761600)).toBe("2026-09-18 16:00 EDT");
+  it("a September Friday close is 4:00pm EDT = 8:00pm UTC (cycle-assigned.json's exercise time)", () => {
+    expect(fmtUtc(1789761600)).toBe("Fri 18 Sep, 8:00pm UTC");
+    expect(fmtEastern(1789761600)).toBe("Fri 18 Sep, 4:00pm EDT");
   });
 
-  it("a December Friday close is 16:00 EST = 21:00 UTC: the UTC hour moves, the Eastern one does not", () => {
+  it("a December Friday close is 4:00pm EST = 9:00pm UTC: the UTC hour moves, the Eastern one does not", () => {
     // 2026-12-18T21:00:00Z, the first NYSE Friday close after daylight time ends on 2026-11-01.
-    expect(fmtUtc(1797627600)).toBe("2026-12-18 21:00 UTC");
-    expect(fmtEastern(1797627600)).toBe("2026-12-18 16:00 EST");
+    expect(fmtUtc(1797627600)).toBe("Fri 18 Dec, 9:00pm UTC");
+    expect(fmtEastern(1797627600)).toBe("Fri 18 Dec, 4:00pm EST");
   });
 
   it("expiry a day later, and a midnight-UTC instant on the previous Eastern day", () => {
-    expect(fmtEastern(1789848000)).toBe("2026-09-19 16:00 EDT");
+    expect(fmtEastern(1789848000)).toBe("Sat 19 Sep, 4:00pm EDT");
     // 2026-09-10T00:26:40Z is still the evening of the 9th in New York.
-    expect(fmtUtc(1789000000)).toBe("2026-09-10 00:26 UTC");
-    expect(fmtEastern(1789000000)).toBe("2026-09-09 20:26 EDT");
+    expect(fmtUtc(1789000000)).toBe("Thu 10 Sep, 12:26am UTC");
+    expect(fmtEastern(1789000000)).toBe("Wed 9 Sep, 8:26pm EDT");
   });
 
   it("is a dash for nothing, zero and a bigint that is not a time", () => {
     expect(fmtEastern(undefined)).toBe("—");
     expect(fmtEastern(null)).toBe("—");
     expect(fmtEastern(0)).toBe("—");
-    expect(fmtEastern(1789761600n)).toBe("2026-09-18 16:00 EDT");
+    expect(fmtEastern(1789761600n)).toBe("Fri 18 Sep, 4:00pm EDT");
   });
 });
