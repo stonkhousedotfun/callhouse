@@ -152,9 +152,6 @@ describe("foldVaultLogs", () => {
     // actually distributed survives, and it is the post-deposit supply.
     expect(row.sharesAtHarvest).toBe(120n * WAD);
 
-    // Every row rebuilt from vault logs is a week the vault armed.
-    expect(row.wrote).toBe(true);
-
     expect(row.contracts).toBe(12n);
     expect(row.contractsAssigned).toBe(0n);
     expect(row.txOpen).toBe(TX_OPEN);
@@ -365,6 +362,8 @@ describe("foldVaultLogs", () => {
     expect(rows).toHaveLength(1);
     const row = rows[0]!;
     expect(row.stranded).toBe(true);
+    expect(row.strandGen).toBe(1);
+    expect(row.strandRecovered).toBe(true);
     expect(row.settled).toBe(true);
     expect(row.filled).toBe(true);
     expect(row.contracts).toBe(12n);
@@ -376,6 +375,24 @@ describe("foldVaultLogs", () => {
     expect(row.strikeProceedsUsdg).toBe(712_500000n);
     expect(row.harvestGrossUsdg).toBe(760_500000n);
     expect(row.creditedUsdg).toBe(758_100000n);
+
+    // Before the retry lands the same week is stranded and NOT recovered, with the premium alone.
+    const waiting = foldVaultLogs([
+      rollOpen,
+      listingApproved,
+      callsWritten(12n, TX_FILL_1, 150n),
+      claimStranded,
+      strandedClose,
+      distributed(45_600000n, 100n * WAD, TX_CLOSE, 200n),
+      harvest(48_000000n, TX_CLOSE, 200n),
+    ])[0]!;
+    expect(waiting.stranded).toBe(true);
+    expect(waiting.strandGen).toBe(1);
+    expect(waiting.strandRecovered).toBe(false);
+    expect(waiting.settled).toBe(true);
+    expect(waiting.strikeProceedsUsdg).toBe(0n);
+    expect(waiting.harvestGrossUsdg).toBe(48_000000n);
+    expect(waiting.premiumNetUsdg).toBe(45_600000n);
   });
 
   it("a week that never closed is open: no RollClose, no settled", () => {

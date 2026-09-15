@@ -42,9 +42,10 @@ export { componentsStruct, seaportOrderHash, type OrderComponentsStruct } from "
  *     and the two must agree. The keeper's own `orderHash` string must equal it, and the row the
  *     page receives carries that value;
  *   - the order is the vault's in every field a fill spends against: offerer AND zone are the
- *     vault, PARTIAL_RESTRICTED, one ERC-1155 offer of this cycle's option id, ONE USDG leg to the
- *     vault at the count and gross the vault recorded, the vault's conduit key, no zone hash, not
- *     past its end time (checkListingIsOurs, the same function the page runs on the row);
+ *     vault, PARTIAL_RESTRICTED, one ERC-1155 offer of this cycle's option id on the clearinghouse
+ *     the vault names (`vault.clear()`, read here), ONE USDG leg to the vault at the count and
+ *     gross the vault recorded, the vault's conduit key, no zone hash, not past its end time
+ *     (checkListingIsOurs, the same function the page runs on the row);
  *   - the vault's phase is Listed and Seaport does not report the order cancelled or sold out.
  *
  * The signature the keeper serves is NOT carried. The vault pre-validates the order on Seaport
@@ -180,6 +181,12 @@ export type VaultListingSlot = {
   optionId: bigint;
   /** `vault.conduitKey()`: zero at deploy, read rather than assumed. */
   conduitKey: Hex;
+  /**
+   * `vault.clear()`: the clearinghouse the vault was constructed with, a deploy-time choice. The
+   * offer item must be this contract's ERC-1155. Read rather than taken from the build's
+   * NEXT_PUBLIC_CLEARINGHOUSE, which is the fallback for a reader that does not supply it.
+   */
+  clear?: Address;
 };
 
 /** Chain reads the check needs. The route builds one from the app's server-side viem client;
@@ -354,7 +361,9 @@ export async function verifyKeeperOrders(
       {
         vault: config.vault,
         usdg: config.usdg,
-        clearinghouse: config.clearinghouse,
+        // The vault's own clearinghouse when the reader supplied it: a build whose compiled
+        // constant points at another Clear must not reject the vault's real listing.
+        clearinghouse: state.vault.clear ?? config.clearinghouse,
         seaport: config.seaport,
         listingHash: state.vault.listingHash,
         chainId: config.chainId,
@@ -737,7 +746,7 @@ export function viemKeeperChainReader(client: PublicClient, addresses: { vault: 
     (await client.multicall({ allowFailure: true, batchSize: 0, contracts: contracts as never })) as unknown as CallResult[];
   const ok = (r: CallResult | undefined): unknown => (r?.status === "success" ? r.result : undefined);
 
-  const SLOT = ["phase", "listingHash", "listingAmount", "listingGrossUsdg", "optionId", "conduitKey"] as const;
+  const SLOT = ["phase", "listingHash", "listingAmount", "listingGrossUsdg", "optionId", "conduitKey", "clear"] as const;
 
   return {
     async readState({ offerers, orderHashes }) {
@@ -748,7 +757,7 @@ export function viemKeeperChainReader(client: PublicClient, addresses: { vault: 
       ]);
       const slot = results.slice(0, SLOT.length);
       if (slot.some((r) => r.status !== "success")) throw new Error("vault listing slot unreadable");
-      const [phase, listingHash, listingAmount, listingGrossUsdg, optionId, conduitKey] = slot.map(ok);
+      const [phase, listingHash, listingAmount, listingGrossUsdg, optionId, conduitKey, clear] = slot.map(ok);
       const base = SLOT.length;
       return {
         vault: {
@@ -758,6 +767,7 @@ export function viemKeeperChainReader(client: PublicClient, addresses: { vault: 
           listingGrossUsdg: listingGrossUsdg as bigint,
           optionId: optionId as bigint,
           conduitKey: (conduitKey as Hex | undefined) ?? ZERO_CONDUIT_KEY,
+          clear: clear as Address,
         },
         counters: offerers.map((_, i) => ok(results[base + i]) as bigint | undefined),
         statuses: orderHashes.map((_, i) => {

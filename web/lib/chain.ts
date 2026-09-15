@@ -10,8 +10,9 @@ import { createPublicClient, defineChain, fallback, http, type PublicClient } fr
  * So the fallback transport is safe for the contract reads that make up 99% of this app, and
  * the log scan on /activity deliberately uses `archiveClient` (primary only) instead.
  *
- * Testnet 46630 is intentionally not defined here. It has no Valorem Clear, no Overcall
- * registry and no NVDA Stock Token, so there is nothing for this UI to render there.
+ * Testnet 46630 is intentionally not defined here. It has no NVDA Stock Token and no
+ * clearinghouse this vault can use (ops/addresses.json records what is there and why not), so
+ * there is nothing for this UI to render there.
  */
 export const CHAIN_ID = Number(process.env.NEXT_PUBLIC_CHAIN_ID ?? 4663);
 

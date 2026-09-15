@@ -10,7 +10,7 @@ import { fetchKeeperOrderBook } from "@/lib/api";
 import { addressUrl } from "@/lib/chain";
 import { CLEARINGHOUSE, MARKET, MAX_LISTINGS_PER_CYCLE, SEAPORT, VAULT } from "@/lib/contracts";
 import { feedNotice, listingNotice, shouldAskFeed, type CycleListingState, type Notice } from "@/lib/cycleNotices";
-import { fmtUsdg, fmtUtc, maxContracts, shortHash, unitPriceUsdg } from "@/lib/format";
+import { fmtEastern, fmtUsdg, fmtUtc, maxContracts, shortHash, unitPriceUsdg } from "@/lib/format";
 import { useCycleOption, useNow, useOrderStatus, useVaultSnapshot } from "@/lib/hooks";
 
 function NoticeBlock({ notice }: { notice: Notice }) {
@@ -87,6 +87,11 @@ export default function CyclePage() {
   const unitPrice = unitPriceUsdg(v.listingGrossUsdg, v.listingAmount);
   const cap = maxContracts(v.totalAssets, v.policy);
   const tupleMismatch = option?.agreesWithVault === false;
+  // The clearinghouse is a deploy-time choice recorded in the vault. The checks and the tuple read
+  // follow the vault's answer; a build whose compiled constant disagrees is a configuration fault
+  // worth saying out loud, because the docs page and the explorer links print the constant.
+  const clearinghouse = v.clear ?? CLEARINGHOUSE;
+  const clearMismatch = v.clear !== undefined && v.clear.toLowerCase() !== CLEARINGHOUSE.toLowerCase();
 
   return (
     <>
@@ -110,6 +115,15 @@ export default function CyclePage() {
           <strong>Chain reads are failing right now.</strong>
           The vault could not be read from the RPC, so the figures below are missing rather than zero. They fill in by
           themselves when the node answers again.
+        </div>
+      ) : null}
+
+      {clearMismatch ? (
+        <div className="notice" data-tone="bad">
+          <strong>This build names a different clearinghouse from the vault.</strong>
+          The vault was constructed with {v.clear}; NEXT_PUBLIC_CLEARINGHOUSE is {CLEARINGHOUSE}. Every check on this
+          page follows the vault&apos;s, so the order below is still checked correctly, but the build should be fixed
+          before anything else is read from it.
         </div>
       ) : null}
 
@@ -155,10 +169,16 @@ export default function CyclePage() {
                       : "—"}
                 </span>
               </div>
-              <div className="row">
-                <span className="k">Sale window closes · expiry</span>
+              <div className="row" title="The option type's exercise and expiry timestamps, snapshotted by the vault at rollOpen. The keeper targets the NYSE close, 16:00 Eastern, and 24 hours later; the figures are the chain's.">
+                <span className="k">Sale window closes</span>
                 <span className="v">
-                  {fmtUtc(v.cycleExerciseTs)} · {fmtUtc(v.cycleExpiryTs)}
+                  {fmtUtc(v.cycleExerciseTs)} · {fmtEastern(v.cycleExerciseTs)}
+                </span>
+              </div>
+              <div className="row">
+                <span className="k">Expiry</span>
+                <span className="v">
+                  {fmtUtc(v.cycleExpiryTs)} · {fmtEastern(v.cycleExpiryTs)}
                 </span>
               </div>
               <div className="row">
@@ -275,9 +295,9 @@ export default function CyclePage() {
         )}
 
         <p className="tiny faint" style={{ marginTop: 12, marginBottom: 0 }}>
-          Clearinghouse{" "}
-          <a href={addressUrl(CLEARINGHOUSE)} target="_blank" rel="noreferrer noopener">
-            {CLEARINGHOUSE}
+          Clearinghouse (the vault&apos;s <code>clear()</code>){" "}
+          <a href={addressUrl(clearinghouse)} target="_blank" rel="noreferrer noopener">
+            {clearinghouse}
           </a>{" "}
           · Seaport{" "}
           <a href={addressUrl(SEAPORT)} target="_blank" rel="noreferrer noopener">
@@ -352,14 +372,16 @@ export default function CyclePage() {
       <div className="card" style={{ marginTop: 16 }}>
         <div className="card-title">How a fill works here</div>
         <p className="small muted" style={{ marginTop: 8, marginBottom: 0 }}>
-          The order is a PARTIAL_RESTRICTED Seaport 1.6 order whose zone is the vault. When you fill k of N, Seaport
-          calls the vault before moving anything; the vault re-checks its gate at today&apos;s spot (the strike is
-          still above its floor, the premium clears its floor, the size fits its capacity, the window is open, the
-          oracle is live, writes are not halted) and writes exactly k contracts into Valorem inside your transaction.
-          Seaport then moves them to you and pulls k × the unit price in USDG to the vault, and the vault confirms
-          nothing stayed behind. So a fill can be refused after a rally, and this page simulates yours before the
-          button is live. The order is validated on chain, so the signature is empty; any Seaport 1.6 client can fill
-          it from the raw JSON on the card.
+          The order is a PARTIAL_RESTRICTED Seaport 1.6 order whose offerer and zone are both the vault, with one
+          payment leg (USDG, to the vault) and an empty signature. When you fill k of N, Seaport calls the vault
+          before moving anything; the vault re-checks its gate at today&apos;s spot (the strike is still above its
+          floor, the premium clears its floor, the size fits its capacity, the window is open, the oracle is live,
+          writes are not halted) and writes exactly k contracts into Valorem inside your transaction. Seaport then
+          moves them to you and pulls k × the unit price in USDG to the vault, and the vault confirms nothing stayed
+          behind. So a fill can be refused after a rally, and this page simulates yours before the button is live.
+          The order is validated on chain, so the signature is empty; any Seaport 1.6 client can fill it from the
+          raw JSON on the card with fulfillAdvancedOrder(numerator k, denominator N) after approving k × the unit
+          price of USDG to Seaport.
         </p>
       </div>
     </>

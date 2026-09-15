@@ -1,6 +1,6 @@
 "use client";
 
-import { fmtCountdown, fmtUtc, windowProgress } from "@/lib/format";
+import { fmtCountdown, fmtEastern, fmtUtc, windowProgress } from "@/lib/format";
 import { useNow, type VaultSnapshot } from "@/lib/hooks";
 
 /**
@@ -9,9 +9,12 @@ import { useNow, type VaultSnapshot } from "@/lib/hooks";
  * Every timestamp here comes from the vault's own snapshot of the option type it armed at
  * rollOpen: `cycleExerciseTs` (the end of the sale window, when the exercise window opens) and
  * `cycleExpiryTs`. Both were read from the clearinghouse's immutable tuple and are what the
- * vault's hooks enforce. NOTHING here is derived from "Friday 20:00 UTC": the keeper chooses the
- * type, the vault records it, and a hardcoded weekday would keep counting down to a deadline the
- * vault never had.
+ * vault's hooks enforce. NOTHING here is derived from a calendar: the keeper chooses the type,
+ * the vault records it, and a hardcoded weekday would keep counting down to a deadline the vault
+ * never had. The keeper's own rule is the NYSE close, 16:00 America/New_York on the cycle's
+ * Friday (Thursday before a Friday market holiday), with expiry 24 hours later; that is 20:00 UTC
+ * in daylight time and 21:00 UTC from November, so each deadline is printed in UTC AND on the
+ * Eastern clock (fmtEastern) to make the same instant readable both ways.
  *
  * Likewise the open/closed state is the vault's `phase` against its own clock, not a comparison
  * this component invents: a fill goes through only while Listed and before `cycleExerciseTs`
@@ -61,12 +64,12 @@ export function CycleTape({ snapshot }: { snapshot: VaultSnapshot }) {
         <div className="stat">
           <div className="stat-label">Sale window closes in</div>
           <div className="stat-value">{now === 0 || !armed ? "—" : fmtCountdown(exerciseTs, now)}</div>
-          <div className="stat-sub">{armed ? fmtUtc(exerciseTs) : "nothing armed"}</div>
+          <div className="stat-sub">{armed ? `${fmtUtc(exerciseTs)} · ${fmtEastern(exerciseTs)}` : "nothing armed"}</div>
         </div>
         <div className="stat">
           <div className="stat-label">Expiry in</div>
           <div className="stat-value">{now === 0 || !armed ? "—" : fmtCountdown(expiryTs, now)}</div>
-          <div className="stat-sub">{armed ? fmtUtc(expiryTs) : "nothing armed"}</div>
+          <div className="stat-sub">{armed ? `${fmtUtc(expiryTs)} · ${fmtEastern(expiryTs)}` : "nothing armed"}</div>
         </div>
       </div>
 
@@ -75,9 +78,11 @@ export function CycleTape({ snapshot }: { snapshot: VaultSnapshot }) {
           <div className="rail-fill" style={{ width: `${(progress * 100).toFixed(1)}%` }} />
         </div>
         <div className="tiny faint" style={{ marginTop: 6 }}>
-          The sale window closes at the option&apos;s exercise time: the last moment a fill can write a call. Between
-          then and expiry the calls sold are exercisable, so assignment happens in that window. After expiry the
-          keeper reclaims, harvests and settles the queue.
+          The sale window closes at the option&apos;s exercise time: the last moment a fill can write a call. The keeper
+          creates each week&apos;s type to open its exercise window at the NYSE close (16:00 Eastern, so the UTC hour
+          moves with daylight time) and to expire a day later; the times shown are the chain&apos;s, not a
+          calendar&apos;s. Between exercise and expiry the calls sold are exercisable, so assignment happens in that
+          window. After expiry the keeper reclaims, harvests and settles the queue.
         </div>
       </div>
     </div>

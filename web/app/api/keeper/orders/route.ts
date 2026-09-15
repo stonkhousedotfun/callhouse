@@ -11,13 +11,16 @@ import {
 } from "@/lib/keeperOrders";
 
 /**
- * The keeper fallback: the vault's live listing as the keeper serves it at GET /orders, checked
- * against the chain, for the cycle page to use when Overcall's book does not show it.
+ * The order feed: the vault's live listing as the keeper serves it at GET /orders, checked
+ * against the chain, for the cycle page to fill. This is THE venue. The vault's calls are listed
+ * nowhere else; the chain carries the authorised hash, size, gross and option id, and only the
+ * keeper that built the order has its salt, times and counter.
  *
  * WHERE IT READS FROM: `KEEPER_ORDERS_URL`, a RUNTIME server variable (not NEXT_PUBLIC_, never
  * inlined, never sent to a browser), read per request. On Railway it is the keeper's private
  * address, http://keeper.railway.internal:8787/orders. Unset, this route answers 503 with
- * `configured: false` and the page shows nothing about the fallback.
+ * `configured: false` and the cycle page says the feed is not wired: nothing can be bought
+ * through the page until it is.
  *
  * WHAT IT WILL NOT DO: read anything from the request. No query string, no body and no header
  * reaches the upstream call, so the route cannot be pointed at another host. Redirects are not
@@ -48,7 +51,7 @@ function chainReader(): KeeperChainReader {
   return reader;
 }
 
-const UNEXPECTED = "The fallback route could not check the keeper's orders.";
+const UNEXPECTED = "The order feed route could not check the keeper's orders.";
 
 // Keyed by the URL, so a changed KEEPER_ORDERS_URL never reuses an answer from the old one.
 const answer = shareWhileRunning(

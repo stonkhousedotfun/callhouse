@@ -112,9 +112,9 @@ export function foldVaultLogs(logs: LooseLog[]): ChainDraft[] {
   const ensure = (cycle: number): ChainDraft => {
     let row = rows.get(cycle);
     if (!row) {
-      // Every row here starts from one of the vault's own events, so the vault armed it.
-      // The weeks it sat out leave no vault log and are known only to the indexer.
-      row = { cycle, wrote: true, filled: false, settled: false };
+      // Every row here starts from one of the vault's own events. The vault numbers its own
+      // cycles, so a week the keeper sat out has no number and no row anywhere.
+      row = { cycle, filled: false, settled: false };
       rows.set(cycle, row);
     }
     return row;
@@ -201,13 +201,19 @@ export function foldVaultLogs(logs: LooseLog[]): ChainDraft[] {
       case "ClaimStranded": {
         const cycle = toNum(arg(log, "cycleNumber"));
         if (cycle === undefined) break;
-        ensure(cycle).stranded = true;
+        const row = ensure(cycle);
+        row.stranded = true;
+        row.strandGen = toNum(arg(log, "gen"));
+        row.strandRecovered = false;
         strandedCycle = cycle;
         break;
       }
       case "StrandedClaimRecovered": {
-        // The claim is home. The row stays marked stranded (it is history: the close did strand)
-        // and its recovery Harvest, in this same transaction, is accepted below.
+        // The claim is home. The row stays marked stranded (it is history: the close did strand),
+        // is marked recovered, and its recovery Harvest, in this same transaction, is accepted
+        // below. Generations resolve strictly in order and one claim strands at a time, so the
+        // recovered generation is the open stranded cycle's.
+        if (strandedCycle !== undefined) ensure(strandedCycle).strandRecovered = true;
         break;
       }
       case "RollClose": {
@@ -338,7 +344,15 @@ async function cyclesFromChain(): Promise<CycleRow[]> {
     ...row,
     openedAt: row.openBlock !== undefined ? timestamps.get(row.openBlock) : undefined,
     closedAt: row.closeBlock !== undefined ? timestamps.get(row.closeBlock) : undefined,
-    status: row.settled ? (row.stranded ? "stranded" : row.filled ? "filled" : "unfilled") : "open",
+    // The indexer's `stranded` status resolves to `assigned`/`closed` at recovery; the label here
+    // follows suit (the row's `stranded` and `strandRecovered` carry the history).
+    status: row.settled
+      ? row.stranded && row.strandRecovered !== true
+        ? "stranded"
+        : row.filled
+          ? "filled"
+          : "unfilled"
+      : "open",
   }));
 
   out.sort((a, b) => b.cycle - a.cycle);

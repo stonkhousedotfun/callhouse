@@ -229,9 +229,11 @@ export default function HomePage() {
                 <div className="row">
                   <span className="k">Result</span>
                   <span className="v">
-                    {last.stranded
+                    {last.stranded && last.strandRecovered !== true
                       ? "closed, claim stranded"
-                      : last.filled
+                      : last.stranded
+                        ? `claim stranded, recovered${(last.contractsAssigned ?? 0n) > 0n ? `, assigned ${(last.contractsAssigned ?? 0n).toString()}` : ""}`
+                        : last.filled
                         ? (last.contractsAssigned ?? 0n) > 0n
                           ? `assigned ${(last.contractsAssigned ?? 0n).toString()}`
                           : "filled, expired worthless"

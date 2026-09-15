@@ -1,5 +1,6 @@
 import { decodeErrorResult, type Abi, type Hex } from "viem";
 
+import { usdgErrorsAbi } from "./abi/erc20";
 import { seaportAbi } from "./abi/seaport";
 import { vaultAbi } from "./abi/vault";
 import { fmtUsdg, fmtUtc } from "./format";
@@ -15,14 +16,25 @@ import { fmtUsdg, fmtUtc } from "./format";
  * them is the honest thing, not a leak of internals; EXPLAINED translates the ones a depositor or
  * a buyer can actually hit, with the figures the error carries formatted in their own units.
  *
- * Seaport's own errors are decoded too (lib/abi/seaport.ts), so a fill simulation can tell "the
- * vault refused" from "Seaport refused" from "the buyer's USDG approval is short"
+ * Seaport's own errors are decoded too (lib/abi/seaport.ts), and so are USDG's four
+ * (lib/abi/erc20.ts usdgErrorsAbi), so a fill simulation can tell "the vault refused" from
+ * "Seaport refused" from "USDG would not move" from "the buyer's USDG approval is short"
  * (lib/fillPreflight.ts). Solidity's `Error(string)` and `Panic(uint256)` are named as such.
+ *
+ * THE SOURCE IS DECIDED BY SELECTOR, NOT BY WHICH ABI HAPPENS TO DECODE FIRST. viem's
+ * `decodeErrorResult` appends `Error(string)` and `Panic(uint256)` to every ABI it is given, so
+ * the first ABI in the list would claim a token's `Error("ERC20: insufficient allowance")` as a
+ * VAULT revert, and the fill page would then block a fill the vault had already accepted. The
+ * two Solidity selectors are matched first and attributed to `solidity`; only a selector that is
+ * neither is looked up in the vault's, Seaport's and USDG's ABIs, in that order. No vault or
+ * library error shares a selector with a Seaport or a USDG one (each name is unique across the
+ * three, and the vault raises only custom errors of its own), so the order between them cannot
+ * misattribute anything.
  *
  * DELIBERATELY ABSENT: React, a chain client. Pure over hex, so vitest covers it.
  */
 
-export type RevertSource = "vault" | "seaport" | "solidity" | "unknown";
+export type RevertSource = "vault" | "seaport" | "token" | "solidity" | "unknown";
 
 export type DecodedRevert = {
   source: RevertSource;
@@ -40,10 +52,14 @@ const SOLIDITY_ABI = [
   { type: "error", name: "Panic", inputs: [{ name: "code", type: "uint256" }] },
 ] as const;
 
+/** `Error(string)` and `Panic(uint256)`: the two selectors solc itself emits. */
+export const SOLIDITY_ERROR_SELECTOR: Hex = "0x08c379a0";
+export const SOLIDITY_PANIC_SELECTOR: Hex = "0x4e487b71";
+
 const SOURCES: ReadonlyArray<readonly [RevertSource, Abi]> = [
   ["vault", vaultAbi as unknown as Abi],
   ["seaport", seaportAbi as unknown as Abi],
-  ["solidity", SOLIDITY_ABI as unknown as Abi],
+  ["token", usdgErrorsAbi as unknown as Abi],
 ];
 
 const big = (v: unknown): bigint | undefined => (typeof v === "bigint" ? v : typeof v === "number" ? BigInt(v) : undefined);
@@ -67,6 +83,8 @@ export const EXPLAINED: Record<string, string | ((args: readonly unknown[]) => s
   ZeroAssets: "Enter an amount above zero.",
   ZeroShares: "Enter an amount above zero.",
   WrongPhase: "The vault is not in the phase this action needs right now.",
+  UsdgLegBlocked:
+    "The Stock Token leg is paid but the USDG leg could not move (USDG paused, or the vault or the receiver frozen). The USDG stays owed; collect it later, or to another receiver.",
   ERC20InsufficientAllowance: "Approve the vault to move your tokens first.",
   ERC20InsufficientBalance: "Not enough tokens in the wallet.",
   // The stranded claim.
@@ -113,6 +131,12 @@ export const EXPLAINED: Record<string, string | ((args: readonly unknown[]) => s
   BadReturnValueFromERC20OnTransfer: "Seaport: the token transfer did not return true.",
   ConsiderationNotMet: "Seaport: the payment leg was not fully covered.",
   NoContract: (a) => `Seaport: there is no contract at ${String(a[0])}.`,
+  // USDG (Paxos). The names are the token's own; see lib/abi/erc20.ts usdgErrorsAbi.
+  ContractPaused: "USDG is paused by its issuer, so no USDG can move: nothing can be bought or paid out until the pause is lifted.",
+  AddressFrozen:
+    "USDG's issuer has frozen an address in this transfer (the payer, the vault, or Seaport as the spender), so the USDG leg cannot move.",
+  InsufficientFunds: "Not enough USDG in the wallet for this fill.",
+  InsufficientAllowance: "USDG is not yet approved to Seaport for this amount. The approve step fixes that.",
   // Solidity.
   Error: (a) => `Reverted: ${String(a[0])}`,
   Panic: (a) => `The contract hit an internal error (panic code ${String(a[0])}).`,
@@ -127,22 +151,32 @@ export function explainRevert(name: string, args: readonly unknown[] = []): stri
   return `Reverted: ${name}${detail}`;
 }
 
+function decodeWith(source: RevertSource, abi: Abi, data: Hex, selector: Hex): DecodedRevert | undefined {
+  try {
+    const decoded = decodeErrorResult({ abi, data });
+    const args = (decoded.args ?? []) as readonly unknown[];
+    return { source, name: decoded.errorName, args, selector, text: explainRevert(decoded.errorName, args) };
+  } catch {
+    return undefined;
+  }
+}
+
 /**
- * Decode raw revert data against the vault's merged ABI, then Seaport's, then Solidity's own two.
- * Undefined for no data at all; an unknown selector comes back named `undefined` with its
- * selector in the text, so a page never prints a bare hex blob and never pretends to know.
+ * Decode raw revert data: Solidity's own two by selector first, then the vault's merged ABI, then
+ * Seaport's, then USDG's. Undefined for no data at all; an unknown selector comes back named
+ * `undefined` with its selector in the text, so a page never prints a bare hex blob and never
+ * pretends to know.
  */
 export function decodeRevertData(data: Hex | undefined): DecodedRevert | undefined {
   if (data === undefined || !/^0x[0-9a-fA-F]*$/.test(data) || data.length < 10) return undefined;
   const selector = data.slice(0, 10).toLowerCase() as Hex;
+  if (selector === SOLIDITY_ERROR_SELECTOR || selector === SOLIDITY_PANIC_SELECTOR) {
+    return decodeWith("solidity", SOLIDITY_ABI as unknown as Abi, data, selector);
+  }
   for (const [source, abi] of SOURCES) {
-    try {
-      const decoded = decodeErrorResult({ abi, data });
-      const args = (decoded.args ?? []) as readonly unknown[];
-      return { source, name: decoded.errorName, args, selector, text: explainRevert(decoded.errorName, args) };
-    } catch {
-      /* not this ABI */
-    }
+    const decoded = decodeWith(source, abi, data, selector);
+    // viem's fallback to Error/Panic cannot fire here: those selectors were handled above.
+    if (decoded !== undefined) return decoded;
   }
   return { source: "unknown", args: [], selector, text: `Reverted with an unrecognised error (selector ${selector}).` };
 }

@@ -17,7 +17,7 @@ import path from "node:path";
  * node_modules it actually traced. The runner stage ships that and nothing else: no pnpm, no
  * source tree, no dev dependencies. Without it the image would have to carry the whole
  * workspace install to run `next start`, and this app is not statically exportable anyway —
- * app/api/overcall/listings is `force-dynamic` and runs on the server per request.
+ * app/api/keeper/orders is `force-dynamic` and runs on the server per request.
  *
  * `outputFileTracingRoot` is the one that surprises people. This is a pnpm workspace, so the
  * real dependency tree lives at the REPO ROOT (../node_modules/.pnpm), not in web/node_modules,

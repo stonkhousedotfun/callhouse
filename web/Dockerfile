@@ -18,8 +18,7 @@
 #     and build-base to compile a database driver into a web image would be absurd, so the
 #     install is filtered to this package and its dependencies instead. Every workspace
 #     member's package.json is still copied in — see the manifest block below for why.
-#   - No OVERCALL_API_BASE or KEEPER_ORDERS_URL build ARG. Both are server-side and read per
-#     request. See the runner.
+#   - No KEEPER_ORDERS_URL build ARG. It is server-side and read per request. See the runner.
 #   - No `next start`. The standalone output ships its own server; `next start` would need the
 #     full node_modules tree this image deliberately does not carry.
 #   - No HEALTHCHECK instruction. Railway owns the healthcheck (web/railway.json).
@@ -117,8 +116,8 @@ ARG NEXT_PUBLIC_ASSET=""
 ENV NEXT_PUBLIC_ASSET=$NEXT_PUBLIC_ASSET
 ARG NEXT_PUBLIC_USDG=""
 ENV NEXT_PUBLIC_USDG=$NEXT_PUBLIC_USDG
-ARG NEXT_PUBLIC_REGISTRY=""
-ENV NEXT_PUBLIC_REGISTRY=$NEXT_PUBLIC_REGISTRY
+# The clearinghouse is a deploy-time choice recorded in the vault (`clear()`); a vault on our own
+# Clear needs its address here. The app follows the vault's answer for every check regardless.
 ARG NEXT_PUBLIC_CLEARINGHOUSE=""
 ENV NEXT_PUBLIC_CLEARINGHOUSE=$NEXT_PUBLIC_CLEARINGHOUSE
 ARG NEXT_PUBLIC_SEAPORT=""
@@ -180,14 +179,12 @@ ENV HOSTNAME=0.0.0.0
 # injected value wins; this keeps `docker run` locally on a predictable port.
 ENV PORT=3000
 
-# OVERCALL_API_BASE is NOT set here and is NOT a build ARG. app/api/overcall/listings reads it
-# per request on the server, so it is a Railway RUNTIME variable: change it and restart, no
-# rebuild. It is left unset on purpose — route.ts already defaults to https://overcall.finance,
-# and a second copy of that URL is a second thing to get wrong.
-#
-# KEEPER_ORDERS_URL is the same kind of variable, read per request by app/api/keeper/orders. It
-# has no default at all: unset, the keeper fallback answers 503 "not configured" and the cycle page
-# shows none of it. On Railway it is http://keeper.railway.internal:8787/orders (ops/deploy.md §3).
+# KEEPER_ORDERS_URL is NOT set here and is NOT a build ARG. app/api/keeper/orders reads it per
+# request on the server, so it is a Railway RUNTIME variable: change it and restart, no rebuild.
+# It has no default: unset, the order feed answers 503 "not configured", the cycle page says the
+# feed is not wired, and nothing can be bought through the app. The fill page is the only venue
+# for the vault's calls, so a deployment without it sells nothing. On Railway it is
+# http://keeper.railway.internal:8787/orders (ops/deploy.md §3).
 
 RUN addgroup -g 1001 -S nodejs && adduser -u 1001 -S nextjs -G nodejs
 

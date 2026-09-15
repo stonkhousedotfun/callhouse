@@ -34,7 +34,8 @@ function sumKnown(rows: CycleRow[], figure: (row: CycleRow) => bigint | undefine
  * terminal one — emitted inside the keeper's rollClose — closes the week; the checkpoints still
  * move real money, so both kinds accumulate onto the same row. A close whose Valorem redeem
  * reverted strands the claim: the row is closed and marked, and the strike USDG arrives through a
- * later Harvest when the claim is retried.
+ * later Harvest when the claim is retried; the row then says "recovered" and keeps the mark,
+ * because the close did strand and that is history.
  *
  * Premium and strike proceeds are separate columns (W-21). On an assigned week the closing
  * harvest also sweeps the USDG the assigned collateral was sold for at the strike. That is
@@ -158,9 +159,11 @@ export default function ActivityPage() {
                   const sold = row.contractsSold ?? row.contracts ?? 0n;
                   const result = !row.settled
                     ? "open"
-                    : row.stranded
+                    : row.stranded && row.strandRecovered !== true
                       ? "closed, claim stranded"
-                      : !row.filled
+                      : row.stranded
+                        ? `claim stranded, recovered${assigned > 0n ? `, assigned ${assigned.toString()}` : ""}`
+                        : !row.filled
                         ? assigned > 0n
                           ? `unfilled, assigned ${assigned.toString()}`
                           : "unfilled, 0"
@@ -169,9 +172,11 @@ export default function ActivityPage() {
                           : "filled";
                   const resultLong = !row.settled
                     ? "the week is still running"
-                    : row.stranded
-                      ? "the week closed and its premium was harvested, but Valorem could not return the claim's collateral (a USDG pause or freeze, or a Stock Token blocklist); the strike USDG arrives when the claim is retried"
-                      : !row.filled
+                    : row.stranded && row.strandRecovered !== true
+                      ? `the week closed and its premium was harvested, but Valorem could not return the claim's collateral (a USDG pause or freeze, or a Stock Token blocklist); anyone can retry the claim, and its collateral and strike USDG arrive when the retry succeeds${row.strandGen !== undefined ? ` (strand generation ${row.strandGen})` : ""}`
+                      : row.stranded
+                        ? `the close could not redeem the claim, and a later retryStrandedClaim brought it home: the strike proceeds landed fee-free through the retry's harvest${row.strandGen !== undefined ? ` (strand generation ${row.strandGen})` : ""}`
+                        : !row.filled
                         ? assigned > 0n
                           ? `nobody bought the vault's call, so it earned no premium, but Valorem assigned ${assigned.toString()} of its contracts; that collateral left at the strike and came back as the strike proceeds`
                           : "nobody bought the call; nothing was written and the week earned nothing"

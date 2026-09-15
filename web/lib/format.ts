@@ -287,6 +287,35 @@ export function fmtUtc(ts: number | bigint | undefined | null): string {
   );
 }
 
+/**
+ * The same instant in New York, the clock the keeper builds the week's option type against: the
+ * exercise time is the NYSE close, 16:00 America/New_York (a Thursday before a Friday market
+ * holiday), and expiry is 24 hours later. That is 20:00 UTC while daylight time holds and 21:00
+ * UTC from November, which is why the UTC figure alone reads as if the close moved. Rendered
+ * beside the UTC figure, never instead of it, and always with the zone name (EDT or EST) so the
+ * offset in force is on screen. Display only: the timestamp itself is the chain's.
+ */
+export function fmtEastern(ts: number | bigint | undefined | null): string {
+  if (ts === undefined || ts === null) return "—";
+  const seconds = typeof ts === "bigint" ? Number(ts) : ts;
+  if (!Number.isFinite(seconds) || seconds <= 0) return "—";
+  const parts = new Intl.DateTimeFormat("en-US", {
+    timeZone: "America/New_York",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false,
+    timeZoneName: "short",
+  }).formatToParts(new Date(seconds * 1000));
+  const get = (type: Intl.DateTimeFormatPartTypes) => parts.find((p) => p.type === type)?.value ?? "";
+  // Intl renders midnight as "24" under hour12: false in some ICU builds; the chain's clock is
+  // 0..23 and so is this.
+  const hour = get("hour") === "24" ? "00" : get("hour");
+  return `${get("year")}-${get("month")}-${get("day")} ${hour}:${get("minute")} ${get("timeZoneName")}`;
+}
+
 export function fmtUtcDate(ts: number | bigint | undefined | null): string {
   if (ts === undefined || ts === null) return "—";
   const seconds = typeof ts === "bigint" ? Number(ts) : ts;

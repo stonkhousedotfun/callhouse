@@ -62,7 +62,9 @@ export default function DocsPage() {
         <li>
           <strong>The option type.</strong> The keeper creates it on the clearinghouse with{" "}
           <code>newOptionType</code> (permissionless): {MARKET} in, USDG out, one token per contract, an exercise time
-          at the week&apos;s close and an expiry a day later.
+          at the NYSE close on the cycle&apos;s Friday (16:00 Eastern, which is 20:00 UTC in daylight time and 21:00
+          UTC from November; the Thursday before a Friday market holiday) and an expiry 24 hours later. Every page
+          prints those two instants from the chain, in UTC and on the Eastern clock.
         </li>
         <li>
           <strong>Arm.</strong> <code>rollOpen(optionId)</code> reads the type back from the clearinghouse and
@@ -328,8 +330,9 @@ export default function DocsPage() {
       <h2>Roles</h2>
       <ul className="tight">
         <li>
-          <strong>Admin (multisig).</strong> Sets policy inside the bytecode caps, the deposit cap,
-          the fee recipient; accepts the Valorem fee; lifts a halt.
+          <strong>Admin.</strong> Sets policy inside the bytecode caps, the deposit cap, the fee recipient; accepts
+          the Valorem fee; lifts a halt. At launch this is one deployer key with no timelock, until the handover to
+          a multisig; the deposit cap stays small for as long as that holds.
         </li>
         <li>
           <strong>Keeper (hot key).</strong> Creates the week&apos;s option type, arms it, authorises listings, cancels

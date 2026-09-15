@@ -1,20 +1,27 @@
-import { encodeErrorResult, type Abi, type Hex } from "viem";
+import { encodeErrorResult, toFunctionSelector, type Abi, type Hex } from "viem";
 import { describe, expect, it } from "vitest";
 
+import { usdgErrorsAbi } from "./abi/erc20";
 import { seaportAbi } from "./abi/seaport";
 import { vaultAbi } from "./abi/vault";
-import { decodeRevertData, explainRevert } from "./revert";
+import { SOLIDITY_ERROR_SELECTOR, SOLIDITY_PANIC_SELECTOR, decodeRevertData, explainRevert } from "./revert";
 
 /**
  * A revert decodes to a name and a sentence, never to a bare selector. The vault ABI is the
  * generated one (lib/abi/vault.ts), so a library-only error the generator merged in
  * (PremiumBelowFloorAtFill lives in ValoremLib, OfferExceedsCapacity in SeaportOrderLib) must
  * decode too: the fill page's pre-flight depends on exactly that.
+ *
+ * The SOURCE matters as much as the name: lib/fillPreflight.ts blocks the fill button on a
+ * `vault` revert and leaves it on for a `solidity` Error(string) or a USDG shortfall. viem folds
+ * Error(string) and Panic(uint256) into every ABI it decodes with, so an attribution that went by
+ * "which ABI decoded it" called a token's string revert a vault refusal; the selector decides.
  */
 const vault = (errorName: string, args: readonly unknown[] = []): Hex =>
   encodeErrorResult({ abi: vaultAbi as unknown as Abi, errorName, args });
 const seaport = (errorName: string, args: readonly unknown[] = []): Hex =>
   encodeErrorResult({ abi: seaportAbi as unknown as Abi, errorName, args });
+const usdg = (errorName: string): Hex => encodeErrorResult({ abi: usdgErrorsAbi as unknown as Abi, errorName, args: [] });
 
 describe("decodeRevertData", () => {
   it("names a vault error and formats its figures in USDG", () => {
@@ -38,18 +45,64 @@ describe("decodeRevertData", () => {
     expect(decodeRevertData(vault("DepositsClosed"))!.text).toContain("Deposits are closed right now");
     expect(decodeRevertData(vault("StillStranded"))!.text).toContain("still cannot be redeemed");
     expect(decodeRevertData(vault("NotStranded"))!.text).toBe("No claim is stranded, so there is nothing to retry.");
-    expect(decodeRevertData(vault("WriteWindowClosed", [1_789_000_000]))!.text).toContain("2026-09-09");
+    // 1_789_000_000 is 2026-09-10T00:26:40Z; the sentence carries the date and time of the close.
+    expect(decodeRevertData(vault("WriteWindowClosed", [1_789_000_000]))!.text).toContain("2026-09-10 00:26 UTC");
+    expect(decodeRevertData(vault("UsdgLegBlocked", [12_000000n]))!.text).toContain("USDG stays owed");
   });
 
-  it("names Seaport's errors and Solidity's Error(string)", () => {
+  it("names Seaport's errors", () => {
     expect(decodeRevertData(seaport("InvalidTime", [1n, 2n]))).toMatchObject({ source: "seaport", name: "InvalidTime" });
     expect(decodeRevertData(seaport("BadFraction"))!.text).toContain("Take fewer contracts");
+    expect(decodeRevertData(seaport("InvalidRestrictedOrder", [`0x${"ab".repeat(32)}`]))).toMatchObject({ source: "seaport", name: "InvalidRestrictedOrder" });
+  });
+
+  it("attributes Solidity's Error(string) and Panic(uint256) to solidity, by selector, never to the vault", () => {
     const reason = encodeErrorResult({
       abi: [{ type: "error", name: "Error", inputs: [{ name: "reason", type: "string" }] }],
       errorName: "Error",
       args: ["ERC20: transfer amount exceeds allowance"],
     });
+    expect(reason.slice(0, 10)).toBe(SOLIDITY_ERROR_SELECTOR);
     expect(decodeRevertData(reason)).toMatchObject({ source: "solidity", name: "Error", text: "Reverted: ERC20: transfer amount exceeds allowance" });
+    const panic = encodeErrorResult({
+      abi: [{ type: "error", name: "Panic", inputs: [{ name: "code", type: "uint256" }] }],
+      errorName: "Panic",
+      args: [0x11n],
+    });
+    expect(panic.slice(0, 10)).toBe(SOLIDITY_PANIC_SELECTOR);
+    expect(decodeRevertData(panic)).toMatchObject({ source: "solidity", name: "Panic", text: "The contract hit an internal error (panic code 17)." });
+  });
+
+  it("names USDG's own four errors as the token's, with the selectors verified on chain 4663", () => {
+    // integrations/usdg.md B1 and B4: ContractPaused 0xab35696f, AddressFrozen 0x1fd1cc44; §4
+    // InsufficientFunds 0x356680b7. InsufficientAllowance is derived from the same source tree.
+    expect(toFunctionSelector("ContractPaused()")).toBe("0xab35696f");
+    expect(toFunctionSelector("AddressFrozen()")).toBe("0x1fd1cc44");
+    expect(toFunctionSelector("InsufficientFunds()")).toBe("0x356680b7");
+    expect(toFunctionSelector("InsufficientAllowance()")).toBe("0x13be252b");
+    expect(decodeRevertData(usdg("ContractPaused"))).toMatchObject({ source: "token", name: "ContractPaused", selector: "0xab35696f" });
+    expect(decodeRevertData(usdg("AddressFrozen"))).toMatchObject({ source: "token", name: "AddressFrozen", selector: "0x1fd1cc44" });
+    expect(decodeRevertData(usdg("InsufficientFunds"))!.text).toBe("Not enough USDG in the wallet for this fill.");
+    expect(decodeRevertData(usdg("InsufficientAllowance"))!.text).toContain("approve step");
+  });
+
+  it("no vault, Seaport or USDG error shares a selector with another, so the lookup order cannot misattribute", () => {
+    const selectors = new Map<string, string>();
+    for (const [label, abi] of [
+      ["vault", vaultAbi],
+      ["seaport", seaportAbi],
+      ["usdg", usdgErrorsAbi],
+    ] as const) {
+      for (const entry of abi as unknown as Abi) {
+        if (entry.type !== "error") continue;
+        const sel = toFunctionSelector(`${entry.name}(${entry.inputs.map((i) => i.type).join(",")})`);
+        const owner = `${label}:${entry.name}`;
+        expect(selectors.get(sel) ?? owner, `${sel} claimed by ${selectors.get(sel)} and ${owner}`).toBe(owner);
+        selectors.set(sel, owner);
+      }
+    }
+    expect(selectors.has(SOLIDITY_ERROR_SELECTOR)).toBe(false);
+    expect(selectors.has(SOLIDITY_PANIC_SELECTOR)).toBe(false);
   });
 
   it("reports an unknown selector as unknown, with the selector, and nothing for no data", () => {

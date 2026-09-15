@@ -1,7 +1,7 @@
 # web
 
 `app.callhouse.finance` — the Callhouse dapp. Next.js App Router, React 19, wagmi 3, viem. No custody,
-no private keys, no server-side signing.
+no private keys, no server-side signing. Unaudited, and it says so on every page.
 
 The marketing landing is a separate repository, `leekzor/callhouse-site`, served at
 `callhouse.finance`. It carries no wallet code at all and it is not a copy of anything here; the two
@@ -14,96 +14,150 @@ be changed together.
 
 ```bash
 pnpm --filter @callhouse/web dev     # http://localhost:3000  (the landing owns 3001)
-pnpm --filter @callhouse/web build
-node ../scripts/copy-lint.mjs        # compliance gate, also runs in CI
+pnpm --filter @callhouse/web lint
+pnpm --filter @callhouse/web typecheck   # the app, then tests/acceptance under its own tsconfig
+pnpm --filter @callhouse/web test        # vitest, node environment, no jsdom
+pnpm --filter @callhouse/web copy-lint   # compliance gate, also runs in CI
+pnpm --filter @callhouse/web build       # next build; NEXT_PUBLIC_VAULT unset builds the "not configured" pages
 ```
+
+## What the app is, under write on fill
+
+The vault (contracts/, pinned to the redesign of 2026-09-13) **writes calls only inside a Seaport
+fill**. Each week the keeper creates one option type on the Valorem clearinghouse
+(`clear.newOptionType`, permissionless), the vault arms it (`rollOpen(optionId)`, which validates
+the tuple from the clearinghouse itself: asset, USDG, one-token lot, window, both band bounds) and
+writes nothing. The keeper then authorises ONE Seaport 1.6 order (`approveListing`): a
+`PARTIAL_RESTRICTED` order (orderType 3) whose offerer AND zone are the vault, zone hash zero,
+conduit key zero, one ERC-1155 offer item (the clearinghouse, this week's option id, at most the
+vault's capacity), ONE ERC-20 consideration item (USDG to the vault, a whole multiple of the size),
+`endTime <= cycleExerciseTs`, Seaport's live counter, a random salt and an **empty signature**: the
+vault validates the order on Seaport and has no key. Every fill of that order runs the vault's
+`authorizeOrder` hook, which re-checks the floors at the spot OF THE FILL and writes exactly the
+filled contracts; `validateOrder` reverts the fill unless no token stayed behind. So
+`contractsWritten == sold` by construction, unsold inventory cannot exist, and a fill can be refused
+after a rally (`PremiumBelowFloorAtFill`, `StrikeBelowBand`) until the keeper reprices (at most
+three listings a cycle).
+
+There is no registry, no third-party book, no fee leg and no EIP-1271. **This app's fill page is the
+only venue for the vault's calls.** The names "Overcall" and "registry" appear in this repository
+only in notes that say they are history.
 
 ## Routes
 
 | Route | Content |
 |---|---|
-| `/` | one vault card: idle and locked, this week's strike, listed / filled / unfilled / assigned, last week's realized net premium per share (and its strike proceeds on their own line if assigned) |
-| `/vault/nvda` | deposit, queue withdraw, complete redeem, claim USDG |
-| `/vault/nvda/cycle` | the five-rung Overcall ladder, our pick, the order hash, explorer links, and the raw Seaport payload so a buyer can fill from here — from Overcall's book, or from the keeper when the book does not show it |
-| `/activity` | every harvest, including the unfilled weeks shown as "unfilled, 0" |
+| `/` | one vault card: collateral (idle / sold / assigned), this week's strike, calls sold and capacity, the order hash, last week's realized net premium per share (and its strike proceeds on their own line if assigned); the stranded banner when a claim is stranded |
+| `/vault/nvda` | deposit (closed whenever `maxDeposit == 0`, with the reason and the Listed-phase risk on screen), queue or instant withdraw, `settleQueue` while flat, complete redeem, claim USDG, the stranded banner with the queuer's pending claim share and a Retry button |
+| `/vault/nvda/cycle` | **the fill page**: this week's option type (from the vault's snapshot and `clear.option(optionId)`), the vault's order on chain (`listingHash`, size, gross, Seaport's status), capacity remaining, the live in-fill floor, and the fill card that checks the keeper's order against the chain, simulates the exact fill, then fills it |
+| `/activity` | every week, one row per cycle, from the indexer or rebuilt from the vault's own logs: `CallsWritten` per fill, `RollClose`, `Harvest`, `ClaimStranded`, `StrandedClaimRecovered` |
 | `/docs` | short spec and the risk list |
 | `/legal` | geographic restrictions and the Stock Token legal form |
-| `GET /api/overcall/listings` | server-side, read-only proxy to Overcall's book for this vault (their API sends no CORS headers) |
-| `GET /api/keeper/orders` | server-side keeper fallback: the vault's listing from the keeper's `/orders`, checked against the chain. See "The keeper fallback" |
+| `GET /api/keeper/orders` | server side: the keeper's `/orders`, checked against the chain, as the rows the fill page fills. See "The fill flow" |
 
-## The keeper fallback
+## The fill flow
 
-The vault authorises exactly one Seaport order by hash (EIP-1271). The keeper posts it to
-Overcall's book; if Overcall's validator refuses it (open question L-04) or their API is down, the
-book never shows it and nobody can buy the week. The keeper keeps serving the order at its own
-`GET /orders`. This app reads it there.
-
-**Who calls what.** The browser calls only `/api/keeper/orders` on this app's own origin. That
-route (`app/api/keeper/orders/route.ts`, logic in `lib/keeperOrders.ts`) fetches the one URL in
+The chain carries the authorised hash, the size, the gross and the option id (`listingHash`,
+`listingAmount`, `listingGrossUsdg`, `optionId`), but not the salt, the times or the counter a fill
+has to send. Those live with the keeper that built the order, at its `GET /orders`. The browser
+never reads the keeper: it calls `/api/keeper/orders` on this app's own origin, and that route
+(`app/api/keeper/orders/route.ts`, logic in `lib/keeperOrders.ts`) fetches the one URL in
 `KEEPER_ORDERS_URL`, a runtime server variable (on Railway,
 `http://keeper.railway.internal:8787/orders`). Nothing from the request reaches that fetch, so the
 route cannot be aimed anywhere else. Redirects are not followed, the answer is capped at 64 KiB,
 5 s (body included) and 8 orders (more is refused whole, as a 502), the chain reads have their own
-6 s deadline, and error messages are the route's own words. The browser waits 15 s and maps its
-own timeout or network failure to "The fallback route did not answer." **Unset, the route answers
-503 `{"configured": false}` and the cycle page shows nothing about the fallback.**
+6 s deadline, and error messages are the route's own words. **Unset, the route answers 503
+`{"configured": false}`, the cycle page says the feed is not wired, and nothing can be bought
+through the app.**
 
-**The keeper is not trusted.** `/orders` serves `OrderParameters` (no `counter`) plus convenience
-fields. The route keeps only the parameters and the signature bytes. It reads the chain's state in
-one Multicall3 `eth_call` (so one block): the vault's `phase`, `listingHash`, `listingAmount`,
-`listingGrossUsdg` and `optionId`, `Seaport.getCounter` for each offerer and
-`Seaport.getOrderStatus` for each order hash. Then, for each order:
+**What the keeper serves.** `/orders` answers `{ orders: [...] }`; each entry carries `orderHash`
+(bytes32 hex), `chainId` (number), `parameters` (Seaport `OrderParameters` as JSON: `offerer`,
+`zone`, `offer[]`, `consideration[]` with decimal-string amounts and numeric item types,
+`orderType`, `startTime`, `endTime`, `zoneHash`, `salt`, `conduitKey` and
+`totalOriginalConsiderationItems`, with NO `counter`) and `signature` (`"0x"`; a 64/65-byte
+placeholder from an older keeper is accepted and dropped). Every other key (`seaport`, `vault`,
+`optionId`, `contracts`, `filledContracts`, `remainingContracts`, `unitPrice6`, `grossUsdg6`,
+`endTime`, `status`) is ignored: the route rebuilds everything it passes on from the parameters
+and the chain.
+
+**The keeper is not trusted.** The route reads the chain's state in one Multicall3 `eth_call` (so
+one block): the vault's `phase`, `listingHash`, `listingAmount`, `listingGrossUsdg`, `optionId`,
+`conduitKey` and `clear`, `Seaport.getCounter` for each offerer and `Seaport.getOrderStatus` for
+each order hash. Then, for each order:
 
 1. an order whose hash is not the vault's `listingHash` is an earlier or superseded listing (a
    counter bump retires one without cancelling it, and the keeper serves a row until its end
    time). It goes under `closed` as `notCurrent` and is not checked further: it can never be
    offered, and it must not read as tampering;
-2. for the order that names `listingHash`: restores the counter from `getCounter(offerer)` (a
-   counter is not always 0: the vault's `rollClose` bumps it to kill a week's listings), hashes
-   the components locally (`lib/seaportOrder.ts`) and with `Seaport.getOrderHash` in a second
-   batch, and requires the two to agree; the keeper's own `orderHash` must equal them;
-3. runs `checkListingIsOurs` (`lib/overcall.ts`, the same check the Overcall rows go through):
-   the components hash to the hash, the hash equals `listingHash`, offerer and premium recipient
-   are the vault, the fee leg is Overcall's 5% to Overcall's recipient rounded per contract,
-   amounts match the vault's recorded count, gross and option id, no zone, no conduit,
-   PARTIAL_OPEN;
+2. for the order that names `listingHash`: restores the counter from `getCounter(offerer)` (the
+   vault's `lockBook` and `rollClose` bump it, and Seaport bumps by a quasi-random amount, so it is
+   never assumed), hashes the components locally (`lib/seaportOrder.ts`, the EIP-712 derivation)
+   and with `Seaport.getOrderHash` in a second batch, and requires the two to agree; the keeper's
+   own `orderHash` must equal them;
+3. runs `checkListingIsOurs` (`lib/listing.ts`, the same check the fill card runs again in the
+   browser): offerer AND zone are the vault, orderType 3, zone hash zero, the vault's conduit key,
+   one ERC-1155 offer on the clearinghouse the vault names (`vault.clear()`), ONE USDG leg to the
+   vault, `gross % amount == 0`, amounts equal to the vault's recorded count, gross and option id,
+   the components hash to the hash, and the end time has not passed;
 4. only then reads the lifecycle: cancelled, sold out (Seaport's fraction), vault not Listed, or
    end time passed is `closed` with that state. Otherwise `remaining` and `status` come from
    Seaport's fill fraction.
 
-Passing orders come back under `orders` in the same row shape `/api/overcall/listings` serves.
-An order that fails 2 or 3 comes back under `rejected` with its reasons and is logged as one warning
-line per computation (`"msg":"keeper orders rejected"`, with the count). An order whose chain reads
-failed comes back under `unchecked`. `closed` is not logged as a warning. None of them is fillable.
-One computation serves every request while it runs and for 2 s after it settles.
+**What the route answers.** `GET /api/keeper/orders` → `{ configured, orders, rejected, closed,
+unchecked, error? }` (`lib/keeperOrders.ts` `KeeperOrdersBody`). `orders` is `ListingRow[]`:
+`{ orderHash, chainId, offerer, optionId, quantity, remaining, unitPrice6, totalPrice6, startTime,
+endTime, salt, counter, status: "open" | "partial", components (OrderComponents JSON, counter
+restored), signature: "0x" }`. `rejected` and `unchecked` are `{ orderHash: Hex | null, reasons:
+string[] }[]`; `closed` is `{ orderHash, state: "notCurrent" | "soldOut" | "cancelled" |
+"notListed" | "expired" }[]`. Only `rejected` is an alarm (one warning line per computation,
+`"msg":"keeper orders rejected"`); `closed` is information; `unchecked` is a chain read that
+failed. One computation serves every request while it runs and for 2 s after it settles.
 
-**Seaport, then Overcall.** `/vault/nvda/cycle` decides what to say in `lib/cycleNotices.ts`. When
-Seaport reports the vault's order sold out or cancelled, the page says so in a neutral notice and
-does not ask the keeper. Otherwise it asks the route only when Overcall's book has answered (or
-failed) and has no live row for the vault's `listingHash` that passes `checkListingIsOurs`. The
-keeper's order then renders through the same `OrderPayload` card, labelled with what the book
-shows for it ("Overcall's book is not showing it.", "did not answer.", "lists this order as
-filled.", or "Overcall's row for this order did not check out against the chain."), which runs
-the same check against the chain again, takes the contracts left from Seaport rather than from
-either row, and fills through the same `approve(Seaport, cost)` + `fulfillAdvancedOrder` with
-numerator/denominator. There is no keeper-only fill code. Rejected orders render as a red notice
-with at most three of them listed and no button; a keeper, route or chain that does not answer
-renders as a warning headed "The keeper fallback is unavailable right now."; a closed order as
-information.
+**The fill card** (`components/OrderPayload.tsx`) checks the row against the chain AGAIN, from the
+vault's own slot read by `useVaultSnapshot`, then simulates the exact `fulfillAdvancedOrder` it
+would send (`eth_call`, 800k gas; a first fill measured 386k on the live chain, a top-up 156k),
+from the buyer's address, before the button is live. `lib/fillPreflight.ts` says what the result
+means: a vault or library error decoded by name (`lib/revert.ts`, against the merged ABI) blocks
+the button with the vault's reason; a Seaport pre-hook error blocks it with Seaport's; USDG paused
+or frozen blocks it as the token's refusal; a transfer-step failure, a token's `Error(string)` or
+USDG's own `InsufficientAllowance` / `InsufficientFunds` means the hook passed and the buyer's
+approval is what is missing, which the button's first step fixes. The fill is
+`approve(USDG → Seaport, k × unit price)` then `fulfillAdvancedOrder(order, numerator k,
+denominator N, signature "0x", extraData "0x", no criteria resolvers, conduit key zero, recipient
+= the buyer)`. The raw order JSON on the card lets any Seaport 1.6 client do the same.
+
+`lib/cycleNotices.ts` decides what the cycle page says: Seaport's status first (a sold-out or
+cancelled order is a neutral notice and the feed is not asked), then the feed (unconfigured is a
+warning that names `KEEPER_ORDERS_URL`; `rejected` is red; a lifecycle state is information; an
+authorised hash the keeper is not serving is the thing to escalate, because an unserved order is an
+unfilled week).
 
 `lib/keeperOrders.test.ts` covers the counter restore, a superseded order after a counter bump
-(closed, no warning), a hash the keeper names that its parameters do not hash to, wrong offerer,
-expired, every non-Listed phase, a redirected or inflated payment leg under the authorised hash,
-cancelled and sold-out orders as closed (and a tampered sold-out order still rejected), malformed
-entries, a keeper flooding 64 KiB of entries (one small 502, one log line), chain reads that fail
-(unchecked) or pass their deadline (502 in the route's words), Seaport and the local hash
-disagreeing, the share window measured from settle, the browser client's own wording for a
-timeout, and, over real local HTTP, an oversized body (declared and streamed), a keeper that
-never answers or stalls mid-body, a redirect, and the route's 503 when unconfigured.
-`lib/cycleNotices.test.ts` pins the page's decisions: a sold-out week, a book listing other open
-orders beside the keeper's card, a book that marks the order filled while Seaport has contracts
-left, an unverified Overcall row, and a chain failure that must not be blamed on the keeper. The W-13
-fork acceptance below exercises the route against the real keeper server.
+(closed, no warning), a hash the keeper names that its parameters do not hash to, wrong offerer or
+zone, a non-restricted order type, a conduit key, a clearinghouse other than the vault's, expired,
+every non-Listed phase, a redirected or inflated payment leg under the authorised hash, cancelled
+and sold-out orders as closed (and a tampered sold-out order still rejected), malformed entries, a
+keeper flooding 64 KiB of entries (one small 502, one log line), chain reads that fail (unchecked)
+or pass their deadline (502 in the route's words), Seaport and the local hash disagreeing, the
+share window measured from settle, the browser client's own wording for a timeout, and, over real
+local HTTP, an oversized body (declared and streamed), a keeper that never answers or stalls
+mid-body, a redirect, and the route's 503 when unconfigured. `lib/listing.test.ts` is one
+tampering per test against `checkListingIsOurs`; `lib/fillPreflight.test.ts` and
+`lib/revert.test.ts` pin the verdict for every revert class, with encoded revert data and no node.
+
+## The stranded claim, on the pages
+
+`rollClose` goes to Idle even when Valorem's redeem reverts (USDG paused or frozen, the vault
+blocklisted on the Stock Token) and keeps the claim: `isStranded()` is `phase == Idle && claimKey
+!= 0`. While it holds, `maxDeposit == 0` and instant redemption is off, `rollOpen` reverts
+`StillStranded`, and anyone may `retryStrandedClaim()`. `components/StrandedBanner.tsx` renders on
+`isStranded()` on every page: the fraction of the claim still owned by live shares
+(`strandedRemainingWad`), the fraction owed to settled epochs, the strand generation, and for a
+connected account its pending claim share (`owedStrandWad`, plus its slice of a settled epoch's
+`epochStrandWad`), its live shares' slice, and what `previewCompleteRedeem` says is collectable now;
+the Retry button sends `retryStrandedClaim`. `components/RedeemQueue.tsx` offers `settleQueue`
+whenever the vault is Idle and the account's entry is in the current epoch (the queue is the exit
+while stranded), and says when part of a redemption waits on the claim.
 
 ## Copy rules are a CI gate, not a style preference
 
@@ -142,6 +196,12 @@ If a forbidden phrase genuinely belongs inside an explicit negation on the docs 
   "Strike proceeds (assignment)". `creditedUsdg` and `harvestGrossUsdg` on the row include it
   and are never passed to `fmtRealizedWeek` or `usdgPerShare` (W-21).
 - An unfilled week renders as "unfilled, 0". It is the most likely outcome, not an error state.
+- **Calls sold equals calls written** (`contractsWritten`). Capacity remaining is
+  `Policy.maxContracts(totalAssets) − contractsWritten` (`lib/format.ts`), re-sized at every fill.
+- **Every deadline is the option type's**, snapshotted by the vault at `rollOpen`
+  (`cycleExerciseTs`, `cycleExpiryTs`), printed in UTC and on the Eastern clock (`fmtEastern`: the
+  keeper targets the NYSE close, 16:00 America/New_York, 20:00 UTC in daylight time and 21:00 UTC
+  from November; Thursday before a Friday market holiday). Nothing is derived from a calendar.
 - No price chart. No candlesticks on a vault share.
 - Must work at 400px wide.
 
@@ -161,137 +221,126 @@ authoritative list and the root `../.env.example` carries the shared defaults. A
 `NEXT_PUBLIC_VAULT` points the whole UI at a different contract, so treat the build env as
 production configuration and check it against `../ops/addresses.json`.
 
-Two variables are runtime server-side only, read per request, and change with a restart:
-`OVERCALL_API_BASE` (the book proxy's upstream, default `https://overcall.finance`) and
-`KEEPER_ORDERS_URL` (the keeper fallback, no default; unset turns the fallback off). Neither may
-become `NEXT_PUBLIC_` or a Docker build ARG.
+| Variable | Kind | Meaning |
+|---|---|---|
+| `NEXT_PUBLIC_VAULT` | build, required | the deployed vault; unset builds the "not configured" pages |
+| `KEEPER_ORDERS_URL` | **runtime, server side, required for the fill page** | the keeper's `GET /orders`; read per request by `app/api/keeper/orders`, never `NEXT_PUBLIC_`, never a Docker build ARG. Unset, nothing can be bought through the app |
+| `NEXT_PUBLIC_CLEARINGHOUSE` | build, default compiled in | the clearinghouse the vault was constructed with; a deploy on our own Clear (`contracts/script/DeployClear.s.sol`) needs its address here. The app reads `vault.clear()` and follows it for every check; the cycle page reports a build whose value disagrees |
+| `NEXT_PUBLIC_ASSET`, `NEXT_PUBLIC_USDG`, `NEXT_PUBLIC_SEAPORT` | build, defaults compiled in | explorer-confirmed third-party addresses; overrides for a fork only |
+| `NEXT_PUBLIC_CHAIN_ID`, `NEXT_PUBLIC_RPC_URL`, `NEXT_PUBLIC_RPC_URL_2`, `NEXT_PUBLIC_EXPLORER_URL` | build | the chain; blank is unsafe for these (see the Dockerfile) |
+| `NEXT_PUBLIC_API_URL` | build | the indexer; unreachable degrades history to the log fallback |
+| `NEXT_PUBLIC_VAULT_FROM_BLOCK` | build | the deploy block, so the log fallback is one query |
+| `NEXT_PUBLIC_SITE_URL`, `NEXT_PUBLIC_APP_URL`, `NEXT_PUBLIC_DOCS_URL` | build, defaults compiled in | the domains, read only by `lib/site.ts`; never used to reach a node |
 
-`NEXT_PUBLIC_SITE_URL` (`https://callhouse.finance`) and `NEXT_PUBLIC_APP_URL`
-(`https://app.callhouse.finance`) are the two domains, read only by `lib/site.ts`. `APP_URL` is Next's
-`metadataBase`; `SITE_URL` is where this app links back to. Neither is ever used to reach a node —
-RPCs and addresses live in `lib/chain.ts` and `lib/contracts.ts`. Both have the production values
-compiled in as defaults, so a missing variable cannot produce a link to `undefined`; override them
-for a preview or for local work, not to fill in a blank. Like every `NEXT_PUBLIC_*` they are
-inlined by `next build`, so changing one needs a rebuild, not a restart — `../ops/deploy.md` §3 is
-the full table.
+`NEXT_PUBLIC_REGISTRY` and `OVERCALL_API_BASE` are gone with the redesign (no registry, no
+third-party book) and a value set for either is ignored. Every `NEXT_PUBLIC_*` is inlined by
+`next build`, so changing one needs a rebuild, not a restart — `../ops/deploy.md` §3 is the full
+table; every one of them has an `ARG` + `ENV` pair in `web/Dockerfile`, which must be kept in step
+with `.env.example`.
 
 ## The `/v1/cycles` shape is a tested contract
 
-`lib/api.ts` reads the indexer's nested cycle shape — `written`, `fill`, `settlement`,
-`harvest` and the rest, with every money figure as `{raw, decimals, formatted}` — and that shape
-is pinned by the four files under `../ops/fixtures/api/` (a filled, an unfilled, an assigned and
-a skipped week, with real numbers). `lib/api.test.ts` runs `normaliseCycle` over them and asserts
-the exact base-unit integers and booleans `/activity` renders; the indexer's own test proves it
-still emits them. The skipped week (`status: "idle"`, `wrote: false`) is the one row nothing on
-chain ever closes, so `normaliseCycle` settles it by the registry's expiry and carries `wrote` so
-a page can say "not written" rather than "unfilled". The `harvest` group publishes premium and
-strike proceeds separately (`premiumGross`, `premiumNet`, `premiumNetPerShare` beside
+`lib/api.ts` reads the indexer's nested cycle shape — `option`, `written`, `listing`, `fill`,
+`settlement`, `harvest`, with every money figure as `{raw, decimals, formatted}` — and that shape
+is pinned by the four files under `../ops/fixtures/api/` (a filled, an unfilled, an assigned and a
+stranded week, with real numbers: 12 contracts at 4 USDG is 48 gross, 2.4 fee, 45.6 net, 0.456 per
+share over 100 shares; the assigned week is 48 + 950 = 998 gross with the same 2.4 fee).
+`lib/api.test.ts` runs `normaliseCycle` over them and asserts the exact base-unit integers and
+booleans `/activity` renders; the indexer's own test proves it still emits them. A stranded week
+(`status: "stranded"`, `settlement.strand: {gen, recovered, ...}`) is a SETTLED row: its close ran
+and its premium was harvested; `strandGen` and `strandRecovered` are carried so the pages can say
+"claim stranded" and, later, "recovered". There is no skipped-week row: the vault numbers its own
+cycles, so a week the keeper sat out has no row anywhere. The `harvest` group publishes premium
+and strike proceeds separately (`premiumGross`, `premiumNet`, `premiumNetPerShare` beside
 `strikeProceedsUsdg` and `creditedUsdg`); `normaliseCycle` reads them, and splits a pre-W-21
 payload, whose `premiumNet` still included strike proceeds, by subtracting
 `settlement.assignmentUsdg`. The `/activity` log fallback (`lib/history.ts`) does the same split
-with the `RollClose.usdgFromAssignment` from the closing harvest's own transaction. The flat top-level keys the normaliser also
-accepts are a courtesy for a hand-rolled payload, not what the indexer sends. If a week you know
-was filled shows as "unfilled, 0" against
-a live `NEXT_PUBLIC_API_URL`, run `pnpm --filter @callhouse/web test` first: that is exactly the
-defect the fixtures exist to catch, and `../ops/fixtures/api/README.md` says how to regenerate
-them after a deliberate shape change.
+with the `RollClose.usdgFromAssignment` from the closing harvest's own transaction, sums
+`CallsWritten` per fill for the week's size, and folds a `StrandedClaimRecovered` retry's
+`Harvest` onto the stranded row as fee-free strike proceeds. The flat top-level keys the
+normaliser also accepts are a courtesy for a hand-rolled payload, not what the indexer sends. If a
+week you know was filled shows as "unfilled, 0" against a live `NEXT_PUBLIC_API_URL`, run
+`pnpm --filter @callhouse/web test` first: that is exactly the defect the fixtures exist to catch,
+and `../ops/fixtures/api/README.md` says how to regenerate them after a deliberate shape change.
 
 ## The ABIs under `lib/abi/` are generated, not hand-written
 
 `lib/abi/vault.ts` is produced by `pnpm gen:abis` (script in `scripts/gen-abis.mjs`) from
-`../ops/abis/Vault.json`, which is itself refreshed from the compiled artefact after any contract
-change. The filter keeps the read surface plus the functions a depositor may call — never the
-keeper or admin entry points — and every event and custom error, so a revert decodes to a name
-instead of a selector. The other files in that directory have hand-maintained headers over
-canonical sources (see their comments); do not edit the bodies by hand either.
+`../ops/abis/Vault.json` plus the error fragments of `ValoremLib.json`, `SeaportOrderLib.json` and
+`Policy.json`, which are refreshed from the compiled artefacts after any contract change. The
+filter keeps the read surface, the functions a depositor may call (`settleQueue` and
+`retryStrandedClaim` included) and the two Seaport zone hooks (`authorizeOrder`, `validateOrder`,
+so a fill simulation can name what the hook refused with) — never the keeper or admin entry
+points — and every event and custom error, including the 36 raised only inside the linked
+libraries, so a revert decodes to a name instead of a selector: 92 errors, 36 events, 99
+functions. The generator throws if a required function is lost. The other files in that directory
+have hand-maintained headers over canonical sources (see their comments; `usdgErrorsAbi` in
+`erc20.ts` carries USDG's four reverts with their on-chain selectors); do not edit the bodies by
+hand either.
 
 ## Fork acceptance (W-13)
 
 `tests/acceptance/fork.acceptance.ts` drives this app in a real browser, from wallets created for
-the run, against an anvil fork of 4663 with the keeper running beside it, and includes a fill of
-the keeper's own `/orders` served through this app's `/api/keeper/orders`, after a tampered copy
-of the same order has been refused. It is not part of `pnpm test` or CI: it needs anvil, a
-network fork and a Chromium.
+the run, against an anvil fork of 4663 with the keeper running beside it. **The file in the tree
+is the pre-redesign run and does not pass against the write-on-fill contracts**; it is typechecked
+(`pnpm typecheck` runs it under `tests/acceptance/tsconfig.json`) and is rewritten in the stage
+after the keeper lane lands. It is not part of `pnpm test` or CI: it needs anvil, a network fork
+and a Chromium.
 
 ```bash
-anvil --fork-url https://rpc.mainnet.chain.robinhood.com --chain-id 4663 --port 8548   # own terminal
-(cd ../contracts && forge build)
-pnpm --filter @callhouse/web acceptance:fork     # ~1 min; last line: W-13 FORK ACCEPTANCE PASSED
+anvil --fork-url https://rpc.mainnet.chain.robinhood.com --chain-id 4663 --port 8548 --code-size-limit 98304   # own terminal
+(cd ../contracts && forge build)             # the Vault is 25,765 B; forge's EIP-170 line is noise on this chain
+pnpm --filter @callhouse/web acceptance:fork # last line: W-13 FORK ACCEPTANCE PASSED
 ```
 
-Optional: `ACCEPTANCE_RPC` (default `http://127.0.0.1:8548`), `ACCEPTANCE_OUT` (default a temp
-dir: `run.json` with every tx hash and amount, `keeper.db`, next and browser logs, and a screenshot
-plus DOM of each page on failure), `ACCEPTANCE_HEADFUL=1`, `ACCEPTANCE_KEEPER_LOG_LEVEL`. The
-Chromium is Playwright's (`playwright-core` 1.63.0, revision 1243); if it is not cached, run
-`pnpm --filter @callhouse/web exec playwright-core install chromium` once. **The run overwrites
-`web/.next` with a build pointed at the fork**; rebuild before serving anything else from the
-checkout. It refuses any RPC that is not anvil on chain 4663.
+`--code-size-limit 98304` is not optional: chain 4663's real code limit is 98,304 B and without the
+flag anvil refuses the vault. The public RPC keeps only a few thousand trailing blocks of state and
+rate-limits under load, so start anvil immediately before the run and restart it at the head on a
+missing-state error. Optional: `ACCEPTANCE_RPC` (default `http://127.0.0.1:8548`), `ACCEPTANCE_OUT`
+(default a temp dir: `run.json` with every tx hash and amount, `keeper.db`, next and browser logs,
+and a screenshot plus DOM of each page on failure), `ACCEPTANCE_HEADFUL=1`,
+`ACCEPTANCE_KEEPER_LOG_LEVEL`. The Chromium is Playwright's (`playwright-core` 1.63.0, revision
+1243); if it is not cached, run `pnpm --filter @callhouse/web exec playwright-core install chromium`
+once. **The run overwrites `web/.next` with a build pointed at the fork**; rebuild before serving
+anything else from the checkout. It refuses any RPC that is not anvil on chain 4663 and loopback.
 
-**Approach.** A real browser, not calls re-implemented beside the components. The setup deploys a
-Vault with MockRegistry and MockFeed and a fresh option series on the real Valorem Clear, the way
-`keeper/src/dryrun.ts` does (that file exports nothing and runs itself on import, so its fork
-primitives are mirrored, not imported), then imports the keeper's production modules and calls
-`reconcile()`/`tick()` and `startHealthServer()`. The app is `next build` + `next start` with every
-`NEXT_PUBLIC_*` on the fork (both RPC slots, vault, registry, deploy block) and
-`NEXT_PUBLIC_API_URL` unreachable, so history comes from the log fallback; the runtime server
-variables are `OVERCALL_API_BASE` (a local stub book) and `KEEPER_ORDERS_URL` (the keeper's real
-`/orders`). Each wallet is an
-EIP-1193 provider injected into headless Chromium and announced over EIP-6963; wagmi's
-`injected()` connector lists it like an extension, it exposes no account until the page's Connect
-flow asks, and it signs the page's `eth_sendTransaction` with a key generated for the run. It
-refuses a call it cannot decode against `lib/abi`, so every page transaction is checked by name
-and exact arguments.
+**The redesigned scenario the rewrite runs.** DeployClear (or the upstream Clear) → Deploy → Verify →
+Configure on the fork; wallets funded by storage writes; the keeper's production modules driven
+beside the app (`next build` + `next start` with every `NEXT_PUBLIC_*` on the fork,
+`NEXT_PUBLIC_API_URL` unreachable so history comes from the log fallback, and `KEEPER_ORDERS_URL`
+pointed at the keeper's real `/orders`). Three weeks under `evm_increaseTime`:
 
-**What it proves**, each figure checked to the base unit on chain and as rendered:
+1. **A filled, assigned week.** The keeper creates the option type on the clearinghouse
+   (`newOptionType`, six fields, the id read back), `rollOpen` arms it (nothing written, no claim,
+   the vault holds 0 option tokens), `approveListing` authorises a `PARTIAL_RESTRICTED` order with
+   the vault as zone and an empty signature. **Tamper first:** the keeper's SQLite row is edited so
+   `/orders` serves the payment leg to an attacker under the authorised hash; `/api/keeper/orders`
+   returns no order and one rejection naming the hash mismatch and the redirected leg, and the
+   cycle page renders no fill card. **Then the row is restored** and two buyers fill 2 and 3 of N
+   from the page's own button: `approve(Seaport, k × unit)` then `fulfillAdvancedOrder(k, N, "0x")`;
+   the vault emits one `CallsWritten` per fill, `contractsWritten == 5`, the vault's option balance
+   is 0, the USDG landed. A deposit in Listed goes through with the risk notice on screen; a queued
+   redemption is escrowed. The buyer exercises 2 on Clear inside the window; `lockBook`;
+   `rollClose` → assignment 2, strike proceeds fee-free, `completeRedeem` / `claimUsdg` /
+   `sweepFee` to the base unit; "Last week realized" and the `/activity` row agree with the chain.
+2. **An unfilled week.** Armed and listed, nobody fills; the sale window closes
+   (`WriteWindowClosed` on a late simulation); `rollClose` closes flat, instant redemption reopens,
+   `settleQueue` from the page settles an entry queued while flat.
+3. **A stranded week.** Fills, then USDG's `ASSET_PROTECTION` EOA (impersonated on the fork, as the
+   contracts' fork test does) freezes the vault; `rollClose` reaches Idle with the claim kept
+   (`ClaimStranded`, `EpochStrandShare` for the queued epoch); every page shows the stranded banner
+   with the queuer's pending share, `DepositForm` is closed with the stranded reason, `rollOpen` is
+   refused; unfreeze; the Retry button sends `retryStrandedClaim` → `StrandedClaimRecovered`,
+   payouts to the base unit, `/activity` says "claim stranded, recovered".
 
-1. **Deposit** (`/vault/nvda`, fresh wallet): Connect, type 25, "Approve and deposit" sends
-   `approve(vault, 25e18)` then `deposit(25e18, owner)`; 25 cNVDA minted, "worth 25.0000 NVDA raw".
-2. **The fallback fill, through the real route.** Seaport's counter for the vault is set to 7
-   before the keeper lists, so nothing downstream can get away with assuming 0. The book the keeper
-   posts to refuses the listing (400, the L-04 failure mode): the keeper records `post_failed`,
-   alerts `api_reject`, and `/orders` serves the order. The web proxy's upstream answers like that
-   book (no row for the vault) for the whole run, and the app runs with
-   `KEEPER_ORDERS_URL` pointed at the keeper's real HTTP server. **Tamper first:** the keeper's
-   SQLite row is edited so its `/orders` serves the premium leg paid to an attacker under the
-   authorised hash; `/api/keeper/orders` returns no order and one rejection naming the keeper's
-   wrong hash, the hash mismatch and the redirected premium leg, and `/vault/nvda/cycle` says
-   "Overcall's book has no listing matching the vault's current order hash.", shows the keeper
-   rejection with those reasons, and renders no fill card and no quantity input. **Then the row is
-   restored:** the route serves one order whose `counter` is Seaport's 7, whose components Seaport
-   (and `seaportOrderHash` in `lib/keeperOrders.ts`, and the keeper's `localOrderHash`) hash to the
-   vault's `listingHash`, which passes `checkListingIsOurs`, and which carries none of the keeper's
-   convenience fields. The page renders "Signed order · fill from here" labelled "Listed directly
-   by the vault's keeper; Overcall's book is not showing it.", and a second fresh wallet fills 2 of
-   23 from its button: `approve(Seaport, cost)` and `fulfillAdvancedOrder` with numerator 2,
-   denominator 23, the placeholder signature, no conduit. The vault receives exactly
-   writer-per-contract × 2, Overcall fee-per-contract × 2, the buyer holds 2 option tokens. A raw
-   Seaport client then fills 3 more straight from the `/orders` JSON, and the `OrderParameters` it
-   sends are asserted identical to the ones the page sent.
-3. **Queue while Listed**: "Queue redemption" sends `queueRedeem(10e18)`; 10 shares escrowed,
-   epoch shown.
-4. **Close and collect**: warp, keeper `lockBook` and `rollClose`; one `Harvest` whose gross is
-   exactly the two writer legs, fee = floor(gross × 500 / 10000), `QueueSettled` = 10 NVDA plus
-   10e18 × index delta / 1e27; "Complete redemption" and "Claim … USDG" deliver exactly those, and
-   escrow + claim + fee + dust + owed = gross.
-5. **Pages**: "Last week realized" (gross, fee, net, per-share, 0 assigned, no strike-proceeds row)
-   and the account's shares, NAV, wallet NVDA and USDG on `/vault/nvda`; the `/activity` row,
-   totals, "rebuilt from vault logs" and the indexer notice. No uncaught page error.
+Each wallet is an EIP-1193 provider injected into headless Chromium and announced over EIP-6963;
+wagmi's `injected()` connector lists it like an extension, it exposes no account until the page's
+Connect flow asks, and it signs the page's `eth_sendTransaction` with a key generated for the run.
+It refuses a call it cannot decode against `lib/abi`, so every page transaction is checked by name
+and exact arguments. No uncaught page error is tolerated in any state.
 
-**What it does not prove:**
-
-- A real wallet extension (MetaMask, Rabby …), its approval UI, or a hardware wallet; mobile
-  browsers or the 400px layout.
-- Overcall's hosted book, their validator accepting the vault's EIP-1271 listing (L-04), or their
-  front end. Both upstreams here are local stubs.
-- That the deployed app can reach the deployed keeper. Here both run on 127.0.0.1; on Railway the
-  route goes over the IPv6 private network to `keeper.railway.internal`. The keeper binds `::`
-  (`keeper/src/health.test.ts` asserts it answers on `::1`), but the deployed path is a
-  post-deploy check: ops/deploy.md §9 item 14.
-- The route under a hostile network: its timeout, byte cap and redirect refusal are covered by
-  `lib/keeperOrders.test.ts` over local HTTP, not by this run.
-- The indexer path (`NEXT_PUBLIC_API_URL` live, X-11), so "Net / collateral at harvest" renders its
-  honest dash; an assigned week on the pages (strike proceeds non-zero); an unfilled week; a
-  mid-week deposit checkpoint.
-- The real OvercallRegistry and Chainlink feed (mocked so the clock can be warped), the production
-  Docker image (`next start` on the build output, not `web/server.js`), and real RPC latency or
-  reorgs.
+**What it does not prove:** a real wallet extension, its approval UI, or a hardware wallet; mobile
+browsers or the 400px layout; that the deployed app can reach the deployed keeper over Railway's
+private network (a post-deploy check, `ops/deploy.md` §9); the route under a hostile network (its
+timeout, byte cap and redirect refusal are `lib/keeperOrders.test.ts`, over local HTTP); the
+indexer path (`NEXT_PUBLIC_API_URL` live); the production Docker image; real RPC latency or reorgs.

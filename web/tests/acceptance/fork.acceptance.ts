@@ -3,6 +3,12 @@
  * Chain 4663, with the keeper running for real beside it. Includes a fill served from the
  * keeper's own `/orders` payload.
  *
+ * STALE: THIS RUN DESCRIBES THE PRE-REDESIGN VAULT (Overcall book, registry, EIP-1271, a
+ * placeholder signature, a fee leg) and does not pass against the write-on-fill contracts. It is
+ * rewritten in a later stage for the redesigned scenario (web/README.md "Fork acceptance
+ * (W-13)"); until then only its imports and a few type references were patched so
+ * `pnpm typecheck` stays green, and nothing below should be read as a description of the app.
+ *
  * WHAT RUNS
  *   - anvil, forked from mainnet (started by you, see web/README.md "Fork acceptance (W-13)").
  *   - A Vault deployed from contracts/out with MockRegistry and MockFeed, exactly as
@@ -87,19 +93,20 @@ import { generatePrivateKey, privateKeyToAccount, type PrivateKeyAccount } from 
 import { stockTokenAbi } from "../../lib/abi/erc20";
 import { seaportAbi } from "../../lib/abi/seaport";
 import { vaultAbi } from "../../lib/abi/vault";
-import {
-  ASSET,
-  CLEARINGHOUSE,
-  OVERCALL_FEE_RECIPIENT,
-  SEAPORT,
-  USDG,
-  ZERO_CONDUIT_KEY,
-} from "../../lib/contracts";
-import type { KeeperOrderBook, OvercallListing } from "../../lib/api";
-import { fmtAsset, fmtUsdg, fmtUtcDate, premiumPerShare, shortAddress, splitPremium } from "../../lib/format";
+import { ASSET, CLEARINGHOUSE, SEAPORT, USDG, ZERO_ADDRESS, ZERO_CONDUIT_KEY } from "../../lib/contracts";
+import type { KeeperOrderBook } from "../../lib/api";
+import { fmtAsset, fmtUsdg, fmtUtcDate, premiumPerShare, shortAddress } from "../../lib/format";
 import { KEEPER_REASONS, componentsStruct, seaportOrderHash } from "../../lib/keeperOrders";
-import { REASONS, checkListingIsOurs } from "../../lib/overcall";
+import { REASONS, checkListingIsOurs, type ListingRow as OvercallListing } from "../../lib/listing";
 import type { CycleRow, ListingRow } from "../../../keeper/src/state.js";
+
+/** Pre-redesign shims, kept only so this stale file typechecks until its rewrite (see the header). */
+const OVERCALL_FEE_RECIPIENT = ZERO_ADDRESS;
+const PLACEHOLDER_SIGNATURE_SHIM = "0x";
+function splitPremium(unitPrice6: bigint, contracts: bigint) {
+  // One leg under write on fill: the whole unit price is the vault's, there is no fee leg.
+  return { unitPrice6, writerPerContract6: unitPrice6, feePerContract6: 0n, writerTotal6: unitPrice6 * contracts, feeTotal6: 0n };
+}
 
 /*//////////////////////////////////////////////////////////////
                               SETTINGS
@@ -1120,13 +1127,13 @@ async function main(): Promise<void> {
       const rows = store.listingsForCycle(1);
       assertEq(rows.length, 1, "one listing row");
       const row = rows[0] as ListingRow;
-      assertEq(row.status, "post_failed", "the keeper recorded the book's refusal");
+      assertEq(row.status, "approved", "the keeper recorded the listing");
       assertEq(row.counter, SEAPORT_COUNTER.toString(), "the keeper built the order with Seaport's live counter");
       assert(stubRequests.some((r) => r.startsWith("POST /api/orders")), "the keeper did POST to the book");
       assert(alerts.some((a) => a.kind === "api_reject" && a.message.includes("/orders")), "api_reject alert names the /orders fallback");
       assertEq(cycle.option_id, series.ids[0]?.toString() ?? "", "wrote the nearest in-band rung");
       const onChainPolicy = await policy.readPolicy();
-      const contracts = policy.maxContracts(DEPOSIT, LOT, onChainPolicy);
+      const contracts = policy.maxContracts(DEPOSIT, onChainPolicy);
       assertEq(BigInt(row.contracts), contracts, "listed the whole write at 95% utilisation");
       const spot = await read<bigint>(vault, vaultAbi, "spotUsdg");
       assertEq(row.unit_price6, policy.minUnitPrice6(spot, onChainPolicy).toString(), "priced at the policy floor");
@@ -1141,11 +1148,11 @@ async function main(): Promise<void> {
       assertEq(order.orderHash.toLowerCase(), listingHash.toLowerCase(), "/orders serves the authorised hash");
       assertEq(order.status, "post_failed", "/orders serves it although the book refused it");
       assertEq(order.contracts, contracts.toString(), "/orders contracts");
-      assertEq(order.signature, seaport.PLACEHOLDER_SIGNATURE, "/orders signature is the 65-byte placeholder");
+      assertEq(order.signature, PLACEHOLDER_SIGNATURE_SHIM, "/orders signature is empty");
       const split = splitPremium(BigInt(order.unitPrice6), contracts);
       assertEq(order.parameters.consideration[0]?.startAmount ?? "", split.writerTotal6.toString(), "writer leg = per-contract split x N (web splitPremium)");
       assertEq(order.parameters.consideration[1]?.startAmount ?? "", split.feeTotal6.toString(), "fee leg = per-contract split x N (web splitPremium)");
-      assertEq(row.to_vault6, split.writerTotal6.toString(), "keeper to_vault6 agrees with the web split");
+      assertEq(row.gross_usdg6, split.writerTotal6.toString(), "keeper gross_usdg6 agrees with the web split");
       record.txs.push({ label: "keeper: rollOpen", by: KEEPER.address, hash: cycle.roll_open_tx as Hex, block: "", via: "keeper" });
       if (row.approve_tx) record.txs.push({ label: "keeper: approveListing", by: KEEPER.address, hash: row.approve_tx as Hex, block: "", via: "keeper" });
       Object.assign(record.amounts, {
@@ -1230,7 +1237,7 @@ async function main(): Promise<void> {
       const counter = await read<bigint>(SEAPORT, seaportAbi, "getCounter", [vault]);
       assertEq(counter, SEAPORT_COUNTER, "Seaport getCounter(vault)");
       assertEq(row.components.counter, counter.toString(), "route restored components.counter from Seaport");
-      assertEq(row.counter, counter.toString(), "route row counter");
+      assertEq(row.counter ?? "", counter.toString(), "route row counter");
       // Seaport hashes the route's components to the authorised hash, and so does the web lib.
       const onChainHash = await read<Hex>(SEAPORT, seaportAbi, "getOrderHash", [seaport.componentsFromJson(row.components as never)]);
       assertEq(onChainHash.toLowerCase(), listed.order.orderHash.toLowerCase(), "seaport.getOrderHash(route components) = the vault's listingHash");
@@ -1241,7 +1248,7 @@ async function main(): Promise<void> {
         assert(!(key in (row as Record<string, unknown>)), `route row does not carry the keeper's "${key}"`);
       }
       assertEq(row.status, "open", "route row status from Seaport's fill fraction");
-      assertEq(row.remaining, listed.contracts.toString(), "route row remaining");
+      assertEq(row.remaining ?? "", listed.contracts.toString(), "route row remaining");
       // The same check the page runs, from web/lib/overcall.ts, against the vault's own slots.
       const check = checkListingIsOurs(
         row,
@@ -1393,7 +1400,7 @@ async function main(): Promise<void> {
       // the row flaps partial <-> post_failed every POST_RETRY_INTERVAL_MS. /orders serves both
       // statuses, so the fallback itself is unaffected; the assertion accepts either and says
       // which it saw.
-      assert(row.status === "partial" || row.status === "post_failed", `keeper listing status is a live one (got ${row.status})`);
+      assert(row.status === "partial" || row.status === "approved", `keeper listing status is a live one (got ${row.status})`);
       if (row.status !== "partial") note(`keeper listing status after the retry: ${row.status} (Seaport says ${row.seaport_total_filled}/${row.seaport_total_size}; see the KNOWN KEEPER DEFECT note)`);
       record.amounts.keeperListingStatusAfterPartialFill = row.status;
       const { orders } = await getJson<{ orders: KeeperOrder[] }>(`${keeperUrl}/orders`);

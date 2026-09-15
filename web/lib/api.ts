@@ -26,6 +26,14 @@
  * and every fill writes exactly what it sold (`CallsWritten` per fill), so contracts written and
  * contracts sold are one number. `contracts` on a row is that number; `contractsSold` is kept as
  * a field because the indexer publishes it and older payloads carry it, and the two agree.
+ *
+ * EVERY ROW IS A WEEK THE VAULT ARMED. The vault numbers its own cycles (`cycleNumber` is bumped
+ * by `rollOpen` and by nothing else), so a week the keeper sat out has no cycle number and no
+ * row: there is no "skipped" status and no `wrote` flag any more. The indexer's statuses are
+ * `listed`, `filled` (running), and `unfilled`, `closed`, `assigned`, `stranded` (over). A
+ * STRANDED week is over too: the close ran, the premium was harvested, only the claim's
+ * collateral and strike USDG are still inside Valorem, and `settlement.strand` says which
+ * generation it is and whether `retryStrandedClaim` has since brought it home.
  */
 import type { Address, Hex } from "viem";
 
@@ -143,13 +151,6 @@ export type VaultSummary = {
  */
 export type CycleRow = {
   cycle: number;
-  /**
-   * False for a week the vault sat out (no option type armed: writes halted, a strike outside the
-   * band, a stale feed). Such a week is a published outcome, not "unfilled": "unfilled" says a
-   * call was armed and nobody bought it, which is not what happened. The indexer sends it; the
-   * log fallback sets it true, since every row there starts from a vault event.
-   */
-  wrote?: boolean;
   optionId?: bigint;
   strikeUsdg?: bigint;
   /** Contracts written this week. Under write on fill this equals contracts sold. */
@@ -167,9 +168,17 @@ export type CycleRow = {
    * True when `rollClose` could not redeem the week's Valorem claim and left it stranded
    * (ClaimStranded). The week is closed and its premium harvested; the strike USDG inside the
    * claim arrives when `retryStrandedClaim` succeeds, through a later Harvest carrying this
-   * cycle's number. False or absent for an ordinary week.
+   * cycle's number. False or absent for an ordinary week. Stays true after the recovery: the
+   * close DID strand, and that is history.
    */
   stranded?: boolean;
+  /** The vault's strand generation this week's claim opened (`ClaimStranded.gen`). */
+  strandGen?: number;
+  /**
+   * True once `retryStrandedClaim` redeemed the claim (StrandedClaimRecovered). Undefined for a
+   * week that never stranded; false while the claim is still inside Valorem.
+   */
+  strandRecovered?: boolean;
   // THE WEEK'S USDG, SPLIT (W-21). On an assigned week the vault's harvest sweeps premium AND
   // the strike proceeds from the contracts taken at the strike. The strike proceeds are returned
   // principal, not yield, so every premium figure a page shows — gross, net, per share, "Last
@@ -236,37 +245,30 @@ export type HealthRow = {
 
 /**
  * The statuses under which the indexer considers a week over (indexer/ponder.schema.ts,
- * `cycleStatus`), plus the generic "settled" a hand-rolled payload might use. A week whose close
- * stranded its claim is closed too: the harvest ran, the queue settled, only the claim's USDG is
- * still to come.
- *
- * `idle` is not here because on its own it is ambiguous. The indexer uses it both for the
- * current week before the next rollOpen (not over) and for a week the vault sat out (over, and
- * a published outcome — the schema calls it "terminal for a skipped week"). Only RollClose ever
- * stamps `closedAt`, so a skipped week never gets one. The two are told apart below by the
- * week's own clock: an idle week the vault never armed is settled once its expiry has passed.
- * Leaving idle out entirely made every skipped week render as "still running" forever.
+ * `cycleStatus`: `unfilled`, `closed`, `assigned`, `stranded`), plus the generic "settled" a
+ * hand-rolled payload might use. A week whose close stranded its claim is over too: the harvest
+ * ran, the queue settled, only the claim's collateral and strike USDG are still to come. The two
+ * running statuses, `listed` and `filled`, are not here; nor is anything for a week the vault
+ * never armed, because such a week has no row (see the header).
  */
 const CLOSED_STATUSES = new Set(["unfilled", "closed", "assigned", "settled", "stranded"]);
 
 /**
  * One `/v1/cycles` row → one `CycleRow`. Exported for web/lib/api.test.ts, which runs it over
- * the fixtures in ops/fixtures/api/; nothing outside this file calls it directly.
- *
- * `nowSeconds` is only consulted for an idle week (see `CLOSED_STATUSES`); it is a parameter
- * so the test can place "now" on either side of a fixture's expiry. `fetchCycles` reads the
- * clock once per response rather than once per row.
+ * the fixtures in ops/fixtures/api/; nothing outside this file calls it directly. Pure over its
+ * input: no clock is read, because nothing on a row depends on "now" any more (a week is over
+ * when the indexer says so or when a close is on record; there is no week that expires unclosed).
  */
-export function normaliseCycle(input: unknown, nowSeconds: number = Math.floor(Date.now() / 1000)): CycleRow | null {
+export function normaliseCycle(input: unknown): CycleRow | null {
   const r = asRecord(input);
   const cycle = toNumber(pick(r, "cycle", "cycleNumber", "cycle_number", "number"));
   if (cycle === undefined) return null;
 
   // The indexer's groups. On a flat payload each is `{}`, so every `pick` below falls through
-  // to the top-level spelling on its right. The week's clock (exercise, expiry) lived under
-  // `registry` before the redesign and is read from a `cycle`/`option` group as well, so either
-  // spelling of the indexer's works.
-  const clock = { ...asRecord(r.registry), ...asRecord(r.option), ...asRecord(r.cycle) };
+  // to the top-level spelling on its right. The week's clock (exercise, expiry) is the option
+  // type's, snapshotted by the vault at rollOpen; the indexer publishes it under `option`, and a
+  // `cycle` group is read as well so a hand-rolled payload may spell it either way.
+  const clock = { ...asRecord(r.option), ...asRecord(r.cycle) };
   const written = asRecord(r.written);
   const listing = asRecord(r.listing);
   const fill = asRecord(r.fill);
@@ -322,11 +324,18 @@ export function normaliseCycle(input: unknown, nowSeconds: number = Math.floor(D
     ? toBigInt(pick(harvest, "premiumNet"))
     : (minus(credited, strike) ?? minus(premiumGross, fee));
   const status = toStr(pick(r, "status"));
-  // `wrote` (the pre-redesign name) or `armed`: did the vault open a cycle on an option type.
-  const wroteRaw = pick(r, "wrote", "armed");
-  const wrote = typeof wroteRaw === "boolean" ? wroteRaw : undefined;
-  const strandedRaw = pick(settlement, "stranded") ?? pick(r, "stranded");
+  // The stranded close. The indexer's boolean is the fact (it stays true after the recovery);
+  // `settlement.strand` is null for an ordinary week and `{gen, recovered, recoveredAt,
+  // recoveredTx}` for one whose close stranded. A `status` of "stranded" alone, from a payload
+  // without the boolean, is read as stranded and unrecovered: that status resolves to `assigned`
+  // or `closed` the moment the retry lands.
+  const strand = asRecord(pick(settlement, "strand"));
+  const strandedRaw = pick(r, "stranded") ?? pick(settlement, "stranded");
   const stranded = typeof strandedRaw === "boolean" ? strandedRaw : status === "stranded" ? true : undefined;
+  const strandGen = toNumber(pick(strand, "gen") ?? pick(r, "strandGen", "strand_gen"));
+  const recoveredRaw = pick(strand, "recovered") ?? pick(r, "strandRecovered", "strand_recovered");
+  const strandRecovered =
+    typeof recoveredRaw === "boolean" ? recoveredRaw : stranded === true ? status !== "stranded" && status !== undefined : undefined;
   const filledAt = toNumber(pick(fill, "firstFillAt") ?? pick(r, "filledAt", "filled_at"));
   const closedAt = toNumber(
     pick(settlement, "closedAt") ?? pick(r, "closedAt", "closed_at", "settledAt", "settled_at"),
@@ -336,13 +345,6 @@ export function normaliseCycle(input: unknown, nowSeconds: number = Math.floor(D
       pick(written, "expiryTimestamp", "expiryTs") ??
       pick(r, "expiryTs", "expiry_ts", "expiryTimestamp", "expiry_timestamp"),
   );
-
-  // A skipped week. The vault armed nothing, so nothing can close it; the week's expiry is the
-  // moment its outcome became final. `wrote` must be the indexer's own false: a flat payload
-  // that says only `status: "idle"` has not said whether the vault sat the week out, and is
-  // left open rather than guessed at.
-  const skippedAndOver =
-    status === "idle" && wrote === false && expiryTs !== undefined && expiryTs < nowSeconds;
 
   // "Filled" means a buyer paid. The indexer says so itself (`filled` is `contractsSold > 0`
   // on its side, and Seaport's OrderFulfilled plus the vault's CallsWritten are the only source
@@ -358,7 +360,6 @@ export function normaliseCycle(input: unknown, nowSeconds: number = Math.floor(D
 
   return {
     cycle,
-    wrote,
     optionId: toBigInt(pick(written, "optionId") ?? pick(r, "optionId", "option_id")),
     strikeUsdg: toBigInt(pick(written, "strikeUsdg") ?? pick(r, "strikeUsdg", "strike", "strike_usdg")),
     contracts: contractsWritten ?? contractsSold,
@@ -377,6 +378,8 @@ export function normaliseCycle(input: unknown, nowSeconds: number = Math.floor(D
     ),
     expiryTs,
     stranded,
+    strandGen,
+    strandRecovered,
     harvestGrossUsdg: gross,
     premiumGrossUsdg: premiumGross,
     feeUsdg: fee,
@@ -397,11 +400,10 @@ export function normaliseCycle(input: unknown, nowSeconds: number = Math.floor(D
     txClose: toHex(pick(settlement, "txClose") ?? pick(r, "txClose", "tx_close")),
     status,
     filled,
-    // Over when the indexer says so, when a close is on record, or when a skipped week's
-    // expiry has passed. An ASSIGNED week has a `closedAt` and a status in the set;
-    // before this read the nested `closedAt` it fell through to "open".
-    settled:
-      closedAt !== undefined || (status !== undefined && CLOSED_STATUSES.has(status)) || skippedAndOver,
+    // Over when the indexer says so or when a close is on record. An ASSIGNED week has a
+    // `closedAt` and a status in the set; before this read the nested `closedAt` it fell through
+    // to "open".
+    settled: closedAt !== undefined || (status !== undefined && CLOSED_STATUSES.has(status)),
   };
 }
 
@@ -443,10 +445,8 @@ export async function fetchVaultSummary(): Promise<VaultSummary | null> {
 export async function fetchCycles(limit = 52): Promise<CycleRow[] | null> {
   try {
     const payload = await getJson(`${API_BASE}/v1/cycles?limit=${encodeURIComponent(String(limit))}`);
-    // Not `.map(normaliseCycle)`: map would pass the array index as `nowSeconds`.
-    const now = Math.floor(Date.now() / 1000);
     const rows = unwrapList(payload, "cycles", "items", "data")
-      .map((row) => normaliseCycle(row, now))
+      .map((row) => normaliseCycle(row))
       .filter((c): c is CycleRow => c !== null);
     rows.sort((a, b) => b.cycle - a.cycle);
     return rows;

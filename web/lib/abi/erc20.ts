@@ -111,3 +111,20 @@ export const stockTokenAbi = [
     outputs: [{ name: "", type: "bool" }],
   },
 ] as const;
+
+/**
+ * USDG's own reverts, so a fill simulation can name the stablecoin's refusal instead of an
+ * unknown selector. USDG on 4663 is Paxos's token (paxos-token-contracts, integrations/usdg.md):
+ * every transfer path reverts `ContractPaused()` while paused (B1), `AddressFrozen()` when the
+ * sender, the recipient or the `transferFrom` spender is frozen (B4), and its own
+ * `InsufficientFunds()` / `InsufficientAllowance()` — never OpenZeppelin's argument-carrying
+ * names — when a balance or an allowance is short. The selectors were verified on chain
+ * (ContractPaused 0xab35696f, AddressFrozen 0x1fd1cc44, InsufficientFunds 0x356680b7) and
+ * lib/revert.test.ts pins all four against this ABI. Errors only: nothing here is ever called.
+ */
+export const usdgErrorsAbi = [
+  { type: "error", name: "ContractPaused", inputs: [] },
+  { type: "error", name: "AddressFrozen", inputs: [] },
+  { type: "error", name: "InsufficientFunds", inputs: [] },
+  { type: "error", name: "InsufficientAllowance", inputs: [] },
+] as const;

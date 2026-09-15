@@ -62,6 +62,11 @@ import { useNotice, useTxRunner } from "./TxToast";
  * The signature is EMPTY. The vault has no key: it validated the order on Seaport inside
  * approveListing, and Seaport skips verification for a validated order. The fee is the
  * protocol's, at harvest; the buyer pays one leg, to the vault, for exactly what they take.
+ *
+ * The clearinghouse the offer item must name is the one the vault was constructed with
+ * (`snapshot.clear`, read from the vault), so a build whose NEXT_PUBLIC_CLEARINGHOUSE points at
+ * another Clear cannot reject the vault's real listing; the compiled constant stands in only
+ * until that read has landed.
  */
 
 /** A placeholder fulfiller for a viewer without a wallet: the vault's hook runs before any
@@ -118,7 +123,7 @@ export function OrderPayload({
         {
           vault: VAULT,
           usdg: USDG,
-          clearinghouse: CLEARINGHOUSE,
+          clearinghouse: snapshot.clear ?? CLEARINGHOUSE,
           seaport: SEAPORT,
           listingHash: expectedListingHash,
           chainId: CHAIN_ID,
@@ -129,7 +134,7 @@ export function OrderPayload({
         },
         nowSeconds,
       ),
-    [listing, expectedListingHash, snapshot.listingAmount, snapshot.listingGrossUsdg, snapshot.optionId, snapshot.conduitKey, nowSeconds],
+    [listing, expectedListingHash, snapshot.listingAmount, snapshot.listingGrossUsdg, snapshot.optionId, snapshot.conduitKey, snapshot.clear, nowSeconds],
   );
   const checking = check.ok && nowSeconds === 0;
   const verified = check.ok && nowSeconds > 0;
@@ -231,7 +236,7 @@ export function OrderPayload({
           orderHash: listing.orderHash,
           components: listing.components,
           signature: "0x",
-          note: "PARTIAL_RESTRICTED; zone = the vault; validated on chain, so the signature is empty. Fill with fulfillAdvancedOrder(numerator k, denominator offer[0].startAmount).",
+          note: "PARTIAL_RESTRICTED (orderType 3); offerer = zone = the vault; one USDG consideration item to the vault; validated on chain, so the signature is empty and extraData is empty. Fill with fulfillAdvancedOrder(numerator k, denominator offer[0].startAmount) after approving k × unit price of USDG to Seaport; the vault writes exactly k contracts inside the fill and re-checks its floors at that moment's spot.",
         },
         null,
         2,
@@ -497,6 +502,14 @@ function PreflightNotice({ verdict, pending, placeholder }: { verdict: Preflight
         <div className="notice" data-tone="warn" style={{ marginTop: 12 }}>
           <strong>Seaport would refuse this fill{verdict.decoded.name ? ` (${verdict.decoded.name})` : ""}.</strong>{" "}
           {verdict.decoded.text}
+        </div>
+      );
+    case "tokenRefused":
+      return (
+        <div className="notice" data-tone="bad" style={{ marginTop: 12 }}>
+          <strong>USDG would not move for this fill{verdict.decoded.name ? ` (${verdict.decoded.name})` : ""}.</strong>{" "}
+          {verdict.decoded.text} The vault&apos;s own checks were not the problem; the button stays off until USDG
+          moves again, and this page re-simulates every few seconds.
         </div>
       );
     case "inconclusive":

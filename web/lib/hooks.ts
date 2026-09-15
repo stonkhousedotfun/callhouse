@@ -189,6 +189,16 @@ export type VaultSnapshot = {
   listingsThisCycle?: number;
   /** The vault's Seaport conduit key (zero at deploy). A listing must carry exactly this. */
   conduitKey?: Hex;
+  /**
+   * `vault.clear()`: the clearinghouse the vault was constructed with, which is a deploy-time
+   * choice (Overcall's instance, or one deployed by contracts/script/DeployClear.s.sol; that name
+   * is history, the address is not). The offer item of every listing must be THIS contract's
+   * ERC-1155 and the week's tuple is read from it, so the chain's answer, not
+   * NEXT_PUBLIC_CLEARINGHOUSE, is what the checks and the tuple read use once it has been read;
+   * the compiled constant is the fallback until then and a build whose constant disagrees is
+   * reported on the cycle page.
+   */
+  clear?: Address;
   accUsdgPerShare?: bigint;
   totalUsdgDistributed?: bigint;
   usdgReservedForQueue?: bigint;
@@ -248,6 +258,7 @@ export function useVaultSnapshot() {
       ["listingAmount", vault("listingAmount")],
       ["listingsThisCycle", vault("listingsThisCycle")],
       ["conduitKey", vault("conduitKey")],
+      ["clear", vault("clear")],
       ["accUsdgPerShare", vault("accUsdgPerShare")],
       ["totalUsdgDistributed", vault("totalUsdgDistributed")],
       ["usdgReservedForQueue", vault("usdgReservedForQueue")],
@@ -346,6 +357,7 @@ export function useVaultSnapshot() {
       listingAmount: big(r.raw("listingAmount")),
       listingsThisCycle: num(r.raw("listingsThisCycle")),
       conduitKey: hex(r.raw("conduitKey")),
+      clear: hex(r.raw("clear")) as Address | undefined,
       accUsdgPerShare: big(r.raw("accUsdgPerShare")),
       totalUsdgDistributed: big(r.raw("totalUsdgDistributed")),
       usdgReservedForQueue: big(r.raw("usdgReservedForQueue")),
@@ -398,15 +410,17 @@ export type CycleOption = {
  * registry and no ladder: the keeper creates one type a week (`clear.newOptionType`) and the
  * vault checks its tuple at rollOpen (asset, USDG, one-token lot, window, both band bounds) and
  * snapshots strike, exercise and expiry. Reading the tuple here too means a disagreement shows up
- * on screen instead of being trusted from one side.
+ * on screen instead of being trusted from one side. The clearinghouse asked is the one the vault
+ * names (`snapshot.clear`), the compiled constant only until that read has landed.
  */
 export function useCycleOption(snapshot: VaultSnapshot) {
   const optionId = snapshot.optionId;
+  const clearinghouse = snapshot.clear ?? CLEARINGHOUSE;
   const enabled = optionId !== undefined && optionId !== 0n;
 
   const query = useReadContracts({
     contracts: enabled
-      ? [{ address: CLEARINGHOUSE, abi: valoremClearAbi as unknown as Abi, functionName: "option", args: [optionId] }]
+      ? [{ address: clearinghouse, abi: valoremClearAbi as unknown as Abi, functionName: "option", args: [optionId] }]
       : [],
     allowFailure: true,
     query: { enabled, refetchInterval: 60_000, staleTime: 30_000 },

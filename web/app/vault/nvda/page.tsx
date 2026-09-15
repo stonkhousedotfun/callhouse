@@ -184,7 +184,7 @@ export default function VaultPage() {
                     : lastWasAssigned
                       ? `unfilled, assigned ${(last.contractsAssigned ?? 0n).toString()}`
                       : "unfilled, 0"}
-                  {last.stranded ? " · claim stranded at the close" : ""} ·{" "}
+                  {last.stranded ? (last.strandRecovered === true ? " · claim stranded at the close, since recovered" : " · claim stranded at the close") : ""} ·{" "}
                   {fmtUtcDate(last.closedAt)}
                 </div>
               </div>

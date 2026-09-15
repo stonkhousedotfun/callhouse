@@ -385,6 +385,39 @@ describe("verifyKeeperOrders", () => {
     expect(orders).toHaveLength(1);
   });
 
+  it("checks the offer token against the clearinghouse the VAULT names, not the build's constant", async () => {
+    // A vault deployed on its own Clear (contracts/script/DeployClear.s.sol): the slot's `clear`
+    // is that address, the keeper's offer item names it, and a build whose compiled
+    // NEXT_PUBLIC_CLEARINGHOUSE still points at the upstream instance must not reject the
+    // vault's real listing. Without the slot's `clear` the constant is the fallback.
+    const ownClear = "0x3333333333333333333333333333333333333333" as Address;
+    const onOwnClear = goodParameters();
+    onOwnClear.offer[0]!.token = ownClear;
+    const hash = hashOf(onOwnClear, COUNTER);
+    const { orders, rejected } = await verifyKeeperOrders(
+      [keeperEntry(onOwnClear)],
+      fakeChain({ slot: { listingHash: hash, clear: ownClear } }).reader,
+      CONFIG,
+      NOW,
+    );
+    expect(rejected).toEqual([]);
+    expect(orders).toHaveLength(1);
+    expect(orders[0]!.components.offer[0]!.token).toBe(ownClear);
+    // And the converse: the slot names the upstream Clear, so an offer of some other ERC-1155
+    // is refused even when the build's constant would have accepted it.
+    const { rejected: refused } = await verifyKeeperOrders(
+      [keeperEntry(onOwnClear)],
+      fakeChain({ slot: { listingHash: hash, clear: CLEARINGHOUSE } }).reader,
+      CONFIG,
+      NOW,
+    );
+    expect(refused).toHaveLength(1);
+    expect(refused[0]!.reasons).toContain(REASONS.offerToken);
+    // No `clear` in the slot: the build's constant stands in, and the fixture's offer is on it.
+    const { orders: byConstant } = await verifyKeeperOrders([keeperEntry()], fakeChain().reader, CONFIG, NOW);
+    expect(byConstant).toHaveLength(1);
+  });
+
   it("reports an expired order as closed", async () => {
     const expired = goodParameters();
     expired.endTime = String(NOW);
