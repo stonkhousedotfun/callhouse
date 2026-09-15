@@ -77,7 +77,7 @@ const count = (v: unknown): string => String(big(v) ?? "?");
 export const EXPLAINED: Record<string, string | ((args: readonly unknown[]) => string)> = {
   // Deposits and the queue.
   UseQueue: "A call is open, so this redemption has to go through the queue.",
-  DepositCapExceeded: "That would take this account past its 20 NVDA cap.",
+  DepositCapExceeded: "That is more than this account can hold.",
   InsufficientIdle: "Not enough idle NVDA in the account for that.",
   NotOwner: "Only the account owner can do that.",
   NoWeek: "This week is not open for offers yet.",

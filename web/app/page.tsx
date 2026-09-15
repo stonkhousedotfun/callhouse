@@ -20,7 +20,7 @@ const ROADMAP = [
     when: "Now",
     title: "Beta, NVDA first",
     current: true,
-    body: `Public beta. ${MARKET} first. You choose how much of yours is for sale each week. ${STATUS.audit}.`,
+    body: `${MARKET} first.`,
   },
   {
     when: "Next",
@@ -59,7 +59,7 @@ export default function HomePage() {
               <Chip tone="accent" dot>
                 {STATUS.phase}
               </Chip>
-              <Chip tone="warn">{STATUS.audit}</Chip>
+
             </div>
             <p>
               Put your {MARKET} in. Each week someone can pay you for the chance to buy it at a set price. If they
@@ -76,7 +76,7 @@ export default function HomePage() {
 
       <Notice tone="warn" className="mb-6 lg:[&>div]:max-w-[88ch]">
         Premium is paid only if a buyer fills. Assignment can take the collateral at the strike. Stock Tokens are debt
-        securities, not Nvidia shares. {STATUS.phase}. {STATUS.auditLine}
+        securities, not Nvidia shares.
       </Notice>
 
       <div className="grid gap-4 sm:gap-5">
@@ -96,11 +96,11 @@ export default function HomePage() {
                 </p>
               </div>
             </div>
-            <dl className="grid grid-cols-2 gap-3 sm:grid-cols-4">
+            <dl className="grid grid-cols-2 gap-3 sm:grid-cols-3">
               <Figure label="First stock" value={MARKET} />
               <Figure label="You get paid in" value="USDG" tone="usdg" />
               <Figure label="Our fee" value="5%" />
-              <Figure label="Cap" value="20" unit={MARKET} />
+
             </dl>
             <div className="flex flex-wrap gap-3 border-t border-line pt-5">
               <Button href={ACCOUNT_HREF}>Put {MARKET} in</Button>
@@ -114,8 +114,7 @@ export default function HomePage() {
             <Chip>Next</Chip>
             <h2 className="text-[22px] font-extrabold tracking-[-0.02em] text-ink-2">More stocks</h2>
             <p className="text-[15.5px] text-ink-2">
-              Additional Stock Token books, one underlying each, after {MARKET} and the audit report is public. We
-              will not name the next ticker until that book is being built.
+              More stocks later. We will not name the next ticker until we are building it.
             </p>
             <p className="text-[13.5px] text-ink-3">
               Same design: your lots, your premium, your assignment. No basket, no points.
