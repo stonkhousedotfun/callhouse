@@ -121,7 +121,8 @@ COPY --from=builder --chown=node:node /out ./
 
 USER node
 
-VOLUME ["/data"]
+# Railway owns the volume (UI mount at /data). A Dockerfile VOLUME instruction is rejected:
+# "docker VOLUME is not supported, use Railway Volumes".
 EXPOSE 8787
 
 # Exec form: node is PID 1 and receives Railway's SIGTERM directly, which index.ts turns into
