@@ -1,135 +1,139 @@
 /**
- * The keeper, for real, against an anvil fork of Robinhood Chain 4663.
+ * The keeper, for real, against an anvil fork of Robinhood Chain 4663 — write on fill.
  *
- * WHY THIS FILE EXISTS: the previous dry run drove the CONTRACTS through a week and never ran a
- * line of the keeper — it re-implemented the strike pick without production's isApproved/cycleOf
- * filters and touched none of roll.ts, state.ts, overcallApi.ts, alerts.ts or health.ts. This one
- * imports the production modules and calls `reconcile()` and `tick()`, exactly as index.ts does,
- * against a fork of mainnet state. Three cycles run:
+ * WHY THIS FILE EXISTS: a keeper that has never run is a keeper whose first run is Friday night
+ * with depositors' collateral. This harness imports the PRODUCTION modules and calls
+ * `reconcile()` and `tick()` exactly as index.ts does, against a fork of mainnet state, and
+ * drives three weeks through them plus the arm of a fourth:
  *
- *   cycle 1  the LIVE Overcall NVDA series (ids, strikes and timestamps read from the real
- *            registry at the fork block), mirrored into a MockRegistry so the fork's clock can be
- *            warped through it. deposit -> tick: rollOpen + approveListing + POST -> tick: the
- *            book shows it -> a buyer fills on the real Seaport from the keeper's own /orders
- *            payload -> tick: filled -> warp -> tick: lockBook -> warp -> tick: rollClose. The
- *            harvest lands, the depositor claims it.
- *   cycle 2  a fresh five-rung series created on the real Valorem Clear, and the vault is rolled
- *            open BEHIND the keeper's back ("rolled while asleep"). The keeper must adopt the
- *            cycle from chain, list from the policy floor, watch nobody fill it, retire the
- *            listing at lockBook, and close the week honestly as unfilled, 0.
- *   cycle 3  a fresh series again, and this week is IN THE MONEY. The keeper writes and lists
- *            from Idle, a buyer fills on the real Seaport, the depositor queues 10 of the 25
- *            shares while the call is live, the feed moves above the strike, the keeper locks
- *            the book, and the buyer exercises 9 of the 23 contracts on the real Valorem Clear
- *            inside the window. rollClose must redeem the assigned claim (14 NVDA back, 9 x
- *            strike USDG in), publish contracts_assigned = 9, harvest premium + strike proceeds
- *            with the protocol fee on the premium ONLY (the strike proceeds are the assigned
- *            depositors' principal and are never fee'd), and settle the queue; the depositor
- *            then completes the redeem (NVDA plus the escrow's USDG) and claims the rest, to
- *            the base unit.
- *            The keeper's pre-close read, contractsAssignedAt, is also called directly against
- *            the real Clear (9 before the redeem; TokenNotFound -> unknown after) and both
- *            branches of resolveContractsAssigned are driven on the real receipt, because a
- *            tick alone can only ever exercise the event path: Vault.sol:801 always emits.
+ *   week 1  UNFILLED. A depositor puts collateral in; the keeper computes the next NYSE Friday
+ *           close, creates the option type on the REAL Valorem Clear, ARMS it (`rollOpen`
+ *           writes nothing: RollOpen.contractsCount == 0), and authorises one PARTIAL_RESTRICTED
+ *           listing at capacity, served from its own /orders with an EMPTY signature. Nobody
+ *           fills. The depositor queues while Listed; the exercise timestamp closes deposits;
+ *           `lockBook` retires the listing; `rollClose` closes flat (0 written, 0 assigned, the
+ *           honest Harvest(1, 0, 0, 0)) and settles that queue. While flat, an instant redeem
+ *           works, and a queue joined while Idle is settled by the keeper's own `settleQueue()`.
+ *   week 2  FILLED AND EXERCISED. The keeper lists; buyer A fills 2 of N straight from the
+ *           keeper's /orders JSON through the real Seaport's `fulfillAdvancedOrder(2, N, "0x")`,
+ *           buyer B fills 3 more (gas recorded for both: the first fill opens the claim, the
+ *           second tops it up). CallsWritten fires once per fill, `contractsWritten == 5`, and the
+ *           vault's ERC-1155 balance of the option is 0 after each fill: written == sold. A
+ *           Listed-phase deposit succeeds (decision D8) and checkpoints the premium early
+ *           (`sweepFee` then pays the fee to the base unit); the depositor queues while Listed.
+ *           At the exercise timestamp spot moves above the strike, buyer A exercises 2 on the
+ *           real Clear, `lockBook`, then `rollClose`: assignment 2, ClaimRedeemed, a second
+ *           Harvest carrying the strike proceeds fee-free, the queue settled; `completeRedeem`
+ *           and `claimUsdg` to the base unit.
+ *   week 3  STRANDED. Fills, one exercise (so the claim holds BOTH legs), a queue joined while
+ *           Listed, and then the vault is FROZEN on the real USDG by Paxos's ASSET_PROTECTION
+ *           role (impersonated). `rollClose` STRANDS: ClaimStranded in the receipt, Idle with the
+ *           claim kept, the settling epoch takes its EpochStrandShare, the keeper pages
+ *           `claim_stranded`, deposits revert DepositsClosed, `rollOpen` would revert
+ *           StillStranded and the keeper never even tries. The keeper's retry timer fires and the
+ *           retry REVERTS while the freeze holds (`strand_retry_failed`); after the unfreeze its
+ *           next retry lands (StrandedClaimRecovered, Harvest carrying the stranded cycle's
+ *           number, the deferred fee swept), the queuer's EpochStrandShare is paid with the rest
+ *           of the entry, and the keeper arms the following week normally.
+ *   then    the store is closed and reopened, and every row is asserted.
  *
- * WHAT IS REAL: the fork (mainnet state), Valorem Clear — including its exercise, assignment and
- * claim redemption in cycle 3 — Seaport 1.6, NVDA, USDG, Multicall3, the cycle-1 option series,
- * the vault bytecode (linked and deployed from contracts/out), and every keeper module. WHAT IS
- * STUBBED, each for one stated reason:
- *   - OvercallRegistry -> src/mocks/MockRegistry.sol. The real one's cycle is set by Overcall's
- *     operator; a rehearsal needs to set it on demand, twice.
- *   - Chainlink RHNVDA/USD -> src/mocks/MockFeed.sol seeded with the REAL answer at the fork
- *     block. The run warps the clock a week, and the real feed would then trip the vault's
- *     StalePrice gate — correctly, and uselessly for a rehearsal. DRYRUN_FEED=real keeps the real
- *     feed and runs cycle 1 only.
- *   - Overcall's listings API -> an in-process HTTP server implementing POST/GET/DELETE
- *     /api/orders with the response shapes recon R3 recorded. overcallApi.ts runs unmodified.
- *   - ALERT_WEBHOOK -> an in-process capture. alerts.ts runs unmodified.
- *   - NVDA and USDG balances are written into storage (anvil_setStorageAt), the fork suite's
- *     `deal` technique, because nobody here holds real Stock Tokens.
- * WHAT IS NOT EXERCISED HERE: index.ts's timer loop and signal handling (this harness calls
- * tick()), multiple exercisers, relists, a guardian rollClose and the Valorem fee branch — all
- * five are dryrun-extended.ts — and Overcall's real validator, which cannot be, from a fork.
+ * WHAT IS REAL: the fork (mainnet state), Valorem Clear (option types, writes inside Seaport's
+ * hook, exercise, assignment, redeem, and the freeze-time revert of the redeem), Seaport 1.6
+ * (validation, partial fills through the zone hooks, cancellation, counter bumps), NVDA, USDG
+ * (and its ASSET_PROTECTION freeze), Multicall3, the vault bytecode (linked and deployed from
+ * contracts/out exactly as script/Deploy.s.sol constructs it), and every keeper module. WHAT IS
+ * MOCKED, for one stated reason: Chainlink RHNVDA/USD -> src/mocks/MockFeed.sol seeded with the
+ * REAL answer at the fork block. The run warps the clock three weeks and moves spot on purpose
+ * twice (in the money before an exercise); the real feed would trip the vault's StalePrice gate
+ * on the first warp, correctly and uselessly for a rehearsal. ALERT_WEBHOOK is an in-process
+ * capture; alerts.ts runs unmodified. Balances are written into token storage (the fork suite's
+ * `deal`), because nobody here holds real Stock Tokens.
+ *
+ * WHAT IS NOT EXERCISED HERE: index.ts's timer loop and signal handling, several exercisers, a
+ * guardian cancel, the relist budget, the Valorem fee branch, a reprice after a rally, an
+ * anyone-rollClose, and a fill the vault refuses — all in dryrun-extended.ts.
  *
  * HOW TO RUN IT (keeper/README.md "Dry run" has the long form):
- *   anvil --fork-url https://rpc.mainnet.chain.robinhood.com --chain-id 4663 --port 8545
+ *   anvil --fork-url https://rpc.mainnet.chain.robinhood.com --chain-id 4663 --port 8560 --code-size-limit 98304
  *   (cd contracts && forge build)
  *   pnpm --filter @callhouse/keeper dryrun
  *
  * ENV (all optional):
- *   DRYRUN_RPC           anvil endpoint. Default http://127.0.0.1:8545
+ *   DRYRUN_RPC           anvil endpoint. Default http://127.0.0.1:8560. Loopback only, chain 4663 only.
  *   DRYRUN_ARTIFACTS     contracts/out. Default ../contracts/out relative to this package
- *   DRYRUN_OUT           where state.db, report.md and run.json go. Default ./dryrun-out/<utc>
- *   DRYRUN_DEPOSIT       asset base units to deposit. Default 25e18. Cycle 3 needs at least
- *                        10e18 (it queues 10e18 shares and exercises 9 contracts). Every
- *                        amount is derived, including cycle 1's usdgDust carried into cycle 3's
- *                        pot; the closed forms (6.4 NVDA, zero dust, floor(2/5) of net) are
- *                        additionally pinned at the default only.
- *   DRYRUN_FEED          mock (default) | real
+ *   DRYRUN_OUT           where keeper.db, report.md and run.json go. Default ./dryrun-out/<utc>
+ *   DRYRUN_DEPOSIT       asset base units the depositor puts in. Default 25e18; within
+ *                        [15e18, 45e18] (the run queues 5 + 3 + 4 + 2, redeems 2, sells 5 + 2,
+ *                        deposits 5 more under a 50e18 cap). Every figure is derived.
  *   DRYRUN_KEEPER_PK     the hot key to run as. Default: a key derived from a label
- *   DRYRUN_HEALTH_PORT   KEEPER_PORT for the health server. Default 18787
- *   DRYRUN_SKIP_CYCLE2   1 to stop after the filled cycle (cycle 3 is skipped too)
- *   DRYRUN_SKIP_CYCLE3   1 to stop after cycle 2
+ *   DRYRUN_HEALTH_PORT   KEEPER_PORT for the health server. Default 18790
  *
  * Every keeper variable is set by this file before the keeper is imported; a keeper .env is
  * deliberately NOT read (KEEPER_ENV_FILE=/dev/null), so a mainnet key cannot leak into a fork run.
  */
-import { mkdirSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync } from 'node:fs';
 import { join, resolve } from 'node:path';
-import { encodeEventTopics, getAddress, keccak256, parseEventLogs, toHex, type Address, type Hex } from 'viem';
+import { keccak256, parseEventLogs, toHex, type Address, type Hex } from 'viem';
+import { clearAbi, seaportAbi, vaultAbi } from './abi.js';
 import {
+  ACC_PRECISION,
   ADMIN,
-  BPS,
+  ANYONE,
   BUYER,
+  BUYER_B,
   CHAIN_ID,
   CLEAR,
   DEPOSITOR,
-  FEED,
   FEE_SAFE,
+  GUARDIAN,
   KEEPER,
   LAUNCH_POLICY,
   LOT,
   NVDA,
-  OVERCALL_FEE,
-  REGISTRY_NVDA,
   RPC,
   SEAPORT,
   USDG,
+  VAULT_MIN_LEAD_S,
   ZERO_BYTES32,
-  ONE_HUNDRED_ETH,
   AlertCapture,
-  OvercallStub,
-  artifact,
+  allFrom,
+  answerAbove,
+  approve,
   assert,
+  assertAddr,
   assertEq,
+  assertServedShape,
   balanceOf,
-  clearDelegation,
-  createFreshSeries,
+  capacityOf,
   currentStep,
   deal,
-  deploy,
-  deployLinked,
-  erc20Abi,
+  deployVault,
+  exerciseOn,
   expectRevert,
-  feedAbi,
+  fillFromOrders,
   forkChain,
+  fundActors,
   harvestFee,
-  latestTimestamp,
-  mockFeedAbi,
-  mockRegistryAbi,
+  healthClient,
+  isFrozen,
   note,
+  only,
+  preflightFork,
   pub,
-  rpc,
   sendTx,
-  setBalance,
+  setFeed,
+  setUsdgFrozen,
   step,
   trail,
-  vaultQueueAbi,
+  vaultHarnessAbi,
   wallet,
-  warpTo,
+  warpAndRefresh,
+  writeRunFiles,
 } from './dryrun-common.js';
+import { nextWeekWindow } from './calendar.js';
 // Type-only, erased at runtime: the keeper's state.ts (and config.ts behind it) is still not
-// loaded until the environment below has been set.
+// loaded until the environment below has been set. optionType.ts reads config.ts too, so it is
+// imported dynamically beside the other production modules.
 import type { ListingRow } from './state.js';
 
 /*//////////////////////////////////////////////////////////////
@@ -138,33 +142,51 @@ import type { ListingRow } from './state.js';
 
 const OUT = resolve(process.env.DRYRUN_OUT ?? join('dryrun-out', new Date().toISOString().replace(/[:.]/g, '-')));
 const DEPOSIT = BigInt(process.env.DRYRUN_DEPOSIT ?? '25000000000000000000');
-const FEED_MODE = process.env.DRYRUN_FEED === 'real' ? 'real' : 'mock';
-const HEALTH_PORT = Number(process.env.DRYRUN_HEALTH_PORT ?? '18787');
-const SKIP_CYCLE2 = process.env.DRYRUN_SKIP_CYCLE2 === '1';
-const SKIP_CYCLE3 = process.env.DRYRUN_SKIP_CYCLE3 === '1';
+const HEALTH_PORT = Number(process.env.DRYRUN_HEALTH_PORT ?? '18790');
+const DEPOSIT_CAP = 50n * LOT;
+
+/** Week 1: queued while Listed (settled by rollClose), then redeemed instantly, then queued
+ *  while Idle (settled by the keeper's settleQueue). */
+const QUEUE_W1_LISTED = 5n * LOT;
+const REDEEM_W1_INSTANT = 2n * LOT;
+const QUEUE_W1_IDLE = 3n * LOT;
+/** Week 2: two fills, one deposit while Listed, one queue while Listed, one exercise. */
+const FILL_A2 = 2n;
+const FILL_B2 = 3n;
+const DEPOSIT_LISTED = 5n * LOT;
+const QUEUE_W2 = 4n * LOT;
+const EXERCISE_W2 = 2n;
+/** Week 3: one fill, one queue while Listed, one exercise (both claim legs non-zero), a freeze. */
+const FILL_A3 = 2n;
+const QUEUE_W3 = 2n * LOT;
+const EXERCISE_W3 = 1n;
+/** The keeper's stranded-claim retry timer for this run: the schema's floor. */
+const RETRY_MS = 1_000;
 
 /*//////////////////////////////////////////////////////////////
                               THE RECORD
 //////////////////////////////////////////////////////////////*/
 
 const record = {
+  harness: 'dryrun',
   startedAt: new Date().toISOString(),
   rpc: RPC,
   clientVersion: '',
   chainId: 0,
   forkBlock: '',
-  feedMode: FEED_MODE,
   deposit: DEPOSIT.toString(),
+  keeperConfig: {} as Record<string, unknown>,
   actors: trail.actors,
   addresses: trail.addresses,
+  blocks: {} as Record<string, string>,
   cycle1: {} as Record<string, unknown>,
   cycle2: {} as Record<string, unknown>,
   cycle3: {} as Record<string, unknown>,
+  cycle4: {} as Record<string, unknown>,
   harnessTxs: trail.harnessTxs,
   steps: trail.steps,
-  health: {} as Record<string, unknown>,
-  stubRequests: trail.stubRequests,
   alerts: trail.alerts,
+  health: {} as Record<string, unknown>,
   db: {} as Record<string, unknown>,
   stoppedAt: null as string | null,
   error: null as string | null,
@@ -172,6 +194,7 @@ const record = {
 };
 
 const startedMs = Date.now();
+const sleep = (ms: number) => new Promise<void>((done) => setTimeout(done, ms));
 
 /*//////////////////////////////////////////////////////////////
                                 MAIN
@@ -180,265 +203,293 @@ const startedMs = Date.now();
 async function main(): Promise<void> {
   mkdirSync(OUT, { recursive: true });
   const dbPath = join(OUT, 'keeper.db');
+  assert(DEPOSIT >= 15n * LOT && DEPOSIT <= 45n * LOT, `DRYRUN_DEPOSIT must be within [15e18, 45e18], got ${DEPOSIT}`);
 
   /* ---------- 0. preflight ---------- */
 
-  await step('preflight: this is an anvil fork of 4663', async () => {
-    const clientVersion = await rpc<string>('web3_clientVersion');
-    assert(
-      clientVersion.toLowerCase().includes('anvil'),
-      `${RPC} is not anvil (reports "${clientVersion}"). This script writes storage and warps time; it must never be pointed at a real chain.`,
-    );
-    const chainId = await pub.getChainId();
-    assertEq(chainId, CHAIN_ID, 'chain id');
-    let forkBlock = 'unknown';
-    try {
-      const info = await rpc<{ forkConfig?: { forkBlockNumber?: number } }>('anvil_nodeInfo');
-      if (info.forkConfig?.forkBlockNumber !== undefined) forkBlock = String(info.forkConfig.forkBlockNumber);
-    } catch {
-      /* older anvil */
-    }
-    if (forkBlock === 'unknown') forkBlock = (await pub.getBlockNumber()).toString();
-    record.clientVersion = clientVersion;
-    record.chainId = chainId;
-    record.forkBlock = forkBlock;
-    note(`anvil ${clientVersion}, fork block ${forkBlock}, head timestamp ${await latestTimestamp()}`);
-
-    for (const [label, actor] of Object.entries({ keeper: KEEPER, admin: ADMIN, feeSafe: FEE_SAFE, depositor: DEPOSITOR, buyer: BUYER })) {
-      await setBalance(actor.address, ONE_HUNDRED_ETH);
-      await clearDelegation(actor.address);
-      record.actors[label] = actor.address;
-    }
-    note(`keeper ${KEEPER.address}, admin ${ADMIN.address}, depositor ${DEPOSITOR.address}, buyer ${BUYER.address}`);
+  await step('preflight: this is an anvil fork of 4663 on a loopback RPC', async () => {
+    Object.assign(record, await preflightFork());
+    await fundActors({ keeper: KEEPER, admin: ADMIN, feeSafe: FEE_SAFE, guardian: GUARDIAN, depositor: DEPOSITOR, buyerA: BUYER, buyerB: BUYER_B, anyone: ANYONE });
   });
 
-  /* ---------- 1. the live series, read from the real registry ---------- */
+  /* ---------- 1. deploy ---------- */
 
-  const registryAbi = (await import('./abi.js')).registryAbi;
-  const clearAbi = (await import('./abi.js')).clearAbi;
-  const vaultAbi = (await import('./abi.js')).vaultAbi;
-  const seaportAbi = (await import('./abi.js')).seaportAbi;
-  const harvestEvent = (await import('./abi.js')).harvestEvent;
-  const rollCloseEvent = (await import('./abi.js')).rollCloseEvent;
-
-  const live = await step('read the live Overcall NVDA cycle from the real registry', async () => {
-    const cycle = await pub.readContract({ address: REGISTRY_NVDA, abi: registryAbi, functionName: 'cycle' });
-    const now = await latestTimestamp();
-    assert(cycle.number !== 0, 'the real registry has no cycle at this fork block; fork at a newer block');
-    assert(BigInt(cycle.exerciseTimestamp) > now, 'the live cycle is past its write deadline at this fork block; fork at a newer block');
-    const strikes = await Promise.all(
-      cycle.optionIds.map((id) => pub.readContract({ address: REGISTRY_NVDA, abi: registryAbi, functionName: 'strikePerContract', args: [id] })),
-    );
-    note(`cycle ${cycle.number}: ${cycle.optionIds.length} rungs, strikes ${strikes.map((s) => (BigInt(s) / 1_000_000n).toString()).join('/')} USDG, exercise ${cycle.exerciseTimestamp}, expiry ${cycle.expiryTimestamp}`);
-    record.cycle1.liveRegistryCycle = cycle.number;
-    record.cycle1.optionIds = cycle.optionIds.map(String);
-    record.cycle1.strikes = strikes.map(String);
-    record.cycle1.exerciseTimestamp = cycle.exerciseTimestamp;
-    record.cycle1.expiryTimestamp = cycle.expiryTimestamp;
-    return { ids: [...cycle.optionIds], strikes: strikes.map((s) => BigInt(s)), exercise: BigInt(cycle.exerciseTimestamp), expiry: BigInt(cycle.expiryTimestamp), lot: BigInt(cycle.lotSize) };
+  const { vault, feed, answer, vaultDeployBlock } = await step('deploy MockFeed (seeded with the real answer), both libraries and the linked Vault; grant KEEPER_ROLE and GUARDIAN_ROLE', async () => {
+    const deployment = await deployVault(DEPOSIT_CAP, 'Callhouse NVDA (dry run)');
+    record.blocks.vaultDeployBlock = deployment.vaultDeployBlock.toString();
+    return deployment;
   });
+  const V = { address: vault, abi: vaultAbi } as const;
+  const Q = { address: vault, abi: vaultHarnessAbi } as const;
 
-  /* ---------- 2. deploy: registry, feed, library, vault ---------- */
+  /* ---------- 2. the environment, and then — only then — the keeper ---------- */
 
-  const { registry, feed, vault, realAnswer } = await step('deploy MockRegistry, the feed, both libraries and the linked Vault', async () => {
-    const [, answer] = await pub.readContract({ address: FEED, abi: feedAbi, functionName: 'latestRoundData' });
-    note(`real Chainlink answer at the fork block: ${answer} (8 dp)`);
-
-    const mockRegistry = artifact('MockRegistry.sol/MockRegistry.json');
-    const registryAddr = await deploy('MockRegistry', ADMIN, mockRegistry.abi, mockRegistry.bytecode.object, [NVDA, USDG, CLEAR]);
-
-    let feedAddr: Address = FEED;
-    if (FEED_MODE === 'mock') {
-      const mockFeed = artifact('MockFeed.sol/MockFeed.json');
-      feedAddr = await deploy('MockFeed', ADMIN, mockFeed.abi, mockFeed.bytecode.object, [8, answer, 'RHNVDA / USD (dry-run mirror of the real answer)']);
-    } else {
-      note('DRYRUN_FEED=real: the vault reads the real Chainlink feed; cycle 2 will be skipped');
-      record.addresses.feed = FEED;
-    }
-
-    const vaultArtifact = artifact('Vault.sol/Vault.json');
-    const refs = Object.values(vaultArtifact.bytecode.linkReferences).flatMap((byName) => Object.keys(byName)).sort();
-    assert(
-      refs.join(',') === 'SeaportOrderLib,ValoremLib',
-      `Vault should link exactly SeaportOrderLib and ValoremLib (contracts/README.md), the artifact names: ${refs.join(',') || 'none'}`,
-    );
-    const vaultAddr = await deployLinked('Vault', ADMIN, vaultArtifact, [
-      {
-        asset: NVDA,
-        usdg: USDG,
-        clear: CLEAR,
-        seaport: SEAPORT,
-        registry: registryAddr,
-        priceFeed: feedAddr,
-        maxPriceAge: 4 * 86_400,
-        overcallFeeRecipient: OVERCALL_FEE,
-        conduitKey: ZERO_BYTES32,
-        seaportZone: '0x0000000000000000000000000000000000000000',
-        admin: ADMIN.address,
-        feeRecipient: FEE_SAFE.address,
-        depositCap: 50n * LOT,
-        name: 'Callhouse NVDA (dry run)',
-        symbol: 'cNVDA',
-      },
-    ]);
-
-    const keeperRole = await pub.readContract({ address: vaultAddr, abi: vaultAbi, functionName: 'KEEPER_ROLE' });
-    await sendTx('grantRole(KEEPER_ROLE, keeper)', ADMIN, () =>
-      wallet.writeContract({ account: ADMIN, chain: forkChain, address: vaultAddr, abi: vaultAbi, functionName: 'grantRole', args: [keeperRole, KEEPER.address] }),
-    );
-    return { registry: registryAddr, feed: feedAddr, vault: vaultAddr, realAnswer: answer };
-  });
-
-  /* ---------- 3. cycle 1 on the mock registry: the live series, verbatim ---------- */
-
-  await step('set cycle 1 on MockRegistry = the live series (real option ids, strikes, timestamps)', async () => {
-    await sendTx('MockRegistry.setCycleWithStrikes(cycle 1)', ADMIN, () =>
-      wallet.writeContract({
-        account: ADMIN,
-        chain: forkChain,
-        address: registry,
-        abi: mockRegistryAbi,
-        functionName: 'setCycleWithStrikes',
-        args: [live.ids, live.strikes, Number(live.exercise), Number(live.expiry)],
-      }),
-    );
-    const cycle = await pub.readContract({ address: registry, abi: registryAbi, functionName: 'cycle' });
-    assertEq(cycle.number, 1, 'mock cycle number');
-    assertEq(cycle.optionIds.length, live.ids.length, 'mock rung count');
-  });
-
-  /* ---------- 4. stubs, environment, and then — only then — the keeper ---------- */
-
-  const stub = new OvercallStub();
   const alerts = new AlertCapture();
-  await stub.start();
   await alerts.start();
 
   process.env.KEEPER_ENV_FILE = '/dev/null';
   process.env.RH_RPC = RPC;
   delete process.env.RH_RPC_2;
   process.env.CHAIN_ID = String(CHAIN_ID);
-  process.env.REGISTRY = registry;
   process.env.VAULT = vault;
-  process.env.KEEPER_PK = keccak256(toHex('callhouse-dryrun:keeper'));
-  if (process.env.DRYRUN_KEEPER_PK) process.env.KEEPER_PK = process.env.DRYRUN_KEEPER_PK;
+  process.env.KEEPER_PK = process.env.DRYRUN_KEEPER_PK ?? keccak256(toHex('callhouse-dryrun:keeper'));
   process.env.KEEPER_DB_PATH = dbPath;
   process.env.KEEPER_PORT = String(HEALTH_PORT);
   process.env.KEEPER_LOG_LEVEL = process.env.KEEPER_LOG_LEVEL ?? 'info';
   process.env.KEEPER_FALLBACK_DIR = join(OUT, 'fallback');
-  process.env.OVERCALL_ORDERS_URL = `${stub.url}/api/orders`;
-  process.env.OVERCALL_MARKET = 'NVDA';
-  process.env.OVERCALL_MAX_ATTEMPTS = '2';
+  process.env.KEEPER_RETRY_STRANDED_MS = String(RETRY_MS);
   process.env.ALERT_WEBHOOK = alerts.url;
-  delete process.env.KEEPER_UNIT_PRICE_USDG6;
-  // Margin 0 is the identity (policy.ts withPremiumMargin), so every "priced at the policy floor"
-  // assertion below holds only if a shell's PREMIUM_MARGIN_BPS cannot leak in.
-  delete process.env.PREMIUM_MARGIN_BPS;
-  delete process.env.OVERCALL_API_KEY;
+  // The keeper's own defaults price and time the week; a shell override would break the
+  // "priced at the fill floor plus the default margin" and "next NYSE Friday" assertions.
+  for (const key of ['KEEPER_UNIT_PRICE_USDG6', 'KEEPER_PREMIUM_MARGIN_BPS', 'KEEPER_STRIKE_OTM_BPS', 'KEEPER_ARM_LEAD_S', 'KEEPER_NYSE_HOLIDAYS', 'ALERT_WEBHOOK_TOKEN']) {
+    delete process.env[key];
+  }
 
   // The production modules. config.ts validates the environment above the moment this runs.
   const roll = await import('./roll.js');
   const { store, KeeperStore } = await import('./state.js');
-  const seaport = await import('./seaport.js');
   const policy = await import('./policy.js');
+  const seaport = await import('./seaport.js');
+  const { optionIdFor, targetStrike6, weeklyTuple } = await import('./optionType.js');
   const { startHealthServer } = await import('./health.js');
   const { config } = await import('./config.js');
   const { account } = await import('./clients.js');
-  assert(account.address === KEEPER.address, 'the keeper module derived a different address than the harness');
-  assertEq(config.VAULT, vault, 'keeper config VAULT');
-  stub.hashOf = (components) => seaport.localOrderHash(seaport.componentsFromJson(components as never));
+  assertAddr(account.address, KEEPER.address, 'the keeper module derived the harness keeper address');
+  assertAddr(config.VAULT, vault, 'keeper config VAULT');
+  record.keeperConfig = {
+    strikeOtmBps: config.KEEPER_STRIKE_OTM_BPS,
+    premiumMarginBps: config.KEEPER_PREMIUM_MARGIN_BPS,
+    armLeadS: config.KEEPER_ARM_LEAD_S,
+    retryStrandedMs: config.KEEPER_RETRY_STRANDED_MS,
+    pollIntervalMs: config.POLL_INTERVAL_MS,
+  };
+  assertEq(config.KEEPER_RETRY_STRANDED_MS, RETRY_MS, 'the retry timer is the run’s');
 
   const healthServer = startHealthServer();
-  const health = async (path: string): Promise<{ status: number; body: Record<string, unknown> }> => {
-    const response = await fetch(`http://127.0.0.1:${HEALTH_PORT}${path}`);
-    return { status: response.status, body: (await response.json()) as Record<string, unknown> };
+  const health = healthClient(HEALTH_PORT);
+  const stopServers = (): void => {
+    healthServer.close();
+    alerts.stop();
   };
-
-  /**
-   * A buyer fills `listed` in full on the REAL Seaport, using the parameters and signature the
-   * keeper's own GET /orders serves. Shared by cycles 1 and 3, transaction for transaction.
-   */
-  const buyerFills = async (listed: ListingRow): Promise<{ fillTx: Hex }> => {
-    const orders = await health('/orders');
-    const served = (orders.body.orders as Array<Record<string, unknown>>)[0];
-    assert(served !== undefined, '/orders served nothing');
-    assertEq(String(served.orderHash).toLowerCase(), listed.order_hash.toLowerCase(), '/orders serves the authorised order');
-    const p = served.parameters as {
-      offerer: string; zone: string; orderType: number; startTime: string; endTime: string; zoneHash: string; salt: string; conduitKey: string;
-      totalOriginalConsiderationItems: string;
-      offer: Array<{ itemType: number; token: string; identifierOrCriteria: string; startAmount: string; endAmount: string }>;
-      consideration: Array<{ itemType: number; token: string; identifierOrCriteria: string; startAmount: string; endAmount: string; recipient: string }>;
-    };
-    const parameters = {
-      offerer: getAddress(p.offerer),
-      zone: getAddress(p.zone),
-      offer: p.offer.map((o) => ({ itemType: o.itemType, token: getAddress(o.token), identifierOrCriteria: BigInt(o.identifierOrCriteria), startAmount: BigInt(o.startAmount), endAmount: BigInt(o.endAmount) })),
-      consideration: p.consideration.map((c) => ({ itemType: c.itemType, token: getAddress(c.token), identifierOrCriteria: BigInt(c.identifierOrCriteria), startAmount: BigInt(c.startAmount), endAmount: BigInt(c.endAmount), recipient: getAddress(c.recipient) })),
-      orderType: p.orderType,
-      startTime: BigInt(p.startTime),
-      endTime: BigInt(p.endTime),
-      zoneHash: p.zoneHash as Hex,
-      salt: BigInt(p.salt),
-      conduitKey: p.conduitKey as Hex,
-      totalOriginalConsiderationItems: BigInt(p.totalOriginalConsiderationItems),
-    };
-    const gross = BigInt(listed.gross_usdg6);
-    const vaultBefore = await balanceOf(USDG, vault);
-    const overcallBefore = await balanceOf(USDG, OVERCALL_FEE);
-
-    await deal(USDG, BUYER.address, gross);
-    await sendTx('USDG.approve(seaport)', BUYER, () =>
-      wallet.writeContract({ account: BUYER, chain: forkChain, address: USDG, abi: erc20Abi, functionName: 'approve', args: [SEAPORT, gross] }),
-    );
-    // The signature served is the 65-byte placeholder; the vault answers EIP-1271 for the hash.
-    const fill = await sendTx('seaport.fulfillOrder (buyer, placeholder signature via EIP-1271)', BUYER, () =>
-      wallet.writeContract({
-        account: BUYER,
-        chain: forkChain,
-        address: SEAPORT,
-        abi: seaportAbi,
-        functionName: 'fulfillOrder',
-        args: [{ parameters, signature: String(served.signature) as Hex }, ZERO_BYTES32],
-      }),
-    );
-    assertEq((await balanceOf(USDG, vault)) - vaultBefore, BigInt(listed.to_vault6), "the vault's 95% leg landed");
-    assertEq((await balanceOf(USDG, OVERCALL_FEE)) - overcallBefore, BigInt(listed.to_overcall6), "Overcall's 5% leg landed");
-    const bought = await pub.readContract({ address: CLEAR, abi: clearAbi, functionName: 'balanceOf', args: [BUYER.address, BigInt(listed.option_id)] });
-    assertEq(bought, BigInt(listed.contracts), 'the buyer holds the option tokens');
-    // Overcall's book re-syncs from chain; the stub does the same on request.
-    stub.markFilled(listed.order_hash, listed.to_vault6);
-    return { fillTx: fill.hash };
-  };
-
-  /** Five fresh option types on the REAL Valorem Clear (dryrun-common.ts). Shared by cycles 2 and 3. */
-  const freshSeries = (n: number, rec: Record<string, unknown>) => createFreshSeries({ vault, feed, registry, answer: realAnswer }, n, rec);
 
   const dumpDb = (): Record<string, unknown> => ({
     counts: store.counts(),
     cycles: store.recentCycles(10),
-    listings: store.db.prepare('SELECT order_hash, cycle_number, seq, option_id, contracts, unit_price6, gross_usdg6, to_vault6, to_overcall6, end_time, status, api_status, api_error, approve_tx, cancel_tx, posted_at, visible_at, seaport_total_filled, seaport_total_size, seaport_cancelled FROM listings ORDER BY cycle_number, seq').all(),
-    txs: store.recentTxs(50),
-    alerts: store.recentAlerts(50).map((a) => ({ id: a.id, kind: a.kind, severity: a.severity, message: a.message, delivered: a.delivered })),
+    listings: store.db.prepare('SELECT order_hash, cycle_number, seq, option_id, contracts, unit_price6, gross_usdg6, end_time, counter, status, approve_tx, cancel_tx, seaport_total_filled, seaport_total_size, seaport_cancelled FROM listings ORDER BY cycle_number, seq').all(),
+    txs: store.recentTxs(60),
+    alerts: store.recentAlerts(60).map((a) => ({ id: a.id, kind: a.kind, severity: a.severity, message: a.message, delivered: a.delivered })),
     meta: store.db.prepare('SELECT key, value FROM meta ORDER BY key').all(),
   });
+  const keeperTxs = () => store.db.prepare('SELECT kind, cycle_number, status, hash FROM txs ORDER BY created_at, rowid').all() as Array<{ kind: string; cycle_number: number | null; status: string; hash: string }>;
+  const txKinds = () => keeperTxs().map((t) => `${t.cycle_number ?? '-'}:${t.kind}:${t.status}`);
+  const onlyListingFor = (cycleNumber: number, seq: number): ListingRow => {
+    const row = store.listingsForCycle(cycleNumber).find((r) => r.seq === seq);
+    assert(row !== undefined, `cycle ${cycleNumber} listing seq ${seq}`);
+    return row;
+  };
+  const receiptOf = (hash: string | null) => {
+    assert(hash !== null, 'a transaction hash is on record');
+    return pub.getTransactionReceipt({ hash: hash as Hex });
+  };
+  const readPolicy = () => policy.readPolicy();
+  const spotUsdg = () => pub.readContract({ ...V, functionName: 'spotUsdg' });
+  const optionBalance = (holder: Address, id: bigint) => pub.readContract({ address: CLEAR, abi: clearAbi, functionName: 'balanceOf', args: [holder, id] });
+  const orderStatus = (hash: string) => pub.readContract({ address: SEAPORT, abi: seaportAbi, functionName: 'getOrderStatus', args: [hash as Hex] });
 
-  /** The one event of a kind that a given contract emitted in a receipt. */
-  const only = <T extends { address: Address }>(events: readonly T[], at: Address, what: string): T => {
-    const matching = events.filter((e) => e.address.toLowerCase() === at.toLowerCase());
-    assertEq(matching.length, 1, `exactly one ${what} event from ${at}`);
-    const found = matching[0];
-    assert(found !== undefined, what);
-    return found;
+  /**
+   * What an Idle tick that arms a week must have done, checked against the vault, the Clear,
+   * Seaport, /orders and the keeper's own store: the next NYSE Friday close from the block the
+   * tick saw, the option type created (or reused) on the real Clear at spot + KEEPER_STRIKE_OTM_BPS
+   * rounded to a whole USDG, `rollOpen(id)` writing nothing, and ONE listing at capacity priced
+   * at the fill floor plus KEEPER_PREMIUM_MARGIN_BPS. Returns the listing row and the week.
+   */
+  /**
+   * What the next Idle tick must arm, derived BEFORE the tick from the head block and the feed
+   * exactly as the keeper derives it, so the tick can be checked against a prediction rather
+   * than against its own output. `existedBefore` is true when the tuple already exists on the
+   * Clear (an earlier run on the same fork created it): the keeper then reuses it and sends no
+   * newOptionType, which is the designed behaviour, not a miss.
+   */
+  const expectedArm = async () => {
+    const blockTs = (await pub.getBlock({ blockTag: 'latest' })).timestamp;
+    const window = nextWeekWindow(Number(blockTs), config.KEEPER_ARM_LEAD_S, config.KEEPER_NYSE_HOLIDAYS);
+    assert(window.exerciseTs >= Number(blockTs) + VAULT_MIN_LEAD_S, 'the window respects the vault’s MIN_LEAD');
+    const [p, spot] = await Promise.all([readPolicy(), spotUsdg()]);
+    for (const key of Object.keys(LAUNCH_POLICY) as Array<keyof typeof LAUNCH_POLICY>) {
+      assertEq(p[key], LAUNCH_POLICY[key], `vault.policy().${key} = Policy.launchDefaults().${key}`);
+    }
+    const strike = targetStrike6(spot, config.KEEPER_STRIKE_OTM_BPS);
+    const tuple = weeklyTuple(NVDA, USDG, strike, window.exerciseTs, window.expiryTs);
+    const optionId = optionIdFor(tuple);
+    const existedBefore = (await pub.readContract({ address: CLEAR, abi: clearAbi, functionName: 'tokenType', args: [optionId] })) === 1;
+    return { window, p, spot, strike, optionId, existedBefore };
   };
 
-  const stopServers = (): void => {
-    healthServer.close();
-    stub.stop();
-    alerts.stop();
+  const assertArmed = async (cycleNumber: number, expected: Awaited<ReturnType<typeof expectedArm>>, rec: Record<string, unknown>, alertsFrom: number) => {
+    const { window, p, spot, strike, optionId, existedBefore } = expected;
+
+    // The vault: armed on exactly that id, nothing written.
+    assertEq(await pub.readContract({ ...V, functionName: 'phase' }), roll.Phase.Listed, 'phase Listed');
+    assertEq(await pub.readContract({ ...V, functionName: 'cycleNumber' }), cycleNumber, 'vault.cycleNumber');
+    assertEq(await pub.readContract({ ...V, functionName: 'optionId' }), optionId, 'vault.optionId == the id derived from the tuple');
+    assertEq(await pub.readContract({ ...V, functionName: 'cycleStrikeUsdg' }), strike, 'vault.cycleStrikeUsdg == round(spot x 1.05) to a whole USDG');
+    assertEq(BigInt(await pub.readContract({ ...V, functionName: 'cycleExerciseTs' })), BigInt(window.exerciseTs), 'vault.cycleExerciseTs == the next NYSE Friday 16:00 ET');
+    assertEq(BigInt(await pub.readContract({ ...V, functionName: 'cycleExpiryTs' })), BigInt(window.expiryTs), 'vault.cycleExpiryTs == exercise + 24 h');
+    assertEq(await pub.readContract({ ...V, functionName: 'claimKey' }), 0n, 'no claim at the arm');
+    assertEq(await pub.readContract({ ...V, functionName: 'contractsWritten' }), 0n, 'nothing written at the arm');
+    assertEq(await optionBalance(vault, optionId), 0n, 'the vault holds no option tokens at the arm');
+    const [strikeMinBand, strikeMaxBand] = [(spot * (10_000n + p.minOtmBps)) / 10_000n, (spot * (10_000n + p.maxOtmBps)) / 10_000n];
+    assert(strike >= strikeMinBand && strike <= strikeMaxBand, `strike ${strike} inside the band [${strikeMinBand}, ${strikeMaxBand}]`);
+
+    // The Clear: the type exists with exactly the tuple, and the keeper's derivation of its id holds.
+    assertEq(await pub.readContract({ address: CLEAR, abi: clearAbi, functionName: 'tokenType', args: [optionId] }), 1, 'clear.tokenType(id) == Option');
+    const o = await pub.readContract({ address: CLEAR, abi: clearAbi, functionName: 'option', args: [optionId] });
+    assertAddr(o.underlyingAsset, NVDA, 'option.underlyingAsset');
+    assertEq(o.underlyingAmount, LOT, 'option.underlyingAmount == one lot');
+    assertAddr(o.exerciseAsset, USDG, 'option.exerciseAsset');
+    assertEq(o.exerciseAmount, strike, 'option.exerciseAmount == the strike');
+    assertEq(o.exerciseTimestamp, window.exerciseTs, 'option.exerciseTimestamp');
+    assertEq(o.expiryTimestamp, window.expiryTs, 'option.expiryTimestamp');
+
+    // The keeper's transactions: newOptionType (with its NewOptionType log naming the id) unless
+    // the tuple already existed, rollOpen (RollOpen.contractsCount == 0), approveListing
+    // (ListingApproved).
+    const cycle = store.getCycle(cycleNumber);
+    assert(cycle !== null, `cycle row ${cycleNumber}`);
+    assertEq(cycle.status, 'open', 'cycle row status');
+    assertEq(cycle.option_id, optionId.toString(), 'row option_id');
+    assertEq(cycle.strike_usdg6, strike.toString(), 'row strike');
+    assertEq(cycle.exercise_ts, window.exerciseTs, 'row exercise_ts');
+    assertEq(cycle.expiry_ts, window.expiryTs, 'row expiry_ts');
+    assertEq(cycle.contracts, 0, 'row contracts: 0 sold at the arm');
+    assert(cycle.roll_open_tx !== null, 'roll_open_tx recorded');
+    // newOptionType is recorded without a cycle (the number is the vault's, known only after
+    // rollOpen), so the newest one is this week's.
+    const creations = keeperTxs().filter((t) => t.kind === 'newOptionType');
+    const created = creations[creations.length - 1];
+    let newOptionTypeTx: string | null = null;
+    if (existedBefore) {
+      note(`the tuple already existed on the Clear (an earlier run on this fork); the keeper reused it and created nothing`);
+    } else {
+      assert(created !== undefined && created.status === 'success', 'the keeper created the option type on the real Clear (newOptionType confirmed)');
+      const createdReceipt = await receiptOf(created.hash);
+      assert(createdReceipt.blockNumber > (await receiptOf(cycle.roll_open_tx)).blockNumber - 2n, 'the creation is this tick’s');
+      const newType = only(parseEventLogs({ abi: clearAbi, eventName: 'NewOptionType', logs: createdReceipt.logs }), CLEAR, 'NewOptionType');
+      assertEq(newType.args.optionId, optionId, 'NewOptionType.optionId == the derived id');
+      assertEq(newType.args.exerciseAmount, strike, 'NewOptionType.exerciseAmount');
+      newOptionTypeTx = created.hash;
+    }
+    const openReceipt = await receiptOf(cycle.roll_open_tx);
+    const opened = only(parseEventLogs({ abi: vaultAbi, eventName: 'RollOpen', logs: openReceipt.logs }), vault, 'RollOpen');
+    assertEq(opened.args.cycleNumber, cycleNumber, 'RollOpen.cycleNumber');
+    assertEq(opened.args.optionId, optionId, 'RollOpen.optionId');
+    assertEq(BigInt(opened.args.contractsCount), 0n, 'RollOpen.contractsCount == 0: the arm writes nothing');
+    assertEq(opened.args.strikeUsdg, strike, 'RollOpen.strikeUsdg');
+    assertEq(allFrom(parseEventLogs({ abi: vaultAbi, eventName: 'CallsWritten', logs: openReceipt.logs }), vault).length, 0, 'no CallsWritten at the arm');
+
+    // The listing: one row, at capacity, priced at the fill floor plus the margin, authorised on
+    // the real Seaport, served from /orders in the shape the vault checked.
+    const rows = store.listingsForCycle(cycleNumber);
+    assertEq(rows.length, 1, 'one listing row for the cycle');
+    const row = rows[0];
+    assert(row !== undefined, 'listing row');
+    assertEq(row.status, 'approved', 'listing status');
+    assertEq(row.seq, 1, 'seq 1');
+    const totalAssets = await pub.readContract({ ...V, functionName: 'totalAssets' });
+    const capacity = capacityOf(totalAssets, 0n, p);
+    assertEq(BigInt(row.contracts), capacity, `listed the whole capacity: Policy.maxContracts(${totalAssets}) - 0 = ${capacity}`);
+    assertEq(BigInt(row.contracts), policy.capacity(totalAssets, 0n, p), 'the keeper’s own capacity() agrees');
+    const priced = policy.priceListing({ policy: p, spotUsdg6: spot, strikeUsdg6: strike, contracts: capacity, feesEnabled: false, feeBps: 15 });
+    assert(priced.ok, 'the keeper’s pricing rule accepts the week');
+    const floorUnit = policy.fillFloorUnit6(spot, capacity, p, false, 15);
+    assertEq(priced.floorUnit6, floorUnit, 'the fill floor per contract: ceil(minPremium(spot, N) / N), fee off');
+    assertEq(BigInt(row.unit_price6), policy.withPremiumMargin(floorUnit, config.KEEPER_PREMIUM_MARGIN_BPS), `unit price = ceil(floor x (10000 + ${config.KEEPER_PREMIUM_MARGIN_BPS}) / 10000)`);
+    assertEq(BigInt(row.unit_price6), priced.unitPrice6, 'the keeper priced by its own rule');
+    assert(BigInt(row.unit_price6) * capacity >= (spot * capacity * p.minPremiumBps) / 10_000n, 'the gross clears Policy.minPremium at this spot');
+    assert(BigInt(row.unit_price6) <= strike, 'unit <= strike (UnitPriceExceedsStrike)');
+    assertEq(BigInt(row.gross_usdg6), BigInt(row.unit_price6) * capacity, 'gross == unit x N, so gross % N == 0');
+    assertEq(row.end_time, window.exerciseTs, 'endTime == cycleExerciseTs');
+    assertEq(row.signature, '0x', 'the row carries the EMPTY signature');
+    assertEq(row.counter, (await pub.readContract({ address: SEAPORT, abi: seaportAbi, functionName: 'getCounter', args: [vault] })).toString(), 'built at the live Seaport counter');
+    const components = seaport.componentsFromJson(JSON.parse(row.components_json) as never);
+    assertEq(seaport.localOrderHash(components).toLowerCase(), row.order_hash.toLowerCase(), 'the local struct hash reproduces the stored hash');
+    assertEq((await pub.readContract({ ...V, functionName: 'listingHash' })).toLowerCase(), row.order_hash.toLowerCase(), 'vault.listingHash == the stored hash');
+    assertEq(await pub.readContract({ ...V, functionName: 'listingAmount' }), capacity, 'vault.listingAmount');
+    assertEq(await pub.readContract({ ...V, functionName: 'listingGrossUsdg' }), BigInt(row.gross_usdg6), 'vault.listingGrossUsdg');
+    assertEq(await pub.readContract({ ...V, functionName: 'listingsThisCycle' }), 1, 'listingsThisCycle 1');
+    const [isValidated, isCancelled, totalFilled, totalSize] = await orderStatus(row.order_hash);
+    assertEq(isValidated, true, 'seaport.getOrderStatus(hash).isValidated: the order is live on the real Seaport');
+    assertEq(isCancelled, false, 'not cancelled');
+    assertEq(totalFilled, 0n, 'nothing filled');
+    assertEq(totalSize, 0n, 'untouched');
+    assert(row.approve_tx !== null, 'approve_tx recorded');
+    const approved = only(parseEventLogs({ abi: vaultAbi, eventName: 'ListingApproved', logs: (await receiptOf(row.approve_tx)).logs }), vault, 'ListingApproved');
+    assertEq(approved.args.orderHash.toLowerCase(), row.order_hash.toLowerCase(), 'ListingApproved.orderHash');
+    assertEq(approved.args.amount, capacity, 'ListingApproved.amount');
+    assertEq(approved.args.grossUsdg, BigInt(row.gross_usdg6), 'ListingApproved.grossUsdg');
+    assertEq(approved.args.seq, 1, 'ListingApproved.seq');
+    const served = await health.orders();
+    assertEq(served.length, 1, '/orders serves exactly one order');
+    const entry = served[0];
+    assert(entry !== undefined, '/orders[0]');
+    assertEq(entry.orderHash.toLowerCase(), row.order_hash.toLowerCase(), '/orders serves the authorised hash');
+    assertServedShape(entry, { vault, optionId, contracts: capacity, unitPrice6: BigInt(row.unit_price6), endTime: BigInt(window.exerciseTs) });
+    assertEq(entry.remainingContracts, capacity.toString(), '/orders remainingContracts == the whole size');
+    assertEq(entry.status, 'approved', '/orders status');
+    assert(existsSync(join(OUT, 'fallback', `${row.order_hash}.json`)), 'the payload was mirrored to KEEPER_FALLBACK_DIR');
+    assertEq(alerts.since(alertsFrom).join(','), 'roll_open,listing', 'alerts: the arm and the listing, in order');
+    const armAlert = alerts.last('roll_open');
+    assertEq(armAlert.data.cycleNumber as number, cycleNumber, 'roll_open alert cycle');
+    assertEq(String(armAlert.data.capacity), capacity.toString(), 'roll_open alert capacity: planned on the vault as it is now');
+    assertEq(String(armAlert.data.exerciseTs), String(window.exerciseTs), 'roll_open alert exerciseTs');
+    note(`cycle ${cycleNumber}: option ${optionId.toString().slice(0, 12)}… strike ${strike} USDG6, close ${window.closeDay} (exercise ${window.exerciseTs}, expiry ${window.expiryTs}); listed ${capacity} at ${row.unit_price6} USDG6 (floor ${floorUnit}), spot ${spot}`);
+
+    Object.assign(rec, {
+      optionId: optionId.toString(),
+      strikeUsdg6: strike.toString(),
+      spotAtArmUsdg6: spot.toString(),
+      exerciseTimestamp: window.exerciseTs,
+      expiryTimestamp: window.expiryTs,
+      closeDay: window.closeDay,
+      listed: capacity.toString(),
+      unitPrice6: row.unit_price6,
+      floorUnit6: floorUnit.toString(),
+      gross6: row.gross_usdg6,
+      orderHash: row.order_hash,
+      newOptionTypeTx,
+      optionTypeReused: existedBefore,
+      rollOpenTx: cycle.roll_open_tx,
+      approveTx: row.approve_tx,
+    });
+    return { row, window, optionId, strike, capacity, unit: BigInt(row.unit_price6) };
+  };
+
+  /** The keeper's lockBook tick: Exercisable, the live listing retired everywhere. */
+  const assertLocked = async (cycleNumber: number, row: ListingRow, rec: Record<string, unknown>) => {
+    assertEq(await pub.readContract({ ...V, functionName: 'phase' }), roll.Phase.Exercisable, 'phase Exercisable');
+    const cycle = store.getCycle(cycleNumber);
+    assert(cycle !== null && cycle.lock_tx !== null, 'lock_tx recorded');
+    assertEq(cycle.status, 'locked', 'cycle status locked');
+    const receipt = await receiptOf(cycle.lock_tx);
+    only(parseEventLogs({ abi: vaultAbi, eventName: 'BookLocked', logs: receipt.logs }), vault, 'BookLocked');
+    const invalidated = only(parseEventLogs({ abi: vaultAbi, eventName: 'AllListingsInvalidated', logs: receipt.logs }), vault, 'AllListingsInvalidated');
+    const cancelled = only(parseEventLogs({ abi: vaultAbi, eventName: 'ListingCancelled', logs: receipt.logs }), vault, 'ListingCancelled');
+    assertEq(cancelled.args.orderHash.toLowerCase(), row.order_hash.toLowerCase(), 'lockBook killed the live listing');
+    assertEq(invalidated.args.newCounter, await pub.readContract({ address: SEAPORT, abi: seaportAbi, functionName: 'getCounter', args: [vault] }), 'the Seaport counter moved (a bump, not a cancel)');
+    assert(invalidated.args.newCounter !== BigInt(row.counter), 'the counter is no longer the one the order was built at');
+    assertEq(await pub.readContract({ ...V, functionName: 'listingHash' }), ZERO_BYTES32, 'vault.listingHash cleared');
+    assertEq((await orderStatus(row.order_hash))[1], false, 'Seaport isCancelled stays false on a counter bump');
+    const dead = store.getListing(row.order_hash);
+    assert(dead !== null, 'listing row');
+    assert(dead.status === 'expired' || dead.status === 'filled', `the listing row is terminal (${dead.status})`);
+    assertEq((await health.orders()).length, 0, '/orders serves nothing after lockBook');
+    assertEq(await pub.readContract({ ...V, functionName: 'maxDeposit', args: [DEPOSITOR.address] }), 0n, 'deposits closed while Exercisable');
+    rec.lockTx = cycle.lock_tx;
+    rec.counterAfterLock = invalidated.args.newCounter.toString();
   };
 
   try {
-    /* ---------- 5. boot: reconcile against a vault that has done nothing ---------- */
+    /* ---------- 3. boot ---------- */
 
     await step('keeper boot: reconcile() against the fresh vault', async () => {
       await roll.reconcile();
@@ -446,981 +497,904 @@ async function main(): Promise<void> {
       assert(snap !== null, 'reconcile produced no snapshot');
       assertEq(snap.phase, roll.Phase.Idle, 'phase');
       assertEq(snap.hasKeeperRole, true, 'keeper role');
-      assertEq(snap.registryCycle.number, 1, 'registry cycle');
-      assertEq(snap.isWritingOpen, true, 'writing open');
+      assertEq(snap.isStranded, false, 'not stranded');
+      assertEq(snap.valoremFeesEnabled, false, 'the real Clear’s fee switch is off');
       assertEq(alerts.kinds().length, 0, 'no alert on a clean boot');
-      const h = await health('/health');
-      note(`GET /health -> ${h.status} ${String(h.body.status)}`);
+      const h = await health.get('/health');
+      assertEq(h.status, 200, 'GET /health');
       record.health.afterBoot = h.body;
+      note(`GET /health -> ${h.status} ${String(h.body.status)}`);
     });
 
-    /* ---------- 6. deposit ---------- */
+    /* =====================================================================================
+       WEEK 1: unfilled
+       ===================================================================================== */
 
-    await step(`a depositor puts ${DEPOSIT} NVDA wei in`, async () => {
+    await step(`week 1: the depositor puts ${DEPOSIT} NVDA wei in`, async () => {
+      assert((await pub.readContract({ ...V, functionName: 'maxDeposit', args: [DEPOSITOR.address] })) >= DEPOSIT, 'deposits are open');
       await deal(NVDA, DEPOSITOR.address, DEPOSIT);
-      await sendTx('NVDA.approve(vault)', DEPOSITOR, () =>
-        wallet.writeContract({ account: DEPOSITOR, chain: forkChain, address: NVDA, abi: erc20Abi, functionName: 'approve', args: [vault, DEPOSIT] }),
-      );
+      await approve('NVDA.approve(vault)', DEPOSITOR, NVDA, vault, DEPOSIT);
       await sendTx('vault.deposit', DEPOSITOR, () =>
         wallet.writeContract({ account: DEPOSITOR, chain: forkChain, address: vault, abi: vaultAbi, functionName: 'deposit', args: [DEPOSIT, DEPOSITOR.address] }),
       );
-      const shares = await pub.readContract({ address: vault, abi: vaultAbi, functionName: 'balanceOf', args: [DEPOSITOR.address] });
-      assertEq(shares, DEPOSIT, 'first deposit is 1:1');
+      assertEq(await pub.readContract({ ...V, functionName: 'balanceOf', args: [DEPOSITOR.address] }), DEPOSIT, 'first deposit is 1:1');
+      assertEq(await pub.readContract({ ...V, functionName: 'totalAssets' }), DEPOSIT, 'totalAssets');
     });
 
-    /* ---------- 7. tick: the keeper writes and lists ---------- */
-
-    const listed = await step('tick #1 (Idle, writing open): rollOpen -> approveListing -> POST to Overcall', async () => {
+    const week1 = await step('week 1, tick #1 (Idle): newOptionType on the real Clear -> rollOpen (arm only) -> approveListing at capacity -> /orders', async () => {
+      const expected = await expectedArm();
       await roll.tick();
-      const snap = roll.getLastSnapshot();
-      assert(snap !== null, 'no snapshot');
-      const phase = await pub.readContract({ address: vault, abi: vaultAbi, functionName: 'phase' });
-      assertEq(phase, roll.Phase.Listed, 'vault phase after tick #1');
-
-      const cycle = store.getCycle(1);
-      assert(cycle !== null, 'no cycle row');
-      assertEq(cycle.status, 'open', 'cycle row status');
-      assert(cycle.roll_open_tx !== null, 'roll_open_tx recorded');
-      assertEq(store.getTx(cycle.roll_open_tx)?.status ?? null, 'success', 'rollOpen receipt');
-      const listings = store.listingsForCycle(1);
-      assertEq(listings.length, 1, 'one listing row');
-      const row = listings[0];
-      assert(row !== undefined, 'listing row');
-      assertEq(row.status, 'posted', 'listing status after POST');
-      assertEq(row.api_status, 'open', 'book status from the 201');
-      assert(row.approve_tx !== null, 'approve_tx recorded');
-      assertEq(stub.requests.filter((r) => r.startsWith('POST')).length, 1, 'exactly one POST');
-      assertEq(alerts.kinds().join(','), 'roll_open', 'alerts so far');
-
-      // The vault's policy is whatever its constructor installed. Read it back through the
-      // keeper's own reader and pin every field to Policy.launchDefaults(), rather than
-      // restating the numbers where a stale copy could size the write.
-      const onChainPolicy = await policy.readPolicy();
-      for (const key of Object.keys(LAUNCH_POLICY) as Array<keyof typeof LAUNCH_POLICY>) {
-        assertEq(onChainPolicy[key], LAUNCH_POLICY[key], `vault.policy().${key} = Policy.launchDefaults().${key}`);
-      }
-      const expectedContracts = policy.maxContracts(DEPOSIT, live.lot, onChainPolicy);
-      assertEq(BigInt(row.contracts), expectedContracts, 'listed the whole write at 95% utilisation');
-      const inventory = await pub.readContract({ address: CLEAR, abi: clearAbi, functionName: 'balanceOf', args: [vault, BigInt(row.option_id)] });
-      assertEq(inventory, expectedContracts, 'real Valorem minted the option tokens to the vault');
-      const listingHash = await pub.readContract({ address: vault, abi: vaultAbi, functionName: 'listingHash' });
-      assertEq(listingHash.toLowerCase(), row.order_hash.toLowerCase(), 'the vault authorised the hash the keeper stored');
-
-      note(`wrote ${row.contracts} contracts of option ${row.option_id.slice(0, 12)}… at strike ${cycle.strike_usdg6} USDG6, ask ${row.unit_price6} USDG6/contract, gross ${row.gross_usdg6}`);
-      record.cycle1.contracts = row.contracts;
-      record.cycle1.strikeUsdg6 = cycle.strike_usdg6;
-      record.cycle1.unitPrice6 = row.unit_price6;
-      record.cycle1.gross6 = row.gross_usdg6;
-      record.cycle1.toVault6 = row.to_vault6;
-      record.cycle1.toOvercall6 = row.to_overcall6;
-      record.cycle1.orderHash = row.order_hash;
-      return row;
+      return assertArmed(1, expected, record.cycle1, 0);
     });
 
-    await step('tick #2 (Listed, nobody has filled): Seaport says open, the book says open -> visible', async () => {
+    await step('week 1, tick #2 (Listed, nobody has filled): nothing changes', async () => {
+      const txsBefore = txKinds().length;
+      const alertsBefore = alerts.received.length;
       await roll.tick();
-      const row = store.getListing(listed.order_hash);
+      assertEq(txKinds().length, txsBefore, 'no transaction');
+      assertEq(alerts.received.length, alertsBefore, 'no alert');
+      const row = store.getListing(week1.row.order_hash);
       assert(row !== null, 'row');
-      assertEq(row.status, 'visible', 'listing status after the book check');
-      assert(row.visible_at !== null, 'visible_at stamped');
-      assertEq(row.seaport_total_filled, '0', 'nothing filled yet');
-      assertEq(alerts.kinds().join(','), 'roll_open', 'no new alert');
+      assertEq(row.status, 'approved', 'still approved');
+      assertEq(row.seaport_total_filled, '0', 'Seaport: nothing filled');
+      assertEq((await health.orders()).length, 1, '/orders still serves it');
     });
 
-    /* ---------- 8. a buyer fills on the real Seaport, from the keeper's own /orders ---------- */
-
-    await step("a buyer fills the listing on the real Seaport, using the keeper's /orders payload", async () => {
-      await buyerFills(listed);
+    await step(`week 1: the depositor queues ${QUEUE_W1_LISTED} shares while Listed`, async () => {
+      const epoch = await pub.readContract({ ...V, functionName: 'epochId' });
+      assertEq(epoch, 1n, 'epoch 1: the constructor starts there');
+      const { receipt } = await sendTx(`vault.queueRedeem(${QUEUE_W1_LISTED}) (depositor)`, DEPOSITOR, () =>
+        wallet.writeContract({ account: DEPOSITOR, chain: forkChain, address: vault, abi: vaultHarnessAbi, functionName: 'queueRedeem', args: [QUEUE_W1_LISTED] }),
+      );
+      const ev = only(parseEventLogs({ abi: vaultHarnessAbi, eventName: 'QueueRedeem', logs: receipt.logs }), vault, 'QueueRedeem');
+      assertEq(ev.args.shares, QUEUE_W1_LISTED, 'QueueRedeem.shares');
+      assertEq(ev.args.epochId, 1n, 'QueueRedeem.epochId');
+      assertEq(await pub.readContract({ ...V, functionName: 'queuedShares' }), QUEUE_W1_LISTED, 'queuedShares');
+      assertEq(await pub.readContract({ ...V, functionName: 'balanceOf', args: [vault] }), QUEUE_W1_LISTED, 'the vault escrows the shares on itself');
+      assertEq(await pub.readContract({ ...V, functionName: 'totalSupply' }), DEPOSIT, 'nothing is burned until settlement');
+      assertEq(await pub.readContract({ ...V, functionName: 'canRedeemInstantly' }), false, 'the queue is the only exit while a call is open');
+      assertEq(await pub.readContract({ ...Q, functionName: 'previewRedeem', args: [QUEUE_W1_LISTED] }), 0n, 'previewRedeem quotes 0: no instant path');
+      await expectRevert('completeRedeem before the epoch settles', 'EpochNotSettled', () =>
+        pub.simulateContract({ account: DEPOSITOR, address: vault, abi: vaultHarnessAbi, functionName: 'completeRedeem', args: [DEPOSITOR.address] }),
+      );
+      record.cycle1.queueListed = { shares: QUEUE_W1_LISTED.toString(), epoch: '1', tx: receipt.transactionHash };
     });
 
-    await step('tick #3 (Listed, filled): Seaport getOrderStatus reports the fill', async () => {
+    await step('week 1: warp to the exercise timestamp; deposits close on the clock; tick #3 -> lockBook', async () => {
+      await warpAndRefresh(BigInt(week1.window.exerciseTs), 'week-1 exerciseTimestamp', feed, answer);
+      // The deposit gate keys on the timestamp, not the phase: the vault is still Listed but the
+      // exercise window has opened, so new money is refused before anyone can mint against a
+      // NAV that an exercise could collapse (Vault._depositRefused reason 2).
+      assertEq(await pub.readContract({ ...V, functionName: 'phase' }), roll.Phase.Listed, 'still Listed before the tick');
+      assertEq(await pub.readContract({ ...V, functionName: 'maxDeposit', args: [DEPOSITOR.address] }), 0n, 'maxDeposit quotes 0 once the exercise window is open');
+      await expectRevert('deposit after the exercise window opened (vault still Listed)', 'DepositsClosed', () =>
+        pub.simulateContract({ account: DEPOSITOR, address: vault, abi: vaultAbi, functionName: 'deposit', args: [LOT, DEPOSITOR.address] }),
+      );
+      const alertsBefore = alerts.received.length;
       await roll.tick();
-      const row = store.getListing(listed.order_hash);
+      await assertLocked(1, week1.row, record.cycle1);
+      assertEq(store.getListing(week1.row.order_hash)?.status ?? null, 'expired', 'the unfilled listing row is expired');
+      assertEq(alerts.received.length, alertsBefore, 'lockBook raises no alert');
+    });
+
+    await step('week 1: warp past expiry; tick #4 -> rollClose flat: 0 written, 0 assigned, Harvest(1, 0, 0, 0), the Listed queue settled', async () => {
+      await warpAndRefresh(BigInt(week1.window.expiryTs), 'week-1 expiryTimestamp', feed, answer);
+      const alertsBefore = alerts.received.length;
+      await roll.tick();
+      assertEq(await pub.readContract({ ...V, functionName: 'phase' }), roll.Phase.Idle, 'phase Idle');
+      const cycle = store.getCycle(1);
+      assert(cycle !== null && cycle.roll_close_tx !== null, 'roll_close_tx recorded');
+      assertEq(cycle.status, 'closed', 'closed');
+      const receipt = await receiptOf(cycle.roll_close_tx);
+      const rc = only(parseEventLogs({ abi: vaultAbi, eventName: 'RollClose', logs: receipt.logs }), vault, 'RollClose');
+      assertEq(rc.args.cycleNumber, 1, 'RollClose.cycleNumber');
+      assertEq(rc.args.assetsReturned, 0n, 'RollClose.assetsReturned 0: nothing was ever written');
+      assertEq(rc.args.usdgFromAssignment, 0n, 'RollClose.usdgFromAssignment 0');
+      assertEq(rc.args.contractsAssignedCount, 0n, 'RollClose.contractsAssignedCount 0');
+      const hv = only(parseEventLogs({ abi: vaultAbi, eventName: 'Harvest', logs: receipt.logs }), vault, 'Harvest');
+      assertEq(hv.args.grossUsdg, 0n, 'Harvest.gross 0: the honest zero of an unfilled week');
+      assertEq(hv.args.feeUsdg, 0n, 'Harvest.fee 0');
+      assertEq(hv.args.netUsdg, 0n, 'Harvest.net 0');
+      assertEq(allFrom(parseEventLogs({ abi: vaultHarnessAbi, eventName: 'ClaimRedeemed', logs: receipt.logs }), vault).length, 0, 'no claim to redeem: no ClaimRedeemed');
+      assertEq(allFrom(parseEventLogs({ abi: vaultAbi, eventName: 'ClaimStranded', logs: receipt.logs }), vault).length, 0, 'nothing stranded');
+      assertEq(allFrom(parseEventLogs({ abi: vaultHarnessAbi, eventName: 'FeeSwept', logs: receipt.logs }), vault).length, 0, 'no fee to sweep');
+      // The queue joined while Listed settles inside rollClose, priced like an instant redemption
+      // (virtual share included): q x (idle + 1) / (supply + 1).
+      const settled = only(parseEventLogs({ abi: vaultAbi, eventName: 'QueueSettled', logs: receipt.logs }), vault, 'QueueSettled');
+      const payout = (QUEUE_W1_LISTED * (DEPOSIT + 1n)) / (DEPOSIT + 1n);
+      assertEq(settled.args.epochId, 1n, 'QueueSettled.epochId 1');
+      assertEq(settled.args.shares, QUEUE_W1_LISTED, 'QueueSettled.shares');
+      assertEq(settled.args.assets, payout, `QueueSettled.assets = ${QUEUE_W1_LISTED} x (${DEPOSIT} + 1) / (${DEPOSIT} + 1) = ${payout}`);
+      assertEq(settled.args.usdgOut, 0n, 'QueueSettled.usdgOut 0: no premium this week');
+      assertEq(await pub.readContract({ ...V, functionName: 'epochId' }), 2n, 'epoch advanced');
+      assertEq(await pub.readContract({ ...V, functionName: 'reservedAssets' }), payout, 'reservedAssets');
+      assertEq(await pub.readContract({ ...V, functionName: 'optionId' }), 0n, 'the armed type is forgotten');
+      assertEq(await pub.readContract({ ...V, functionName: 'claimKey' }), 0n, 'no claim');
+      assertEq(await pub.readContract({ ...V, functionName: 'contractsWritten' }), 0n, 'nothing written');
+      assertEq(await pub.readContract({ ...V, functionName: 'isStranded' }), false, 'not stranded');
+      assertEq(await pub.readContract({ ...V, functionName: 'canRedeemInstantly' }), true, 'flat');
+      assertEq(await balanceOf(USDG, vault), 0n, 'no premium, no proceeds');
+      // The keeper's row and alert.
+      assertEq(cycle.contracts, 0, 'row contracts 0 sold');
+      assertEq(cycle.gross_usdg6, '0', 'gross 0');
+      assertEq(cycle.fee_usdg6, '0', 'fee 0');
+      assertEq(cycle.net_usdg6, '0', 'net 0');
+      assertEq(cycle.contracts_assigned, 0, 'contracts_assigned 0');
+      assertEq(cycle.assets_returned, '0', 'assets_returned 0 (a known zero, not NULL)');
+      assertEq(cycle.usdg_from_assignment, '0', 'usdg_from_assignment 0');
+      assertEq(alerts.since(alertsBefore).join(','), 'roll_close', 'one roll_close alert');
+      assertEq(alerts.latest().message, 'cycle 1 closed unfilled: 0 USDG harvested.', 'the unfilled wording');
+      const tape = ((await health.get('/cycles')).body.cycles as Array<Record<string, unknown>>).find((c) => c.cycle_number === 1);
+      assert(tape !== undefined, '/cycles serves cycle 1');
+      assertEq(tape.premium_gross_usdg6 as string, '0', '/cycles premium 0');
+      assertEq(tape.strike_proceeds_usdg6 as string, '0', '/cycles strike proceeds 0');
+      record.cycle1.rollCloseTx = cycle.roll_close_tx;
+      record.cycle1.contracts = '0';
+      record.cycle1.harvest = { gross: '0', fee: '0', net: '0', assetsReturned: '0', usdgFromAssignment: '0', contractsAssigned: 0 };
+      record.cycle1.queueListed = { ...(record.cycle1.queueListed as Record<string, unknown>), payoutAssets: payout.toString(), usdgOut: '0' };
+      const h = await health.get('/health');
+      assertEq(h.status, 200, '/health after a full cycle');
+      record.health.afterCycle1 = h.body;
+    });
+
+    await step('week 1, flat: completeRedeem pays the Listed queue; an instant redeem works; a queue joined while Idle is settled by the keeper’s settleQueue()', async () => {
+      const payout = BigInt((record.cycle1.queueListed as { payoutAssets: string }).payoutAssets);
+      const nvdaBefore = await balanceOf(NVDA, DEPOSITOR.address);
+      const { receipt: done } = await sendTx('vault.completeRedeem (depositor, epoch 1)', DEPOSITOR, () =>
+        wallet.writeContract({ account: DEPOSITOR, chain: forkChain, address: vault, abi: vaultHarnessAbi, functionName: 'completeRedeem', args: [DEPOSITOR.address] }),
+      );
+      const completed = only(parseEventLogs({ abi: vaultHarnessAbi, eventName: 'CompleteRedeem', logs: done.logs }), vault, 'CompleteRedeem');
+      assertEq(completed.args.shares, QUEUE_W1_LISTED, 'CompleteRedeem.shares');
+      assertEq(completed.args.assets, payout, 'CompleteRedeem.assets');
+      assertEq(completed.args.usdgOut, 0n, 'CompleteRedeem.usdgOut');
+      assertEq((await balanceOf(NVDA, DEPOSITOR.address)) - nvdaBefore, payout, 'NVDA delivered');
+      assertEq(await pub.readContract({ ...V, functionName: 'reservedAssets' }), 0n, 'the epoch drained');
+
+      // Instant redemption, only while flat: shares x (totalAssets + 1) / (supply + 1).
+      const supply = await pub.readContract({ ...V, functionName: 'totalSupply' });
+      const assets = await pub.readContract({ ...V, functionName: 'totalAssets' });
+      assertEq(supply, DEPOSIT - QUEUE_W1_LISTED, 'supply after the settled queue');
+      assertEq(assets, DEPOSIT - payout, 'totalAssets after the settled queue');
+      const expectedOut = (REDEEM_W1_INSTANT * (assets + 1n)) / (supply + 1n);
+      assertEq(await pub.readContract({ ...Q, functionName: 'previewRedeem', args: [REDEEM_W1_INSTANT] }), expectedOut, 'previewRedeem quotes the instant payout');
+      const { receipt: redeemed } = await sendTx(`vault.redeem(${REDEEM_W1_INSTANT}) (depositor, instant)`, DEPOSITOR, () =>
+        wallet.writeContract({ account: DEPOSITOR, chain: forkChain, address: vault, abi: vaultHarnessAbi, functionName: 'redeem', args: [REDEEM_W1_INSTANT, DEPOSITOR.address, DEPOSITOR.address] }),
+      );
+      const withdrew = only(parseEventLogs({ abi: vaultHarnessAbi, eventName: 'Withdraw', logs: redeemed.logs }), vault, 'Withdraw');
+      assertEq(withdrew.args.shares, REDEEM_W1_INSTANT, 'Withdraw.shares');
+      assertEq(withdrew.args.assets, expectedOut, `Withdraw.assets = ${REDEEM_W1_INSTANT} x (${assets} + 1) / (${supply} + 1)`);
+      assertEq((await balanceOf(NVDA, DEPOSITOR.address)) - nvdaBefore, payout + expectedOut, 'NVDA delivered instantly');
+
+      // A queue joined while Idle: the keeper's next tick settles it (permissionless
+      // settleQueue), re-reads the vault, and only then plans week 2 on what is left.
+      const { receipt: queued } = await sendTx(`vault.queueRedeem(${QUEUE_W1_IDLE}) (depositor, while Idle)`, DEPOSITOR, () =>
+        wallet.writeContract({ account: DEPOSITOR, chain: forkChain, address: vault, abi: vaultHarnessAbi, functionName: 'queueRedeem', args: [QUEUE_W1_IDLE] }),
+      );
+      const ev = only(parseEventLogs({ abi: vaultHarnessAbi, eventName: 'QueueRedeem', logs: queued.logs }), vault, 'QueueRedeem');
+      assertEq(ev.args.epochId, 2n, 'QueueRedeem.epochId 2');
+      record.cycle1.instantRedeem = { shares: REDEEM_W1_INSTANT.toString(), assets: expectedOut.toString(), tx: redeemed.transactionHash };
+      record.cycle1.queueIdle = { shares: QUEUE_W1_IDLE.toString(), epoch: '2', tx: queued.transactionHash };
+    });
+
+    /* =====================================================================================
+       WEEK 2: filled and exercised
+       ===================================================================================== */
+
+    const week2 = await step('week 2, tick #5 (Idle, shares queued): settleQueue() -> a fresh snapshot -> newOptionType -> rollOpen -> approveListing', async () => {
+      const supplyBefore = await pub.readContract({ ...V, functionName: 'totalSupply' });
+      const idleBefore = await pub.readContract({ ...V, functionName: 'idleAssets' });
+      const staleCapacity = capacityOf(await pub.readContract({ ...V, functionName: 'totalAssets' }), 0n, await readPolicy());
+      const alertsBefore = alerts.received.length;
+      const expected = await expectedArm();
+      await roll.tick();
+      // settleQueue first, by the keeper, permissionlessly.
+      const settleTx = keeperTxs().find((t) => t.kind === 'settleQueue');
+      assert(settleTx !== undefined && settleTx.status === 'success', 'the keeper sent settleQueue');
+      const settled = only(parseEventLogs({ abi: vaultAbi, eventName: 'QueueSettled', logs: (await receiptOf(settleTx.hash)).logs }), vault, 'QueueSettled');
+      const payout = (QUEUE_W1_IDLE * (idleBefore + 1n)) / (supplyBefore + 1n);
+      assertEq(settled.args.epochId, 2n, 'QueueSettled.epochId 2');
+      assertEq(settled.args.shares, QUEUE_W1_IDLE, 'QueueSettled.shares');
+      assertEq(settled.args.assets, payout, `QueueSettled.assets = ${QUEUE_W1_IDLE} x (${idleBefore} + 1) / (${supplyBefore} + 1)`);
+      assertEq(settled.args.usdgOut, 0n, 'QueueSettled.usdgOut 0');
+      assertEq(alerts.since(alertsBefore)[0] ?? null, 'queue_settled', 'the settlement is announced first');
+      assertEq(String(alerts.last('queue_settled').data.epochId), '2', 'queue_settled alert epoch');
+      // Then the week, planned on the vault AFTER the settlement: the reserve is out of NAV.
+      const armed = await assertArmed(2, expected, record.cycle2, alertsBefore + 1);
+      assert(armed.capacity < staleCapacity, `capacity ${armed.capacity} is less than the ${staleCapacity} a stale (pre-settlement) snapshot would have planned`);
+      // settleQueue is filed under the vault's cycle number at the time (the last closed week);
+      // newOptionType under none, because the number is the vault's and known only at rollOpen.
+      assertEq(txKinds().slice(-4).join(','), '1:settleQueue:success,-:newOptionType:success,2:rollOpen:success,2:approveListing:success', 'the tick’s four transactions, in order');
+      record.cycle1.queueIdle = { ...(record.cycle1.queueIdle as Record<string, unknown>), settleTx: settleTx.hash, payoutAssets: payout.toString(), usdgOut: '0' };
+      // Collect the settled queue so the reserve is empty for the rest of the run.
+      await sendTx('vault.completeRedeem (depositor, epoch 2)', DEPOSITOR, () =>
+        wallet.writeContract({ account: DEPOSITOR, chain: forkChain, address: vault, abi: vaultHarnessAbi, functionName: 'completeRedeem', args: [DEPOSITOR.address] }),
+      );
+      assertEq(await pub.readContract({ ...V, functionName: 'reservedAssets' }), 0n, 'the epoch drained');
+      return armed;
+    });
+    const optionId2 = week2.optionId;
+    const strike2 = week2.strike;
+    const N2 = week2.capacity;
+    const unit2 = week2.unit;
+    assert(N2 >= FILL_A2 + FILL_B2 + 1n, `${N2} listed leaves room for ${FILL_A2} + ${FILL_B2} fills and a remainder`);
+
+    const fills2: Array<Record<string, unknown>> = [];
+    await step(`week 2: buyer A fills ${FILL_A2}/${N2} on the real Seaport from /orders (the first fill opens the claim); tick #6 -> fill`, async () => {
+      const served = await health.order(week2.row.order_hash);
+      const fill = await fillFromOrders('buyer A', BUYER, vault, served, FILL_A2);
+      assertEq(await pub.readContract({ ...V, functionName: 'contractsWritten' }), FILL_A2, 'contractsWritten == 2 == sold');
+      assertEq(await pub.readContract({ ...V, functionName: 'lockedAssets' }), FILL_A2 * LOT, 'two lots behind the claim');
+      assertEq(await pub.readContract({ ...V, functionName: 'totalAssets' }), DEPOSIT - QUEUE_W1_LISTED - REDEEM_W1_INSTANT - QUEUE_W1_IDLE, 'writing moves collateral, it does not lose it');
+      fills2.push({ buyer: 'A', contracts: FILL_A2.toString(), numerator: FILL_A2.toString(), denominator: N2.toString(), tx: fill.hash, block: fill.block.toString(), gasUsed: fill.gasUsed.toString(), premium: fill.premium.toString(), opensClaim: true });
+      const alertsBefore = alerts.received.length;
+      await roll.tick();
+      assertEq(alerts.since(alertsBefore).join(','), 'fill', 'the keeper published the fill');
+      assertEq(String(alerts.last('fill').data.filled), FILL_A2.toString(), 'fill alert: contracts filled');
+      assertEq(String(alerts.last('fill').data.sold), FILL_A2.toString(), 'fill alert: sold so far');
+      const row = store.getListing(week2.row.order_hash);
       assert(row !== null, 'row');
-      assertEq(row.status, 'filled', 'listing status');
-      assertEq(row.seaport_total_filled, row.seaport_total_size, 'fully filled');
-      assertEq(alerts.kinds().join(','), 'roll_open', 'no new alert');
+      assertEq(row.status, 'partial', 'listing partial');
+      assertEq(store.getCycle(2)?.contracts ?? null, Number(FILL_A2), 'the cycle row tracks the sold count');
+      const entry = await health.order(week2.row.order_hash);
+      assertEq(entry.filledContracts, FILL_A2.toString(), '/orders filledContracts');
+      assertEq(entry.remainingContracts, (N2 - FILL_A2).toString(), '/orders remainingContracts');
+      assertEq(entry.status, 'partial', '/orders status partial');
+      record.cycle2.claimKey = fill.claimKey.toString();
     });
 
-    /* ---------- 9. lockBook at the exercise timestamp ---------- */
-
-    await step('warp to exerciseTimestamp; tick #4 -> lockBook', async () => {
-      await warpTo(live.exercise, 'cycle-1 exerciseTimestamp');
+    await step(`week 2: buyer B fills ${FILL_B2}/${N2} more (a top-up of the same claim); tick #7 -> fill`, async () => {
+      const claimBefore = await pub.readContract({ ...V, functionName: 'claimKey' });
+      const served = await health.order(week2.row.order_hash);
+      const fill = await fillFromOrders('buyer B', BUYER_B, vault, served, FILL_B2);
+      assertEq(fill.claimKey, claimBefore, 'the real Clear topped up the same claim');
+      assertEq(await pub.readContract({ ...V, functionName: 'contractsWritten' }), FILL_A2 + FILL_B2, 'contractsWritten == 5 == the sum of the two fills');
+      const claim = await pub.readContract({ address: CLEAR, abi: clearAbi, functionName: 'claim', args: [claimBefore] });
+      assertEq(claim.amountWritten, (FILL_A2 + FILL_B2) * LOT, 'claim.amountWritten sums the two writes (1e18-scaled)');
+      assertEq(await balanceOf(USDG, vault), unit2 * (FILL_A2 + FILL_B2), 'the vault holds both premiums');
+      fills2.push({ buyer: 'B', contracts: FILL_B2.toString(), numerator: FILL_B2.toString(), denominator: N2.toString(), tx: fill.hash, block: fill.block.toString(), gasUsed: fill.gasUsed.toString(), premium: fill.premium.toString(), opensClaim: false });
+      const alertsBefore = alerts.received.length;
       await roll.tick();
-      assertEq(await pub.readContract({ address: vault, abi: vaultAbi, functionName: 'phase' }), roll.Phase.Exercisable, 'phase');
-      const cycle = store.getCycle(1);
-      assert(cycle !== null, 'cycle row');
-      assertEq(cycle.status, 'locked', 'cycle status');
-      assert(cycle.lock_tx !== null, 'lock_tx recorded');
-      record.cycle1.lockTx = cycle.lock_tx;
+      assertEq(alerts.since(alertsBefore).join(','), 'fill', 'the keeper published the second fill');
+      assertEq(String(alerts.last('fill').data.sold), (FILL_A2 + FILL_B2).toString(), 'fill alert: 5 sold so far');
+      assertEq(store.getListing(week2.row.order_hash)?.status ?? null, 'partial', 'still partial');
+      assertEq((await health.order(week2.row.order_hash)).remainingContracts, (N2 - FILL_A2 - FILL_B2).toString(), '/orders remaining');
+      record.cycle2.fills = fills2;
+      record.cycle2.contracts = (FILL_A2 + FILL_B2).toString();
     });
 
-    /* ---------- 10. rollClose at expiry ---------- */
-
-    await step('warp to expiryTimestamp; tick #5 -> rollClose, harvest, settle', async () => {
-      await warpTo(live.expiry, 'cycle-1 expiryTimestamp');
+    const listedDeposit = await step(`week 2: a deposit of ${DEPOSIT_LISTED} while Listed succeeds (D8) and checkpoints the premium; sweepFee pays the fee`, async () => {
+      const [supply, assets, accBefore, dustBefore, p] = await Promise.all([
+        pub.readContract({ ...V, functionName: 'totalSupply' }),
+        pub.readContract({ ...V, functionName: 'totalAssets' }),
+        pub.readContract({ ...V, functionName: 'accUsdgPerShare' }),
+        pub.readContract({ ...Q, functionName: 'usdgDust' }),
+        readPolicy(),
+      ]);
+      const room = await pub.readContract({ ...V, functionName: 'maxDeposit', args: [DEPOSITOR.address] });
+      assertEq(room, DEPOSIT_CAP - assets, 'maxDeposit = cap - totalAssets while Listed');
+      const premium = unit2 * (FILL_A2 + FILL_B2);
+      const fee = harvestFee(premium, 0n, p.protocolFeeBps);
+      await deal(NVDA, DEPOSITOR.address, DEPOSIT_LISTED);
+      await approve('NVDA.approve(vault)', DEPOSITOR, NVDA, vault, DEPOSIT_LISTED);
+      const { receipt } = await sendTx(`vault.deposit(${DEPOSIT_LISTED}) (depositor, while Listed)`, DEPOSITOR, () =>
+        wallet.writeContract({ account: DEPOSITOR, chain: forkChain, address: vault, abi: vaultAbi, functionName: 'deposit', args: [DEPOSIT_LISTED, DEPOSITOR.address] }),
+      );
+      const deposited = only(parseEventLogs({ abi: vaultHarnessAbi, eventName: 'Deposit', logs: receipt.logs }), vault, 'Deposit');
+      const expectedShares = (DEPOSIT_LISTED * (supply + 1n)) / (assets + 1n);
+      assertEq(deposited.args.shares, expectedShares, `shares = ${DEPOSIT_LISTED} x (${supply} + 1) / (${assets} + 1): the short call is valued at zero`);
+      // The deposit checkpointed the premium: Harvest(2, premium, fee, net) inside the deposit.
+      const hv = only(parseEventLogs({ abi: vaultAbi, eventName: 'Harvest', logs: receipt.logs }), vault, 'Harvest (deposit checkpoint)');
+      assertEq(hv.args.cycleNumber, 2, 'Harvest.cycleNumber');
+      assertEq(hv.args.grossUsdg, premium, 'Harvest.gross == the two premiums');
+      assertEq(hv.args.feeUsdg, fee, `Harvest.fee = floor(premium x ${p.protocolFeeBps} / 10000)`);
+      assertEq(hv.args.netUsdg, premium - fee, 'Harvest.net');
+      const accAfter = await pub.readContract({ ...V, functionName: 'accUsdgPerShare' });
+      // Distributor._distributeUsdg: the pot is the net plus whatever dust the last distribution
+      // could not index, and the index moves by floor(pot x 1e27 / supply BEFORE the mint).
+      assertEq(accAfter - accBefore, ((premium - fee + dustBefore) * ACC_PRECISION) / supply, 'index delta = floor((net + carried dust) x 1e27 / supply BEFORE the mint): new shares cannot claim earlier premium');
+      assertEq(await pub.readContract({ ...Q, functionName: 'pendingFeeUsdg' }), fee, 'the fee is pending: a checkpoint makes no external call');
+      // Anyone sweeps it.
+      const feeSafeBefore = await balanceOf(USDG, FEE_SAFE.address);
+      const { receipt: swept } = await sendTx('vault.sweepFee() (anyone)', ANYONE, () =>
+        wallet.writeContract({ account: ANYONE, chain: forkChain, address: vault, abi: vaultHarnessAbi, functionName: 'sweepFee' }),
+      );
+      const feeSwept = only(parseEventLogs({ abi: vaultHarnessAbi, eventName: 'FeeSwept', logs: swept.logs }), vault, 'FeeSwept');
+      assertAddr(feeSwept.args.feeRecipient, FEE_SAFE.address, 'FeeSwept.feeRecipient');
+      assertEq(feeSwept.args.amount, fee, 'FeeSwept.amount to the base unit');
+      assertEq((await balanceOf(USDG, FEE_SAFE.address)) - feeSafeBefore, fee, 'the fee Safe received it');
+      assertEq(await pub.readContract({ ...Q, functionName: 'pendingFeeUsdg' }), 0n, 'nothing pending');
+      await expectRevert('a second sweepFee', 'NothingToClaim', () =>
+        pub.simulateContract({ account: ANYONE, address: vault, abi: vaultHarnessAbi, functionName: 'sweepFee' }),
+      );
+      // Capacity grew with NAV; the live listing still offers its remainder, so nothing relists.
+      const txsBefore = txKinds().length;
+      const alertsBefore = alerts.received.length;
       await roll.tick();
-      assertEq(await pub.readContract({ address: vault, abi: vaultAbi, functionName: 'phase' }), roll.Phase.Idle, 'phase after rollClose');
-      const cycle = store.getCycle(1);
-      assert(cycle !== null, 'cycle row');
-      assertEq(cycle.status, 'closed', 'cycle status');
-      assert(cycle.roll_close_tx !== null, 'roll_close_tx recorded');
-      const toVault = BigInt(listed.to_vault6);
-      assertEq(cycle.gross_usdg6, toVault.toString(), 'gross harvest = the 95% leg that filled');
-      // The fee rule, from the chain: the policy's bps, and the fee-free amount from the
-      // RollClose log in the same transaction (0 on an out-of-the-money week, so the whole
-      // harvest is premium and fee-bearing).
-      const { protocolFeeBps } = await policy.readPolicy();
-      const closeReceipt1 = await pub.getTransactionReceipt({ hash: cycle.roll_close_tx as Hex });
-      const rollClose1 = only(parseEventLogs({ abi: vaultAbi, eventName: 'RollClose', logs: closeReceipt1.logs }), vault, 'RollClose');
-      assertEq(rollClose1.args.usdgFromAssignment, 0n, 'out of the money: RollClose.usdgFromAssignment = 0, nothing is fee-free');
-      const fee1 = harvestFee(toVault, rollClose1.args.usdgFromAssignment, protocolFeeBps);
-      assertEq(cycle.fee_usdg6, fee1.toString(), 'protocol fee = floor(premium x protocolFeeBps / 10000)');
-      assertEq(cycle.net_usdg6, (toVault - fee1).toString(), 'net to depositors = gross - fee');
-      assertEq(cycle.contracts_assigned, 0, 'out of the money: nothing assigned');
-      // K-21 columns, from the same RollClose log: every written lot came back, no strike proceeds.
-      assertEq(rollClose1.args.assetsReturned, BigInt(listed.contracts) * LOT, 'RollClose.assetsReturned = every written lot');
-      assertEq(cycle.assets_returned, rollClose1.args.assetsReturned.toString(), 'assets_returned = RollClose.assetsReturned');
-      assertEq(cycle.usdg_from_assignment, '0', 'usdg_from_assignment = 0 on an unassigned week (known zero, not NULL)');
-      assertEq(alerts.kinds().join(','), 'roll_open,roll_close', 'alerts');
-      const last = alerts.received[alerts.received.length - 1];
-      assert(last !== undefined, 'roll_close alert');
-      const net = BigInt(cycle.net_usdg6 ?? '0');
-      assertEq(last.message, `cycle 1 closed: ${roll.formatUsdg(toVault)} USDG harvested, ${roll.formatUsdg(net)} to depositors.`, 'the unassigned filled-week wording, unchanged by K-21');
+      assertEq(txKinds().length, txsBefore, 'tick #8: no transaction (the listing is partially filled, not sold out)');
+      assertEq(alerts.received.length, alertsBefore, 'no alert');
+      assertEq((await health.order(week2.row.order_hash)).remainingContracts, (N2 - FILL_A2 - FILL_B2).toString(), '/orders remaining unchanged');
+      record.cycle2.listedDeposit = { assets: DEPOSIT_LISTED.toString(), shares: expectedShares.toString(), tx: receipt.transactionHash, checkpointHarvest: { gross: premium.toString(), fee: fee.toString(), net: (premium - fee).toString() }, sweepFeeTx: swept.transactionHash, feeSwept: fee.toString() };
+      return { premium, fee, indexDelta1: accAfter - accBefore, sharesBefore: supply, shares: expectedShares };
+    });
 
-      const idle = await pub.readContract({ address: vault, abi: vaultAbi, functionName: 'idleAssets' });
-      assertEq(idle, DEPOSIT, 'all collateral came back from Valorem');
-      const claimable = await pub.readContract({ address: vault, abi: vaultAbi, functionName: 'claimableUsdg', args: [DEPOSITOR.address] });
-      // One holder: claimable = floor(D x floor(net x 1e27 / D) / 1e27) = what the index credited,
-      // and the rest of net is usdgDust, carried into the next distribution (0 when D divides 1e27).
-      const dust1 = await pub.readContract({ address: vault, abi: vaultQueueAbi, functionName: 'usdgDust' });
-      assertEq(claimable, net - dust1, 'claimable = net - usdgDust: the single holder is credited everything the index represents');
+    await step(`week 2: the depositor queues ${QUEUE_W2} shares while Listed (epoch 3)`, async () => {
+      const { receipt } = await sendTx(`vault.queueRedeem(${QUEUE_W2}) (depositor)`, DEPOSITOR, () =>
+        wallet.writeContract({ account: DEPOSITOR, chain: forkChain, address: vault, abi: vaultHarnessAbi, functionName: 'queueRedeem', args: [QUEUE_W2] }),
+      );
+      const ev = only(parseEventLogs({ abi: vaultHarnessAbi, eventName: 'QueueRedeem', logs: receipt.logs }), vault, 'QueueRedeem');
+      assertEq(ev.args.epochId, 3n, 'QueueRedeem.epochId 3');
+      record.cycle2.queue = { sharesQueued: QUEUE_W2.toString(), epoch: '3', queueTx: receipt.transactionHash };
+    });
+
+    await step('week 2: warp to the exercise timestamp; spot moves above the strike; tick #9 -> lockBook', async () => {
+      await warpAndRefresh(BigInt(week2.window.exerciseTs), 'week-2 exerciseTimestamp', feed, answerAbove(strike2, 5n));
+      const spot = await spotUsdg();
+      assert(spot > strike2, `spot ${spot} above strike ${strike2}: in the money`);
+      assertEq(await pub.readContract({ ...V, functionName: 'maxDeposit', args: [DEPOSITOR.address] }), 0n, 'deposits closed on the clock');
+      await roll.tick();
+      await assertLocked(2, week2.row, record.cycle2);
+      assertEq(store.getListing(week2.row.order_hash)?.status ?? null, 'expired', 'the partially filled listing is expired');
+      record.cycle2.itmSpotUsdg6 = spot.toString();
+    });
+
+    const exercised2 = await step(`week 2: buyer A exercises ${EXERCISE_W2} on the real Clear inside the window`, async () => {
+      const done = await exerciseOn('buyer A', BUYER, vault, optionId2, EXERCISE_W2, strike2);
+      assertEq(done.feesEnabled, false, 'the fee switch is off');
+      assertEq(await pub.readContract({ ...V, functionName: 'contractsAssigned' }), EXERCISE_W2, 'vault.contractsAssigned() == 2');
+      assertEq(await pub.readContract({ ...V, functionName: 'claimedExerciseProceeds' }), EXERCISE_W2 * strike2, 'the claim holds 2 x strike of USDG');
+      assertEq(await pub.readContract({ ...V, functionName: 'lockedAssets' }), (FILL_A2 + FILL_B2 - EXERCISE_W2) * LOT, 'three lots still locked');
+      assertEq(await pub.readContract({ ...V, functionName: 'maxDeposit', args: [DEPOSITOR.address] }), 0n, 'deposits stay closed: Exercisable, and unredeemed strike proceeds in the claim');
+      record.cycle2.exercise = { by: 'A', contracts: EXERCISE_W2.toString(), tx: done.hash, debitUsdg6: done.debit.toString(), clearFee: done.fee.toString() };
+      record.cycle2.contractsExercised = EXERCISE_W2.toString();
+      return done;
+    });
+
+    const closed2 = await step('week 2: warp past expiry; tick #10 -> rollClose: assignment 2, ClaimRedeemed, Harvest with the strike proceeds fee-free, the queue settled', async () => {
+      await warpAndRefresh(BigInt(week2.window.expiryTs), 'week-2 expiryTimestamp', feed, answerAbove(strike2, 5n));
+      const written = FILL_A2 + FILL_B2;
+      const [supplyBefore, accBefore, epochBefore, vaultNvdaBefore, vaultUsdgBefore, feeSafeBefore, dustBefore, p] = await Promise.all([
+        pub.readContract({ ...V, functionName: 'totalSupply' }),
+        pub.readContract({ ...V, functionName: 'accUsdgPerShare' }),
+        pub.readContract({ ...V, functionName: 'epochId' }),
+        balanceOf(NVDA, vault),
+        balanceOf(USDG, vault),
+        balanceOf(USDG, FEE_SAFE.address),
+        pub.readContract({ ...Q, functionName: 'usdgDust' }),
+        readPolicy(),
+      ]);
+      assertEq(epochBefore, 3n, 'epoch 3 is the one settling');
+      const keeperSnap = await roll.snapshot();
+      assertEq(await roll.contractsAssignedAt(keeperSnap), EXERCISE_W2, "the keeper's own pre-close read of the real Clear: 2");
+      const alertsBefore = alerts.received.length;
+      await roll.tick();
+      assertEq(await pub.readContract({ ...V, functionName: 'phase' }), roll.Phase.Idle, 'phase Idle');
+      const cycle = store.getCycle(2);
+      assert(cycle !== null && cycle.roll_close_tx !== null, 'roll_close_tx recorded');
+      assertEq(cycle.status, 'closed', 'closed');
+      const receipt = await receiptOf(cycle.roll_close_tx);
+      const rc = only(parseEventLogs({ abi: vaultAbi, eventName: 'RollClose', logs: receipt.logs }), vault, 'RollClose');
+      assertEq(rc.args.cycleNumber, 2, 'RollClose.cycleNumber');
+      assertEq(rc.args.assetsReturned, (written - EXERCISE_W2) * LOT, 'RollClose.assetsReturned = the unassigned lots');
+      assertEq(rc.args.usdgFromAssignment, EXERCISE_W2 * strike2, 'RollClose.usdgFromAssignment = 2 x strike');
+      assertEq(rc.args.contractsAssignedCount, EXERCISE_W2, 'RollClose.contractsAssignedCount 2');
+      const redeemedByClear = only(parseEventLogs({ abi: clearAbi, eventName: 'ClaimRedeemed', logs: receipt.logs }), CLEAR, "the Clear's ClaimRedeemed");
+      assertAddr(redeemedByClear.args.redeemer, vault, 'the vault redeemed its own claim');
+      assertEq(redeemedByClear.args.exerciseAmountRedeemed, EXERCISE_W2 * strike2, 'Clear.ClaimRedeemed.exerciseAmountRedeemed');
+      assertEq(redeemedByClear.args.underlyingAmountRedeemed, (written - EXERCISE_W2) * LOT, 'Clear.ClaimRedeemed.underlyingAmountRedeemed');
+      const redeemed = only(parseEventLogs({ abi: vaultHarnessAbi, eventName: 'ClaimRedeemed', logs: receipt.logs }), vault, "the vault's ClaimRedeemed");
+      assertEq(redeemed.args.claimKey, BigInt(record.cycle2.claimKey as string), 'ClaimRedeemed.claimKey');
+      // This Harvest carries ONLY the strike proceeds: the premium was checkpointed at the
+      // deposit, so gross == usdgFromAssignment, fee-free.
+      const hv = only(parseEventLogs({ abi: vaultAbi, eventName: 'Harvest', logs: receipt.logs }), vault, 'Harvest');
+      assertEq(hv.args.grossUsdg, EXERCISE_W2 * strike2, 'Harvest.gross = the strike proceeds alone');
+      assertEq(hv.args.feeUsdg, 0n, 'Harvest.fee 0: strike proceeds are principal, never fee’d');
+      assertEq(hv.args.netUsdg, EXERCISE_W2 * strike2, 'Harvest.net');
+      assertEq(allFrom(parseEventLogs({ abi: vaultHarnessAbi, eventName: 'FeeSwept', logs: receipt.logs }), vault).length, 0, 'nothing to sweep: the fee went at the checkpoint');
+      assertEq(await balanceOf(USDG, FEE_SAFE.address), feeSafeBefore, 'fee Safe unchanged by the close');
+      // The distribution and the queue.
+      const accAfter = await pub.readContract({ ...V, functionName: 'accUsdgPerShare' });
+      const indexDelta = accAfter - accBefore;
+      assertEq(indexDelta, ((EXERCISE_W2 * strike2 + dustBefore) * ACC_PRECISION) / supplyBefore, `index delta = floor((strike proceeds + ${dustBefore} carried dust) x 1e27 / supply), escrow included`);
+      const settled = only(parseEventLogs({ abi: vaultAbi, eventName: 'QueueSettled', logs: receipt.logs }), vault, 'QueueSettled');
+      const idleAfterRedeem = vaultNvdaBefore + rc.args.assetsReturned;
+      const payoutAssets = (QUEUE_W2 * (idleAfterRedeem + 1n)) / (supplyBefore + 1n);
+      const escrowUsdg = (QUEUE_W2 * indexDelta) / ACC_PRECISION;
+      assertEq(settled.args.epochId, 3n, 'QueueSettled.epochId');
+      assertEq(settled.args.shares, QUEUE_W2, 'QueueSettled.shares');
+      assertEq(settled.args.assets, payoutAssets, `QueueSettled.assets = ${QUEUE_W2} x (${idleAfterRedeem} + 1) / (${supplyBefore} + 1)`);
+      assertEq(settled.args.usdgOut, escrowUsdg, "QueueSettled.usdgOut = the escrow's own accrual over the close: 4e18 x indexDelta / 1e27");
+      assertEq(await pub.readContract({ ...V, functionName: 'totalSupply' }), supplyBefore - QUEUE_W2, 'the escrow was burned');
+      assertEq(await pub.readContract({ ...V, functionName: 'reservedAssets' }), payoutAssets, 'reservedAssets');
+      assertEq(await pub.readContract({ ...V, functionName: 'usdgReservedForQueue' }), escrowUsdg, 'usdgReservedForQueue');
+      assertEq(await pub.readContract({ ...V, functionName: 'claimKey' }), 0n, 'claim redeemed');
+      assertEq(await pub.readContract({ ...V, functionName: 'contractsWritten' }), 0n, 'contractsWritten zeroed');
+      assertEq(await pub.readContract({ ...V, functionName: 'canRedeemInstantly' }), true, 'flat again');
+      assertEq(await balanceOf(NVDA, vault), idleAfterRedeem, 'the vault NVDA: never written + returned');
+      assertEq(await balanceOf(USDG, vault), vaultUsdgBefore + EXERCISE_W2 * strike2, 'vault USDG grew by the strike proceeds');
+      // The keeper's row sums BOTH Harvests of the cycle; the fee is the checkpoint's.
+      const premium = listedDeposit.premium;
+      const gross = premium + EXERCISE_W2 * strike2;
+      assertEq(cycle.contracts, Number(written), 'row contracts 5 sold');
+      assertEq(cycle.gross_usdg6, gross.toString(), 'gross_usdg6 = premium + strike proceeds, summed over two Harvest events');
+      assertEq(cycle.fee_usdg6, listedDeposit.fee.toString(), 'fee_usdg6 = the checkpoint fee on the premium only');
+      assertEq(cycle.net_usdg6, (gross - listedDeposit.fee).toString(), 'net_usdg6');
+      assertEq(cycle.contracts_assigned, Number(EXERCISE_W2), 'contracts_assigned 2, from the RollClose event');
+      assertEq(cycle.assets_returned, rc.args.assetsReturned.toString(), 'assets_returned');
+      assertEq(cycle.usdg_from_assignment, rc.args.usdgFromAssignment.toString(), 'usdg_from_assignment');
+      assertEq(alerts.since(alertsBefore).join(','), 'roll_close', 'one roll_close alert');
+      const last = alerts.latest();
+      assertEq(
+        last.message,
+        `cycle 2 closed: premium ${roll.formatUsdg(premium)} USDG (fee ${roll.formatUsdg(listedDeposit.fee)}), strike proceeds ${roll.formatUsdg(EXERCISE_W2 * strike2)} USDG from ${EXERCISE_W2} contracts assigned; ${roll.formatUsdg(gross - listedDeposit.fee)} USDG to depositors.`,
+        'the assigned-week wording: premium and strike proceeds apart',
+      );
+      assertEq(String(last.data.contractsAssignedSource), 'RollClose', 'the count came from the event');
+      assertEq(Number(last.data.contractsAssignedFromClaim), Number(EXERCISE_W2), "the keeper's own pre-read inside the tick agreed");
+      assertEq(String(last.data.premiumUsdg), roll.formatUsdg(premium), 'data.premiumUsdg');
+      assertEq(String(last.data.strikeProceedsUsdg), roll.formatUsdg(EXERCISE_W2 * strike2), 'data.strikeProceedsUsdg');
+      const tape = ((await health.get('/cycles')).body.cycles as Array<Record<string, unknown>>).find((c) => c.cycle_number === 2);
+      assert(tape !== undefined, '/cycles serves cycle 2');
+      assertEq(tape.premium_gross_usdg6 as string, premium.toString(), '/cycles premium_gross_usdg6');
+      assertEq(tape.strike_proceeds_usdg6 as string, (EXERCISE_W2 * strike2).toString(), '/cycles strike_proceeds_usdg6');
+      record.cycle2.rollCloseTx = cycle.roll_close_tx;
+      record.cycle2.harvest = {
+        gross: gross.toString(),
+        fee: listedDeposit.fee.toString(),
+        net: (gross - listedDeposit.fee).toString(),
+        premium: premium.toString(),
+        usdgFromAssignment: (EXERCISE_W2 * strike2).toString(),
+        assetsReturned: rc.args.assetsReturned.toString(),
+        contractsAssigned: Number(EXERCISE_W2),
+        harvestEvents: 2,
+        keeperPreReadBeforeTick: EXERCISE_W2.toString(),
+      };
+      record.cycle2.queue = { ...(record.cycle2.queue as Record<string, unknown>), payoutAssets: payoutAssets.toString(), escrowUsdg: escrowUsdg.toString(), indexDelta: indexDelta.toString() };
+      record.health.afterCycle2 = (await health.get('/health')).body;
+      return { payoutAssets, escrowUsdg, indexDelta, supplyBefore };
+    });
+
+    await step('week 2: completeRedeem and claimUsdg to the base unit; sweepFee has nothing left', async () => {
+      const [previewAssets, previewUsdg] = await pub.readContract({ ...V, functionName: 'previewCompleteRedeem', args: [DEPOSITOR.address] });
+      assertEq(previewAssets, closed2.payoutAssets, 'previewCompleteRedeem.assets');
+      assertEq(previewUsdg, closed2.escrowUsdg, 'previewCompleteRedeem.usdgOut');
+      const nvdaBefore = await balanceOf(NVDA, DEPOSITOR.address);
+      const usdgBefore = await balanceOf(USDG, DEPOSITOR.address);
+      const { receipt } = await sendTx('vault.completeRedeem (depositor, epoch 3)', DEPOSITOR, () =>
+        wallet.writeContract({ account: DEPOSITOR, chain: forkChain, address: vault, abi: vaultHarnessAbi, functionName: 'completeRedeem', args: [DEPOSITOR.address] }),
+      );
+      const done = only(parseEventLogs({ abi: vaultHarnessAbi, eventName: 'CompleteRedeem', logs: receipt.logs }), vault, 'CompleteRedeem');
+      assertEq(done.args.assets, closed2.payoutAssets, 'CompleteRedeem.assets');
+      assertEq(done.args.usdgOut, closed2.escrowUsdg, 'CompleteRedeem.usdgOut');
+      assertEq((await balanceOf(NVDA, DEPOSITOR.address)) - nvdaBefore, closed2.payoutAssets, 'NVDA delivered');
+      assertEq((await balanceOf(USDG, DEPOSITOR.address)) - usdgBefore, closed2.escrowUsdg, "the escrow's USDG delivered");
+      assertEq(await pub.readContract({ ...V, functionName: 'reservedAssets' }), 0n, 'reserve drained');
+      assertEq(await pub.readContract({ ...V, functionName: 'usdgReservedForQueue' }), 0n, 'USDG reserve drained');
+      // The shares that stayed: the checkpoint's index move on the pre-mint balance, and the
+      // close's index move on what was left after the queue.
+      const sharesLeft = await pub.readContract({ ...V, functionName: 'balanceOf', args: [DEPOSITOR.address] });
+      assertEq(sharesLeft, closed2.supplyBefore - QUEUE_W2, 'shares left');
+      const claimable = await pub.readContract({ ...V, functionName: 'claimableUsdg', args: [DEPOSITOR.address] });
+      const expectedClaimable = (listedDeposit.sharesBefore * listedDeposit.indexDelta1) / ACC_PRECISION + (sharesLeft * closed2.indexDelta) / ACC_PRECISION;
+      assertEq(claimable, expectedClaimable, 'claimable = floor(pre-mint shares x delta1 / 1e27) + floor(shares left x delta2 / 1e27)');
+      const { receipt: claimed } = await sendTx('vault.claimUsdg (depositor)', DEPOSITOR, () =>
+        wallet.writeContract({ account: DEPOSITOR, chain: forkChain, address: vault, abi: vaultAbi, functionName: 'claimUsdg' }),
+      );
+      const ev = only(parseEventLogs({ abi: vaultHarnessAbi, eventName: 'ClaimUsdg', logs: claimed.logs }), vault, 'ClaimUsdg');
+      assertEq(ev.args.amount, claimable, 'ClaimUsdg.amount == claimableUsdg');
+      assertEq((await balanceOf(USDG, DEPOSITOR.address)) - usdgBefore, closed2.escrowUsdg + claimable, 'USDG received: the escrow leg plus the claim');
+      assertEq(await pub.readContract({ ...V, functionName: 'claimableUsdg', args: [DEPOSITOR.address] }), 0n, 'nothing left to claim');
+      await expectRevert('sweepFee with nothing pending', 'NothingToClaim', () =>
+        pub.simulateContract({ account: ANYONE, address: vault, abi: vaultHarnessAbi, functionName: 'sweepFee' }),
+      );
+      // Where every base unit of the week's USDG went.
+      const remainder = await balanceOf(USDG, vault);
+      const [dust, unallocated, accounted] = await Promise.all([
+        pub.readContract({ ...Q, functionName: 'usdgDust' }),
+        pub.readContract({ ...Q, functionName: 'usdgUnallocated' }),
+        pub.readContract({ ...Q, functionName: 'usdgAccounted' }),
+      ]);
+      const gross = listedDeposit.premium + EXERCISE_W2 * strike2;
+      assertEq(listedDeposit.fee + closed2.escrowUsdg + claimable + remainder, gross, 'fee + escrow + claim + remainder = premium + strike proceeds');
+      assertEq(accounted, remainder, 'the remainder sits inside usdgAccounted: it can never be re-harvested as premium');
+      assertEq(unallocated, 0n, 'nothing was received while the supply was zero');
+      assert(dust <= remainder, 'the index dust is inside the remainder');
+      note(`completeRedeem paid ${closed2.payoutAssets} NVDA wei + ${roll.formatUsdg(closed2.escrowUsdg)} USDG; claimUsdg paid ${roll.formatUsdg(claimable)}; fee ${roll.formatUsdg(listedDeposit.fee)}; ${remainder} base unit(s) left (dust ${dust})`);
+      record.cycle2.queue = { ...(record.cycle2.queue as Record<string, unknown>), completeRedeemTx: receipt.transactionHash, assetsOut: closed2.payoutAssets.toString(), usdgOut: closed2.escrowUsdg.toString() };
+      record.cycle2.claimed = claimable.toString();
+      record.cycle2.claimTx = claimed.transactionHash;
+      record.cycle2.usdgLeftInVault = { remainder: remainder.toString(), usdgDust: dust.toString() };
+      record.cycle2.final = {
+        totalSupply: (await pub.readContract({ ...V, functionName: 'totalSupply' })).toString(),
+        idleAssets: (await pub.readContract({ ...V, functionName: 'idleAssets' })).toString(),
+        depositorShares: sharesLeft.toString(),
+        depositorNvda: (await balanceOf(NVDA, DEPOSITOR.address)).toString(),
+      };
+    });
+
+    /* =====================================================================================
+       WEEK 3: stranded by a USDG freeze
+       ===================================================================================== */
+
+    const week3 = await step('week 3, tick #11 (Idle, flat): newOptionType -> rollOpen -> approveListing', async () => {
+      const alertsBefore = alerts.received.length;
+      const expected = await expectedArm();
+      await roll.tick();
+      return assertArmed(3, expected, record.cycle3, alertsBefore);
+    });
+    const optionId3 = week3.optionId;
+    const strike3 = week3.strike;
+    const N3 = week3.capacity;
+    const unit3 = week3.unit;
+    assert(N3 >= FILL_A3 + 1n, `${N3} listed leaves room for a ${FILL_A3} fill`);
+
+    await step(`week 3: buyer A fills ${FILL_A3}/${N3}; tick #12 -> fill; the depositor queues ${QUEUE_W3} while Listed (epoch 4)`, async () => {
+      const served = await health.order(week3.row.order_hash);
+      const fill = await fillFromOrders('buyer A', BUYER, vault, served, FILL_A3);
+      const alertsBefore = alerts.received.length;
+      await roll.tick();
+      assertEq(alerts.since(alertsBefore).join(','), 'fill', 'fill published');
+      assertEq(store.getCycle(3)?.contracts ?? null, Number(FILL_A3), 'cycle row sold count');
+      const { receipt } = await sendTx(`vault.queueRedeem(${QUEUE_W3}) (depositor)`, DEPOSITOR, () =>
+        wallet.writeContract({ account: DEPOSITOR, chain: forkChain, address: vault, abi: vaultHarnessAbi, functionName: 'queueRedeem', args: [QUEUE_W3] }),
+      );
+      const ev = only(parseEventLogs({ abi: vaultHarnessAbi, eventName: 'QueueRedeem', logs: receipt.logs }), vault, 'QueueRedeem');
+      assertEq(ev.args.epochId, 4n, 'QueueRedeem.epochId 4');
+      record.cycle3.fills = [{ buyer: 'A', contracts: FILL_A3.toString(), numerator: FILL_A3.toString(), denominator: N3.toString(), tx: fill.hash, block: fill.block.toString(), gasUsed: fill.gasUsed.toString(), premium: fill.premium.toString(), opensClaim: true }];
+      record.cycle3.contracts = FILL_A3.toString();
+      record.cycle3.claimKey = fill.claimKey.toString();
+      record.cycle3.queue = { sharesQueued: QUEUE_W3.toString(), epoch: '4', queueTx: receipt.transactionHash };
+    });
+
+    await step(`week 3: warp to the exercise timestamp; spot above the strike; tick #13 -> lockBook; buyer A exercises ${EXERCISE_W3} of ${FILL_A3} (both claim legs non-zero)`, async () => {
+      await warpAndRefresh(BigInt(week3.window.exerciseTs), 'week-3 exerciseTimestamp', feed, answerAbove(strike3, 5n));
+      await roll.tick();
+      await assertLocked(3, week3.row, record.cycle3);
+      const done = await exerciseOn('buyer A', BUYER, vault, optionId3, EXERCISE_W3, strike3);
+      assertEq(await pub.readContract({ ...V, functionName: 'lockedAssets' }), (FILL_A3 - EXERCISE_W3) * LOT, 'one lot still locked');
+      assertEq(await pub.readContract({ ...V, functionName: 'claimedExerciseProceeds' }), EXERCISE_W3 * strike3, 'one strike of USDG in the claim');
+      record.cycle3.exercise = { by: 'A', contracts: EXERCISE_W3.toString(), tx: done.hash, debitUsdg6: done.debit.toString() };
+      record.cycle3.contractsExercised = EXERCISE_W3.toString();
+    });
+
+    const stranded = await step('week 3: warp past expiry; Paxos freezes the vault on USDG (impersonated ASSET_PROTECTION); tick #14 -> rollClose STRANDS the claim', async () => {
+      await warpAndRefresh(BigInt(week3.window.expiryTs), 'week-3 expiryTimestamp', feed, answerAbove(strike3, 5n));
+      const freezeTx = await setUsdgFrozen(vault, true);
+      assertEq(await isFrozen(vault), true, 'USDG.isFrozen(vault)');
+      const claimKey = await pub.readContract({ ...V, functionName: 'claimKey' });
+      const [supplyBefore, vaultUsdgBefore, vaultNvdaBefore, feeSafeBefore, p] = await Promise.all([
+        pub.readContract({ ...V, functionName: 'totalSupply' }),
+        balanceOf(USDG, vault),
+        balanceOf(NVDA, vault),
+        balanceOf(USDG, FEE_SAFE.address),
+        readPolicy(),
+      ]);
+      const premium = unit3 * FILL_A3;
+      const fee = harvestFee(premium, 0n, p.protocolFeeBps);
+      const alertsBefore = alerts.received.length;
+      const txsBefore = txKinds().length;
+      await roll.tick();
+      assertEq(txKinds().length, txsBefore + 1, 'one transaction: rollClose');
+      const cycle = store.getCycle(3);
+      assert(cycle !== null && cycle.roll_close_tx !== null, 'roll_close_tx recorded');
+      assertEq(cycle.status, 'stranded', 'the row says stranded');
+      assertEq(cycle.strand_gen, '1', 'strand_gen 1');
+      const receipt = await receiptOf(cycle.roll_close_tx);
+      // The receipt: a zero-leg RollClose, ClaimStranded, the premium harvested, no ClaimRedeemed,
+      // the fee NOT swept (the vault is frozen on USDG), the queue settled with its strand share.
+      const rc = only(parseEventLogs({ abi: vaultAbi, eventName: 'RollClose', logs: receipt.logs }), vault, 'RollClose');
+      assertEq(rc.args.assetsReturned, 0n, 'RollClose.assetsReturned 0: nothing came home');
+      assertEq(rc.args.usdgFromAssignment, 0n, 'RollClose.usdgFromAssignment 0');
+      assertEq(rc.args.contractsAssignedCount, EXERCISE_W3, 'RollClose.contractsAssignedCount 1: read before the failed redeem');
+      const strand = only(parseEventLogs({ abi: vaultAbi, eventName: 'ClaimStranded', logs: receipt.logs }), vault, 'ClaimStranded');
+      assertEq(strand.args.cycleNumber, 3, 'ClaimStranded.cycleNumber');
+      assertEq(strand.args.claimKey, claimKey, 'ClaimStranded.claimKey');
+      assertEq(strand.args.gen, 1n, 'ClaimStranded.gen 1');
+      assertEq(allFrom(parseEventLogs({ abi: vaultHarnessAbi, eventName: 'ClaimRedeemed', logs: receipt.logs }), vault).length, 0, 'no ClaimRedeemed: the redeem reverted inside the Clear');
+      const hv = only(parseEventLogs({ abi: vaultAbi, eventName: 'Harvest', logs: receipt.logs }), vault, 'Harvest');
+      assertEq(hv.args.grossUsdg, premium, 'Harvest.gross = the premium that sat idle');
+      assertEq(hv.args.feeUsdg, fee, 'Harvest.fee on the premium');
+      assertEq(allFrom(parseEventLogs({ abi: vaultHarnessAbi, eventName: 'FeeSwept', logs: receipt.logs }), vault).length, 0, 'no FeeSwept: the frozen vault cannot pay the fee, and the close does not depend on it');
+      assertEq(await pub.readContract({ ...Q, functionName: 'pendingFeeUsdg' }), fee, 'the fee stays pending');
+      assertEq(await balanceOf(USDG, FEE_SAFE.address), feeSafeBefore, 'fee Safe unchanged');
+      assertEq(await balanceOf(USDG, vault), vaultUsdgBefore, 'no USDG moved under the freeze');
+      const settled = only(parseEventLogs({ abi: vaultAbi, eventName: 'QueueSettled', logs: receipt.logs }), vault, 'QueueSettled');
+      const idle = vaultNvdaBefore;
+      const payoutAssets = (QUEUE_W3 * (idle + 1n)) / (supplyBefore + 1n);
+      assertEq(settled.args.epochId, 4n, 'QueueSettled.epochId 4');
+      assertEq(settled.args.assets, payoutAssets, `QueueSettled.assets = ${QUEUE_W3} x (${idle} + 1) / (${supplyBefore} + 1): priced on the IDLE balance, the claim at nothing`);
+      const share = only(parseEventLogs({ abi: vaultAbi, eventName: 'EpochStrandShare', logs: receipt.logs }), vault, 'EpochStrandShare');
+      const wad = (1_000_000_000_000_000_000n * QUEUE_W3) / supplyBefore;
+      assertEq(share.args.epochId, 4n, 'EpochStrandShare.epochId');
+      assertEq(share.args.gen, 1n, 'EpochStrandShare.gen');
+      assertEq(share.args.wad, wad, `EpochStrandShare.wad = 1e18 x ${QUEUE_W3} / ${supplyBefore}: the epoch's pro-rata share of the stranded claim`);
+      // The vault: Idle with the claim kept, everything shut that should be.
+      assertEq(await pub.readContract({ ...V, functionName: 'phase' }), roll.Phase.Idle, 'phase Idle even though the redeem failed');
+      assertEq(await pub.readContract({ ...V, functionName: 'isStranded' }), true, 'isStranded');
+      assertEq(await pub.readContract({ ...V, functionName: 'claimKey' }), claimKey, 'the claim is kept');
+      assertEq(await pub.readContract({ ...V, functionName: 'optionId' }), optionId3, 'and the type with it');
+      assertEq(await pub.readContract({ ...V, functionName: 'contractsWritten' }), FILL_A3, 'and the count that shuts the instant path');
+      assertEq(await pub.readContract({ ...V, functionName: 'strandGen' }), 1n, 'generation 1 open');
+      assertEq(await pub.readContract({ ...V, functionName: 'lastResolvedGen' }), 0n, 'unresolved');
+      assertEq(await pub.readContract({ ...V, functionName: 'strandedRemainingWad' }), 1_000_000_000_000_000_000n - wad, 'live shares own the rest of the claim');
+      assertEq(await pub.readContract({ ...V, functionName: 'epochStrandWad', args: [4n] }), wad, 'epochStrandWad[4]');
+      assertEq(await pub.readContract({ ...V, functionName: 'epochStrandGen', args: [4n] }), 1n, 'epochStrandGen[4]');
+      assertEq(await pub.readContract({ ...V, functionName: 'lockedAssets' }), (FILL_A3 - EXERCISE_W3) * LOT, 'the stranded claim still reads as locked collateral');
+      assertEq(await pub.readContract({ ...V, functionName: 'canRedeemInstantly' }), false, 'instant path shut');
+      assertEq(await pub.readContract({ ...V, functionName: 'maxDeposit', args: [DEPOSITOR.address] }), 0n, 'deposits shut');
+      await expectRevert('deposit while stranded', 'DepositsClosed', () =>
+        pub.simulateContract({ account: DEPOSITOR, address: vault, abi: vaultAbi, functionName: 'deposit', args: [LOT, DEPOSITOR.address] }),
+      );
+      await expectRevert('retryStrandedClaim while the freeze holds (anyone)', 'StillStranded', () =>
+        pub.simulateContract({ account: ANYONE, address: vault, abi: vaultHarnessAbi, functionName: 'retryStrandedClaim' }),
+      );
+      // rollOpen over it would revert StillStranded: proven with a fresh type at the same strike.
+      const headTs = (await pub.getBlock({ blockTag: 'latest' })).timestamp;
+      const nextWindow = nextWeekWindow(Number(headTs), config.KEEPER_ARM_LEAD_S, config.KEEPER_NYSE_HOLIDAYS);
+      const { receipt: typed } = await sendTx('clear.newOptionType (harness, a type the keeper would arm next)', ANYONE, () =>
+        wallet.writeContract({ account: ANYONE, chain: forkChain, address: CLEAR, abi: clearAbi, functionName: 'newOptionType', args: [NVDA, LOT, USDG, strike3, nextWindow.exerciseTs, nextWindow.expiryTs] }),
+      );
+      const nextId = only(parseEventLogs({ abi: clearAbi, eventName: 'NewOptionType', logs: typed.logs }), CLEAR, 'NewOptionType').args.optionId;
+      await expectRevert('rollOpen over a stranded claim (keeper key)', 'StillStranded', () =>
+        pub.simulateContract({ account: KEEPER, address: vault, abi: vaultAbi, functionName: 'rollOpen', args: [nextId] }),
+      );
+      // The keeper: the row, the roll_close wording, and the page.
+      assertEq(cycle.contracts_assigned, Number(EXERCISE_W3), 'contracts_assigned 1');
+      assertEq(cycle.assets_returned, '0', 'assets_returned 0 (a stranded close reports zero legs)');
+      assertEq(cycle.usdg_from_assignment, '0', 'usdg_from_assignment 0');
+      assertEq(cycle.gross_usdg6, premium.toString(), 'gross_usdg6 = the premium harvest so far');
+      assertEq(alerts.since(alertsBefore).join(','), 'roll_close,claim_stranded', 'the close, then the page');
+      assertEq(
+        alerts.last('roll_close').message,
+        `cycle 3 closed: ${roll.formatUsdg(premium)} USDG harvested, ${roll.formatUsdg(premium - fee)} to depositors. The claim could NOT be redeemed and is stranded: its legs are paid by retryStrandedClaim.`,
+        'the stranded wording',
+      );
+      assertEq(alerts.last('roll_close').data.stranded as boolean, true, 'data.stranded');
+      const page = alerts.last('claim_stranded');
+      assertEq(page.severity, 'error', 'claim_stranded is an error');
+      assertEq(String(page.data.gen), '1', 'claim_stranded gen');
+      assertEq(String(page.data.claimKey), claimKey.toString(), 'claim_stranded claimKey');
+      assertEq(String(page.data.tx), cycle.roll_close_tx, 'claim_stranded tx');
+      // /state and /health report from the snapshot a tick takes BEFORE it acts, so the stranded
+      // flag reaches them on the next tick (asserted there).
+      record.cycle3.strand = {
+        freezeTx,
+        rollCloseTx: cycle.roll_close_tx,
+        gen: '1',
+        claimKey: claimKey.toString(),
+        epochStrandShare: { epoch: '4', wad: wad.toString() },
+        strandedRemainingWad: (1_000_000_000_000_000_000n - wad).toString(),
+        harvestAtClose: { gross: premium.toString(), fee: fee.toString(), net: (premium - fee).toString() },
+        pendingFee: fee.toString(),
+        nextTypeRefused: nextId.toString(),
+      };
+      record.cycle3.queue = { ...(record.cycle3.queue as Record<string, unknown>), payoutAssets: payoutAssets.toString(), escrowUsdg: settled.args.usdgOut.toString(), strandWad: wad.toString() };
+      return { claimKey, wad, payoutAssets, escrowUsdg: settled.args.usdgOut, premium, fee, supplyBefore };
+    });
+
+    await step('week 3, tick #15 (Idle, stranded): no arm attempted; the retry timer fires and retryStrandedClaim reverts StillStranded -> strand_retry_failed; tick #16 inside the timer does nothing', async () => {
+      const txsBefore = txKinds().length;
+      const alertsBefore = alerts.received.length;
+      await roll.tick();
+      assertEq(txKinds().length, txsBefore, 'no transaction: no newOptionType, no rollOpen, no retry sent');
+      assertEq(alerts.since(alertsBefore).join(','), 'strand_retry_failed', 'the retry was simulated, reverted, and reported as such');
+      const failed = alerts.last('strand_retry_failed');
+      assertEq(failed.severity, 'warn', 'a warn, not a page');
+      assert(failed.message.includes('StillStranded'), 'the alert names the hook answer');
+      assertEq(await pub.readContract({ ...V, functionName: 'phase' }), roll.Phase.Idle, 'still Idle');
+      assertEq(await pub.readContract({ ...V, functionName: 'cycleNumber' }), 3, 'no cycle 4');
+      assert(store.getCycle(4) === null, 'no cycle 4 row');
+      const state = (await health.get('/state')).body.vault as { stranded: boolean; strandGen: string };
+      assertEq(state.stranded, true, '/state stranded (from this tick’s snapshot)');
+      assertEq(state.strandGen, '1', '/state strandGen');
+      assertEq(String((await health.get('/health')).body.status), 'ok', '/health stays 200 ok: a strand is not a wedged loop');
+      await roll.tick();
+      assertEq(txKinds().length, txsBefore, 'tick #16: still nothing sent');
+      assertEq(alerts.received.length, alertsBefore + 1, 'tick #16: inside the retry timer, nothing more is reported');
+    });
+
+    const recovered = await step('week 3: Paxos unfreezes; the timer elapses; tick #17 -> retryStrandedClaim lands: StrandedClaimRecovered, Harvest for cycle 3, the deferred fee swept', async () => {
+      const unfreezeTx = await setUsdgFrozen(vault, false);
+      assertEq(await isFrozen(vault), false, 'unfrozen');
+      await sleep(RETRY_MS + 200);
+      const [vaultNvdaBefore, vaultUsdgBefore, feeSafeBefore, accBefore, supply, dustBefore] = await Promise.all([
+        balanceOf(NVDA, vault),
+        balanceOf(USDG, vault),
+        balanceOf(USDG, FEE_SAFE.address),
+        pub.readContract({ ...V, functionName: 'accUsdgPerShare' }),
+        pub.readContract({ ...V, functionName: 'totalSupply' }),
+        pub.readContract({ ...Q, functionName: 'usdgDust' }),
+      ]);
+      const alertsBefore = alerts.received.length;
+      await roll.tick();
+      const retryTx = keeperTxs().find((t) => t.kind === 'retryStrandedClaim');
+      assert(retryTx !== undefined && retryTx.status === 'success', 'the keeper sent retryStrandedClaim');
+      const receipt = await receiptOf(retryTx.hash);
+      const assetsReturned = (FILL_A3 - EXERCISE_W3) * LOT;
+      const usdgReturned = EXERCISE_W3 * strike3;
+      const queueAssets = (assetsReturned * stranded.wad) / 1_000_000_000_000_000_000n;
+      const queueUsdg = (usdgReturned * stranded.wad) / 1_000_000_000_000_000_000n;
+      const rec = only(parseEventLogs({ abi: vaultAbi, eventName: 'StrandedClaimRecovered', logs: receipt.logs }), vault, 'StrandedClaimRecovered');
+      assertEq(rec.args.gen, 1n, 'StrandedClaimRecovered.gen');
+      assertEq(rec.args.assets, assetsReturned, 'StrandedClaimRecovered.assets = the unassigned lot');
+      assertEq(rec.args.usdgOut, usdgReturned, 'StrandedClaimRecovered.usdgOut = one strike');
+      assertEq(rec.args.queueWad, stranded.wad, "StrandedClaimRecovered.queueWad = the epoch's share");
+      const redeemed = only(parseEventLogs({ abi: vaultHarnessAbi, eventName: 'ClaimRedeemed', logs: receipt.logs }), vault, 'ClaimRedeemed');
+      assertEq(redeemed.args.claimKey, stranded.claimKey, 'ClaimRedeemed.claimKey');
+      only(parseEventLogs({ abi: clearAbi, eventName: 'ClaimRedeemed', logs: receipt.logs }), CLEAR, "the Clear's ClaimRedeemed");
+      const hv = only(parseEventLogs({ abi: vaultAbi, eventName: 'Harvest', logs: receipt.logs }), vault, 'Harvest');
+      assertEq(hv.args.cycleNumber, 3, "the retry's Harvest carries the STRANDED cycle's number");
+      assertEq(hv.args.grossUsdg, usdgReturned - queueUsdg, "Harvest.gross = the live shares' part of the strike leg");
+      assertEq(hv.args.feeUsdg, 0n, 'Harvest.fee 0: strike proceeds, fee-free');
+      const swept = only(parseEventLogs({ abi: vaultHarnessAbi, eventName: 'FeeSwept', logs: receipt.logs }), vault, 'FeeSwept');
+      assertEq(swept.args.amount, stranded.fee, 'the fee deferred by the freeze is swept now, to the base unit');
+      assertEq((await balanceOf(USDG, FEE_SAFE.address)) - feeSafeBefore, stranded.fee, 'the fee Safe received it');
+      assertEq(await pub.readContract({ ...Q, functionName: 'pendingFeeUsdg' }), 0n, 'nothing pending');
+      // The vault: resolved, flat, the queue's share reserved, the rest to live shares.
+      assertEq(await pub.readContract({ ...V, functionName: 'isStranded' }), false, 'resolved');
+      assertEq(await pub.readContract({ ...V, functionName: 'claimKey' }), 0n, 'claim redeemed');
+      assertEq(await pub.readContract({ ...V, functionName: 'contractsWritten' }), 0n, 'contractsWritten zeroed');
+      assertEq(await pub.readContract({ ...V, functionName: 'lastResolvedGen' }), 1n, 'generation 1 resolved');
+      assertEq(await pub.readContract({ ...V, functionName: 'strandedRemainingWad' }), 0n, 'strandedRemainingWad 0');
+      const s = await pub.readContract({ ...V, functionName: 'strands', args: [1n] });
+      assertEq(s[0], assetsReturned, 'strands[1].assetsIn');
+      assertEq(s[1], usdgReturned, 'strands[1].usdgIn');
+      assertEq(s[2], stranded.wad, 'strands[1].wadLeft');
+      assertEq(s[3], queueAssets, 'strands[1].assetsLeft = assetsIn x wad / 1e18');
+      assertEq(s[4], queueUsdg, 'strands[1].usdgLeft = usdgIn x wad / 1e18');
+      assertEq(await pub.readContract({ ...V, functionName: 'reservedAssets' }), stranded.payoutAssets + queueAssets, "reservedAssets = the epoch's idle slice + its claim share");
+      assertEq(await pub.readContract({ ...V, functionName: 'usdgReservedForQueue' }), stranded.escrowUsdg + queueUsdg, 'usdgReservedForQueue');
+      assertEq(await pub.readContract({ ...V, functionName: 'canRedeemInstantly' }), true, 'flat again');
+      assertEq((await balanceOf(NVDA, vault)) - vaultNvdaBefore, assetsReturned, 'the unassigned lot is back');
+      assertEq((await balanceOf(USDG, vault)) - vaultUsdgBefore, usdgReturned - stranded.fee, 'the strike leg landed, less the fee that finally left');
+      const accAfter = await pub.readContract({ ...V, functionName: 'accUsdgPerShare' });
+      assertEq(accAfter - accBefore, ((usdgReturned - queueUsdg + dustBefore) * ACC_PRECISION) / supply, `index delta = floor((the live shares' strike part + ${dustBefore} carried dust) x 1e27 / supply)`);
+      // The keeper: the row closed with the whole cycle summed, and the recovery announced.
+      const cycle = store.getCycle(3);
+      assert(cycle !== null, 'row');
+      assertEq(cycle.status, 'closed', 'recovered: closed');
+      assertEq(cycle.retry_tx, retryTx.hash, 'retry_tx');
+      assertEq(cycle.strand_gen, '1', 'strand_gen kept');
+      assertEq(cycle.gross_usdg6, (stranded.premium + usdgReturned - queueUsdg).toString(), 'gross_usdg6 = the premium harvest at the close + the retry harvest, summed over cycle 3');
+      assertEq(cycle.fee_usdg6, stranded.fee.toString(), 'fee on the premium only');
+      assertEq(cycle.assets_returned, assetsReturned.toString(), 'assets_returned from StrandedClaimRecovered');
+      assertEq(cycle.usdg_from_assignment, usdgReturned.toString(), 'usdg_from_assignment from StrandedClaimRecovered');
+      assertEq(alerts.since(alertsBefore).join(','), 'strand_recovered', 'the recovery announced; nothing armed in the same tick');
+      const announced = alerts.last('strand_recovered');
+      assertEq(String(announced.data.gen), '1', 'strand_recovered gen');
+      assertEq(String(announced.data.assets), assetsReturned.toString(), 'strand_recovered assets');
+      assertEq(announced.data.witnessedLive as boolean, true, 'witnessed by this keeper');
+      assertEq((await health.get('/state')).body.phase as string, 'Idle', '/state Idle');
+      record.cycle3.recovery = { unfreezeTx, retryTx: retryTx.hash, assets: assetsReturned.toString(), usdgOut: usdgReturned.toString(), queueWad: stranded.wad.toString(), queueAssets: queueAssets.toString(), queueUsdg: queueUsdg.toString(), harvest: { gross: (usdgReturned - queueUsdg).toString(), fee: '0' }, feeSwept: stranded.fee.toString() };
+      record.cycle3.rollCloseTx = (record.cycle3.strand as { rollCloseTx: string }).rollCloseTx;
+      record.cycle3.harvest = {
+        gross: cycle.gross_usdg6,
+        fee: cycle.fee_usdg6,
+        net: cycle.net_usdg6,
+        premium: stranded.premium.toString(),
+        usdgFromAssignment: usdgReturned.toString(),
+        assetsReturned: assetsReturned.toString(),
+        contractsAssigned: cycle.contracts_assigned,
+        harvestEvents: 2,
+      };
+      return { queueAssets, queueUsdg, indexDelta: accAfter - accBefore };
+    });
+
+    await step("week 3: the queuer's completeRedeem pays the idle slice, the escrow's USDG and its EpochStrandShare (StrandShareSettled); claimUsdg the rest", async () => {
+      const [previewAssets, previewUsdg] = await pub.readContract({ ...V, functionName: 'previewCompleteRedeem', args: [DEPOSITOR.address] });
+      assertEq(previewAssets, stranded.payoutAssets + recovered.queueAssets, 'previewCompleteRedeem.assets = idle slice + claim share');
+      assertEq(previewUsdg, stranded.escrowUsdg + recovered.queueUsdg, 'previewCompleteRedeem.usdgOut = escrow + claim share');
+      const nvdaBefore = await balanceOf(NVDA, DEPOSITOR.address);
+      const usdgBefore = await balanceOf(USDG, DEPOSITOR.address);
+      const { receipt } = await sendTx('vault.completeRedeem (depositor, epoch 4 + strand share)', DEPOSITOR, () =>
+        wallet.writeContract({ account: DEPOSITOR, chain: forkChain, address: vault, abi: vaultHarnessAbi, functionName: 'completeRedeem', args: [DEPOSITOR.address] }),
+      );
+      const entry = only(parseEventLogs({ abi: vaultHarnessAbi, eventName: 'QueueEntrySettled', logs: receipt.logs }), vault, 'QueueEntrySettled');
+      assertEq(entry.args.epochId, 4n, 'QueueEntrySettled.epochId');
+      assertEq(entry.args.assets, stranded.payoutAssets, 'QueueEntrySettled.assets: the idle slice');
+      const share = only(parseEventLogs({ abi: vaultHarnessAbi, eventName: 'StrandShareSettled', logs: receipt.logs }), vault, 'StrandShareSettled');
+      assertEq(share.args.gen, 1n, 'StrandShareSettled.gen');
+      assertEq(share.args.wad, stranded.wad, 'StrandShareSettled.wad');
+      assertEq(share.args.assets, recovered.queueAssets, 'StrandShareSettled.assets: the last owner takes exactly what is left');
+      assertEq(share.args.usdgOut, recovered.queueUsdg, 'StrandShareSettled.usdgOut');
+      const done = only(parseEventLogs({ abi: vaultHarnessAbi, eventName: 'CompleteRedeem', logs: receipt.logs }), vault, 'CompleteRedeem');
+      assertEq(done.args.shares, QUEUE_W3, 'CompleteRedeem.shares');
+      assertEq(done.args.assets, stranded.payoutAssets + recovered.queueAssets, 'CompleteRedeem.assets');
+      assertEq(done.args.usdgOut, stranded.escrowUsdg + recovered.queueUsdg, 'CompleteRedeem.usdgOut');
+      assertEq((await balanceOf(NVDA, DEPOSITOR.address)) - nvdaBefore, done.args.assets, 'NVDA delivered');
+      assertEq((await balanceOf(USDG, DEPOSITOR.address)) - usdgBefore, done.args.usdgOut, 'USDG delivered');
+      assertEq(await pub.readContract({ ...V, functionName: 'reservedAssets' }), 0n, 'reserve drained');
+      assertEq(await pub.readContract({ ...V, functionName: 'usdgReservedForQueue' }), 0n, 'USDG reserve drained');
+      const s = await pub.readContract({ ...V, functionName: 'strands', args: [1n] });
+      assertEq(s[2] + s[3] + s[4], 0n, 'the generation drained to zero: no dust');
+      assertEq(await pub.readContract({ ...V, functionName: 'owedStrandWad', args: [DEPOSITOR.address] }), 0n, 'nothing staged');
+      const sharesLeft = await pub.readContract({ ...V, functionName: 'balanceOf', args: [DEPOSITOR.address] });
+      const claimable = await pub.readContract({ ...V, functionName: 'claimableUsdg', args: [DEPOSITOR.address] });
+      assert(claimable > 0n, 'the shares that stayed earned the premium and the live part of the strike leg');
       await sendTx('vault.claimUsdg (depositor)', DEPOSITOR, () =>
         wallet.writeContract({ account: DEPOSITOR, chain: forkChain, address: vault, abi: vaultAbi, functionName: 'claimUsdg' }),
       );
-      assertEq(await balanceOf(USDG, DEPOSITOR.address), claimable, 'the depositor received exactly the claimable USDG');
-      const [owed1, accounted1] = await Promise.all([
-        pub.readContract({ address: vault, abi: vaultQueueAbi, functionName: 'usdgOwed' }),
-        pub.readContract({ address: vault, abi: vaultQueueAbi, functionName: 'usdgAccounted' }),
-      ]);
-      const carried1 = await balanceOf(USDG, vault);
-      assertEq(owed1, 0n, 'usdgOwed 0: a single holder claims exactly what was credited');
-      assertEq(carried1, dust1 + owed1, 'what stays in the vault after cycle 1 = usdgDust + usdgOwed');
-      assertEq(accounted1, carried1, 'and it is inside usdgAccounted, so the next harvest cannot re-count it');
-      record.cycle1.rollCloseTx = cycle.roll_close_tx;
-      record.cycle1.harvest = { gross: cycle.gross_usdg6, fee: cycle.fee_usdg6, net: cycle.net_usdg6, depositorReceived: claimable.toString(), usdgDust: dust1.toString(), usdgLeftInVault: carried1.toString() };
-      note(`harvest gross ${roll.formatUsdg(BigInt(cycle.gross_usdg6 ?? '0'))} USDG, fee ${roll.formatUsdg(BigInt(cycle.fee_usdg6 ?? '0'))}, net ${roll.formatUsdg(net)}; depositor claimed ${roll.formatUsdg(claimable)}`);
-
-      const h = await health('/health');
-      assertEq(h.status, 200, '/health after a full cycle');
-      record.health.afterCycle1 = h.body;
-      record.health.cycles = (await health('/cycles')).body;
-      note(`GET /health -> ${String(h.body.status)}; GET /cycles -> ${((record.health.cycles as { cycles: unknown[] }).cycles).length} cycle(s)`);
+      assertEq(await pub.readContract({ ...V, functionName: 'claimableUsdg', args: [DEPOSITOR.address] }), 0n, 'claimed');
+      assertEq(await pub.readContract({ ...V, functionName: 'maxDeposit', args: [DEPOSITOR.address] }) > 0n, true, 'deposits are open again');
+      record.cycle3.queue = { ...(record.cycle3.queue as Record<string, unknown>), completeRedeemTx: receipt.transactionHash, assetsOut: done.args.assets.toString(), usdgOut: done.args.usdgOut.toString(), strandAssets: recovered.queueAssets.toString(), strandUsdg: recovered.queueUsdg.toString() };
+      record.cycle3.claimed = claimable.toString();
+      record.cycle3.final = {
+        totalSupply: (await pub.readContract({ ...V, functionName: 'totalSupply' })).toString(),
+        idleAssets: (await pub.readContract({ ...V, functionName: 'idleAssets' })).toString(),
+        depositorShares: sharesLeft.toString(),
+        depositorNvda: (await balanceOf(NVDA, DEPOSITOR.address)).toString(),
+      };
     });
 
-    /* ---------- 11. cycle 2: rolled while asleep, unfilled, closed honestly ---------- */
+    /* =====================================================================================
+       WEEK 4: the keeper arms the following week normally
+       ===================================================================================== */
 
-    if (SKIP_CYCLE2 || FEED_MODE === 'real') {
-      note(SKIP_CYCLE2 ? 'DRYRUN_SKIP_CYCLE2=1: stopping after cycle 1' : 'DRYRUN_FEED=real: cycle 2 needs a fresh oracle after a one-week warp; stopping after cycle 1');
-      record.cycle2.skipped = true;
-      record.cycle3.skipped = true;
-    } else {
-      const series2 = await step('cycle 2: create a fresh five-rung series on the REAL Valorem Clear', () => freshSeries(2, record.cycle2));
+    await step('week 4, tick #18 (Idle, resolved): the keeper arms the following week normally', async () => {
+      const alertsBefore = alerts.received.length;
+      const expected = await expectedArm();
+      await roll.tick();
+      const armed = await assertArmed(4, expected, record.cycle4, alertsBefore);
+      assertEq(await pub.readContract({ ...V, functionName: 'strandGen' }), 1n, 'generation 1 stays resolved');
+      assertEq(await pub.readContract({ ...V, functionName: 'isStranded' }), false, 'not stranded');
+      note(`week 4 armed: ${armed.capacity} contracts at ${armed.unit} USDG6`);
+      record.health.afterCycle4 = (await health.get('/health')).body;
+      record.health.state = (await health.get('/state')).body;
+      record.health.cycles = (await health.get('/cycles')).body;
+    });
 
-      await step('cycle 2: the vault is rolled open BEHIND the keeper (same key, no database row)', async () => {
-        // The plan is computed with the production picker so the write is exactly what the
-        // keeper would have chosen; only the sending is done here, to simulate a keeper that
-        // died between the transaction landing and the write to SQLite.
-        const [cycle, p, rungs, spot, idle] = await Promise.all([
-          policy.readCycle(),
-          policy.readPolicy(),
-          policy.readCycle().then((c) => policy.readRungs(c)),
-          pub.readContract({ address: vault, abi: vaultAbi, functionName: 'spotUsdg' }),
-          pub.readContract({ address: vault, abi: vaultAbi, functionName: 'idleAssets' }),
-        ]);
-        const plan = await policy.pickWrite({ cycle, rungs, policy: p, idleAssets: idle, spotUsdg6: spot, readLastFill: async () => null });
-        assert(plan.ok, `picker refused cycle 2: ${plan.ok ? '' : plan.reason}`);
-        assertEq(plan.strikeUsdg6, series2.strikes[0] ?? 0n, 'nearest in-band rung');
-        await sendTx('vault.rollOpen (cycle 2, sent by the harness as the keeper key)', KEEPER, () =>
-          wallet.writeContract({ account: KEEPER, chain: forkChain, address: vault, abi: vaultAbi, functionName: 'rollOpen', args: [plan.optionId, plan.contracts] }),
-        );
-        assertEq(await pub.readContract({ address: vault, abi: vaultAbi, functionName: 'phase' }), roll.Phase.Listed, 'phase');
-        assertEq(store.getCycle(2) === null, true, 'the keeper has NO row for cycle 2');
-        record.cycle2.contracts = plan.contracts.toString();
-        record.cycle2.strikeUsdg6 = plan.strikeUsdg6.toString();
-      });
+    /* ---------- what the keeper remembers, after a restart ---------- */
 
-      await step('cycle 2: reconcile() adopts the open cycle it has no record of', async () => {
-        await roll.reconcile();
-        const cycle = store.getCycle(2);
-        assert(cycle !== null, 'adopted row exists');
-        assertEq(cycle.status, 'open', 'adopted status');
-        assertEq(cycle.option_id, series2.ids[0]?.toString() ?? '', 'adopted option id');
-        assertEq(cycle.roll_open_tx, null, 'an adopted cycle has no rollOpen tx on record');
-        assertEq(store.listingsForCycle(2).length, 0, 'and no listing yet');
-      });
-
-      const listed2 = await step('cycle 2, tick #6 (Listed, no listing): list from the policy floor -> approveListing -> POST', async () => {
-        await roll.tick();
-        const rows = store.listingsForCycle(2);
-        assertEq(rows.length, 1, 'one listing');
-        const row = rows[0];
-        assert(row !== undefined, 'row');
-        assertEq(row.status, 'posted', 'posted');
-        assertEq(row.contracts, record.cycle2.contracts as string, 'listed the whole inventory');
-        // The header's claim, made true: a first listing prices at the policy floor computed
-        // from LIVE spot and policy — the same reads the tick just made.
-        const [freshPolicy, freshSpot] = await Promise.all([
-          policy.readPolicy(),
-          pub.readContract({ address: vault, abi: vaultAbi, functionName: 'spotUsdg' }),
-        ]);
-        assertEq(row.unit_price6, policy.minUnitPrice6(BigInt(freshSpot), freshPolicy).toString(), 'listed at the freshly computed policy floor');
-        assertEq(stub.requests.filter((r) => r.startsWith('POST')).length, 2, 'second POST');
-        assertEq(store.getCycle(2)?.relists_used ?? -1, 0, 'a first listing is not a relist');
-        record.cycle2.orderHash = row.order_hash;
-        record.cycle2.unitPrice6 = row.unit_price6;
-        return row;
-      });
-
-      await step('cycle 2, tick #7: visible in the book; nobody fills', async () => {
-        await roll.tick();
-        assertEq(store.getListing(listed2.order_hash)?.status ?? null, 'visible', 'visible');
-      });
-
-      await step('cycle 2: warp to exerciseTimestamp; tick #8 -> lockBook retires the live listing', async () => {
-        await warpTo(series2.exercise, 'cycle-2 exerciseTimestamp');
-        const deletesBefore = stub.requests.filter((r) => r.startsWith('DELETE')).length;
-        await roll.tick();
-        assertEq(await pub.readContract({ address: vault, abi: vaultAbi, functionName: 'phase' }), roll.Phase.Exercisable, 'phase');
-        assertEq(store.getCycle(2)?.status ?? null, 'locked', 'locked');
-        assertEq(store.getListing(listed2.order_hash)?.status ?? null, 'expired', 'the unfilled listing row is retired');
-        assertEq(stub.requests.filter((r) => r.startsWith('DELETE')).length, deletesBefore + 1, 'the book was told');
-        assertEq(store.openListings().length, 0, '/orders offers nothing past endTime');
-      });
-
-      await step('cycle 2: warp to expiryTimestamp; tick #9 -> rollClose: unfilled, 0', async () => {
-        await warpTo(series2.expiry, 'cycle-2 expiryTimestamp');
-        await roll.tick();
-        assertEq(await pub.readContract({ address: vault, abi: vaultAbi, functionName: 'phase' }), roll.Phase.Idle, 'phase');
-        const cycle = store.getCycle(2);
-        assert(cycle !== null, 'cycle row');
-        assertEq(cycle.status, 'closed', 'closed');
-        assertEq(cycle.gross_usdg6, '0', 'unfilled: 0');
-        assertEq(cycle.fee_usdg6, '0', 'unfilled: 0 fee');
-        assertEq(cycle.net_usdg6, '0', 'unfilled: 0 net');
-        const closeReceipt2 = await pub.getTransactionReceipt({ hash: cycle.roll_close_tx as Hex });
-        const rollClose2 = only(parseEventLogs({ abi: vaultAbi, eventName: 'RollClose', logs: closeReceipt2.logs }), vault, 'RollClose');
-        assertEq(rollClose2.args.assetsReturned, BigInt(record.cycle2.contracts as string) * LOT, 'RollClose.assetsReturned = every written lot');
-        assertEq(rollClose2.args.usdgFromAssignment, 0n, 'RollClose.usdgFromAssignment = 0');
-        assertEq(cycle.assets_returned, rollClose2.args.assetsReturned.toString(), 'assets_returned = RollClose.assetsReturned');
-        assertEq(cycle.usdg_from_assignment, '0', 'usdg_from_assignment = 0 on an unfilled week (known zero, not NULL)');
-        assertEq(alerts.kinds().join(','), 'roll_open,roll_close,roll_close', 'alerts');
-        const last = alerts.received[alerts.received.length - 1];
-        assert(last !== undefined, 'roll_close alert');
-        assertEq(last.message, 'cycle 2 closed unfilled: 0 USDG harvested.', 'the roll_close alert says unfilled, 0');
-        assertEq(await pub.readContract({ address: vault, abi: vaultAbi, functionName: 'idleAssets' }), DEPOSIT, 'collateral back again');
-        record.cycle2.rollCloseTx = cycle.roll_close_tx;
-        record.cycle2.harvest = { gross: cycle.gross_usdg6, fee: cycle.fee_usdg6, net: cycle.net_usdg6 };
-      });
-
-      /* ---------- 12. cycle 3: in the money — filled, a queued redeem, 9 of 23 assigned ---------- */
-
-      if (SKIP_CYCLE3) {
-        note('DRYRUN_SKIP_CYCLE3=1: stopping after cycle 2');
-        record.cycle3.skipped = true;
-      } else {
-        /** Contracts the buyer exercises, of the 23 written. Partial assignment is the normal case. */
-        const EXERCISED = 9n;
-        /** Shares the depositor queues while the call is live, of the 25e18 minted 1:1. */
-        const QUEUED = 10n * LOT;
-        /** Distributor.ACC_PRECISION: the USDG-per-share index is scaled by 1e27. */
-        const ACC_PRECISION = 10n ** 27n;
-        /** Vault USDG and usdgDust carried into cycle 3 from cycle 1, read before cycle 3's write. */
-        let carriedUsdg = 0n;
-        let carriedDust = 0n;
-        const V = { address: vault, abi: vaultAbi } as const;
-        const Q = { address: vault, abi: vaultQueueAbi } as const;
-        const strikeOfCycle3 = (): bigint => {
-          const row = store.getCycle(3);
-          assert(row !== null && row.strike_usdg6 !== null, 'cycle 3 strike on record');
-          return BigInt(row.strike_usdg6);
-        };
-        /** The feed answer that puts spot 5 USD above the strike: USDG6 -> 8 dp, plus 5e8. */
-        const itmAnswer8 = (): bigint => strikeOfCycle3() * 100n + 5n * 100_000_000n;
-
-        const series3 = await step('cycle 3: create a fresh five-rung series on the REAL Valorem Clear', async () => {
-          // The harness-local fragment must describe the compiled vault, not a memory of it.
-          const compiled = artifact('Vault.sol/Vault.json').abi;
-          for (const fragment of vaultQueueAbi) {
-            assert(
-              compiled.some((item) => item.type === fragment.type && 'name' in item && item.name === fragment.name),
-              `Vault artifact has no ${fragment.type} named ${fragment.name}`,
-            );
-          }
-          const series = await freshSeries(3, record.cycle3);
-          const cycle = await pub.readContract({ address: registry, abi: registryAbi, functionName: 'cycle' });
-          assertEq(cycle.number, 3, 'mock registry cycle number');
-          assertEq(await pub.readContract({ address: registry, abi: registryAbi, functionName: 'isWritingOpen' }), true, 'writing open');
-          return series;
-        });
-
-        const listed3 = await step('cycle 3, tick #10 (Idle, writing open): the KEEPER writes and lists', async () => {
-          const idleBefore = await pub.readContract({ ...V, functionName: 'idleAssets' });
-          assertEq(idleBefore, DEPOSIT, 'idle collateral entering cycle 3: both earlier cycles expired out of the money');
-          // What cycle 1 left behind, measured rather than assumed to be 0: its index dust (and any
-          // per-account floor loss) is still in the vault, and the Distributor folds usdgDust into
-          // the next pot. 0 and 0 at the default 25e18, whose supply divides 1e27.
-          [carriedUsdg, carriedDust] = await Promise.all([balanceOf(USDG, vault), pub.readContract({ ...Q, functionName: 'usdgDust' })]);
-          assertEq(carriedUsdg, BigInt((record.cycle1.harvest as { usdgLeftInVault: string }).usdgLeftInVault), 'nothing moved the vault USDG since cycle 1 (cycle 2 earned 0)');
-          assert(carriedDust <= carriedUsdg, 'carried usdgDust is inside the carried balance');
-          record.cycle3.carriedIn = { usdg: carriedUsdg.toString(), usdgDust: carriedDust.toString() };
-          note(`carried into cycle 3: ${carriedUsdg} USDG6 in the vault, of which usdgDust ${carriedDust}`);
-          await roll.tick();
-          assertEq(await pub.readContract({ ...V, functionName: 'phase' }), roll.Phase.Listed, 'vault phase after the tick');
-          assertEq(await pub.readContract({ ...V, functionName: 'cycleNumber' }), 3, 'vault cycle number');
-
-          const cycle = store.getCycle(3);
-          assert(cycle !== null, 'cycle row 3');
-          assertEq(cycle.status, 'open', 'cycle row status');
-          assert(cycle.roll_open_tx !== null, "roll_open_tx recorded: this rollOpen was the keeper's own");
-          assertEq(store.getTx(cycle.roll_open_tx)?.status ?? null, 'success', 'rollOpen receipt');
-          assertEq(cycle.option_id, series3.ids[0]?.toString() ?? '', 'the nearest in-band rung');
-          assertEq(cycle.strike_usdg6, series3.strikes[0]?.toString() ?? '', 'its strike');
-          assertEq(cycle.exercise_ts, Number(series3.exercise), 'exercise_ts');
-          assertEq(cycle.expiry_ts, Number(series3.expiry), 'expiry_ts');
-
-          const [freshPolicy, freshSpot, registryCycle] = await Promise.all([
-            policy.readPolicy(),
-            pub.readContract({ ...V, functionName: 'spotUsdg' }),
-            policy.readCycle(),
-          ]);
-          const expectedContracts = policy.maxContracts(idleBefore, registryCycle.lotSize, freshPolicy);
-          assertEq(cycle.contracts, Number(expectedContracts), 'wrote the whole idle balance at 95% utilisation');
-
-          const rows = store.listingsForCycle(3);
-          assertEq(rows.length, 1, 'one listing row');
-          const row = rows[0];
-          assert(row !== undefined, 'row');
-          assertEq(row.status, 'posted', 'listing status after POST');
-          assertEq(row.api_status, 'open', 'book status from the 201');
-          assert(row.approve_tx !== null, 'approve_tx recorded');
-          assertEq(BigInt(row.contracts), expectedContracts, 'listed the whole write');
-          assertEq(row.unit_price6, policy.minUnitPrice6(freshSpot, freshPolicy).toString(), 'priced at the policy floor: the book has no fill on these fresh ids');
-          const inventory = await pub.readContract({ address: CLEAR, abi: clearAbi, functionName: 'balanceOf', args: [vault, BigInt(row.option_id)] });
-          assertEq(inventory, expectedContracts, 'real Valorem minted the option tokens to the vault');
-          const listingHash = await pub.readContract({ ...V, functionName: 'listingHash' });
-          assertEq(listingHash.toLowerCase(), row.order_hash.toLowerCase(), 'the vault authorised the hash the keeper stored');
-          const claimKey = await pub.readContract({ ...V, functionName: 'claimKey' });
-          assert(claimKey !== 0n, 'the vault holds a Valorem claim');
-          assertEq(stub.requests.filter((r) => r.startsWith('POST')).length, 3, 'third POST');
-
-          // A second roll_open inside the hour. roll.ts sends roll_open and roll_close with
-          // `force: true`, so the KEEPER_ALERT_COOLDOWN_MS (1 h, keyed 'roll_open:') in alerts.ts
-          // does not suppress it; the exact list below is the assertion of that.
-          assertEq(alerts.kinds().join(','), 'roll_open,roll_close,roll_close,roll_open', 'alerts: the second roll_open is force-sent past the cooldown');
-          const last = alerts.received[alerts.received.length - 1];
-          assert(last !== undefined, 'alert');
-          assertEq((last.data as { cycleNumber?: number }).cycleNumber ?? null, 3, 'the roll_open alert names cycle 3');
-
-          note(`wrote ${row.contracts} contracts of option ${row.option_id.slice(0, 12)}… at strike ${cycle.strike_usdg6} USDG6, ask ${row.unit_price6} USDG6/contract, gross ${row.gross_usdg6}`);
-          record.cycle3.contracts = row.contracts;
-          record.cycle3.strikeUsdg6 = cycle.strike_usdg6;
-          record.cycle3.unitPrice6 = row.unit_price6;
-          record.cycle3.gross6 = row.gross_usdg6;
-          record.cycle3.toVault6 = row.to_vault6;
-          record.cycle3.toOvercall6 = row.to_overcall6;
-          record.cycle3.orderHash = row.order_hash;
-          record.cycle3.rollOpenTx = cycle.roll_open_tx;
-          record.cycle3.optionId = row.option_id;
-          record.cycle3.claimKey = claimKey.toString();
-          return row;
-        });
-
-        await step('cycle 3, tick #11 (Listed, nobody has filled): visible in the book', async () => {
-          await roll.tick();
-          const row = store.getListing(listed3.order_hash);
-          assert(row !== null, 'row');
-          assertEq(row.status, 'visible', 'listing status after the book check');
-          assert(row.visible_at !== null, 'visible_at stamped');
-          assertEq(alerts.kinds().length, 4, 'no new alert');
-        });
-
-        await step("cycle 3: a buyer fills the listing on the real Seaport, using the keeper's /orders payload", async () => {
-          const { fillTx } = await buyerFills(listed3);
-          record.cycle3.fillTx = fillTx;
-        });
-
-        await step('cycle 3, tick #12 (Listed, filled): Seaport getOrderStatus reports the fill', async () => {
-          await roll.tick();
-          const row = store.getListing(listed3.order_hash);
-          assert(row !== null, 'row');
-          assertEq(row.status, 'filled', 'listing status');
-          assertEq(row.seaport_total_filled, row.seaport_total_size, 'fully filled');
-          assertEq(alerts.kinds().length, 4, 'no new alert');
-        });
-
-        await step('cycle 3: the depositor queues 10 of 25 shares while the call is live (Listed, filled)', async () => {
-          const epochBefore = await pub.readContract({ ...V, functionName: 'epochId' });
-          assertEq(epochBefore, 1n, 'epoch 1: the constructor starts there and no queue has settled yet');
-          assertEq(await pub.readContract({ ...V, functionName: 'balanceOf', args: [DEPOSITOR.address] }), DEPOSIT, 'all 25e18 shares still free');
-          const { hash, receipt } = await sendTx('vault.queueRedeem(10e18) (depositor)', DEPOSITOR, () =>
-            wallet.writeContract({ account: DEPOSITOR, chain: forkChain, address: vault, abi: vaultQueueAbi, functionName: 'queueRedeem', args: [QUEUED] }),
-          );
-          const ev = only(parseEventLogs({ abi: vaultQueueAbi, eventName: 'QueueRedeem', logs: receipt.logs }), vault, 'QueueRedeem');
-          assertEq(ev.args.owner.toLowerCase(), DEPOSITOR.address.toLowerCase(), 'QueueRedeem.owner');
-          assertEq(ev.args.shares, QUEUED, 'QueueRedeem.shares');
-          assertEq(ev.args.epochId, epochBefore, 'QueueRedeem.epochId');
-          assertEq(await pub.readContract({ ...V, functionName: 'balanceOf', args: [DEPOSITOR.address] }), DEPOSIT - QUEUED, 'the depositor keeps 15e18');
-          assertEq(await pub.readContract({ ...V, functionName: 'balanceOf', args: [vault] }), QUEUED, 'the vault escrows the 10e18 on itself');
-          assertEq(await pub.readContract({ ...V, functionName: 'totalSupply' }), DEPOSIT, 'nothing is burned until settlement');
-          assertEq(await pub.readContract({ ...V, functionName: 'queuedShares' }), QUEUED, 'queuedShares');
-          assertEq(await pub.readContract({ ...Q, functionName: 'queuedSharesOf', args: [DEPOSITOR.address] }), QUEUED, 'queuedSharesOf');
-          assertEq(await pub.readContract({ ...Q, functionName: 'queuedEpochOf', args: [DEPOSITOR.address] }), epochBefore, 'queuedEpochOf');
-          assertEq(await pub.readContract({ ...V, functionName: 'canRedeemInstantly' }), false, 'the queue is the only exit while a call is open');
-          assertEq(await pub.readContract({ ...Q, functionName: 'previewRedeem', args: [QUEUED] }), 0n, 'previewRedeem quotes 0: no instant path');
-          await expectRevert('completeRedeem before the epoch settles', 'EpochNotSettled', () =>
-            pub.simulateContract({ account: DEPOSITOR, address: vault, abi: vaultQueueAbi, functionName: 'completeRedeem', args: [DEPOSITOR.address] }),
-          );
-          record.cycle3.queue = { sharesQueued: QUEUED.toString(), epoch: epochBefore.toString(), queueTx: hash };
-        });
-
-        await step('cycle 3: warp to exerciseTimestamp; spot moves above the strike; tick #13 -> lockBook', async () => {
-          await warpTo(series3.exercise, 'cycle-3 exerciseTimestamp');
-          const strike = strikeOfCycle3();
-          // In the money, honestly: the feed says spot = strike + 5 USD. Set only NOW, after the
-          // keeper has written and listed — before rollOpen it would have moved the OTM band and
-          // the pick, before approveListing the premium floor. Nothing in lockBook, exercise,
-          // rollClose or the queue reads spot, and Valorem is physically settled with no oracle,
-          // so this is the narrative of the week, not its mechanism.
-          await sendTx('MockFeed.setAnswer (strike + 5 USD: in the money)', ADMIN, () =>
-            wallet.writeContract({ account: ADMIN, chain: forkChain, address: feed, abi: mockFeedAbi, functionName: 'setAnswer', args: [itmAnswer8()] }),
-          );
-          const spot = await pub.readContract({ ...V, functionName: 'spotUsdg' });
-          assert(spot > strike, `spot ${spot} above strike ${strike}`);
-          note(`spot ${spot} USDG6 > strike ${strike} USDG6`);
-          record.cycle3.itmSpotUsdg6 = spot.toString();
-
-          // The deposit gate keys on the timestamp, not the phase: the vault is still Listed but
-          // the exercise window has opened, so new money is refused before anyone can mint against
-          // a NAV that an exercise is about to collapse (Vault._requireDepositPhase).
-          assertEq(await pub.readContract({ ...Q, functionName: 'maxDeposit', args: [DEPOSITOR.address] }), 0n, 'maxDeposit quotes 0 once the exercise window is open');
-          await expectRevert('deposit after the exercise window opened (vault still Listed)', 'DepositsClosedForCycle', () =>
-            pub.simulateContract({ account: DEPOSITOR, address: vault, abi: vaultAbi, functionName: 'deposit', args: [LOT, DEPOSITOR.address] }),
-          );
-
-          const deletesBefore = stub.requests.filter((r) => r.startsWith('DELETE')).length;
-          await roll.tick();
-          assertEq(await pub.readContract({ ...V, functionName: 'phase' }), roll.Phase.Exercisable, 'phase');
-          const cycle = store.getCycle(3);
-          assert(cycle !== null, 'cycle row');
-          assertEq(cycle.status, 'locked', 'cycle status');
-          assert(cycle.lock_tx !== null, 'lock_tx recorded');
-          assertEq(store.getTx(cycle.lock_tx)?.status ?? null, 'success', 'lockBook receipt');
-          // A filled row is terminal: liveListingsForCycle excludes it, so lockBook neither retires
-          // it nor tells the book. (Cycle 2's unfilled row became 'expired' with a DELETE.)
-          assertEq(store.getListing(listed3.order_hash)?.status ?? null, 'filled', 'the filled listing row stays filled');
-          assertEq(stub.requests.filter((r) => r.startsWith('DELETE')).length, deletesBefore, 'no DELETE for a filled listing');
-          assertEq(store.openListings().length, 0, '/orders serves nothing');
-          assertEq(alerts.kinds().length, 4, 'no new alert');
-          record.cycle3.lockTx = cycle.lock_tx;
-        });
-
-        const exercised3 = await step('cycle 3: the buyer exercises 9 of 23 on the REAL Valorem Clear', async () => {
-          const strike = strikeOfCycle3();
-          const optionId = BigInt(listed3.option_id);
-          const written = BigInt(listed3.contracts);
-          const claimKey = await pub.readContract({ ...V, functionName: 'claimKey' });
-          assert(claimKey !== 0n, 'claim still open');
-
-          // What the Clear pulls: exerciseAmount x amount, plus its own fee ONLY if the fee switch
-          // is on (live 4663: off). Read live rather than assumed; the debit is asserted exact.
-          const [feesEnabled, feeBps] = await Promise.all([
-            pub.readContract({ address: CLEAR, abi: clearAbi, functionName: 'feesEnabled' }),
-            pub.readContract({ address: CLEAR, abi: clearAbi, functionName: 'feeBps' }),
-          ]);
-          const rx = strike * EXERCISED;
-          let clearFee = 0n;
-          if (feesEnabled) {
-            clearFee = (rx * BigInt(feeBps)) / 10_000n;
-            if (clearFee === 0n) clearFee = 1n;
-          }
-          const debit = rx + clearFee;
-          note(`Clear feesEnabled=${String(feesEnabled)} feeBps=${feeBps}: exercising ${EXERCISED} pulls ${rx} + fee ${clearFee} = ${debit} USDG6`);
-
-          assertEq(await balanceOf(USDG, BUYER.address), 0n, 'the buyer spent every USDG6 on the fill');
-          const buyerNvdaBefore = await balanceOf(NVDA, BUYER.address);
-          const clearUsdgBefore = await balanceOf(USDG, CLEAR);
-          const clearNvdaBefore = await balanceOf(NVDA, CLEAR);
-          const vaultUsdgBefore = await balanceOf(USDG, vault);
-          assertEq(vaultUsdgBefore, carriedUsdg + BigInt(listed3.to_vault6), "the vault holds this premium leg plus exactly what cycle 1 left (cycle 1's claim, cycle 2 earned nothing)");
-          assertEq(await pub.readContract({ address: CLEAR, abi: clearAbi, functionName: 'balanceOf', args: [BUYER.address, optionId] }), written, 'the buyer holds all 23 option tokens');
-          assertEq(await pub.readContract({ ...V, functionName: 'totalAssets' }), DEPOSIT, 'NAV before the exercise');
-          assertEq(await pub.readContract({ ...V, functionName: 'contractsAssigned' }), 0n, 'nothing assigned yet');
-
-          await deal(USDG, BUYER.address, debit);
-          await sendTx('USDG.approve(clear)', BUYER, () =>
-            wallet.writeContract({ account: BUYER, chain: forkChain, address: USDG, abi: erc20Abi, functionName: 'approve', args: [CLEAR, debit] }),
-          );
-          const { hash, receipt } = await sendTx(`clear.exercise(optionId, ${EXERCISED}) (buyer)`, BUYER, () =>
-            wallet.writeContract({ account: BUYER, chain: forkChain, address: CLEAR, abi: clearAbi, functionName: 'exercise', args: [optionId, EXERCISED] }),
-          );
-          const ev = only(parseEventLogs({ abi: clearAbi, eventName: 'OptionsExercised', logs: receipt.logs }), CLEAR, 'OptionsExercised');
-          assertEq(ev.args.optionId, optionId, 'OptionsExercised.optionId');
-          assertEq(ev.args.exerciser.toLowerCase(), BUYER.address.toLowerCase(), 'OptionsExercised.exerciser');
-          assertEq(ev.args.amount, EXERCISED, 'OptionsExercised.amount');
-
-          // All four token legs, exact.
-          assertEq(await balanceOf(USDG, BUYER.address), 0n, 'the Clear pulled exactly exerciseAmount x 9 (+ fee)');
-          assertEq((await balanceOf(NVDA, BUYER.address)) - buyerNvdaBefore, EXERCISED * LOT, 'the buyer took delivery of 9 NVDA');
-          assertEq((await balanceOf(USDG, CLEAR)) - clearUsdgBefore, debit, 'the strike USDG sits in the Clear');
-          assertEq(clearNvdaBefore - (await balanceOf(NVDA, CLEAR)), EXERCISED * LOT, 'the Clear released 9 NVDA');
-          assertEq(await pub.readContract({ address: CLEAR, abi: clearAbi, functionName: 'balanceOf', args: [BUYER.address, optionId] }), written - EXERCISED, '23 -> 14 option tokens');
-          assertEq(await balanceOf(USDG, vault), vaultUsdgBefore, 'nothing reached the vault yet: the proceeds wait inside the claim');
-
-          // The vault is the SOLE writer of this private option type, so every exercised contract
-          // lands on its claim. Read BEFORE rollClose: it zeroes claimKey and Valorem then reverts.
-          const claim = await pub.readContract({ address: CLEAR, abi: clearAbi, functionName: 'claim', args: [claimKey] });
-          assertEq(claim.optionId, optionId, 'claim.optionId');
-          assertEq(claim.amountWritten, written * LOT, 'claim.amountWritten is a 1e18-scaled scalar');
-          assertEq(claim.amountExercised, EXERCISED * LOT, 'claim.amountExercised = 9e18, the scalar');
-          const position = await pub.readContract({ address: CLEAR, abi: clearAbi, functionName: 'position', args: [claimKey] });
-          assertEq(position.underlyingAmount, (written - EXERCISED) * LOT, 'position.underlyingAmount: 14 lots still locked');
-          assertEq(position.exerciseAmount, rx, 'position.exerciseAmount: 9 strikes of USDG');
-          assertEq(await pub.readContract({ ...V, functionName: 'contractsAssigned' }), EXERCISED, 'vault.contractsAssigned() is the raw count 9, not 9e18');
-          assertEq(await pub.readContract({ ...V, functionName: 'lockedAssets' }), (written - EXERCISED) * LOT, 'vault.lockedAssets()');
-          assertEq(await pub.readContract({ ...V, functionName: 'claimedExerciseProceeds' }), rx, 'vault.claimedExerciseProceeds()');
-          assertEq(await pub.readContract({ ...V, functionName: 'totalAssets' }), DEPOSIT - EXERCISED * LOT, 'NAV is already down 9 lots, before settlement');
-          assertEq(await pub.readContract({ ...V, functionName: 'contractsWritten' }), written, 'contractsWritten');
-          assertEq(await pub.readContract({ ...V, functionName: 'contractsRemaining' }), 0n, 'no unsold inventory');
-          assertEq(await pub.readContract({ ...V, functionName: 'contractsSold' }), written, 'contractsSold');
-          assertEq(await pub.readContract({ ...Q, functionName: 'maxDeposit', args: [DEPOSITOR.address] }), 0n, 'deposits stay closed: Exercisable, and unredeemed strike proceeds in the claim');
-
-          record.cycle3.exerciseTx = hash;
-          record.cycle3.contractsExercised = EXERCISED.toString();
-          record.cycle3.exerciseDebitUsdg6 = debit.toString();
-          record.cycle3.clearFeesEnabled = feesEnabled;
-          record.cycle3.claimAmountExercised = claim.amountExercised.toString();
-          return { strike, optionId, claimKey, rx, debit };
-        });
-
-        const closed3 = await step('cycle 3: warp to expiryTimestamp; tick #14 -> rollClose: redeem the assigned claim, harvest, settle the queue', async () => {
-          await warpTo(series3.expiry, 'cycle-3 expiryTimestamp');
-          await sendTx('MockFeed.setAnswer (refresh updatedAt; still in the money)', ADMIN, () =>
-            wallet.writeContract({ account: ADMIN, chain: forkChain, address: feed, abi: mockFeedAbi, functionName: 'setAnswer', args: [itmAnswer8()] }),
-          );
-          const written = BigInt(listed3.contracts);
-          const toVault = BigInt(listed3.to_vault6);
-          const [supplyBefore, accBefore, distributedBefore, claimedBefore, epochBefore, vaultUsdgBefore, vaultNvdaBefore, feeSafeBefore, protocol] = await Promise.all([
-            pub.readContract({ ...V, functionName: 'totalSupply' }),
-            pub.readContract({ ...V, functionName: 'accUsdgPerShare' }),
-            pub.readContract({ ...V, functionName: 'totalUsdgDistributed' }),
-            pub.readContract({ ...Q, functionName: 'totalUsdgClaimed' }),
-            pub.readContract({ ...V, functionName: 'epochId' }),
-            balanceOf(USDG, vault),
-            balanceOf(NVDA, vault),
-            balanceOf(USDG, FEE_SAFE.address),
-            policy.readPolicy(),
-          ]);
-          assertEq(supplyBefore, DEPOSIT, 'the escrowed shares still count in the supply');
-          assertEq(vaultNvdaBefore, DEPOSIT - written * LOT, 'the vault holds what it did not write');
-          const [dustBefore, unallocatedBefore] = await Promise.all([
-            pub.readContract({ ...Q, functionName: 'usdgDust' }),
-            pub.readContract({ ...Q, functionName: 'usdgUnallocated' }),
-          ]);
-          assertEq(dustBefore, carriedDust, 'usdgDust entering the close is what cycle 1 left');
-          assertEq(unallocatedBefore, 0n, 'nothing unallocated: the supply was never zero');
-          assertEq(await pub.readContract({ ...V, functionName: 'contractsAssigned' }), EXERCISED, "the harness's own read of vault.contractsAssigned(): 9 before the close");
-          assertEq(await pub.readContract({ ...V, functionName: 'claimKey' }), exercised3.claimKey, 'claim still open');
-
-          // THE KEEPER'S OWN pre-close read, called directly. roll.ts:doRollClose takes
-          // `contractsAssignedAt(snap)` before it sends the transaction; with this vault bytecode
-          // the RollClose event then wins in resolveContractsAssigned (Vault.sol:797-801 reads the
-          // count and emits it unconditionally), so nothing downstream of the tick — the cycle
-          // row, /cycles, the alert — would notice a wrong divisor or a swallowed revert in that
-          // function. Here it runs through the keeper's own publicClient (Multicall3-batched, the
-          // production read path) against the real Clear, on the keeper's own snapshot.
-          const keeperSnap = await roll.snapshot();
-          assertEq(keeperSnap.phase, roll.Phase.Exercisable, "the keeper's snapshot: still Exercisable");
-          assertEq(keeperSnap.vaultClaimKey, exercised3.claimKey, "the keeper's snapshot carries the open claim key");
-          assert(keeperSnap.blockTimestamp >= BigInt(series3.expiry), "the keeper's snapshot is past expiry: the next tick closes");
-          const assignedBefore = await roll.contractsAssignedAt(keeperSnap);
-          assertEq(assignedBefore, EXERCISED, 'roll.contractsAssignedAt(snap) = 9n: claim.amountExercised 9e18 / 1e18, the keeper twin of ValoremLib.sol:149');
-
-          await roll.tick();
-          assertEq(await pub.readContract({ ...V, functionName: 'phase' }), roll.Phase.Idle, 'phase after rollClose');
-          const cycle = store.getCycle(3);
-          assert(cycle !== null, 'cycle row');
-          assertEq(cycle.status, 'closed', 'cycle status');
-          assert(cycle.roll_close_tx !== null, 'roll_close_tx recorded');
-          assertEq(store.getTx(cycle.roll_close_tx)?.status ?? null, 'success', 'rollClose receipt');
-          const receipt = await pub.getTransactionReceipt({ hash: cycle.roll_close_tx as Hex });
-
-          /* ---- the receipt: what the vault and the Clear said happened ---- */
-          const rc = only(parseEventLogs({ abi: vaultQueueAbi, eventName: 'RollClose', logs: receipt.logs }), vault, 'RollClose');
-          assertEq(rc.args.cycleNumber, 3, 'RollClose.cycleNumber');
-          assertEq(rc.args.assetsReturned, (written - EXERCISED) * LOT, 'RollClose.assetsReturned = 14 NVDA');
-          assertEq(rc.args.usdgFromAssignment, exercised3.rx, 'RollClose.usdgFromAssignment = 9 x strike');
-          assertEq(rc.args.contractsAssignedCount, EXERCISED, 'RollClose.contractsAssignedCount = 9');
-          const assetsReturned = rc.args.assetsReturned;
-          const usdgFromAssignment = rc.args.usdgFromAssignment;
-
-          // Both branches of the keeper's resolver, on the REAL receipt and the REAL pre-read.
-          // The event path is what the tick just took (bound below through the row and the
-          // alert); the fallback path is reachable only by removing the RollClose log, which is
-          // done to a copy of the receipt here and nowhere in production.
-          const viaEvent = roll.resolveContractsAssigned(receipt, assignedBefore);
-          assertEq(viaEvent.source, 'RollClose', 'resolver: the vault event is the source');
-          assertEq(viaEvent.assigned, Number(EXERCISED), 'resolver: 9 published from the event');
-          assertEq(viaEvent.fromEvent, EXERCISED, 'resolver: fromEvent 9n');
-          assertEq(viaEvent.fromClaim, EXERCISED, 'resolver: fromClaim 9n, the pre-read');
-          assertEq(viaEvent.mismatch, false, 'resolver: the event and the pre-close Valorem read agree');
-          const rollCloseTopic = encodeEventTopics({ abi: [rollCloseEvent], eventName: 'RollClose' })[0];
-          const withoutRollClose = { ...receipt, logs: receipt.logs.filter((entry) => entry.topics[0] !== rollCloseTopic) };
-          assertEq(withoutRollClose.logs.length, receipt.logs.length - 1, 'exactly one RollClose log stripped from the copy');
-          const viaClaim = roll.resolveContractsAssigned(withoutRollClose, assignedBefore);
-          assertEq(viaClaim.source, 'claim-preread', 'resolver without the event: the pre-close Valorem read stands in');
-          assertEq(viaClaim.assigned, Number(EXERCISED), 'resolver without the event: still 9, from the real pre-read');
-          assertEq(viaClaim.fromEvent, null, 'resolver without the event: fromEvent null');
-          assertEq(viaClaim.mismatch, false, 'resolver without the event: nothing to compare');
-          const viaNothing = roll.resolveContractsAssigned(withoutRollClose, null);
-          assertEq(viaNothing.source, 'unknown', 'resolver with neither: unknown');
-          assertEq(viaNothing.assigned, 0, 'resolver with neither: 0, and doRollClose warns');
-
-          const clearRedeemed = only(parseEventLogs({ abi: clearAbi, eventName: 'ClaimRedeemed', logs: receipt.logs }), CLEAR, "the Clear's ClaimRedeemed");
-          assertEq(clearRedeemed.args.claimId, exercised3.claimKey, 'Clear.ClaimRedeemed.claimId');
-          assertEq(clearRedeemed.args.optionId, exercised3.optionId, 'Clear.ClaimRedeemed.optionId');
-          assertEq(clearRedeemed.args.redeemer.toLowerCase(), vault.toLowerCase(), 'the vault redeemed its own claim');
-          assertEq(clearRedeemed.args.exerciseAmountRedeemed, usdgFromAssignment, 'Clear.ClaimRedeemed.exerciseAmountRedeemed');
-          assertEq(clearRedeemed.args.underlyingAmountRedeemed, assetsReturned, 'Clear.ClaimRedeemed.underlyingAmountRedeemed');
-          const adapterRedeemed = only(parseEventLogs({ abi: vaultQueueAbi, eventName: 'ClaimRedeemed', logs: receipt.logs }), vault, "the adapter's ClaimRedeemed");
-          assertEq(adapterRedeemed.args.claimKey, exercised3.claimKey, 'ClaimRedeemed.claimKey');
-          assertEq(adapterRedeemed.args.underlyingReturned, assetsReturned, 'ClaimRedeemed.underlyingReturned, measured as a balance delta');
-          assertEq(adapterRedeemed.args.exerciseReceived, usdgFromAssignment, 'ClaimRedeemed.exerciseReceived, measured as a balance delta');
-
-          const hv = only(parseEventLogs({ abi: vaultQueueAbi, eventName: 'Harvest', logs: receipt.logs }), vault, 'Harvest');
-          const gross = hv.args.grossUsdg;
-          const fee = hv.args.feeUsdg;
-          const net = hv.args.netUsdg;
-          assertEq(hv.args.cycleNumber, 3, 'Harvest.cycleNumber');
-          assertEq(gross, toVault + usdgFromAssignment, 'gross = the premium leg that filled + the strike proceeds the claim returned');
-          assertEq(protocol.protocolFeeBps, LAUNCH_POLICY.protocolFeeBps, 'policy().protocolFeeBps is still the launch 500 (5% of premium)');
-          // Fee-free = RollClose.usdgFromAssignment from THIS receipt, the amount rollClose hands
-          // _harvest. The gross still carries the strike proceeds; the fee does not touch them.
-          assertEq(fee, harvestFee(gross, usdgFromAssignment, protocol.protocolFeeBps), "fee = floor((gross - RollClose.usdgFromAssignment) x protocolFeeBps / 10000): premium only, strike proceeds never fee'd");
-          assertEq(fee, (toVault * protocol.protocolFeeBps) / BPS, 'fee = floor(premium leg x protocolFeeBps / 10000), the same number from the fill side');
-          assertEq(net, gross - fee, 'net = gross - fee, strike proceeds credited to holders in full');
-
-          // The keeper sums every Harvest for the cycle from its own rollOpen block to the close.
-          // Re-derived here from the chain; there must be exactly one (no deposit ran a checkpoint).
-          const openTx = store.getTx(cycle.roll_open_tx ?? '');
-          assert(openTx !== null && openTx.block_number !== null, 'the rollOpen block is on record');
-          const harvestLogs = await pub.getLogs({ address: vault, event: harvestEvent, args: { cycleNumber: 3 }, fromBlock: BigInt(openTx.block_number), toBlock: receipt.blockNumber });
-          assertEq(harvestLogs.length, 1, 'one Harvest event over [rollOpen block, rollClose block]');
-          // Every Harvest over the range obeys the per-event fee rule: the terminal one (in the
-          // rollClose transaction) excludes the strike proceeds, a deposit checkpoint excludes 0.
-          for (const entry of harvestLogs) {
-            const feeFree = entry.transactionHash === receipt.transactionHash ? usdgFromAssignment : 0n;
-            assertEq(
-              entry.args.feeUsdg ?? null,
-              harvestFee(entry.args.grossUsdg ?? 0n, feeFree, protocol.protocolFeeBps),
-              `Harvest in ${String(entry.transactionHash)}: fee on premium only (fee-free ${feeFree})`,
-            );
-            assertEq(entry.args.netUsdg ?? null, (entry.args.grossUsdg ?? 0n) - (entry.args.feeUsdg ?? 0n), `Harvest in ${String(entry.transactionHash)}: net = gross - fee`);
-          }
-          const summed = harvestLogs.reduce(
-            (acc, entry) => ({ gross: acc.gross + (entry.args.grossUsdg ?? 0n), fee: acc.fee + (entry.args.feeUsdg ?? 0n), net: acc.net + (entry.args.netUsdg ?? 0n) }),
-            { gross: 0n, fee: 0n, net: 0n },
-          );
-          assertEq(summed.gross, gross, 'summed Harvest gross');
-          assertEq(summed.fee, fee, 'summed Harvest fee');
-          assertEq(summed.net, net, 'summed Harvest net');
-
-          /* ---- the keeper's row and alert ---- */
-          assertEq(cycle.gross_usdg6, gross.toString(), 'gross_usdg6');
-          assertEq(cycle.fee_usdg6, fee.toString(), 'fee_usdg6');
-          assertEq(cycle.net_usdg6, net.toString(), 'net_usdg6');
-          assertEq(cycle.contracts_assigned, Number(EXERCISED), 'contracts_assigned = 9, from the RollClose event');
-          // K-21: the split rides in the row, straight from this receipt's RollClose.
-          assertEq(cycle.assets_returned, assetsReturned.toString(), 'assets_returned = RollClose.assetsReturned = 14e18');
-          assertEq(cycle.usdg_from_assignment, usdgFromAssignment.toString(), 'usdg_from_assignment = RollClose.usdgFromAssignment = 9 x strike');
-          assertEq(alerts.kinds().join(','), 'roll_open,roll_close,roll_close,roll_open,roll_close', 'alerts');
-          const last = alerts.received[alerts.received.length - 1];
-          assert(last !== undefined, 'alert');
-          // roll.ts rollCloseMessage, assigned branch: premium = gross - strike proceeds, named apart.
-          assertEq(
-            last.message,
-            `cycle 3 closed: premium ${roll.formatUsdg(gross - usdgFromAssignment)} USDG (fee ${roll.formatUsdg(fee)}), strike proceeds ${roll.formatUsdg(usdgFromAssignment)} USDG from ${EXERCISED} contracts assigned; ${roll.formatUsdg(net)} USDG to depositors.`,
-            "the roll_close message, in the keeper's own K-21 format",
-          );
-          assertEq(gross - usdgFromAssignment, toVault, 'the premium the message names is exactly the premium leg that filled');
-          const data = last.data as {
-            cycleNumber?: number;
-            contractsAssigned?: number;
-            contractsAssignedSource?: string;
-            contractsAssignedFromClaim?: number | null;
-            premiumUsdg?: string | null;
-            strikeProceedsUsdg?: string | null;
-            assetsReturned?: string | null;
-          };
-          assertEq(data.cycleNumber ?? null, 3, 'roll_close alert cycle');
-          assertEq(data.premiumUsdg ?? null, roll.formatUsdg(toVault), 'roll_close alert data.premiumUsdg = the premium leg');
-          assertEq(data.strikeProceedsUsdg ?? null, roll.formatUsdg(usdgFromAssignment), 'roll_close alert data.strikeProceedsUsdg = RollClose.usdgFromAssignment');
-          assertEq(data.assetsReturned ?? null, assetsReturned.toString(), 'roll_close alert data.assetsReturned = RollClose.assetsReturned (wei)');
-          assertEq(data.contractsAssigned ?? null, Number(EXERCISED), 'roll_close alert carries contractsAssigned = 9');
-          assertEq(data.contractsAssignedSource ?? null, 'RollClose', 'roll_close alert: the count came from the RollClose event');
-          // This binds the value doRollClose's OWN contractsAssignedAt call returned inside the
-          // tick — not the harness's call above — to 9: the pre-read the keeper took, and would
-          // have published had the event been missing.
-          assertEq(
-            data.contractsAssignedFromClaim === undefined ? 'absent' : data.contractsAssignedFromClaim,
-            Number(EXERCISED),
-            "roll_close alert: the keeper's own pre-close Valorem read inside the tick was 9",
-          );
-          note(`the roll_close MESSAGE names premium ${roll.formatUsdg(toVault)} and strike proceeds ${roll.formatUsdg(usdgFromAssignment)} apart (K-21); data carries premiumUsdg, strikeProceedsUsdg, assetsReturned and contractsAssigned (with contractsAssignedSource and contractsAssignedFromClaim beside it)`);
-
-          /* ---- fee, distribution, queue settlement ---- */
-          const swept = only(parseEventLogs({ abi: vaultQueueAbi, eventName: 'FeeSwept', logs: receipt.logs }), vault, 'FeeSwept');
-          assertEq(swept.args.feeRecipient.toLowerCase(), FEE_SAFE.address.toLowerCase(), 'FeeSwept.feeRecipient');
-          assertEq(swept.args.amount, fee, 'FeeSwept.amount');
-          assertEq((await balanceOf(USDG, FEE_SAFE.address)) - feeSafeBefore, fee, 'the fee Safe received the fee in the same transaction');
-          assertEq(await pub.readContract({ ...Q, functionName: 'pendingFeeUsdg' }), 0n, 'no fee left pending');
-
-          const accAfter = await pub.readContract({ ...V, functionName: 'accUsdgPerShare' });
-          const indexDelta = accAfter - accBefore;
-          // Distributor._distributeUsdg: pot = net + carried usdgDust + usdgUnallocated (both read
-          // before the tick; 0 at the default deposit), and the index moves by floor(pot x 1e27 / supply).
-          const pot = net + dustBefore + unallocatedBefore;
-          assertEq(indexDelta, (pot * ACC_PRECISION) / supplyBefore, 'index delta = floor((net + carried usdgDust) x 1e27 / totalSupply), escrow included in the supply');
-          const distributed = only(parseEventLogs({ abi: vaultQueueAbi, eventName: 'UsdgDistributed', logs: receipt.logs }), vault, 'UsdgDistributed');
-          assertEq(distributed.args.totalSupply, supplyBefore, 'UsdgDistributed.totalSupply: the escrowed shares were still in the supply');
-          assertEq(distributed.args.accUsdgPerShare, accAfter, 'UsdgDistributed.accUsdgPerShare');
-          assertEq(distributed.args.amount, (indexDelta * supplyBefore) / ACC_PRECISION, 'UsdgDistributed.amount = what the index can represent');
-          const dust = await pub.readContract({ ...Q, functionName: 'usdgDust' });
-          assertEq(dust, pot - distributed.args.amount, 'usdgDust = (net + carried dust) - credited');
-          assertEq((await pub.readContract({ ...V, functionName: 'totalUsdgDistributed' })) - distributedBefore, distributed.args.amount, 'totalUsdgDistributed grew by the credited amount');
-
-          const settled = only(parseEventLogs({ abi: vaultQueueAbi, eventName: 'QueueSettled', logs: receipt.logs }), vault, 'QueueSettled');
-          assertEq(settled.args.epochId, epochBefore, 'QueueSettled.epochId');
-          assertEq(settled.args.shares, QUEUED, 'QueueSettled.shares');
-          const escrowUsdg = settled.args.usdgOut;
-          const payoutAssets = settled.args.assets;
-          assertEq(escrowUsdg, (QUEUED * indexDelta) / ACC_PRECISION, "the escrow's own accrual: 10e18 x indexDelta / 1e27, taken out of the index for the queue");
-          assertEq(payoutAssets, ((vaultNvdaBefore + assetsReturned) * QUEUED) / supplyBefore, 'payoutAssets = idleAssets after the redeem x queued / supply');
-          assertEq((await pub.readContract({ ...Q, functionName: 'totalUsdgClaimed' })) - claimedBefore, escrowUsdg, 'totalUsdgClaimed counts the escrow take');
-          if (DEPOSIT === 25n * LOT) {
-            assertEq(payoutAssets, 6_400_000_000_000_000_000n, '16e18 x 10e18 / 25e18 = 6.4 NVDA, not the 10 that were queued');
-            assertEq(dust, 0n, '1e27 / 25e18 is an integer, so the index is exact and there is no dust');
-            assertEq(escrowUsdg, (net * 2n) / 5n, 'floor(2/5 of net)');
-          }
-
-          /* ---- state after ---- */
-          assertEq(await pub.readContract({ ...V, functionName: 'totalSupply' }), supplyBefore - QUEUED, 'the escrowed shares were burned at settlement');
-          assertEq(await pub.readContract({ ...V, functionName: 'queuedShares' }), 0n, 'queue drained');
-          assertEq(await pub.readContract({ ...V, functionName: 'epochId' }), epochBefore + 1n, 'epoch advanced');
-          const [epochSharesLeft, epochAssetsLeft, epochUsdgLeft] = await pub.readContract({ ...Q, functionName: 'epochs', args: [epochBefore] });
-          assertEq(epochSharesLeft, QUEUED, 'epochs[1].sharesRemaining');
-          assertEq(epochAssetsLeft, payoutAssets, 'epochs[1].assetsRemaining');
-          assertEq(epochUsdgLeft, escrowUsdg, 'epochs[1].usdgRemaining');
-          assertEq(await pub.readContract({ ...V, functionName: 'reservedAssets' }), payoutAssets, 'reservedAssets');
-          assertEq(await pub.readContract({ ...V, functionName: 'usdgReservedForQueue' }), escrowUsdg, 'usdgReservedForQueue');
-          const vaultNvdaAfter = await balanceOf(NVDA, vault);
-          assertEq(vaultNvdaAfter, vaultNvdaBefore + assetsReturned, 'the vault holds 2 never written + 14 returned');
-          const idleAfter = await pub.readContract({ ...V, functionName: 'idleAssets' });
-          assertEq(idleAfter, vaultNvdaAfter - payoutAssets, 'idleAssets excludes what is reserved for the epoch');
-          assertEq(await pub.readContract({ ...V, functionName: 'totalAssets' }), idleAfter, 'totalAssets: nothing locked any more');
-          assertEq(await pub.readContract({ ...V, functionName: 'lockedAssets' }), 0n, 'lockedAssets');
-          assertEq(await pub.readContract({ ...V, functionName: 'claimKey' }), 0n, 'claimKey zeroed');
-          assertEq(await pub.readContract({ ...V, functionName: 'contractsWritten' }), 0n, 'contractsWritten zeroed');
-          assertEq(await pub.readContract({ ...V, functionName: 'contractsAssigned' }), 0n, 'contractsAssigned reads 0 AFTER the close, which is why the keeper reads it before');
-          // The keeper's function after the close, on the keeper's own fresh snapshot: claimKey
-          // is 0 (AdapterValorem.sol:148 zeroes it inside _redeemClaim), answered without a read.
-          const keeperSnapAfter = await roll.snapshot();
-          assertEq(keeperSnapAfter.vaultClaimKey, 0n, "the keeper's snapshot after the close: claimKey 0");
-          assertEq(await roll.contractsAssignedAt(keeperSnapAfter), 0n, 'roll.contractsAssignedAt after the close: 0n from the zero claimKey, no read');
-          // ...and the read it must never take: the burned claim. On the real Clear, claim() now
-          // reverts TokenNotFound (the vault's and the keeper's stated reason for reading first;
-          // decoded with the keeper's own clearAbi), and the keeper reports that as unknown
-          // (null), never as a silent 0 — pinned on the real revert, not a stub. This probe is the
-          // run's one deliberate warn line in the keeper log besides cycle 2's adoption.
-          await expectRevert('clear.claim(redeemed claimKey)', 'TokenNotFound', () =>
-            pub.readContract({ address: CLEAR, abi: clearAbi, functionName: 'claim', args: [exercised3.claimKey] }),
-          );
-          assertEq(await roll.contractsAssignedAt({ ...keeperSnapAfter, vaultClaimKey: exercised3.claimKey }), null, 'roll.contractsAssignedAt on the burned claim: null (unknown), not 0');
-          assertEq(await pub.readContract({ ...V, functionName: 'canRedeemInstantly' }), true, 'flat again');
-          assertEq(await pub.readContract({ address: CLEAR, abi: clearAbi, functionName: 'balanceOf', args: [vault, exercised3.claimKey] }), 0n, 'the claim NFT was burned by the redeem');
-          assertEq(await balanceOf(USDG, vault), vaultUsdgBefore + usdgFromAssignment - fee, 'vault USDG = premium + strike proceeds - fee = net');
-          assertEq(await balanceOf(NVDA, BUYER.address), EXERCISED * LOT, 'the buyer keeps the 9 NVDA');
-          if (DEPOSIT === 25n * LOT) assertEq(idleAfter, 9_600_000_000_000_000_000n, 'idle 16 - 6.4 = 9.6 NVDA');
-
-          const h = await health('/health');
-          assertEq(h.status, 200, '/health after the assigned cycle');
-          assertEq(String(h.body.status), 'ok', '/health status');
-          const cycles = (await health('/cycles')).body.cycles as Array<Record<string, unknown>>;
-          const servedCycle = cycles[0];
-          assert(servedCycle !== undefined, '/cycles served nothing');
-          assertEq(servedCycle.cycle_number as number, 3, '/cycles[0] is cycle 3');
-          assertEq(servedCycle.contracts_assigned as number, Number(EXERCISED), '/cycles shows contracts_assigned 9');
-          assertEq(String(servedCycle.gross_usdg6), gross.toString(), '/cycles shows the gross');
-          assertEq(servedCycle.assets_returned as string, assetsReturned.toString(), '/cycles assets_returned = 14e18');
-          assertEq(servedCycle.usdg_from_assignment as string, usdgFromAssignment.toString(), '/cycles usdg_from_assignment = 9 x strike');
-          assertEq(servedCycle.premium_gross_usdg6 as string, toVault.toString(), '/cycles premium_gross_usdg6 = the premium leg (gross - strike proceeds)');
-          assertEq(servedCycle.strike_proceeds_usdg6 as string, usdgFromAssignment.toString(), '/cycles strike_proceeds_usdg6 = RollClose.usdgFromAssignment');
-          for (const earlier of [1, 2]) {
-            const served = cycles.find((c) => c.cycle_number === earlier);
-            assert(served !== undefined, `/cycles serves cycle ${earlier}`);
-            assertEq(served.usdg_from_assignment as string, '0', `/cycles cycle ${earlier} usdg_from_assignment '0'`);
-            assertEq(served.strike_proceeds_usdg6 as string, '0', `/cycles cycle ${earlier} strike_proceeds_usdg6 '0'`);
-            assertEq(served.premium_gross_usdg6 as string, String(served.gross_usdg6), `/cycles cycle ${earlier} premium = gross`);
-            assertEq(store.getCycle(earlier)?.usdg_from_assignment ?? null, '0', `cycle ${earlier} row usdg_from_assignment '0'`);
-          }
-          record.health.afterCycle3 = h.body;
-
-          record.cycle3.rollCloseTx = cycle.roll_close_tx;
-          record.cycle3.harvest = {
-            gross: gross.toString(),
-            fee: fee.toString(),
-            net: net.toString(),
-            premium: toVault.toString(),
-            usdgFromAssignment: usdgFromAssignment.toString(),
-            feeBearing: (gross - usdgFromAssignment).toString(),
-            protocolFeeBps: protocol.protocolFeeBps.toString(),
-            assetsReturned: assetsReturned.toString(),
-            contractsAssigned: cycle.contracts_assigned,
-            contractsAssignedSource: data.contractsAssignedSource ?? null,
-            contractsAssignedFromClaim: data.contractsAssignedFromClaim ?? null,
-            keeperPreReadBeforeTick: assignedBefore === null ? null : assignedBefore.toString(),
-          };
-          record.cycle3.queue = {
-            ...(record.cycle3.queue as Record<string, unknown>),
-            payoutAssets: payoutAssets.toString(),
-            escrowUsdg: escrowUsdg.toString(),
-            indexDelta: indexDelta.toString(),
-            usdgDust: dust.toString(),
-          };
-          note(
-            `harvest gross ${roll.formatUsdg(gross)} USDG (premium ${roll.formatUsdg(toVault)} + strike proceeds ${roll.formatUsdg(usdgFromAssignment)}), ` +
-              `fee ${roll.formatUsdg(fee)} (${protocol.protocolFeeBps} bps of the premium only; the strike proceeds are fee-free), net ${roll.formatUsdg(net)}; epoch ${epochBefore} reserved ${payoutAssets} NVDA wei + ${roll.formatUsdg(escrowUsdg)} USDG`,
-          );
-          return { gross, fee, net, escrowUsdg, payoutAssets, indexDelta, epoch: epochBefore, vaultNvdaAfter };
-        });
-
-        await step('cycle 3: the depositor completes the queued redeem, then claims the rest', async () => {
-          const [previewAssets, previewUsdg] = await pub.readContract({ ...Q, functionName: 'previewCompleteRedeem', args: [DEPOSITOR.address] });
-          assertEq(previewAssets, closed3.payoutAssets, 'previewCompleteRedeem.assets');
-          assertEq(previewUsdg, closed3.escrowUsdg, 'previewCompleteRedeem.usdgOut');
-          const nvdaBefore = await balanceOf(NVDA, DEPOSITOR.address);
-          const usdgBefore = await balanceOf(USDG, DEPOSITOR.address);
-
-          const { hash: completeTx, receipt } = await sendTx('vault.completeRedeem (depositor)', DEPOSITOR, () =>
-            wallet.writeContract({ account: DEPOSITOR, chain: forkChain, address: vault, abi: vaultQueueAbi, functionName: 'completeRedeem', args: [DEPOSITOR.address] }),
-          );
-          const entry = only(parseEventLogs({ abi: vaultQueueAbi, eventName: 'QueueEntrySettled', logs: receipt.logs }), vault, 'QueueEntrySettled');
-          assertEq(entry.args.owner.toLowerCase(), DEPOSITOR.address.toLowerCase(), 'QueueEntrySettled.owner');
-          assertEq(entry.args.epochId, closed3.epoch, 'QueueEntrySettled.epochId');
-          assertEq(entry.args.shares, QUEUED, 'QueueEntrySettled.shares');
-          assertEq(entry.args.assets, closed3.payoutAssets, 'QueueEntrySettled.assets');
-          assertEq(entry.args.usdgOut, closed3.escrowUsdg, 'QueueEntrySettled.usdgOut');
-          const done = only(parseEventLogs({ abi: vaultQueueAbi, eventName: 'CompleteRedeem', logs: receipt.logs }), vault, 'CompleteRedeem');
-          assertEq(done.args.owner.toLowerCase(), DEPOSITOR.address.toLowerCase(), 'CompleteRedeem.owner');
-          assertEq(done.args.receiver.toLowerCase(), DEPOSITOR.address.toLowerCase(), 'CompleteRedeem.receiver');
-          assertEq(done.args.shares, QUEUED, 'CompleteRedeem.shares');
-          assertEq(done.args.assets, closed3.payoutAssets, 'CompleteRedeem.assets');
-          assertEq(done.args.usdgOut, closed3.escrowUsdg, 'CompleteRedeem.usdgOut');
-          assertEq((await balanceOf(NVDA, DEPOSITOR.address)) - nvdaBefore, closed3.payoutAssets, 'NVDA actually delivered');
-          assertEq((await balanceOf(USDG, DEPOSITOR.address)) - usdgBefore, closed3.escrowUsdg, "the escrow's USDG actually delivered");
-          assertEq(await pub.readContract({ ...V, functionName: 'reservedAssets' }), 0n, 'the only claimant drained the epoch: no assets stranded');
-          assertEq(await pub.readContract({ ...V, functionName: 'usdgReservedForQueue' }), 0n, 'no USDG stranded');
-          assertEq(await pub.readContract({ ...Q, functionName: 'queuedSharesOf', args: [DEPOSITOR.address] }), 0n, 'queue slot cleared');
-          assertEq(await pub.readContract({ ...Q, functionName: 'queuedEpochOf', args: [DEPOSITOR.address] }), 0n, 'queue epoch cleared');
-          assertEq(await pub.readContract({ ...Q, functionName: 'owedAssets', args: [DEPOSITOR.address] }), 0n, 'nothing owed');
-          assertEq(await pub.readContract({ ...Q, functionName: 'owedQueueUsdg', args: [DEPOSITOR.address] }), 0n, 'nothing owed');
-          const [epochSharesLeft, epochAssetsLeft, epochUsdgLeft] = await pub.readContract({ ...Q, functionName: 'epochs', args: [closed3.epoch] });
-          assertEq(epochSharesLeft + epochAssetsLeft + epochUsdgLeft, 0n, 'the epoch is empty');
-
-          // The 15e18 that stayed earn their share of the same index move.
-          const sharesLeft = await pub.readContract({ ...V, functionName: 'balanceOf', args: [DEPOSITOR.address] });
-          assertEq(sharesLeft, DEPOSIT - QUEUED, '15e18 shares left');
-          const claimable = await pub.readContract({ ...V, functionName: 'claimableUsdg', args: [DEPOSITOR.address] });
-          assertEq(claimable, (sharesLeft * closed3.indexDelta) / ACC_PRECISION, 'claimable = shares x indexDelta / 1e27');
-          const { hash: claimTx, receipt: claimReceipt } = await sendTx('vault.claimUsdg (depositor)', DEPOSITOR, () =>
-            wallet.writeContract({ account: DEPOSITOR, chain: forkChain, address: vault, abi: vaultAbi, functionName: 'claimUsdg' }),
-          );
-          const claimed = only(parseEventLogs({ abi: vaultQueueAbi, eventName: 'ClaimUsdg', logs: claimReceipt.logs }), vault, 'ClaimUsdg');
-          assertEq(claimed.args.account.toLowerCase(), DEPOSITOR.address.toLowerCase(), 'ClaimUsdg.account');
-          assertEq(claimed.args.to.toLowerCase(), DEPOSITOR.address.toLowerCase(), 'ClaimUsdg.to');
-          assertEq(claimed.args.amount, claimable, 'ClaimUsdg.amount = exactly claimableUsdg');
-          assertEq((await balanceOf(USDG, DEPOSITOR.address)) - usdgBefore, closed3.escrowUsdg + claimable, 'USDG received this cycle: the escrow leg plus the claim');
-          assertEq(await pub.readContract({ ...V, functionName: 'claimableUsdg', args: [DEPOSITOR.address] }), 0n, 'nothing left to claim');
-
-          // Where every base unit of the gross went.
-          const remainder = await balanceOf(USDG, vault);
-          const [dust, unallocated, owed, accounted] = await Promise.all([
-            pub.readContract({ ...Q, functionName: 'usdgDust' }),
-            pub.readContract({ ...Q, functionName: 'usdgUnallocated' }),
-            pub.readContract({ ...Q, functionName: 'usdgOwed' }),
-            pub.readContract({ ...Q, functionName: 'usdgAccounted' }),
-          ]);
-          // Carried-in USDG (cycle 1's dust; 0 at the default deposit) is part of the same ledger:
-          // the pot folded it in, so it leaves through the same escrow/claim/dust/owed split.
-          assertEq(closed3.escrowUsdg + claimable + closed3.fee + dust + owed, closed3.gross + carriedUsdg, 'gross + carried-in = escrow + claim + fee + dust + owed');
-          assertEq(remainder, dust + owed, 'what stays in the vault is exactly the index dust plus the per-account floor loss');
-          assertEq(accounted, remainder, 'and it sits inside usdgAccounted, so it can never be re-harvested as new premium');
-          assertEq(unallocated, 0n, 'nothing was received while the supply was zero');
-          assert(owed <= 1n, `usdgOwed ${owed}: the MasterChef floor loss is at most one base unit (Distributor.sol, the usdgAccounted and _claimUsdg comments)`);
-          if (DEPOSIT === 25n * LOT) {
-            assertEq(owed, closed3.net % 5n === 0n ? 0n : 1n, 'floor(2n/5) + floor(3n/5) = n - 1 unless 5 divides n');
-          }
-
-          // Final shape.
-          assertEq(await pub.readContract({ ...V, functionName: 'phase' }), roll.Phase.Idle, 'phase');
-          assertEq(await pub.readContract({ ...V, functionName: 'totalSupply' }), DEPOSIT - QUEUED, 'totalSupply');
-          const vaultNvda = await balanceOf(NVDA, vault);
-          assertEq(vaultNvda, closed3.vaultNvdaAfter - closed3.payoutAssets, 'the vault paid the epoch out of its balance');
-          assertEq(await pub.readContract({ ...V, functionName: 'reservedAssets' }), 0n, 'reservedAssets back to 0');
-          assertEq(await pub.readContract({ ...V, functionName: 'idleAssets' }), vaultNvda, 'idleAssets = the whole balance again');
-          assertEq(await pub.readContract({ ...V, functionName: 'totalAssets' }), vaultNvda, 'totalAssets');
-          if (DEPOSIT === 25n * LOT) assertEq(vaultNvda, 9_600_000_000_000_000_000n, '9.6 NVDA backing 15 shares');
-          assert((await pub.readContract({ ...Q, functionName: 'previewRedeem', args: [sharesLeft] })) > 0n, 'the instant path is open again');
-
-          record.cycle3.queue = {
-            ...(record.cycle3.queue as Record<string, unknown>),
-            completeRedeemTx: completeTx,
-            assetsOut: closed3.payoutAssets.toString(),
-            usdgOut: closed3.escrowUsdg.toString(),
-          };
-          record.cycle3.claimed = claimable.toString();
-          record.cycle3.claimTx = claimTx;
-          record.cycle3.usdgLeftInVault = { remainder: remainder.toString(), usdgDust: dust.toString(), usdgOwed: owed.toString() };
-          record.cycle3.final = {
-            totalSupply: (DEPOSIT - QUEUED).toString(),
-            idleAssets: vaultNvda.toString(),
-            depositorNvda: (await balanceOf(NVDA, DEPOSITOR.address)).toString(),
-            depositorShares: sharesLeft.toString(),
-          };
-          note(`completeRedeem paid ${closed3.payoutAssets} NVDA wei + ${roll.formatUsdg(closed3.escrowUsdg)} USDG; claimUsdg paid ${roll.formatUsdg(claimable)}; fee ${roll.formatUsdg(closed3.fee)}; ${remainder} base unit(s) left in the vault (dust ${dust}, owed ${owed})`);
-        });
-      }
-    }
-
-    /* ---------- 13. what the keeper remembers, after a restart ---------- */
-
-    await step('close the store, reopen the same file: everything is still there', async () => {
+    await step('close the store, reopen the same file: every row is still there', async () => {
+      assertEq(
+        alerts.kinds().join(','),
+        [
+          'roll_open', 'listing', 'roll_close',
+          'queue_settled', 'roll_open', 'listing', 'fill', 'fill', 'roll_close',
+          'roll_open', 'listing', 'fill', 'roll_close', 'claim_stranded', 'strand_retry_failed', 'strand_recovered',
+          'roll_open', 'listing',
+        ].join(','),
+        'every alert, in order, nothing else',
+      );
+      // newOptionType is absent for a week whose tuple an earlier run on this fork had created.
+      const reused = [record.cycle1, record.cycle2, record.cycle3, record.cycle4].filter((c) => c.optionTypeReused === true).length;
+      assertEq(
+        txKinds().filter((t) => !t.includes(':newOptionType:')).join(','),
+        [
+          '1:rollOpen:success', '1:approveListing:success', '1:lockBook:success', '1:rollClose:success',
+          '1:settleQueue:success', '2:rollOpen:success', '2:approveListing:success', '2:lockBook:success', '2:rollClose:success',
+          '3:rollOpen:success', '3:approveListing:success', '3:lockBook:success', '3:rollClose:success', '3:retryStrandedClaim:success',
+          '4:rollOpen:success', '4:approveListing:success',
+        ].join(','),
+        'every keeper transaction, in order',
+      );
+      assertEq(txKinds().filter((t) => t === '-:newOptionType:success').length, 4 - reused, `one newOptionType per week the fork had not seen (${reused} reused)`);
+      assertEq(store.recentCycles(10).map((c) => `${c.cycle_number}:${c.status}`).join(','), '4:open,3:closed,2:closed,1:closed', 'cycle rows');
+      assertEq(store.db.prepare('SELECT status FROM listings ORDER BY cycle_number').all().map((r) => (r as { status: string }).status).join(','), 'expired,expired,expired,approved', 'listing rows');
+      const metaKeys = (store.db.prepare('SELECT key FROM meta ORDER BY key').all() as Array<{ key: string }>).map((m) => m.key);
+      assert(metaKeys.includes('strand_alerted:1') && metaKeys.includes('strand_retry_ms') && metaKeys.includes('clear_fees_enabled') && metaKeys.includes('last_heartbeat_ms'), `meta keys: ${metaKeys.join(',')}`);
       const before = dumpDb();
-      record.health.final = (await health('/health')).body;
-      record.health.state = (await health('/state')).body;
+      record.blocks.lastBlock = (await pub.getBlockNumber()).toString();
+      record.health.final = (await health.get('/health')).body;
       stopServers();
       store.close();
       const reopened = new KeeperStore(dbPath);
       try {
         const counts = reopened.counts();
         assertEq(JSON.stringify(counts), JSON.stringify((before as { counts: unknown }).counts), 'row counts after reopen');
-        if (record.cycle3.skipped !== true) {
-          // Derived, not guessed. txs: 4 (cycle 1) + 3 (cycle 2; its rollOpen was the harness's)
-          // + 4 (cycle 3) keeper transactions. alerts: the five captured above, both roll kinds
-          // force-sent past the cooldown. meta: last_heartbeat_ms plus one book_poll_ms per listing.
-          assertEq(JSON.stringify(counts), JSON.stringify({ cycles: 3, listings: 3, txs: 11, alerts: 5, meta: 4 }), 'row counts after three cycles');
-        }
-        note(`state.db rows after reopen: ${JSON.stringify(counts)}`);
+        assertEq(JSON.stringify(counts), JSON.stringify({ cycles: 4, listings: 4, txs: 20 - reused, alerts: 18, meta: metaKeys.length }), 'row counts after three weeks and an arm');
+        const gross3 = (record.cycle3.harvest as { gross: string }).gross;
+        const gross2 = (record.cycle2.harvest as { gross: string }).gross;
+        assertEq(
+          reopened.recentCycles(10).map((c) => `${c.cycle_number}:${c.status}:${c.gross_usdg6 ?? 'null'}`).join(','),
+          `4:open:null,3:closed:${gross3},2:closed:${gross2},1:closed:0`,
+          'every cycle row, with its gross, survives the reopen',
+        );
+        assertEq(
+          reopened.db.prepare('SELECT status FROM listings ORDER BY cycle_number').all().map((r) => (r as { status: string }).status).join(','),
+          'expired,expired,expired,approved',
+          'every listing row survives the reopen',
+        );
+        note(`keeper.db rows after reopen: ${JSON.stringify(counts)}`);
       } finally {
         reopened.close();
       }
@@ -1445,56 +1419,14 @@ async function main(): Promise<void> {
   }
 }
 
-/*//////////////////////////////////////////////////////////////
-                              THE REPORT
-//////////////////////////////////////////////////////////////*/
-
 function writeReport(): void {
-  const json = JSON.stringify(record, (_k, v: unknown) => (typeof v === 'bigint' ? v.toString() : v), 2);
-  writeFileSync(join(OUT, 'run.json'), json);
-
-  const lines: string[] = [];
-  const h = (t: string) => lines.push('', `### ${t}`, '');
-  lines.push(`# Dry run ${record.startedAt}`, '');
-  lines.push(`- result: ${record.error ? `**FAILED at "${record.stoppedAt}"**: ${record.error}` : '**passed**'}`);
-  lines.push(`- wall clock: ${(record.wallClockMs / 1000).toFixed(1)}s`);
-  lines.push(`- anvil: ${record.clientVersion}, chain ${record.chainId}, fork block ${record.forkBlock}, rpc ${record.rpc}`);
-  lines.push(`- feed: ${record.feedMode}`);
-  h('Actors');
-  for (const [k, v] of Object.entries(record.actors)) lines.push(`- ${k}: \`${v}\``);
-  h('Deployed on the fork');
-  for (const [k, v] of Object.entries(record.addresses)) lines.push(`- ${k}: \`${v}\``);
-  h('Cycle 1 (the live series, filled)');
-  for (const [k, v] of Object.entries(record.cycle1)) lines.push(`- ${k}: ${typeof v === 'object' ? JSON.stringify(v) : String(v)}`);
-  h('Cycle 2 (fresh series, rolled while asleep, unfilled)');
-  for (const [k, v] of Object.entries(record.cycle2)) lines.push(`- ${k}: ${typeof v === 'object' ? JSON.stringify(v) : String(v)}`);
-  h('Cycle 3 (fresh series, in the money: filled, queued redeem, 9 of 23 assigned)');
-  for (const [k, v] of Object.entries(record.cycle3)) lines.push(`- ${k}: ${typeof v === 'object' ? JSON.stringify(v) : String(v)}`);
-  h('Harness transactions');
-  lines.push('| step | by | tx | block | gas |', '|---|---|---|---|---|');
-  for (const t of record.harnessTxs) lines.push(`| ${t.label} | \`${t.by.slice(0, 10)}…\` | \`${t.hash}\` | ${t.block} | ${t.gasUsed} |`);
-  h('Keeper transactions (from state.db txs)');
-  const txs = ((record.db as { txs?: Array<Record<string, unknown>> }).txs ?? []).slice().reverse();
-  lines.push('| kind | cycle | tx | block | gas | status |', '|---|---|---|---|---|---|');
-  for (const t of txs) lines.push(`| ${String(t.kind)} | ${String(t.cycle_number)} | \`${String(t.hash)}\` | ${String(t.block_number)} | ${String(t.gas_used)} | ${String(t.status)} |`);
-  h('state.db cycles');
-  lines.push('```json', JSON.stringify((record.db as { cycles?: unknown }).cycles ?? [], null, 1), '```');
-  h('state.db listings');
-  lines.push('```json', JSON.stringify((record.db as { listings?: unknown }).listings ?? [], null, 1), '```');
-  h('state.db meta');
-  lines.push('```json', JSON.stringify((record.db as { meta?: unknown }).meta ?? [], null, 1), '```');
-  h('Alerts captured at ALERT_WEBHOOK, in order');
-  for (const a of record.alerts) lines.push(`- [${a.severity}] **${a.kind}**: ${a.message}`);
-  h('Requests the Overcall stub received, in order');
-  for (const r of record.stubRequests) lines.push(`- \`${r}\``);
-  h('Health endpoints');
-  lines.push('```json', JSON.stringify(record.health, null, 1), '```');
-  h('Steps');
-  for (const s of record.steps) {
-    lines.push(`- ${s.step} (${s.ms} ms)`);
-    for (const n of s.notes) lines.push(`  - ${n}`);
-  }
-  writeFileSync(join(OUT, 'report.md'), `${lines.join('\n')}\n`);
+  writeRunFiles(OUT, 'Dry run', record, [
+    ['keeperConfig', 'Keeper configuration under test'],
+    ['cycle1', 'Week 1 (unfilled; queue while Listed; instant redeem and settleQueue while flat)'],
+    ['cycle2', 'Week 2 (two fills of 2 + 3; a Listed deposit; queue while Listed; 2 exercised)'],
+    ['cycle3', 'Week 3 (a fill, one exercised, queue while Listed; USDG freeze -> stranded -> retry -> recovered)'],
+    ['cycle4', 'Week 4 (armed normally after the recovery)'],
+  ]);
 }
 
 main()

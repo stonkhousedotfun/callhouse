@@ -299,7 +299,8 @@ cast call $SEAPORT "getCounter(address)(uint256)" $VAULT --rpc-url $RH_RPC
 
 ```
 minGrossUsdg = spot6 * N * minPremiumBps / 10000      # launch: 0.40% of spot notional per week
-unitPrice6   = ceil(minGrossUsdg / N * (10000 + PREMIUM_MARGIN_BPS) / 10000)
+floorUnit6   = ceil(minGrossUsdg / N)                 # plus the Valorem fee valued at spot when that fee is on
+unitPrice6   = ceil(floorUnit6 * (10000 + KEEPER_PREMIUM_MARGIN_BPS) / 10000)   # default margin 100 = 1%
 gross        = unitPrice6 * N                          # must divide by N exactly
 ```
 
@@ -309,7 +310,8 @@ gross        = unitPrice6 * N                          # must divide by N exactl
 - `unitPrice6 ≤ strike` (`UnitPriceExceedsStrike`).
 - The floor is re-checked **at every fill against live spot** (`PremiumBelowFloorAtFill`), with the
   Valorem engine fee valued at spot added to it when that fee is on. A listing priced at the floor
-  becomes unfillable on any upward tick; `PREMIUM_MARGIN_BPS` is the keeper's cushion.
+  becomes unfillable on any upward tick; `KEEPER_PREMIUM_MARGIN_BPS` (default 100, i.e. 1%) is the
+  keeper's cushion, and a rise beyond it is a reprice (step 9).
 
 A premium below the floor is a week the vault declines to sell, not a number to negotiate.
 
@@ -405,10 +407,14 @@ cast logs --address $VAULT $(cast keccak "CallsWritten(uint256,uint256,uint112,u
 - Partially filled → fine. The remainder stays live at the same unit price.
 - Simulation reverts `PremiumBelowFloorAtFill` or `StrikeBelowBand` after a rally → **reprice**:
   `cancelListing(components)` (keeper or guardian), then `approveListing` again at the new floor.
-  Three authorisations per cycle in total, cancelled or not; the keeper's `KEEPER_MAX_RELISTS`
-  budget sits under that cap. A relist is a reprice, never a size change: the vault sizes fills.
+  Three authorisations per cycle in total, cancelled or not, and that cap is the keeper's whole
+  reprice budget (there is no keeper-side relist limit). A relist is a reprice, never a size
+  change: the vault sizes fills. The keeper also relists after a guardian `cancelListing` /
+  `invalidateAllListings`, and after a listing sells out while deposits have added capacity.
 - Never have two live orders. `approveListing` refuses (`PreviousListingLive`); cancel first.
-- The keeper alerts `fill_sim_revert` when its own hourly simulation starts reverting
+- The keeper mirrors the fill gate's two spot checks every tick (the strike against the band
+  floor, the ask against the fill floor) and alerts `fill_sim_revert` when the live listing
+  would be refused and it cannot or may not reprice
   (`ops/alerts.md` §3).
 
 ---

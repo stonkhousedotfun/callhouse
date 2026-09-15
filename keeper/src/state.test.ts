@@ -12,7 +12,7 @@
  * directory, and restart-safety is only a test if there is a file to reopen.
  */
 import assert from 'node:assert/strict';
-import { existsSync, mkdirSync, mkdtempSync } from 'node:fs';
+import { existsSync, mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
@@ -27,7 +27,7 @@ process.env.KEEPER_PK = `0x${'11'.repeat(32)}`;
 process.env.KEEPER_DB_PATH = join(scratch, 'default', 'keeper.db');
 process.env.KEEPER_LOG_LEVEL = 'fatal';
 
-const { KeeperStore, bigintReplacer, cycleTapeRow, splitGross, store } = await import('./state.js');
+const { KeeperStore, applyMigrations, bigintReplacer, cycleTapeRow, splitGross, store } = await import('./state.js');
 const { EMPTY_SIGNATURE, buildOrderComponents, componentsFromJson, componentsToJson, localOrderHash } =
   await import('./seaport.js');
 type ListingRow = import('./state.js').ListingRow;
@@ -65,8 +65,6 @@ function listingRow(overrides: Partial<ListingRow> = {}): Omit<ListingRow, 'crea
     contracts: '23',
     unit_price6: '873192',
     gross_usdg6: (873_192n * 23n).toString(),
-    to_vault6: (873_192n * 23n).toString(),
-    to_overcall6: '0',
     end_time: 1789761600,
     counter: COUNTER.toString(),
     salt: SALT.toString(),
@@ -75,12 +73,6 @@ function listingRow(overrides: Partial<ListingRow> = {}): Omit<ListingRow, 'crea
     approve_tx: `0x${'aa'.repeat(32)}`,
     cancel_tx: null,
     status: 'approved',
-    api_status: null,
-    api_error: null,
-    posted_at: null,
-    visible_at: null,
-    filled_numerator: null,
-    filled_denominator: null,
     seaport_total_filled: null,
     seaport_total_size: null,
     seaport_cancelled: null,
@@ -185,7 +177,7 @@ test('listings: updateListing writes only allowlisted columns and normalises big
       seaport_total_filled: 3n.toString(),
       seaport_total_size: '23',
       seaport_cancelled: 0,
-      posted_at: 1_700_000_000_000,
+      cancel_tx: `0x${'cc'.repeat(32)}`,
       // Outside LISTING_COLUMNS: the economics and the key are immutable once authorised.
       unit_price6: '1',
       order_hash: `0x${'ff'.repeat(32)}`,
@@ -197,7 +189,7 @@ test('listings: updateListing writes only allowlisted columns and normalises big
     assert.equal(row.seaport_total_filled, '3');
     assert.equal(row.seaport_total_size, '23');
     assert.equal(row.seaport_cancelled, 0);
-    assert.equal(row.posted_at, 1_700_000_000_000);
+    assert.equal(row.cancel_tx, `0x${'cc'.repeat(32)}`);
     assert.equal(row.unit_price6, '873192', 'economics cannot be patched');
     assert.equal(row.contracts, '23');
     assert.equal(db.getListing(`0x${'ff'.repeat(32)}`), null, 'the key cannot be patched');
@@ -332,88 +324,53 @@ test('restart safety: close the file, reopen it, every row is still there', () =
 
 /** The `cycles` table exactly as the keeper before K-21 created it: no assets_returned, no
  *  usdg_from_assignment. A production volume holds a file like this. */
-const PRE_K21_CYCLES = `
-CREATE TABLE cycles (
-  cycle_number       INTEGER PRIMARY KEY,
-  option_id          TEXT,
-  strike_usdg6       TEXT,
-  contracts          INTEGER,
-  exercise_ts        INTEGER,
-  expiry_ts          INTEGER,
-  lot_size           TEXT,
-  status             TEXT NOT NULL,
-  skip_reason        TEXT,
-  roll_open_tx       TEXT,
-  lock_tx            TEXT,
-  roll_close_tx      TEXT,
-  gross_usdg6        TEXT,
-  fee_usdg6          TEXT,
-  net_usdg6          TEXT,
-  contracts_assigned INTEGER,
-  relists_used       INTEGER NOT NULL DEFAULT 0,
-  opened_at          INTEGER,
-  locked_at          INTEGER,
-  closed_at          INTEGER,
-  created_at         INTEGER NOT NULL,
-  updated_at         INTEGER NOT NULL
-);`;
-
 function columnsOf(db: Database.Database): string[] {
   return (db.prepare('PRAGMA table_info(cycles)').all() as Array<{ name: string }>).map((c) => c.name).sort();
 }
 
-test('migration: a database from the previous keeper opens, gains the four columns as NULL, and keeps every row', () => {
-  const path = join(scratch, 'pre-k21', 'keeper.db');
-  const fresh = new KeeperStore(join(scratch, 'post-k21.db'));
+test('migration: the write-on-fill schema is the first release; the mechanism adds a column only when it is missing', () => {
+  // No keeper database predates this schema, so MIGRATIONS is empty: opening a file this keeper
+  // wrote is a no-op, and the listings table carries no Overcall-shaped column at all.
+  const path = join(scratch, 'first-release', 'keeper.db');
+  const fresh = new KeeperStore(path);
   const freshColumns = columnsOf(fresh.db);
+  const listingColumns = (fresh.db.prepare('PRAGMA table_info(listings)').all() as Array<{ name: string }>).map((c) => c.name);
+  fresh.ensureCycle(3, 'closed');
+  fresh.updateCycle(3, { gross_usdg6: '2044079259', fee_usdg6: '953962', net_usdg6: '2043125297', contracts_assigned: 9 });
   fresh.close();
-  assert.ok(freshColumns.includes('assets_returned') && freshColumns.includes('usdg_from_assignment'), 'a fresh database has them from SCHEMA');
-  assert.ok(freshColumns.includes('strand_gen') && freshColumns.includes('retry_tx'), 'and the stranded-claim columns');
-
-  // Build the old file by hand, with a closed week recorded the old way.
-  mkdirSync(join(scratch, 'pre-k21'), { recursive: true });
-  const old = new Database(path);
-  old.exec(PRE_K21_CYCLES);
-  old
-    .prepare(
-      "INSERT INTO cycles (cycle_number, status, roll_close_tx, gross_usdg6, fee_usdg6, net_usdg6, contracts_assigned, relists_used, created_at, updated_at) VALUES (3, 'closed', ?, '2044079259', '953962', '2043125297', 9, 0, 1, 1)",
-    )
-    .run(`0x${'0c'.repeat(32)}`);
-  assert.equal(columnsOf(old).includes('assets_returned'), false);
-  old.close();
-
-  const migrated = new KeeperStore(path);
-  try {
-    assert.deepEqual(columnsOf(migrated.db), freshColumns, 'same column set as a fresh database');
-    const row = migrated.getCycle(3);
-    assert.ok(row);
-    assert.equal(row.gross_usdg6, '2044079259', 'the old row survived');
-    assert.equal(row.contracts_assigned, 9);
-    assert.equal(row.assets_returned, null, 'not recorded before the column existed: NULL, not 0');
-    assert.equal(row.usdg_from_assignment, null);
-    assert.equal(row.strand_gen, null);
-    assert.equal(row.retry_tx, null);
-    const tape = cycleTapeRow(row);
-    assert.equal(tape.premium_gross_usdg6, null, 'an unknown split is not published as all-premium');
-    assert.equal(tape.strike_proceeds_usdg6, null);
-
-    // The migrated columns are writable through the allowlisted updater.
-    migrated.updateCycle(3, { assets_returned: (14n * 10n ** 18n).toString(), usdg_from_assignment: '2025000000' });
-    migrated.ensureCycle(4, 'open');
-  } finally {
-    migrated.close();
+  for (const column of ['assets_returned', 'usdg_from_assignment', 'strand_gen', 'retry_tx']) {
+    assert.ok(freshColumns.includes(column), `${column} is in SCHEMA from the start`);
   }
+  for (const gone of ['to_vault6', 'to_overcall6', 'api_status', 'api_error', 'posted_at', 'visible_at', 'filled_numerator', 'filled_denominator']) {
+    assert.ok(!listingColumns.includes(gone), `${gone} is not a listing column any more`);
+  }
+  assert.deepEqual(
+    listingColumns,
+    ['order_hash', 'cycle_number', 'seq', 'option_id', 'contracts', 'unit_price6', 'gross_usdg6', 'end_time', 'counter', 'salt', 'components_json', 'signature', 'approve_tx', 'cancel_tx', 'status', 'seaport_total_filled', 'seaport_total_size', 'seaport_cancelled', 'created_at', 'updated_at'],
+    'the listing row is exactly what /orders and cancelListing need',
+  );
 
-  // Reopening runs the migration again: a no-op, not "duplicate column name".
+  // Reopening applies no migration and changes no column.
   const reopened = new KeeperStore(path);
   try {
-    assert.deepEqual(columnsOf(reopened.db), freshColumns);
-    assert.equal(reopened.getCycle(3)?.assets_returned, '14000000000000000000');
-    assert.equal(reopened.getCycle(3)?.usdg_from_assignment, '2025000000');
-    assert.equal(reopened.getCycle(4)?.usdg_from_assignment, null, 'a new row starts NULL too');
-    assert.equal(reopened.counts().cycles, 2);
+    assert.deepEqual(columnsOf(reopened.db), freshColumns, 'an empty migration list changes nothing');
+    assert.equal(reopened.getCycle(3)?.gross_usdg6, '2044079259', 'the row survived');
+    assert.equal(reopened.getCycle(3)?.assets_returned, null, 'not recorded: NULL, not 0');
   } finally {
     reopened.close();
+  }
+
+  // The mechanism itself, on a raw file: a listed column is added once, existing rows read NULL
+  // for it, and a second application is a no-op rather than "duplicate column name".
+  const raw = new Database(path);
+  try {
+    const first = applyMigrations(raw, [{ table: 'cycles', column: 'note', type: 'TEXT' }]);
+    assert.deepEqual(first, [{ table: 'cycles', column: 'note', type: 'TEXT' }], 'added exactly the missing column');
+    assert.ok(columnsOf(raw).includes('note'));
+    assert.equal((raw.prepare('SELECT note FROM cycles WHERE cycle_number = 3').get() as { note: string | null }).note, null);
+    assert.deepEqual(applyMigrations(raw, [{ table: 'cycles', column: 'note', type: 'TEXT' }]), [], 'idempotent');
+  } finally {
+    raw.close();
   }
 });
 

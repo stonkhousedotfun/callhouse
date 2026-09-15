@@ -42,7 +42,6 @@ export const log = {
   policy: logger.child({ mod: 'policy' }),
   seaport: logger.child({ mod: 'seaport' }),
   state: logger.child({ mod: 'state' }),
-  api: logger.child({ mod: 'overcall' }),
   alerts: logger.child({ mod: 'alerts' }),
   health: logger.child({ mod: 'health' }),
   boot: logger.child({ mod: 'boot' }),

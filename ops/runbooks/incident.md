@@ -545,17 +545,17 @@ cast call $VAULT "listingGrossUsdg()(uint256)" --rpc-url $RH_RPC
 cast call $VAULT "listingAmount()(uint256)"    --rpc-url $RH_RPC
 # floor at live spot = spot6 * amount * minPremiumBps / 10000 (+ the engine fee valued at spot when on)
 ```
-The keeper alerts `fill_sim_revert` (P2, warn) with the decoded reason. `open-week.md` §8 has the
-simulation command.
+The keeper mirrors the same two checks every tick and alerts `fill_sim_revert` (P2, warn) with the
+reason when it cannot or may not reprice. `open-week.md` §8 has the simulation command.
 
 ### Do
 This is the gate working: the vault re-prices the floor and the band floor **at every fill**, so a
 listing priced at Monday's spot is refused on Tuesday's rally rather than sold cheap.
 
 - `PremiumBelowFloorAtFill` → **reprice**: `cancelListing(components)`, then `approveListing` at
-  the new floor (plus `PREMIUM_MARGIN_BPS`). The keeper does this inside its relist budget
-  (`KEEPER_MAX_RELISTS`, under the vault's 3 authorisations per cycle, cancelled or not). Once the
-  budget is spent, the week stays listed at the last price and fills only if spot comes back.
+  the new floor (plus `KEEPER_PREMIUM_MARGIN_BPS`). The keeper does this on its own, within the
+  vault's 3 authorisations per cycle (cancelled or not; there is no separate keeper budget). Once
+  they are spent, the week stays listed at the last price and fills only if spot comes back.
 - `StrikeBelowBand` → the strike is now under the band floor. A reprice cannot fix a strike;
   cancel the listing (or leave it: it cannot fill while the condition holds) and publish
   `unfilled, 0` unless spot returns before `cycleExerciseTs`.

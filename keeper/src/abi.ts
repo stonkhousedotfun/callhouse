@@ -219,6 +219,25 @@ const CLAIM_STRANDED_EVENT = {
 /** The same fragment, for `getLogs`. */
 export const claimStrandedEvent = CLAIM_STRANDED_EVENT;
 
+/**
+ * Vault.StrandedClaimRecovered, hoisted for `getLogs`: `retryStrandedClaim` is permissionless, so
+ * the recovery a stranded cycle is waiting for can land from any address while this keeper is
+ * down, and the row is closed out from this log (indexed on the strand generation).
+ */
+const STRANDED_CLAIM_RECOVERED_EVENT = {
+  type: 'event',
+  name: 'StrandedClaimRecovered',
+  inputs: [
+    { name: 'gen', type: 'uint256', indexed: true },
+    { name: 'assets', type: 'uint256', indexed: false },
+    { name: 'usdgOut', type: 'uint256', indexed: false },
+    { name: 'queueWad', type: 'uint256', indexed: false },
+  ],
+} as const;
+
+/** The same fragment, for `getLogs`. */
+export const strandedClaimRecoveredEvent = STRANDED_CLAIM_RECOVERED_EVENT;
+
 export const vaultAbi = [
   // --- phase machine ---
   { type: 'function', name: 'phase', inputs: [], outputs: [{ type: 'uint8' }], stateMutability: 'view' },
@@ -548,16 +567,7 @@ export const vaultAbi = [
       { name: 'wad', type: 'uint256', indexed: false },
     ],
   },
-  {
-    type: 'event',
-    name: 'StrandedClaimRecovered',
-    inputs: [
-      { name: 'gen', type: 'uint256', indexed: true },
-      { name: 'assets', type: 'uint256', indexed: false },
-      { name: 'usdgOut', type: 'uint256', indexed: false },
-      { name: 'queueWad', type: 'uint256', indexed: false },
-    ],
-  },
+  STRANDED_CLAIM_RECOVERED_EVENT,
   {
     type: 'event',
     name: 'UsdgLegDeferred',

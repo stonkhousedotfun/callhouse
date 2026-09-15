@@ -1,5 +1,280 @@
 # Keeper dry run — recorded
 
+This file is the record of the keeper's production code executing whole weeks against a fork of
+Robinhood Chain 4663. It exists because a keeper that has never run is a keeper whose first run
+is Friday night with depositors' collateral. Re-run both harnesses on every commit that touches
+`keeper/` or `contracts/` before a deploy, and replace the top section when the numbers change.
+
+---
+
+## Write on fill — 2026-09-14 (this record supersedes everything below the "pre-redesign" line)
+
+Two runs, each on its own fresh anvil fork (`anvil/v1.6.0`, port 8560, `--chain-id 4663
+--code-size-limit 98304`, forked from `https://rpc.mainnet.chain.robinhood.com`), both
+**passed**, on the finished keeper tree with the contracts submodule at `79cee08`. Keeper gate on
+the same tree: `pnpm --filter @callhouse/keeper typecheck` 0 errors (both harnesses included) and
+`pnpm --filter @callhouse/keeper test` 96/96. Raw artefacts (report.md, run.json, keeper.db, and
+keeper-process.log for the extended run) are in the operator's scratch directory, not the
+repository.
+
+| run | command | fork block | vault | wall clock | result |
+|---|---|---|---|---|---|
+| three weeks + a fourth arm, deposit 25e18 | `pnpm --filter @callhouse/keeper dryrun` | 63348605 | `0x0Bb345e8…7f50` (block 63348609; last block 63348666) | 35.6 s | `DRY RUN PASSED` |
+| the extended scenarios, deposit 30e18 | `pnpm --filter @callhouse/keeper dryrun:extended` | 63347757 | `0x0Bb345e8…7f50` (block 63347761; last block 63347827) | 42.0 s | `EXTENDED DRY RUN PASSED` |
+
+Keeper configuration under test: `KEEPER_STRIKE_OTM_BPS` 500, `KEEPER_PREMIUM_MARGIN_BPS` 100,
+`KEEPER_ARM_LEAD_S` 21600, `KEEPER_RETRY_STRANDED_MS` 1000 (the schema's floor, so the retry
+timer fires between two ticks), `POLL_INTERVAL_MS` 60000 (5000 for the spawned process). Every
+keeper module ran unmodified: `roll.ts` (`reconcile`, `tick`, `snapshot`, `contractsAssignedAt`),
+`state.ts`, `policy.ts`, `seaport.ts`, `optionType.ts`, `calendar.ts`, `alerts.ts`, `health.ts`,
+`clients.ts`, `config.ts`, `abi.ts`, `logger.ts`, and `index.ts` as the spawned process.
+
+What is real: the fork (mainnet state), Valorem Clear `0x9a7b40e5…C0C0` (option types created by
+the keeper, writes inside Seaport's `authorizeOrder`, exercise, assignment, redeem, and the
+freeze-time revert of the redeem), Seaport 1.6 (validation, partial fills through the zone hooks,
+cancels, counter bumps), NVDA, USDG and its `ASSET_PROTECTION_ROLE` freeze (the role holder
+`0x3Af3e85f…024B` impersonated), the vault bytecode linked and deployed from `contracts/out`
+exactly as `script/Deploy.s.sol` constructs it (no registry, no zone argument). Mocked: the
+Chainlink feed (`MockFeed` seeded with the real answer `21192775000` = 211.927750 USDG at the
+fork block, re-stamped after every warp and moved on purpose before each exercise). No Overcall,
+no registry, no placeholder signature anywhere.
+
+### dryrun.ts — three weeks and a fourth arm
+
+Strike for weeks 1 and 2: `round(211.927750 × 1.05)` = **223** USDG; fill floor per contract
+`ceil(0.40% × 211.927750)` = 0.847711; ask with the 1% margin **0.856189**. Every `/orders` payload
+was asserted to be `orderType 3`, `offerer == zone == vault`, `zoneHash 0`, `conduitKey 0`,
+`startTime 0`, `endTime == cycleExerciseTs`, ONE ERC-1155 offer item (the Clear, the armed id, N)
+and ONE USDG consideration item (`unit × N`, recipient the vault), `signature "0x"`,
+`totalOriginalConsiderationItems "1"`; `seaport.getOrderStatus(hash).isValidated` true and
+`vault.listingHash == hash` after every approval; the local struct hash reproduced every stored
+hash; the payload was mirrored to `KEEPER_FALLBACK_DIR`.
+
+**Week 1 (unfilled).** Deposit 25e18 (1:1). Tick #1 (Idle): `newOptionType` on the real Clear
+(141,587 gas; `NewOptionType.optionId` == the id the keeper derived, `tokenType == Option`, the
+tuple `(NVDA, 1e18, USDG, 223000000, 1789761600, 1789848000)` = the 2026-09-18 close, 16:00 ET =
+20:00 UTC), `rollOpen(id)` (156,130 gas; `RollOpen(1, id, 0, 223000000)`, no `CallsWritten`, no
+option tokens, `claimKey 0`), `approveListing` at capacity **23** = `floor(25 × 0.95)` (216,681
+gas; `ListingApproved(seq 1)`); alerts `roll_open` (capacity 23) and `listing`. Tick #2: nothing.
+Queue 5e18 while Listed (epoch 1; `canRedeemInstantly` false, `previewRedeem` 0,
+`completeRedeem` → `EpochNotSettled(1, 1)`). At the exercise timestamp, still Listed:
+`maxDeposit` 0 and `deposit` → `DepositsClosed`. Tick #3 → `lockBook` (64,416 gas): `BookLocked`,
+`AllListingsInvalidated` (counter bumped, Seaport `isCancelled` stays false), listing row
+`expired`, `/orders` empty. Tick #4 past expiry → `rollClose` (174,798 gas): `RollClose(1, 0, 0,
+0)`, the honest `Harvest(1, 0, 0, 0)`, no `ClaimRedeemed`, no `ClaimStranded`, no `FeeSwept`,
+`QueueSettled(1, 5e18, 5e18, 0)` (= `5e18 × (25e18 + 1) / (25e18 + 1)`), `optionId` and
+`claimKey` 0, flat; row `contracts 0`, `assets_returned '0'`, `usdg_from_assignment '0'`; alert
+`cycle 1 closed unfilled: 0 USDG harvested.`; `/cycles` premium and strike proceeds 0. Flat:
+`completeRedeem` paid 5e18 NVDA; instant `redeem(2e18)` paid `2e18 × (20e18 + 1) / (20e18 + 1)` =
+2e18 (`Withdraw`); queue 3e18 while Idle (epoch 2).
+
+**Tick #5 (Idle, shares queued):** the keeper's own `settleQueue()` (153,705 gas): `QueueSettled(2,
+3e18, 3e18, 0)`, alert `queue_settled` first; then **a fresh snapshot**, and week 2 planned on it:
+capacity **14** (= `floor(15 × 0.95)`), where a plan from the pre-settlement snapshot would have
+said 17 (the defect this run was written to catch; `roll.idle.test.ts` pins it). Then
+`newOptionType` (the 2026-09-25 close), `rollOpen`, `approveListing` 14 at 0.856189, all in the
+same tick; transactions in order `1:settleQueue, -:newOptionType, 2:rollOpen, 2:approveListing`.
+
+**Week 2 (filled and exercised).** Buyer A filled **2/14** straight from `/orders` with
+`fulfillAdvancedOrder(numerator 2, denominator 14, signature "0x")` after approving 1.712378 USDG
+to Seaport: **462,677 gas** (the first fill opens the claim), `OrderFulfilled` for the hash with
+one consideration item, `CallsWritten(id, claimKey, 2, 2e18)` once, the vault's ERC-1155 balance
+of the option 0 after the fill, the claim NFT held, `contractsWritten 2`, `lockedAssets 2e18`,
+`totalAssets` unchanged; tick #6 published `fill` (2 filled; 2 sold; 12 of capacity left), row
+`partial`, `/orders` `filledContracts 2` / `remainingContracts 12`. Buyer B filled **3/14**:
+**289,157 gas** (the top-up), the same claim, `CallsWritten(…, 3, 3e18)` once,
+`claim.amountWritten 5e18`, `contractsWritten 5`, premium 4.280945 on the vault; tick #7 `fill` (3
+filled; 5 sold; 9 left). A 5e18 deposit while Listed (D8): `maxDeposit` = cap − totalAssets =
+35e18, shares `5e18 × (15e18 + 1) / (15e18 + 1)` = 5e18, and the deposit's checkpoint
+`Harvest(2, 4280945, 214047, 4066898)` with the index moved by `floor(4066898 × 1e27 / 15e18)`
+on the pre-mint supply; `pendingFeeUsdg 214047`; `sweepFee()` by anyone → `FeeSwept(feeSafe,
+214047)`, then a second `sweepFee` → `NothingToClaim`. Tick #8: nothing (the listing is partially
+filled, not sold out). Queue 4e18 while Listed (epoch 3). Spot → 228 (strike + 5); tick #9 →
+`lockBook` (50,736 gas), row `expired`. Buyer A exercised **2** on the real Clear (debit 446 USDG,
+fee 0): `contractsAssigned 2`, `claimedExerciseProceeds 446000000`, `lockedAssets 3e18`, deposits
+closed. The keeper's own pre-close read `contractsAssignedAt` answered 2. Tick #10 → `rollClose`
+(359,978 gas): `RollClose(2, 3e18, 446000000, 2)`, the Clear's and the vault's `ClaimRedeemed`,
+`Harvest(2, 446000000, 0, 446000000)` (strike proceeds only, fee-free: the premium was
+checkpointed at the deposit), no `FeeSwept`, index delta `floor((446000000 + 1 unit of carried
+dust) × 1e27 / 20e18)` = 22300000050000000, `QueueSettled(3, 4e18, 3.6e18, 89.2 USDG)` (assets
+`4e18 × (18e18 + 1) / (20e18 + 1)`, USDG `4e18 × delta / 1e27`); row **gross 450280945 / fee
+214047 / net 450066898** (two Harvest events summed), `contracts_assigned 2`, `assets_returned
+3e18`, `usdg_from_assignment 446000000`; alert `cycle 2 closed: premium 4.280945 USDG (fee
+0.214047), strike proceeds 446 USDG from 2 contracts assigned; 450.066898 USDG to depositors.`
+with `contractsAssignedSource RollClose` and `contractsAssignedFromClaim 2`; `/cycles`
+`premium_gross_usdg6 4280945`, `strike_proceeds_usdg6 446000000`. `completeRedeem` paid exactly
+the preview (3.6 NVDA + 89.2 USDG); `claimUsdg` paid 360.866897 (= `floor(15e18 × delta1 / 1e27)
++ floor(16e18 × delta2 / 1e27)`); `fee + escrow + claim + remainder = premium + strike proceeds`
+with 1 base unit left inside `usdgAccounted`.
+
+**Week 3 (stranded).** Strike **239** (spot 228), listed **13** at 0.92112 (floor 0.912). Buyer A
+filled 2/13 (445,577 gas, premium 1.84224); queue 2e18 while Listed (epoch 4); spot → 244; tick →
+`lockBook`; buyer A exercised **1 of 2** (239 USDG), so the claim held one lot AND one strike.
+Past expiry, Paxos's `ASSET_PROTECTION` EOA (impersonated) **froze the vault on the real USDG**
+(`isFrozen(vault)` true). Tick #14 → `rollClose` (442,819 gas) STRANDED: `RollClose(3, 0, 0, 1)`,
+`ClaimStranded(3, claimKey, 1)`, `Harvest(3, 1842240, 92112, 1750128)` (the premium), **no
+`FeeSwept`** and `pendingFeeUsdg 92112` (the frozen vault cannot pay it; the close does not depend
+on it), `QueueSettled(4, 2e18, 1.55e18, 0.218766)` priced on the idle balance, `EpochStrandShare(4,
+1, 125000000000000000)` (= `1e18 × 2e18 / 16e18`), `strandedRemainingWad 875000000000000000`;
+phase Idle, `isStranded()` true, the claim, the type and `contractsWritten 2` kept, `lockedAssets
+1e18`, `canRedeemInstantly` false, `maxDeposit` 0, `deposit` → `DepositsClosed`,
+`retryStrandedClaim` (anyone) → `StillStranded`, and `rollOpen` from the keeper key on a fresh
+type at the same strike → `StillStranded`; row `stranded` with `strand_gen '1'`, alerts `cycle 3
+closed: 1.84224 USDG harvested, 1.750128 to depositors. The claim could NOT be redeemed and is
+stranded: its legs are paid by retryStrandedClaim.` then `claim_stranded` (error; gen 1, the claim
+key, the close tx). Tick #15: **no transaction** (no `newOptionType`, no `rollOpen`), `/state`
+`stranded true`, `/health` 200 `ok`; the retry timer fired, the simulation reverted
+`StillStranded`, alert `strand_retry_failed` (warn, naming `StillStranded`). Tick #16 inside the
+timer: nothing. Unfreeze; 1.2 s later tick #17 → `retryStrandedClaim` (331,357 gas):
+`StrandedClaimRecovered(1, 1e18, 239000000, 125000000000000000)`, both `ClaimRedeemed`s,
+`Harvest(3, 209125000, 0, 209125000)` carrying the **stranded cycle's** number (the live shares'
+`0.875` of the strike leg, fee-free), **`FeeSwept(feeSafe, 92112)`** (the deferred fee, to the base
+unit); `isStranded()` false, `lastResolvedGen 1`, `strandedRemainingWad 0`, `strands(1) = (1e18,
+239000000, 0.125e18, 0.125e18, 29875000)`, `reservedAssets` = the epoch's idle slice + its claim
+share; row `closed`, `retry_tx` set, **gross 210967240 / fee 92112 / net 210875128** (both Harvest
+events of cycle 3), `assets_returned 1e18`, `usdg_from_assignment 239000000`; alert
+`strand_recovered`. The queuer's `completeRedeem`: `QueueEntrySettled(…, 4, 2e18, 1.55e18,
+218766)`, `StrandShareSettled(…, 1, 0.125e18, 0.125e18, 29875000)` (the last owner takes exactly
+what is left), `CompleteRedeem(…, 2e18, 1.675e18, 30093766)`, the generation drained to zero;
+`claimUsdg` 210.656362; deposits open again.
+
+**Week 4:** tick #18 armed normally: strike **256** (spot 244), 11 listed at 0.98576 for the
+2026-10-09 close; `strandGen` stays 1, not stranded.
+
+After `store.close()` and reopen: `{cycles 4, listings 4, txs 20, alerts 18, meta 6}`, cycles
+`4:open, 3:closed:210967240, 2:closed:450280945, 1:closed:0`, listings `expired, expired,
+expired, approved`. Alerts, exactly and in order: `roll_open, listing, roll_close,
+queue_settled, roll_open, listing, fill, fill, roll_close, roll_open, listing, fill, roll_close,
+claim_stranded, strand_retry_failed, strand_recovered, roll_open, listing`. Keeper transactions,
+all `success`: `newOptionType, 1:rollOpen, 1:approveListing, 1:lockBook, 1:rollClose,
+1:settleQueue, newOptionType, 2:rollOpen, 2:approveListing, 2:lockBook, 2:rollClose,
+newOptionType, 3:rollOpen, 3:approveListing, 3:lockBook, 3:rollClose, 3:retryStrandedClaim,
+newOptionType, 4:rollOpen, 4:approveListing` (`newOptionType` is filed under no cycle; the vault's
+number is known only after `rollOpen`; `settleQueue` under the last closed cycle).
+
+### dryrun-extended.ts — the scenarios the three weeks do not reach
+
+**(a) `index.ts`, the compiled process.** `tsc` → `node dist/index.js` (pid 12768, `POLL_INTERVAL_MS`
+5000). It booted, reconciled, sent `boot` (`keeper online for 0x0Bb345e8…`), ticked idle twice
+(`not arming this tick`, reason `no-capacity`) 5068 ms apart; its own `/health` answered 200 `ok`,
+phase Idle, `hasKeeperRole` true. After the 30e18 deposit landed, its third tick created the type
+and armed (both confirmed) and delivered `roll_open`, which the harness held open; SIGTERM was sent
+with that delivery held. The process logged `shutting down` (line 19) → `waiting for the in-flight
+tick` (20), was still alive 2 s later with no `stopped`, and after the release **confirmed
+`approveListing` (line 25) after the signal**, then `stopped` (27 of 28 lines), started no further
+tick, logged no error, exited 0 with no signal. No `-wal`/`-shm`/`-journal` beside `keeper.db`;
+`integrity_check ok`, `journal_mode wal`; rows `{cycles 1, listings 1, txs 3, alerts 3, meta 5}`:
+cycle 1 `open`, the listing `approved` with signature `0x`, txs `newOptionType, rollOpen,
+approveListing` all `success`, alerts `boot, roll_open, listing` all delivered, meta
+`clear_fees_enabled, last_heartbeat_ms, week_armed_ts, week_target_ts` plus the idle ticks'
+`skip_reason = no-capacity`; `vault.listingHash` equalled the stored hash. The in-process keeper
+opened the same file and carried the week on.
+
+**(d) Partial fills, a guardian cancel, a REPRICE, refused fills, the budget.** Listing 1: 28 at
+0.856189 (strike 223), counter 0. Buyer A filled 7/28 (462,701 gas; premium 5.993323; Seaport
+7/28); tick → `partial`. The guardian `cancelListing` (`0xdad57d00…`; a role-less cancel →
+`AccessControlUnauthorizedAccount`); Seaport `isCancelled` true; tick → listing 2: **21** (= the
+remaining capacity) at 0.856189 (spot unchanged), `listingsThisCycle 2`, `relists_used 1`, the
+dead row `cancelled` with its 7/28 kept, `/orders` serving only listing 2. Buyer B filled 6/21
+(288,951 gas; 5.137134). **The feed rallied 150 bps** (answer 21510666674, spot 215.106666; the
+strike 223 still above the band floor 221.56): an `eth_call` of a 1-contract fill of listing 2
+reverted **`PremiumBelowFloorAtFill(856189, 860426)`**, decoded by name through the merged Seaport
++ vault ABI (gross = the old ask, floor = `minPremium(spot, 1)` at the new spot), and the keeper's
+`fillVerdict` said `premium-below-floor`. Its tick sent `cancelListing` (61,806 gas) then
+`approveListing` (236,586): listing 3, **15 at 0.869032** (floor 0.860427), `listingsThisCycle 3`,
+`relists_used 2`, listing 2 `cancelled` on Seaport; a funded eth_call of listing 3 passed, and
+buyer B filled 1/15 at the new price (276,627 gas; premium 0.869032). The guardian `haltWrites`:
+the eth_call reverted **`WritesAreHalted()`**, the keeper sent nothing, the guardian's
+`unhaltWrites` → `AccessControlUnauthorizedAccount`, the admin unhalted, fillable again. The
+guardian `invalidateAllListings`: counter 0 → 336338220724829861585285325867275914255, Seaport
+`isCancelled` stayed false, tick → listing 3 retired (`cancelled`), nothing listed, `/orders`
+empty, `clear.balanceOf(vault, id) == 0` (nothing unsold ever existed), and a fourth
+`approveListing` from the keeper key at the live counter → **`TooManyListings(3, 3)`**. 14 sold.
+
+**(b) Several exercisers, several transactions.** A exercised 3 (669 USDG), B 4 (892), A 2 (446)
+in three transactions; `vault.contractsAssigned()` read 3, 7, 9. The keeper's pre-read answered 9;
+its `rollClose` (290,359 gas) emitted the only `RollClose(1, 5e18, 2007000000, 9)` for cycle 1;
+the Clear's `ClaimRedeemed` carried the same legs; one `Harvest` gross 2018999489 = the three
+premiums 11.999489 + 2007 strike proceeds, fee 599974 = `floor(11999489 × 500 / 10000)`, net
+2018399515; the fee swept in the close; vault NVDA = 30e18 − 9e18; alert `cycle 1 closed: premium
+11.999489 USDG (fee 0.599974), strike proceeds 2007 USDG from 9 contracts assigned; 2018.399515
+USDG to depositors.`; `relists_used 2`; the depositor claimed 2018.399514.
+
+**(c) Anyone `rollClose`.** Cycle 2: 19 listed at 0.92112 (strike 239, spot 228); buyer B filled
+19/19 (450,181 gas) → `filled`, `/orders` empty, no relist (capacity 0); `lockBook`; B exercised 4.
+The keeper did not tick. A role-less `rollClose` reverted **`GuardianTooEarly(1790456400)`** just
+past expiry 1790452800 and again in a block mined at exactly 1790456399; the keeper key's
+simulation passed in that block. At exactly **1790456400** the role-less address closed (block
+63347812, 208,986 gas): `RollClose(2, 15e18, 956000000, 4)`, `Harvest` 973501280 / 875064 /
+972626216; the keeper's row still said `locked`. **Then, with the keeper still down, the Clear's
+`feeTo` (impersonated) turned the engine fee on** (`FeeSwitchUpdated(enabled true)`). The keeper's
+next tick sent nothing and raised, in order, `fee_switch` (forced), `valorem_fees_enabled`
+(`Valorem's engine fee is on (15 bps). The vault will not arm or fill until an admin calls
+acceptValoremFee(true).`) and the reconstructed `roll_close` (`… strike proceeds 956 USDG from 4
+contracts assigned; 972.626216 USDG to depositors. The close ran without this keeper witnessing
+it; reconstructed from chain logs.`, `witnessedLive false`, no `contractsAssignedSource`); the row
+`closed` with `roll_close_tx` = the stranger's, `contracts 19` from the `CallsWritten` sum,
+`contracts_assigned 4`, `assets_returned 15e18`, `usdg_from_assignment 956000000`, its own open
+and lock hashes kept; `/cycles` served the split; a further `reconcile()` and tick raised nothing
+and sent nothing and left the row byte-identical.
+
+**(e) Valorem's fee, on and accepted.** `skip_reason = valorem-fees-enabled`; `/state`
+`valoremFeesEnabled true`, `valoremFeeAccepted false`; `rollOpen` from the keeper key on the exact
+tuple it would arm → **`ValoremFeeNotAccepted(15)`**. After the admin's `acceptValoremFee(true)`
+the keeper armed on that tuple (reused: no `newOptionType`; strike 256, spot 244) and listed 16 at
+**1.35542**: floor 1.342 with the fee valued at spot against 0.976 without it
+(`fillFloor = minPremium + fee × spot / 1e18`, as `ValoremLib.writeOnFill`). Buyer A filled 5
+(476,071 gas; premium 6.7771): the vault paid 5e18 + **7500000000000000** NVDA wei (15 bps), the
+Clear's `feeBalance(NVDA)` rose by exactly that, and the vault's NVDA allowance to the Clear was
+back at 0. A exercised 2 paying **768000** USDG6 of fee (15 bps of 512 USDG). `rollClose` (226,759
+gas): `RollClose(3, 3e18, 512000000, 2)` — neither fee netted — `feeBalance` unchanged by the
+redeem, `Harvest` 518777100 / 338855 / 518438245, alert `cycle 3 closed: premium 6.7771 USDG (fee
+0.338855), strike proceeds 512 USDG from 2 contracts assigned; 518.438245 USDG to depositors.`
+
+Rows after reopen: `{cycles 3, listings 5, txs 16, alerts 19, meta 6}`; cycles `3:closed:2,
+2:closed:4, 1:closed:9` (assigned). Alerts, exactly and in order: `boot, roll_open, listing, fill,
+listing, fill, listing, fill, roll_close, roll_open, listing, fill, fee_switch,
+valorem_fees_enabled, roll_close, roll_open, listing, fill, roll_close`. Keeper transactions, all
+`success`: `newOptionType, 1:rollOpen, 1:approveListing, 1:approveListing, 1:cancelListing,
+1:approveListing, 1:lockBook, 1:rollClose, newOptionType, 2:rollOpen, 2:approveListing,
+2:lockBook, 3:rollOpen, 3:approveListing, 3:lockBook, 3:rollClose` — cycle 2 has no `rollClose`
+of its own and cycle 3 no `newOptionType`.
+
+### What the two runs changed in the keeper, and what they do not prove
+
+Product fixes made from these runs, each with a unit test: an Idle tick that settles the queue
+re-reads the vault before planning the week (`roll.idle.test.ts`; the run shows capacity 14 where
+a stale snapshot planned 17); `phase_stuck` is judged on the head block's clock, not the wall
+clock; the `claim_stranded` page names the retry timer in seconds when it is under a minute
+(`describeInterval`). Alert kinds renamed to the runbooks' vocabulary: `claim_stranded`,
+`strand_retry_failed`, `strand_recovered`, `fill_sim_revert`.
+
+Not proven here: an NVDA-side strand (the Stock Token blocklist role was not impersonated);
+several writers in one Valorem bucket (the vault is its types' sole writer on this fork); a
+`StrikeBelowBand` rally past the band floor (the 150 bps rally stays inside it by design, so it
+is a reprice, not a dead week); a reprice with the listing budget already spent (the `fill_sim_
+revert` alert with "listings are spent" is unit-tested only through its wording); `index.ts`'s
+SIGINT and `unhandledRejection` paths and PID 1 inside the container; the real Chainlink feed
+after a warp (its `StalePrice` gate is covered by the contracts' fork suite).
+
+Traps met while getting these runs green, for the next operator: the public RPC answered anvil's
+fork request `429 Too Many Requests` (`failed to create genesis`) once and needed a retry with a
+few seconds of backoff; a rerun on the same fork reuses option types (the tuple is the id), which
+the harness now accepts and records as `optionTypeReused`; the fill-page pre-flight (an `eth_call`
+of the fill) shows the hook's refusal whatever the buyer holds, but an ACCEPTANCE needs the buyer
+funded and approved for the fraction, because the transfers run inside the same call.
+
+---
+
+## Pre-redesign record (2026-09-13) — SUPERSEDED, kept for history
+
+Everything below describes the keeper BEFORE the write-on-fill redesign: an Overcall registry, a
+`POST` to overcall.finance, `rollOpen(optionId, contracts)` writing the whole week at the arm, a
+placeholder signature and a two-item order. None of it is the current flow; the figures are kept
+because the accounting identities they pin (fee on premium only, the queue maths, the K-21 split)
+still hold and were re-asserted above.
+
+
 This file is the record of the first time the keeper's production code executed a whole roll.
 It exists because a keeper that has never run is a keeper whose first run is Friday night with
 depositors' collateral. `src/dryrun.ts` produced everything below; the raw `report.md`,

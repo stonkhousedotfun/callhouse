@@ -44,6 +44,7 @@ import {
   rollCloseEvent,
   rollOpenEvent,
   stockTokenAbi,
+  strandedClaimRecoveredEvent,
   vaultAbi,
 } from './abi.js';
 import { alert, clearAlert } from './alerts.js';
@@ -482,7 +483,7 @@ async function assertWiring(): Promise<void> {
   });
   if (!approved) {
     await alert(
-      'listing_unfillable',
+      'fill_sim_revert',
       `vault has not approved ${transferTarget} to move its option tokens; every fill will fail`,
       { transferTarget },
       { force: true, severity: 'error' },
@@ -869,8 +870,11 @@ async function raiseHealthAlerts(snap: ChainSnapshot): Promise<void> {
     clearAlert('oracle_paused');
   }
 
-  // The guardian path opens an hour after expiry; if we are still here, say so loudly.
-  const nowSec = BigInt(Math.floor(Date.now() / 1000));
+  // The guardian path opens an hour after expiry; if we are still here, say so loudly. Judged on
+  // the head block's clock like every other decision in this module: the vault's `GuardianTooEarly`
+  // is a `block.timestamp` comparison, and the wall clock is the one clock a lagging RPC (or a
+  // warped fork) does not share with the chain.
+  const nowSec = snap.blockTimestamp;
   if (snap.phase !== Phase.Idle && snap.vaultExpiryTs > 0n && nowSec > snap.vaultExpiryTs + 3600n) {
     await alert(
       'phase_stuck',
@@ -960,7 +964,8 @@ export function nextWindow(snap: Pick<ChainSnapshot, 'blockTimestamp'>): WeekWin
   return nextWeekWindow(Number(snap.blockTimestamp), config.KEEPER_ARM_LEAD_S, config.KEEPER_NYSE_HOLIDAYS);
 }
 
-async function onIdle(snap: ChainSnapshot): Promise<void> {
+async function onIdle(initial: ChainSnapshot): Promise<void> {
+  let snap = initial;
   // A close we never witnessed. phase Idle with a nonzero cycle number and an expiry still on
   // the vault means rollClose already ran for the last cycle the vault armed. Close the row out
   // from chain logs before anything else is decided.
@@ -971,8 +976,14 @@ async function onIdle(snap: ChainSnapshot): Promise<void> {
 
   // The queue settles while flat, permissionlessly. Stranded or not: while stranded it is the
   // queuers' only exit (their idle slice now, their claim share at the retry).
+  //
+  // The settlement moves assets into the reserve, and `totalAssets()` is what the week is sized
+  // on; a plan taken from the snapshot BEFORE the settlement would size capacity on collateral
+  // that now belongs to settled redeemers, and could arm a cycle with nothing left to list.
+  // Re-read the vault before deciding anything else.
   if (snap.queuedShares > 0n) {
-    await doSettleQueue(snap);
+    const settled = await doSettleQueue(snap);
+    if (settled) snap = await snapshot();
   }
 
   if (snap.isStranded) {
@@ -1228,10 +1239,10 @@ async function alertStranded(cycleNumber: number, gen: bigint, claimKey: bigint,
   if (store.getMeta(STRAND_ALERTED_KEY(gen)) !== null) return;
   store.setMeta(STRAND_ALERTED_KEY(gen), tx);
   await alert(
-    'stranded',
+    'claim_stranded',
     `cycle ${cycleNumber}: rollClose could not redeem the Valorem claim (strand generation ${gen}). The vault is Idle ` +
       'with the claim kept; deposits and instant redemption are shut, the queue still settles, and the keeper will ' +
-      `retry retryStrandedClaim() every ${Math.round(config.KEEPER_RETRY_STRANDED_MS / 60_000)} minutes. ` +
+      `retry retryStrandedClaim() every ${describeInterval(config.KEEPER_RETRY_STRANDED_MS)}. ` +
       'Check USDG (pause / freeze of the vault or of Clear) and the Stock Token blocklist.',
     { cycleNumber, gen: gen.toString(), claimKey: claimKey.toString(), tx },
     { force: true },
@@ -1263,7 +1274,7 @@ async function handleStranded(snap: ChainSnapshot): Promise<void> {
       const name = revertName(error);
       const reason = describeError(error);
       await alert(
-        'retry_failed',
+        'strand_retry_failed',
         `cycle ${cycleNumber}: retryStrandedClaim still reverts (${name ?? reason}); the cause has not cleared`,
         { cycleNumber, gen: snap.strandGen.toString(), reason },
         { dedupeKey: snap.strandGen.toString() },
@@ -1287,16 +1298,7 @@ async function reconcileRecoveredStrand(snap: ChainSnapshot): Promise<void> {
   try {
     const logs = await logClient.getLogs({
       address: config.VAULT,
-      event: {
-        type: 'event',
-        name: 'StrandedClaimRecovered',
-        inputs: [
-          { name: 'gen', type: 'uint256', indexed: true },
-          { name: 'assets', type: 'uint256', indexed: false },
-          { name: 'usdgOut', type: 'uint256', indexed: false },
-          { name: 'queueWad', type: 'uint256', indexed: false },
-        ],
-      } as const,
+      event: strandedClaimRecoveredEvent,
       args: { gen },
       fromBlock: 0n,
       toBlock: snap.blockNumber,
@@ -1330,9 +1332,9 @@ async function recordRecovery(cycleNumber: number, gen: bigint, receipt: Transac
     assets_returned: recovered ? recovered.args.assets.toString() : null,
     usdg_from_assignment: recovered ? recovered.args.usdgOut.toString() : null,
   });
-  clearAlert('retry_failed', gen.toString());
+  clearAlert('strand_retry_failed', gen.toString());
   await alert(
-    'stranded_recovered',
+    'strand_recovered',
     `cycle ${cycleNumber}: the stranded claim (generation ${gen}) was redeemed` +
       (recovered ? `: ${recovered.args.assets} asset wei and ${formatUsdg(recovered.args.usdgOut)} USDG came home` : '') +
       `; ${formatUsdg(harvest.net)} USDG to depositors over the cycle.` +
@@ -1354,14 +1356,15 @@ async function recordRecovery(cycleNumber: number, gen: bigint, receipt: Transac
                            SETTLE QUEUE
 //////////////////////////////////////////////////////////////*/
 
-/** Permissionless: settle a redeem queue joined while the vault is flat (Idle). */
-async function doSettleQueue(snap: ChainSnapshot): Promise<void> {
+/** Permissionless: settle a redeem queue joined while the vault is flat (Idle). True once the
+ *  settlement confirmed, so the caller knows its snapshot is behind the chain. */
+async function doSettleQueue(snap: ChainSnapshot): Promise<boolean> {
   const sim = await guardedSimulate('settleQueue', () =>
     publicClient.simulateContract({ address: config.VAULT, abi: vaultAbi, functionName: 'settleQueue', account }),
   );
-  if (!sim) return;
+  if (!sim) return false;
   const receipt = await sendAndConfirm('settleQueue', snap.vaultCycleNumber || null, () => walletClient.writeContract(sim.request));
-  if (!receipt) return;
+  if (!receipt) return false;
   const settled = parseEventLogs({ abi: vaultAbi, eventName: 'QueueSettled', logs: receipt.logs }).find(
     (event) => event.address.toLowerCase() === config.VAULT.toLowerCase(),
   );
@@ -1379,6 +1382,7 @@ async function doSettleQueue(snap: ChainSnapshot): Promise<void> {
     },
     { force: true },
   );
+  return true;
 }
 
 /*//////////////////////////////////////////////////////////////
@@ -1453,7 +1457,7 @@ async function pollLiveListing(snap: ChainSnapshot): Promise<void> {
     // let the next tick build a listing we CAN serve.
     log.roll.warn({ orderHash: snap.listingHash }, 'vault has a listing this keeper did not create');
     await alert(
-      'listing_unfillable',
+      'fill_sim_revert',
       `the vault has a listing (${snap.listingHash}) this keeper cannot serve: there is no local row for it. ` +
         'Recovering by invalidating it on chain and relisting from our own records.',
       { listingHash: snap.listingHash },
@@ -1494,7 +1498,7 @@ async function pollLiveListing(snap: ChainSnapshot): Promise<void> {
   // Would the next buyer be refused? The fill gate re-prices at the spot of the fill.
   if (snap.spotUsdg6 === null) {
     await alert(
-      'listing_unfillable',
+      'fill_sim_revert',
       `listing ${row.order_hash}: the oracle is stale (${snap.spotError ?? 'unknown'}); every fill reverts until the feed prints`,
       { orderHash: row.order_hash, reason: 'stale-oracle' },
       { dedupeKey: `${row.order_hash}:stale` },
@@ -1509,7 +1513,7 @@ async function pollLiveListing(snap: ChainSnapshot): Promise<void> {
     snap.valoremFeeBps,
   );
   if (verdict.fillable) {
-    clearAlert('listing_unfillable', `${row.order_hash}:strike-below-band`);
+    clearAlert('fill_sim_revert', `${row.order_hash}:strike-below-band`);
     return;
   }
 
@@ -1517,7 +1521,7 @@ async function pollLiveListing(snap: ChainSnapshot): Promise<void> {
     // A rally pulled the strike inside the band floor. No price fixes that; the listing
     // revives on its own if spot falls back, and cancelling it would only spend a slot.
     await alert(
-      'listing_unfillable',
+      'fill_sim_revert',
       `listing ${row.order_hash}: strike ${formatUsdg(snap.vaultStrikeUsdg6)} is below the band floor ` +
         `${formatUsdg(BigInt(verdict.detail.bandLowUsdg6 ?? '0'))} at spot ${formatUsdg(snap.spotUsdg6)}; every fill reverts StrikeBelowBand until spot falls back`,
       { orderHash: row.order_hash, reason: verdict.reason, ...verdict.detail },
@@ -1529,7 +1533,7 @@ async function pollLiveListing(snap: ChainSnapshot): Promise<void> {
   // premium-below-floor: a reprice fixes it, if a slot is left.
   if (snap.listingsThisCycle >= MAX_LISTINGS_PER_CYCLE) {
     await alert(
-      'listing_unfillable',
+      'fill_sim_revert',
       `listing ${row.order_hash}: ask ${formatUsdg(BigInt(verdict.detail.unitPrice6 ?? '0'))} is under the fill floor ` +
         `${formatUsdg(verdict.floorUnit6)} at spot ${formatUsdg(snap.spotUsdg6)}, and the vault's ${MAX_LISTINGS_PER_CYCLE} listings are spent; ` +
         'it stays unfillable until spot falls back',
@@ -1613,7 +1617,7 @@ async function createListing(snap: ChainSnapshot): Promise<boolean> {
   const offChainHash = localOrderHash(components);
   if (onChainHash.toLowerCase() !== offChainHash.toLowerCase()) {
     await alert(
-      'listing_unfillable',
+      'fill_sim_revert',
       'locally derived order hash disagrees with seaport.getOrderHash; refusing to authorise',
       { onChainHash, offChainHash },
       { dedupeKey: onChainHash, severity: 'error' },
@@ -1647,8 +1651,6 @@ async function createListing(snap: ChainSnapshot): Promise<boolean> {
     contracts: contracts.toString(),
     unit_price6: unitPrice6.toString(),
     gross_usdg6: gross6.toString(),
-    to_vault6: gross6.toString(),
-    to_overcall6: '0',
     end_time: Number(components.endTime),
     counter: counter.toString(),
     salt: components.salt.toString(),
@@ -1657,12 +1659,6 @@ async function createListing(snap: ChainSnapshot): Promise<boolean> {
     approve_tx: receipt.transactionHash,
     cancel_tx: null,
     status: 'approved',
-    api_status: null,
-    api_error: null,
-    posted_at: null,
-    visible_at: null,
-    filled_numerator: null,
-    filled_denominator: null,
     seaport_total_filled: null,
     seaport_total_size: null,
     seaport_cancelled: null,
@@ -2223,6 +2219,17 @@ export function listingFilled(row: { contracts: string; seaport_total_filled: st
     totalFilled: BigInt(row.seaport_total_filled ?? '0'),
     totalSize: BigInt(row.seaport_total_size ?? '0'),
   });
+}
+
+/** A timer, for an alert: whole minutes when it is at least a minute, seconds below that (a
+ *  fork rehearsal runs the stranded retry every second, and "every 0 minutes" is a lie). */
+export function describeInterval(ms: number): string {
+  if (ms >= 60_000) {
+    const minutes = Math.round(ms / 60_000);
+    return `${minutes} minute${minutes === 1 ? '' : 's'}`;
+  }
+  const seconds = Math.max(1, Math.round(ms / 1_000));
+  return `${seconds} second${seconds === 1 ? '' : 's'}`;
 }
 
 /** USDG base units -> a human "123.456789" string. Display only. */

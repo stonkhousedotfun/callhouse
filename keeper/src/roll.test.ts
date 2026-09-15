@@ -38,7 +38,7 @@ process.env.KEEPER_PK = `0x${'11'.repeat(32)}`;
 process.env.KEEPER_DB_PATH = join(scratch, 'keeper.db');
 process.env.KEEPER_LOG_LEVEL = 'fatal';
 
-const { decodeClaimStranded, decodeRollClose, listingFilled, resolveContractsAssigned, rollCloseAlertData, rollCloseMessage, seaportVerdict } =
+const { decodeClaimStranded, decodeRollClose, describeInterval, listingFilled, resolveContractsAssigned, rollCloseAlertData, rollCloseMessage, seaportVerdict } =
   await import('./roll.js');
 type RollCloseSummary = import('./roll.js').RollCloseSummary;
 const { vaultAbi } = await import('./abi.js');
@@ -66,6 +66,14 @@ test('seaportVerdict: cancelled and expired are latches', () => {
   assert.equal(seaportVerdict('cancelled', seaport({})), 'cancelled');
   assert.equal(seaportVerdict('expired', seaport({})), 'expired');
   assert.equal(seaportVerdict('expired', seaport({ isFullyFilled: true, totalFilled: 23n })), 'expired');
+});
+
+test('describeInterval: minutes at a minute or more, seconds below (the retry timer in the stranded page)', () => {
+  assert.equal(describeInterval(3_600_000), '60 minutes');
+  assert.equal(describeInterval(60_000), '1 minute');
+  assert.equal(describeInterval(90_000), '2 minutes');
+  assert.equal(describeInterval(1_000), '1 second', 'the fork rehearsal’s timer, not "0 minutes"');
+  assert.equal(describeInterval(15_000), '15 seconds');
 });
 
 test('listingFilled: the row’s Seaport fraction applied to its size', () => {

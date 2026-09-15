@@ -104,12 +104,9 @@ export interface ListingRow {
   /** The order's size (`vault.listingAmount`), not the unfilled remainder. */
   contracts: string;
   unit_price6: string;
-  /** `unit_price6 × contracts`; the one consideration item, paid to the vault in full. */
+  /** `unit_price6 × contracts`: the ONE consideration item, paid to the vault in full. There is
+   *  no venue fee item and no second recipient. */
   gross_usdg6: string;
-  /** Equal to `gross_usdg6`: the whole premium is the vault's under write on fill. */
-  to_vault6: string;
-  /** Always '0'. Kept for the column shape of an earlier keeper; there is no venue fee item. */
-  to_overcall6: string;
   end_time: number;
   counter: string;
   salt: string;
@@ -119,13 +116,8 @@ export interface ListingRow {
   approve_tx: string | null;
   cancel_tx: string | null;
   status: ListingStatus;
-  /** Unused since the venue went away; NULL on every new row. */
-  api_status: string | null;
-  api_error: string | null;
-  posted_at: number | null;
-  visible_at: number | null;
-  filled_numerator: string | null;
-  filled_denominator: string | null;
+  /** Seaport's own `getOrderStatus` fraction, as last read: the fill is `contracts × filled /
+   *  size`. Both NULL until the first read. */
   seaport_total_filled: string | null;
   seaport_total_size: string | null;
   seaport_cancelled: number | null;
@@ -197,8 +189,6 @@ CREATE TABLE IF NOT EXISTS listings (
   contracts            TEXT NOT NULL,
   unit_price6          TEXT NOT NULL,
   gross_usdg6          TEXT NOT NULL,
-  to_vault6            TEXT NOT NULL,
-  to_overcall6         TEXT NOT NULL,
   end_time             INTEGER NOT NULL,
   counter              TEXT NOT NULL,
   salt                 TEXT NOT NULL,
@@ -207,12 +197,6 @@ CREATE TABLE IF NOT EXISTS listings (
   approve_tx           TEXT,
   cancel_tx            TEXT,
   status               TEXT NOT NULL,
-  api_status           TEXT,
-  api_error            TEXT,
-  posted_at            INTEGER,
-  visible_at           INTEGER,
-  filled_numerator     TEXT,
-  filled_denominator   TEXT,
   seaport_total_filled TEXT,
   seaport_total_size   TEXT,
   seaport_cancelled    INTEGER,
@@ -262,14 +246,37 @@ CREATE TABLE IF NOT EXISTS meta (
  * migration is idempotent and a fresh database (which already has the column) skips it. Existing
  * rows read NULL: "not recorded", which is the truth for a week closed before the column existed.
  * Append only; never reorder or remove.
+ *
+ * EMPTY AT THE FIRST RELEASE. The SCHEMA above is the write-on-fill schema of 2026-09-14 and no
+ * keeper database exists yet that predates it: the columns the pre-redesign keeper had grown by
+ * migration (`assets_returned`, `usdg_from_assignment`, `strand_gen`, `retry_tx`) are in the
+ * table from the start, and the Overcall-shaped listing columns it carried (`to_vault6`,
+ * `to_overcall6`, `api_status`, `api_error`, `posted_at`, `visible_at`, `filled_numerator`,
+ * `filled_denominator`) are gone rather than dragged along as always-NULL. The mechanism stays,
+ * tested through {applyMigrations}, for the first column the next release adds.
  */
-const MIGRATIONS: ReadonlyArray<{ table: string; column: string; type: string }> = [
-  { table: 'cycles', column: 'assets_returned', type: 'TEXT' },
-  { table: 'cycles', column: 'usdg_from_assignment', type: 'TEXT' },
-  // Write on fill (2026-09-13): the stranded-claim state machine.
-  { table: 'cycles', column: 'strand_gen', type: 'TEXT' },
-  { table: 'cycles', column: 'retry_tx', type: 'TEXT' },
-];
+const MIGRATIONS: ReadonlyArray<Migration> = [];
+
+export interface Migration {
+  table: string;
+  column: string;
+  type: string;
+}
+
+/** Apply the migrations `db` has not had yet, in one transaction; the columns actually added. */
+export function applyMigrations(db: Database.Database, migrations: ReadonlyArray<Migration>): Migration[] {
+  const added: Migration[] = [];
+  const apply = db.transaction(() => {
+    for (const migration of migrations) {
+      const columns = db.prepare(`PRAGMA table_info(${migration.table})`).all() as Array<{ name: string }>;
+      if (columns.some((c) => c.name === migration.column)) continue;
+      db.exec(`ALTER TABLE ${migration.table} ADD COLUMN ${migration.column} ${migration.type}`);
+      added.push(migration);
+    }
+  });
+  apply();
+  return added;
+}
 
 /** Columns the generic updaters are allowed to touch. Keeps the dynamic SQL honest. */
 const CYCLE_COLUMNS = new Set<keyof CycleRow>([
@@ -302,12 +309,6 @@ const LISTING_COLUMNS = new Set<keyof ListingRow>([
   'approve_tx',
   'cancel_tx',
   'status',
-  'api_status',
-  'api_error',
-  'posted_at',
-  'visible_at',
-  'filled_numerator',
-  'filled_denominator',
   'seaport_total_filled',
   'seaport_total_size',
   'seaport_cancelled',
@@ -341,15 +342,9 @@ export class KeeperStore {
 
   /** Apply MIGRATIONS that this file has not had yet. Runs in one transaction. */
   private migrate(): void {
-    const apply = this.db.transaction(() => {
-      for (const { table, column, type } of MIGRATIONS) {
-        const columns = this.db.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>;
-        if (columns.some((c) => c.name === column)) continue;
-        this.db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${type}`);
-        log.state.info({ table, column }, 'migrated: added column');
-      }
-    });
-    apply();
+    for (const { table, column } of applyMigrations(this.db, MIGRATIONS)) {
+      log.state.info({ table, column }, 'migrated: added column');
+    }
   }
 
   /*------------------------------- meta -------------------------------*/
@@ -444,16 +439,12 @@ export class KeeperStore {
       .prepare(
         `INSERT INTO listings (
            order_hash, cycle_number, seq, option_id, contracts, unit_price6, gross_usdg6,
-           to_vault6, to_overcall6, end_time, counter, salt, components_json, signature,
-           approve_tx, cancel_tx, status, api_status, api_error, posted_at, visible_at,
-           filled_numerator, filled_denominator, seaport_total_filled, seaport_total_size,
-           seaport_cancelled, created_at, updated_at
+           end_time, counter, salt, components_json, signature, approve_tx, cancel_tx, status,
+           seaport_total_filled, seaport_total_size, seaport_cancelled, created_at, updated_at
          ) VALUES (
            @order_hash, @cycle_number, @seq, @option_id, @contracts, @unit_price6, @gross_usdg6,
-           @to_vault6, @to_overcall6, @end_time, @counter, @salt, @components_json, @signature,
-           @approve_tx, @cancel_tx, @status, @api_status, @api_error, @posted_at, @visible_at,
-           @filled_numerator, @filled_denominator, @seaport_total_filled, @seaport_total_size,
-           @seaport_cancelled, @created_at, @updated_at
+           @end_time, @counter, @salt, @components_json, @signature, @approve_tx, @cancel_tx, @status,
+           @seaport_total_filled, @seaport_total_size, @seaport_cancelled, @created_at, @updated_at
          )
          ON CONFLICT(order_hash) DO NOTHING`,
       )

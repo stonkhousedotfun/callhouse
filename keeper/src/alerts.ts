@@ -10,12 +10,14 @@
  *   tx_revert            a simulation or a receipt came back reverted (decoded error in the text)
  *   cycle_not_created    a Friday passed without the vault being armed; the reason is attached
  *   option_type_failed   clear.newOptionType could not be created or confirmed
- *   listing_unfillable   the live listing would be refused at the fill gate (a rally moved the
- *                        strike inside the band floor, or the ask under the fill floor) and the
- *                        keeper cannot or may not reprice it
- *   stranded             rollClose could not redeem the claim (USDG paused/frozen, NVDA blocklist)
- *   retry_failed         retryStrandedClaim still reverts; the cause has not cleared
- *   stranded_recovered   the retry went through; both legs are home
+ *   fill_sim_revert      the live listing would be refused at the fill gate (a rally moved the
+ *                        strike inside the band floor, or the ask under the fill floor; the feed
+ *                        is stale) and the keeper cannot or may not reprice it. `data.reason`
+ *                        names the hook's answer. Also raised when the vault authorises a hash
+ *                        this keeper cannot serve, or has not approved Seaport to move the tokens
+ *   claim_stranded       rollClose could not redeem the claim (USDG paused/frozen, NVDA blocklist)
+ *   strand_retry_failed  retryStrandedClaim still reverts; the cause has not cleared
+ *   strand_recovered     the retry went through; both legs are home
  *   low_gas              keeper ETH under KEEPER_MIN_GAS_WEI (0.01 by default)
  *   fee_switch           Valorem's engine fee switch flipped (FeeSwitchUpdated on Clear)
  *   valorem_fees_enabled the fee is on and governance has not accepted it; nothing sells
@@ -33,10 +35,10 @@ export type AlertKind =
   | 'tx_revert'
   | 'cycle_not_created'
   | 'option_type_failed'
-  | 'listing_unfillable'
-  | 'stranded'
-  | 'retry_failed'
-  | 'stranded_recovered'
+  | 'fill_sim_revert'
+  | 'claim_stranded'
+  | 'strand_retry_failed'
+  | 'strand_recovered'
   | 'low_gas'
   | 'fee_switch'
   | 'valorem_fees_enabled'
@@ -57,10 +59,10 @@ const DEFAULT_SEVERITY: Record<AlertKind, AlertSeverity> = {
   tx_revert: 'error',
   cycle_not_created: 'warn',
   option_type_failed: 'error',
-  listing_unfillable: 'warn',
-  stranded: 'error',
-  retry_failed: 'warn',
-  stranded_recovered: 'info',
+  fill_sim_revert: 'warn',
+  claim_stranded: 'error',
+  strand_retry_failed: 'warn',
+  strand_recovered: 'info',
   low_gas: 'warn',
   fee_switch: 'warn',
   valorem_fees_enabled: 'warn',
