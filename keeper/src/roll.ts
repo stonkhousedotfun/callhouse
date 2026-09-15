@@ -533,7 +533,19 @@ async function reconcilePendingTxs(): Promise<void> {
   }
 }
 
-/** If the vault is mid-cycle and we have no row for it, write one from chain state. */
+/**
+ * If the vault is mid-cycle and we have no row for it, write one from chain state.
+ *
+ * Runs at boot AND at the start of every non-Idle tick; when the row exists it is one SELECT.
+ * The tick matters as much as the boot. A rollOpen whose receipt wait timed out (or whose receipt
+ * poll hit an RPC error) while the transaction landed leaves the process RUNNING with the vault
+ * Listed and no row: syncFills then has nothing to count against and publishes no `fill` all
+ * week, lockBook and rollClose create bare rows with no option id, strike or timestamps, and the
+ * week is never marked armed — so the first Idle tick after the close pages a forced "passed
+ * without a cycle … Published as unfilled, 0" for a week that was armed and may have sold.
+ * Adoption therefore also attaches the keeper's own unattached rollOpen submission (by its
+ * receipt) and marks the week armed when it is the week the keeper was aiming at.
+ */
 async function adoptOpenCycle(snap: ChainSnapshot): Promise<void> {
   if (snap.phase === Phase.Idle || snap.vaultCycleNumber === 0) return;
   if (store.getCycle(snap.vaultCycleNumber)) return;
@@ -549,12 +561,57 @@ async function adoptOpenCycle(snap: ChainSnapshot): Promise<void> {
     opened_at: Date.now(),
   });
   // The row is created without its rollOpen hash; recover it from the txs table when the
-  // submission was ours (harvestForCycle sums from the rollOpen BLOCK).
+  // submission was ours (harvestForCycle sums from the rollOpen BLOCK). A submission whose
+  // receipt was lost was recorded with no cycle number, so attach it first.
+  await attachOrphanRollOpen(snap.vaultCycleNumber);
   backfillOpenTx(snap.vaultCycleNumber);
-  log.boot.warn(
+  markWeekArmed(Number(snap.vaultExerciseTs));
+  log.roll.warn(
     { cycleNumber: snap.vaultCycleNumber, phase: PHASE_NAMES[snap.phase] },
     'adopted an open cycle the database had no record of',
   );
+}
+
+/**
+ * Attach a cycle number to the keeper's own rollOpen submission that was recorded without one.
+ *
+ * onIdle sends rollOpen with no cycle number (the vault numbers the cycle and the RollOpen log
+ * says which) and attaches it only once the receipt is in hand, so a lost receipt leaves the txs
+ * row unattached — and backfillOpenTx, resolveOpenBlock and closeCycleFromLogs all look the
+ * submission up BY cycle number. The receipt decides, never a guess: a submission is attached
+ * only when its own receipt carries the vault's RollOpen for this cycle. Newest first, five at
+ * most; an unmined or unanswered hash is skipped and looked at again on the next adoption.
+ */
+async function attachOrphanRollOpen(cycleNumber: number): Promise<void> {
+  if (store.latestTxForCycle('rollOpen', cycleNumber) !== null) return;
+  for (const tx of store.unattachedTxs('rollOpen', 5)) {
+    let receipt: TransactionReceipt;
+    try {
+      receipt = await publicClient.getTransactionReceipt({ hash: tx.hash as Hash });
+    } catch {
+      continue;
+    }
+    const opened = parseEventLogs({ abi: vaultAbi, eventName: 'RollOpen', logs: receipt.logs }).find(
+      (event) => event.address.toLowerCase() === config.VAULT.toLowerCase() && Number(event.args.cycleNumber) === cycleNumber,
+    );
+    if (!opened) continue;
+    store.recordTxResult(tx.hash, 'success', receipt.blockNumber, receipt.gasUsed, null);
+    store.attachTxToCycle(tx.hash, cycleNumber);
+    log.roll.info({ cycleNumber, hash: tx.hash, block: receipt.blockNumber }, 'attached a rollOpen submission whose receipt was lost to the cycle it opened');
+    return;
+  }
+}
+
+/**
+ * Mark a week armed from the vault's own cycle timestamps, when it is the week the keeper was
+ * aiming at (`week_target_ts`). The arm path does this on its receipt; this is the same fact for
+ * the paths that learn of the arm later (adoption, a close reconstructed from logs). A cycle
+ * armed for some other Friday does not mark the target week: that week really was not armed.
+ */
+function markWeekArmed(exerciseTs: number): void {
+  if (exerciseTs !== 0 && store.getMetaNumber(WEEK_TARGET_KEY) === exerciseTs) {
+    store.setMeta(WEEK_ARMED_KEY, String(exerciseTs));
+  }
 }
 
 /**
@@ -687,6 +744,8 @@ async function closeCycleFromLogs(cycleNumber: number, snap: ChainSnapshot): Pro
   }
   store.updateCycle(cycleNumber, patch);
   backfillOpenTx(cycleNumber);
+  // The vault's cycle timestamps survive the close: an arm this keeper never saw still counts.
+  markWeekArmed(Number(snap.vaultExerciseTs));
 
   const summary: RollCloseSummary = {
     cycleNumber,
@@ -910,6 +969,9 @@ export async function tick(): Promise<void> {
     }
     store.beat(snap.at);
     await raiseHealthAlerts(snap);
+    // A cycle the vault armed and this database has no row for (a rollOpen receipt lost while the
+    // transaction landed). One SELECT when the row exists; see adoptOpenCycle.
+    if (snap.phase !== Phase.Idle) await adoptOpenCycle(snap);
 
     log.roll.debug(
       {
@@ -986,13 +1048,19 @@ async function onIdle(initial: ChainSnapshot): Promise<void> {
     if (settled) snap = await snapshot();
   }
 
+  // Every Friday is accounted for BEFORE the stranded branch. While a claim is stranded rollOpen
+  // reverts StillStranded, so each Friday that goes by is a week without a cycle and is published
+  // as one (`cycle_not_created`, reason `stranded`). Returning into handleStranded first would
+  // leave the target at the stranded cycle's own Friday, which WAS armed, and every week lost to
+  // the strand would pass without a line.
+  const window = nextWindow(snap);
+  await noteWeekRollover(window);
+
   if (snap.isStranded) {
+    await remember(window, 'stranded');
     await handleStranded(snap);
     return;
   }
-
-  const window = nextWindow(snap);
-  await noteWeekRollover(window);
 
   if (snap.writesHalted) {
     await remember(window, 'writes-halted');
@@ -1065,7 +1133,7 @@ async function onIdle(initial: ChainSnapshot): Promise<void> {
   );
   const cycleNumber = opened ? Number(opened.args.cycleNumber) : snap.vaultCycleNumber + 1;
   // The submission was recorded without a cycle; attach it now that the number is known.
-  store.db.prepare('UPDATE txs SET cycle_number = ? WHERE hash = ?').run(cycleNumber, receipt.transactionHash);
+  store.attachTxToCycle(receipt.transactionHash, cycleNumber);
 
   store.ensureCycle(cycleNumber, 'open');
   store.updateCycle(cycleNumber, {
@@ -1321,6 +1389,10 @@ async function recordRecovery(cycleNumber: number, gen: bigint, receipt: Transac
   );
   // The retry's Harvest carries the stranded cycle's number, so the cycle sum now includes it.
   const harvest = await harvestForCycle(cycleNumber, receipt);
+  // Only the live shares' part of the redeem goes through that Harvest (recoveryLegs), so only
+  // that part is recorded as the cycle's strike proceeds: premium = gross - proceeds must come
+  // out as the close-time premium, not as premium minus the queue's share.
+  const legs = recovered ? recoveryLegs(recovered.args.assets, recovered.args.usdgOut, recovered.args.queueWad) : null;
   store.ensureCycle(cycleNumber, 'closed');
   store.updateCycle(cycleNumber, {
     status: 'closed',
@@ -1329,14 +1401,19 @@ async function recordRecovery(cycleNumber: number, gen: bigint, receipt: Transac
     gross_usdg6: harvest.gross.toString(),
     fee_usdg6: harvest.fee.toString(),
     net_usdg6: harvest.net.toString(),
-    assets_returned: recovered ? recovered.args.assets.toString() : null,
-    usdg_from_assignment: recovered ? recovered.args.usdgOut.toString() : null,
+    assets_returned: legs ? legs.liveAssets.toString() : null,
+    usdg_from_assignment: legs ? legs.liveUsdg.toString() : null,
   });
   clearAlert('strand_retry_failed', gen.toString());
   await alert(
     'strand_recovered',
     `cycle ${cycleNumber}: the stranded claim (generation ${gen}) was redeemed` +
-      (recovered ? `: ${recovered.args.assets} asset wei and ${formatUsdg(recovered.args.usdgOut)} USDG came home` : '') +
+      (recovered && legs
+        ? `: ${recovered.args.assets} asset wei and ${formatUsdg(recovered.args.usdgOut)} USDG came home` +
+          (legs.queueUsdg > 0n || legs.queueAssets > 0n
+            ? ` (${legs.queueAssets} asset wei and ${formatUsdg(legs.queueUsdg)} USDG of it booked to the epochs that settled while stranded)`
+            : '')
+        : '') +
       `; ${formatUsdg(harvest.net)} USDG to depositors over the cycle.` +
       (witnessedLive ? '' : ' The retry ran without this keeper; reconstructed from chain logs.'),
     {
@@ -1345,11 +1422,49 @@ async function recordRecovery(cycleNumber: number, gen: bigint, receipt: Transac
       assets: recovered ? recovered.args.assets.toString() : null,
       usdgOut: recovered ? formatUsdg(recovered.args.usdgOut) : null,
       queueWad: recovered ? recovered.args.queueWad.toString() : null,
+      queueAssets: legs ? legs.queueAssets.toString() : null,
+      queueUsdg: legs ? formatUsdg(legs.queueUsdg) : null,
+      strikeProceedsUsdg: legs ? formatUsdg(legs.liveUsdg) : null,
       tx: receipt.transactionHash,
       witnessedLive,
     },
     { force: true },
   );
+}
+
+/** 1e18: `queueWad` is a WAD fraction of the claim. */
+const WAD = 1_000_000_000_000_000_000n;
+
+export interface RecoveryLegs {
+  /** Underlying left to the live shares: `assets - queueAssets`. */
+  liveAssets: bigint;
+  /** USDG the retry harvests for the live shares: `usdgOut - queueUsdg`. The cycle's strike
+   *  proceeds inside its summed Harvest. */
+  liveUsdg: bigint;
+  /** `floor(assets × queueWad / 1e18)`: reserved for the epochs that settled while stranded. */
+  queueAssets: bigint;
+  /** `floor(usdgOut × queueWad / 1e18)`: reserved and accounted, never harvested. */
+  queueUsdg: bigint;
+}
+
+/**
+ * Split a `StrandedClaimRecovered(gen, assets, usdgOut, queueWad)` into what the live shares
+ * receive through the harvest and what the queue epochs booked while stranded.
+ *
+ * WHY: the event carries the WHOLE redeem, but `Vault.retryStrandedClaim` first books queueWad's
+ * share for the settled epochs (`queueAssets = assets.mulDiv(queueWad, 1e18)` into
+ * `reservedAssets`, `queueUsdg = usdgOut.mulDiv(queueWad, 1e18)` into `usdgReservedForQueue`,
+ * marked accounted) and only then calls `_harvest(usdgOut - queueUsdg)`. The cycle's
+ * `gross_usdg6` is the sum of its Harvest events, so recording the full `usdgOut` as strike
+ * proceeds subtracts USDG that never entered the gross. The fork dry run's cycle 3 did exactly
+ * that: gross 210967240 against proceeds 239000000 published premium 0 for a week that earned
+ * 1842240 of premium and harvested 209125000 of strike proceeds (29875000 went to epoch 4).
+ * `mulDiv` rounds down, and so does bigint division.
+ */
+export function recoveryLegs(assets: bigint, usdgOut: bigint, queueWad: bigint): RecoveryLegs {
+  const queueAssets = (assets * queueWad) / WAD;
+  const queueUsdg = (usdgOut * queueWad) / WAD;
+  return { liveAssets: assets - queueAssets, liveUsdg: usdgOut - queueUsdg, queueAssets, queueUsdg };
 }
 
 /*//////////////////////////////////////////////////////////////
@@ -1495,6 +1610,26 @@ async function pollLiveListing(snap: ChainSnapshot): Promise<void> {
     return;
   }
 
+  // Valorem's fee switch on and the vault has not accepted the fee: ValoremLib.writeOnFill
+  // refuses EVERY fill with ValoremFeeNotAccepted before it looks at spot, the band or the floor,
+  // so no price sells. A reprice here would cancel the live order and spend one of the vault's
+  // three approvals on an ask that carries a fee the vault may not pay; if Valorem then turns the
+  // switch off again before governance accepts, that ask sits ~15 bps of notional above the floor
+  // (fillVerdict calls it fillable, so nothing brings it down) with a slot gone. The live listing
+  // is left exactly as it is until governance accepts or the switch goes off. Checked in the
+  // hook's own order: the fee before the oracle.
+  if (snap.valoremFeesEnabled && !snap.valoremFeeAccepted) {
+    await alert(
+      'fill_sim_revert',
+      `listing ${row.order_hash}: Valorem's engine fee is on (${snap.valoremFeeBps} bps of notional) and the vault has not accepted it; ` +
+        'every fill reverts ValoremFeeNotAccepted. Not repricing: the listing stays as it is until acceptValoremFee(true) or the switch goes off',
+      { orderHash: row.order_hash, reason: 'valorem-fee-not-accepted', feeBps: snap.valoremFeeBps },
+      { dedupeKey: `${row.order_hash}:valorem-fee-not-accepted` },
+    );
+    return;
+  }
+  clearAlert('fill_sim_revert', `${row.order_hash}:valorem-fee-not-accepted`);
+
   // Would the next buyer be refused? The fill gate re-prices at the spot of the fill.
   if (snap.spotUsdg6 === null) {
     await alert(
@@ -1574,6 +1709,12 @@ async function createListing(snap: ChainSnapshot): Promise<boolean> {
     return false;
   }
   if (snap.writesHalted || !snap.hasKeeperRole) return false;
+  if (snap.valoremFeesEnabled && !snap.valoremFeeAccepted) {
+    // Every fill would revert ValoremFeeNotAccepted, and approveListing checks neither the fee nor
+    // its acceptance: an approval now spends one of the three on a listing nothing can buy.
+    log.roll.warn({ cycleNumber, feeBps: snap.valoremFeeBps }, 'Valorem fee on and not accepted; not authorising a listing');
+    return false;
+  }
   if (snap.listingsThisCycle >= MAX_LISTINGS_PER_CYCLE) {
     log.roll.info({ cycleNumber }, 'the vault’s listings for this cycle are spent; nothing more can be offered');
     return false;

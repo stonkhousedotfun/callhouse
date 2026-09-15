@@ -2,10 +2,13 @@
  * Durable keeper state, in SQLite.
  *
  * The keeper is a single process that must survive being killed at any instant — including
- * between `vault.approveListing()` landing on chain and the row being written, which is the one
- * window where the chain and this file can disagree. Everything it has done is written here
- * before and after the fact, and `roll.ts` reconciles this table against live vault state on
- * every boot. Nothing is inferred from "it is Friday, so I probably armed already".
+ * between `vault.approveListing()` landing on chain and its receipt coming back. That is why a
+ * listing row is written BEFORE the approval is sent (status `submitted`, with the components,
+ * salt and counter): the order is on disk whatever happens to the receipt, so a lost receipt or
+ * a kill mid-wait is adopted by hash on the next tick instead of being invalidated as foreign.
+ * Everything else the keeper does is written here before and after the fact too, and `roll.ts`
+ * reconciles this table against live vault state on every boot and every tick. Nothing is
+ * inferred from "it is Friday, so I probably armed already".
  *
  * All 256-bit values are stored as decimal TEXT. SQLite integers are 64-bit and an optionId is
  * 256 bits; storing one as INTEGER silently truncates it.
@@ -34,6 +37,10 @@ export type CycleStatus = 'open' | 'locked' | 'closed' | 'stranded';
 
 /**
  * Listing lifecycle, from Seaport's own `getOrderStatus` and the vault's `listingHash`.
+ *   submitted  built and handed to vault.approveListing; not confirmed yet. Written BEFORE the
+ *              send so the components survive a lost receipt or a kill. Never served.
+ *   failed     the approval reverted, was never broadcast, or was dropped unmined. Never served.
+ *              Adopted back to `approved` if the vault turns out to authorise its hash after all.
  *   approved   vault.approveListing landed; the order is validated on Seaport, nothing filled.
  *   partial    Seaport reports a fraction filled and the order is still live.
  *   filled     Seaport reports it fully filled.
@@ -42,7 +49,7 @@ export type CycleStatus = 'open' | 'locked' | 'closed' | 'stranded';
  *   expired    killed by lockBook or rollClose (counter bump at the end of the week).
  * `approved` and `partial` are what /orders serves.
  */
-export type ListingStatus = 'approved' | 'partial' | 'filled' | 'cancelled' | 'expired';
+export type ListingStatus = 'submitted' | 'failed' | 'approved' | 'partial' | 'filled' | 'cancelled' | 'expired';
 
 export type TxKind =
   | 'newOptionType'
@@ -55,7 +62,9 @@ export type TxKind =
   | 'retryStrandedClaim'
   | 'settleQueue';
 
-export type TxStatus = 'pending' | 'success' | 'reverted';
+/** `dropped`: never mined and no longer pending in the keeper's mempool (the node forgot it, or a
+ *  later nonce replaced it). Distinct from `reverted`, which was mined. */
+export type TxStatus = 'pending' | 'success' | 'reverted' | 'dropped';
 
 export interface CycleRow {
   cycle_number: number;
@@ -77,11 +86,15 @@ export interface CycleRow {
   net_usdg6: string | null;
   contracts_assigned: number | null;
   /** `RollClose.assetsReturned`: underlying handed back by the redeemed claim, asset base units
-   *  (wei). NULL on a row closed before this column existed, or a close with no RollClose. */
+   *  (wei). NULL on a close with no RollClose. A stranded close reports 0; the recovery then
+   *  records the LIVE SHARES' part of `StrandedClaimRecovered.assets` (the queue epochs' share,
+   *  `floor(assets × queueWad / 1e18)`, went to the reserve, not to the cycle). */
   assets_returned: string | null;
   /** `RollClose.usdgFromAssignment`: strike proceeds from assigned contracts, USDG base units.
    *  Already INSIDE `gross_usdg6` (the terminal Harvest includes it) and fee-free, so premium is
-   *  `gross_usdg6 - usdg_from_assignment`. NULL means unknown, never 0. */
+   *  `gross_usdg6 - usdg_from_assignment`. NULL means unknown, never 0. For a recovered stranded
+   *  cycle it is `usdgOut - floor(usdgOut × queueWad / 1e18)`: exactly what the retry's Harvest
+   *  carried, so the same subtraction still yields the close-time premium. */
   usdg_from_assignment: string | null;
   /** Reprices this cycle: approveListing calls after the first. The vault caps the total at 3. */
   relists_used: number;
@@ -487,6 +500,13 @@ export class KeeperStore {
       .all(nowSeconds) as ListingRow[];
   }
 
+  /** Rows written before their approveListing confirmed and not yet resolved either way. */
+  unconfirmedListingsForCycle(cycleNumber: number): ListingRow[] {
+    return this.db
+      .prepare("SELECT * FROM listings WHERE cycle_number = ? AND status = 'submitted' ORDER BY seq ASC")
+      .all(cycleNumber) as ListingRow[];
+  }
+
   /** Every listing for a cycle that still offers an order: the same set /orders serves. */
   liveListingsForCycle(cycleNumber: number): ListingRow[] {
     return this.db
@@ -554,6 +574,18 @@ export class KeeperStore {
       .prepare('SELECT * FROM txs WHERE kind = ? AND cycle_number = ? ORDER BY created_at DESC, rowid DESC LIMIT 1')
       .get(kind, cycleNumber) as TxRow | undefined;
     return row ?? null;
+  }
+
+  /** The newest submissions of a kind recorded without a cycle number (rollOpen goes out before
+   *  the vault has numbered the cycle), for adoption after a lost receipt. */
+  unattachedTxs(kind: TxKind, limit: number): TxRow[] {
+    return this.db
+      .prepare('SELECT * FROM txs WHERE kind = ? AND cycle_number IS NULL ORDER BY created_at DESC, rowid DESC LIMIT ?')
+      .all(kind, limit) as TxRow[];
+  }
+
+  attachTxToCycle(hash: string, cycleNumber: number): void {
+    this.db.prepare('UPDATE txs SET cycle_number = ?, updated_at = ? WHERE hash = ?').run(cycleNumber, Date.now(), hash);
   }
 
   pendingTxs(): TxRow[] {
