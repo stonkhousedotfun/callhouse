@@ -3,13 +3,21 @@
 /**
  * The landing page: the vault's live state next to the last closed week.
  *
- * What is deliberately NOT here is any forward-looking number. Everything shown is either the
- * current on-chain state or a realized figure from a week that has already closed, labelled
- * "Last week realized". No week is ever scaled up to a longer period — the wording rules in
- * scripts/copy-lint.mjs exist to keep it that way.
+ * What is deliberately NOT here is any forecast. Everything shown is the current on-chain state,
+ * a realized figure from a week that has already closed (labelled "Last week realized"), or, while
+ * the vault is Listed with a live order and its sale window open, that order's own arithmetic as it
+ * stands (owner-approved wording, lib/cycleTerms.ts CYCLE_TERMS_LABELS): the order total if every
+ * remaining contract sells (price per contract × contracts left to buy) and the protocol fee on that
+ * total, which the vault charges at harvest. Contracts left to buy is Seaport's count for the
+ * vault's order hash, read here or, failing that, by the order feed route; when neither has one,
+ * all three show "—" rather than an estimate. So each figure shown is current order state in exact
+ * USDG, not an outcome for anyone: a week in which nobody buys pays nothing. There is no
+ * percentage, no figure after the fee, and no week is ever scaled up to a longer period — the
+ * wording rules in scripts/copy-lint.mjs exist to keep it that way.
  */
 import Link from "next/link";
 
+import { useKeeperOrderBook } from "@/components/CyclePricing";
 import { CycleTapeInline } from "@/components/CycleTape";
 import { GuardBadges, VaultPhaseBadge } from "@/components/PhaseBadge";
 import { PositionSplit } from "@/components/PositionSplit";
@@ -25,13 +33,17 @@ import {
   Row,
   Rows,
   Stat,
+  Unit,
   WarnIcon,
 } from "@/components/ui";
 import { addressUrl } from "@/lib/chain";
 import { MARKET, MAX_LISTINGS_PER_CYCLE, SHARE_TICKER, VAULT } from "@/lib/contracts";
+import { hasOnChainListing, shouldAskFeed, windowClosed, type CycleListingState } from "@/lib/cycleNotices";
+import { CYCLE_TERMS_LABELS, cycleTerms } from "@/lib/cycleTerms";
 import {
   WAD,
   fmtAsset,
+  fmtCountdown,
   fmtRealizedWeek,
   fmtUsdg,
   fmtUtcDate,
@@ -42,7 +54,8 @@ import {
   tvlUsdg,
 } from "@/lib/format";
 import { useCycleHistory, lastSettled } from "@/lib/history";
-import { collateralSplit, useNow, useVaultSnapshot } from "@/lib/hooks";
+import { collateralSplit, useNow, useOrderStatus, useVaultSnapshot } from "@/lib/hooks";
+import { fillableForTerms } from "@/lib/orderFillable";
 
 export default function HomePage() {
   const { data: v, isLoading, isError: chainReadFailed } = useVaultSnapshot();
@@ -69,6 +82,50 @@ export default function HomePage() {
   const lastTvl = tvlUsdg(last?.assetsAtHarvest, last?.spotUsdgAtHarvest);
   const lastWasAssigned =
     last !== undefined && ((last.contractsAssigned ?? 0n) > 0n || (last.strikeProceedsUsdg ?? 0n) > 0n);
+
+  // THIS WEEK'S TERMS (lib/cycleTerms.ts), null while nothing is armed. The order figures exist only
+  // while the vault is Listed with a live listing hash and the sale window open. Contracts left to
+  // buy is Seaport's count for the vault's hash, read here with the same getOrderStatus call the
+  // cycle page makes; while that has no answer, the checked feed row's `remaining` for the hash
+  // (app/api/keeper/orders computes it from its own getOrderStatus read), or 0 when the route
+  // reports that hash sold out, cancelled or expired. With neither, lib/orderFillable.ts gives no
+  // count and the three order rows show "—" with a note: never the whole listing, which overstates
+  // what is left after any fill. The feed query shares the cycle page's cache key
+  // (components/CyclePricing.tsx useKeeperOrderBook).
+  const baseListingState: CycleListingState = {
+    vaultConfigured: VAULT !== undefined,
+    phase: v.phase,
+    listingHash: v.listingHash,
+    listingAmount: v.listingAmount,
+    seaportStatus: undefined,
+    cycleExerciseTs: v.cycleExerciseTs,
+    nowSeconds,
+  };
+  const liveListing = hasOnChainListing(baseListingState);
+  const orderOpen = v.phase === 1 && liveListing && nowSeconds > 0 && !windowClosed(baseListingState);
+  const { data: orderStatus, isLoading: orderStatusLoading } = useOrderStatus(orderOpen ? v.listingHash : undefined);
+  // useOrderStatus fills every field or none.
+  const seaportStatus =
+    orderStatus?.isCancelled !== undefined && orderStatus.totalFilled !== undefined && orderStatus.totalSize !== undefined
+      ? { isCancelled: orderStatus.isCancelled, totalFilled: orderStatus.totalFilled, totalSize: orderStatus.totalSize }
+      : undefined;
+  const listingState: CycleListingState = { ...baseListingState, seaportStatus };
+  const askFeed = orderOpen && shouldAskFeed(listingState);
+  const feed = useKeeperOrderBook(v.listingHash, askFeed);
+  const feedBook = askFeed ? feed.data : undefined;
+  const fillable = orderOpen
+    ? fillableForTerms({
+        phase: v.phase,
+        listingHash: v.listingHash,
+        listingAmount: v.listingAmount,
+        windowClosed: false,
+        seaportStatus,
+        rows: feedBook?.listings,
+        closed: feedBook?.closed,
+      })
+    : undefined;
+  const fillableUnread = orderOpen && fillable === undefined && !orderStatusLoading && !(askFeed && feed.isLoading);
+  const terms = cycleTerms(v, { fillableContracts: fillable?.contracts });
 
   return (
     <>
@@ -137,16 +194,33 @@ export default function HomePage() {
             <Stat
               className="rounded-md bg-surface-2 p-4 sm:p-5"
               label="This week's strike"
-              value={v.cycleStrikeUsdg && v.cycleStrikeUsdg > 0n && v.phase !== 0 ? fmtUsdg(v.cycleStrikeUsdg) : "—"}
+              value={
+                terms !== null
+                  ? terms.strikeFmt
+                  : v.cycleStrikeUsdg && v.cycleStrikeUsdg > 0n && v.phase !== 0
+                    ? fmtUsdg(v.cycleStrikeUsdg)
+                    : "—"
+              }
               unit="USDG"
               sub={
-                v.phase === undefined
-                  ? "—"
-                  : v.phase === 0
-                    ? "nothing armed this cycle"
-                    : `${(v.contractsWritten ?? 0n).toString()} calls sold this week${
+                v.phase === undefined ? (
+                  "—"
+                ) : v.phase === 0 ? (
+                  "nothing armed this cycle"
+                ) : (
+                  <>
+                    <span className="block">
+                      {`${(v.contractsWritten ?? 0n).toString()} calls sold this week${
                         v.capacity !== undefined && v.phase === 1 ? ` · capacity for ${v.capacity.toString()} more` : ""
-                      }`
+                      }`}
+                    </span>
+                    {terms !== null ? (
+                      <span data-slot="strike-expiry" className="block">
+                        {CYCLE_TERMS_LABELS.expiry} {terms.expiryEastern}
+                      </span>
+                    ) : null}
+                  </>
+                )
               }
             />
           </div>
@@ -168,12 +242,85 @@ export default function HomePage() {
           </div>
 
           <div className="grid grid-cols-1 gap-x-12 gap-y-6 border-t border-line pt-6 lg:grid-cols-2">
-            <div className="min-w-0">
+            <div className="min-w-0" data-slot="this-week">
               <h3 className="mb-1.5 text-base font-bold tracking-[-0.01em]">
                 This week
               </h3>
               <Rows>
                 <Row k="Vault cycle" v={<>#{v.cycleNumber ?? "—"}</>} />
+                {terms !== null ? (
+                  <>
+                    <Row
+                      k={CYCLE_TERMS_LABELS.strike}
+                      v={
+                        <>
+                          {terms.strikeFmt} <Unit>USDG</Unit>
+                        </>
+                      }
+                    />
+                    <Row
+                      title="The option's exercise time, snapshotted by the vault when the cycle was armed: the week's NYSE close. The vault refuses every fill from this moment."
+                      k={CYCLE_TERMS_LABELS.exercise}
+                      v={
+                        <>
+                          <span className="whitespace-nowrap">{terms.exerciseUtc}</span> ·{" "}
+                          <span className="whitespace-nowrap">{terms.exerciseEastern}</span>
+                        </>
+                      }
+                    />
+                    <Row
+                      title="The option's expiry, 24 hours after the exercise time, from the vault's snapshot."
+                      k={CYCLE_TERMS_LABELS.expiry}
+                      v={
+                        <>
+                          <span className="whitespace-nowrap">{terms.expiryUtc}</span> ·{" "}
+                          <span className="whitespace-nowrap">{terms.expiryEastern}</span>
+                        </>
+                      }
+                    />
+                    {liveListing && terms.unitPrice6 !== undefined ? (
+                      <Row
+                        k={CYCLE_TERMS_LABELS.unitPrice}
+                        v={
+                          <>
+                            {terms.unitPriceFmt} <Unit>USDG</Unit>
+                          </>
+                        }
+                      />
+                    ) : null}
+                    {orderOpen ? (
+                      <>
+                        <Row k={CYCLE_TERMS_LABELS.fillableContracts} v={terms.fillableContractsFmt} />
+                        <Row
+                          title="Price per contract times contracts left to buy: the order as it stands. If nobody buys, the vault receives nothing."
+                          k={CYCLE_TERMS_LABELS.orderGrossIfAllFill}
+                          v={
+                            terms.orderGrossIfAllFill6 === undefined ? (
+                              "—"
+                            ) : (
+                              <>
+                                {terms.orderGrossIfAllFillFmt} <Unit>USDG</Unit>
+                              </>
+                            )
+                          }
+                        />
+                        <Row
+                          title="policy().protocolFeeBps of that total, rounded down as the vault rounds it. The vault charges the fee once, at harvest, on the week's whole premium."
+                          k={CYCLE_TERMS_LABELS.orderFeeIfAllFill}
+                          v={
+                            terms.orderFeeIfAllFill6 === undefined ? (
+                              "—"
+                            ) : (
+                              <>
+                                {terms.orderFeeIfAllFillFmt} <Unit>USDG</Unit>
+                              </>
+                            )
+                          }
+                        />
+                      </>
+                    ) : null}
+                  </>
+                ) : null}
                 <Row
                   k="Order hash"
                   v={
@@ -194,8 +341,25 @@ export default function HomePage() {
                     </>
                   }
                 />
-                <CycleTapeInline snapshot={v} />
+                {terms !== null ? (
+                  <>
+                    <Row
+                      k="Until the exercise deadline"
+                      v={nowSeconds === 0 ? "—" : fmtCountdown(terms.exerciseTs, nowSeconds)}
+                    />
+                    <Row k="Until expiry" v={nowSeconds === 0 ? "—" : fmtCountdown(terms.expiryTs, nowSeconds)} />
+                  </>
+                ) : (
+                  <CycleTapeInline snapshot={v} />
+                )}
               </Rows>
+              {fillableUnread ? (
+                <p data-slot="this-week-fill-note" className="mt-2 text-[12.5px] leading-[1.55] text-ink-3">
+                  Seaport&apos;s fill count for this order could not be read, and the order feed did not give one, so
+                  contracts left to buy and the two figures after it are not shown.{" "}
+                  <Link href="/vault/nvda/cycle" className="link">The cycle page</Link> has the order itself.
+                </p>
+              ) : null}
             </div>
 
             <div className="min-w-0 max-lg:border-t max-lg:border-line max-lg:pt-6">

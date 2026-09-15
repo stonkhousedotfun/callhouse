@@ -1,18 +1,26 @@
 "use client";
 
-import { useQuery } from "@tanstack/react-query";
-
+import { CyclePricing, useKeeperOrderBook, type CyclePricingFeed } from "@/components/CyclePricing";
 import { CycleTape } from "@/components/CycleTape";
 import { OrderPayload } from "@/components/OrderPayload";
 import { GuardBadges, VaultPhaseBadge } from "@/components/PhaseBadge";
 import { StrandedBanner } from "@/components/StrandedBanner";
 import { Card, CardHead, CardMeta, CardTitle, ExternalLink, Notice as NoticeBox, PageHead, Row, Rows, Table, Unit } from "@/components/ui";
-import { fetchKeeperOrderBook } from "@/lib/api";
 import { cn } from "@/lib/cn";
 import { addressUrl } from "@/lib/chain";
 import { CLEARINGHOUSE, MARKET, MAX_LISTINGS_PER_CYCLE, SEAPORT, VAULT } from "@/lib/contracts";
-import { feedNotice, listingNotice, shouldAskFeed, type CycleListingState, type Notice } from "@/lib/cycleNotices";
+import {
+  feedNotice,
+  listingNotice,
+  orderFinished,
+  shouldAskFeed,
+  windowClosed,
+  type CycleListingState,
+  type Notice,
+} from "@/lib/cycleNotices";
+import { CYCLE_TERMS_LABELS, cycleTerms } from "@/lib/cycleTerms";
 import { fmtEastern, fmtUsdg, fmtUtc, maxContracts, shortHash, unitPriceUsdg } from "@/lib/format";
+import { fillableForTerms } from "@/lib/orderFillable";
 import { useCycleOption, useNow, useOrderStatus, useVaultSnapshot } from "@/lib/hooks";
 
 /**
@@ -88,18 +96,40 @@ export default function CyclePage() {
   // authorised listing; OrderPayload checks it again. When the deployment has no
   // KEEPER_ORDERS_URL the route says so and the page says the feed is not wired.
   const askFeed = shouldAskFeed(listingState);
-  const feed = useQuery({
-    queryKey: ["keeper-orders", VAULT ?? "none", v.listingHash ?? "none"],
-    enabled: askFeed,
-    refetchInterval: 30_000,
-    queryFn: fetchKeeperOrderBook,
-  });
+  const feed = useKeeperOrderBook(v.listingHash, askFeed);
   const feedBook = askFeed ? feed.data : undefined;
   const feedListing = feedBook?.listings.find((l) => l.orderHash.toLowerCase() === v.listingHash?.toLowerCase());
   const chainNotice = listingNotice(listingState);
   const orderFeedNotice = feedNotice(listingState, askFeed && feed.isLoading ? "loading" : feedBook, feedListing !== undefined);
 
   const unitPrice = unitPriceUsdg(v.listingGrossUsdg, v.listingAmount);
+
+  // THE ORDER'S FIGURES (lib/cycleTerms.ts). Contracts left to buy is Seaport's count for the
+  // vault's listingHash as this page reads it, else the checked feed row's (the route's own
+  // Seaport read), else 0 when the route reports the hash sold out, cancelled or expired. With
+  // none of those (Seaport's read has not answered or failed, and the feed has no row), or outside
+  // Listed, or once the sale window has closed, lib/orderFillable.ts gives no count and the rows
+  // show "—", never the whole listing. cycleTerms caps the count at the vault's capacity. The
+  // totals are that count times the listed unit price, and the fee on it floored as
+  // Policy.splitHarvest floors it.
+  const fillable = fillableForTerms({
+    phase: v.phase,
+    listingHash: v.listingHash,
+    listingAmount: v.listingAmount,
+    windowClosed: windowClosed(listingState),
+    seaportStatus,
+    rows: feedListing === undefined ? undefined : [feedListing],
+    closed: feedBook?.closed,
+  });
+  // What the pricing card says when the feed has no row for the hash: why it has none.
+  const pricingFeed: CyclePricingFeed = orderFinished(listingState)
+    ? "order-finished"
+    : !askFeed || feed.isLoading
+      ? "loading"
+      : feedBook === undefined || !feedBook.configured || feedBook.error !== undefined
+        ? "unread"
+        : "not-served";
+  const terms = cycleTerms(v, { fillableContracts: fillable?.contracts });
   const cap = maxContracts(v.totalAssets, v.policy);
   const tupleMismatch = option?.agreesWithVault === false;
   // The clearinghouse is a deploy-time choice recorded in the vault. The checks and the tuple read
@@ -118,8 +148,9 @@ export default function CyclePage() {
             Each week the keeper creates one out-of-the-money option type on the clearinghouse and the vault arms it after
             checking the strike, the lot and the window itself. The vault then authorises one Seaport order for it; this
             page is where that order is filled. Nothing is written until you buy: the fill itself writes exactly the
-            contracts you take, so the vault never holds an unsold call. Everything below is read from the chain, and
-            the order&apos;s parameters from the vault&apos;s keeper, checked against the chain first.
+            contracts you take, so the vault never holds an unsold call. Everything below is read from the chain, except
+            the order&apos;s parameters from the vault&apos;s keeper, checked against the chain first, and the keeper&apos;s
+            own report of how it priced the order, which the chain cannot check and which is labelled as such.
           </p>
         }
       />
@@ -175,17 +206,22 @@ export default function CyclePage() {
                       className={STACK_420}
                       v={
                         <>
-                          {fmtUsdg(v.cycleStrikeUsdg)} <Unit>USDG</Unit>
-                          {option?.otmBps !== undefined ? (
-                            <span className="text-ink-3">
-                              {` · ${option.otmBps >= 0 ? "+" : ""}${(option.otmBps / 100).toFixed(2)}% vs spot`}
-                            </span>
-                          ) : (
-                            ""
-                          )}
+                          {terms?.strikeFmt ?? fmtUsdg(v.cycleStrikeUsdg)} <Unit>USDG</Unit>
                         </>
                       }
                     />
+                    {terms?.strikeAboveSpotUsdg !== undefined ? (
+                      <Row
+                        title="The vault's strike less the spot its own price gate reads now, in USDG. It moves with spot; negative once spot is above the strike."
+                        k={CYCLE_TERMS_LABELS.strikeAboveSpot}
+                        className={STACK_420}
+                        v={
+                          <>
+                            {terms.strikeAboveSpotFmt} <Unit>USDG</Unit>
+                          </>
+                        }
+                      />
+                    ) : null}
                     <Row
                       title="The band the vault applies at today's spot. Both bounds are checked when a cycle is armed; the floor is re-checked at every fill, so a rally can make the vault refuse a sale until the keeper reprices."
                       k={<>Band at today&apos;s spot</>}
@@ -346,9 +382,13 @@ export default function CyclePage() {
                     }
                   />
                   <Row
-                    k="Per contract"
+                    k={CYCLE_TERMS_LABELS.unitPrice}
                     v={
-                      unitPrice === undefined ? (
+                      terms?.unitPrice6 !== undefined ? (
+                        <>
+                          {terms.unitPriceFmt} <Unit>USDG</Unit>
+                        </>
+                      ) : unitPrice === undefined ? (
                         "—"
                       ) : (
                         <>
@@ -357,6 +397,43 @@ export default function CyclePage() {
                       )
                     }
                   />
+                  {v.phase === 1 ? (
+                    <>
+                      <Row
+                        title="Contracts in this order a buyer can still take: Seaport's filled fraction for the vault's order hash as this page reads it, or as the order feed route read it, capped at the vault's capacity. Not shown while neither has answered, or once the sale window has closed."
+                        k={CYCLE_TERMS_LABELS.fillableContracts}
+                        v={terms?.fillableContractsFmt ?? "—"}
+                      />
+                      <Row
+                        title="Price per contract times contracts left to buy: the arithmetic of the order as it stands. If nobody buys, the vault receives nothing."
+                        k={CYCLE_TERMS_LABELS.orderGrossIfAllFill}
+                        className={STACK_420}
+                        v={
+                          terms?.orderGrossIfAllFill6 === undefined ? (
+                            "—"
+                          ) : (
+                            <>
+                              {terms.orderGrossIfAllFillFmt} <Unit>USDG</Unit>
+                            </>
+                          )
+                        }
+                      />
+                      <Row
+                        title="policy().protocolFeeBps of that total, rounded down as the vault rounds it. The vault charges the fee once, at harvest, on the week's whole premium."
+                        k={CYCLE_TERMS_LABELS.orderFeeIfAllFill}
+                        className={STACK_420}
+                        v={
+                          terms?.orderFeeIfAllFill6 === undefined ? (
+                            "—"
+                          ) : (
+                            <>
+                              {terms.orderFeeIfAllFillFmt} <Unit>USDG</Unit>
+                            </>
+                          )
+                        }
+                      />
+                    </>
+                  ) : null}
                   <Row
                     k="Seaport validated"
                     mono={false}
@@ -426,6 +503,15 @@ export default function CyclePage() {
                 ) : null}
               </p>
             </Card>
+
+            {hasOnChainListing ? (
+              <CyclePricing
+                listing={feedListing}
+                feed={pricingFeed}
+                vaultStrike6={v.cycleStrikeUsdg}
+                vaultUnitPrice6={unitPrice}
+              />
+            ) : null}
           </div>
 
           <div className="grid min-w-0 gap-4 empty:hidden sm:gap-5">

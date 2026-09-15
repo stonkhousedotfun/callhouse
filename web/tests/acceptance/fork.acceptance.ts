@@ -30,6 +30,10 @@
  *   (a) depositor: approve + deposit 25 NVDA from /vault/nvda; shares and their NAV render.
  *   (b) buyer: a tampered keeper order is refused by the route and not offered; then fill 2 of N
  *       from /vault/nvda/cycle; then 3 more from the raw payload.
+ *       While still Listed, the cycle page and the home page show this week's terms (strike,
+ *       deadlines, price per contract, contracts left to buy, the order total if every remaining
+ *       contract sells and the protocol fee on it) equal to figures computed here from vault reads
+ *       and Seaport's status, and the cycle page shows the keeper's fixed-mode pricing report.
  *   (c) depositor: queue 10 shares while the vault is Listed.
  *   (d) warp to exercise (buyer exercises 2) and expiry; keeper ticks lockBook and rollClose;
  *       the depositor completes the redeem and claims USDG from the page.
@@ -81,7 +85,8 @@ import { seaportAbi } from "../../lib/abi/seaport";
 import { vaultAbi } from "../../lib/abi/vault";
 import { ASSET, CLEARINGHOUSE, SEAPORT, USDG, ZERO_CONDUIT_KEY } from "../../lib/contracts";
 import type { KeeperOrderBook } from "../../lib/api";
-import { fmtAsset, fmtUsdg, fmtUtcDate, premiumPerShare, shortAddress } from "../../lib/format";
+import { CYCLE_TERMS_LABELS, cycleTerms } from "../../lib/cycleTerms";
+import { fmtAsset, fmtEastern, fmtUsdg, fmtUtc, fmtUtcDate, premiumPerShare, shortAddress } from "../../lib/format";
 import { KEEPER_REASONS, componentsStruct, seaportOrderHash } from "../../lib/keeperOrders";
 import { REASONS, checkListingIsOurs, type ListingRow as FeedListing } from "../../lib/listing";
 import type { CycleRow, ListingRow } from "../../../keeper/src/state.js";
@@ -695,6 +700,11 @@ function rowValue(scope: Locator, key: RegExp): Locator {
 function stat(scope: Locator, label: RegExp): { value: Locator; sub: Locator } {
   const box = scope.locator(SLOT.stat).filter({ has: scope.page().locator(SLOT.statLabel, { hasText: label }) });
   return { value: box.locator(SLOT.statValue), sub: box.locator(SLOT.statSub) };
+}
+
+/** USDG as lib/cycleTerms.ts shows every figure: two decimals on whole cents, all six otherwise. */
+function exactUsdg(value: bigint): string {
+  return fmtUsdg(value, value % 10_000n === 0n ? 2 : 6);
 }
 
 function exactly(text: string): RegExp {
@@ -1328,6 +1338,145 @@ async function main(): Promise<void> {
       record.amounts.keeperListingStatusAfterPartialFill = row.status;
       const { orders } = await getJson<{ orders: KeeperOrder[] }>(`${keeperUrl}/orders`);
       assertEq(orders.length, 1, "/orders still serves it");
+    });
+
+    await step("(b) while Listed: the cycle page and the home page show this week's terms and order figures, from the chain; the keeper's fixed-mode pricing report", async () => {
+      assertEq(await read<number>(vault, vaultAbi, "phase"), roll.Phase.Listed, "vault is Listed");
+      // Everything below is computed here from the vault's slots and Seaport's status, not from the web lib.
+      const [strike, exerciseRaw, expiryRaw, listingAmount, listingGross, written, totalAssets, spot, policyTuple, listingHash] = await Promise.all([
+        read<bigint>(vault, vaultAbi, "cycleStrikeUsdg"),
+        read<bigint | number>(vault, vaultAbi, "cycleExerciseTs"),
+        read<bigint | number>(vault, vaultAbi, "cycleExpiryTs"),
+        read<bigint>(vault, vaultAbi, "listingAmount"),
+        read<bigint>(vault, vaultAbi, "listingGrossUsdg"),
+        read<bigint>(vault, vaultAbi, "contractsWritten"),
+        read<bigint>(vault, vaultAbi, "totalAssets"),
+        read<bigint>(vault, vaultAbi, "spotUsdg"),
+        read<readonly [number, number, number, number, number, bigint]>(vault, vaultAbi, "policy"),
+        read<Hex>(vault, vaultAbi, "listingHash"),
+      ]);
+      const exercise = Number(exerciseRaw);
+      const expiry = Number(expiryRaw);
+      assert(BigInt(Math.floor(Date.now() / 1000)) < BigInt(exercise) && (await latestTimestamp()) < BigInt(exercise), "the sale window is still open");
+      const [, isCancelled, totalFilled, totalSize] = await read<readonly [boolean, boolean, bigint, bigint]>(SEAPORT, seaportAbi, "getOrderStatus", [listingHash]);
+      assertEq(isCancelled, false, "the order is not cancelled");
+      const [, , , maxUtilizationBps, protocolFeeBps, maxContractsCap] = policyTuple;
+      const byUtilization = (totalAssets * BigInt(maxUtilizationBps)) / BPS / LOT;
+      const maxWritable = byUtilization < maxContractsCap ? byUtilization : maxContractsCap;
+      const capacity = maxWritable > written ? maxWritable - written : 0n;
+      const soldPerSeaport = totalSize === 0n ? 0n : (totalFilled * listingAmount) / totalSize;
+      const seaportLeft = listingAmount - soldPerSeaport;
+      const left = seaportLeft < capacity ? seaportLeft : capacity;
+      const unit = listingGross / listingAmount;
+      const gross = unit * left;
+      const fee = (gross * BigInt(protocolFeeBps)) / BPS;
+      assertEq(soldPerSeaport, FILL_FROM_PAGE + FILL_FROM_RAW_PAYLOAD, "Seaport records 5 sold");
+      assertEq(left, listed.contracts - (FILL_FROM_PAGE + FILL_FROM_RAW_PAYLOAD), "contracts left to buy");
+      assertEq(unit, listed.unitPrice6, "unit price from the vault's slot");
+      assertEq(strike, listed.strike, "strike from the vault's snapshot");
+      const expected = {
+        strike: `${exactUsdg(strike)} USDG`,
+        strikeAboveSpot: `${exactUsdg(strike - spot)} USDG`,
+        exercise: `${fmtUtc(exercise)} · ${fmtEastern(exercise)}`,
+        expiry: `${fmtUtc(expiry)} · ${fmtEastern(expiry)}`,
+        expiryEastern: fmtEastern(expiry),
+        unitPrice: `${exactUsdg(unit)} USDG`,
+        left: left.toString(),
+        gross: `${exactUsdg(gross)} USDG`,
+        fee: `${exactUsdg(fee)} USDG`,
+      };
+      // The web lib derives the same figures from the same reads (cross-check, not the source of truth).
+      const terms = cycleTerms(
+        {
+          phase: roll.Phase.Listed,
+          cycleStrikeUsdg: strike,
+          cycleExerciseTs: exercise,
+          cycleExpiryTs: expiry,
+          spotUsdg: spot,
+          listingGrossUsdg: listingGross,
+          listingAmount,
+          contractsWritten: written,
+          capacity,
+          policy: {
+            minOtmBps: Number(policyTuple[0]),
+            maxOtmBps: Number(policyTuple[1]),
+            minPremiumBps: Number(policyTuple[2]),
+            maxUtilizationBps: Number(maxUtilizationBps),
+            protocolFeeBps: Number(protocolFeeBps),
+            maxContractsCap,
+          },
+        },
+        { fillableContracts: seaportLeft },
+      );
+      assert(terms !== null, "cycleTerms on the chain reads");
+      assertEq(terms.orderGrossIfAllFill6 ?? -1n, gross, "cycleTerms order total = unit x left");
+      assertEq(terms.orderFeeIfAllFill6 ?? -1n, fee, "cycleTerms fee = floor(total x feeBps / 10000)");
+      assertEq(`${terms.orderGrossIfAllFillFmt} USDG`, expected.gross, "cycleTerms formats the order total the same way");
+
+      const page = buyerPage;
+      await page.goto(`${web.url}/vault/nvda/cycle`);
+      const option = card(page, /^This week's option · vault cycle #1$/);
+      // The strike row is the strike alone: no distance from spot as a percentage.
+      await expectText("cycle terms: strike", rowValue(option, /^Strike, per contract$/), exactly(expected.strike));
+      await expectText("cycle terms: strike minus spot, in USDG", rowValue(option, exactly(CYCLE_TERMS_LABELS.strikeAboveSpot)), expected.strikeAboveSpot);
+      await expectText("cycle terms: expiry (UTC · Eastern)", rowValue(option, /^Expiry$/), expected.expiry);
+      const onChain = card(page, exactly("The vault's order, on chain"));
+      await expectText("cycle terms: price per contract", rowValue(onChain, exactly(CYCLE_TERMS_LABELS.unitPrice)), expected.unitPrice);
+      await expectText("cycle terms: contracts left to buy", rowValue(onChain, exactly(CYCLE_TERMS_LABELS.fillableContracts)), expected.left);
+      await expectText("cycle terms: order total", rowValue(onChain, exactly(CYCLE_TERMS_LABELS.orderGrossIfAllFill)), expected.gross);
+      await expectText("cycle terms: protocol fee on it", rowValue(onChain, exactly(CYCLE_TERMS_LABELS.orderFeeIfAllFill)), expected.fee);
+
+      // The keeper's own report, as stored with the listing and served through the route.
+      const keeperRow = store.getListing(listed.order.orderHash);
+      assert(keeperRow !== null && typeof keeperRow.pricing_json === "string", "the keeper stored a pricing report with the listing");
+      const report = JSON.parse(keeperRow.pricing_json) as { mode: string; priceSource: string; floorUnit6: string; marginUnit6: string; unitPrice6: string; strikeUsdg6: string };
+      assertEq(report.mode, "fixed", "keeper pricing mode");
+      assertEq(report.priceSource, "fill-floor", "keeper price source");
+      assertEq(BigInt(report.unitPrice6), unit, "the report's ask is the vault's unit price");
+      assertEq(BigInt(report.strikeUsdg6), strike, "the report's strike is the vault's strike");
+      const pricing = card(page, exactly("How the keeper priced this week"));
+      await expectText("pricing: meta", pricing.locator(SLOT.cardMeta), "keeper-reported");
+      await expectText("pricing: mode", rowValue(pricing, /^Pricing mode$/), "fixed · strike a set distance above spot, ask at the vault floor plus margin");
+      await expectText("pricing: what set the ask", rowValue(pricing, /^What set the ask$/), "The vault floor plus the keeper's margin");
+      await expectText("pricing: strike", rowValue(pricing, /^Strike$/), expected.strike);
+      await expectText("pricing: vault floor", rowValue(pricing, /^Vault floor per contract$/), `${exactUsdg(BigInt(report.floorUnit6))} USDG`);
+      await expectText("pricing: floor plus margin", rowValue(pricing, /^Vault floor plus the keeper's margin$/), `${exactUsdg(BigInt(report.marginUnit6))} USDG`);
+      await expectText("pricing: ask", rowValue(pricing, /^Ask per contract$/), expected.unitPrice);
+      await expectText(
+        "pricing: note",
+        pricing.locator('[data-slot="pricing-note"]'),
+        /^Reported by the keeper with its order, not read from the chain, and shown for information only\. In fixed mode no market data is used\. The vault itself enforces only its premium floor and its strike band/,
+      );
+      await expectAbsent("pricing: implied volatility row", pricing.locator(SLOT.k, { hasText: /^Implied volatility at the strike$/ }));
+      await expectAbsent("pricing: target delta row", pricing.locator(SLOT.k, { hasText: /^Target delta$/ }));
+      await expectAbsent("pricing: mismatch notice", pricing.locator('[data-slot="pricing-mismatch"]'));
+
+      await page.goto(`${web.url}/`);
+      await expectText("home: This week's strike", stat(page.locator("main"), /^This week's strike$/).value, expected.strike);
+      await expectText("home: strike expiry (Eastern)", page.locator('[data-slot="strike-expiry"]'), `${CYCLE_TERMS_LABELS.expiry} ${expected.expiryEastern}`);
+      const thisWeek = page.locator('[data-slot="this-week"]');
+      await expectText("home this week: strike", rowValue(thisWeek, exactly(CYCLE_TERMS_LABELS.strike)), expected.strike);
+      await expectText("home this week: exercise deadline", rowValue(thisWeek, exactly(CYCLE_TERMS_LABELS.exercise)), expected.exercise);
+      await expectText("home this week: expiry", rowValue(thisWeek, exactly(CYCLE_TERMS_LABELS.expiry)), expected.expiry);
+      await expectText("home this week: price per contract", rowValue(thisWeek, exactly(CYCLE_TERMS_LABELS.unitPrice)), expected.unitPrice);
+      await expectText("home this week: contracts left to buy", rowValue(thisWeek, exactly(CYCLE_TERMS_LABELS.fillableContracts)), expected.left);
+      await expectText("home this week: order total", rowValue(thisWeek, exactly(CYCLE_TERMS_LABELS.orderGrossIfAllFill)), expected.gross);
+      await expectText("home this week: protocol fee on it", rowValue(thisWeek, exactly(CYCLE_TERMS_LABELS.orderFeeIfAllFill)), expected.fee);
+      // The count is Seaport's (read on the home page too), so the no-count note is not shown.
+      await expectAbsent("home this week: no-count note", thisWeek.locator('[data-slot="this-week-fill-note"]'));
+
+      Object.assign(record.amounts, {
+        termsStrike: expected.strike,
+        termsExercise: expected.exercise,
+        termsExpiry: expected.expiry,
+        termsUnitPrice: expected.unitPrice,
+        termsContractsLeft: expected.left,
+        termsOrderTotal: expected.gross,
+        termsOrderFee: expected.fee,
+        pricingFloorUnit6: report.floorUnit6,
+        pricingMarginUnit6: report.marginUnit6,
+      });
+      note(`terms: strike ${expected.strike}, left ${expected.left} x ${expected.unitPrice} = ${expected.gross}, fee ${expected.fee}; floor ${report.floorUnit6}, margin ${report.marginUnit6}`);
     });
 
     /* ---------- (c) queue while Listed ---------- */
