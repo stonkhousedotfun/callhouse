@@ -140,51 +140,57 @@ export default function AccountPage() {
   }
 
   if (!mounted) {
-    return <p className="py-8 text-sm text-ink-3">Loading…</p>;
+    return <div className="min-h-[calc(100dvh-16rem)]" />;
   }
 
   if (!isConnected) {
     return (
-      <div className="max-w-sm py-8">
-        <h1 className="text-lg font-bold tracking-[-0.02em]">Account</h1>
-        <p className="mt-1 mb-4 text-sm text-ink-2">Connect to deposit {MARKET}.</p>
-        <ConnectButton />
+      <div className="flex min-h-[calc(100dvh-16rem)] items-center justify-center">
+        <Card pad="sm" className="w-full max-w-sm text-center">
+          <h1 className="text-base font-bold tracking-[-0.02em]">Account</h1>
+          <p className="mt-1 mb-4 text-[13px] text-ink-2">Connect to deposit {MARKET}.</p>
+          <div className="flex justify-center">
+            <ConnectButton />
+          </div>
+        </Card>
       </div>
     );
   }
 
   if (!hasAccount) {
     return (
-      <div className="max-w-sm py-8">
-        <h1 className="text-lg font-bold tracking-[-0.02em]">Account</h1>
-        <p className="mt-1 mb-4 text-sm text-ink-2">One transaction. Holds your {MARKET}.</p>
-        <Button
-          size="sm"
-          disabled={busy}
-          onClick={() =>
-            send(
-              () =>
-                writeContractAsync({
-                  address: FACTORY,
-                  abi: accountFactoryAbi as unknown as Abi,
-                  functionName: "createAccount",
-                }),
-              "Open account",
-              "Account opened",
-            )
-          }
-        >
-          Open account
-        </Button>
+      <div className="flex min-h-[calc(100dvh-16rem)] items-center justify-center">
+        <Card pad="sm" className="w-full max-w-sm text-center">
+          <h1 className="text-base font-bold tracking-[-0.02em]">Open an account</h1>
+          <p className="mt-1 mb-4 text-[13px] text-ink-2">Holds your {MARKET}.</p>
+          <Button
+            size="sm"
+            disabled={busy}
+            onClick={() =>
+              send(
+                () =>
+                  writeContractAsync({
+                    address: FACTORY,
+                    abi: accountFactoryAbi as unknown as Abi,
+                    functionName: "createAccount",
+                  }),
+                "Open account",
+                "Account opened",
+              )
+            }
+          >
+            Open account
+          </Button>
+        </Card>
       </div>
     );
   }
 
   return (
-    <div className="mx-auto max-w-xl py-6">
-      <div className="mb-4 flex flex-wrap items-baseline justify-between gap-2">
-        <h1 className="text-lg font-bold tracking-[-0.02em]">Account</h1>
-        <div className="flex flex-wrap gap-1.5">
+    <div className="mx-auto w-full max-w-md py-4">
+      <div className="mb-3 flex items-center justify-between gap-2">
+        <h1 className="text-base font-bold tracking-[-0.02em]">Account</h1>
+        <div className="flex flex-wrap justify-end gap-1">
           {listedAmt > 0n ? (
             <Chip tone="accent" dot>
               {listedAmt.toString()} listed
@@ -197,28 +203,28 @@ export default function AccountPage() {
         </div>
       </div>
 
-      <dl className="mb-4 grid grid-cols-3 gap-px overflow-hidden rounded-md border border-line bg-line text-[12px]">
-        <div className="bg-surface px-3 py-2.5">
+      <dl className="mb-3 grid grid-cols-3 overflow-hidden rounded-md border border-line text-[11px] leading-tight">
+        <div className="border-r border-line px-2.5 py-2">
           <dt className="text-ink-3">Account</dt>
           <dd className="num mt-0.5 font-semibold">
-            {fmtAsset(inAccount)} <span className="font-medium text-ink-3">{MARKET}</span>
+            {fmtAsset(inAccount)} <span className="text-ink-3">{MARKET}</span>
           </dd>
         </div>
-        <div className="bg-surface px-3 py-2.5">
+        <div className="border-r border-line px-2.5 py-2">
           <dt className="text-ink-3">Free</dt>
           <dd className="num mt-0.5 font-semibold">
-            {fmtAsset(idleAmt)} <span className="font-medium text-ink-3">{MARKET}</span>
+            {fmtAsset(idleAmt)} <span className="text-ink-3">{MARKET}</span>
           </dd>
         </div>
-        <div className="bg-surface px-3 py-2.5">
+        <div className="px-2.5 py-2">
           <dt className="text-ink-3">USDG</dt>
           <dd className="num mt-0.5 font-semibold text-usdg">{fmtUsdg(usdgAmt)}</dd>
         </div>
       </dl>
 
-      <Card pad="sm" className="grid gap-4">
+      <Card pad="sm" className="grid gap-3">
         <div>
-          <div className="mb-1.5 flex items-baseline justify-between gap-2 text-[12px]">
+          <div className="mb-1 flex items-baseline justify-between text-[11px]">
             <span className="font-semibold text-ink-2">Deposit</span>
             <button
               type="button"
@@ -228,7 +234,7 @@ export default function AccountPage() {
               Wallet {fmtAsset(walletAmt)}
             </button>
           </div>
-          <div className="flex items-center gap-2">
+          <div className="flex items-center gap-1.5">
             <Field
               id="solo-deposit"
               size="sm"
@@ -240,7 +246,7 @@ export default function AccountPage() {
               placeholder="0"
             />
             <Button
-              size="sm"
+              size="xs"
               disabled={busy || depositAmt === null || depositAmt === 0n}
               onClick={async () => {
                 const amt = depositAmt!;
@@ -276,7 +282,7 @@ export default function AccountPage() {
               Deposit
             </Button>
             <Button
-              size="sm"
+              size="xs"
               variant="ghost"
               disabled={busy || idleAmt === 0n}
               onClick={() =>
@@ -293,14 +299,14 @@ export default function AccountPage() {
                 )
               }
             >
-              Withdraw
+              Out
             </Button>
           </div>
         </div>
 
-        <div className="border-t border-line pt-4">
-          <div className="mb-1.5 flex items-baseline justify-between gap-2 text-[12px]">
-            <span className="font-semibold text-ink-2">Offer this week</span>
+        <div className="border-t border-line pt-3">
+          <div className="mb-1 flex items-baseline justify-between text-[11px]">
+            <span className="font-semibold text-ink-2">Offer</span>
             {wholeIdle > 0n && listedAmt === 0n ? (
               <button type="button" className="link" onClick={() => setOfferRaw(wholeIdle.toString())}>
                 Free {wholeIdle.toString()}
@@ -308,18 +314,18 @@ export default function AccountPage() {
             ) : null}
           </div>
           {weekId === 0 ? (
-            <p className="text-[13px] text-ink-3">Week not open.</p>
+            <p className="text-[12px] text-ink-3">Week not open.</p>
           ) : listedAmt > 0n ? (
-            <p className="text-[13px] text-ink-2">
+            <p className="text-[12px] text-ink-2">
               {listedAmt.toString()} {MARKET} listed
               {writtenAmt > 0n ? ` · ${writtenAmt.toString()} sold` : ""}.
             </p>
           ) : (
-            <div className="flex items-center gap-2">
+            <div className="flex items-center gap-1.5">
               <Field
                 id="solo-offer"
                 size="sm"
-                className="w-28 shrink-0"
+                className="w-24 shrink-0"
                 suffix={MARKET}
                 value={offerRaw}
                 placeholder={wholeIdle > 0n ? wholeIdle.toString() : "0"}
@@ -327,7 +333,7 @@ export default function AccountPage() {
                 inputMode="numeric"
               />
               <Button
-                size="sm"
+                size="xs"
                 disabled={busy || !Number.isInteger(offerLots) || offerLots <= 0}
                 onClick={async () => {
                   const lots = BigInt(offerLots);
@@ -365,10 +371,10 @@ export default function AccountPage() {
       </Card>
 
       {listedAmt > 0n || writtenAmt > 0n || usdgAmt > 0n ? (
-        <div className="mt-3 flex flex-wrap gap-2">
+        <div className="mt-2 flex flex-wrap gap-1.5">
           {listedAmt > 0n || writtenAmt > 0n ? (
             <Button
-              size="sm"
+              size="xs"
               variant="ghost"
               disabled={busy}
               onClick={() =>
@@ -389,7 +395,7 @@ export default function AccountPage() {
           ) : null}
           {usdgAmt > 0n ? (
             <Button
-              size="sm"
+              size="xs"
               disabled={busy}
               onClick={() =>
                 send(
