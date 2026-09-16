@@ -1,5 +1,6 @@
 import { decodeErrorResult, type Abi, type Hex } from "viem";
 
+import { clearExerciseErrorsAbi } from "./abi/clear";
 import { usdgErrorsAbi } from "./abi/erc20";
 import { seaportAbi } from "./abi/seaport";
 import { accountFactoryAbi } from "./abi/accountFactory";
@@ -36,7 +37,7 @@ import { fmtEastern, fmtUsdg, fmtUtc } from "./format";
  * DELIBERATELY ABSENT: React, a chain client. Pure over hex, so vitest covers it.
  */
 
-export type RevertSource = "vault" | "seaport" | "token" | "solidity" | "unknown";
+export type RevertSource = "vault" | "seaport" | "token" | "clear" | "solidity" | "unknown";
 
 export type DecodedRevert = {
   source: RevertSource;
@@ -64,6 +65,7 @@ const SOURCES: ReadonlyArray<readonly [RevertSource, Abi]> = [
   ["vault", vaultAbi as unknown as Abi],
   ["seaport", seaportAbi as unknown as Abi],
   ["token", usdgErrorsAbi as unknown as Abi],
+  ["clear", clearExerciseErrorsAbi as unknown as Abi],
 ];
 
 const big = (v: unknown): bigint | undefined => (typeof v === "bigint" ? v : typeof v === "number" ? BigInt(v) : undefined);
@@ -91,6 +93,11 @@ export const EXPLAINED: Record<string, string | ((args: readonly unknown[]) => s
   NotAuthorized: "Not allowed.",
   NoAccount: "Create an account first.",
   WritesAreHalted: "New sales are paused. Try again later.",
+  StillOpen: "Last week's call is still open. Close it first.",
+  ExerciseTooEarly: "The exercise window has not opened yet.",
+  ExpiredOption: "This call has expired.",
+  InvalidOption: "That is not a call this page can exercise.",
+  CallerHoldsInsufficientOptions: "This wallet does not hold that many calls.",
   // Vault._depositRefused, every reason a depositor can meet. "Assignment pending" is left out on
   // purpose: nothing can be assigned before cycleExerciseTs, so it only ever holds alongside the
   // sale window, the settling phase or a stranded claim, which are named. A full deposit cap is

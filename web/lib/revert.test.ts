@@ -1,6 +1,7 @@
 import { encodeErrorResult, toFunctionSelector, type Abi, type Hex } from "viem";
 import { describe, expect, it } from "vitest";
 
+import { clearExerciseErrorsAbi } from "./abi/clear";
 import { usdgErrorsAbi } from "./abi/erc20";
 import { seaportAbi } from "./abi/seaport";
 import { vaultAbi } from "./abi/vault";
@@ -83,6 +84,21 @@ describe("decodeRevertData", () => {
     });
     expect(panic.slice(0, 10)).toBe(SOLIDITY_PANIC_SELECTOR);
     expect(decodeRevertData(panic)).toMatchObject({ source: "solidity", name: "Panic", text: "The contract hit an internal error (panic code 17)." });
+  });
+
+  it("names the clearinghouse exercise errors so Book does not show a bare selector", () => {
+    const data = encodeErrorResult({
+      abi: clearExerciseErrorsAbi as unknown as Abi,
+      errorName: "ExerciseTooEarly",
+      args: [1n, 1_789_761_600],
+    });
+    expect(decodeRevertData(data)).toMatchObject({
+      source: "clear",
+      name: "ExerciseTooEarly",
+      text: "The exercise window has not opened yet.",
+    });
+    expect(explainRevert("TooEarly")).toBe("The week has not ended yet.");
+    expect(explainRevert("StillOpen")).toContain("Close it first");
   });
 
   it("names USDG's own four errors as the token's, with the selectors verified on chain 4663", () => {

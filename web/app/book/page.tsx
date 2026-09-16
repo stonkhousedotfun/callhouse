@@ -2,11 +2,12 @@
 
 import { useMemo, useState } from "react";
 import type { Abi, Address, Hex } from "viem";
-import { useAccount, usePublicClient, useReadContract, useReadContracts, useWriteContract } from "wagmi";
+import { useAccount, useBlock, usePublicClient, useReadContract, useReadContracts, useWriteContract } from "wagmi";
 
 import { ConnectButton } from "@/components/ConnectButton";
-import { useTxRunner } from "@/components/TxToast";
+import { useNotice, useTxRunner } from "@/components/TxToast";
 import { Button, Card, CardHead, CardTitle, Notice, PageHead, Row, Rows } from "@/components/ui";
+import { CHAIN_ID } from "@/lib/chain";
 import {
   CLEARINGHOUSE,
   FACTORY,
@@ -14,12 +15,15 @@ import {
   SEAPORT,
   USDG,
   ZERO_CONDUIT_KEY,
+  ZERO_HASH,
   accountFactoryAbi,
   seaportAbi,
   stockTokenAbi,
   valoremClearAbi,
   writerAccountAbi,
 } from "@/lib/contracts";
+import { exerciseAmounts, exerciseWindow } from "@/lib/exercise";
+import { parseFactoryWeek } from "@/lib/factoryWeek";
 import { fmtUsdg, shortAddress } from "@/lib/format";
 import type { OrderComponentsJson } from "@/lib/listing";
 import { advancedOrderFor } from "@/lib/seaportOrder";
@@ -80,12 +84,41 @@ function toJson(c: LotOrder): OrderComponentsJson {
   };
 }
 
+function asOption(data: unknown): {
+  exerciseAmount: bigint;
+  underlyingAmount: bigint;
+  exerciseTs: number;
+  expiryTs: number;
+} | undefined {
+  if (data === null || data === undefined || typeof data !== "object") return undefined;
+  const rec = data as Record<string, unknown>;
+  const exerciseAmount = rec.exerciseAmount ?? rec[3];
+  const underlyingAmount = rec.underlyingAmount ?? rec[1];
+  const exerciseTs = rec.exerciseTimestamp ?? rec[4];
+  const expiryTs = rec.expiryTimestamp ?? rec[5];
+  if (exerciseAmount === undefined || underlyingAmount === undefined || exerciseTs === undefined || expiryTs === undefined) {
+    return undefined;
+  }
+  return {
+    exerciseAmount: BigInt(exerciseAmount as bigint),
+    underlyingAmount: BigInt(underlyingAmount as bigint),
+    exerciseTs: Number(exerciseTs),
+    expiryTs: Number(expiryTs),
+  };
+}
+
 export default function BookPage() {
-  const { address, isConnected } = useAccount();
+  const { address, isConnected, chainId } = useAccount();
   const { writeContractAsync } = useWriteContract();
   const publicClient = usePublicClient();
   const run = useTxRunner();
+  const notice = useNotice();
   const [busy, setBusy] = useState(false);
+  const { data: block } = useBlock({
+    chainId: CHAIN_ID,
+    query: { refetchInterval: 15_000 },
+  });
+  const chainNow = block?.timestamp !== undefined ? Number(block.timestamp) : undefined;
 
   const countRead = useReadContract({
     address: FACTORY,
@@ -170,7 +203,7 @@ export default function BookPage() {
           address: SEAPORT,
           abi: seaportAbi as unknown as Abi,
           functionName: "getOrderHash" as const,
-          args: [row.result as LotOrder],
+          args: [row.result as LotOrder] as const,
         },
       ];
     });
@@ -181,18 +214,14 @@ export default function BookPage() {
     query: { enabled: hashCalls.length > 0 },
   });
 
+  // 1:1 with hashCalls so a failed getOrderHash cannot shift getOrderStatus onto a neighbour.
   const statusCalls = useMemo(() => {
-    return (hashesRead.data ?? []).flatMap((row) => {
-      if (row.status !== "success") return [];
-      return [
-        {
-          address: SEAPORT,
-          abi: seaportAbi as unknown as Abi,
-          functionName: "getOrderStatus" as const,
-          args: [row.result as Hex],
-        },
-      ];
-    });
+    return (hashesRead.data ?? []).map((row) => ({
+      address: SEAPORT,
+      abi: seaportAbi as unknown as Abi,
+      functionName: "getOrderStatus" as const,
+      args: [row.status === "success" ? (row.result as Hex) : ZERO_HASH] as const,
+    }));
   }, [hashesRead.data]);
 
   const statusRead = useReadContracts({
@@ -205,18 +234,10 @@ export default function BookPage() {
     abi: accountFactoryAbi as unknown as Abi,
     functionName: "week",
   });
-  const weekId = (() => {
-    const d = week.data;
-    if (!d) return 0;
-    if (Array.isArray(d)) return Number(d[0] ?? 0);
-    return Number((d as { id?: number }).id ?? 0);
-  })();
-  const weekAsk = (() => {
-    const d = week.data;
-    if (!d) return undefined;
-    if (Array.isArray(d)) return d[4] as bigint | undefined;
-    return (d as { askUsdg?: bigint }).askUsdg;
-  })();
+  const parsedWeek = parseFactoryWeek(week.data);
+  const weekReady = week.isSuccess || week.isError;
+  const weekOpen = Boolean(parsedWeek && parsedWeek.id > 0);
+  const weekAsk = parsedWeek?.askUsdg;
 
   const optionIdRead = useReadContracts({
     contracts: accounts.map((account) => ({
@@ -243,21 +264,69 @@ export default function BookPage() {
     query: { enabled: Boolean(address) && Boolean(optionIdRead.data) },
   });
 
-  const heldRows = useMemo(() => {
-    const out: Array<{ optionId: bigint; balance: bigint }> = [];
+  const heldIds = useMemo(() => {
+    const ids: bigint[] = [];
+    const seen = new Set<string>();
     accounts.forEach((_, i) => {
       const id = optionIdRead.data?.[i]?.status === "success" ? (optionIdRead.data[i].result as bigint) : 0n;
       const bal = holdRead.data?.[i]?.status === "success" ? (holdRead.data[i].result as bigint) : 0n;
-      if (id !== 0n && bal > 0n) out.push({ optionId: id, balance: bal });
+      if (id === 0n || bal === 0n) return;
+      const key = id.toString();
+      if (seen.has(key)) return;
+      seen.add(key);
+      ids.push(id);
+    });
+    return ids;
+  }, [accounts, optionIdRead.data, holdRead.data]);
+
+  const heldInfoRead = useReadContracts({
+    contracts: heldIds.map((id) => ({
+      address: CLEARINGHOUSE,
+      abi: valoremClearAbi as unknown as Abi,
+      functionName: "option" as const,
+      args: [id] as const,
+    })),
+    query: { enabled: heldIds.length > 0 },
+  });
+
+  const heldRows = useMemo(() => {
+    const out: Array<{
+      optionId: bigint;
+      balance: bigint;
+      window: ReturnType<typeof exerciseWindow>;
+    }> = [];
+    const infoById = new Map<string, ReturnType<typeof asOption>>();
+    heldIds.forEach((id, i) => {
+      const row = heldInfoRead.data?.[i];
+      if (row?.status === "success") infoById.set(id.toString(), asOption(row.result));
+    });
+    accounts.forEach((_, i) => {
+      const id = optionIdRead.data?.[i]?.status === "success" ? (optionIdRead.data[i].result as bigint) : 0n;
+      const bal = holdRead.data?.[i]?.status === "success" ? (holdRead.data[i].result as bigint) : 0n;
+      if (id === 0n || bal === 0n) return;
+      if (out.some((row) => row.optionId === id)) return;
+      const opt = infoById.get(id.toString());
+      out.push({
+        optionId: id,
+        balance: bal,
+        window: exerciseWindow(
+          opt ? { exerciseTs: opt.exerciseTs, expiryTs: opt.expiryTs } : undefined,
+          chainNow,
+        ),
+      });
     });
     return out;
-  }, [accounts, optionIdRead.data, holdRead.data]);
+  }, [accounts, optionIdRead.data, holdRead.data, heldIds, heldInfoRead.data, chainNow]);
 
   const liveRows = useMemo(() => {
     const out: Array<{ order: LotOrder; owner?: Address }> = [];
+    let successIdx = 0;
     (lotsRead.data ?? []).forEach((row, i) => {
       if (row.status !== "success") return;
-      const status = statusRead.data?.[i];
+      const hashIdx = successIdx;
+      successIdx += 1;
+      const hashRow = hashesRead.data?.[hashIdx];
+      const status = hashRow?.status === "success" ? statusRead.data?.[hashIdx] : undefined;
       if (status?.status === "success") {
         const [validated, cancelled, filled, size] = status.result as [boolean, boolean, bigint, bigint];
         if (!validated || cancelled || (size > 0n && filled >= size)) return;
@@ -267,33 +336,78 @@ export default function BookPage() {
       out.push({ order, owner });
     });
     return out;
-  }, [lotsRead.data, statusRead.data, ownerRead.data, accounts, lotCalls]);
+  }, [lotsRead.data, hashesRead.data, statusRead.data, ownerRead.data, accounts, lotCalls]);
+
+  const write = (args: Parameters<typeof writeContractAsync>[0]) =>
+    writeContractAsync({ ...args, chainId: CHAIN_ID });
 
   async function exercise(optionId: bigint, amount: bigint) {
     if (!address || !publicClient) return;
+    if (chainId !== CHAIN_ID) {
+      notice("error", "Wrong network", "Switch to Robinhood Chain.");
+      return;
+    }
     setBusy(true);
     try {
-      const opt = (await publicClient.readContract({
+      const raw = await publicClient.readContract({
         address: CLEARINGHOUSE,
         abi: valoremClearAbi as unknown as Abi,
         functionName: "option",
         args: [optionId],
-      })) as { exerciseAmount: bigint };
-      const cost = opt.exerciseAmount * amount;
+      });
+      const opt = asOption(raw);
+      if (!opt) {
+        notice("error", "Exercise not sent", "Could not read this call.");
+        return;
+      }
+      const window = exerciseWindow({ exerciseTs: opt.exerciseTs, expiryTs: opt.expiryTs }, Number(await publicClient.getBlock().then((b) => b.timestamp)));
+      if (window === "before") {
+        notice("error", "Exercise not sent", "The exercise window has not opened yet.");
+        return;
+      }
+      if (window === "expired") {
+        notice("error", "Exercise not sent", "This call has expired.");
+        return;
+      }
+      const on = Boolean(
+        await publicClient.readContract({
+          address: CLEARINGHOUSE,
+          abi: valoremClearAbi as unknown as Abi,
+          functionName: "feesEnabled",
+        }),
+      );
+      const bps = Number(
+        await publicClient.readContract({
+          address: CLEARINGHOUSE,
+          abi: valoremClearAbi as unknown as Abi,
+          functionName: "feeBps",
+        }),
+      );
+      const amounts = exerciseAmounts({
+        amount,
+        strikeUsdg: opt.exerciseAmount,
+        underlyingAmount: opt.underlyingAmount,
+        feesEnabled: on,
+        feeBps: bps,
+      });
+      if (!amounts) {
+        notice("error", "Exercise not sent", "Could not size this exercise.");
+        return;
+      }
       const approved = await run(
         () =>
-          writeContractAsync({
+          write({
             address: USDG,
             abi: stockTokenAbi as unknown as Abi,
             functionName: "approve",
-            args: [CLEARINGHOUSE, cost],
+            args: [CLEARINGHOUSE, amounts.total],
           }),
         { pending: "Approve USDG", success: "Approved" },
       );
       if (!approved) return;
       await run(
         () =>
-          writeContractAsync({
+          write({
             address: CLEARINGHOUSE,
             abi: valoremClearAbi as unknown as Abi,
             functionName: "exercise",
@@ -309,6 +423,10 @@ export default function BookPage() {
 
   async function fill(order: LotOrder) {
     if (!address) return;
+    if (chainId !== CHAIN_ID) {
+      notice("error", "Wrong network", "Switch to Robinhood Chain.");
+      return;
+    }
     setBusy(true);
     try {
       const json = toJson(order);
@@ -316,7 +434,7 @@ export default function BookPage() {
       const cost = order.consideration.reduce((sum, item) => sum + item.startAmount, 0n);
       const approved = await run(
         () =>
-          writeContractAsync({
+          write({
             address: USDG,
             abi: stockTokenAbi as unknown as Abi,
             functionName: "approve",
@@ -327,7 +445,7 @@ export default function BookPage() {
       if (!approved) return;
       await run(
         () =>
-          writeContractAsync({
+          write({
             address: SEAPORT,
             abi: seaportAbi as unknown as Abi,
             functionName: "fulfillAdvancedOrder",
@@ -351,7 +469,7 @@ export default function BookPage() {
         lede={
           <p>
             Each offer is one {MARKET} from one person. If you buy, they get paid and you get the call.
-            {weekAsk !== undefined && weekId > 0 ? ` This week: ${fmtUsdg(weekAsk, 3)} USDG each.` : ""}
+            {weekAsk !== undefined && weekOpen ? ` This week: ${fmtUsdg(weekAsk, 3)} USDG each.` : ""}
           </p>
         }
       />
@@ -359,24 +477,34 @@ export default function BookPage() {
       {heldRows.length > 0 ? (
         <div className="mb-6 grid gap-3">
           <h2 className="text-lg font-bold tracking-[-0.015em]">Yours to exercise</h2>
-          {heldRows.map((row) => (
-            <Card key={row.optionId.toString()}>
-              <CardHead>
-                <CardTitle>
-                  {row.balance.toString()} {MARKET} call
-                </CardTitle>
-              </CardHead>
-              <div className="mt-3">
-                <Button disabled={busy} onClick={() => void exercise(row.optionId, row.balance)}>
-                  Exercise
-                </Button>
-              </div>
-            </Card>
-          ))}
+          {heldRows.map((row) => {
+            const ready = row.window === "open";
+            const label =
+              row.window === "before" ? "Opens later" : row.window === "expired" ? "Expired" : row.window === "unknown" ? "Exercise" : "Exercise";
+            return (
+              <Card key={row.optionId.toString()}>
+                <CardHead>
+                  <CardTitle>
+                    {row.balance.toString()} {MARKET} call
+                  </CardTitle>
+                </CardHead>
+                <div className="mt-3">
+                  <Button
+                    disabled={busy || !ready || !isConnected || chainId !== CHAIN_ID}
+                    onClick={() => void exercise(row.optionId, row.balance)}
+                  >
+                    {label}
+                  </Button>
+                </div>
+              </Card>
+            );
+          })}
         </div>
       ) : null}
 
-      {weekId === 0 ? (
+      {!weekReady ? (
+        <Notice tone="info">Loading this week.</Notice>
+      ) : !weekOpen ? (
         <Notice tone="info">Nothing is for sale yet this week.</Notice>
       ) : liveRows.length === 0 ? (
         <Notice tone="info">Nothing is for sale right now. Check back after someone offers their {MARKET}.</Notice>
@@ -395,7 +523,7 @@ export default function BookPage() {
                   <Row k="From" v={shortAddress(owner ?? order.offerer)} />
                 </Rows>
                 <div className="mt-3">
-                  {!isConnected ? (
+                  {!isConnected || chainId !== CHAIN_ID ? (
                     <ConnectButton />
                   ) : (
                     <Button disabled={busy} onClick={() => void fill(order)}>

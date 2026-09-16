@@ -1,12 +1,13 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useMemo, useState, type ReactNode } from "react";
 import { formatUnits, type Abi, type Address } from "viem";
-import { useAccount, useReadContract, useWriteContract } from "wagmi";
+import { useAccount, useBlock, useReadContract, useWriteContract } from "wagmi";
 
 import { ConnectButton } from "@/components/ConnectButton";
 import { useTxRunner } from "@/components/TxToast";
 import { Button, Card, Chip, Field } from "@/components/ui";
+import { CHAIN_ID } from "@/lib/chain";
 import {
   ASSET,
   ASSET_DECIMALS,
@@ -18,17 +19,34 @@ import {
   stockTokenAbi,
   writerAccountAbi,
 } from "@/lib/contracts";
+import { parseFactoryWeek } from "@/lib/factoryWeek";
 import { fmtAsset, fmtUsdg, parseAmount } from "@/lib/format";
 import { useMounted } from "@/lib/hooks";
 
+function EmptyCard({ title, children }: { title: string; children: ReactNode }) {
+  return (
+    <div className="flex min-h-[calc(100dvh-16rem)] items-center justify-center">
+      <Card pad="sm" className="w-full max-w-sm text-center">
+        <h1 className="text-base font-bold tracking-[-0.02em]">{title}</h1>
+        {children}
+      </Card>
+    </div>
+  );
+}
+
 export default function AccountPage() {
   const mounted = useMounted();
-  const { address, isConnected } = useAccount();
+  const { address, isConnected, chainId } = useAccount();
   const { writeContractAsync } = useWriteContract();
   const run = useTxRunner();
   const [depositRaw, setDepositRaw] = useState("");
   const [offerRaw, setOfferRaw] = useState("");
   const [busy, setBusy] = useState(false);
+  const { data: block } = useBlock({
+    chainId: CHAIN_ID,
+    query: { refetchInterval: 15_000 },
+  });
+  const now = block?.timestamp;
 
   const accountRead = useReadContract({
     address: FACTORY,
@@ -39,9 +57,17 @@ export default function AccountPage() {
   });
   const account = (typeof accountRead.data === "string" ? accountRead.data : undefined) as Address | undefined;
   const hasAccount = Boolean(account && account !== ZERO_ADDRESS);
+  const accountLoading = Boolean(address) && (accountRead.isLoading || accountRead.isFetching) && !accountRead.data;
 
   const walletNvda = useReadContract({
     address: ASSET,
+    abi: stockTokenAbi as unknown as Abi,
+    functionName: "balanceOf",
+    args: address ? [address] : undefined,
+    query: { enabled: Boolean(address) },
+  });
+  const walletUsdg = useReadContract({
+    address: USDG,
     abi: stockTokenAbi as unknown as Abi,
     functionName: "balanceOf",
     args: address ? [address] : undefined,
@@ -77,11 +103,17 @@ export default function AccountPage() {
     functionName: "contractsWritten",
     query: { enabled: hasAccount },
   });
-  const usdgBal = useReadContract({
+  const accountUsdg = useReadContract({
     address: USDG,
     abi: stockTokenAbi as unknown as Abi,
     functionName: "balanceOf",
     args: account ? [account] : undefined,
+    query: { enabled: hasAccount },
+  });
+  const listedExpiry = useReadContract({
+    address: account,
+    abi: writerAccountAbi as unknown as Abi,
+    functionName: "listedExpiryTs",
     query: { enabled: hasAccount },
   });
   const allowance = useReadContract({
@@ -96,48 +128,69 @@ export default function AccountPage() {
     abi: accountFactoryAbi as unknown as Abi,
     functionName: "week",
   });
+  const halted = useReadContract({
+    address: FACTORY,
+    abi: accountFactoryAbi as unknown as Abi,
+    functionName: "writesHalted",
+  });
 
-  const weekId =
-    week.data && typeof week.data === "object" && "id" in (week.data as object)
-      ? Number((week.data as { id: number }).id)
-      : Array.isArray(week.data)
-        ? Number(week.data[0])
-        : 0;
+  const parsedWeek = parseFactoryWeek(week.data);
+  const weekReady = week.isSuccess || week.isError;
+  const weekOpen = Boolean(parsedWeek && parsedWeek.id > 0);
+  const writesHalted = halted.data === true;
   const idleAmt = typeof idle.data === "bigint" ? idle.data : 0n;
   const reservedAmt = typeof reserved.data === "bigint" ? reserved.data : 0n;
-  const usdgAmt = typeof usdgBal.data === "bigint" ? usdgBal.data : 0n;
+  const walletUsdgAmt = typeof walletUsdg.data === "bigint" ? walletUsdg.data : 0n;
+  const accountUsdgAmt = typeof accountUsdg.data === "bigint" ? accountUsdg.data : 0n;
   const listedAmt = typeof listed.data === "bigint" ? listed.data : 0n;
   const writtenAmt = typeof written.data === "bigint" ? written.data : 0n;
   const requestedAmt = typeof requested.data === "bigint" ? requested.data : 0n;
   const walletAmt = typeof walletNvda.data === "bigint" ? walletNvda.data : 0n;
+  const listedExpiryTs =
+    typeof listedExpiry.data === "bigint"
+      ? listedExpiry.data
+      : typeof listedExpiry.data === "number"
+        ? BigInt(listedExpiry.data)
+        : 0n;
   const inAccount = idleAmt + reservedAmt;
   const wholeIdle = idleAmt / 10n ** BigInt(ASSET_DECIMALS);
+  const canSettle = listedExpiryTs > 0n && now !== undefined && now >= listedExpiryTs;
 
-  const refresh = () => {
-    void accountRead.refetch();
-    void walletNvda.refetch();
-    void idle.refetch();
-    void reserved.refetch();
-    void requested.refetch();
-    void listed.refetch();
-    void written.refetch();
-    void usdgBal.refetch();
-    void allowance.refetch();
-  };
+  const refresh = () =>
+    Promise.all([
+      accountRead.refetch(),
+      walletNvda.refetch(),
+      walletUsdg.refetch(),
+      idle.refetch(),
+      reserved.refetch(),
+      requested.refetch(),
+      listed.refetch(),
+      written.refetch(),
+      accountUsdg.refetch(),
+      listedExpiry.refetch(),
+      allowance.refetch(),
+      week.refetch(),
+      halted.refetch(),
+    ]);
 
   const depositAmt = useMemo(() => parseAmount(depositRaw, ASSET_DECIMALS), [depositRaw]);
-  const offerLots = Number.parseInt(offerRaw || String(wholeIdle), 10);
+  const parsedOffer = Number.parseInt(offerRaw || String(wholeIdle), 10);
+  const offerLots = Number.isInteger(parsedOffer) ? parsedOffer : NaN;
+  const offerOk = Number.isInteger(offerLots) && offerLots > 0 && BigInt(offerLots) <= wholeIdle;
 
   async function send(fn: () => Promise<`0x${string}`>, pending: string, success: string) {
     setBusy(true);
     try {
       const hash = await run(fn, { pending, success });
-      refresh();
+      await refresh();
       return hash !== null;
     } finally {
       setBusy(false);
     }
   }
+
+  const write = (args: Parameters<typeof writeContractAsync>[0]) =>
+    writeContractAsync({ ...args, chainId: CHAIN_ID });
 
   if (!mounted) {
     return <div className="min-h-[calc(100dvh-16rem)]" />;
@@ -145,44 +198,64 @@ export default function AccountPage() {
 
   if (!isConnected) {
     return (
-      <div className="flex min-h-[calc(100dvh-16rem)] items-center justify-center">
-        <Card pad="sm" className="w-full max-w-sm text-center">
-          <h1 className="text-base font-bold tracking-[-0.02em]">Account</h1>
-          <p className="mt-1 mb-4 text-[13px] text-ink-2">Connect to deposit {MARKET}.</p>
-          <div className="flex justify-center">
-            <ConnectButton />
-          </div>
-        </Card>
-      </div>
+      <EmptyCard title="Account">
+        <p className="mt-1 mb-4 text-[13px] text-ink-2">Connect to deposit {MARKET}.</p>
+        <div className="flex justify-center">
+          <ConnectButton />
+        </div>
+      </EmptyCard>
+    );
+  }
+
+  if (chainId !== CHAIN_ID) {
+    return (
+      <EmptyCard title="Account">
+        <p className="mt-1 mb-4 text-[13px] text-ink-2">Switch to Robinhood Chain.</p>
+        <div className="flex justify-center">
+          <ConnectButton />
+        </div>
+      </EmptyCard>
+    );
+  }
+
+  if (accountLoading) {
+    return <div className="min-h-[calc(100dvh-16rem)]" />;
+  }
+
+  if (accountRead.isError) {
+    return (
+      <EmptyCard title="Account">
+        <p className="mt-1 mb-4 text-[13px] text-ink-2">Could not read this wallet&apos;s account.</p>
+        <Button size="sm" onClick={() => void accountRead.refetch()}>
+          Retry
+        </Button>
+      </EmptyCard>
     );
   }
 
   if (!hasAccount) {
     return (
-      <div className="flex min-h-[calc(100dvh-16rem)] items-center justify-center">
-        <Card pad="sm" className="w-full max-w-sm text-center">
-          <h1 className="text-base font-bold tracking-[-0.02em]">Open an account</h1>
-          <p className="mt-1 mb-4 text-[13px] text-ink-2">Holds your {MARKET}.</p>
-          <Button
-            size="sm"
-            disabled={busy}
-            onClick={() =>
-              send(
-                () =>
-                  writeContractAsync({
-                    address: FACTORY,
-                    abi: accountFactoryAbi as unknown as Abi,
-                    functionName: "createAccount",
-                  }),
-                "Open account",
-                "Account opened",
-              )
-            }
-          >
-            Open account
-          </Button>
-        </Card>
-      </div>
+      <EmptyCard title="Open an account">
+        <p className="mt-1 mb-4 text-[13px] text-ink-2">Holds your {MARKET}.</p>
+        <Button
+          size="sm"
+          disabled={busy}
+          onClick={() =>
+            send(
+              () =>
+                write({
+                  address: FACTORY,
+                  abi: accountFactoryAbi as unknown as Abi,
+                  functionName: "createAccount",
+                }),
+              "Open account",
+              "Account opened",
+            )
+          }
+        >
+          Open account
+        </Button>
+      </EmptyCard>
     );
   }
 
@@ -199,7 +272,8 @@ export default function AccountPage() {
             <Chip>Not listed</Chip>
           )}
           {writtenAmt > 0n ? <Chip tone="usdg">{writtenAmt.toString()} sold</Chip> : null}
-          {weekId === 0 ? <Chip tone="warn">Week closed</Chip> : null}
+          {weekReady && !weekOpen ? <Chip tone="warn">Week closed</Chip> : null}
+          {writesHalted ? <Chip tone="warn">Paused</Chip> : null}
         </div>
       </div>
 
@@ -218,7 +292,7 @@ export default function AccountPage() {
         </div>
         <div className="px-2.5 py-2">
           <dt className="text-ink-3">USDG</dt>
-          <dd className="num mt-0.5 font-semibold text-usdg">{fmtUsdg(usdgAmt)}</dd>
+          <dd className="num mt-0.5 font-semibold text-usdg">{fmtUsdg(walletUsdgAmt)}</dd>
         </div>
       </dl>
 
@@ -247,14 +321,14 @@ export default function AccountPage() {
             />
             <Button
               size="xs"
-              disabled={busy || depositAmt === null || depositAmt === 0n}
+              disabled={busy || depositAmt === null || depositAmt === 0n || depositAmt > walletAmt}
               onClick={async () => {
                 const amt = depositAmt!;
                 const current = (allowance.data as bigint | undefined) ?? 0n;
                 if (current < amt) {
                   const ok = await send(
                     () =>
-                      writeContractAsync({
+                      write({
                         address: ASSET,
                         abi: stockTokenAbi as unknown as Abi,
                         functionName: "approve",
@@ -267,7 +341,7 @@ export default function AccountPage() {
                 }
                 await send(
                   () =>
-                    writeContractAsync({
+                    write({
                       address: account!,
                       abi: writerAccountAbi as unknown as Abi,
                       functionName: "deposit",
@@ -288,7 +362,7 @@ export default function AccountPage() {
               onClick={() =>
                 send(
                   () =>
-                    writeContractAsync({
+                    write({
                       address: account!,
                       abi: writerAccountAbi as unknown as Abi,
                       functionName: "withdraw",
@@ -313,13 +387,22 @@ export default function AccountPage() {
               </button>
             ) : null}
           </div>
-          {weekId === 0 ? (
+          {parsedWeek && weekOpen ? (
+            <p className="mb-1 text-[11px] text-ink-3">
+              {fmtUsdg(parsedWeek.strikeUsdg)} strike · {fmtUsdg(parsedWeek.askUsdg, 3)} USDG
+            </p>
+          ) : null}
+          {!weekReady ? (
+            <p className="text-[12px] text-ink-3">Loading…</p>
+          ) : !weekOpen ? (
             <p className="text-[12px] text-ink-3">Week not open.</p>
           ) : listedAmt > 0n ? (
             <p className="text-[12px] text-ink-2">
               {listedAmt.toString()} {MARKET} listed
               {writtenAmt > 0n ? ` · ${writtenAmt.toString()} sold` : ""}.
             </p>
+          ) : writesHalted ? (
+            <p className="text-[12px] text-ink-3">New sales are paused.</p>
           ) : (
             <div className="flex items-center gap-1.5">
               <Field
@@ -334,13 +417,13 @@ export default function AccountPage() {
               />
               <Button
                 size="xs"
-                disabled={busy || !Number.isInteger(offerLots) || offerLots <= 0}
+                disabled={busy || !offerOk}
                 onClick={async () => {
                   const lots = BigInt(offerLots);
                   if (requestedAmt !== lots) {
                     const ok = await send(
                       () =>
-                        writeContractAsync({
+                        write({
                           address: account!,
                           abi: writerAccountAbi as unknown as Abi,
                           functionName: "requestWrite",
@@ -353,7 +436,7 @@ export default function AccountPage() {
                   }
                   await send(
                     () =>
-                      writeContractAsync({
+                      write({
                         address: account!,
                         abi: writerAccountAbi as unknown as Abi,
                         functionName: "list",
@@ -370,9 +453,9 @@ export default function AccountPage() {
         </div>
       </Card>
 
-      {listedAmt > 0n || writtenAmt > 0n || usdgAmt > 0n ? (
+      {canSettle || accountUsdgAmt > 0n ? (
         <div className="mt-2 flex flex-wrap gap-1.5">
-          {listedAmt > 0n || writtenAmt > 0n ? (
+          {canSettle ? (
             <Button
               size="xs"
               variant="ghost"
@@ -380,7 +463,7 @@ export default function AccountPage() {
               onClick={() =>
                 send(
                   () =>
-                    writeContractAsync({
+                    write({
                       address: account!,
                       abi: writerAccountAbi as unknown as Abi,
                       functionName: "settle",
@@ -393,14 +476,14 @@ export default function AccountPage() {
               Close week
             </Button>
           ) : null}
-          {usdgAmt > 0n ? (
+          {accountUsdgAmt > 0n ? (
             <Button
               size="xs"
               disabled={busy}
               onClick={() =>
                 send(
                   () =>
-                    writeContractAsync({
+                    write({
                       address: account!,
                       abi: writerAccountAbi as unknown as Abi,
                       functionName: "claimUsdg",
@@ -410,7 +493,7 @@ export default function AccountPage() {
                 )
               }
             >
-              Collect {fmtUsdg(usdgAmt)} USDG
+              Collect {fmtUsdg(accountUsdgAmt)} USDG
             </Button>
           ) : null}
         </div>

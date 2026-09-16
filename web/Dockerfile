@@ -93,6 +93,11 @@ RUN pnpm install --frozen-lockfile --filter @callhouse/web...
 ARG NEXT_PUBLIC_VAULT=""
 ENV NEXT_PUBLIC_VAULT=$NEXT_PUBLIC_VAULT
 
+# Isolated 1-lot factory. Blank is SAFE: lib/contracts.ts compiles in the live address
+# 0xc4A5Cd0DE91CaB7F5Ebe2114bc63Fbb43E642BBb. Set this only to point a build at a new factory.
+ARG NEXT_PUBLIC_FACTORY=""
+ENV NEXT_PUBLIC_FACTORY=$NEXT_PUBLIC_FACTORY
+
 # ---- chain. Blank is UNSAFE for these four — see the note above. Mirrors lib/chain.ts. ----
 ARG NEXT_PUBLIC_CHAIN_ID="4663"
 ENV NEXT_PUBLIC_CHAIN_ID=$NEXT_PUBLIC_CHAIN_ID
