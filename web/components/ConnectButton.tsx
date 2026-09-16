@@ -128,24 +128,28 @@ export function ConnectButton({ block = false }: { block?: boolean }) {
       {open ? (
         <div className={`${MENU} w-[220px]`} role="listbox" aria-label="Wallets">
           <div className="grid gap-1">
-            {options.map((connector) => (
-              <Button
-                key={connector.uid}
-                size="sm"
-                variant="ghost"
-                className="w-full justify-start!"
-                onClick={async () => {
-                  setOpen(false);
-                  try {
-                    await connect({ connector, chainId: CHAIN_ID });
-                  } catch (err) {
-                    notice("error", "Could not connect", describeError(err));
-                  }
-                }}
-              >
-                {connector.name}
-              </Button>
-            ))}
+            {options.length === 0 ? (
+              <p className="px-1 py-1.5 text-[13px] leading-snug text-ink-3">Install MetaMask or Phantom.</p>
+            ) : (
+              options.map((connector) => (
+                <Button
+                  key={connector.uid}
+                  size="sm"
+                  variant="ghost"
+                  className="w-full justify-start!"
+                  onClick={async () => {
+                    setOpen(false);
+                    try {
+                      await connect({ connector, chainId: CHAIN_ID });
+                    } catch (err) {
+                      notice("error", "Could not connect", describeError(err));
+                    }
+                  }}
+                >
+                  {connector.name}
+                </Button>
+              ))
+            )}
           </div>
         </div>
       ) : null}

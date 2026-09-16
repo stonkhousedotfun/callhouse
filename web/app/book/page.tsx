@@ -22,7 +22,7 @@ import {
   valoremClearAbi,
   writerAccountAbi,
 } from "@/lib/contracts";
-import { exerciseAmounts, exerciseWindow } from "@/lib/exercise";
+import { approvalFor, exerciseAmounts, exerciseWindow } from "@/lib/exercise";
 import { parseFactoryWeek } from "@/lib/factoryWeek";
 import { fmtUsdg, shortAddress } from "@/lib/format";
 import type { OrderComponentsJson } from "@/lib/listing";
@@ -81,6 +81,67 @@ function toJson(c: LotOrder): OrderComponentsJson {
     salt: c.salt.toString(),
     conduitKey: c.conduitKey,
     counter: c.counter.toString(),
+  };
+}
+
+function asBig(value: unknown): bigint {
+  return BigInt(value as bigint);
+}
+
+function asLotOrder(data: unknown): LotOrder | undefined {
+  if (data === null || data === undefined || typeof data !== "object") return undefined;
+  const rec = data as Record<string, unknown>;
+  const inner = rec.c && typeof rec.c === "object" ? (rec.c as Record<string, unknown>) : rec;
+  const offerer = inner.offerer ?? inner[0];
+  const zone = inner.zone ?? inner[1];
+  const offer = inner.offer ?? inner[2];
+  const consideration = inner.consideration ?? inner[3];
+  const orderType = inner.orderType ?? inner[4];
+  const startTime = inner.startTime ?? inner[5];
+  const endTime = inner.endTime ?? inner[6];
+  const zoneHash = inner.zoneHash ?? inner[7];
+  const salt = inner.salt ?? inner[8];
+  const conduitKey = inner.conduitKey ?? inner[9];
+  const counter = inner.counter ?? inner[10];
+  if (
+    typeof offerer !== "string" ||
+    typeof zone !== "string" ||
+    !Array.isArray(offer) ||
+    !Array.isArray(consideration) ||
+    orderType === undefined ||
+    startTime === undefined ||
+    endTime === undefined ||
+    typeof zoneHash !== "string" ||
+    salt === undefined ||
+    typeof conduitKey !== "string" ||
+    counter === undefined
+  ) {
+    return undefined;
+  }
+  const items = (rows: unknown[]) =>
+    rows.map((row) => {
+      const item = row as Record<string, unknown>;
+      return {
+        itemType: Number(item.itemType ?? item[0]),
+        token: (item.token ?? item[1]) as Address,
+        identifierOrCriteria: asBig(item.identifierOrCriteria ?? item[2]),
+        startAmount: asBig(item.startAmount ?? item[3]),
+        endAmount: asBig(item.endAmount ?? item[4]),
+        recipient: (item.recipient ?? item[5]) as Address,
+      };
+    });
+  return {
+    offerer: offerer as Address,
+    zone: zone as Address,
+    offer: items(offer),
+    consideration: items(consideration),
+    orderType: Number(orderType),
+    startTime: asBig(startTime),
+    endTime: asBig(endTime),
+    zoneHash: zoneHash as Hex,
+    salt: asBig(salt),
+    conduitKey: conduitKey as Hex,
+    counter: asBig(counter),
   };
 }
 
@@ -197,13 +258,14 @@ export default function BookPage() {
 
   const hashCalls = useMemo(() => {
     return (lotsRead.data ?? []).flatMap((row) => {
-      if (row.status !== "success") return [];
+      const order = asLotOrder(row.result);
+      if (row.status !== "success" || !order) return [];
       return [
         {
           address: SEAPORT,
           abi: seaportAbi as unknown as Abi,
           functionName: "getOrderHash" as const,
-          args: [row.result as LotOrder] as const,
+          args: [order] as const,
         },
       ];
     });
@@ -331,7 +393,8 @@ export default function BookPage() {
         const [validated, cancelled, filled, size] = status.result as [boolean, boolean, bigint, bigint];
         if (!validated || cancelled || (size > 0n && filled >= size)) return;
       }
-      const order = row.result as LotOrder;
+      const order = asLotOrder(row.result);
+      if (!order) return;
       const owner = ownerRead.data?.[accounts.indexOf(lotCalls[i].address)]?.result as Address | undefined;
       out.push({ order, owner });
     });
@@ -340,6 +403,42 @@ export default function BookPage() {
 
   const write = (args: Parameters<typeof writeContractAsync>[0]) =>
     writeContractAsync({ ...args, chainId: CHAIN_ID });
+
+  async function approveUsdg(spender: Address, total: bigint): Promise<boolean> {
+    if (!address || !publicClient) return false;
+    const [balance, allowance] = await Promise.all([
+      publicClient.readContract({
+        address: USDG,
+        abi: stockTokenAbi as unknown as Abi,
+        functionName: "balanceOf",
+        args: [address],
+      }) as Promise<bigint>,
+      publicClient.readContract({
+        address: USDG,
+        abi: stockTokenAbi as unknown as Abi,
+        functionName: "allowance",
+        args: [address, spender],
+      }) as Promise<bigint>,
+    ]);
+    if (balance < total) {
+      notice("error", "Not enough USDG", `Need ${fmtUsdg(total)} USDG in this wallet.`);
+      return false;
+    }
+    const needed = approvalFor(allowance, total);
+    if (needed === undefined) return false;
+    if (needed === 0n) return true;
+    const approved = await run(
+      () =>
+        write({
+          address: USDG,
+          abi: stockTokenAbi as unknown as Abi,
+          functionName: "approve",
+          args: [spender, needed],
+        }),
+      { pending: "Approve USDG", success: "Approved" },
+    );
+    return Boolean(approved);
+  }
 
   async function exercise(optionId: bigint, amount: bigint) {
     if (!address || !publicClient) return;
@@ -394,17 +493,7 @@ export default function BookPage() {
         notice("error", "Exercise not sent", "Could not size this exercise.");
         return;
       }
-      const approved = await run(
-        () =>
-          write({
-            address: USDG,
-            abi: stockTokenAbi as unknown as Abi,
-            functionName: "approve",
-            args: [CLEARINGHOUSE, amounts.total],
-          }),
-        { pending: "Approve USDG", success: "Approved" },
-      );
-      if (!approved) return;
+      if (!(await approveUsdg(CLEARINGHOUSE, amounts.total))) return;
       await run(
         () =>
           write({
@@ -432,17 +521,7 @@ export default function BookPage() {
       const json = toJson(order);
       const advanced = advancedOrderFor(json, 1n, 1n);
       const cost = order.consideration.reduce((sum, item) => sum + item.startAmount, 0n);
-      const approved = await run(
-        () =>
-          write({
-            address: USDG,
-            abi: stockTokenAbi as unknown as Abi,
-            functionName: "approve",
-            args: [SEAPORT, cost],
-          }),
-        { pending: "Approve USDG", success: "Approved" },
-      );
-      if (!approved) return;
+      if (!(await approveUsdg(SEAPORT, cost))) return;
       await run(
         () =>
           write({
