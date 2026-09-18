@@ -3,7 +3,13 @@ import schema from "ponder:schema";
 import type { Address, Hex } from "viem";
 
 import { stockTokenAbi } from "../abis/stockToken";
-import { ASSET, VAULT } from "./env";
+import { ASSET, vaultAddress } from "./env";
+
+/**
+ * The vault helpers below resolve the address through `vaultAddress()` at call time rather than
+ * importing `VAULT`: on a factory-only deployment `VAULT` is undefined and this module is still
+ * loaded (src/vault.ts imports it), but none of these is ever called there.
+ */
 
 /** The writable database handle handed to every indexing function. */
 export type DB = Context["db"];
@@ -38,9 +44,9 @@ export const eventId = (event: EventMeta): string =>
  * no shares, no cycle. Handlers then reduce events onto it in log order.
  */
 export async function getState(db: DB) {
-  const existing = await db.find(schema.vaultState, { id: VAULT });
+  const existing = await db.find(schema.vaultState, { id: vaultAddress() });
   if (existing !== null) return existing;
-  return await db.insert(schema.vaultState).values({ id: VAULT });
+  return await db.insert(schema.vaultState).values({ id: vaultAddress() });
 }
 
 export type VaultState = Awaited<ReturnType<typeof getState>>;
@@ -51,7 +57,7 @@ type StatePatch = Partial<Omit<VaultState, "id">>;
 /** Apply a patch to the singleton vault-state row and return the updated row. */
 export async function patchState(db: DB, values: StatePatch) {
   await getState(db);
-  return await db.update(schema.vaultState, { id: VAULT }).set(values);
+  return await db.update(schema.vaultState, { id: vaultAddress() }).set(values);
 }
 
 /** Stamp "when did we last see this vault move" without changing anything else. */
@@ -147,7 +153,7 @@ async function readUiMultiplier(client: ReadClient): Promise<bigint | null> {
  * itself (which holds escrowed shares for the redeem queue, not a position).
  */
 export const isAccountable = (addr: Address): boolean =>
-  addr.toLowerCase() !== ZERO_ADDRESS && addr.toLowerCase() !== VAULT.toLowerCase();
+  addr.toLowerCase() !== ZERO_ADDRESS && addr.toLowerCase() !== vaultAddress().toLowerCase();
 
 export async function getUser(db: DB, address: Address, event: EventMeta) {
   const existing = await db.find(schema.user, { address });

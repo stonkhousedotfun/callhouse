@@ -10,14 +10,14 @@
  * can move a strike or a price, and any doubt skips the week (policy.ts turns each failure into
  * a named reason) instead of arming on a guess.
  *
- * THE FEED, as observed on 2026-09-14/15 (keeper/src/fixtures/cboe-nvda-2026-09-14.json):
+ * THE FEED, illustrated by the deterministic synthetic test payload:
  *   GET https://cdn.cboe.com/api/global/delayed_quotes/options/NVDA.json
- *   { timestamp: "2026-09-15 05:57:42",
- *     data: { symbol: "NVDA", current_price: 212.0404, last_trade_time: "2026-09-14T15:59:59",
+ *   { timestamp: "2026-09-15 05:45:00",
+ *     data: { symbol: "NVDA", current_price: 212.35, last_trade_time: "2026-09-14T15:59:59",
  *             options: [ { option: "NVDA260918C00222500", bid, ask, iv, delta, ... }, ... ] } }
  *   option   root + YYMMDD + C|P + strike × 1000 as 8 digits. Weekly expiries every Friday.
  *   prices   per SHARE (one listed contract is 100 shares; the vault's contract is one token).
- *   iv       a fraction (0.3732), unlike the stock-level iv30, which is in percent.
+ *   iv       a fraction (0.43 in the synthetic example), unlike stock-level iv30 in percent.
  *
  * THE TWO CLOCKS. Neither is documented by Cboe, so both were measured:
  *   timestamp        UTC. It is when Cboe generated the file, not when anything traded: fetched

@@ -24,7 +24,7 @@ function clean(value: string | undefined, fallback: string): string {
 /** Marketing site. Landing, /how-it-works, /risks, /legal, /terms, /privacy. Canonical for the disclosures. */
 export const SITE_URL = clean(process.env.NEXT_PUBLIC_SITE_URL, "https://stonkhouse.fun");
 
-/** The full documentation (GitBook, synced from stonkhousedotfun/callhouse-docs). Linked from the footer. */
+/** Legacy v1 documentation (GitBook); v2 guidance lives in the app until its docs are published. */
 export const DOCS_URL = clean(process.env.NEXT_PUBLIC_DOCS_URL, "https://docs.stonkhouse.fun");
 
 /** This app. Used as the metadata base; the dapp is reached by link from SITE_URL. */

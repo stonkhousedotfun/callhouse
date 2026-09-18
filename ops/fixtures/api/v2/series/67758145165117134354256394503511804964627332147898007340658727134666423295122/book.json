@@ -1,0 +1,31 @@
+{
+  "bids": [],
+  "asks": [
+    {
+      "price": {
+        "raw": "250000",
+        "decimals": 6,
+        "formatted": "0.25"
+      },
+      "units": "250",
+      "orders": [
+        {
+          "orderId": "1032",
+          "maker": "0xd3b47D8a6B8e3fc6160Cd02634CF7Ae74aDeB66f",
+          "units": "250",
+          "onChainRemainingUnits": "250",
+          "makerFreeUnits": "5279",
+          "makerFreeCollateral": {
+            "raw": "52795371886099897369",
+            "decimals": 18,
+            "formatted": "52.795371886099897369"
+          },
+          "kind": "AskWrite",
+          "validUntil": 1789673400
+        }
+      ]
+    }
+  ],
+  "updatedBlock": "64418153",
+  "snapshotTimestamp": 1789592400
+}

@@ -1,0 +1,63 @@
+{
+  "series": {
+    "longId": "106061210522032153259223709687936706376356793520792570208645879620069429413222",
+    "shortId": "106061210522032153259223709687936706376356793520792570208645879620069429413223",
+    "ticker": "TSLA",
+    "underlying": "0x322F0929c4625eD5bAd873c95208D54E1c003b2d",
+    "isPut": false,
+    "strike": {
+      "raw": "385000000",
+      "decimals": 6,
+      "formatted": "385"
+    },
+    "expiry": 1789761600,
+    "tenor": "weekly",
+    "mintCutoff": 1789759800,
+    "mintFeePpm": 300,
+    "mintFeesHeld": {
+      "raw": "84910714285715",
+      "decimals": 18,
+      "formatted": "0.000084910714285715"
+    },
+    "mintFeesAccrued": {
+      "raw": "0",
+      "decimals": 18,
+      "formatted": "0"
+    },
+    "status": "open"
+  },
+  "quote": {
+    "bestBid": {
+      "raw": "162500",
+      "decimals": 6,
+      "formatted": "0.1625"
+    },
+    "bestAsk": {
+      "raw": "250000",
+      "decimals": 6,
+      "formatted": "0.25"
+    },
+    "bidUnits": "100",
+    "askUnits": "40",
+    "fair": {
+      "raw": "176672",
+      "decimals": 6,
+      "formatted": "0.176672"
+    },
+    "iv": 0.5697,
+    "delta": 0.031,
+    "last": {
+      "raw": "400000",
+      "decimals": 6,
+      "formatted": "0.4"
+    }
+  },
+  "openInterestUnits": "90",
+  "volume": {
+    "raw": "298960",
+    "decimals": 6,
+    "formatted": "0.29896"
+  },
+  "settlement": null,
+  "exerciseFeeBps": 25
+}

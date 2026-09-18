@@ -1094,21 +1094,10 @@ export const mockFeedAbi = [
   { type: 'function', name: 'setAnswer', inputs: [{ name: 'a', type: 'int256' }], outputs: [], stateMutability: 'nonpayable' },
 ] as const;
 
-export const feedAbi = [
-  {
-    type: 'function',
-    name: 'latestRoundData',
-    inputs: [],
-    outputs: [
-      { name: 'roundId', type: 'uint80' },
-      { name: 'answer', type: 'int256' },
-      { name: 'startedAt', type: 'uint256' },
-      { name: 'updatedAt', type: 'uint256' },
-      { name: 'answeredInRound', type: 'uint80' },
-    ],
-    stateMutability: 'view',
-  },
-] as const;
+/** The Chainlink read surface. Lives in feed.ts since the factory-only keeper reads the feed
+ *  itself (no vault to ask); re-exported here so the harness and its callers do not change. */
+import { feedAbi } from './feed.js';
+export { feedAbi };
 
 /**
  * The vault surface the keeper never touches — the redeem queue, the instant path, the USDG

@@ -59,7 +59,7 @@ vi.mock("ponder", async (importOriginal) => {
 import { ZERO_HARVEST_TOTALS, addHarvest, splitHarvest, type HarvestEvent } from "../../lib/harvest";
 import { closeStatus, endedListingStatus, recoveredStatus, type HarvestOrigin } from "../../lib/lifecycle";
 import { cycleStatus, epochStatus, harvestOrigin, listingStatus } from "../../ponder.schema";
-import { CYCLE_STATUSES, LISTING_STATUSES, accountStrand, cycleJson, harvestJson, listingJson, strandJson, weekOptionIds } from "./index";
+import { CYCLE_STATUSES, LISTING_STATUSES, accountStrand, clampOffset, cycleJson, harvestJson, listingJson, strandJson, weekOptionIds } from "./index";
 import { toJson } from "./serialize";
 
 type CycleRow = typeof schema.cycle.$inferSelect;
@@ -68,6 +68,17 @@ type HarvestRow = typeof schema.harvest.$inferSelect;
 type StrandRow = typeof schema.strand.$inferSelect;
 
 const FIXTURE_DIR = join(import.meta.dirname, "..", "..", "..", "ops", "fixtures", "api");
+
+describe("legacy list pagination", () => {
+  it("caps a valid offset at the largest supported page start", () => {
+    expect(clampOffset(undefined)).toBe(0);
+    expect(clampOffset("9999")).toBe(9_999);
+    expect(clampOffset("10000")).toBe(10_000);
+    expect(clampOffset("10001")).toBe(10_000);
+    expect(clampOffset(String(Number.MAX_SAFE_INTEGER))).toBe(10_000);
+    expect(clampOffset("-1")).toBe(0);
+  });
+});
 
 /*//////////////////////////////////////////////////////////////
                          THE NUMBERS
@@ -735,5 +746,320 @@ describe("accountStrand (/v1/account/:addr strand)", () => {
     // 0.1e18 of generation 1 staged (resolved, not yet folded), and A's entry in generation 2's epoch.
     const r = accountStrand({ ...base, stagedWad: 10n ** 17n, stagedGen: 1n, queuedShares: 6n * LOT });
     expect(r).toEqual({ wad: 10n ** 17n, gen: 1n, epochWad: 240000000000000000n, epochGen: 2n });
+  });
+});
+
+/*//////////////////////////////////////////////////////////////
+                       THE FACTORY MARKET
+//////////////////////////////////////////////////////////////*/
+
+/**
+ * The `/v1/market*` shapes. Same discipline as `cycleJson` above: money is `{raw, decimals,
+ * formatted}`, every uint is a decimal string, timestamps come as seconds AND ISO, and nothing the
+ * index did not read is published as a zero. There is no fixture file for these yet — the web's
+ * /account and /book still read the factory over RPC (the audit finding this lane documents in
+ * indexer/README.md "Factory markets"); when the dapp moves onto `/v1/market`, the fixture goes
+ * under ops/fixtures/api/ and this test pins it the way `cycleJson` is pinned.
+ */
+import { settlementOutcome } from "../../lib/factoryLifecycle";
+import { writerAccountStatus } from "../../ponder.schema";
+import { SETTLEMENT_OUTCOMES, WRITER_ACCOUNT_STATUSES, lotFillJson, marketAddresses, marketJson, marketWeekJson, settlementJson, writerAccountJson } from "./index";
+
+type MarketRow = typeof schema.market.$inferSelect;
+type MarketWeekRow = typeof schema.marketWeek.$inferSelect;
+type WriterAccountRow = typeof schema.writerAccount.$inferSelect;
+type LotFillRow = typeof schema.lotFill.$inferSelect;
+type SettlementRow = typeof schema.accountSettlement.$inferSelect;
+
+// The live NVDA factory on 2026-09-15 (ops/markets/tier1.json): week 1 set at strike 223, ask 1.00.
+const FACTORY = "0xc4A5Cd0DE91CaB7F5Ebe2114bc63Fbb43E642BBb" as const;
+const NVDA = "0xd0601CE157Db5bdC3162BbaC2a2C8aF5320D9EEC" as const;
+const FEED = "0x379EC4f7C378F34a1B47E4F3cbeBCbAC3E8E9F15" as const;
+const OUR_CLEAR = "0x53d7A6d0489Daf3d67b9A314e0eAB2B78Acab9C6" as const;
+const ADMIN = "0xEb82c3D0F89d47453F94f0C2b2a2752e27a19d9b" as const;
+const ACCOUNT = "0x00000000000000000000000000000000000000a1" as const;
+const OWNER = "0x00000000000000000000000000000000000000ee" as const;
+const TX = `0x${"c".repeat(64)}` as const;
+const WEEK_SET_AT = ts("2026-09-15T14:00:00Z");
+const EXERCISE = ts("2026-09-18T20:00:00Z");
+const BASE_EXPIRY = ts("2026-09-19T20:00:00Z");
+
+const MARKET_ROW: MarketRow = {
+  id: FACTORY,
+  ticker: "NVDA",
+  asset: NVDA,
+  feed: FEED,
+  clear: OUR_CLEAR,
+  implementation: "0xe412A596B000f73ad19B39f51dfd0B17A15F45EC",
+  settingsVerified: true,
+  admin: ADMIN,
+  feeRecipient: ADMIN,
+  depositCap: 2n ** 256n - 1n,
+  minOtmBps: 300,
+  maxOtmBps: 1200,
+  minPremiumBps: 40,
+  maxUtilizationBps: 9500,
+  protocolFeeBps: 500,
+  maxContractsCap: 50n,
+  policySetAt: null,
+  writesHalted: false,
+  weekId: 1,
+  strikeUsdg: 223_000000n,
+  exerciseTs: EXERCISE,
+  baseExpiryTs: BASE_EXPIRY,
+  askUsdg: 1_000000n,
+  weekSetAt: WEEK_SET_AT,
+  accountCount: 1,
+  pendingLots: 2n,
+  lotsListed: 0n,
+  lotsFilled: 0n,
+  premiumUsdg: 0n,
+  settlements: 0,
+  assetReturned: 0n,
+  assignedUsdg: 0n,
+  claimedUsdg: 0n,
+  lastBlock: 64_100_000n,
+  lastTimestamp: WEEK_SET_AT,
+};
+
+describe("marketJson (/v1/market)", () => {
+  it("publishes the factory's terms, the setup-read contracts and settings, and the totals, as strings and amounts", () => {
+    const j = marketJson(MARKET_ROW);
+    expect(j.factory).toBe(FACTORY);
+    expect(j.ticker).toBe("NVDA");
+    expect(j.contracts).toEqual({ verified: true, asset: NVDA, feed: FEED, clear: OUR_CLEAR, implementation: MARKET_ROW.implementation });
+    expect(j.settings.policy).toEqual({ minOtmBps: 300, maxOtmBps: 1200, minPremiumBps: 40, maxUtilizationBps: 9500, protocolFeeBps: 500, maxContractsCap: "50" });
+    expect(j.settings.depositCap?.raw).toBe((2n ** 256n - 1n).toString());
+    expect(j.week).toEqual({
+      id: 1,
+      strikeUsdg: { raw: "223000000", decimals: 6, formatted: "223" },
+      askUsdg: { raw: "1000000", decimals: 6, formatted: "1" },
+      exerciseTimestamp: EXERCISE.toString(),
+      exerciseAt: "2026-09-18T20:00:00.000Z",
+      baseExpiryTimestamp: BASE_EXPIRY.toString(),
+      baseExpiryAt: "2026-09-19T20:00:00.000Z",
+      setAt: "2026-09-15T14:00:00.000Z",
+    });
+    expect(j.totals.pendingLots).toBe("2");
+    expect(j.totals.premiumUsdg).toEqual({ raw: "0", decimals: 6, formatted: "0" });
+    expect(j.indexedAt.blockNumber).toBe("64100000");
+    // Nothing a bigint: the payload survives JSON.stringify.
+    expect(() => JSON.stringify(toJson(j))).not.toThrow();
+  });
+
+  it("an unverified setup read is null and says so, never zero; no week is null, not week 0", () => {
+    const unread: MarketRow = {
+      ...MARKET_ROW,
+      asset: null, feed: null, clear: null, implementation: null, settingsVerified: false,
+      admin: null, feeRecipient: null, depositCap: null,
+      minOtmBps: null, maxOtmBps: null, minPremiumBps: null, maxUtilizationBps: null, protocolFeeBps: null, maxContractsCap: null,
+      weekId: 0, strikeUsdg: 0n, askUsdg: 0n, exerciseTs: 0n, baseExpiryTs: 0n, weekSetAt: null,
+    };
+    const j = marketJson(unread);
+    expect(j.contracts.verified).toBe(false);
+    expect(j.settings.verified).toBe(false);
+    expect(j.settings.policy).toBeNull();
+    expect(j.settings.depositCap).toBeNull();
+    expect(j.week).toBeNull();
+  });
+
+  it("immutables read at the head count as verified contracts even when the pinned settings batch did not answer", () => {
+    const j = marketJson({ ...MARKET_ROW, settingsVerified: false, protocolFeeBps: null, depositCap: null });
+    expect(j.contracts.verified).toBe(true);
+    expect(j.settings.verified).toBe(false);
+  });
+});
+
+describe("marketAddresses (the addresses group on /v1/market*)", () => {
+  it("publishes the market's own asset and Clear from the setup read, not the vault's env defaults", () => {
+    const a = marketAddresses(MARKET_ROW);
+    expect(a.asset).toBe(NVDA);
+    expect(a.clearinghouse).toBe(OUR_CLEAR);
+    // The env default (the upstream Valorem build the VAULT writes into) must not leak onto a
+    // factory payload: the factory's Clear is our own DeployClear instance.
+    expect(a.clearinghouse).not.toBe("0x9a7b40e5c1dB1Af822ef091c990b58b02C78C0C0");
+  });
+
+  it("a non-NVDA market's asset flows through; the NVDA env default would be wrong there", () => {
+    const AAPL = "0x000000000000000000000000000000000000aa91";
+    expect(marketAddresses({ ...MARKET_ROW, asset: AAPL, ticker: "AAPL" }).asset).toBe(AAPL);
+  });
+
+  it("an unread setup read is null, never the env default — null means 'not read'", () => {
+    const unread = marketAddresses({ ...MARKET_ROW, asset: null, clear: null });
+    expect(unread.asset).toBeNull();
+    expect(unread.clearinghouse).toBeNull();
+    expect(marketAddresses(null).asset).toBeNull();
+    expect(marketAddresses(null).clearinghouse).toBeNull();
+  });
+});
+
+describe("marketWeekJson (/v1/market/weeks, /v1/market.currentWeek)", () => {
+  it("a week nobody listed under is a row of zeros with its terms, never a missing row", () => {
+    const w: MarketWeekRow = {
+      id: `${FACTORY.toLowerCase()}-1`,
+      factory: FACTORY,
+      weekId: 1,
+      strikeUsdg: 223_000000n,
+      exerciseTs: EXERCISE,
+      baseExpiryTs: BASE_EXPIRY,
+      askUsdg: 1_000000n,
+      setAt: WEEK_SET_AT,
+      setBlock: 64_100_000n,
+      setTx: TX,
+      lotsListed: 0n,
+      lotsFilled: 0n,
+      premiumUsdg: 0n,
+      accountsListed: 0,
+      accountsSettled: 0,
+      assetReturned: 0n,
+      assignedUsdg: 0n,
+    };
+    expect(marketWeekJson(w)).toEqual({
+      week: 1,
+      strikeUsdg: { raw: "223000000", decimals: 6, formatted: "223" },
+      askUsdg: { raw: "1000000", decimals: 6, formatted: "1" },
+      exerciseTimestamp: EXERCISE.toString(),
+      exerciseAt: "2026-09-18T20:00:00.000Z",
+      baseExpiryTimestamp: BASE_EXPIRY.toString(),
+      baseExpiryAt: "2026-09-19T20:00:00.000Z",
+      setAt: "2026-09-15T14:00:00.000Z",
+      setTx: TX,
+      accountsListed: 0,
+      accountsSettled: 0,
+      lotsListed: "0",
+      lotsFilled: "0",
+      premiumUsdg: { raw: "0", decimals: 6, formatted: "0" },
+      assetReturned: { raw: "0", decimals: 18, formatted: "0" },
+      assignedUsdg: { raw: "0", decimals: 6, formatted: "0" },
+    });
+  });
+});
+
+describe("writerAccountJson (/v1/market/accounts/:address)", () => {
+  const base: WriterAccountRow = {
+    id: ACCOUNT,
+    factory: FACTORY,
+    owner: OWNER,
+    index: 1,
+    createdAt: WEEK_SET_AT,
+    createdBlock: 64_050_000n,
+    createdTx: TX,
+    status: "pending",
+    depositedTotal: 3n * LOT,
+    withdrawnTotal: 0n,
+    claimedUsdg: 0n,
+    requestedLots: 2n,
+    listedLots: 0n,
+    filledLots: 0n,
+    listedWeekId: null,
+    optionId: null,
+    listedAskUsdg: 0n,
+    listedAt: null,
+    lotsListed: 0n,
+    lotsFilled: 0n,
+    premiumUsdg: 0n,
+    settlements: 0,
+    lastSettledAt: null,
+    lastActivityAt: WEEK_SET_AT,
+    lastActivityBlock: 64_100_000n,
+  };
+
+  it("a pending account has a request and no listing", () => {
+    const j = writerAccountJson(base);
+    expect(j.status).toBe("pending");
+    expect(j.request).toEqual({ lots: "2", pending: true });
+    expect(j.listing).toBeNull();
+    expect(j.lifetime.deposited).toEqual({ raw: (3n * LOT).toString(), decimals: 18, formatted: "3" });
+  });
+
+  it("a listed account carries the pinned week; the request stays as on chain but no longer counts as pending", () => {
+    const j = writerAccountJson({ ...base, status: "listed", listedLots: 2n, filledLots: 1n, listedWeekId: 1, optionId: OPTION_ID, listedAskUsdg: 1_000000n, listedAt: WEEK_SET_AT });
+    expect(j.request).toEqual({ lots: "2", pending: false });
+    expect(j.listing).toEqual({
+      week: 1,
+      optionId: OPTION_ID.toString(),
+      lots: "2",
+      filledLots: "1",
+      askUsdg: { raw: "1000000", decimals: 6, formatted: "1" },
+      listedAt: "2026-09-15T14:00:00.000Z",
+    });
+  });
+
+  it("an unredeemed settle keeps the option id on the account, as optionId() does on chain", () => {
+    const j = writerAccountJson({ ...base, status: "settled", requestedLots: 0n, optionId: OPTION_ID, settlements: 1, lastSettledAt: BASE_EXPIRY });
+    expect(j.listing).toBeNull();
+    expect(j.optionId).toBe(OPTION_ID.toString());
+    expect(j.lifetime.lastSettledAt).toBe("2026-09-19T20:00:00.000Z");
+  });
+});
+
+describe("lotFillJson / settlementJson", () => {
+  it("a fill is one contract at the whole ask, keyed to its Seaport order", () => {
+    const f: LotFillRow = {
+      id: `${TX}-3`,
+      factory: FACTORY,
+      account: ACCOUNT,
+      owner: OWNER,
+      weekId: 1,
+      optionId: OPTION_ID,
+      orderHash: `0x${"9".repeat(64)}`,
+      premiumUsdg: 1_000000n,
+      blockNumber: 64_120_000n,
+      logIndex: 3,
+      timestamp: EXERCISE - 3600n,
+      txHash: TX,
+    };
+    expect(lotFillJson(f)).toEqual({
+      account: ACCOUNT,
+      owner: OWNER,
+      week: 1,
+      optionId: OPTION_ID.toString(),
+      orderHash: f.orderHash,
+      premiumUsdg: { raw: "1000000", decimals: 6, formatted: "1" },
+      blockNumber: "64120000",
+      at: "2026-09-18T19:00:00.000Z",
+      txHash: TX,
+    });
+  });
+
+  it("a settlement carries the listing's size and fills beside the redeem's two legs, so the outcome is reproducible", () => {
+    const s: SettlementRow = {
+      id: `${TX}-5`,
+      factory: FACTORY,
+      account: ACCOUNT,
+      owner: OWNER,
+      weekId: 1,
+      lotsListed: 2n,
+      lotsFilled: 2n,
+      assetReturned: 0n,
+      strikeUsdg: 2n * 223_000000n,
+      outcome: "assigned",
+      blockNumber: 64_150_000n,
+      logIndex: 5,
+      timestamp: BASE_EXPIRY + 1n,
+      txHash: TX,
+    };
+    const j = settlementJson(s);
+    expect(j.outcome).toBe("assigned");
+    expect(j.strikeUsdg).toEqual({ raw: "446000000", decimals: 6, formatted: "446" });
+    expect(j.assetReturned.raw).toBe("0");
+    expect(settlementOutcome({ filledLots: s.lotsFilled, assetReturned: s.assetReturned, strikeUsdg: s.strikeUsdg })).toBe(j.outcome);
+  });
+});
+
+describe("every factory enum value is produced, and every produced value is an enum value (X-2)", () => {
+  it("writer_account_status", () => {
+    expect([...WRITER_ACCOUNT_STATUSES].sort()).toEqual([...writerAccountStatus.enumValues].sort());
+  });
+
+  it("settlement outcomes", () => {
+    const produced = new Set<string>();
+    for (const filledLots of [0n, 2n]) {
+      for (const assetReturned of [0n, LOT]) {
+        for (const strikeUsdg of [0n, 223_000000n]) produced.add(settlementOutcome({ filledLots, assetReturned, strikeUsdg }));
+      }
+    }
+    expect([...produced].sort()).toEqual([...SETTLEMENT_OUTCOMES].sort());
   });
 });

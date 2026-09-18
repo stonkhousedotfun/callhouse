@@ -40,7 +40,7 @@ delete process.env.ALERT_WEBHOOK;
 const { encodeAbiParameters, encodeEventTopics } = await import('viem');
 const { vaultAbi } = await import('./abi.js');
 const { logClient, publicClient, walletClient } = await import('./clients.js');
-const { config } = await import('./config.js');
+const { config, vaultAddress } = await import('./config.js');
 const { buildApp } = await import('./health.js');
 const { contractsAssignedAt, tick } = await import('./roll.js');
 const { store } = await import('./state.js');
@@ -150,7 +150,7 @@ function encodedLog(eventName: 'RollClose' | 'Harvest', w: Week, logIndex: numbe
   const values: [bigint, bigint, bigint] =
     eventName === 'RollClose' ? [(WRITTEN - w.assigned) * LOT, w.assigned * STRIKE, w.assigned] : [w.gross, w.fee, w.net];
   const data = encodeAbiParameters([{ type: 'uint256' }, { type: 'uint256' }, { type: 'uint256' }], values);
-  return { address: config.VAULT, topics, data, blockNumber: 1_000n, transactionHash: w.closeTx, logIndex };
+  return { address: vaultAddress(), topics, data, blockNumber: 1_000n, transactionHash: w.closeTx, logIndex };
 }
 
 interface LogQuery {

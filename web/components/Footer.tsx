@@ -1,10 +1,10 @@
 /**
  * App footer, in the layout stonkhouse.fun uses (stonkhousedotfun/callhouse-site: components/Footer.tsx).
- * Server component: nothing here hydrates.
+ * Server component apart from one island: the first line's market count and factory link follow
+ * the URL (components/FooterMarket.tsx), and nothing else here hydrates.
  *
  * Three rows, in this order:
- *   1. what this is: product, share ticker, collateral, chain, and the vault contract once one is
- *      configured.
+ *   1. what this is: v1 shows its market count and factory; v2 names the chain and product.
  *   2. where to go: the in-app pages first, then the links that leave the app, each marked ↗ and
  *      opening a new tab. Terms and Privacy are external: the documents live on the marketing site
  *      only (lib/site.ts). stonkhouse.fun sits last because it leaves the app entirely.
@@ -14,9 +14,9 @@
  */
 import Link from "next/link";
 
+import { FooterMarket } from "@/components/FooterMarket";
 import { Container, ExternalLink } from "@/components/ui";
-import { EXPLORER_URL, addressUrl } from "@/lib/chain";
-import { FACTORY, MARKET } from "@/lib/contracts";
+import { EXPLORER_URL } from "@/lib/chain";
 import { DOCS_URL, PRIVACY_URL, SITE_URL, TERMS_URL } from "@/lib/site";
 
 const LINK = "rounded-sm text-ink-2 no-underline transition-colors duration-150 hover:text-ink";
@@ -32,15 +32,7 @@ export function Footer() {
           <p>
             <span className="font-display font-bold text-ink-2">StonkHouse</span>
             {" · "}
-            {MARKET} on Robinhood Chain <span className="num">4663</span>
-            {FACTORY ? (
-              <>
-                {" · "}
-                <ExternalLink href={addressUrl(FACTORY)} arrow className={LINK}>
-                  factory
-                </ExternalLink>
-              </>
-            ) : null}
+            {process.env.NEXT_PUBLIC_V2 === "1" ? "Stock Token options on Robinhood Chain 4663" : <FooterMarket linkClassName={LINK} />}
           </p>
           <nav aria-label="Footer">
             <ul className="flex flex-wrap gap-x-[18px] gap-y-2">
@@ -54,6 +46,13 @@ export function Footer() {
                   Docs
                 </Link>
               </li>
+              {process.env.NEXT_PUBLIC_V2 === "1" ? (
+                <li>
+                  <Link href="/legacy" className={LINK}>
+                    Legacy v1
+                  </Link>
+                </li>
+              ) : null}
               <li>
                 <ExternalLink href={TERMS_URL} arrow className={LINK}>
                   Terms
@@ -69,11 +68,11 @@ export function Footer() {
                   Explorer
                 </ExternalLink>
               </li>
-              <li>
+              {process.env.NEXT_PUBLIC_V2 === "1" ? null : <li>
                 <ExternalLink href={DOCS_URL} arrow className={LINK}>
                   {host(DOCS_URL)}
                 </ExternalLink>
-              </li>
+              </li>}
               <li>
                 <ExternalLink href={SITE_URL} arrow className={LINK}>
                   {host(SITE_URL)}

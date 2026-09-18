@@ -1,0 +1,59 @@
+{
+  "series": {
+    "longId": "72440853335946052646303315030874989888962295984736249817071787589720686247200",
+    "shortId": "72440853335946052646303315030874989888962295984736249817071787589720686247201",
+    "ticker": "NVDA",
+    "underlying": "0xd0601CE157Db5bdC3162BbaC2a2C8aF5320D9EEC",
+    "isPut": false,
+    "strike": {
+      "raw": "223000000",
+      "decimals": 6,
+      "formatted": "223"
+    },
+    "expiry": 1789675200,
+    "tenor": "daily",
+    "mintCutoff": 1789673400,
+    "mintFeePpm": 80,
+    "mintFeesHeld": {
+      "raw": "0",
+      "decimals": 18,
+      "formatted": "0"
+    },
+    "mintFeesAccrued": {
+      "raw": "0",
+      "decimals": 18,
+      "formatted": "0"
+    },
+    "status": "open"
+  },
+  "quote": {
+    "bestBid": {
+      "raw": "113600",
+      "decimals": 6,
+      "formatted": "0.1136"
+    },
+    "bestAsk": {
+      "raw": "250000",
+      "decimals": 6,
+      "formatted": "0.25"
+    },
+    "bidUnits": "100",
+    "askUnits": "250",
+    "fair": {
+      "raw": "123523",
+      "decimals": 6,
+      "formatted": "0.123523"
+    },
+    "iv": 0.4286,
+    "delta": 0.061,
+    "last": null
+  },
+  "openInterestUnits": "0",
+  "volume": {
+    "raw": "0",
+    "decimals": 6,
+    "formatted": "0"
+  },
+  "settlement": null,
+  "exerciseFeeBps": 25
+}

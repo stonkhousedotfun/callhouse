@@ -1,0 +1,45 @@
+{
+  "items": [
+    {
+      "id": "0x87ee9338ca0b3976e898f3078a757e20ce09b1841f53ec8bc270a997cf84cb4b-2",
+      "ts": 1789572600,
+      "price": {
+        "raw": "2250000",
+        "decimals": 6,
+        "formatted": "2.25"
+      },
+      "units": "20",
+      "premium": {
+        "raw": "450000",
+        "decimals": 6,
+        "formatted": "0.45"
+      },
+      "takerIsBuyer": true,
+      "primary": false,
+      "taker": "0x83daA58d0a8d82D7b971338a03AA2f99bfADf4F8",
+      "maker": "0x4088c59Eb3fB713B124f182E7083AEb3358A030B",
+      "tx": "0x87ee9338ca0b3976e898f3078a757e20ce09b1841f53ec8bc270a997cf84cb4b"
+    },
+    {
+      "id": "0xe49c6ea6403e6f3222c458f25cf660f2bf9ecddea60a68b7690a6de110ad1e22-2",
+      "ts": 1789481400,
+      "price": {
+        "raw": "1756500",
+        "decimals": 6,
+        "formatted": "1.7565"
+      },
+      "units": "100",
+      "premium": {
+        "raw": "1756500",
+        "decimals": 6,
+        "formatted": "1.7565"
+      },
+      "takerIsBuyer": true,
+      "primary": true,
+      "taker": "0x4088c59Eb3fB713B124f182E7083AEb3358A030B",
+      "maker": "0xd3b47D8a6B8e3fc6160Cd02634CF7Ae74aDeB66f",
+      "tx": "0xe49c6ea6403e6f3222c458f25cf660f2bf9ecddea60a68b7690a6de110ad1e22"
+    }
+  ],
+  "nextCursor": null
+}

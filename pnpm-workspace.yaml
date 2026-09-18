@@ -3,3 +3,4 @@ packages:
   - indexer
   - web
   - relay
+  - notifier

@@ -4,6 +4,8 @@ import { Figtree, Geist_Mono, Schibsted_Grotesk } from "next/font/google";
 import { Footer } from "@/components/Footer";
 import { Nav } from "@/components/Nav";
 import { Container } from "@/components/ui";
+import { V2ConfigNotice } from "@/components/v2/RouteViews";
+import { DEV_PREVIEW } from "@/lib/devPreview";
 import { APP_URL } from "@/lib/site";
 import { Providers } from "./providers";
 import "./globals.css";
@@ -41,7 +43,7 @@ const mono = Geist_Mono({
  * canonicals and Open Graph URLs resolve against it; without it Next warns and falls back to
  * localhost in a production build.
  *
- * THE robots DECISION — the app is NOT indexed, and that is on purpose. Two reasons, both real:
+ * With v1 (the default), the app is not indexed. Two reasons shaped that decision:
  *
  *   1. The marketing site at stonkhouse.fun carries the canonical /legal and /how-it-works copy.
  *      Serving the same disclosures from two domains is duplicate content, and duplicate
@@ -51,28 +53,30 @@ const mono = Geist_Mono({
  *      by scripts/copy-lint.mjs on every build. The page a stranger finds first should be the
  *      page whose wording is checked before it ships.
  *
- * `follow: true` because the links out of here (explorer, the marketing site) are still worth
- * following; it is indexing this domain that we decline. The app is reached by link from
- * stonkhouse.fun, not by search. app/robots.ts states the same thing as a served robots.txt —
- * the two must be changed together.
+ * With NEXT_PUBLIC_V2=1 outside a dev preview, public buyer pages opt into indexing in their
+ * own metadata and app/robots.ts exposes those routes. Private and legacy pages remain noindex.
  */
 export const metadata: Metadata = {
   metadataBase: new URL(APP_URL),
-  title: "StonkHouse — let your stonks work for you",
+  title: process.env.NEXT_PUBLIC_V2 === "1" ? "StonkHouse — buy an outcome" : "StonkHouse — let your stonks work for you",
   description:
-    "Put your NVDA in. Each week someone can pay you for the chance to buy it at a set price. If they don't, you keep the stock.",
+    process.env.NEXT_PUBLIC_V2 === "1"
+      ? "Explore Stock Token options with a known maximum loss before you buy."
+      : "Put your Stock Tokens in. Each week someone can pay you for the chance to buy them at a set price. If they don't, you keep the stock.",
   // Per-page canonicals override this where a route sets one; the default is the app root.
   alternates: { canonical: "/" },
   openGraph: {
-    title: "StonkHouse — let your stonks work for you",
+    title: process.env.NEXT_PUBLIC_V2 === "1" ? "StonkHouse — buy an outcome" : "StonkHouse — let your stonks work for you",
     description:
-      "Put your NVDA in. Each week someone can pay you for the chance to buy it at a set price. If they don't, you keep the stock.",
+      process.env.NEXT_PUBLIC_V2 === "1"
+        ? "Explore Stock Token options with a known maximum loss before you buy."
+        : "Put your Stock Tokens in. Each week someone can pay you for the chance to buy them at a set price. If they don't, you keep the stock.",
     url: APP_URL,
     siteName: "StonkHouse",
     type: "website",
   },
   twitter: { card: "summary_large_image" },
-  robots: { index: false, follow: true },
+  robots: { index: false, follow: !DEV_PREVIEW },
 };
 
 /**
@@ -99,12 +103,23 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
         >
           Skip to content
         </a>
+        {DEV_PREVIEW ? (
+          <aside aria-label="Development preview" className="border-b border-amber-400 bg-amber-100 text-amber-950">
+            <Container className="flex flex-wrap items-center gap-x-3 gap-y-1 py-2 text-sm">
+              <strong className="shrink-0 rounded-full bg-amber-950 px-2.5 py-0.5 text-xs tracking-wide text-amber-50">DEV PREVIEW</strong>
+              <span>Testing environment. Transactions may use real assets on Robinhood Chain. Review before signing.</span>
+            </Container>
+          </aside>
+        ) : null}
         <Providers>
           <Nav />
           {/* One 1160px column for every route, the same width as the site's chrome. Pages lay out
               their own head and cards inside it. */}
           <main id="main" className="flex-1">
-            <Container className="pb-16 sm:pb-24">{children}</Container>
+            <Container className="pb-16 sm:pb-24">
+              {process.env.NEXT_PUBLIC_V2 === "1" ? <V2ConfigNotice /> : null}
+              {children}
+            </Container>
           </main>
           <Footer />
         </Providers>

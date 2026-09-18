@@ -150,3 +150,11 @@ test('Telegram: oversized data is truncated to ≤ 4096', () => {
   assert.ok(body.text.startsWith('🔴 ERROR tx_revert\nrollOpen reverted on chain'));
   assert.ok(body.text.endsWith('… (truncated)'));
 });
+
+test('a factory-only keeper alert with vault: null parses and prints no vault', () => {
+  const parsed = parseKeeperAlert({ kind: 'low_gas', severity: 'warn', message: 'gas low', vault: null, chainId: 4663 });
+  assert.ok(parsed.ok);
+  if (!parsed.ok) return;
+  const text = formatDiscord(parsed.alert);
+  assert.ok(!JSON.stringify(text).includes('vault '));
+});

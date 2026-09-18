@@ -5,7 +5,7 @@ import { clearExerciseErrorsAbi, valoremClearAbi } from "./abi/clear";
 import { usdgErrorsAbi } from "./abi/erc20";
 import {
   MAX_EXERCISE_AMOUNT,
-  NVDA_PUSH_FAILED,
+  UNDERLYING_PUSH_FAILED,
   USDG_PULL_FAILED,
   approvalFor,
   classifyExerciseSimulation,
@@ -107,13 +107,13 @@ describe("clearFee and exerciseAmounts", () => {
       strikeCost: 374_500_000n,
       fee: 0n,
       total: 374_500_000n,
-      nvdaOut: 2n * LOT,
+      underlyingOut: 2n * LOT,
     });
     expect(exerciseAmounts({ amount: 3n, strikeUsdg: STRIKE, underlyingAmount: LOT, feesEnabled: true, feeBps: 5 })).toEqual({
       strikeCost: 561_750_000n,
       fee: 280_875n,
       total: 562_030_875n,
-      nvdaOut: 3n * LOT,
+      underlyingOut: 3n * LOT,
     });
   });
 
@@ -154,7 +154,7 @@ describe("spotCheck", () => {
   });
 
   it("compares without rounding: a sub-unit lot is valued exactly", () => {
-    const half = { nvdaOut: LOT / 2n, total: 100_000_000n };
+    const half = { underlyingOut: LOT / 2n, total: 100_000_000n };
     expect(spotCheck(200_000_000n, half)).toBe("notWorth"); // 0.5 × 200 = 100, not above 100
     expect(spotCheck(200_000_001n, half)).toBe("worth");
   });
@@ -172,7 +172,7 @@ describe("spotCheck", () => {
 describe("exerciseAssetsMatch", () => {
   const USDG = "0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168" as Address;
   const ASSET = "0xd0601CE157Db5bdC3162BbaC2a2C8aF5320D9EEC" as Address;
-  it("requires USDG in and NVDA out, case-insensitively, and waits for the tuple", () => {
+  it("requires USDG in and the Stock Token out, case-insensitively, and waits for the tuple", () => {
     expect(exerciseAssetsMatch({ exerciseAsset: USDG.toLowerCase() as Address, underlyingAsset: ASSET }, { usdg: USDG, asset: ASSET })).toBe(true);
     expect(exerciseAssetsMatch({ exerciseAsset: ASSET, underlyingAsset: USDG }, { usdg: USDG, asset: ASSET })).toBe(false);
     expect(exerciseAssetsMatch(undefined, { usdg: USDG, asset: ASSET })).toBeUndefined();
@@ -187,7 +187,7 @@ describe("formatting", () => {
     expect(fmtUsdgExact(undefined)).toBe("—");
   });
 
-  it("shows NVDA to full precision with trailing zeros trimmed", () => {
+  it("shows the Stock Token to full precision with trailing zeros trimmed", () => {
     expect(fmtNvdaExact(LOT)).toBe("1");
     expect(fmtNvdaExact(2n * LOT)).toBe("2");
     expect(fmtNvdaExact(25n * 10n ** 17n)).toBe("2.5");
@@ -221,7 +221,7 @@ describe("decodeExerciseRevert", () => {
 
   it("gives solmate's two strings their meaning, and passes everything else through lib/revert.ts", () => {
     expect(decodeExerciseRevert(solidityError(USDG_PULL_FAILED))!.text).toContain("could not take the USDG");
-    expect(decodeExerciseRevert(solidityError(NVDA_PUSH_FAILED))!.text).toContain("could not send the NVDA Stock Token");
+    expect(decodeExerciseRevert(solidityError(UNDERLYING_PUSH_FAILED))!.text).toContain("could not send the Stock Token");
     expect(decodeExerciseRevert(solidityError("something else"))).toMatchObject({ source: "solidity", text: "Reverted: something else" });
     expect(decodeExerciseRevert(usdg("ContractPaused"))).toMatchObject({ source: "token", name: "ContractPaused" });
     expect(decodeExerciseRevert("0xdeadbeef")).toMatchObject({ source: "unknown" });
@@ -273,8 +273,8 @@ describe("classifyExerciseSimulation", () => {
     expect(exerciseAllowed(refused)).toBe(false);
   });
 
-  it("a failed NVDA push, or USDG paused or frozen, blocks as a token refusal", () => {
-    expect(classifyExerciseSimulation({ ok: false, revertData: solidityError(NVDA_PUSH_FAILED) }, funded).kind).toBe("tokenRefused");
+  it("a failed Stock Token push, or USDG paused or frozen, blocks as a token refusal", () => {
+    expect(classifyExerciseSimulation({ ok: false, revertData: solidityError(UNDERLYING_PUSH_FAILED) }, funded).kind).toBe("tokenRefused");
     expect(classifyExerciseSimulation({ ok: false, revertData: usdg("ContractPaused") }, funded).kind).toBe("tokenRefused");
     expect(classifyExerciseSimulation({ ok: false, revertData: usdg("AddressFrozen") }, funded).kind).toBe("tokenRefused");
   });

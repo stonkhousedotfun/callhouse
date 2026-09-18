@@ -298,7 +298,18 @@
         },
         "adminPhase": "bootstrap",
         "_adminPhase": "'bootstrap' while the deployer key holds DEFAULT_ADMIN_ROLE, 'safe' after HandoverAdmin.s.sol STEP=renounce. Verify.s.sol takes it as ADMIN_PHASE.",
-        "_priceFeedIsNotOurs": "The price feed is third-party: Chainlink's RHNVDA/USD proxy 0x379EC4f7C378F34a1B47E4F3cbeBCbAC3E8E9F15, recorded under contracts.nvdaUsdFeed above. We deploy nothing for it."
+        "_priceFeedIsNotOurs": "The price feed is third-party: Chainlink's RHNVDA/USD proxy 0x379EC4f7C378F34a1B47E4F3cbeBCbAC3E8E9F15, recorded under contracts.nvdaUsdFeed above. We deploy nothing for it.",
+        "factories": {
+          "_readme": "per-market AccountFactory addresses live in ops/markets/tier1.json (deployment.*); this block records only the first",
+          "NVDA": {
+            "address": "0xc4A5Cd0DE91CaB7F5Ebe2114bc63Fbb43E642BBb",
+            "implementation": "0xe412A596B000f73ad19B39f51dfd0B17A15F45EC",
+            "deployBlock": 64038234,
+            "deployTx": "0x8ef58643dc5d47e737ad62fcfc5499c591bb04ee3d98f897525c14ed5784f2e5",
+            "confirmed": true,
+            "evidence": "first RoleGranted log of the factory, cast logs 2026-09-15; implementation() and priceFeed() re-read"
+          }
+        }
       },
       "roles": {
         "DEFAULT_ADMIN_ROLE": "0x0000000000000000000000000000000000000000000000000000000000000000",

@@ -1,0 +1,26 @@
+{
+  "items": [
+    {
+      "writer": "0xD6b49a27Ead99118b61F0827C7aB2782aea07bE6",
+      "underlying": "0xd0601CE157Db5bdC3162BbaC2a2C8aF5320D9EEC",
+      "ticker": "NVDA",
+      "strategy": {
+        "active": true,
+        "weekly": true,
+        "smartPricing": false,
+        "otmBps": 450,
+        "askBps": 12,
+        "minAskBps": 5,
+        "maxAskBps": 50,
+        "maxUnits": "0"
+      },
+      "currentLongId": "43462217268812087739261944784956455494004279776534947210729604095134131208790",
+      "orderId": "1009",
+      "expiry": 1789761600,
+      "lastStaleCancelAt": null,
+      "staleSpot": null,
+      "lastRolledAt": 1789392900
+    }
+  ],
+  "nextCursor": null
+}

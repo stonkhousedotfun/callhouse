@@ -1,0 +1,113 @@
+[
+  {
+    "type": "function",
+    "name": "latest",
+    "inputs": [
+      {
+        "name": "underlying",
+        "type": "address",
+        "internalType": "address"
+      }
+    ],
+    "outputs": [
+      {
+        "name": "ok",
+        "type": "bool",
+        "internalType": "bool"
+      },
+      {
+        "name": "price",
+        "type": "uint256",
+        "internalType": "uint256"
+      },
+      {
+        "name": "updatedAt",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "pin",
+    "inputs": [
+      {
+        "name": "underlying",
+        "type": "address",
+        "internalType": "address"
+      },
+      {
+        "name": "expiry",
+        "type": "uint40",
+        "internalType": "uint40"
+      }
+    ],
+    "outputs": [
+      {
+        "name": "pinned",
+        "type": "bytes4",
+        "internalType": "bytes4"
+      }
+    ],
+    "stateMutability": "nonpayable"
+  },
+  {
+    "type": "function",
+    "name": "record",
+    "inputs": [
+      {
+        "name": "underlying",
+        "type": "address",
+        "internalType": "address"
+      },
+      {
+        "name": "expiry",
+        "type": "uint40",
+        "internalType": "uint40"
+      }
+    ],
+    "outputs": [
+      {
+        "name": "recorded",
+        "type": "bool",
+        "internalType": "bool"
+      }
+    ],
+    "stateMutability": "nonpayable"
+  },
+  {
+    "type": "function",
+    "name": "windowPrice",
+    "inputs": [
+      {
+        "name": "underlying",
+        "type": "address",
+        "internalType": "address"
+      },
+      {
+        "name": "start",
+        "type": "uint40",
+        "internalType": "uint40"
+      },
+      {
+        "name": "end",
+        "type": "uint40",
+        "internalType": "uint40"
+      }
+    ],
+    "outputs": [
+      {
+        "name": "ok",
+        "type": "bool",
+        "internalType": "bool"
+      },
+      {
+        "name": "price",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ],
+    "stateMutability": "view"
+  }
+]

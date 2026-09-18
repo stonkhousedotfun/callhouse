@@ -71,7 +71,7 @@ describe("CyclePricingWords: reason codes are never echoed", () => {
 
   it.each([
     // Assembled at runtime: this file is scanned by copy-lint.
-    ["an unknown code", ["guaranteed", "40", "a" + "py", "yield"].join("-")],
+    ["an unknown code", ["guar" + "anteed", "40", "a" + "py", "yield"].join("-")],
     ["an Object.prototype key", "constructor"],
   ])("%s is dropped", (_name, code) => {
     const f = parsed({ ...PREVIOUS, volUnavailableReason: code });

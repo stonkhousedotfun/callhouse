@@ -5,15 +5,14 @@
  * WHY THIS FILE EXISTS: every number here ends up in an immutable option type or a Seaport order.
  * A symbol parsed as the wrong strike, a stale Friday read as this week, a spot from another day,
  * a float rounded down a base unit or a hostile response that hangs the tick would each arm or
- * price a week on nonsense. The fixture is the real NVDA chain taken after the close on Monday
- * 2026-09-14 (trimmed to the 18 Sep and 25 Sep expiries, calls and puts), so the interpolations
- * are pinned on real quotes.
+ * price a week on nonsense. The fixture is a deterministic, synthetic NVDA-shaped chain with
+ * invented Black–Scholes quotes for the 18 Sep and 25 Sep expiries.
  *
  * DELIBERATELY ABSENT: no network. fetchCboeChain is driven through its fetch seam.
  */
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
 import { test } from 'node:test';
+import { syntheticNvdaChain, syntheticNvdaPayload } from './fixtures/synthetic-chains.js';
 import {
   CLOCK_SKEW_TOLERANCE_S,
   MAX_SPREAD_FRACTION_OF_MID,
@@ -44,18 +43,18 @@ import {
                               FIXTURES
 //////////////////////////////////////////////////////////////*/
 
-const RAW = readFileSync(new URL('./fixtures/cboe-nvda-2026-09-14.json', import.meta.url), 'utf8');
-const CHAIN = parseCboeChain(JSON.parse(RAW));
+const RAW = JSON.stringify(syntheticNvdaPayload());
+const CHAIN = syntheticNvdaChain();
 
 /** 2026-09-14T15:59:59 New York (EDT, UTC-4) = 19:59:59 UTC. */
 const LAST_TRADE_UNIX = Date.UTC(2026, 8, 14, 19, 59, 59) / 1000;
-/** "2026-09-15 05:57:42", read as UTC. */
-const FILE_UNIX = Date.UTC(2026, 8, 15, 5, 57, 42) / 1000;
-/** Tuesday 2026-09-15 08:30 UTC: the morning after, when the fixture was fetched. */
+/** Invented file-generation clock, read as UTC. */
+const FILE_UNIX = Date.UTC(2026, 8, 15, 5, 45) / 1000;
+/** Tuesday 2026-09-15 08:30 UTC: the synthetic observation clock. */
 const NOW = Date.UTC(2026, 8, 15, 8, 30, 0) / 1000;
 
-/** The vault's token spot for the fixture: the share close times the token's ~8 bps multiplier. */
-const TOKEN_SPOT6 = 212_210_000n;
+/** Invented token spot near the synthetic chain spot. */
+const TOKEN_SPOT6 = 212_500_000n;
 
 function quotesFor(day: string): CboeOption[] {
   const expiry = selectExpiry(CHAIN, day);
@@ -95,15 +94,15 @@ test('parseOptionSymbol: root + YYMMDD + C|P + strike x 1000, exactly', () => {
   assert.equal(parseOptionSymbol('nvda', 'nvda260918C00222500'), null, 'the root is upper case');
 });
 
-test('parseCboeChain: the fixture parses whole; malformed rows are counted, never priced; a bad envelope throws', () => {
+test('parseCboeChain: the synthetic payload parses whole; malformed rows are counted, never priced; a bad envelope throws', () => {
   assert.equal(CHAIN.root, 'NVDA');
-  assert.equal(CHAIN.shareSpot, 212.0404);
-  assert.equal(CHAIN.timestamp, '2026-09-15 05:57:42');
+  assert.equal(CHAIN.shareSpot, 212.35);
+  assert.equal(CHAIN.timestamp, '2026-09-15 05:45:00');
   assert.equal(CHAIN.lastTradeTime, '2026-09-14T15:59:59');
-  assert.equal(CHAIN.options.length, 340, '18 Sep and 25 Sep, calls and puts');
+  assert.equal(CHAIN.options.length, 108, '27 strikes on both sides of two synthetic expiries');
   assert.equal(CHAIN.skippedRows, 0);
   const c220 = CHAIN.options.find((o) => o.symbol === 'NVDA260918C00220000');
-  assert.deepEqual(c220, { symbol: 'NVDA260918C00220000', expiry: '2026-09-18', type: 'C', strike: 220, bid: 0.62, ask: 0.63, iv: 0.3732, delta: 0.1531 });
+  assert.deepEqual(c220, { symbol: 'NVDA260918C00220000', expiry: '2026-09-18', type: 'C', strike: 220, bid: 1.55, ask: 1.59, iv: 0.43, delta: 0.2392 });
 
   const doc = JSON.parse(RAW) as { data: { options: unknown[] } };
   doc.data.options = [
@@ -122,7 +121,7 @@ test('parseCboeChain: the fixture parses whole; malformed rows are counted, neve
     assert.throws(() => parseCboeChain(json), (err: unknown) => err instanceof VolFetchError && err.code === 'bad-shape');
   expectShape(null);
   expectShape([]);
-  expectShape({ timestamp: '2026-09-15 05:57:42' });
+  expectShape({ timestamp: CHAIN.timestamp });
   expectShape({ ...JSON.parse(RAW), data: { ...JSON.parse(RAW).data, current_price: -1 } });
   expectShape({ ...JSON.parse(RAW), data: { ...JSON.parse(RAW).data, current_price: '212.04' } });
   expectShape({ ...JSON.parse(RAW), data: { ...JSON.parse(RAW).data, symbol: 'nvda; drop table' } });
@@ -134,14 +133,14 @@ test('parseCboeChain: the fixture parses whole; malformed rows are counted, neve
 //////////////////////////////////////////////////////////////*/
 
 test('the two clocks: timestamp is UTC, last_trade_time is New York wall clock, DST included', () => {
-  assert.equal(parseCboeTimestamp('2026-09-15 05:57:42'), FILE_UNIX);
+  assert.equal(parseCboeTimestamp(CHAIN.timestamp), FILE_UNIX);
   assert.equal(parseNewYorkLocalTime('2026-09-14T15:59:59'), LAST_TRADE_UNIX, 'EDT: UTC-4');
   assert.equal(parseNewYorkLocalTime('2026-12-11T15:59:59'), Date.UTC(2026, 11, 11, 20, 59, 59) / 1000, 'EST: UTC-5');
   assert.equal(parseNewYorkLocalTime('2026-09-14T16:14:59.250'), Date.UTC(2026, 8, 14, 20, 14, 59) / 1000, 'fractional seconds are ignored');
   for (const bad of ['', 'yesterday', '2026-09-14', '2026-02-30T10:00:00', '2026-09-14T24:00:00', '2027-03-14T02:30:00']) {
     assert.equal(parseNewYorkLocalTime(bad), null, `refuses ${bad || '(empty)'}`);
   }
-  assert.equal(parseCboeTimestamp('2026-09-15T05:57:42'), FILE_UNIX, 'a T separator is the same instant');
+  assert.equal(parseCboeTimestamp('2026-09-15T05:45:00'), FILE_UNIX, 'a T separator is the same instant');
   assert.equal(parseCboeTimestamp('2026-13-15 05:57:42'), null);
   assert.equal(chainAgeSeconds(CHAIN, NOW), NOW - LAST_TRADE_UNIX);
   assert.equal(closeDayOf(Date.UTC(2026, 8, 18, 20, 0, 0) / 1000), '2026-09-18', 'the exercise ts of a Friday close is that Friday in New York');
@@ -180,9 +179,9 @@ test('chainFreshness: the age of the last trade and of the file, up to maxAge in
 test('selectExpiry: the calls of exactly the close day; no nearest expiry, no interpolation across days', () => {
   const sep18 = selectExpiry(CHAIN, '2026-09-18');
   assert.ok(sep18);
-  assert.equal(sep18.calls.length, 90);
+  assert.equal(sep18.calls.length, 27);
   assert.ok(sep18.calls.every((o) => o.type === 'C' && o.expiry === '2026-09-18'));
-  assert.equal(selectExpiry(CHAIN, '2026-09-25')?.calls.length, 80);
+  assert.equal(selectExpiry(CHAIN, '2026-09-25')?.calls.length, 27);
   // A holiday Thursday close with no Thursday listing, a date in between, and a week not listed.
   assert.equal(selectExpiry(CHAIN, '2026-09-17'), null);
   assert.equal(selectExpiry(CHAIN, '2026-09-21'), null);
@@ -216,19 +215,19 @@ test('the quote filter: two-sided, ask >= bid, delta in (0,1), finite, spread <=
   assert.equal(isUsableQuote(option({ bid: 8.495, ask: 11.505 })), false);
 
   const q = quotesFor('2026-09-18');
-  assert.equal(q.length, 51, 'of 90 listed calls');
+  assert.equal(q.length, 27, 'all synthetic calls have valid quotes');
   assert.ok(q.every((o, i) => i === 0 || o.strike > q[i - 1]!.strike), 'sorted by strike, one quote per strike');
-  assert.ok(!q.some((o) => o.strike === 260), '260: bid 0');
+  assert.ok(!q.some((o) => o.strike === 260), '260 is outside the synthetic grid');
   // A strike listed twice is dropped entirely.
   const dup = filterQuotes([option({ strike: 220 }), option({ strike: 220, bid: 0.5, ask: 0.55 }), option({ strike: 222.5, delta: 0.1 })]);
   assert.deepEqual(dup.map((o) => o.strike), [222.5]);
 });
 
 test('spot mapping: token / share within the divergence limit, else vol-spot-divergence', () => {
-  const m = mapSpot(212.0404, TOKEN_SPOT6, 300);
+  const m = mapSpot(CHAIN.shareSpot, TOKEN_SPOT6, 300);
   assert.ok(m.ok);
-  assert.ok(Math.abs(m.ratio - 1.0008) < 1e-6, 'the token multiplier');
-  assert.ok(Math.abs(m.divergenceBps - 8) < 0.01);
+  assert.ok(Math.abs(m.ratio - Number(TOKEN_SPOT6) / 1e6 / CHAIN.shareSpot) < 1e-9, 'the token multiplier');
+  assert.ok(m.divergenceBps > 0 && m.divergenceBps < 10);
   // 3% apart is the edge; 3.01% is not.
   assert.equal(mapSpot(200, 206_000_000n, 300).ok, true);
   const far = mapSpot(200, 206_020_000n, 300);
@@ -243,24 +242,21 @@ test('spot mapping: token / share within the divergence limit, else vol-spot-div
                          STRIKE AND PRICE
 //////////////////////////////////////////////////////////////*/
 
-test('strikeForDelta on the real chain: 0.15 on 18 Sep lands at 220, between the 217.5 and 220 listings', () => {
+test('strikeForDelta on the synthetic chain: targets interpolate monotonically between listings', () => {
   const q = quotesFor('2026-09-18');
   const r = ratio();
   const s15 = strikeForDelta(q, 0.15, r);
   assert.ok(s15.ok);
-  // 220 (0.1531) and 222.5 (0.0978): 220 + (0.1531 - 0.15) / (0.1531 - 0.0978) × 2.5 = 220.140;
-  // × 1.0008 = 220.316 -> 220.
-  assert.deepEqual(s15.bracket, [220, 222.5]);
-  assert.ok(Math.abs(s15.shareStrike - 220.1401) < 1e-3);
-  assert.equal(s15.strikeUsdg6, 220_000_000n);
-  // 0.10 -> 222.40 share -> 222.58 token -> 223 (half up); 0.25 -> 217.01 -> 217.19 -> 217.
-  assert.equal((strikeForDelta(q, 0.1, r) as { strikeUsdg6: bigint }).strikeUsdg6, 223_000_000n);
-  assert.equal((strikeForDelta(q, 0.25, r) as { strikeUsdg6: bigint }).strikeUsdg6, 217_000_000n);
-  // The longer week: 0.15 on 25 Sep sits between 222.5 (0.1903) and 225 (0.143) -> 224.63 -> 225.
+  assert.deepEqual(s15.bracket, [222.5, 225]);
+  assert.ok(Math.abs(s15.shareStrike - 224.00614754098362) < 1e-9);
+  assert.equal(s15.strikeUsdg6, 224_000_000n);
+  assert.equal((strikeForDelta(q, 0.1, r) as { strikeUsdg6: bigint }).strikeUsdg6, 227_000_000n);
+  assert.equal((strikeForDelta(q, 0.25, r) as { strikeUsdg6: bigint }).strikeUsdg6, 220_000_000n);
+  // More trading time shifts the same delta to a higher strike.
   const s25 = strikeForDelta(quotesFor('2026-09-25'), 0.15, r);
   assert.ok(s25.ok);
-  assert.equal(s25.strikeUsdg6, 225_000_000n);
-  assert.deepEqual(s25.bracket, [222.5, 225]);
+  assert.equal(s25.strikeUsdg6, 231_000_000n);
+  assert.deepEqual(s25.bracket, [230, 232.5]);
   // A delta exactly on a listing is that listing's strike.
   const exact = strikeForDelta([option({ strike: 217.5, delta: 0.2308 }), option({ strike: 220, delta: 0.15 }), option({ strike: 222.5, delta: 0.0978 })], 0.15, 1);
   assert.ok(exact.ok);
@@ -269,14 +265,14 @@ test('strikeForDelta on the real chain: 0.15 on 18 Sep lands at 220, between the
 
 test('strikeForDelta: a target the quotes do not reach is flagged, never extrapolated', () => {
   const q = quotesFor('2026-09-18');
-  const low = strikeForDelta(q, 0.001, ratio());
+  const low = strikeForDelta(q, 0.0001, ratio());
   assert.equal(low.ok, false);
   assert.equal(!low.ok && low.reason, 'vol-delta-out-of-range');
-  assert.equal(!low.ok && low.detail.quotedLow, '0.0026');
-  // Only the strikes from 210 up are quoted (highest delta 0.5621): a 0.9 target is not reached.
+  assert.equal(!low.ok && low.detail.quotedLow, q[q.length - 1]!.delta.toFixed(4));
+  // Only the strikes from 210 up are considered: a 0.9 target is not reached.
   const high = strikeForDelta(q.filter((o) => o.strike >= 210), 0.9, ratio());
   assert.equal(!high.ok && high.reason, 'vol-delta-out-of-range');
-  assert.equal(!high.ok && high.detail.quotedHigh, '0.5621');
+  assert.equal(!high.ok && high.detail.quotedHigh, q.find((o) => o.strike === 210)!.delta.toFixed(4));
   assert.equal((strikeForDelta([], 0.15, 1) as { reason: string }).reason, 'vol-delta-out-of-range');
   assert.equal((strikeForDelta(q, 0.15, 0) as { reason: string }).reason, 'vol-delta-out-of-range', 'a broken ratio');
 });
@@ -286,17 +282,16 @@ test('fairCallPrice: the mid interpolated in share-strike space, mapped to the t
   const r = ratio();
   const f220 = fairCallPrice(q, 220_000_000n, r);
   assert.ok(f220);
-  // 220 token / 1.0008 = 219.824 share, between 217.5 (mid 1.05) and 220 (mid 0.625):
-  // 1.05 + 0.9297 × (0.625 - 1.05) = 0.65489 -> × 1.0008 = 0.655414... -> 655415 base units.
+  // Synthetic 220 token maps between the 217.5 and 220 share listings.
   assert.deepEqual(f220.bracket, [217.5, 220]);
-  assert.ok(Math.abs(f220.shareMid - 0.65489) < 1e-5);
-  assert.equal(f220.fairUnit6, 655_415n);
-  assert.ok(Math.abs(f220.deltaAtStrike - 0.1586) < 1e-4, 'delta interpolated the same way');
-  assert.ok(Math.abs(f220.ivAtStrike - 0.37297) < 1e-4);
-  assert.equal(fairCallPrice(quotesFor('2026-09-25'), 225_000_000n, r)?.fairUnit6, 860_864n);
+  assert.ok(Math.abs(f220.shareMid - 1.6097552941176474) < 1e-9);
+  assert.equal(f220.fairUnit6, 1_610_893n);
+  assert.ok(Math.abs(f220.deltaAtStrike - 0.24354823529411768) < 1e-9, 'delta interpolated the same way');
+  assert.equal(f220.ivAtStrike, 0.43);
+  assert.equal(fairCallPrice(quotesFor('2026-09-25'), 225_000_000n, r)?.fairUnit6, 2_297_834n);
 
-  // On a listing, with ratio 1: that listing's mid, exactly (0.625 -> 625000, not 625001).
-  assert.equal(fairCallPrice(q, 220_000_000n, 1)?.fairUnit6, 625_000n);
+  // On a listing, with ratio 1: that listing's synthetic mid, exactly.
+  assert.equal(fairCallPrice(q, 220_000_000n, 1)?.fairUnit6, 1_570_000n);
   assert.deepEqual(fairCallPrice(q, 220_000_000n, 1)?.bracket, [220, 220]);
   // Rounding UP at the base unit, and float noise is not a base unit.
   assert.equal(usdToUsdg6Up(0.63), 630_000n, '0.63 × 1e6 = 630000.0000000001 in floats');
@@ -306,12 +301,12 @@ test('fairCallPrice: the mid interpolated in share-strike space, mapped to the t
   assert.throws(() => usdToUsdg6Up(Number.NaN));
   assert.throws(() => usdToUsdg6Up(-1));
 
-  // Outside the usable quotes (first 70, last 255 on 18 Sep): null, never an extrapolation.
-  assert.equal(q[0]?.strike, 70);
-  assert.equal(q[q.length - 1]?.strike, 255);
-  assert.equal(fairCallPrice(q, 256_000_000n, r), null, '256 token = 255.8 share, past the last quote');
-  assert.ok(fairCallPrice(q, 255_000_000n, r), '255 token = 254.8 share, inside');
-  assert.equal(fairCallPrice(q, 60_000_000n, r), null);
+  // Outside the synthetic strike grid: null, never an extrapolation.
+  assert.equal(q[0]?.strike, 185);
+  assert.equal(q[q.length - 1]?.strike, 250);
+  assert.equal(fairCallPrice(q, 251_000_000n, r), null);
+  assert.ok(fairCallPrice(q, 250_000_000n, r));
+  assert.equal(fairCallPrice(q, 184_000_000n, r), null);
   assert.equal(fairCallPrice([], 220_000_000n, r), null);
   assert.equal(fairCallPrice(q, 0n, r), null);
 });
@@ -322,8 +317,8 @@ test('checkVolMarket: every strike-independent check in order, each with its own
   const ok = checkVolMarket(ctx, TOKEN_SPOT6, settings);
   assert.ok(ok.ok);
   assert.equal(ok.expiry, '2026-09-18');
-  assert.equal(ok.quotes.length, 51);
-  assert.equal(ok.chainTimestamp, '2026-09-15 05:57:42');
+  assert.equal(ok.quotes.length, 27);
+  assert.equal(ok.chainTimestamp, CHAIN.timestamp);
 
   const reason = (r: ReturnType<typeof checkVolMarket>) => (r.ok ? 'ok' : r.reason);
   assert.equal(reason(checkVolMarket(undefined, TOKEN_SPOT6, settings)), 'vol-unavailable');
@@ -383,7 +378,7 @@ test('fetchCboeChain: https only, redirect manual, the chain parsed from the bod
       return new Response(RAW, { status: 200, headers: { 'content-type': 'application/json' } });
     },
   });
-  assert.equal(chain.options.length, 340);
+  assert.equal(chain.options.length, CHAIN.options.length);
   assert.equal(seen.length, 1);
   assert.equal(seen[0]?.init?.redirect, 'manual', 'redirects are never followed blindly');
   assert.ok(seen[0]?.init?.signal instanceof AbortSignal, 'the deadline reaches the request');
@@ -455,8 +450,8 @@ test('fetchCboeChain: the byte cap is enforced while streaming, and on a declare
     fetchCboeChain(URL_OK, { ...OPTS, maxBytes: 5_000, fetchImpl: async () => new Response(declared.stream, { headers: { 'content-length': '9000000' } }) }),
     expectCode('oversize'),
   );
-  // The real chain fits under the real default with room to spare, and not under a tiny cap.
-  await assert.rejects(fetchCboeChain(URL_OK, { ...OPTS, maxBytes: 100_000, fetchImpl: async () => new Response(RAW) }), expectCode('oversize'));
+  // The synthetic chain fits under the default and fails a cap one byte below its length.
+  await assert.rejects(fetchCboeChain(URL_OK, { ...OPTS, maxBytes: Buffer.byteLength(RAW) - 1, fetchImpl: async () => new Response(RAW) }), expectCode('oversize'));
 });
 
 test('fetchCboeChain: bad JSON, bad UTF-8 and a wrong shape are refused by name', async () => {
@@ -473,7 +468,7 @@ test('fetchCboeChain: bad JSON, bad UTF-8 and a wrong shape are refused by name'
 
 test('checkQuoteWindow: a gapped bracket, a rising delta, a vertical or butterfly arbitrage near it are inconsistent', () => {
   const q = quotesFor('2026-09-25');
-  assert.equal(checkQuoteWindow(q, [222.5, 225]), null, 'the real chain is clean');
+  assert.equal(checkQuoteWindow(q, [222.5, 225]), null, 'the synthetic chain is clean');
   assert.equal(checkQuoteWindow(q, [225, 225]), null, 'an exact listing');
   const why = (r: ReturnType<typeof checkQuoteWindow>) => (r === null ? 'ok' : `${r.reason}: ${r.detail.why}`);
   // Gap: max(2.5, 2.5% of the lower strike). 215 -> 5.375: a 5 USD bracket passes, 7.5 does not.
@@ -481,14 +476,16 @@ test('checkQuoteWindow: a gapped bracket, a rising delta, a vertical or butterfl
   assert.equal(checkQuoteWindow(without([217.5]), [215, 220]), null);
   assert.match(why(checkQuoteWindow(without([217.5, 220]), [215, 222.5])), /vol-inconsistent: .*too far apart/);
   // A delta rising with the strike within one quote of the bracket.
-  const bump = q.map((o) => (o.strike === 227.5 ? { ...o, delta: 0.16 } : o));
+  const bump = q.map((o) => (o.strike === 227.5 ? { ...o, delta: 0.5 } : o));
   assert.match(why(checkQuoteWindow(bump, [222.5, 225])), /delta rises/);
   assert.equal(checkQuoteWindow(bump, [212.5, 215]), null, 'far from the bracket it is not this decision’s business');
   // Vertical: 225 bid above 222.5's ask.
-  const crossed = q.map((o) => (o.strike === 225 ? { ...o, bid: 1.25, ask: 1.3 } : o));
+  const lowerAsk = q.find((o) => o.strike === 222.5)!.ask;
+  const crossed = q.map((o) => (o.strike === 225 ? { ...o, bid: lowerAsk + 0.1, ask: lowerAsk + 0.14 } : o));
   assert.match(why(checkQuoteWindow(crossed, [222.5, 225])), /bid above a lower strike/);
   // Butterfly: 225 bid above the chord of 222.5 and 227.5 asks.
-  const bulge = q.map((o) => (o.strike === 225 ? { ...o, bid: 1.1, ask: 1.12 } : o));
+  const chord = (q.find((o) => o.strike === 222.5)!.ask + q.find((o) => o.strike === 227.5)!.ask) / 2;
+  const bulge = q.map((o) => (o.strike === 225 ? { ...o, bid: chord + 0.1, ask: chord + 0.14 } : o));
   assert.match(why(checkQuoteWindow(bulge, [225, 227.5])), /convex/);
   assert.match(why(checkQuoteWindow(q, [222.5, 223])), /not in the usable quotes/);
 });
@@ -496,11 +493,11 @@ test('checkQuoteWindow: a gapped bracket, a rising delta, a vertical or butterfl
 test('strikeForDelta: a delta that climbs back over the target, or a gapped bracket, is inconsistent', () => {
   const q = quotesFor('2026-09-25');
   const r = ratio();
-  const corrupt = q.map((o) => (o.strike === 160 ? { ...o, delta: 0.12 } : o));
+  const corrupt = q.map((o) => (o.strike === 232.5 ? { ...o, delta: 0.3 } : o));
   const c = strikeForDelta(corrupt, 0.15, r);
   assert.equal(!c.ok && c.reason, 'vol-inconsistent');
-  assert.equal(!c.ok && c.detail.highStrike, '165');
-  const holed = q.filter((o) => o.strike < 216 || o.strike > 239);
+  assert.equal(!c.ok && c.detail.highStrike, '232.5');
+  const holed = q.filter((o) => o.strike < 227.5 || o.strike > 235);
   const h = strikeForDelta(holed, 0.15, r);
   assert.equal(!h.ok && h.reason, 'vol-inconsistent');
   assert.match(!h.ok ? h.detail.why ?? '' : '', /too far apart/);
@@ -563,7 +560,7 @@ test('checkVolMarket: a chain for another root, or one whose rows mostly do not 
   assert.equal(drifted.firstSkip, 'delta: invalid_type');
   const r = checkVolMarket({ ...ctx, chain: drifted }, TOKEN_SPOT6, settings);
   assert.equal(!r.ok && r.reason, 'vol-inconsistent');
-  assert.equal(!r.ok && r.detail.skippedRows, '340');
+  assert.equal(!r.ok && r.detail.skippedRows, String(CHAIN.options.length));
   assert.equal(!r.ok && r.detail.firstSkip, 'delta: invalid_type');
   // A few bad rows are noise: the week still prices, and the count travels with a later skip.
   const few = { ...CHAIN, skippedRows: 3, firstSkip: 'symbol' };

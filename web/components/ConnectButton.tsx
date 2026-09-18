@@ -121,12 +121,11 @@ export function ConnectButton({ block = false }: { block?: boolean }) {
         className={block ? "w-full" : undefined}
         onClick={() => setOpen((v) => !v)}
         aria-expanded={open}
-        aria-haspopup="listbox"
       >
         {connecting ? "Connecting…" : "Connect"}
       </Button>
       {open ? (
-        <div className={`${MENU} w-[220px]`} role="listbox" aria-label="Wallets">
+        <div className={`${MENU} w-[220px]`} role="group" aria-label="Wallets">
           <div className="grid gap-1">
             {options.length === 0 ? (
               <p className="px-1 py-1.5 text-[13px] leading-snug text-ink-3">Install MetaMask or Phantom.</p>

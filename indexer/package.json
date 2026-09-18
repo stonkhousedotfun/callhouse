@@ -9,20 +9,31 @@
     "serve": "ponder serve",
     "codegen": "ponder codegen",
     "gen:abis": "node scripts/gen-abis.mjs",
+    "gen:card-registry": "node scripts/gen-card-registry.mjs",
+    "check:card-registry": "node scripts/gen-card-registry.mjs --check",
+    "gen:v2-registry": "node scripts/gen-v2-registry.mjs",
+    "check:v2-registry": "node scripts/gen-v2-registry.mjs --check",
     "build": "ponder codegen && tsc --noEmit",
     "typecheck": "tsc --noEmit",
     "lint": "tsc --noEmit",
     "test": "vitest run",
-    "fork:sync": "node --experimental-strip-types scripts/fork-sync.ts"
+    "fork:sync": "node --experimental-strip-types scripts/fork-sync.ts",
+    "v2:devnet-check": "node --experimental-strip-types scripts/v2-devnet-check.ts",
+    "v2:dev-readonly-check": "node --experimental-strip-types scripts/v2-dev-readonly-check.ts",
+    "maker:epoch": "node scripts/maker-epoch.mjs"
   },
   "dependencies": {
+    "hono": "^4.13.7",
     "ponder": "^0.17.10",
     "viem": "^2.56.3",
-    "hono": "^4.13.7"
+    "zod": "^3.25.76"
   },
   "devDependencies": {
-    "typescript": "^5.9.3",
+    "@electric-sql/pglite": "0.2.13",
+    "@openzeppelin/merkle-tree": "^1.0.8",
     "@types/node": "^22.20.2",
+    "drizzle-orm": "0.41.0",
+    "typescript": "^5.9.3",
     "vitest": "^3.2.7"
   }
 }

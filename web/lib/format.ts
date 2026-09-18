@@ -87,14 +87,14 @@ export function shortHash(hash: string | undefined | null): string {
  * ----------------------------------------------------------------------------------------- */
 
 /**
- * "NVDA-eq" = raw balance × uiMultiplier() / 1e18.
+ * The "<ticker>-eq" figure = raw balance × uiMultiplier() / 1e18, for any Stock Token.
  *
  * DISPLAY ONLY. The Stock Token uses the multiplier to express splits and dividend adjustments
  * without rebasing anyone's balance. The vault's share maths, the deposit cap, the lot count and
  * every transaction this UI builds all use the RAW balance. If the two ever disagree on screen,
  * the raw number is the one that moved the money.
  */
-export function toNvdaEq(raw: bigint | undefined | null, uiMultiplier: bigint | undefined | null): bigint | undefined {
+export function toStockEq(raw: bigint | undefined | null, uiMultiplier: bigint | undefined | null): bigint | undefined {
   if (raw === undefined || raw === null) return undefined;
   const m = uiMultiplier ?? WAD;
   if (m === 0n) return undefined;

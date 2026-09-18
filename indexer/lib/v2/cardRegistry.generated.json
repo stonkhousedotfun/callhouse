@@ -1,0 +1,238 @@
+{
+  "projectionSha256": "3bd78c95524ce2ff02614f4a35741adb050f6f00ea0a00e4a7c91b8f0be4a3f0",
+  "v2": {
+    "fees": {
+      "takerFeeFlat": "100000",
+      "takerFeeCapBps": 1000,
+      "exerciseFeeBps": 25
+    },
+    "defaults": {
+      "ladder": {
+        "weekly": {
+          "rungs": 5,
+          "firstOtmBps": 200,
+          "stepBps": 200,
+          "cardTargetBps": 400
+        },
+        "daily": {
+          "rungs": 5,
+          "firstOtmBps": 100,
+          "stepBps": 100,
+          "cardTargetBps": 200
+        }
+      }
+    }
+  },
+  "markets": [
+    {
+      "ticker": "AAPL",
+      "v2": {
+        "overrides": {}
+      }
+    },
+    {
+      "ticker": "AMD",
+      "v2": {
+        "overrides": {}
+      }
+    },
+    {
+      "ticker": "AMZN",
+      "v2": {
+        "overrides": {}
+      }
+    },
+    {
+      "ticker": "ASML",
+      "v2": {
+        "overrides": {}
+      }
+    },
+    {
+      "ticker": "BABA",
+      "v2": {
+        "overrides": {}
+      }
+    },
+    {
+      "ticker": "CLSK",
+      "v2": {
+        "overrides": {}
+      }
+    },
+    {
+      "ticker": "COIN",
+      "v2": {
+        "overrides": {}
+      }
+    },
+    {
+      "ticker": "CRCL",
+      "v2": {
+        "overrides": {}
+      }
+    },
+    {
+      "ticker": "CRWV",
+      "v2": {
+        "overrides": {}
+      }
+    },
+    {
+      "ticker": "DELL",
+      "v2": {
+        "overrides": {}
+      }
+    },
+    {
+      "ticker": "EWY",
+      "v2": {
+        "overrides": {}
+      }
+    },
+    {
+      "ticker": "GME",
+      "v2": {
+        "overrides": {}
+      }
+    },
+    {
+      "ticker": "GOOGL",
+      "v2": {
+        "overrides": {}
+      }
+    },
+    {
+      "ticker": "INTC",
+      "v2": {
+        "overrides": {}
+      }
+    },
+    {
+      "ticker": "IONQ",
+      "v2": {
+        "overrides": {}
+      }
+    },
+    {
+      "ticker": "META",
+      "v2": {
+        "overrides": {}
+      }
+    },
+    {
+      "ticker": "MSFT",
+      "v2": {
+        "overrides": {}
+      }
+    },
+    {
+      "ticker": "MSTR",
+      "v2": {
+        "overrides": {}
+      }
+    },
+    {
+      "ticker": "MU",
+      "v2": {
+        "overrides": {}
+      }
+    },
+    {
+      "ticker": "NBIS",
+      "v2": {
+        "overrides": {}
+      }
+    },
+    {
+      "ticker": "NVDA",
+      "v2": {
+        "overrides": {}
+      }
+    },
+    {
+      "ticker": "ORCL",
+      "v2": {
+        "overrides": {}
+      }
+    },
+    {
+      "ticker": "PLTR",
+      "v2": {
+        "overrides": {}
+      }
+    },
+    {
+      "ticker": "QQQ",
+      "v2": {
+        "overrides": {}
+      }
+    },
+    {
+      "ticker": "RGTI",
+      "v2": {
+        "overrides": {}
+      }
+    },
+    {
+      "ticker": "RKLB",
+      "v2": {
+        "overrides": {}
+      }
+    },
+    {
+      "ticker": "SGOV",
+      "v2": {
+        "overrides": {}
+      }
+    },
+    {
+      "ticker": "SLV",
+      "v2": {
+        "overrides": {}
+      }
+    },
+    {
+      "ticker": "SNDK",
+      "v2": {
+        "overrides": {}
+      }
+    },
+    {
+      "ticker": "SPCX",
+      "v2": {
+        "overrides": {}
+      }
+    },
+    {
+      "ticker": "SPY",
+      "v2": {
+        "overrides": {}
+      }
+    },
+    {
+      "ticker": "TSLA",
+      "v2": {
+        "overrides": {}
+      }
+    },
+    {
+      "ticker": "TSM",
+      "v2": {
+        "overrides": {}
+      }
+    },
+    {
+      "ticker": "USAR",
+      "v2": {
+        "overrides": {}
+      }
+    },
+    {
+      "ticker": "USO",
+      "v2": {
+        "overrides": {}
+      }
+    }
+  ]
+}

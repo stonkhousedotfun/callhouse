@@ -1,0 +1,8 @@
+rules:
+  - id: no-dynamic-code-execution
+    message: Avoid dynamic JavaScript execution; review and use a typed parser instead.
+    severity: ERROR
+    languages: [javascript, typescript]
+    pattern-either:
+      - pattern: eval(...)
+      - pattern: new Function(...)

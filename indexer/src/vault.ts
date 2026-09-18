@@ -1,11 +1,11 @@
-import { ponder } from "ponder:registry";
+import { vaultPonder as ponder } from "../lib/registry";
 import schema from "ponder:schema";
 import type { Address } from "viem";
 
 import { valoremClearAbi } from "../abis/valoremClear";
 import { vaultAbi } from "../abis/vault";
 import { checkWiring, constructorSettings, wiringError, type WiringReads } from "../lib/deployment";
-import { ASSET, CLEARINGHOUSE, SEAPORT, USDG, VAULT, WAD } from "../lib/env";
+import { ASSET, CLEARINGHOUSE, SEAPORT, USDG, VAULT as VAULT_ENV, WAD, ZERO_ADDRESS_PLACEHOLDER } from "../lib/env";
 import { addHarvest, splitHarvest } from "../lib/harvest";
 import {
   PHASE,
@@ -38,6 +38,11 @@ import {
 } from "../lib/lifecycle";
 import { log } from "../lib/log";
 import { roleName } from "../lib/roles";
+
+// These handlers are registered only when VAULT_ADDRESS is set (lib/registry.ts), so the address
+// is never read unset; the fallback exists because Ponder loads this module on a factory-only
+// deployment too, and a module-scope throw would stop that build.
+const VAULT = VAULT_ENV ?? ZERO_ADDRESS_PLACEHOLDER;
 
 /*//////////////////////////////////////////////////////////////
                        CONSTRUCTOR SETTINGS

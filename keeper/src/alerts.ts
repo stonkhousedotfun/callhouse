@@ -25,6 +25,16 @@
  *   rpc_lag              head block trails the wall clock by over KEEPER_RPC_LAG_ALERT_MS
  *   phase_stuck          still not Idle an hour after expiry — the guardian path is now open
  *   keeper_error         an unhandled error inside the loop
+ *   keeper_role          (factory) the hot key does not hold KEEPER_ROLE on the factory: it can
+ *                        settle expired accounts but cannot setWeek or listFor
+ *   week_set             (factory) setWeek landed: the strike, the ask and the window, info
+ *   v1_drained           (factory, SOLO_WIND_DOWN) no account is live or pending any more: the
+ *                        run-off is over and nothing is left to settle. Once per factory, info
+ *   v1_settle_held       (factory, any mode) an expired account with claimKey != 0 is NOT settled
+ *                        this tick: USDG is paused, the account or the Clear is frozen on USDG or
+ *                        blocked on the Stock Token, the Stock Token is paused, or one of those
+ *                        reads failed. settle() now would strand the claim. Once per account per
+ *                        reason while it holds, warn
  *   boot / roll_open / listing / fill / queue_settled / roll_close   state changes, info
  */
 import { config } from './config.js';
@@ -46,6 +56,10 @@ export type AlertKind =
   | 'rpc_lag'
   | 'phase_stuck'
   | 'keeper_error'
+  | 'keeper_role'
+  | 'week_set'
+  | 'v1_drained'
+  | 'v1_settle_held'
   | 'boot'
   | 'roll_open'
   | 'listing'
@@ -70,6 +84,10 @@ const DEFAULT_SEVERITY: Record<AlertKind, AlertSeverity> = {
   rpc_lag: 'warn',
   phase_stuck: 'error',
   keeper_error: 'error',
+  keeper_role: 'warn',
+  week_set: 'info',
+  v1_drained: 'info',
+  v1_settle_held: 'warn',
   boot: 'info',
   roll_open: 'info',
   listing: 'info',
@@ -130,7 +148,11 @@ export async function alert(
     kind,
     severity,
     message,
-    vault: config.VAULT,
+    // null for a factory-only process. `factory` and `market` are what the relay shows first once
+    // there are 35 keepers behind it.
+    vault: config.VAULT ?? null,
+    factory: config.FACTORY ?? null,
+    market: config.KEEPER_MARKET,
     chainId: config.CHAIN_ID,
     at: new Date(now).toISOString(),
     data: data ?? {},

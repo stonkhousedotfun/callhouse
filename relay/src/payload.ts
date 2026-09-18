@@ -1,7 +1,7 @@
 /**
  * The keeper's alert payload, as keeper/src/alerts.ts builds it and ops/alerts.md documents it:
  *
- *   { source, kind, severity, message, vault, chainId, at, data }
+ *   { source, kind, severity, message, market, factory, vault, chainId, at, data }
  *
  * WHAT IS STRICT, and why: `severity` is the routing key (ops/alerts.md "Routing") and `kind` and
  * `message` are what a human reads, so all three are required and typed. A body without them is
@@ -17,7 +17,8 @@
  *     in server.ts is what bounds memory.
  *   - `data` is any JSON object. The keeper serialises bigints to strings on the way out
  *     (bigintReplacer), so nothing here needs to know its shape.
- *   - `source`, `vault`, `chainId`, `at` are optional: shown when present, not required.
+ *   - `source`, `market`, `factory`, `vault`, `chainId`, `at` are optional: shown when present,
+ *     not required. The v1 factory keeper sends market and factory without a vault.
  *   - Unknown top-level keys are stripped, not refused.
  */
 import { z } from 'zod';
@@ -32,7 +33,10 @@ export const keeperAlertSchema = z.object({
     .regex(/^[a-z][a-z0-9_]{0,63}$/, 'kind must be a lowercase snake_case identifier (≤ 64 chars)'),
   severity: z.enum(SEVERITIES),
   message: z.string().min(1, 'message must not be empty'),
-  vault: z.string().max(128).optional(),
+  market: z.string().max(128).optional(),
+  factory: z.string().max(128).optional(),
+  // The v1 factory keeper sends `vault: null` when it runs without a pooled vault; accept it as absent.
+  vault: z.string().max(128).nullable().optional(),
   chainId: z.number().int().nonnegative().optional(),
   at: z.string().max(64).optional(),
   data: z.record(z.unknown()).optional(),

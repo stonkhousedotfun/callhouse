@@ -1,27 +1,63 @@
-import { createConfig } from "ponder";
+import { createConfig, factory } from "ponder";
+import { getAbiItem, type Address } from "viem";
 
+import { accountFactoryAbi } from "./abis/accountFactory";
 import { erc20Abi } from "./abis/erc20";
 import { stockTokenAbi } from "./abis/stockToken";
 import { seaportAbi } from "./abis/seaport";
 import { valoremClearAbi } from "./abis/valoremClear";
 import { vaultAbi } from "./abis/vault";
+import { writerAccountAbi } from "./abis/writerAccount";
+import { autoRollerAbi } from "./abis/v2/autoRoller";
+import { clearinghouseAbi } from "./abis/v2/clearinghouse";
+import { expiryCalendarAbi } from "./abis/v2/expiryCalendar";
+import { keeperRewardsAbi } from "./abis/v2/keeperRewards";
+import { makerRegistryAbi } from "./abis/v2/makerRegistry";
+import { orderBookAbi } from "./abis/v2/orderBook";
+import { settlementOracleAbi } from "./abis/v2/settlementOracle";
 import {
   ASSET,
   CHAIN_ID,
   CLEARINGHOUSE,
   END_BLOCK,
+  FACTORY,
   PGLITE_DIRECTORY,
   RPC_URL,
   SEAPORT,
   START_BLOCK,
   USDG,
   VAULT,
+  V2_AUTO_ROLLER,
+  V2_CLEARINGHOUSE,
+  V2_EXPIRY_CALENDAR,
+  V2_KEEPER_REWARDS,
+  V2_MAKER_REGISTRY,
+  V2_ORDER_BOOK,
+  V2_SETTLEMENT_ORACLE,
+  V2_START_BLOCK,
 } from "./lib/env";
 
 /**
- * Stonkhouse indexer — chain 4663 (Robinhood Chain mainnet), one vault.
+ * Stonkhouse indexer — chain 4663 (Robinhood Chain mainnet). V2 indexes all markets through
+ * one Clearinghouse; optional legacy groups retain their one-product-per-process behavior.
  *
- * Sources, and why each one is here:
+ * TWO PRODUCTS, TWO GROUPS OF SOURCES, EACH REGISTERED ONLY WHEN ITS ADDRESS IS SET:
+ *
+ *   VAULT_ADDRESS    the pooled vault, exactly as it has been indexed since the redesign. Every
+ *                    source in `vaultContracts` is unchanged; the NVDA deployment sets this and
+ *                    nothing else and behaves as before.
+ *   FACTORY_ADDRESS  a factory market (contracts/src/solo/): the `AccountFactory` and the
+ *                    `WriterAccount` clones it creates. Tier 1 of the multi-market plan runs ONE
+ *                    process per market, with this, `MARKET` and `START_BLOCK` = that market's
+ *                    deploy block from ops/markets/tier1.json. There is no multi-factory config.
+ *
+ * Both may be set (the NVDA deployment, if it ever wants the factory tape beside the vault's);
+ * v2 may be set with either or on its own. An entirely empty config is refused by lib/env.ts.
+ * The handler registrations follow the same switch
+ * (lib/registry.ts), because Ponder refuses to build an indexing function whose contract is not
+ * in the config.
+ *
+ * The vault's sources, and why each one is here:
  *
  *   Vault          every event the vault emits. This is the primary record, and under write on
  *                  fill it is also the clock: `RollOpen` is what creates a week in the tape (the
@@ -47,12 +83,249 @@ import {
  *                  freeze blocks settlement. Neither is something we can code around, so both
  *                  are indexed and published.
  *
- * Every source starts at START_BLOCK (the vault's deploy block). END_BLOCK is normally unset —
- * production follows the head — and exists to bound a replay for a dry-run.
+ * The factory market's sources:
+ *
+ *   Factory        every event the `AccountFactory` emits: accounts created and rekeyed, the
+ *                  week (`WeekSet` is the clock here: the factory numbers its own weeks), the
+ *                  halt switch, policy / fee recipient / cap changes, and the roles.
+ *   WriterAccount  every event of every clone, with the address set resolved by Ponder from the
+ *                  factory's `AccountCreated(owner, account, index)` — the `factory()` address
+ *                  pattern, keyed on the `account` parameter. A clone's events are delivered from
+ *                  the block it was created in.
+ *
+ *   NOT a source for the factory market, on purpose: Seaport and the two tokens. A `filter` narrows
+ *   topics to fixed addresses and the set of clones is dynamic, so neither could be filtered to
+ *   the accounts, and unfiltered they are the whole chain's transfer history. `LotFilled` carries
+ *   the order hash and the premium, which is the fill; balances are not derivable and the API
+ *   says so. Nor is the Clear: the account handlers are log-only and every figure the tape needs
+ *   is in the clone's own events.
+ *
+ * Legacy sources start at START_BLOCK; v2 sources start at V2_START_BLOCK. END_BLOCK is normally
+ * unset — production follows the head — and exists to bound a replay or smoke test.
  */
+
+const chain = "robinhood" as const;
+
+/** The pooled vault's eight sources. Unchanged from the single-product config. */
+function vaultContracts(vault: Address) {
+  return {
+    Vault: {
+      abi: vaultAbi,
+      chain,
+      address: vault,
+      startBlock: START_BLOCK,
+      endBlock: END_BLOCK,
+    },
+
+    Clear: {
+      abi: valoremClearAbi,
+      chain,
+      address: CLEARINGHOUSE,
+      startBlock: START_BLOCK,
+      endBlock: END_BLOCK,
+      filter: [
+        // `writer` is topic2 on OptionsWritten, `redeemer` is topic3 on ClaimRedeemed, so
+        // both narrow to the vault at the node. The other three Valorem events carry no
+        // address for us, only an optionId or a claimId, and are filtered in the handlers.
+        { event: "OptionsWritten" as const, args: { writer: vault } },
+        { event: "ClaimRedeemed" as const, args: { redeemer: vault } },
+      ],
+    },
+
+    Seaport: {
+      abi: seaportAbi,
+      chain,
+      address: SEAPORT,
+      startBlock: START_BLOCK,
+      endBlock: END_BLOCK,
+      filter: [
+        { event: "OrderFulfilled" as const, args: { offerer: vault } },
+        { event: "OrderCancelled" as const, args: { offerer: vault } },
+        { event: "CounterIncremented" as const, args: { offerer: vault } },
+      ],
+    },
+
+    StockTokenIn: {
+      abi: stockTokenAbi,
+      chain,
+      address: ASSET,
+      startBlock: START_BLOCK,
+      endBlock: END_BLOCK,
+      filter: [{ event: "Transfer" as const, args: { to: vault } }],
+    },
+
+    StockTokenOut: {
+      abi: stockTokenAbi,
+      chain,
+      address: ASSET,
+      startBlock: START_BLOCK,
+      endBlock: END_BLOCK,
+      filter: [{ event: "Transfer" as const, args: { from: vault } }],
+    },
+
+    // The issuer's own switches. Unfiltered by address on purpose: they are contract-wide and
+    // carry no counterparty, and every one of them can stop this vault dead.
+    StockToken: {
+      abi: stockTokenAbi,
+      chain,
+      address: ASSET,
+      startBlock: START_BLOCK,
+      endBlock: END_BLOCK,
+    },
+
+    UsdgIn: {
+      abi: erc20Abi,
+      chain,
+      address: USDG,
+      startBlock: START_BLOCK,
+      endBlock: END_BLOCK,
+      filter: [{ event: "Transfer" as const, args: { to: vault } }],
+    },
+
+    UsdgOut: {
+      abi: erc20Abi,
+      chain,
+      address: USDG,
+      startBlock: START_BLOCK,
+      endBlock: END_BLOCK,
+      filter: [{ event: "Transfer" as const, args: { from: vault } }],
+    },
+  };
+}
+
+/** The factory market's two sources. */
+function factoryContracts(factoryAddress: Address) {
+  return {
+    Factory: {
+      abi: accountFactoryAbi,
+      chain,
+      address: factoryAddress,
+      startBlock: START_BLOCK,
+      endBlock: END_BLOCK,
+    },
+
+    WriterAccount: {
+      abi: writerAccountAbi,
+      chain,
+      // Ponder watches the factory for `AccountCreated` and adds each `account` to this source's
+      // address set from the block it appears in. The child's start block must not precede the
+      // factory's; both are START_BLOCK.
+      address: factory({
+        address: factoryAddress,
+        event: getAbiItem({ abi: accountFactoryAbi, name: "AccountCreated" }),
+        parameter: "account",
+        startBlock: START_BLOCK,
+        endBlock: END_BLOCK,
+      }),
+      startBlock: START_BLOCK,
+      endBlock: END_BLOCK,
+    },
+  };
+}
+
+/** All v2 markets are emitted by this one group of deployed contracts. */
+function v2Contracts() {
+  if (
+    V2_CLEARINGHOUSE === undefined ||
+    V2_ORDER_BOOK === undefined ||
+    V2_SETTLEMENT_ORACLE === undefined ||
+    V2_AUTO_ROLLER === undefined ||
+    V2_MAKER_REGISTRY === undefined ||
+    V2_START_BLOCK === undefined
+  ) {
+    throw new Error("[callhouse/indexer] v2Contracts called without a complete v2 deployment");
+  }
+  return {
+    Clearinghouse: {
+      abi: clearinghouseAbi,
+      chain,
+      address: V2_CLEARINGHOUSE,
+      startBlock: V2_START_BLOCK,
+      endBlock: END_BLOCK,
+    },
+    OrderBook: {
+      abi: orderBookAbi,
+      chain,
+      address: V2_ORDER_BOOK,
+      startBlock: V2_START_BLOCK,
+      endBlock: END_BLOCK,
+    },
+    SettlementOracle: {
+      abi: settlementOracleAbi,
+      chain,
+      address: V2_SETTLEMENT_ORACLE,
+      startBlock: V2_START_BLOCK,
+      endBlock: END_BLOCK,
+    },
+    AutoRoller: {
+      abi: autoRollerAbi,
+      chain,
+      address: V2_AUTO_ROLLER,
+      startBlock: V2_START_BLOCK,
+      endBlock: END_BLOCK,
+    },
+    MakerRegistry: {
+      abi: makerRegistryAbi,
+      chain,
+      address: V2_MAKER_REGISTRY,
+      startBlock: V2_START_BLOCK,
+      endBlock: END_BLOCK,
+    },
+  };
+}
+
+function expiryCalendarContract(address: Address) {
+  return { ExpiryCalendar: { abi: expiryCalendarAbi, chain, address, startBlock: V2_START_BLOCK!, endBlock: END_BLOCK } };
+}
+
+function keeperRewardsContract(address: Address) {
+  return { KeeperRewards: { abi: keeperRewardsAbi, chain, address, startBlock: V2_START_BLOCK!, endBlock: END_BLOCK } };
+}
+
+/**
+ * The full set of sources, as the types see it. At runtime a group is present only when its
+ * address is set; the cast is what lets `ponder.on("Vault:…")` and `ponder.on("Factory:…")` both
+ * type-check in one codebase (the virtual `ponder:registry` types derive from this config), and
+ * lib/registry.ts is what keeps a handler for an absent group from being registered.
+ */
+type Contracts = ReturnType<typeof vaultContracts> & ReturnType<typeof factoryContracts> & ReturnType<typeof v2Contracts>
+  & ReturnType<typeof expiryCalendarContract> & ReturnType<typeof keeperRewardsContract>;
+
+const contracts = {
+  ...(VAULT === undefined ? {} : vaultContracts(VAULT)),
+  ...(FACTORY === undefined ? {} : factoryContracts(FACTORY)),
+  ...(V2_CLEARINGHOUSE === undefined ? {} : v2Contracts()),
+  ...(V2_EXPIRY_CALENDAR === undefined ? {} : expiryCalendarContract(V2_EXPIRY_CALENDAR)),
+  ...(V2_KEEPER_REWARDS === undefined ? {} : keeperRewardsContract(V2_KEEPER_REWARDS)),
+} as Contracts;
+
+/** Periodic maintenance for order expiry and series cutoff. Like contracts, this source is
+ * registered only when the v2 deployment is configured; the cast preserves registry types for
+ * a v1-only build whose v2 handler registrations are inert. */
+const blocks = {
+  ...(V2_CLEARINGHOUSE === undefined ? {} : {
+    V2Clock: {
+      chain,
+      startBlock: V2_START_BLOCK!,
+      endBlock: END_BLOCK,
+      interval: 600,
+    },
+    /** Batched block-end PnL reconciliation sees all fills, transfers and fee logs in a transaction. */
+    V2PnlClock: {
+      chain,
+      startBlock: V2_START_BLOCK!,
+      endBlock: END_BLOCK,
+      interval: 30,
+    },
+  }),
+} as {
+  V2Clock: { chain: typeof chain; startBlock: number; endBlock: number | undefined; interval: number };
+  V2PnlClock: { chain: typeof chain; startBlock: number; endBlock: number | undefined; interval: number };
+};
+
 export default createConfig({
-  // Only when PGLITE_DIRECTORY is set (the fork sync's throwaway database). Otherwise Ponder
-  // decides: Postgres if DATABASE_URL is set, `.ponder/pglite` if not.
+  // Only when PGLITE_DIRECTORY is set (the fork sync's throwaway database, and the smoke test's).
+  // Otherwise Ponder decides: Postgres if DATABASE_URL is set, `.ponder/pglite` if not.
   ...(PGLITE_DIRECTORY === undefined
     ? {}
     : { database: { kind: "pglite" as const, directory: PGLITE_DIRECTORY } }),
@@ -64,87 +337,6 @@ export default createConfig({
       pollingInterval: 2_000,
     },
   },
-  contracts: {
-    Vault: {
-      abi: vaultAbi,
-      chain: "robinhood",
-      address: VAULT,
-      startBlock: START_BLOCK,
-      endBlock: END_BLOCK,
-    },
-
-    Clear: {
-      abi: valoremClearAbi,
-      chain: "robinhood",
-      address: CLEARINGHOUSE,
-      startBlock: START_BLOCK,
-      endBlock: END_BLOCK,
-      filter: [
-        // `writer` is topic2 on OptionsWritten, `redeemer` is topic3 on ClaimRedeemed, so
-        // both narrow to the vault at the node. The other three Valorem events carry no
-        // address for us, only an optionId or a claimId, and are filtered in the handlers.
-        { event: "OptionsWritten", args: { writer: VAULT } },
-        { event: "ClaimRedeemed", args: { redeemer: VAULT } },
-      ],
-    },
-
-    Seaport: {
-      abi: seaportAbi,
-      chain: "robinhood",
-      address: SEAPORT,
-      startBlock: START_BLOCK,
-      endBlock: END_BLOCK,
-      filter: [
-        { event: "OrderFulfilled", args: { offerer: VAULT } },
-        { event: "OrderCancelled", args: { offerer: VAULT } },
-        { event: "CounterIncremented", args: { offerer: VAULT } },
-      ],
-    },
-
-    StockTokenIn: {
-      abi: stockTokenAbi,
-      chain: "robinhood",
-      address: ASSET,
-      startBlock: START_BLOCK,
-      endBlock: END_BLOCK,
-      filter: [{ event: "Transfer", args: { to: VAULT } }],
-    },
-
-    StockTokenOut: {
-      abi: stockTokenAbi,
-      chain: "robinhood",
-      address: ASSET,
-      startBlock: START_BLOCK,
-      endBlock: END_BLOCK,
-      filter: [{ event: "Transfer", args: { from: VAULT } }],
-    },
-
-    // The issuer's own switches. Unfiltered by address on purpose: they are contract-wide and
-    // carry no counterparty, and every one of them can stop this vault dead.
-    StockToken: {
-      abi: stockTokenAbi,
-      chain: "robinhood",
-      address: ASSET,
-      startBlock: START_BLOCK,
-      endBlock: END_BLOCK,
-    },
-
-    UsdgIn: {
-      abi: erc20Abi,
-      chain: "robinhood",
-      address: USDG,
-      startBlock: START_BLOCK,
-      endBlock: END_BLOCK,
-      filter: [{ event: "Transfer", args: { to: VAULT } }],
-    },
-
-    UsdgOut: {
-      abi: erc20Abi,
-      chain: "robinhood",
-      address: USDG,
-      startBlock: START_BLOCK,
-      endBlock: END_BLOCK,
-      filter: [{ event: "Transfer", args: { from: VAULT } }],
-    },
-  },
+  contracts,
+  blocks,
 });

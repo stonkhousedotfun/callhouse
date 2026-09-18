@@ -1,0 +1,13 @@
+{
+  "items": [
+    {
+      "holder": "0xdFbfcf5f533505281840cA0d640aE0580D05a2Be",
+      "units": "80"
+    },
+    {
+      "holder": "0x83daA58d0a8d82D7b971338a03AA2f99bfADf4F8",
+      "units": "10"
+    }
+  ],
+  "nextCursor": null
+}

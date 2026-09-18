@@ -1,4 +1,4 @@
-import { ponder } from "ponder:registry";
+import { vaultPonder as ponder } from "../lib/registry";
 
 import { getState, patchState, snapshot, sub } from "../lib/indexing";
 import { log } from "../lib/log";

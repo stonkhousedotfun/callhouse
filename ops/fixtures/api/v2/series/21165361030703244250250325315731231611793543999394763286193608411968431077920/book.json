@@ -1,0 +1,52 @@
+{
+  "bids": [
+    {
+      "price": {
+        "raw": "339700",
+        "decimals": 6,
+        "formatted": "0.3397"
+      },
+      "units": "100",
+      "orders": [
+        {
+          "orderId": "1049",
+          "maker": "0xd3b47D8a6B8e3fc6160Cd02634CF7Ae74aDeB66f",
+          "units": "100",
+          "onChainRemainingUnits": "100",
+          "makerFreeUnits": null,
+          "makerFreeCollateral": null,
+          "kind": "Bid",
+          "validUntil": 1789761600
+        }
+      ]
+    }
+  ],
+  "asks": [
+    {
+      "price": {
+        "raw": "398900",
+        "decimals": 6,
+        "formatted": "0.3989"
+      },
+      "units": "120",
+      "orders": [
+        {
+          "orderId": "1048",
+          "maker": "0xd3b47D8a6B8e3fc6160Cd02634CF7Ae74aDeB66f",
+          "units": "120",
+          "onChainRemainingUnits": "120",
+          "makerFreeUnits": "2309",
+          "makerFreeCollateral": {
+            "raw": "23099855773809523808",
+            "decimals": 18,
+            "formatted": "23.099855773809523808"
+          },
+          "kind": "AskWrite",
+          "validUntil": 1789759800
+        }
+      ]
+    }
+  ],
+  "updatedBlock": "64418153",
+  "snapshotTimestamp": 1789592400
+}

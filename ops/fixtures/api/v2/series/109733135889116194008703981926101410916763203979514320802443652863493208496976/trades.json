@@ -1,0 +1,25 @@
+{
+  "items": [
+    {
+      "id": "0x5a224406c559d7ca06ee65172f490852a73b308299c5dd4c2b76b240a5ae3d96-2",
+      "ts": 1788964800,
+      "price": {
+        "raw": "674100",
+        "decimals": 6,
+        "formatted": "0.6741"
+      },
+      "units": "100",
+      "premium": {
+        "raw": "674100",
+        "decimals": 6,
+        "formatted": "0.6741"
+      },
+      "takerIsBuyer": true,
+      "primary": true,
+      "taker": "0x83daA58d0a8d82D7b971338a03AA2f99bfADf4F8",
+      "maker": "0xd3b47D8a6B8e3fc6160Cd02634CF7Ae74aDeB66f",
+      "tx": "0x5a224406c559d7ca06ee65172f490852a73b308299c5dd4c2b76b240a5ae3d96"
+    }
+  ],
+  "nextCursor": null
+}

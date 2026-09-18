@@ -93,8 +93,18 @@ RUN pnpm install --frozen-lockfile --filter @callhouse/web...
 ARG NEXT_PUBLIC_VAULT=""
 ENV NEXT_PUBLIC_VAULT=$NEXT_PUBLIC_VAULT
 
-# Isolated 1-lot factory. Blank is SAFE: lib/contracts.ts compiles in the live address
-# 0xc4A5Cd0DE91CaB7F5Ebe2114bc63Fbb43E642BBb. Set this only to point a build at a new factory.
+# ---- MARKETS ARE COMPILED IN, NOT CONFIGURED HERE. The market list (ticker, Stock Token, feed,
+#      factory, status, wave) is web/lib/markets.generated.ts, a COMMITTED file that
+#      web/scripts/gen-markets.mjs writes from ops/markets/tier1.json. The builder copies only a
+#      test JSON fixture from ops/, not the market registry, so it uses the committed file: after
+#      the registry changes, run `pnpm --filter @callhouse/web gen:markets`, commit the output,
+#      and rebuild. The test gate (lib/markets.test.ts) fails on a stale file. ----
+
+# The DEFAULT market's (NVDA) isolated 1-lot factory ONLY. Blank is SAFE and is the production
+# value: lib/contracts.ts falls back to the registry's row in lib/markets.generated.ts
+# (0xc4A5Cd0DE91CaB7F5Ebe2114bc63Fbb43E642BBb). Set it only to point a rehearsal build at another
+# factory for the default market; every other market's factory comes from the registry and this
+# variable does not touch it (lib/markets.ts).
 ARG NEXT_PUBLIC_FACTORY=""
 ENV NEXT_PUBLIC_FACTORY=$NEXT_PUBLIC_FACTORY
 
@@ -114,9 +124,25 @@ ENV NEXT_PUBLIC_EXPLORER_URL=$NEXT_PUBLIC_EXPLORER_URL
 #      can act on. ----
 ARG NEXT_PUBLIC_API_URL="http://localhost:42069"
 ENV NEXT_PUBLIC_API_URL=$NEXT_PUBLIC_API_URL
+# Keep the archived v1 history on its own indexer when API_URL points at v2.
+# Blank follows NEXT_PUBLIC_API_URL for existing deployments.
+ARG NEXT_PUBLIC_V1_API_URL=""
+ENV NEXT_PUBLIC_V1_API_URL=$NEXT_PUBLIC_V1_API_URL
+
+# v2 routing, alerts, and wallet connection are client bundle settings.
+ARG NEXT_PUBLIC_V2="0"
+ENV NEXT_PUBLIC_V2=$NEXT_PUBLIC_V2
+ARG NEXT_PUBLIC_DEV_PREVIEW="0"
+ENV NEXT_PUBLIC_DEV_PREVIEW=$NEXT_PUBLIC_DEV_PREVIEW
+ARG NEXT_PUBLIC_NOTIFIER_URL=""
+ENV NEXT_PUBLIC_NOTIFIER_URL=$NEXT_PUBLIC_NOTIFIER_URL
+ARG NEXT_PUBLIC_WC_PROJECT_ID=""
+ENV NEXT_PUBLIC_WC_PROJECT_ID=$NEXT_PUBLIC_WC_PROJECT_ID
 
 # ---- third-party addresses. Blank is SAFE and is the intended value: lib/contracts.ts carries
-#      explorer-confirmed defaults. Set one only for a fork or a rehearsal deploy. ----
+#      explorer-confirmed defaults. Set one only for a fork or a rehearsal deploy. NEXT_PUBLIC_ASSET
+#      is the DEFAULT market's Stock Token, like NEXT_PUBLIC_FACTORY above: it moves NVDA (and the
+#      closed pooled vault's asset) only; the other markets' tokens are the registry's. ----
 ARG NEXT_PUBLIC_ASSET=""
 ENV NEXT_PUBLIC_ASSET=$NEXT_PUBLIC_ASSET
 ARG NEXT_PUBLIC_USDG=""
@@ -147,6 +173,7 @@ ENV NODE_ENV=production
 
 # ---- sources, last ----
 COPY scripts ./scripts
+COPY ops/fixtures/api/v2/config.json ./ops/fixtures/api/v2/config.json
 COPY web ./web
 
 # `next build` never creates public/, and web/ has none today. An absent directory is a hard COPY

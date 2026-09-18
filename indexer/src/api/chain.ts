@@ -4,7 +4,7 @@ import type { Address } from "viem";
 import { stockTokenAbi } from "../../abis/stockToken";
 import { valoremClearAbi } from "../../abis/valoremClear";
 import { vaultAbi } from "../../abis/vault";
-import { ASSET, CHAIN_NAME, CLEARINGHOUSE, LIVE_READ_TIMEOUT_MS, MULTICALL3, VAULT } from "../../lib/env";
+import { ASSET, CHAIN_NAME, CLEARINGHOUSE, LIVE_READ_TIMEOUT_MS, MULTICALL3, vaultAddress } from "../../lib/env";
 
 /**
  * Live chain reads for the API.
@@ -170,6 +170,8 @@ export type LiveVault = {
 
 export async function readVaultLive(): Promise<LiveVault> {
   const c = client();
+  // Reached only from the `/v1/vault*` routes, which answer 404 before this on a factory-only deployment.
+  const VAULT = vaultAddress();
 
   // Order matters: the destructuring below reads positionally out of the batch.
   const names = [
@@ -302,6 +304,7 @@ export type LiveAccount = {
 };
 
 export async function readAccountLive(address: Address): Promise<LiveAccount> {
+  const VAULT = vaultAddress();
   const call = (functionName: string, args: readonly unknown[]) => ({
     abi: vaultAbi,
     address: VAULT,

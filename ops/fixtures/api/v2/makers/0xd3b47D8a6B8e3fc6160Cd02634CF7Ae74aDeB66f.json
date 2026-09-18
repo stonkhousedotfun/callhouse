@@ -1,0 +1,50 @@
+{
+  "maker": "0xd3b47D8a6B8e3fc6160Cd02634CF7Ae74aDeB66f",
+  "tierBps": 5000,
+  "epochs": [
+    {
+      "epoch": {
+        "id": 2958,
+        "start": 1789344000,
+        "end": 1789948800
+      },
+      "uptimePct": 99.4,
+      "avgSpreadBps": 1480,
+      "depthWithin100bps": "2240",
+      "fills": 10,
+      "volume": {
+        "raw": "8606980",
+        "decimals": 6,
+        "formatted": "8.60698"
+      },
+      "rebates": {
+        "raw": "362699",
+        "decimals": 6,
+        "formatted": "0.362699"
+      },
+      "score": 91.6
+    },
+    {
+      "epoch": {
+        "id": 2957,
+        "start": 1788739200,
+        "end": 1789344000
+      },
+      "uptimePct": 98.7,
+      "avgSpreadBps": 1510,
+      "depthWithin100bps": "1850",
+      "fills": 6,
+      "volume": {
+        "raw": "2559300",
+        "decimals": 6,
+        "formatted": "2.5593"
+      },
+      "rebates": {
+        "raw": "127965",
+        "decimals": 6,
+        "formatted": "0.127965"
+      },
+      "score": 88.1
+    }
+  ]
+}

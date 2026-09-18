@@ -52,7 +52,7 @@ import {
 import { alert, clearAlert } from './alerts.js';
 import { describeInstant, nextWeekWindow, type WeekWindow } from './calendar.js';
 import { account, logClient, publicClient, walletClient } from './clients.js';
-import { BPS, config } from './config.js';
+import { BPS, config, vaultAddress } from './config.js';
 import { log } from './logger.js';
 import { TOKEN_TYPE_OPTION, optionIdFor, weeklyTuple, type OptionTuple } from './optionType.js';
 import {
@@ -199,27 +199,27 @@ export async function snapshot(): Promise<ChainSnapshot> {
     queuedShares,
     keeperRole,
   ] = await Promise.all([
-    publicClient.readContract({ address: config.VAULT, abi: vaultAbi, functionName: 'phase' }),
-    publicClient.readContract({ address: config.VAULT, abi: vaultAbi, functionName: 'writesHalted' }),
-    publicClient.readContract({ address: config.VAULT, abi: vaultAbi, functionName: 'valoremFeeAccepted' }),
-    publicClient.readContract({ address: config.VAULT, abi: vaultAbi, functionName: 'cycleNumber' }),
-    publicClient.readContract({ address: config.VAULT, abi: vaultAbi, functionName: 'cycleExerciseTs' }),
-    publicClient.readContract({ address: config.VAULT, abi: vaultAbi, functionName: 'cycleExpiryTs' }),
-    publicClient.readContract({ address: config.VAULT, abi: vaultAbi, functionName: 'cycleStrikeUsdg' }),
-    publicClient.readContract({ address: config.VAULT, abi: vaultAbi, functionName: 'optionId' }),
-    publicClient.readContract({ address: config.VAULT, abi: vaultAbi, functionName: 'claimKey' }),
-    publicClient.readContract({ address: config.VAULT, abi: vaultAbi, functionName: 'contractsWritten' }),
-    publicClient.readContract({ address: config.VAULT, abi: vaultAbi, functionName: 'listingHash' }),
-    publicClient.readContract({ address: config.VAULT, abi: vaultAbi, functionName: 'listingGrossUsdg' }),
-    publicClient.readContract({ address: config.VAULT, abi: vaultAbi, functionName: 'listingAmount' }),
-    publicClient.readContract({ address: config.VAULT, abi: vaultAbi, functionName: 'listingsThisCycle' }),
-    publicClient.readContract({ address: config.VAULT, abi: vaultAbi, functionName: 'idleAssets' }),
-    publicClient.readContract({ address: config.VAULT, abi: vaultAbi, functionName: 'totalAssets' }),
-    publicClient.readContract({ address: config.VAULT, abi: vaultAbi, functionName: 'lockedAssets' }),
-    publicClient.readContract({ address: config.VAULT, abi: vaultAbi, functionName: 'isStranded' }),
-    publicClient.readContract({ address: config.VAULT, abi: vaultAbi, functionName: 'strandGen' }),
-    publicClient.readContract({ address: config.VAULT, abi: vaultAbi, functionName: 'queuedShares' }),
-    publicClient.readContract({ address: config.VAULT, abi: vaultAbi, functionName: 'KEEPER_ROLE' }),
+    publicClient.readContract({ address: vaultAddress(), abi: vaultAbi, functionName: 'phase' }),
+    publicClient.readContract({ address: vaultAddress(), abi: vaultAbi, functionName: 'writesHalted' }),
+    publicClient.readContract({ address: vaultAddress(), abi: vaultAbi, functionName: 'valoremFeeAccepted' }),
+    publicClient.readContract({ address: vaultAddress(), abi: vaultAbi, functionName: 'cycleNumber' }),
+    publicClient.readContract({ address: vaultAddress(), abi: vaultAbi, functionName: 'cycleExerciseTs' }),
+    publicClient.readContract({ address: vaultAddress(), abi: vaultAbi, functionName: 'cycleExpiryTs' }),
+    publicClient.readContract({ address: vaultAddress(), abi: vaultAbi, functionName: 'cycleStrikeUsdg' }),
+    publicClient.readContract({ address: vaultAddress(), abi: vaultAbi, functionName: 'optionId' }),
+    publicClient.readContract({ address: vaultAddress(), abi: vaultAbi, functionName: 'claimKey' }),
+    publicClient.readContract({ address: vaultAddress(), abi: vaultAbi, functionName: 'contractsWritten' }),
+    publicClient.readContract({ address: vaultAddress(), abi: vaultAbi, functionName: 'listingHash' }),
+    publicClient.readContract({ address: vaultAddress(), abi: vaultAbi, functionName: 'listingGrossUsdg' }),
+    publicClient.readContract({ address: vaultAddress(), abi: vaultAbi, functionName: 'listingAmount' }),
+    publicClient.readContract({ address: vaultAddress(), abi: vaultAbi, functionName: 'listingsThisCycle' }),
+    publicClient.readContract({ address: vaultAddress(), abi: vaultAbi, functionName: 'idleAssets' }),
+    publicClient.readContract({ address: vaultAddress(), abi: vaultAbi, functionName: 'totalAssets' }),
+    publicClient.readContract({ address: vaultAddress(), abi: vaultAbi, functionName: 'lockedAssets' }),
+    publicClient.readContract({ address: vaultAddress(), abi: vaultAbi, functionName: 'isStranded' }),
+    publicClient.readContract({ address: vaultAddress(), abi: vaultAbi, functionName: 'strandGen' }),
+    publicClient.readContract({ address: vaultAddress(), abi: vaultAbi, functionName: 'queuedShares' }),
+    publicClient.readContract({ address: vaultAddress(), abi: vaultAbi, functionName: 'KEEPER_ROLE' }),
   ]);
 
   const [valoremFeesEnabled, valoremFeeBps, keeperBalanceWei, hasKeeperRole, policy] = await Promise.all([
@@ -227,7 +227,7 @@ export async function snapshot(): Promise<ChainSnapshot> {
     publicClient.readContract({ address: config.CLEARINGHOUSE, abi: clearAbi, functionName: 'feeBps' }),
     publicClient.getBalance({ address: account.address }),
     publicClient.readContract({
-      address: config.VAULT,
+      address: vaultAddress(),
       abi: vaultAbi,
       functionName: 'hasRole',
       args: [keeperRole, account.address],
@@ -295,7 +295,7 @@ async function readOraclePaused(): Promise<boolean | null> {
  *  a failure of it. */
 async function readSpot(): Promise<{ value: bigint | null; error: string | null }> {
   try {
-    const value = await publicClient.readContract({ address: config.VAULT, abi: vaultAbi, functionName: 'spotUsdg' });
+    const value = await publicClient.readContract({ address: vaultAddress(), abi: vaultAbi, functionName: 'spotUsdg' });
     return { value, error: null };
   } catch (error) {
     return { value: null, error: describeError(error) };
@@ -451,13 +451,13 @@ export async function reconcile(): Promise<void> {
  */
 async function assertWiring(): Promise<void> {
   const [asset, usdg, clear, seaport, conduitKey, zone, transferTarget] = await Promise.all([
-    publicClient.readContract({ address: config.VAULT, abi: vaultAbi, functionName: 'asset' }),
-    publicClient.readContract({ address: config.VAULT, abi: vaultAbi, functionName: 'usdg' }),
-    publicClient.readContract({ address: config.VAULT, abi: vaultAbi, functionName: 'clear' }),
-    publicClient.readContract({ address: config.VAULT, abi: vaultAbi, functionName: 'seaport' }),
-    publicClient.readContract({ address: config.VAULT, abi: vaultAbi, functionName: 'conduitKey' }),
-    publicClient.readContract({ address: config.VAULT, abi: vaultAbi, functionName: 'seaportZone' }),
-    publicClient.readContract({ address: config.VAULT, abi: vaultAbi, functionName: 'transferApprovalTarget' }),
+    publicClient.readContract({ address: vaultAddress(), abi: vaultAbi, functionName: 'asset' }),
+    publicClient.readContract({ address: vaultAddress(), abi: vaultAbi, functionName: 'usdg' }),
+    publicClient.readContract({ address: vaultAddress(), abi: vaultAbi, functionName: 'clear' }),
+    publicClient.readContract({ address: vaultAddress(), abi: vaultAbi, functionName: 'seaport' }),
+    publicClient.readContract({ address: vaultAddress(), abi: vaultAbi, functionName: 'conduitKey' }),
+    publicClient.readContract({ address: vaultAddress(), abi: vaultAbi, functionName: 'seaportZone' }),
+    publicClient.readContract({ address: vaultAddress(), abi: vaultAbi, functionName: 'transferApprovalTarget' }),
   ]);
 
   const mismatches: string[] = [];
@@ -471,11 +471,11 @@ async function assertWiring(): Promise<void> {
   check('clearinghouse', clear, config.CLEARINGHOUSE);
   check('seaport', seaport, config.SEAPORT);
   check('conduitKey', conduitKey, config.SEAPORT_CONDUIT_KEY);
-  check('seaportZone', zone, config.VAULT);
+  check('seaportZone', zone, vaultAddress());
 
   if (mismatches.length > 0) {
     throw new Error(
-      `Keeper config does not match the deployed vault at ${config.VAULT}:\n  ${mismatches.join('\n  ')}\n` +
+      `Keeper config does not match the deployed vault at ${vaultAddress()}:\n  ${mismatches.join('\n  ')}\n` +
         'Fix the environment. Creating option types on the wrong clearinghouse arms nothing.',
     );
   }
@@ -486,7 +486,7 @@ async function assertWiring(): Promise<void> {
     address: config.CLEARINGHOUSE,
     abi: clearAbi,
     functionName: 'isApprovedForAll',
-    args: [config.VAULT, transferTarget],
+    args: [vaultAddress(), transferTarget],
   });
   if (!approved) {
     await alert(
@@ -498,12 +498,12 @@ async function assertWiring(): Promise<void> {
   }
 
   const keeperRole = await publicClient.readContract({
-    address: config.VAULT,
+    address: vaultAddress(),
     abi: vaultAbi,
     functionName: 'KEEPER_ROLE',
   });
   const hasRole = await publicClient.readContract({
-    address: config.VAULT,
+    address: vaultAddress(),
     abi: vaultAbi,
     functionName: 'hasRole',
     args: [keeperRole, account.address],
@@ -514,7 +514,7 @@ async function assertWiring(): Promise<void> {
     // just cannot arm a new cycle or authorise a listing.
     await alert(
       'boot',
-      `keeper ${account.address} does not hold KEEPER_ROLE on ${config.VAULT}; it can close but not open`,
+      `keeper ${account.address} does not hold KEEPER_ROLE on ${vaultAddress()}; it can close but not open`,
       { keeper: account.address },
       { force: true, severity: 'warn' },
     );
@@ -599,7 +599,7 @@ async function attachOrphanRollOpen(cycleNumber: number): Promise<void> {
       continue;
     }
     const opened = parseEventLogs({ abi: vaultAbi, eventName: 'RollOpen', logs: receipt.logs }).find(
-      (event) => event.address.toLowerCase() === config.VAULT.toLowerCase() && Number(event.args.cycleNumber) === cycleNumber,
+      (event) => event.address.toLowerCase() === vaultAddress().toLowerCase() && Number(event.args.cycleNumber) === cycleNumber,
     );
     if (!opened) continue;
     store.recordTxResult(tx.hash, 'success', receipt.blockNumber, receipt.gasUsed, null);
@@ -650,7 +650,7 @@ async function closeUnwitnessedCycle(snap: ChainSnapshot): Promise<void> {
 
 async function closeCycleFromLogs(cycleNumber: number, snap: ChainSnapshot): Promise<void> {
   const closeLogs = await logClient.getLogs({
-    address: config.VAULT,
+    address: vaultAddress(),
     event: rollCloseEvent,
     args: { cycleNumber },
     fromBlock: 0n,
@@ -680,7 +680,7 @@ async function closeCycleFromLogs(cycleNumber: number, snap: ChainSnapshot): Pro
   const fromBlock = openLog?.blockNumber ?? submittedBlock ?? 0n;
 
   const harvestLogs = await logClient.getLogs({
-    address: config.VAULT,
+    address: vaultAddress(),
     event: harvestEvent,
     args: { cycleNumber },
     fromBlock,
@@ -702,7 +702,7 @@ async function closeCycleFromLogs(cycleNumber: number, snap: ChainSnapshot): Pro
 
   // A ClaimStranded in the same transaction means the claim is still open in Valorem.
   const strandedLogs = await logClient.getLogs({
-    address: config.VAULT,
+    address: vaultAddress(),
     event: claimStrandedEvent,
     args: { cycleNumber },
     fromBlock: closeLog.blockNumber,
@@ -785,7 +785,7 @@ async function closeCycleFromLogs(cycleNumber: number, snap: ChainSnapshot): Pro
  */
 async function findRollOpenLog(cycleNumber: number, toBlock: bigint) {
   const logs = await logClient.getLogs({
-    address: config.VAULT,
+    address: vaultAddress(),
     event: rollOpenEvent,
     args: { cycleNumber },
     fromBlock: 0n,
@@ -797,7 +797,7 @@ async function findRollOpenLog(cycleNumber: number, toBlock: bigint) {
 /** Sum of CallsWritten.contractsCount for an option id over a block range: the contracts sold. */
 async function sumCallsWritten(optionId: bigint, fromBlock: bigint, toBlock: bigint): Promise<bigint> {
   const logs = await logClient.getLogs({
-    address: config.VAULT,
+    address: vaultAddress(),
     event: callsWrittenEvent,
     args: { optionId },
     fromBlock,
@@ -1270,7 +1270,7 @@ async function onIdle(initial: ChainSnapshot): Promise<void> {
 
   const sim = await guardedSimulate('rollOpen', () =>
     publicClient.simulateContract({
-      address: config.VAULT,
+      address: vaultAddress(),
       abi: vaultAbi,
       functionName: 'rollOpen',
       args: [optionId],
@@ -1286,7 +1286,7 @@ async function onIdle(initial: ChainSnapshot): Promise<void> {
   const receipt = await sendAndConfirm('rollOpen', null, () => walletClient.writeContract(sim.request));
   if (!receipt) return;
   const opened = parseEventLogs({ abi: vaultAbi, eventName: 'RollOpen', logs: receipt.logs }).find(
-    (event) => event.address.toLowerCase() === config.VAULT.toLowerCase(),
+    (event) => event.address.toLowerCase() === vaultAddress().toLowerCase(),
   );
   const cycleNumber = opened ? Number(opened.args.cycleNumber) : snap.vaultCycleNumber + 1;
   // The submission was recorded without a cycle; attach it now that the number is known.
@@ -1510,7 +1510,7 @@ async function handleStranded(snap: ChainSnapshot): Promise<void> {
   // answer while the freeze holds and earns a `retry_failed` line, not a `tx_revert` page.
   const sim = await (async () => {
     try {
-      return await publicClient.simulateContract({ address: config.VAULT, abi: vaultAbi, functionName: 'retryStrandedClaim', account });
+      return await publicClient.simulateContract({ address: vaultAddress(), abi: vaultAbi, functionName: 'retryStrandedClaim', account });
     } catch (error) {
       const name = revertName(error);
       const reason = describeError(error);
@@ -1538,7 +1538,7 @@ async function reconcileRecoveredStrand(snap: ChainSnapshot): Promise<void> {
   const gen = row.strand_gen === null ? snap.strandGen : BigInt(row.strand_gen);
   try {
     const logs = await logClient.getLogs({
-      address: config.VAULT,
+      address: vaultAddress(),
       event: strandedClaimRecoveredEvent,
       args: { gen },
       fromBlock: 0n,
@@ -1558,7 +1558,7 @@ async function reconcileRecoveredStrand(snap: ChainSnapshot): Promise<void> {
 
 async function recordRecovery(cycleNumber: number, gen: bigint, receipt: TransactionReceipt, witnessedLive: boolean): Promise<void> {
   const recovered = parseEventLogs({ abi: vaultAbi, eventName: 'StrandedClaimRecovered', logs: receipt.logs }).find(
-    (event) => event.address.toLowerCase() === config.VAULT.toLowerCase(),
+    (event) => event.address.toLowerCase() === vaultAddress().toLowerCase(),
   );
   // The retry's Harvest carries the stranded cycle's number, so the cycle sum now includes it.
   const harvest = await harvestForCycle(cycleNumber, receipt);
@@ -1648,13 +1648,13 @@ export function recoveryLegs(assets: bigint, usdgOut: bigint, queueWad: bigint):
  *  settlement confirmed, so the caller knows its snapshot is behind the chain. */
 async function doSettleQueue(snap: ChainSnapshot): Promise<boolean> {
   const sim = await guardedSimulate('settleQueue', () =>
-    publicClient.simulateContract({ address: config.VAULT, abi: vaultAbi, functionName: 'settleQueue', account }),
+    publicClient.simulateContract({ address: vaultAddress(), abi: vaultAbi, functionName: 'settleQueue', account }),
   );
   if (!sim) return false;
   const receipt = await sendAndConfirm('settleQueue', snap.vaultCycleNumber || null, () => walletClient.writeContract(sim.request));
   if (!receipt) return false;
   const settled = parseEventLogs({ abi: vaultAbi, eventName: 'QueueSettled', logs: receipt.logs }).find(
-    (event) => event.address.toLowerCase() === config.VAULT.toLowerCase(),
+    (event) => event.address.toLowerCase() === vaultAddress().toLowerCase(),
   );
   await alert(
     'queue_settled',
@@ -1754,7 +1754,7 @@ async function pollLiveListing(snap: ChainSnapshot): Promise<void> {
     if (snap.hasKeeperRole && !invalidatedUnservable.has(snap.listingHash)) {
       invalidatedUnservable.add(snap.listingHash);
       const sim = await guardedSimulate('invalidateAllListings', () =>
-        publicClient.simulateContract({ address: config.VAULT, abi: vaultAbi, functionName: 'invalidateAllListings', account }),
+        publicClient.simulateContract({ address: vaultAddress(), abi: vaultAbi, functionName: 'invalidateAllListings', account }),
       );
       if (sim) await sendAndConfirm('invalidateAllListings', snap.vaultCycleNumber, () => walletClient.writeContract(sim.request));
     }
@@ -2046,9 +2046,9 @@ async function createListing(snap: ChainSnapshot, prefetchedVol?: VolContext): P
   const unitPrice6 = priced.unitPrice6;
   log.roll.info({ cycleNumber, contracts: contracts.toString(), ...pricingSummary(priced.pricing) }, 'priced a listing');
 
-  const counter = await readCounter(config.VAULT);
+  const counter = await readCounter(vaultAddress());
   const components = buildOrderComponents({
-    vault: config.VAULT,
+    vault: vaultAddress(),
     optionId: snap.vaultOptionId,
     contracts,
     unitPrice6,
@@ -2072,7 +2072,7 @@ async function createListing(snap: ChainSnapshot, prefetchedVol?: VolContext): P
 
   const sim = await guardedSimulate('approveListing', () =>
     publicClient.simulateContract({
-      address: config.VAULT,
+      address: vaultAddress(),
       abi: vaultAbi,
       functionName: 'approveListing',
       args: [components],
@@ -2211,7 +2211,7 @@ async function cancelLiveListing(snap: ChainSnapshot, orderHash: string, why: st
     const components = componentsFromJson(JSON.parse(row.components_json) as OrderComponentsJson);
     const sim = await guardedSimulate('cancelListing', () =>
       publicClient.simulateContract({
-        address: config.VAULT,
+        address: vaultAddress(),
         abi: vaultAbi,
         functionName: 'cancelListing',
         args: [components],
@@ -2235,7 +2235,7 @@ async function cancelLiveListing(snap: ChainSnapshot, orderHash: string, why: st
   }
 
   const sim = await guardedSimulate('invalidateAllListings', () =>
-    publicClient.simulateContract({ address: config.VAULT, abi: vaultAbi, functionName: 'invalidateAllListings', account }),
+    publicClient.simulateContract({ address: vaultAddress(), abi: vaultAbi, functionName: 'invalidateAllListings', account }),
   );
   if (!sim) return false;
   const receipt = await sendAndConfirm('invalidateAllListings', snap.vaultCycleNumber, () => walletClient.writeContract(sim.request));
@@ -2254,7 +2254,7 @@ async function cancelLiveListing(snap: ChainSnapshot, orderHash: string, why: st
  *  exercise has already begun. */
 async function doLockBook(snap: ChainSnapshot): Promise<void> {
   const sim = await guardedSimulate('lockBook', () =>
-    publicClient.simulateContract({ address: config.VAULT, abi: vaultAbi, functionName: 'lockBook', account }),
+    publicClient.simulateContract({ address: vaultAddress(), abi: vaultAbi, functionName: 'lockBook', account }),
   );
   if (!sim) return;
   const receipt = await sendAndConfirm('lockBook', snap.vaultCycleNumber, () => walletClient.writeContract(sim.request));
@@ -2309,7 +2309,7 @@ async function doRollClose(snap: ChainSnapshot): Promise<void> {
   const assignedBefore = await contractsAssignedAt(snap);
 
   const sim = await guardedSimulate('rollClose', () =>
-    publicClient.simulateContract({ address: config.VAULT, abi: vaultAbi, functionName: 'rollClose', account }),
+    publicClient.simulateContract({ address: vaultAddress(), abi: vaultAbi, functionName: 'rollClose', account }),
   );
   if (!sim) return;
 
@@ -2401,7 +2401,7 @@ async function doRollClose(snap: ChainSnapshot): Promise<void> {
  *  which is a real result and is published as "unfilled, 0" — not treated as a failure. */
 function decodeHarvest(receipt: TransactionReceipt): { gross: bigint; fee: bigint; net: bigint } | null {
   const events = parseEventLogs({ abi: vaultAbi, eventName: 'Harvest', logs: receipt.logs });
-  const harvest = events.find((event) => event.address.toLowerCase() === config.VAULT.toLowerCase());
+  const harvest = events.find((event) => event.address.toLowerCase() === vaultAddress().toLowerCase());
   if (!harvest) return null;
   return { gross: harvest.args.grossUsdg, fee: harvest.args.feeUsdg, net: harvest.args.netUsdg };
 }
@@ -2418,7 +2418,7 @@ export interface RollCloseAmounts {
 /** The vault's `RollClose` event in a receipt, or null when the vault emitted none. */
 export function decodeRollClose(receipt: TransactionReceipt): RollCloseAmounts | null {
   const events = parseEventLogs({ abi: vaultAbi, eventName: 'RollClose', logs: receipt.logs });
-  const found = events.find((event) => event.address.toLowerCase() === config.VAULT.toLowerCase());
+  const found = events.find((event) => event.address.toLowerCase() === vaultAddress().toLowerCase());
   if (!found) return null;
   return {
     assetsReturned: found.args.assetsReturned,
@@ -2430,7 +2430,7 @@ export function decodeRollClose(receipt: TransactionReceipt): RollCloseAmounts |
 /** The vault's `ClaimStranded` in a rollClose receipt, or null when the claim redeemed. */
 export function decodeClaimStranded(receipt: TransactionReceipt): { cycleNumber: number; claimKey: bigint; gen: bigint } | null {
   const events = parseEventLogs({ abi: vaultAbi, eventName: 'ClaimStranded', logs: receipt.logs });
-  const found = events.find((event) => event.address.toLowerCase() === config.VAULT.toLowerCase());
+  const found = events.find((event) => event.address.toLowerCase() === vaultAddress().toLowerCase());
   if (!found) return null;
   return { cycleNumber: Number(found.args.cycleNumber), claimKey: found.args.claimKey, gen: found.args.gen };
 }
@@ -2593,7 +2593,7 @@ async function harvestForCycle(
 
   try {
     const logs = await logClient.getLogs({
-      address: config.VAULT,
+      address: vaultAddress(),
       event: harvestEvent,
       args: { cycleNumber },
       fromBlock: openBlock,

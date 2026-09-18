@@ -7,12 +7,31 @@ cache/
 broadcast/
 .env
 .env.local
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+*.jks
+*.keystore
+*.mnemonic
+*.secret
 *.log
+# Rehearsal logs may contain runtime details; review any evidence before explicit publication.
 .DS_Store
 coverage/
 lcov.info
 .next/
 .ponder/
+*.tsbuildinfo
+.turbo/
+playwright-report/
+test-results/
+
+# Never publish captured third-party options-chain fixtures; tests generate synthetic chains.
+/keeper/src/fixtures/cboe-nvda-2026-09-14.json
+/keeper/src/fixtures/cboe-tsla-2026-09-16.json
 *.db
 *.db-journal
 *.sqlite

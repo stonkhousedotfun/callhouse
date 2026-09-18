@@ -1,6 +1,7 @@
-import { redirect } from "next/navigation";
+import { permanentRedirect, redirect } from "next/navigation";
+import { legacyVaultPath } from "@/app/legacy/routes";
 
-/** Pooled-vault cycle page is retired. 1-lot fills live on /book. */
-export default function CycleRedirect() {
+export default function CyclePage() {
+  if (process.env.NEXT_PUBLIC_V2 === "1") permanentRedirect(legacyVaultPath("/cycle"));
   redirect("/book");
 }

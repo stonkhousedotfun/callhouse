@@ -1,0 +1,42 @@
+# Read-only checks only: none of these hooks rewrites the working tree.
+# Requires installed `gitleaks` and `semgrep` CLIs. In a linked worktree,
+# run manually: installing into shared .git/hooks affects other worktrees.
+repos:
+  - repo: https://github.com/gitleaks/gitleaks
+    rev: v8.30.1
+    hooks:
+      - id: gitleaks-system
+        pass_filenames: false
+        always_run: true
+
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v6.0.0
+    hooks:
+      - id: detect-private-key
+      - id: check-merge-conflict
+      - id: check-added-large-files
+        args: [--maxkb=500]
+      - id: check-case-conflict
+      - id: check-symlinks
+      - id: check-json
+      - id: check-yaml
+      - id: check-toml
+
+  # Uses the installed CLI and checked-in rules; avoids a large hook environment.
+  - repo: local
+    hooks:
+      - id: semgrep-local
+        name: semgrep (high-signal JavaScript/TypeScript rules)
+        entry: semgrep scan --disable-version-check --quiet --skip-unknown-extensions --config=.semgrep/pre-commit.yml --error
+        language: system
+        files: ^(web|indexer|keeper|relay|notifier|ops|scripts)/.*\.(?:[cm]?js|tsx?)$
+
+  - repo: local
+    hooks:
+      - id: migration-scope-guard
+        name: migration scope and private-path guard
+        entry: python scripts/precommit-scope-guard.py
+        language: python
+        pass_filenames: false
+        always_run: true
+        stages: [pre-commit]

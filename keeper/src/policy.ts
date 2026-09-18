@@ -23,7 +23,7 @@
  */
 import { vaultAbi } from './abi.js';
 import { publicClient } from './clients.js';
-import { BPS, ONE_LOT, USDG_ONE, config } from './config.js';
+import { BPS, ONE_LOT, USDG_ONE, config, vaultAddress } from './config.js';
 import { log } from './logger.js';
 import { targetStrike6 } from './optionType.js';
 import {
@@ -78,7 +78,7 @@ let lastPolicyJson: string | undefined;
 export async function readPolicy(): Promise<PolicyParams> {
   const [minOtmBps, maxOtmBps, minPremiumBps, maxUtilizationBps, protocolFeeBps, maxContractsCap] =
     await publicClient.readContract({
-      address: config.VAULT,
+      address: vaultAddress(),
       abi: vaultAbi,
       functionName: 'policy',
     });
@@ -224,8 +224,10 @@ export type PricingMode = 'vol' | 'fixed';
  *                      edge, so the ask never drops below the last market-based one
  *   manual-override    KEEPER_UNIT_PRICE_USDG6, still floored and capped; in vol mode only when it
  *                      is above the market-based ask (it can raise the ask, never undercut it)
+ *   min-ask            solo path only (solo.ts): KEEPER_MIN_ASK_USDG6 was above every other term.
+ *                      The pooled vault has no such floor; priceListing never returns it
  */
-export type PriceSource = 'fill-floor' | 'manual-override' | 'vol-fair' | 'vol-previous-fair';
+export type PriceSource = 'fill-floor' | 'manual-override' | 'vol-fair' | 'vol-previous-fair' | 'min-ask';
 
 /**
  * Every number behind a strike and an ask, stored with each listing (listings.pricing_json) and

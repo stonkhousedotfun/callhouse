@@ -1,0 +1,561 @@
+/**
+ * The market registry as the v2 bots read it: ops/markets/tier1.json and its `v2` blocks.
+ *
+ * Two kinds of `v2` block, both hand-maintained until the O2 deploy write-back fills addresses:
+ *   - top level `v2`: interface version, deploy block, contract addresses, Uniswap v3 periphery,
+ *     fee params, and `defaults` (oracle bounds, ladders per tenor, expiries ahead per tenor);
+ *   - per market `markets[i].v2`: status (planned | live | paused), wave, strikeTick, puts, the
+ *     Uniswap pool and its liquidity floor, the Data Streams feed id, and `overrides`.
+ *
+ * RESOLUTION, one rule for every market parameter: the §3 defaults compiled in here, then the
+ * registry's `v2.defaults`, then the market's `overrides`, each layer replacing only the keys it
+ * names. So a registry may carry a partial `defaults`, and SGOV can say
+ * `"overrides": { "expiriesAhead": { "daily": 0 } }` (no dailies) without restating its ladders.
+ *
+ * ABSENCE IS NOT AN ERROR. Until O2-01 lands the registry has no `v2` blocks at all: the loader
+ * then returns every contract address as null, the compiled defaults, and `v2: null` on every
+ * market. Whether a missing address matters is the caller's question (config.ts asks it per mode),
+ * so the pricing service and a dry run keep working on today's file.
+ *
+ * PRESENCE IS STRICT, like config.ts: a block that is there and malformed refuses to load, with
+ * every problem listed and the market's ticker in the path. `overrides`, `defaults` and the ladder
+ * objects reject unknown keys, because a typo there (`"ladders"`, `"firstOtm"`) would otherwise be
+ * ignored and the market would quietly trade on the defaults. The containers (`v2`, `contracts`,
+ * a market's `v2`) pass unknown keys through: an informational field added by a later task is
+ * harmless, and a misspelt address is caught anyway when a mode needs it.
+ *
+ * Big integers (strikeTick, takerFeeFlat, univ3MinLiquidity, deployBlock) are decimal strings in
+ * the file (§3) and bigint here; a plain JSON integer is accepted too when it is exact.
+ *
+ * The v1 fields each v2 market also needs (ticker, name, `asset` = the underlying, `feed`, `cboe`)
+ * are read from the same row, so this loader is a superset of pricing/markets.ts, which keeps its
+ * own narrower reader.
+ */
+import { readFileSync } from 'node:fs';
+import { getAddress, isAddress, type Address, type Hex } from 'viem';
+import { z } from 'zod';
+
+/** The frozen on-chain interface version these bots were built against. */
+export const INTERFACE_VERSION = 7;
+
+/**
+ * V2Constants.MINT_FEE_CEIL_PPM: the highest collateral rent a market may be registered with, in millionths of
+ * the locked collateral per MINT_FEE_PERIOD (7 days) of remaining life. Clearinghouse._checkConfig reverts
+ * CeilingExceeded above it (INTERFACE_VERSION 7, c05).
+ */
+export const MINT_FEE_CEIL_PPM = 5_000;
+
+/*//////////////////////////////////////////////////////////////
+                         NAMES AND TYPES
+//////////////////////////////////////////////////////////////*/
+
+/** `v2.contracts` keys, in §3 order. */
+export const V2_CONTRACT_NAMES = [
+  'clearinghouse',
+  'orderBook',
+  'settlementOracle',
+  'expiryCalendar',
+  'keeperRewards',
+  'autoRoller',
+  'payoutAdapter',
+  'makerVault',
+  'makerRegistry',
+  'rewardsDistributor',
+] as const;
+export type V2ContractName = (typeof V2_CONTRACT_NAMES)[number];
+
+/** `v2.contracts.sources` keys. */
+export const V2_SOURCE_NAMES = ['chainlink', 'univ3', 'dataStreams'] as const;
+export type V2SourceName = (typeof V2_SOURCE_NAMES)[number];
+
+export const V2_MARKET_STATUSES = ['planned', 'live', 'paused'] as const;
+export type V2MarketStatus = (typeof V2_MARKET_STATUSES)[number];
+
+export const TENORS = ['weekly', 'daily'] as const;
+export type Tenor = (typeof TENORS)[number];
+
+/** One tenor's strike ladder (K2-03 builds it, ADR-12 reads `cardTargetBps`). */
+export interface LadderParams {
+  rungs: number;
+  /** Rung 0 = roundUp(spot × (1 + firstOtmBps / 1e4), strikeTick); puts mirror below spot. */
+  firstOtmBps: number;
+  /** Each further rung × (1 + stepBps / 1e4). */
+  stepBps: number;
+  /** Card scenario target = roundUp(strike × (1 + cardTargetBps / 1e4), strikeTick). */
+  cardTargetBps: number;
+}
+
+/** Everything a market inherits from `v2.defaults` and may override. */
+export interface MarketParams {
+  maxDeviationBps: number;
+  uncorroboratedDelayS: number;
+  spotMaxAgeS: number;
+  ladder: Record<Tenor, LadderParams>;
+  /** How many upcoming expiries of each tenor carry a ladder. 0 switches the tenor off. */
+  expiriesAhead: Record<Tenor, number>;
+}
+
+/** §3's `v2.defaults`, verbatim. What a registry without (part of) that block resolves to. */
+export const SPEC_DEFAULTS: MarketParams = {
+  maxDeviationBps: 150,
+  uncorroboratedDelayS: 21_600,
+  // A feed heartbeat (24 h) plus 1 h: the last print of a quiet feed stays a valid spot (ops/deploy.md §15.13).
+  spotMaxAgeS: 90_000,
+  ladder: {
+    weekly: { rungs: 5, firstOtmBps: 200, stepBps: 200, cardTargetBps: 400 },
+    daily: { rungs: 5, firstOtmBps: 100, stepBps: 100, cardTargetBps: 200 },
+  },
+  expiriesAhead: { weekly: 2, daily: 3 },
+};
+
+/** A market's `overrides`, as written: any subset of MarketParams. */
+export interface MarketOverrides {
+  maxDeviationBps?: number;
+  uncorroboratedDelayS?: number;
+  spotMaxAgeS?: number;
+  ladder?: Partial<Record<Tenor, Partial<LadderParams>>>;
+  expiriesAhead?: Partial<Record<Tenor, number>>;
+}
+
+/** §3 `v2.fees`: what the deploy sets on chain. The bots read the live values from the contracts. */
+export interface V2Fees {
+  /** 0 from INTERFACE_VERSION 7 (c05): the writer fee is collateral rent at mint, not a cut of the premium. */
+  premiumFeeBps: number;
+  /**
+   * The shared collateral rent, millionths of the locked collateral per 7 days of remaining life. A market's own
+   * `v2.mintFeePpm` overrides it; null when the registry predates INTERFACE_VERSION 7.
+   */
+  mintFeePpm: number | null;
+  resaleFeeBps: number;
+  takerFeeFlat: bigint;
+  takerFeeCapBps: number;
+  makerRebateBps: number;
+  exerciseFeeBps: number;
+}
+
+/**
+ * §3 `v2.vault`: the MakerVault `Limits` tuple the deploy sets, in `setLimits` order (INTERFACE_VERSION 7, c21).
+ * The bots read the live values from the vault; this is what the deploy was asked for. null when the registry
+ * carries no `v2.vault` block.
+ */
+export interface V2VaultLimits {
+  maxSeriesUnits: bigint;
+  maxTotalNotional: bigint;
+  askToleranceBps: number;
+  maxBidBpsOfSpot: number;
+  maxOrderLifetime: number;
+  /** Net USDG a quoter call may pay out at once; refills linearly over MakerVault.OUTFLOW_WINDOW (24 h). */
+  maxDailyOutflow: bigint;
+}
+
+export interface UniswapV3Periphery {
+  factory: Address;
+  swapRouter02: Address;
+  quoterV2: Address;
+}
+
+/** A market's `v2` block, typed, with its parameters resolved. */
+export interface V2MarketBlock {
+  status: V2MarketStatus;
+  wave: string;
+  /** USDG base units per share; > 0 and a multiple of PRICE_TICK (100). */
+  strikeTick: bigint;
+  puts: boolean;
+  /**
+   * The collateral rent this market is registered with (INTERFACE_VERSION 7, c05): millionths of the locked
+   * collateral per 7 days of remaining life, pinned into every series created afterwards. Falls back to the
+   * registry's `v2.fees.mintFeePpm`; null only on a registry that predates v7.
+   */
+  mintFeePpm: number | null;
+  univ3Pool: Address | null;
+  univ3MinLiquidity: bigint | null;
+  dataStreamsFeedId: Hex | null;
+  /** As written in the file. */
+  overrides: MarketOverrides;
+  /** SPEC_DEFAULTS ← registry `v2.defaults` ← `overrides`. */
+  params: MarketParams;
+  registeredAt: number | string | null;
+  registerTx: Hex | null;
+}
+
+export interface V2RegistryMarket {
+  ticker: string;
+  name: string | null;
+  /** The Stock Token (`asset` in the file). */
+  underlying: Address;
+  feed: Address;
+  cboe: { root: string; url: string } | null;
+  /** null: this market has no `v2` block (not a v2 market yet). */
+  v2: V2MarketBlock | null;
+}
+
+export interface V2Registry {
+  /** The file it was read from, or null when parsed from memory. */
+  path: string | null;
+  /** `shared.chainId` / `shared.usdg` / `shared.multicall3`: the v1 shared block, present today. */
+  chainId: number | null;
+  usdg: Address | null;
+  multicall3: Address | null;
+  /** false before O2-01: no top-level `v2` block. Every address is then null. */
+  hasV2Block: boolean;
+  interfaceVersion: number | null;
+  deployBlock: bigint | null;
+  contracts: Record<V2ContractName, Address | null>;
+  sources: Record<V2SourceName, Address | null>;
+  uniswapV3: UniswapV3Periphery | null;
+  fees: V2Fees | null;
+  /** `v2.vault`, the MakerVault limits the deploy sets. null when the registry has no `v2.vault` block. */
+  vault: V2VaultLimits | null;
+  /** SPEC_DEFAULTS ← registry `v2.defaults`. What a market with no overrides trades on. */
+  defaults: MarketParams;
+  /** Every market row, in file order, v2 or not. */
+  markets: readonly V2RegistryMarket[];
+}
+
+/*//////////////////////////////////////////////////////////////
+                             FIELDS
+//////////////////////////////////////////////////////////////*/
+
+const address = z
+  .string()
+  .refine((raw) => isAddress(raw, { strict: false }), 'not a 20-byte hex address')
+  .transform((raw): Address => getAddress(raw));
+
+const bytes32 = z
+  .string()
+  .regex(/^0x[0-9a-fA-F]{64}$/, 'not a 32-byte hex value')
+  .transform((raw) => raw.toLowerCase() as Hex);
+
+const httpsUrl = z.string().refine((raw) => {
+  try {
+    return new URL(raw).protocol === 'https:';
+  } catch {
+    return false;
+  }
+}, 'not an https URL');
+
+/** A non-negative integer as a decimal string (§3) or an exact JSON integer. */
+const uint = z.union([z.string(), z.number()]).transform((raw, ctx): bigint => {
+  if (typeof raw === 'number') {
+    if (!Number.isSafeInteger(raw) || raw < 0) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, message: `not a non-negative safe integer: ${raw} (write big values as a decimal string)` });
+      return z.NEVER;
+    }
+    return BigInt(raw);
+  }
+  if (!/^\d{1,78}$/.test(raw)) {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, message: `not a non-negative decimal integer string: ${JSON.stringify(raw)}` });
+    return z.NEVER;
+  }
+  return BigInt(raw);
+});
+
+const int = (min: number, max: number) => z.number().int().min(min).max(max);
+
+/** Bounds the contracts (or the calendar) enforce, restated so a bad registry fails at boot and
+ *  not as a revert. Ceilings: V2Constants.sol; oracle bounds: architecture §3.4; MAX_TENOR = 45 days
+ *  caps how many expiries ahead can exist at all (6 weeklies, ~31 session days). */
+const ladderFields = {
+  rungs: int(1, 50),
+  // 5000: a put rung mirrored below spot at 50 % OTM is the createSeries sanity floor (spot / 2).
+  firstOtmBps: int(0, 5_000),
+  stepBps: int(1, 5_000),
+  // 0 would make the card target the strike itself: a payout of zero and a multiple of 0.
+  cardTargetBps: int(1, 10_000),
+};
+const paramFields = {
+  maxDeviationBps: int(1, 1_000),
+  uncorroboratedDelayS: int(1_800, 86_400),
+  spotMaxAgeS: int(1, 4 * 86_400),
+};
+const expiriesAheadFields = { weekly: int(0, 6), daily: int(0, 31) };
+
+const ladderPartial = z.object(ladderFields).partial().strict();
+const paramsPartial = z
+  .object({
+    ...paramFields,
+    ladder: z.object({ weekly: ladderPartial, daily: ladderPartial }).partial().strict(),
+    expiriesAhead: z.object(expiriesAheadFields).partial().strict(),
+  })
+  .partial()
+  .strict();
+
+const contractsSchema = z
+  .object({
+    ...Object.fromEntries(V2_CONTRACT_NAMES.map((name) => [name, address.nullable().optional()])),
+    sources: z
+      .object(Object.fromEntries(V2_SOURCE_NAMES.map((name) => [name, address.nullable().optional()])))
+      .passthrough()
+      .nullable()
+      .optional(),
+  })
+  .passthrough();
+
+const v2BlockSchema = z
+  .object({
+    interfaceVersion: z.number().int().positive(),
+    deployBlock: uint.nullable().optional(),
+    contracts: contractsSchema.optional(),
+    uniswapV3: z.object({ factory: address, swapRouter02: address, quoterV2: address }).passthrough().nullable().optional(),
+    fees: z
+      .object({
+        premiumFeeBps: int(0, 1_000), // PREMIUM_FEE_CEIL_BPS
+        // INTERFACE_VERSION 7 (c05). Optional so a v6 registry still parses; the version check below is what
+        // stops these bots running against one.
+        mintFeePpm: int(0, MINT_FEE_CEIL_PPM).nullable().optional(), // MINT_FEE_CEIL_PPM
+        resaleFeeBps: int(0, 1_000), // same ceiling
+        takerFeeFlat: uint.refine((v) => v <= 1_000_000n, 'above TAKER_FEE_FLAT_CEIL (1000000)'),
+        takerFeeCapBps: int(0, 1_000), // TAKER_FEE_CAP_CEIL_BPS
+        makerRebateBps: int(0, 10_000),
+        exerciseFeeBps: int(0, 200), // EXERCISE_FEE_CEIL_BPS
+      })
+      .passthrough()
+      // INTERFACE_VERSION 7 (c05): a premium fee above the resale fee is the dodge the rent replaces — the writer
+      // mints, writes into a one-tick bid of their own and resells at the resale fee.
+      .refine((f) => f.premiumFeeBps <= f.resaleFeeBps, {
+        message: 'premiumFeeBps is above resaleFeeBps: the writer fee is collateral rent at mint (mintFeePpm) from INTERFACE_VERSION 7, and a premium fee above the resale fee is avoidable by writing into your own bid and reselling',
+      })
+      .nullable()
+      .optional(),
+    vault: z
+      .object({
+        maxSeriesUnits: uint.refine((v) => v < 2n ** 64n, 'does not fit uint64'),
+        maxTotalNotional: uint.refine((v) => v < 2n ** 128n, 'does not fit uint128'),
+        askToleranceBps: int(0, 10_000),
+        maxBidBpsOfSpot: int(0, 10_000),
+        maxOrderLifetime: int(0, 2 ** 32 - 1),
+        // 0 would deploy the vault unable to bid, take or replace upwards.
+        maxDailyOutflow: uint.refine((v) => v > 0n && v < 2n ** 128n, 'must be > 0 and fit uint128'),
+      })
+      .passthrough()
+      .nullable()
+      .optional(),
+    defaults: paramsPartial.optional(),
+  })
+  .passthrough();
+
+const marketV2Schema = z
+  .object({
+    status: z.enum(V2_MARKET_STATUSES),
+    wave: z.string().min(1),
+    strikeTick: uint.refine((v) => v > 0n && v % 100n === 0n && v < 2n ** 64n, 'must be > 0, a multiple of 100 (PRICE_TICK) and fit uint64'),
+    puts: z.boolean(),
+    // INTERFACE_VERSION 7 (c05); optional so a v6 registry still parses.
+    mintFeePpm: int(0, MINT_FEE_CEIL_PPM).nullable().optional(),
+    univ3Pool: address.nullable().optional(),
+    univ3MinLiquidity: uint.nullable().optional(),
+    dataStreamsFeedId: bytes32.nullable().optional(),
+    overrides: paramsPartial.optional(),
+    registeredAt: z.union([z.number().int().nonnegative(), z.string().min(1)]).nullable().optional(),
+    registerTx: bytes32.nullable().optional(),
+  })
+  .passthrough();
+
+const registrySchema = z
+  .object({
+    shared: z
+      .object({ chainId: z.number().int().positive().optional(), usdg: address.optional(), multicall3: address.optional() })
+      .passthrough()
+      .optional(),
+    v2: v2BlockSchema.nullable().optional(),
+    markets: z
+      .array(
+        z
+          .object({
+            ticker: z.string().regex(/^[A-Z0-9.]{1,8}$/, 'an upper-case ticker'),
+            name: z.string().optional(),
+            asset: address,
+            feed: address,
+            cboe: z.object({ root: z.string().regex(/^[A-Z]{1,6}$/, 'an upper-case option root'), url: httpsUrl }).passthrough().nullable().optional(),
+            v2: marketV2Schema.nullable().optional(),
+          })
+          .passthrough(),
+      )
+      .min(1),
+  })
+  .passthrough();
+
+/*//////////////////////////////////////////////////////////////
+                           RESOLUTION
+//////////////////////////////////////////////////////////////*/
+
+/** `base` with `layer`'s keys replacing it, one level into `ladder.<tenor>` and `expiriesAhead`. Pure. */
+export function applyOverrides(base: MarketParams, layer: MarketOverrides | undefined): MarketParams {
+  if (layer === undefined) return base;
+  const ladder = (tenor: Tenor): LadderParams => ({ ...base.ladder[tenor], ...stripUndefined(layer.ladder?.[tenor]) });
+  return {
+    maxDeviationBps: layer.maxDeviationBps ?? base.maxDeviationBps,
+    uncorroboratedDelayS: layer.uncorroboratedDelayS ?? base.uncorroboratedDelayS,
+    spotMaxAgeS: layer.spotMaxAgeS ?? base.spotMaxAgeS,
+    ladder: { weekly: ladder('weekly'), daily: ladder('daily') },
+    expiriesAhead: { ...base.expiriesAhead, ...stripUndefined(layer.expiriesAhead) },
+  };
+}
+
+function stripUndefined<T extends object>(value: T | undefined): Partial<T> {
+  if (value === undefined) return {};
+  return Object.fromEntries(Object.entries(value).filter(([, v]) => v !== undefined)) as Partial<T>;
+}
+
+/*//////////////////////////////////////////////////////////////
+                             LOADING
+//////////////////////////////////////////////////////////////*/
+
+export class V2RegistryError extends Error {
+  constructor(
+    message: string,
+    readonly problems: readonly string[],
+  ) {
+    super(message);
+    this.name = 'V2RegistryError';
+  }
+}
+
+/** `markets.3.v2.strikeTick` → `markets[3] (TSLA).v2.strikeTick`: an operator edits by ticker. */
+function describePath(path: ReadonlyArray<string | number>, json: unknown): string {
+  if (path[0] === 'markets' && typeof path[1] === 'number') {
+    const row = (json as { markets?: unknown[] }).markets?.[path[1]] as { ticker?: unknown } | undefined;
+    const ticker = typeof row?.ticker === 'string' ? ` (${row.ticker})` : '';
+    const rest = path.slice(2).join('.');
+    return `markets[${path[1]}]${ticker}${rest === '' ? '' : `.${rest}`}`;
+  }
+  return path.join('.') || '(root)';
+}
+
+/** Parse a decoded registry. Throws V2RegistryError with every problem listed. */
+export function parseV2Registry(json: unknown, path: string | null = null): V2Registry {
+  const where = path === null ? 'the market registry' : `the market registry at ${path}`;
+  const parsed = registrySchema.safeParse(json);
+  if (!parsed.success) {
+    const problems = parsed.error.issues.map((i) => `${describePath(i.path, json)}: ${i.message}`);
+    const shown = problems.slice(0, 30);
+    const more = problems.length > shown.length ? `\n  … and ${problems.length - shown.length} more` : '';
+    throw new V2RegistryError(`${where} is not usable:\n  ${shown.join('\n  ')}${more}`, problems);
+  }
+  const data = parsed.data;
+  const problems: string[] = [];
+
+  const block = data.v2 ?? null;
+  if (block !== null && block.interfaceVersion !== INTERFACE_VERSION) {
+    // A registry for another interface version describes contracts these bots cannot call correctly.
+    problems.push(`v2.interfaceVersion: ${block.interfaceVersion}, but this keeper implements INTERFACE_VERSION ${INTERFACE_VERSION}`);
+  }
+  const defaults = applyOverrides(SPEC_DEFAULTS, block?.defaults);
+
+  const rawContracts = (block?.contracts ?? {}) as Partial<Record<V2ContractName, Address | null>> & {
+    sources?: Partial<Record<V2SourceName, Address | null>> | null;
+  };
+  const contracts = Object.fromEntries(V2_CONTRACT_NAMES.map((name) => [name, rawContracts[name] ?? null])) as Record<V2ContractName, Address | null>;
+  const sources = Object.fromEntries(V2_SOURCE_NAMES.map((name) => [name, rawContracts.sources?.[name] ?? null])) as Record<V2SourceName, Address | null>;
+
+  const seenTickers = new Set<string>();
+  const seenUnderlyings = new Map<string, string>();
+  const markets: V2RegistryMarket[] = data.markets.map((m) => {
+    if (seenTickers.has(m.ticker)) problems.push(`markets: ${m.ticker} is listed twice`);
+    seenTickers.add(m.ticker);
+    // Two rows on one token would build two ladders for the same underlying and double every crank.
+    const other = seenUnderlyings.get(m.asset);
+    if (other !== undefined) problems.push(`markets: ${m.ticker} and ${other} share the underlying ${m.asset}`);
+    seenUnderlyings.set(m.asset, m.ticker);
+
+    const v2 = m.v2 ?? null;
+    return {
+      ticker: m.ticker,
+      name: m.name ?? null,
+      underlying: m.asset,
+      feed: m.feed,
+      cboe: m.cboe ? { root: m.cboe.root, url: m.cboe.url } : null,
+      v2:
+        v2 === null
+          ? null
+          : {
+              status: v2.status,
+              wave: v2.wave,
+              strikeTick: v2.strikeTick,
+              puts: v2.puts,
+              // A market's own rate over the shared one, exactly as RegisterMarkets resolves V2_MARKET_<T>_MINT_FEE_PPM
+              // over V2_MINT_FEE_PPM. null only on a pre-v7 registry, which the version check already refuses.
+              mintFeePpm: v2.mintFeePpm ?? block?.fees?.mintFeePpm ?? null,
+              univ3Pool: v2.univ3Pool ?? null,
+              univ3MinLiquidity: v2.univ3MinLiquidity ?? null,
+              dataStreamsFeedId: v2.dataStreamsFeedId ?? null,
+              overrides: (v2.overrides ?? {}) as MarketOverrides,
+              params: applyOverrides(defaults, v2.overrides),
+              registeredAt: v2.registeredAt ?? null,
+              registerTx: v2.registerTx ?? null,
+            },
+    };
+  });
+
+  if (problems.length > 0) throw new V2RegistryError(`${where} is not usable:\n  ${problems.join('\n  ')}`, problems);
+
+  return {
+    path,
+    chainId: data.shared?.chainId ?? null,
+    usdg: data.shared?.usdg ?? null,
+    multicall3: data.shared?.multicall3 ?? null,
+    hasV2Block: block !== null,
+    interfaceVersion: block?.interfaceVersion ?? null,
+    deployBlock: block?.deployBlock ?? null,
+    contracts,
+    sources,
+    uniswapV3: block?.uniswapV3 ? { factory: block.uniswapV3.factory, swapRouter02: block.uniswapV3.swapRouter02, quoterV2: block.uniswapV3.quoterV2 } : null,
+    fees: block?.fees
+      ? {
+          premiumFeeBps: block.fees.premiumFeeBps,
+          mintFeePpm: block.fees.mintFeePpm ?? null,
+          resaleFeeBps: block.fees.resaleFeeBps,
+          takerFeeFlat: block.fees.takerFeeFlat,
+          takerFeeCapBps: block.fees.takerFeeCapBps,
+          makerRebateBps: block.fees.makerRebateBps,
+          exerciseFeeBps: block.fees.exerciseFeeBps,
+        }
+      : null,
+    vault: block?.vault
+      ? {
+          maxSeriesUnits: block.vault.maxSeriesUnits,
+          maxTotalNotional: block.vault.maxTotalNotional,
+          askToleranceBps: block.vault.askToleranceBps,
+          maxBidBpsOfSpot: block.vault.maxBidBpsOfSpot,
+          maxOrderLifetime: block.vault.maxOrderLifetime,
+          maxDailyOutflow: block.vault.maxDailyOutflow,
+        }
+      : null,
+    defaults,
+    markets,
+  };
+}
+
+/** Read and parse `path`. Throws V2RegistryError on an unreadable file, bad JSON or a bad registry. */
+export function loadV2Registry(path: string): V2Registry {
+  let json: unknown;
+  try {
+    json = JSON.parse(readFileSync(path, 'utf8'));
+  } catch (error) {
+    const reason = error instanceof Error ? error.message : String(error);
+    throw new V2RegistryError(`cannot read the market registry at ${path}: ${reason}`, [`cannot read the file: ${reason}`]);
+  }
+  return parseV2Registry(json, path);
+}
+
+/*//////////////////////////////////////////////////////////////
+                            ACCESSORS
+//////////////////////////////////////////////////////////////*/
+
+/** A market with its `v2` block known to be present. */
+export type V2Market = V2RegistryMarket & { v2: V2MarketBlock };
+
+/** Markets that have a `v2` block with one of `statuses` (default: live only), in file order. */
+export function v2Markets(registry: V2Registry, statuses: readonly V2MarketStatus[] = ['live']): V2Market[] {
+  return registry.markets.filter((m): m is V2Market => m.v2 !== null && statuses.includes(m.v2.status));
+}
+
+export function marketByTicker(registry: V2Registry, ticker: string): V2RegistryMarket | null {
+  return registry.markets.find((m) => m.ticker === ticker) ?? null;
+}
+
+/** Case-insensitive on the address, since events and the indexer do not all checksum. */
+export function marketByUnderlying(registry: V2Registry, underlying: string): V2RegistryMarket | null {
+  const key = underlying.toLowerCase();
+  return registry.markets.find((m) => m.underlying.toLowerCase() === key) ?? null;
+}

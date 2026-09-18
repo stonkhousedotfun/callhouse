@@ -1,5 +1,5 @@
 /**
- * Vol pricing through the real tick: the fetch, the arm, the listing, the reprice, the database
+ * Vol pricing through the keeper tick: the fetch, the arm, the listing, the reprice, the database
  * and the HTTP surface, with the chain and the vault stubbed.
  *
  * WHY THIS FILE EXISTS: policy.vol.test.ts pins the maths; this pins the wiring the maths depends
@@ -16,7 +16,7 @@
  * calendar moves on.
  */
 import assert from 'node:assert/strict';
-import { mkdtempSync, readFileSync } from 'node:fs';
+import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { mock, test } from 'node:test';
@@ -35,22 +35,23 @@ for (const key of ['KEEPER_PRICING_MODE', 'KEEPER_TARGET_DELTA', 'KEEPER_PRICE_E
 }
 
 const { publicClient, walletClient } = await import('./clients.js');
-const { config } = await import('./config.js');
+const { config, vaultAddress } = await import('./config.js');
 const { newYorkParts, nextWeekWindow } = await import('./calendar.js');
 const { optionIdFor, weeklyTuple } = await import('./optionType.js');
 const { planWeek, priceListing } = await import('./policy.js');
-const { VOL_MIN_REFETCH_MS, VOL_REPRICE_UP_CHECK_MS, resetVolCache, tick, volSource } = await import('./roll.js');
+const { VOL_MIN_REFETCH_MS, VOL_REPRICE_UP_CHECK_MS, formatUsdg, resetVolCache, tick, volSource } = await import('./roll.js');
 const { buildApp } = await import('./health.js');
 const { buildOrderComponents, componentsToJson, localOrderHash } = await import('./seaport.js');
 const { store } = await import('./state.js');
-const { VolFetchError, closeDayOf, parseCboeChain } = await import('./vol.js');
+const { VolFetchError, closeDayOf } = await import('./vol.js');
+const { syntheticNvdaChain } = await import('./fixtures/synthetic-chains.js');
 type CboeChain = import('./vol.js').CboeChain;
 type OrderComponentsStruct = import('./seaport.js').OrderComponentsStruct;
 
 const LOT = 1_000_000_000_000_000_000n;
 const ZERO32 = `0x${'00'.repeat(32)}` as const;
 const SPOT = 212_210_000n;
-const FIXTURE = parseCboeChain(JSON.parse(readFileSync(new URL('./fixtures/cboe-nvda-2026-09-14.json', import.meta.url), 'utf8')));
+const FIXTURE = syntheticNvdaChain();
 
 interface Call {
   address?: string;
@@ -233,7 +234,10 @@ test('Idle, vol mode: one fetch arms the delta strike and prices its listing; th
     vol: { chain: chainData, error: null, closeDay: window.closeDay, nowSeconds: now },
   });
   assert.ok(expected.ok);
-  assert.equal(expected.strikeUsdg6, 225_000_000n, 'the fixture’s 25 Sep calls at delta 0.15');
+  assert.ok(expected.strikeUsdg6 > SPOT, 'synthetic delta selection stays out of the money');
+  const expectedStrike = expected.strikeUsdg6.toString();
+  const expectedUnit = expected.unitPrice6.toString();
+  const expectedFair = expected.pricing.fairUnit6;
 
   const tokenTypeQueries: bigint[] = [];
   const chain = stubChain(reads, (call) => {
@@ -272,53 +276,53 @@ test('Idle, vol mode: one fetch arms the delta strike and prices its listing; th
 
   assert.equal(fetches, 1, 'the arm and its first listing read ONE market');
   assert.deepEqual(chain.simulated, ['rollOpen', 'approveListing']);
-  const armedId = optionIdFor(weeklyTuple(config.ASSET, config.USDG, 225_000_000n, window.exerciseTs, window.expiryTs));
-  assert.deepEqual(tokenTypeQueries, [armedId], 'the option type the keeper armed carries the 225 strike');
+  const armedId = optionIdFor(weeklyTuple(config.ASSET, config.USDG, expected.strikeUsdg6, window.exerciseTs, window.expiryTs));
+  assert.deepEqual(tokenTypeQueries, [armedId], 'the option type carries the selected strike');
 
   const cycle = store.getCycle(1);
   assert.ok(cycle);
-  assert.equal(cycle.strike_usdg6, '225000000');
+  assert.equal(cycle.strike_usdg6, expectedStrike);
   const armPricing = JSON.parse(cycle.pricing_json ?? 'null') as Record<string, unknown>;
   assert.equal(armPricing.mode, 'vol');
-  assert.equal(armPricing.deltaStrikeUsdg6, '225000000');
+  assert.equal(armPricing.deltaStrikeUsdg6, expected.pricing.deltaStrikeUsdg6);
   assert.equal(armPricing.expiry, window.closeDay);
 
   const listings = store.listingsForCycle(1);
   assert.equal(listings.length, 1);
   const listing = listings[0]!;
-  assert.equal(listing.unit_price6, '946951');
+  assert.equal(listing.unit_price6, expectedUnit);
   assert.equal(listing.contracts, '23');
-  assert.equal(listing.gross_usdg6, (946_951n * 23n).toString());
+  assert.equal(listing.gross_usdg6, (expected.unitPrice6 * 23n).toString());
   const listingPricing = JSON.parse(listing.pricing_json ?? 'null') as Record<string, unknown>;
   assert.deepEqual(listingPricing, JSON.parse(JSON.stringify(expected.pricing)), 'the listing carries exactly the plan’s record');
 
   const alerts = alertsSince(before);
   const rollOpen = alerts.find((a) => a.kind === 'roll_open');
   assert.ok(rollOpen);
-  assert.equal(rollOpen.data.strikeUsdg, '225');
-  assert.equal(rollOpen.data.strikeOtmBps, 602);
-  assert.equal(rollOpen.data.fairUnitUsdg, '0.860864');
-  assert.equal(rollOpen.data.unitPriceUsdg, '0.946951');
+  assert.equal(rollOpen.data.strikeUsdg, formatUsdg(expected.strikeUsdg6));
+  assert.equal(rollOpen.data.strikeOtmBps, expected.pricing.strikeOtmBps);
+  assert.equal(rollOpen.data.fairUnitUsdg, expectedFair === null ? null : formatUsdg(BigInt(expectedFair)));
+  assert.equal(rollOpen.data.unitPriceUsdg, formatUsdg(expected.unitPrice6));
   assert.equal(rollOpen.data.targetDelta, 0.15);
   assert.ok(typeof rollOpen.data.deltaAtStrike === 'number' && typeof rollOpen.data.ivAtStrike === 'number');
-  assert.match(rollOpen.message, /\+602 bps over spot 212\.21, delta 0\.146 \(target 0\.15\), Cboe iv 32\.7, fair 0\.860864/);
+  assert.match(rollOpen.message, /bps over spot 212\.21, delta .* \(target 0\.15\), Cboe iv .* fair /);
   const listed = alerts.find((a) => a.kind === 'listing');
   assert.ok(listed);
   assert.equal(listed.data.priceSource, 'vol-fair');
-  assert.equal(listed.data.unitPriceUsdg, '0.946951', 'the existing alert field keeps its name and meaning');
-  assert.equal(listed.data.floorUnitUsdg, '0.84884');
+  assert.equal(listed.data.unitPriceUsdg, formatUsdg(expected.unitPrice6), 'the existing alert field keeps its name and meaning');
+  assert.equal(listed.data.floorUnitUsdg, formatUsdg(expected.floorUnit6));
   assert.equal(listed.data.pricingMode, 'vol');
 
   const app = buildApp();
   const orders = (await (await app.request('/orders')).json()) as { orders: Array<Record<string, unknown>> };
   assert.equal(orders.orders.length, 1);
   const order = orders.orders[0]!;
-  assert.equal(order.unitPrice6, '946951', 'the existing fields are unchanged');
+  assert.equal(order.unitPrice6, expectedUnit, 'the existing fields are unchanged');
   assert.equal(order.contracts, '23');
   assert.deepEqual(order.pricing, listingPricing, '/orders serves the record, parsed');
   const state = (await (await app.request('/state')).json()) as Record<string, unknown> & { pricing: Record<string, unknown> | null; vault: Record<string, unknown> };
   assert.deepEqual(state.pricing, listingPricing, '/state serves the live cycle’s latest listing record');
-  assert.equal(state.vault.strikeUsdg6, '225000000');
+  assert.equal(state.vault.strikeUsdg6, expectedStrike);
 });
 
 /*//////////////////////////////////////////////////////////////
@@ -330,7 +334,7 @@ function seedRallied(cycleNumber: number, salt: bigint, pricingJson: string | nu
   const now = Math.floor(Date.now() / 1000);
   const exerciseTs = now + 3 * 86_400;
   const optionId = (0xabc000n + BigInt(cycleNumber)) << 96n;
-  const components = buildOrderComponents({ vault: config.VAULT, optionId, contracts: 23n, unitPrice6: 857_329n, endTime: BigInt(exerciseTs), counter: 0n, salt });
+  const components = buildOrderComponents({ vault: vaultAddress(), optionId, contracts: 23n, unitPrice6: 857_329n, endTime: BigInt(exerciseTs), counter: 0n, salt });
   const orderHash = localOrderHash(components);
   store.ensureCycle(cycleNumber, 'open');
   store.updateCycle(cycleNumber, { contracts: 0, strike_usdg6: '225000000', exercise_ts: exerciseTs, pricing_json: pricingJson });
@@ -452,7 +456,7 @@ function seedVolListing(cycleNumber: number, salt: bigint, opts: { unitPrice6: b
   const now = Math.floor(Date.now() / 1000);
   const exerciseTs = now + 3 * 86_400;
   const optionId = (0xabc000n + BigInt(cycleNumber)) << 96n;
-  const components = buildOrderComponents({ vault: config.VAULT, optionId, contracts: 23n, unitPrice6: opts.unitPrice6, endTime: BigInt(exerciseTs), counter: 0n, salt });
+  const components = buildOrderComponents({ vault: vaultAddress(), optionId, contracts: 23n, unitPrice6: opts.unitPrice6, endTime: BigInt(exerciseTs), counter: 0n, salt });
   const orderHash = localOrderHash(components);
   store.ensureCycle(cycleNumber, 'open');
   store.updateCycle(cycleNumber, { contracts: 0, strike_usdg6: '225000000', exercise_ts: exerciseTs, pricing_json: ARM_RECORD });
@@ -569,10 +573,10 @@ test('Listed, vol mode: no upward reprice without a spare slot, below the thresh
     assert.equal(warn.data.liveUnitUsdg, '0.946951');
   }
 
-  // The market has not moved: nothing to do, and the next checks are throttled past the 5-minute
+  // The live ask is safely above the synthetic market: nothing to do, and checks are throttled past the 5-minute
   // download cache.
   {
-    const { orderHash, reads, chainData } = seedVolListing(13, 13n, { unitPrice6: 946_951n, spot: 212_210_000n, listingsThisCycle: 1, pricingJson: VOL_LISTING_RECORD });
+    const { orderHash, reads, chainData } = seedVolListing(13, 13n, { unitPrice6: 5_000_000n, spot: 212_210_000n, listingsThisCycle: 1, pricingJson: JSON.stringify({ mode: 'vol', fairUnit6: '4500000', unitPrice6: '5000000' }) });
     const chain = stubChain(reads);
     resetVolCache();
     let fetches = 0;

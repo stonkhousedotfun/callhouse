@@ -276,7 +276,7 @@ async function main(): Promise<void> {
   const { config } = await import('./config.js');
   const { account } = await import('./clients.js');
   assertAddr(account.address, KEEPER.address, 'the keeper module derived the harness keeper address');
-  assertAddr(config.VAULT, vault, 'keeper config VAULT');
+  assertAddr(config.VAULT ?? '(unset)', vault, 'keeper config VAULT');
   record.keeperConfig = {
     strikeOtmBps: config.KEEPER_STRIKE_OTM_BPS,
     premiumMarginBps: config.KEEPER_PREMIUM_MARGIN_BPS,

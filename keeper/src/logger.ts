@@ -11,7 +11,15 @@ const isTty = process.stdout.isTTY === true;
 
 export const logger: Logger = pino({
   level: config.KEEPER_LOG_LEVEL,
-  base: { service: 'callhouse-keeper', vault: config.VAULT, chainId: config.CHAIN_ID },
+  // `vault` is null for a factory-only process; `market` is the registry ticker, so 35 keepers'
+  // lines can be told apart in one log stream.
+  base: {
+    service: 'callhouse-keeper',
+    vault: config.VAULT ?? null,
+    factory: config.FACTORY ?? null,
+    market: config.KEEPER_MARKET,
+    chainId: config.CHAIN_ID,
+  },
   formatters: {
     // Emit `level: "info"` instead of `level: 30`; log shippers read the word, humans do too.
     level: (label) => ({ level: label }),
@@ -45,4 +53,6 @@ export const log = {
   alerts: logger.child({ mod: 'alerts' }),
   health: logger.child({ mod: 'health' }),
   boot: logger.child({ mod: 'boot' }),
+  solo: logger.child({ mod: 'solo' }),
+  feed: logger.child({ mod: 'feed' }),
 } as const;

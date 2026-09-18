@@ -200,7 +200,7 @@ describe('with both targets configured', () => {
       assert.equal(res.status, 401);
     });
 
-    test('correct ?token= (what the keeper can send today) → 200', async () => {
+    test('correct legacy ?token= → 200', async () => {
       const res = await post(`${relay.url}/alert?token=${encodeURIComponent(RELAY_TOKEN)}`, SAMPLE);
       assert.equal(res.status, 200);
     });

@@ -59,6 +59,16 @@ export const NYSE_HOLIDAYS_2026_2027: readonly string[] = [
   '2027-12-24',
 ];
 
+/**
+ * 2028's full-day NYSE closures, as ops/markets/v2-sources.json lists them (the source the v2 ExpiryCalendar was seeded
+ * from): MLK Day, Presidents' Day, Good Friday, Memorial Day, Juneteenth, Independence Day, Labor Day, Thanksgiving,
+ * Christmas. New Year's Day 2028 is a Saturday and is not observed.
+ */
+export const NYSE_HOLIDAYS_2028: readonly string[] = ['2028-01-17', '2028-02-21', '2028-04-14', '2028-05-29', '2028-06-19', '2028-07-04', '2028-09-04', '2028-11-23', '2028-12-25'];
+
+/** The v2 pricing clock's table: every year the on-chain ExpiryCalendar is seeded for. PRICING_NYSE_HOLIDAYS replaces it. */
+export const NYSE_HOLIDAYS_2026_2028: readonly string[] = [...NYSE_HOLIDAYS_2026_2027, ...NYSE_HOLIDAYS_2028];
+
 export const NEW_YORK = 'America/New_York';
 
 /** The regular NYSE close, local time. */

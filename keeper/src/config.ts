@@ -7,7 +7,9 @@
  * has already lost the week. A keeper that refuses to start gets noticed in seconds.
  *
  * Keys mirror keeper/.env.example. Anything with a sane, chain-wide constant answer has a default;
- * anything deployment-specific (vault, key) does not and must be supplied.
+ * anything deployment-specific (the vault or the factory, the key) does not and must be supplied.
+ * Since the multi-market expansion a process is EITHER the pooled vault's (VAULT), a factory's
+ * (FACTORY: one process per market, env-driven, see solo.ts) or both; at least one is required.
  *
  * There is no registry and no Overcall API under write on fill: the vault reads the option
  * tuple from the clearinghouse, the keeper creates that tuple itself, and the only venue is the
@@ -144,10 +146,40 @@ const schema = z.object({
   /** Zero: Seaport pulls the ERC-1155 itself. Must equal `vault.conduitKey()`. */
   SEAPORT_CONDUIT_KEY: bytes32Field.default(ZERO_BYTES32),
 
-  /* ---- our deployment ---- */
-  VAULT: addressField,
-  /** Isolated 1-lot factory. Unset keeps the keeper on the pooled vault only. */
+  /* ---- our deployment: at least one of VAULT / FACTORY (checked in loadConfig) ---- */
+  /** The pooled vault. OPTIONAL since the multi-market expansion: the pooled product is closed
+   *  and every new market is factory-only, so a process with no VAULT runs the solo path alone
+   *  (solo.ts) and never touches roll.ts. Modules that are vault-only read it through
+   *  `vaultAddress()`, which throws if it is unset; they are never entered without one. */
+  VAULT: addressField.optional(),
+  /** Isolated 1-lot factory (contracts/src/solo/AccountFactory.sol). Unset keeps the keeper on
+   *  the pooled vault only; set with VAULT, the process drives both. */
   FACTORY: addressField.optional(),
+  /** The Chainlink proxy the factory prices against (`factory.priceFeed()`, cross-checked at
+   *  boot). The solo path reads `latestRoundData()` from it directly, because a factory market has
+   *  no vault and therefore no `vault.spotUsdg()` to lean on. Default: the NVDA proxy, so the
+   *  live NVDA keeper needs no new key. Every other market sets its own (ops/keeper-env.sh). */
+  PRICE_FEED: addressField.default('0x379EC4f7C378F34a1B47E4F3cbeBCbAC3E8E9F15'),
+  /** Solo path: the week's ask is never below this many USDG base units, whatever the fill floor
+   *  says. Default 1000000 (1 USDG): the floor the first factory keeper hard-coded, kept so the
+   *  live NVDA keeper's behaviour does not change with this key's arrival. It is far too high for
+   *  a $25 token (4% of spot for a week), so the env generator writes each market's registry
+   *  value (`minAskUsdg6`, 100000 = 0.10 USDG at the 2026-09-15 build) instead. */
+  KEEPER_MIN_ASK_USDG6: bigintField.default('1000000'),
+  /** The market this process serves, as a label: logs, /health, /state and every alert carry it,
+   *  so 35 keepers posting to one relay can be told apart. Upper-case ticker, 1..8 of A-Z 0-9 '.',
+   *  the registry's `ticker`. Default NVDA. Not read by any pricing decision. */
+  KEEPER_MARKET: z.string().regex(/^[A-Z0-9.]{1,8}$/, 'an upper-case ticker, e.g. TSLA').default('NVDA'),
+  /** v1 run-off (ADR-10): this factory is frozen (`writesHalted`, `depositCap` 0) and its listed
+   *  weeks are left to expire. The solo tick never calls `setWeek` or `listFor`; it still settles
+   *  every expired account and raises the health alerts, and says `v1_drained` once when no account
+   *  is live or pending. `1`/`true` on, `0`/`false`/unset off, anything else refused at boot, like the
+   *  pooled WIND_DOWN: a typo here must not leave a frozen market quietly setting weeks. The
+   *  registry's per-market `v1RunOff` renders it (ops/keeper-env.sh). */
+  SOLO_WIND_DOWN: z
+    .enum(['1', 'true', '0', 'false'])
+    .optional()
+    .transform((v) => v === '1' || v === 'true'),
 
   /* ---- keeper ---- */
   KEEPER_PK: privateKeyField,
@@ -256,9 +288,11 @@ const schema = z.object({
 
   /* ---- loop ---- */
   POLL_INTERVAL_MS: intField(5_000, 3_600_000).default(60_000),
-  /** Close the pooled vault: never arm or list; still lockBook/rollClose/settleQueue so queued redemptions pay. */
+  /** Close the pooled vault: never arm or list; still lockBook/rollClose/settleQueue so queued redemptions pay.
+   *  `1`/`true` on, `0`/`false`/unset off, anything else refused at boot (as SOLO_WIND_DOWN): a mistyped value read
+   *  as off would re-arm a vault depositors were told is closed. */
   WIND_DOWN: z
-    .string()
+    .enum(["1", "true", "0", "false"])
     .optional()
     .transform((v) => v === "true" || v === "1"),
 });
@@ -280,11 +314,19 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): KeeperConfig {
   }
 
   const parsed = schema.safeParse(cleaned);
-  if (!parsed.success) {
-    const lines = parsed.error.issues.map((issue) => {
-      const key = issue.path.join('.') || '(root)';
-      return `  ${key}: ${issue.message}`;
-    });
+  const lines = parsed.success
+    ? []
+    : parsed.error.issues.map((issue) => {
+        const key = issue.path.join('.') || '(root)';
+        return `  ${key}: ${issue.message}`;
+      });
+  // A process with neither address has nothing to drive. Checked here rather than with a zod
+  // refinement because a refinement is skipped when any other key fails to parse, and this line
+  // belongs in the same list as a missing KEEPER_PK, not in a second boot failure after it.
+  if (!cleaned.VAULT && !cleaned.FACTORY) {
+    lines.push('  VAULT / FACTORY: at least one must be set: VAULT (the pooled vault) or FACTORY (the isolated 1-lot factory)');
+  }
+  if (lines.length > 0 || !parsed.success) {
     throw new Error(
       `Keeper configuration is not usable. Fix these and restart:\n${lines.join('\n')}\n\n` +
         'Every key is documented in keeper/README.md and keeper/.env.example (the repo-root ' +
@@ -309,6 +351,19 @@ function loadOrDie(): KeeperConfig {
 }
 
 export const config: KeeperConfig = loadOrDie();
+
+/**
+ * The pooled vault's address for the modules that only exist for it (roll.ts, seaport.ts,
+ * policy.readPolicy, the vault half of health.ts). VAULT became optional when the factory-only
+ * markets arrived; those modules keep an `Address` in hand through this one accessor instead of
+ * threading `| undefined` through sixty call sites. index.ts never enters them without a VAULT,
+ * so the throw is unreachable in production; it exists so a future caller that forgets the guard
+ * fails with a sentence rather than an `undefined` address in an eth_call.
+ */
+export function vaultAddress(): Address {
+  if (config.VAULT === undefined) throw new Error('VAULT is not configured: this process is factory-only');
+  return config.VAULT;
+}
 
 /** One lot: exactly one Stock Token. `Policy.LOT`; the only `underlyingAmount` the vault arms. */
 export const ONE_LOT = 1_000_000_000_000_000_000n;

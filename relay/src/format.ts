@@ -42,7 +42,9 @@ export function truncate(text: string, max: number, marker = '…'): string {
 
 function contextLine(alert: KeeperAlert): string {
   return [
-    alert.vault === undefined ? null : `vault ${alert.vault}`,
+    alert.market === undefined ? null : `market ${alert.market}`,
+    alert.factory === undefined ? null : `factory ${alert.factory}`,
+    alert.vault === undefined || alert.vault === null ? null : `vault ${alert.vault}`,
     alert.chainId === undefined ? null : `chain ${alert.chainId}`,
     alert.at ?? null,
     alert.source ?? null,
@@ -80,10 +82,12 @@ export interface DiscordBody {
 export function formatDiscord(alert: KeeperAlert): DiscordBody {
   const mark = SEVERITY_MARK[alert.severity];
   const context = contextLine(alert);
-  const header = `${mark.emoji} **${mark.label}** \`${alert.kind}\` ${alert.message}${context === '' ? '' : `\n${context}`}`;
-  // A literal ``` inside the JSON would close the code block early and spill the rest of the
-  // payload out as markdown. A zero-width space between the backticks defuses it.
-  const body = dataJson(alert)?.replaceAll('```', '`​``') ?? null;
+  // Break every backtick in untrusted text. Replacing only runs of three misses overlapping
+  // fences in longer runs, including strings quoted from RPC errors in the header.
+  const defuseFence = (value: string): string => value.replaceAll('`', '`​');
+  const header = `${mark.emoji} **${mark.label}** \`${alert.kind}\` ${defuseFence(alert.message)}${context === '' ? '' : `\n${defuseFence(context)}`}`;
+  const json = dataJson(alert);
+  const body = json === null ? null : defuseFence(json);
   return {
     content: fit(header, body, DISCORD_CONTENT_LIMIT, { open: '\n```json\n', close: '\n```' }),
     allowed_mentions: { parse: [] },
@@ -94,6 +98,7 @@ export interface TelegramBody {
   chat_id: string;
   text: string;
   disable_web_page_preview: true;
+  disable_notification: boolean;
 }
 
 export function formatTelegram(alert: KeeperAlert, chatId: string): TelegramBody {
@@ -104,5 +109,6 @@ export function formatTelegram(alert: KeeperAlert, chatId: string): TelegramBody
     chat_id: chatId,
     text: fit(header, dataJson(alert), TELEGRAM_TEXT_LIMIT, { open: '\n\ndata:\n', close: '' }),
     disable_web_page_preview: true,
+    disable_notification: alert.severity === 'info',
   };
 }

@@ -1,0 +1,62 @@
+[
+  {
+    "name": "call in the money",
+    "isPut": false,
+    "strike": "231000000",
+    "price": "240000000",
+    "exerciseFeeBps": 25,
+    "grossPerUnit": "375000000000000",
+    "feePerUnit": "25000000000000",
+    "longPerUnit": "350000000000000",
+    "shortPerUnit": "9625000000000000",
+    "usdPerUnit": "84000"
+  },
+  {
+    "name": "call small intrinsic caps the fee",
+    "isPut": false,
+    "strike": "200000000",
+    "price": "201000000",
+    "exerciseFeeBps": 200,
+    "grossPerUnit": "49751243781094",
+    "feePerUnit": "4975124378109",
+    "longPerUnit": "44776119402985",
+    "shortPerUnit": "9950248756218906",
+    "usdPerUnit": "8999"
+  },
+  {
+    "name": "put in the money",
+    "isPut": true,
+    "strike": "200000000",
+    "price": "190000000",
+    "exerciseFeeBps": 25,
+    "grossPerUnit": "100000",
+    "feePerUnit": "5000",
+    "longPerUnit": "95000",
+    "shortPerUnit": "1900000",
+    "usdPerUnit": "95000"
+  },
+  {
+    "name": "put sub-unit intrinsic rounds away",
+    "isPut": true,
+    "strike": "200000000",
+    "price": "199999999",
+    "exerciseFeeBps": 25,
+    "grossPerUnit": "0",
+    "feePerUnit": "0",
+    "longPerUnit": "0",
+    "shortPerUnit": "2000000",
+    "usdPerUnit": "0"
+  },
+  {
+    "name": "put full loss at zero price",
+    "isPut": true,
+    "strike": "200000000",
+    "price": "0",
+    "exerciseFeeBps": 25,
+    "grossPerUnit": "2000000",
+    "feePerUnit": "5000",
+    "longPerUnit": "1995000",
+    "shortPerUnit": "0",
+    "usdPerUnit": "1995000"
+  }
+]

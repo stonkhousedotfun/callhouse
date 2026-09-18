@@ -96,14 +96,15 @@ COPY indexer/src ./indexer/src
 
 # A self-contained production tree: the indexer's files plus ONLY its production dependencies
 # (ponder, viem, hono and their trees), with no workspace symlinks back into /app/node_modules.
-# `src/api/index.test.ts` rides along and is inert: Ponder's file glob ignores *.test.ts, and
-# vitest is a dev dependency that is not in /out.
+# The *.test.ts files under src/ ride along and are inert: Ponder's file glob ignores *.test.ts,
+# and vitest is a dev dependency that is not in /out.
 RUN pnpm --filter @callhouse/indexer deploy --prod /out
 
 # Assert the tree can actually start Ponder, rather than finding out at first boot. `--version`
 # loads the CLI and its dependency graph without needing a database or an RPC.
 RUN test -f /out/ponder.config.ts \
  && test -f /out/src/api/index.ts \
+ && test -f /out/lib/v2/cardRegistry.generated.json \
  && (cd /out && node node_modules/ponder/dist/esm/bin/ponder.js --version) \
  || { echo "BUILD ERROR: /out is missing the Ponder sources, or the ponder CLI does not load from it."; \
       echo "Check the COPY lines above and the indexer/* exceptions in the root .dockerignore."; \

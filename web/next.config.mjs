@@ -35,6 +35,11 @@ const nextConfig = {
   turbopack: {},
   output: "standalone",
   outputFileTracingRoot: path.join(import.meta.dirname, ".."),
+  async headers() {
+    return process.env.NEXT_PUBLIC_DEV_PREVIEW === "1"
+      ? [{ source: "/:path*", headers: [{ key: "X-Robots-Tag", value: "noindex, nofollow, noarchive" }] }]
+      : [];
+  },
 };
 
 export default nextConfig;
