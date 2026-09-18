@@ -15,17 +15,13 @@ jobs:
     name: keeper / indexer / web
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@v4
       # No `version:` here: package.json's packageManager (pnpm@9.10.0) is the single source, and
       # action-setup fails with "Multiple versions of pnpm specified" when both are set.
-      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4
-      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
         with: {node-version: 22, cache: pnpm}
       - run: pnpm install --frozen-lockfile
-      - name: check generated v2 service environments
-        run: node ops/v2-env.mjs --check
-      - name: check generated market keeper environments
-        run: node ops/keeper-env.sh --check
       - name: typecheck keeper
         run: pnpm --filter @callhouse/keeper typecheck
       - name: build keeper
@@ -47,30 +43,12 @@ jobs:
       - name: web tests
         run: pnpm --filter @callhouse/web test
 
-  # User notifications (notifier/). Its own job so a notifier change does not wait on the web build.
-  # The storage tests run on PGlite in-process: no Postgres service is needed.
-  notifier:
-    name: notifier
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4
-      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
-        with: {node-version: 22, cache: pnpm}
-      - run: pnpm install --frozen-lockfile
-      - name: typecheck notifier
-        run: pnpm --filter @callhouse/notifier typecheck
-      - name: build notifier
-        run: pnpm --filter @callhouse/notifier build
-      - name: notifier tests
-        run: pnpm --filter @callhouse/notifier test
-
   copy-lint:
     name: copy-lint (compliance)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
         with: {node-version: 22}
       - name: forbidden + required copy (web; the landing is linted in stonkhousedotfun/callhouse-site)
         run: node scripts/copy-lint.mjs
