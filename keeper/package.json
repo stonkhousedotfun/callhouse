@@ -12,7 +12,13 @@
     "lint": "tsc -p tsconfig.json --noEmit",
     "test": "tsx --test 'src/**/*.test.ts'",
     "dryrun": "tsx src/dryrun.ts",
-    "dryrun:extended": "tsx src/dryrun-extended.ts"
+    "dryrun:extended": "tsx src/dryrun-extended.ts",
+    "solo:quote": "tsx src/solo-quote.ts",
+    "gen:abis": "node scripts/gen-abis.mjs",
+    "v2:dryrun": "tsx src/v2/cranker/dryrun.ts",
+    "v2:devnet-cycle": "tsx src/v2/cranker/devnet-cycle.ts",
+    "v2:devnet-mm": "tsx src/v2/mm/devnet-mm.ts",
+    "v2:devnet-pricer": "tsx src/v2/pricer/devnet-reprice.ts"
   },
   "dependencies": {
     "viem": "^2.56.3",

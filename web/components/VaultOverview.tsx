@@ -16,7 +16,7 @@ import { Card, CardHead, CardTitle, Row, Rows, Stat, Unit } from "@/components/u
 import { MARKET, MAX_LISTINGS_PER_CYCLE, SHARE_TICKER, VAULT } from "@/lib/contracts";
 import { hasOnChainListing, shouldAskFeed, windowClosed, type CycleListingState } from "@/lib/cycleNotices";
 import { CYCLE_TERMS_LABELS, cycleTerms } from "@/lib/cycleTerms";
-import { WAD, fmtAsset, fmtCountdown, fmtUsdg, multiplierIsActive, shortHash, toNvdaEq, tvlUsdg } from "@/lib/format";
+import { WAD, fmtAsset, fmtCountdown, fmtUsdg, multiplierIsActive, shortHash, toStockEq, tvlUsdg } from "@/lib/format";
 import { collateralSplit, useNow, useOrderStatus, useVaultSnapshot } from "@/lib/hooks";
 import { fillableForTerms } from "@/lib/orderFillable";
 
@@ -153,7 +153,7 @@ export function VaultOverview() {
             {multiplierIsActive(v.uiMultiplier) ? (
               <div className="mt-2 max-w-[60em] text-[12.5px] leading-[1.55] text-ink-3">
                 The Stock Token reports a uiMultiplier other than 1.0. Display-only {MARKET}-eq of the
-                collateral: <span className="num text-ink-2">{fmtAsset(toNvdaEq(v.totalAssets, v.uiMultiplier))}</span>. Share maths uses the
+                collateral: <span className="num text-ink-2">{fmtAsset(toStockEq(v.totalAssets, v.uiMultiplier))}</span>. Share maths uses the
                 raw balance above.
               </div>
             ) : null}

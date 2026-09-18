@@ -5,7 +5,8 @@
  * the first real alert has already lost that alert, so this refuses to start instead. And the
  * same rule about secrets: no issue message ever echoes the value it is complaining about.
  *
- *   RELAY_TOKEN            required. The shared secret the keeper presents. ≥ 32 characters;
+ *   RELAY_TOKEN            required. The shared secret the keeper presents. Surrounding
+ *                          whitespace is trimmed, as it is in the keeper. ≥ 32 characters;
  *                          generate with `openssl rand -hex 32`.
  *   DISCORD_WEBHOOK_URL    a Discord channel webhook. Its path is the credential.
  *   TELEGRAM_BOT_TOKEN     a Telegram bot token from @BotFather …
@@ -60,6 +61,7 @@ const envSchema = z
       blankIsUnset,
       z
         .string({ required_error: 'Required' })
+        .trim()
         .min(32, 'must be at least 32 characters (openssl rand -hex 32)'),
     ),
     DISCORD_WEBHOOK_URL: z.preprocess(blankIsUnset, httpUrl.optional()),

@@ -17,10 +17,10 @@ import { SOLIDITY_ERROR_SELECTOR, SOLIDITY_PANIC_SELECTOR, decodeRevertData, typ
  * then assigns the exercise to writers, charges a fee if its fee switch is on
  * (`fee = exerciseAmount × amount × feeBps / 10_000`, floored, and 1 base unit when that floors to
  * zero), burns the options, pulls `exerciseAmount × amount + fee` of the exercise asset (USDG) with
- * solmate's safeTransferFrom, and pushes `underlyingAmount × amount` of the underlying (NVDA) with
- * safeTransfer. Solmate swallows a token's own revert: a failed USDG pull is
- * Error("TRANSFER_FROM_FAILED") and a failed NVDA push is Error("TRANSFER_FAILED"), whatever the
- * token said. Everything below mirrors that, to the base unit.
+ * solmate's safeTransferFrom, and pushes `underlyingAmount × amount` of the underlying (the Stock
+ * Token) with safeTransfer. Solmate swallows a token's own revert: a failed USDG pull is
+ * Error("TRANSFER_FROM_FAILED") and a failed Stock Token push is Error("TRANSFER_FAILED"), whatever
+ * the token said. Everything below mirrors that, to the base unit.
  *
  * THE CLOCK IS THE CHAIN'S. The window is `exerciseTimestamp <= t < expiryTimestamp` where `t` is
  * the timestamp of the chain's latest block, never the device's clock: a device that runs a few
@@ -31,7 +31,7 @@ import { SOLIDITY_ERROR_SELECTOR, SOLIDITY_PANIC_SELECTOR, decodeRevertData, typ
  * the simulation (which runs against the same latest block) and the one run again right before
  * sending are what catch that, and the worst case is a reverted exercise that moved no tokens.
  *
- * EXACT FIGURES. USDG is shown to all 6 decimals and NVDA to its full 18, trailing zeros trimmed:
+ * EXACT FIGURES. USDG is shown to all 6 decimals and the Stock Token to its full 18, trailing zeros trimmed:
  * no figure on the card is rounded, so no cost is ever shown lower than what the clearinghouse
  * pulls. The spot check compares by cross-multiplication in integers, never through a rounded
  * value. No percentages.
@@ -40,7 +40,7 @@ import { SOLIDITY_ERROR_SELECTOR, SOLIDITY_PANIC_SELECTOR, decodeRevertData, typ
  * vitest covers every branch with plain values and encoded revert data.
  */
 
-/** One lot, and the scale the vault's spot is quoted against: USDG base units per 1e18 of NVDA. */
+/** One lot, and the scale the vault's spot is quoted against: USDG base units per 1e18 of the Stock Token. */
 const WAD = 10n ** 18n;
 const BPS = 10_000n;
 
@@ -93,12 +93,12 @@ export type ExerciseAmounts = {
   fee: bigint;
   /** What the clearinghouse pulls, and exactly what the approval is for. */
   total: bigint;
-  /** `underlyingAmount × amount`, NVDA base units, sent to the exerciser. */
-  nvdaOut: bigint;
+  /** `underlyingAmount × amount`, Stock Token base units, sent to the exerciser. */
+  underlyingOut: bigint;
 };
 
 /**
- * The USDG and NVDA legs of exercising `amount` contracts, exactly as the clearinghouse computes
+ * The USDG and Stock Token legs of exercising `amount` contracts, exactly as the clearinghouse computes
  * them. Undefined until the tuple and the fee switch have both been read: a total without the fee
  * would be a total the clearinghouse might pull more than.
  */
@@ -114,7 +114,7 @@ export function exerciseAmounts(args: {
   if (feesEnabled && feeBps === undefined) return undefined;
   const strikeCost = strikeUsdg * amount;
   const fee = clearFee(strikeCost, feesEnabled, feeBps ?? 0);
-  return { strikeCost, fee, total: strikeCost + fee, nvdaOut: underlyingAmount * amount };
+  return { strikeCost, fee, total: strikeCost + fee, underlyingOut: underlyingAmount * amount };
 }
 
 /**
@@ -131,21 +131,21 @@ export function approvalFor(allowance: bigint | undefined, total: bigint): bigin
 
 /**
  * Is exercising worth it at the vault's spot? `spotUsdg` is the vault's `spotUsdg()`: USDG base
- * units for one whole NVDA (1e18 base units).
+ * units for one whole Stock Token (1e18 base units).
  *
- *   "worth"      the NVDA received is worth more than the USDG paid, at that spot
+ *   "worth"      the underlying received is worth more than the USDG paid, at that spot
  *   "notWorth"   it is worth the same or less: spot is at or below the strike (plus the
- *                clearinghouse's fee, when that is on), so exercising costs more than the NVDA
+ *                clearinghouse's fee, when that is on), so exercising costs more than the underlying
  *   "unknown"    spot could not be read (the feed is stale and `spotUsdg()` reverts, or it has
  *                not answered): the page cannot tell, and treats it as a warning too
  *
- * `spot × nvdaOut ≤ total × 1e18`, in integers: nothing is rounded before the comparison.
+ * `spot × underlyingOut ≤ total × 1e18`, in integers: nothing is rounded before the comparison.
  */
 export type SpotCheck = "worth" | "notWorth" | "unknown";
 
-export function spotCheck(spotUsdg: bigint | undefined, amounts: Pick<ExerciseAmounts, "nvdaOut" | "total"> | undefined): SpotCheck {
+export function spotCheck(spotUsdg: bigint | undefined, amounts: Pick<ExerciseAmounts, "underlyingOut" | "total"> | undefined): SpotCheck {
   if (spotUsdg === undefined || spotUsdg <= 0n || amounts === undefined) return "unknown";
-  return spotUsdg * amounts.nvdaOut <= amounts.total * WAD ? "notWorth" : "worth";
+  return spotUsdg * amounts.underlyingOut <= amounts.total * WAD ? "notWorth" : "worth";
 }
 
 /** The spot check warns, and asks for an explicit confirmation, unless it says "worth". */
@@ -156,7 +156,7 @@ export function spotNeedsConfirmation(check: SpotCheck): boolean {
 /* ------------------------------------------------------------------------------ assets --- */
 
 /**
- * The tuple names the tokens the page approves and expects: USDG in, NVDA out. The vault checked
+ * The tuple names the tokens the page approves and expects: USDG in, the Stock Token out. The vault checked
  * both at rollOpen; checked again here because the approval goes to the USDG constant.
  */
 export function exerciseAssetsMatch(
@@ -181,7 +181,7 @@ export function fmtUsdgExact(value: bigint | undefined): string {
   return fmtUsdg(value, 6);
 }
 
-/** NVDA to full precision with trailing zeros trimmed: 1e18 → "1", 25e17 → "2.5", 1 → "0.000000000000000001". */
+/** The Stock Token to full precision with trailing zeros trimmed: 1e18 → "1", 25e17 → "2.5", 1 → "0.000000000000000001". */
 export function fmtNvdaExact(value: bigint | undefined): string {
   if (value === undefined) return "—";
   const negative = value < 0n;
@@ -204,7 +204,7 @@ const big = (v: unknown): bigint | undefined => (typeof v === "bigint" ? v : typ
 
 /** solmate SafeTransferLib's two strings, as the clearinghouse raises them inside exercise. */
 export const USDG_PULL_FAILED = "TRANSFER_FROM_FAILED";
-export const NVDA_PUSH_FAILED = "TRANSFER_FAILED";
+export const UNDERLYING_PUSH_FAILED = "TRANSFER_FAILED";
 
 /** Plain-English versions of what exercise can raise. */
 export function explainExerciseRevert(name: string, args: readonly unknown[]): string | undefined {
@@ -226,8 +226,8 @@ function explainSolidityString(reason: string): string | undefined {
   if (reason === USDG_PULL_FAILED) {
     return "The clearinghouse could not take the USDG for the strike: the wallet's USDG approval to the clearinghouse or its USDG balance is short, or USDG is paused or an address in the transfer is frozen by its issuer.";
   }
-  if (reason === NVDA_PUSH_FAILED) {
-    return "The clearinghouse could not send the NVDA Stock Token to this wallet: the token may be paused, or this address may not be allowed to receive it.";
+  if (reason === UNDERLYING_PUSH_FAILED) {
+    return "The clearinghouse could not send the Stock Token to this wallet: the token may be paused, or this address may not be allowed to receive it.";
   }
   return undefined;
 }
@@ -313,7 +313,7 @@ export type ExerciseSimulation = { ok: true } | { ok: false; revertData?: Hex; m
  * is `usdgShort` (blocked: an approval would not help), an allowance below the total is
  * `needsApproval` (allowed: the button's first step is the exact approval, and the exercise is
  * simulated again after it), and with both covered the token itself refused (paused or frozen):
- * blocked. A failed NVDA push is the Stock Token refusing to deliver: blocked. USDG's own named
+ * blocked. A failed push of the underlying is the Stock Token refusing to deliver: blocked. USDG's own named
  * errors, if a build of the clearinghouse ever bubbles them, map the same way. Anything else is
  * inconclusive: the page says so and leaves the wallet to show the outcome.
  */
@@ -346,7 +346,7 @@ export function classifyExerciseSimulation(
     if (ctx.allowance === undefined || ctx.allowance < ctx.total) return { kind: "needsApproval", decoded };
     return { kind: "tokenRefused", decoded };
   }
-  if (decoded.source === "solidity" && decoded.name === "Error" && decoded.args[0] === NVDA_PUSH_FAILED) {
+  if (decoded.source === "solidity" && decoded.name === "Error" && decoded.args[0] === UNDERLYING_PUSH_FAILED) {
     return { kind: "tokenRefused", decoded };
   }
   if (decoded.source === "token") {
@@ -397,7 +397,7 @@ export type ExerciseButtonState = { enabled: boolean; label: string; blocker?: E
 /**
  * The button, in one predicate. Its label names the amount ("Exercise 2 contracts"), so the ARIA
  * name says exactly what a click sends. It is live only when every one of these holds: a wallet,
- * on this app's chain (both writes are pinned to it), the window open by the chain's clock, the tuple's tokens are USDG and NVDA, the option balance,
+ * on this app's chain (both writes are pinned to it), the window open by the chain's clock, the tuple's tokens are USDG and the Stock Token, the option balance,
  * the amounts (with the fee switch) and the allowance read, a whole amount of at least one and no
  * more than the balance, enough USDG for the total, a simulation verdict for this exact exercise
  * that allows it, and, when spot does not show the exercise is worth it, the holder's explicit

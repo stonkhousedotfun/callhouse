@@ -1092,4 +1092,26 @@ export const erc20Abi = [
 export const stockTokenAbi = [
   { type: 'function', name: 'oraclePaused', inputs: [], outputs: [{ type: 'bool' }], stateMutability: 'view' },
   { type: 'function', name: 'uiMultiplier', inputs: [], outputs: [{ type: 'uint256' }], stateMutability: 'view' },
+  // Transfer gates, for the factory keeper's settle guard (solo.ts). `paused()` is the token's own
+  // pause OR its access registry's; the blocklist lives on that registry, not on the token
+  // (ops/recon/R5-price-feed.md §3.4, R12 §4). Both names are in ops/abis/StockToken.json.
+  { type: 'function', name: 'paused', inputs: [], outputs: [{ type: 'bool' }], stateMutability: 'view' },
+  { type: 'function', name: 'ACCESS_CONTROLLED_REGISTRY', inputs: [], outputs: [{ type: 'address' }], stateMutability: 'view' },
+] as const;
+
+/** The Stock Token access registry (the beacon in the token's EIP-1967 slot, and what
+ *  `ACCESS_CONTROLLED_REGISTRY()` returns): a blocked address can neither send nor receive. */
+export const stockRegistryAbi = [
+  { type: 'function', name: 'isBlocked', inputs: [{ name: 'account', type: 'address' }], outputs: [{ type: 'bool' }], stateMutability: 'view' },
+] as const;
+
+/*//////////////////////////////////////////////////////////////
+                              USDG
+//////////////////////////////////////////////////////////////*/
+
+/** USDG's transfer gates (ops/abis/USDG.json): a global pause, and a per-address freeze that
+ *  stops the address sending and receiving. */
+export const usdgGateAbi = [
+  { type: 'function', name: 'paused', inputs: [], outputs: [{ type: 'bool' }], stateMutability: 'view' },
+  { type: 'function', name: 'isFrozen', inputs: [{ name: 'addr', type: 'address' }], outputs: [{ type: 'bool' }], stateMutability: 'view' },
 ] as const;

@@ -39,7 +39,7 @@ import type { Address, Hex } from "viem";
 
 import type { ListingRow } from "./listing";
 
-const RAW_API_BASE = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:42069";
+const RAW_API_BASE = process.env.NEXT_PUBLIC_V1_API_URL?.trim() || process.env.NEXT_PUBLIC_API_URL || "http://localhost:42069";
 export const API_BASE = RAW_API_BASE.replace(/\/+$/, "");
 
 const DEFAULT_TIMEOUT_MS = 8000;

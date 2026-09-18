@@ -1,0 +1,2866 @@
+{
+  "items": [
+    {
+      "id": "0x34147ef9a21fcd12524e310dd64171391a9fed61aaad4e9721faf1de96b83f4e-2",
+      "kind": "fill",
+      "ts": 1789585500,
+      "longId": "29578741721805883636096061263188069692265858688783836537835344212255512771642",
+      "series": {
+        "longId": "29578741721805883636096061263188069692265858688783836537835344212255512771642",
+        "shortId": "29578741721805883636096061263188069692265858688783836537835344212255512771643",
+        "ticker": "NVDA",
+        "underlying": "0xd0601CE157Db5bdC3162BbaC2a2C8aF5320D9EEC",
+        "isPut": false,
+        "strike": {
+          "raw": "221000000",
+          "decimals": 6,
+          "formatted": "221"
+        },
+        "expiry": 1790366400,
+        "tenor": "weekly",
+        "mintCutoff": 1790364600,
+        "mintFeePpm": 80,
+        "mintFeesHeld": {
+          "raw": "51646825396826",
+          "decimals": 18,
+          "formatted": "0.000051646825396826"
+        },
+        "mintFeesAccrued": {
+          "raw": "0",
+          "decimals": 18,
+          "formatted": "0"
+        },
+        "status": "open"
+      },
+      "accounts": [
+        "0x4088c59Eb3fB713B124f182E7083AEb3358A030B",
+        "0x70556BaA315dD8d467ea452aBcd7deEbEa073Ff9"
+      ],
+      "data": {
+        "orderId": "1021",
+        "taker": "0x4088c59Eb3fB713B124f182E7083AEb3358A030B",
+        "maker": "0x70556BaA315dD8d467ea452aBcd7deEbEa073Ff9",
+        "recipient": "0x4088c59Eb3fB713B124f182E7083AEb3358A030B",
+        "units": "50",
+        "price": {
+          "raw": "3600000",
+          "decimals": 6,
+          "formatted": "3.6"
+        },
+        "premium": {
+          "raw": "1800000",
+          "decimals": 6,
+          "formatted": "1.8"
+        },
+        "takerFee": {
+          "raw": "100000",
+          "decimals": 6,
+          "formatted": "0.1"
+        },
+        "sellerFee": {
+          "raw": "0",
+          "decimals": 6,
+          "formatted": "0"
+        },
+        "makerRebate": {
+          "raw": "60000",
+          "decimals": 6,
+          "formatted": "0.06"
+        },
+        "primary": true,
+        "takerIsBuyer": true,
+        "tx": "0x34147ef9a21fcd12524e310dd64171391a9fed61aaad4e9721faf1de96b83f4e"
+      }
+    },
+    {
+      "id": "0xdd9d81052020032364801a571908dee82b4bfb574f6de302f022bf8249d8b732-2",
+      "kind": "fill",
+      "ts": 1789585200,
+      "longId": "43293694946995027951420864636341246531661381642010273628732417116006111144922",
+      "series": {
+        "longId": "43293694946995027951420864636341246531661381642010273628732417116006111144922",
+        "shortId": "43293694946995027951420864636341246531661381642010273628732417116006111144923",
+        "ticker": "NVDA",
+        "underlying": "0xd0601CE157Db5bdC3162BbaC2a2C8aF5320D9EEC",
+        "isPut": false,
+        "strike": {
+          "raw": "216000000",
+          "decimals": 6,
+          "formatted": "216"
+        },
+        "expiry": 1789675200,
+        "tenor": "daily",
+        "mintCutoff": 1789673400,
+        "mintFeePpm": 80,
+        "mintFeesHeld": {
+          "raw": "9047619047620",
+          "decimals": 18,
+          "formatted": "0.00000904761904762"
+        },
+        "mintFeesAccrued": {
+          "raw": "0",
+          "decimals": 18,
+          "formatted": "0"
+        },
+        "status": "open"
+      },
+      "accounts": [
+        "0x70556BaA315dD8d467ea452aBcd7deEbEa073Ff9",
+        "0xd3b47D8a6B8e3fc6160Cd02634CF7Ae74aDeB66f",
+        "0xF9806B161b1d09106C63E25907F50B4a93EF8fda"
+      ],
+      "data": {
+        "orderId": "1022",
+        "taker": "0x70556BaA315dD8d467ea452aBcd7deEbEa073Ff9",
+        "maker": "0xd3b47D8a6B8e3fc6160Cd02634CF7Ae74aDeB66f",
+        "recipient": "0xF9806B161b1d09106C63E25907F50B4a93EF8fda",
+        "units": "50",
+        "price": {
+          "raw": "1601200",
+          "decimals": 6,
+          "formatted": "1.6012"
+        },
+        "premium": {
+          "raw": "800600",
+          "decimals": 6,
+          "formatted": "0.8006"
+        },
+        "takerFee": {
+          "raw": "80060",
+          "decimals": 6,
+          "formatted": "0.08006"
+        },
+        "sellerFee": {
+          "raw": "0",
+          "decimals": 6,
+          "formatted": "0"
+        },
+        "makerRebate": {
+          "raw": "40030",
+          "decimals": 6,
+          "formatted": "0.04003"
+        },
+        "primary": true,
+        "takerIsBuyer": false,
+        "tx": "0xdd9d81052020032364801a571908dee82b4bfb574f6de302f022bf8249d8b732"
+      }
+    },
+    {
+      "id": "0x04b0d4dcde3e0275052cbf0b99c4f495e89bf7eec8077a72dfaf224cf29e649e-2",
+      "kind": "fill",
+      "ts": 1789581600,
+      "longId": "43293694946995027951420864636341246531661381642010273628732417116006111144922",
+      "series": {
+        "longId": "43293694946995027951420864636341246531661381642010273628732417116006111144922",
+        "shortId": "43293694946995027951420864636341246531661381642010273628732417116006111144923",
+        "ticker": "NVDA",
+        "underlying": "0xd0601CE157Db5bdC3162BbaC2a2C8aF5320D9EEC",
+        "isPut": false,
+        "strike": {
+          "raw": "216000000",
+          "decimals": 6,
+          "formatted": "216"
+        },
+        "expiry": 1789675200,
+        "tenor": "daily",
+        "mintCutoff": 1789673400,
+        "mintFeePpm": 80,
+        "mintFeesHeld": {
+          "raw": "9047619047620",
+          "decimals": 18,
+          "formatted": "0.00000904761904762"
+        },
+        "mintFeesAccrued": {
+          "raw": "0",
+          "decimals": 18,
+          "formatted": "0"
+        },
+        "status": "open"
+      },
+      "accounts": [
+        "0x300a7AB2f92B536e3f58422372c964B2Bb535ea2",
+        "0xd3b47D8a6B8e3fc6160Cd02634CF7Ae74aDeB66f"
+      ],
+      "data": {
+        "orderId": "1020",
+        "taker": "0x300a7AB2f92B536e3f58422372c964B2Bb535ea2",
+        "maker": "0xd3b47D8a6B8e3fc6160Cd02634CF7Ae74aDeB66f",
+        "recipient": "0x300a7AB2f92B536e3f58422372c964B2Bb535ea2",
+        "units": "25",
+        "price": {
+          "raw": "2023200",
+          "decimals": 6,
+          "formatted": "2.0232"
+        },
+        "premium": {
+          "raw": "505800",
+          "decimals": 6,
+          "formatted": "0.5058"
+        },
+        "takerFee": {
+          "raw": "50580",
+          "decimals": 6,
+          "formatted": "0.05058"
+        },
+        "sellerFee": {
+          "raw": "0",
+          "decimals": 6,
+          "formatted": "0"
+        },
+        "makerRebate": {
+          "raw": "25290",
+          "decimals": 6,
+          "formatted": "0.02529"
+        },
+        "primary": true,
+        "takerIsBuyer": true,
+        "tx": "0x04b0d4dcde3e0275052cbf0b99c4f495e89bf7eec8077a72dfaf224cf29e649e"
+      }
+    },
+    {
+      "id": "0x04d0825e610571570d30e091170393d248e346bf277b0f923a1069353da0a0f6-2",
+      "kind": "fill",
+      "ts": 1789578000,
+      "longId": "46588051945214594507881385412189524467283696705776886860822256214930033866522",
+      "series": {
+        "longId": "46588051945214594507881385412189524467283696705776886860822256214930033866522",
+        "shortId": "46588051945214594507881385412189524467283696705776886860822256214930033866523",
+        "ticker": "TSLA",
+        "underlying": "0x322F0929c4625eD5bAd873c95208D54E1c003b2d",
+        "isPut": false,
+        "strike": {
+          "raw": "370000000",
+          "decimals": 6,
+          "formatted": "370"
+        },
+        "expiry": 1789761600,
+        "tenor": "weekly",
+        "mintCutoff": 1789759800,
+        "mintFeePpm": 300,
+        "mintFeesHeld": {
+          "raw": "27321428571429",
+          "decimals": 18,
+          "formatted": "0.000027321428571429"
+        },
+        "mintFeesAccrued": {
+          "raw": "0",
+          "decimals": 18,
+          "formatted": "0"
+        },
+        "status": "open"
+      },
+      "accounts": [
+        "0xdFbfcf5f533505281840cA0d640aE0580D05a2Be",
+        "0xd3b47D8a6B8e3fc6160Cd02634CF7Ae74aDeB66f"
+      ],
+      "data": {
+        "orderId": "1019",
+        "taker": "0xdFbfcf5f533505281840cA0d640aE0580D05a2Be",
+        "maker": "0xd3b47D8a6B8e3fc6160Cd02634CF7Ae74aDeB66f",
+        "recipient": "0xdFbfcf5f533505281840cA0d640aE0580D05a2Be",
+        "units": "30",
+        "price": {
+          "raw": "1751800",
+          "decimals": 6,
+          "formatted": "1.7518"
+        },
+        "premium": {
+          "raw": "525540",
+          "decimals": 6,
+          "formatted": "0.52554"
+        },
+        "takerFee": {
+          "raw": "52554",
+          "decimals": 6,
+          "formatted": "0.052554"
+        },
+        "sellerFee": {
+          "raw": "0",
+          "decimals": 6,
+          "formatted": "0"
+        },
+        "makerRebate": {
+          "raw": "26277",
+          "decimals": 6,
+          "formatted": "0.026277"
+        },
+        "primary": true,
+        "takerIsBuyer": true,
+        "tx": "0x04d0825e610571570d30e091170393d248e346bf277b0f923a1069353da0a0f6"
+      }
+    },
+    {
+      "id": "0xef1baab5d64911a91404b681ad0ebe65095c6edbd389ba525fdbef25e54bf0a8-2",
+      "kind": "fill",
+      "ts": 1789576200,
+      "longId": "106061210522032153259223709687936706376356793520792570208645879620069429413222",
+      "series": {
+        "longId": "106061210522032153259223709687936706376356793520792570208645879620069429413222",
+        "shortId": "106061210522032153259223709687936706376356793520792570208645879620069429413223",
+        "ticker": "TSLA",
+        "underlying": "0x322F0929c4625eD5bAd873c95208D54E1c003b2d",
+        "isPut": false,
+        "strike": {
+          "raw": "385000000",
+          "decimals": 6,
+          "formatted": "385"
+        },
+        "expiry": 1789761600,
+        "tenor": "weekly",
+        "mintCutoff": 1789759800,
+        "mintFeePpm": 300,
+        "mintFeesHeld": {
+          "raw": "84910714285715",
+          "decimals": 18,
+          "formatted": "0.000084910714285715"
+        },
+        "mintFeesAccrued": {
+          "raw": "0",
+          "decimals": 18,
+          "formatted": "0"
+        },
+        "status": "open"
+      },
+      "accounts": [
+        "0x83daA58d0a8d82D7b971338a03AA2f99bfADf4F8",
+        "0x70556BaA315dD8d467ea452aBcd7deEbEa073Ff9"
+      ],
+      "data": {
+        "orderId": "1018",
+        "taker": "0x83daA58d0a8d82D7b971338a03AA2f99bfADf4F8",
+        "maker": "0x70556BaA315dD8d467ea452aBcd7deEbEa073Ff9",
+        "recipient": "0x83daA58d0a8d82D7b971338a03AA2f99bfADf4F8",
+        "units": "10",
+        "price": {
+          "raw": "400000",
+          "decimals": 6,
+          "formatted": "0.4"
+        },
+        "premium": {
+          "raw": "40000",
+          "decimals": 6,
+          "formatted": "0.04"
+        },
+        "takerFee": {
+          "raw": "4000",
+          "decimals": 6,
+          "formatted": "0.004"
+        },
+        "sellerFee": {
+          "raw": "0",
+          "decimals": 6,
+          "formatted": "0"
+        },
+        "makerRebate": {
+          "raw": "2400",
+          "decimals": 6,
+          "formatted": "0.0024"
+        },
+        "primary": true,
+        "takerIsBuyer": true,
+        "tx": "0xef1baab5d64911a91404b681ad0ebe65095c6edbd389ba525fdbef25e54bf0a8"
+      }
+    },
+    {
+      "id": "0x87ee9338ca0b3976e898f3078a757e20ce09b1841f53ec8bc270a997cf84cb4b-2",
+      "kind": "fill",
+      "ts": 1789572600,
+      "longId": "60558647635115674919406403683765577243570507269437549868919321410193856009092",
+      "series": {
+        "longId": "60558647635115674919406403683765577243570507269437549868919321410193856009092",
+        "shortId": "60558647635115674919406403683765577243570507269437549868919321410193856009093",
+        "ticker": "NVDA",
+        "underlying": "0xd0601CE157Db5bdC3162BbaC2a2C8aF5320D9EEC",
+        "isPut": false,
+        "strike": {
+          "raw": "218000000",
+          "decimals": 6,
+          "formatted": "218"
+        },
+        "expiry": 1789761600,
+        "tenor": "weekly",
+        "mintCutoff": 1789759800,
+        "mintFeePpm": 80,
+        "mintFeesHeld": {
+          "raw": "37063492063493",
+          "decimals": 18,
+          "formatted": "0.000037063492063493"
+        },
+        "mintFeesAccrued": {
+          "raw": "0",
+          "decimals": 18,
+          "formatted": "0"
+        },
+        "status": "open"
+      },
+      "accounts": [
+        "0x83daA58d0a8d82D7b971338a03AA2f99bfADf4F8",
+        "0x4088c59Eb3fB713B124f182E7083AEb3358A030B"
+      ],
+      "data": {
+        "orderId": "1016",
+        "taker": "0x83daA58d0a8d82D7b971338a03AA2f99bfADf4F8",
+        "maker": "0x4088c59Eb3fB713B124f182E7083AEb3358A030B",
+        "recipient": "0x83daA58d0a8d82D7b971338a03AA2f99bfADf4F8",
+        "units": "20",
+        "price": {
+          "raw": "2250000",
+          "decimals": 6,
+          "formatted": "2.25"
+        },
+        "premium": {
+          "raw": "450000",
+          "decimals": 6,
+          "formatted": "0.45"
+        },
+        "takerFee": {
+          "raw": "45000",
+          "decimals": 6,
+          "formatted": "0.045"
+        },
+        "sellerFee": {
+          "raw": "0",
+          "decimals": 6,
+          "formatted": "0"
+        },
+        "makerRebate": {
+          "raw": "22500",
+          "decimals": 6,
+          "formatted": "0.0225"
+        },
+        "primary": false,
+        "takerIsBuyer": true,
+        "tx": "0x87ee9338ca0b3976e898f3078a757e20ce09b1841f53ec8bc270a997cf84cb4b"
+      }
+    },
+    {
+      "id": "0x0c4c526d444d60f94a98e9e471cc2fed740c0dca3d9e7f34b8d3ac78c578cf53-2",
+      "kind": "fill",
+      "ts": 1789570800,
+      "longId": "106061210522032153259223709687936706376356793520792570208645879620069429413222",
+      "series": {
+        "longId": "106061210522032153259223709687936706376356793520792570208645879620069429413222",
+        "shortId": "106061210522032153259223709687936706376356793520792570208645879620069429413223",
+        "ticker": "TSLA",
+        "underlying": "0x322F0929c4625eD5bAd873c95208D54E1c003b2d",
+        "isPut": false,
+        "strike": {
+          "raw": "385000000",
+          "decimals": 6,
+          "formatted": "385"
+        },
+        "expiry": 1789761600,
+        "tenor": "weekly",
+        "mintCutoff": 1789759800,
+        "mintFeePpm": 300,
+        "mintFeesHeld": {
+          "raw": "84910714285715",
+          "decimals": 18,
+          "formatted": "0.000084910714285715"
+        },
+        "mintFeesAccrued": {
+          "raw": "0",
+          "decimals": 18,
+          "formatted": "0"
+        },
+        "status": "open"
+      },
+      "accounts": [
+        "0xdFbfcf5f533505281840cA0d640aE0580D05a2Be",
+        "0xd3b47D8a6B8e3fc6160Cd02634CF7Ae74aDeB66f"
+      ],
+      "data": {
+        "orderId": "1017",
+        "taker": "0xdFbfcf5f533505281840cA0d640aE0580D05a2Be",
+        "maker": "0xd3b47D8a6B8e3fc6160Cd02634CF7Ae74aDeB66f",
+        "recipient": "0xdFbfcf5f533505281840cA0d640aE0580D05a2Be",
+        "units": "80",
+        "price": {
+          "raw": "323700",
+          "decimals": 6,
+          "formatted": "0.3237"
+        },
+        "premium": {
+          "raw": "258960",
+          "decimals": 6,
+          "formatted": "0.25896"
+        },
+        "takerFee": {
+          "raw": "25896",
+          "decimals": 6,
+          "formatted": "0.025896"
+        },
+        "sellerFee": {
+          "raw": "0",
+          "decimals": 6,
+          "formatted": "0"
+        },
+        "makerRebate": {
+          "raw": "12948",
+          "decimals": 6,
+          "formatted": "0.012948"
+        },
+        "primary": true,
+        "takerIsBuyer": true,
+        "tx": "0x0c4c526d444d60f94a98e9e471cc2fed740c0dca3d9e7f34b8d3ac78c578cf53"
+      }
+    },
+    {
+      "id": "0xe3f7222375fdc35fc61b235035e26c94692e2ad0193193cd7d0453c38b2d2569-2",
+      "kind": "fill",
+      "ts": 1789566300,
+      "longId": "53049387840509124880347138772092641306875327769503654725941913402917970002896",
+      "series": {
+        "longId": "53049387840509124880347138772092641306875327769503654725941913402917970002896",
+        "shortId": "53049387840509124880347138772092641306875327769503654725941913402917970002897",
+        "ticker": "NVDA",
+        "underlying": "0xd0601CE157Db5bdC3162BbaC2a2C8aF5320D9EEC",
+        "isPut": false,
+        "strike": {
+          "raw": "231000000",
+          "decimals": 6,
+          "formatted": "231"
+        },
+        "expiry": 1789761600,
+        "tenor": "weekly",
+        "mintCutoff": 1789759800,
+        "mintFeePpm": 80,
+        "mintFeesHeld": {
+          "raw": "77500000000000",
+          "decimals": 18,
+          "formatted": "0.0000775"
+        },
+        "mintFeesAccrued": {
+          "raw": "0",
+          "decimals": 18,
+          "formatted": "0"
+        },
+        "status": "open"
+      },
+      "accounts": [
+        "0xdFbfcf5f533505281840cA0d640aE0580D05a2Be",
+        "0xd3b47D8a6B8e3fc6160Cd02634CF7Ae74aDeB66f"
+      ],
+      "data": {
+        "orderId": "1015",
+        "taker": "0xdFbfcf5f533505281840cA0d640aE0580D05a2Be",
+        "maker": "0xd3b47D8a6B8e3fc6160Cd02634CF7Ae74aDeB66f",
+        "recipient": "0xdFbfcf5f533505281840cA0d640aE0580D05a2Be",
+        "units": "300",
+        "price": {
+          "raw": "250000",
+          "decimals": 6,
+          "formatted": "0.25"
+        },
+        "premium": {
+          "raw": "750000",
+          "decimals": 6,
+          "formatted": "0.75"
+        },
+        "takerFee": {
+          "raw": "75000",
+          "decimals": 6,
+          "formatted": "0.075"
+        },
+        "sellerFee": {
+          "raw": "0",
+          "decimals": 6,
+          "formatted": "0"
+        },
+        "makerRebate": {
+          "raw": "37500",
+          "decimals": 6,
+          "formatted": "0.0375"
+        },
+        "primary": true,
+        "takerIsBuyer": true,
+        "tx": "0xe3f7222375fdc35fc61b235035e26c94692e2ad0193193cd7d0453c38b2d2569"
+      }
+    },
+    {
+      "id": "0x1e293d0219102876414ec954396afd399869ec59d84a38558cdf1ede4b672bea-2",
+      "kind": "fill",
+      "ts": 1789488000,
+      "longId": "43462217268812087739261944784956455494004279776534947210729604095134131208790",
+      "series": {
+        "longId": "43462217268812087739261944784956455494004279776534947210729604095134131208790",
+        "shortId": "43462217268812087739261944784956455494004279776534947210729604095134131208791",
+        "ticker": "NVDA",
+        "underlying": "0xd0601CE157Db5bdC3162BbaC2a2C8aF5320D9EEC",
+        "isPut": false,
+        "strike": {
+          "raw": "227000000",
+          "decimals": 6,
+          "formatted": "227"
+        },
+        "expiry": 1789761600,
+        "tenor": "weekly",
+        "mintCutoff": 1789759800,
+        "mintFeePpm": 80,
+        "mintFeesHeld": {
+          "raw": "21714285714286",
+          "decimals": 18,
+          "formatted": "0.000021714285714286"
+        },
+        "mintFeesAccrued": {
+          "raw": "0",
+          "decimals": 18,
+          "formatted": "0"
+        },
+        "status": "open"
+      },
+      "accounts": [
+        "0x300a7AB2f92B536e3f58422372c964B2Bb535ea2",
+        "0xD6b49a27Ead99118b61F0827C7aB2782aea07bE6"
+      ],
+      "data": {
+        "orderId": "1009",
+        "taker": "0x300a7AB2f92B536e3f58422372c964B2Bb535ea2",
+        "maker": "0xD6b49a27Ead99118b61F0827C7aB2782aea07bE6",
+        "recipient": "0x300a7AB2f92B536e3f58422372c964B2Bb535ea2",
+        "units": "60",
+        "price": {
+          "raw": "260100",
+          "decimals": 6,
+          "formatted": "0.2601"
+        },
+        "premium": {
+          "raw": "156060",
+          "decimals": 6,
+          "formatted": "0.15606"
+        },
+        "takerFee": {
+          "raw": "15606",
+          "decimals": 6,
+          "formatted": "0.015606"
+        },
+        "sellerFee": {
+          "raw": "0",
+          "decimals": 6,
+          "formatted": "0"
+        },
+        "makerRebate": {
+          "raw": "7803",
+          "decimals": 6,
+          "formatted": "0.007803"
+        },
+        "primary": true,
+        "takerIsBuyer": true,
+        "tx": "0x1e293d0219102876414ec954396afd399869ec59d84a38558cdf1ede4b672bea"
+      }
+    },
+    {
+      "id": "0x9332f31fe0fda41595a156a47958005ad9c765483ba0efae6e998548c70a032e-2",
+      "kind": "fill",
+      "ts": 1789487100,
+      "longId": "16806637460361860723066303679148593183455019340475891529427188140971423202060",
+      "series": {
+        "longId": "16806637460361860723066303679148593183455019340475891529427188140971423202060",
+        "shortId": "16806637460361860723066303679148593183455019340475891529427188140971423202061",
+        "ticker": "NVDA",
+        "underlying": "0xd0601CE157Db5bdC3162BbaC2a2C8aF5320D9EEC",
+        "isPut": false,
+        "strike": {
+          "raw": "217000000",
+          "decimals": 6,
+          "formatted": "217"
+        },
+        "expiry": 1789588800,
+        "tenor": "daily",
+        "mintCutoff": 1789587000,
+        "mintFeePpm": 80,
+        "mintFeesHeld": {
+          "raw": "13452380952381",
+          "decimals": 18,
+          "formatted": "0.000013452380952381"
+        },
+        "mintFeesAccrued": {
+          "raw": "0",
+          "decimals": 18,
+          "formatted": "0"
+        },
+        "status": "settling"
+      },
+      "accounts": [
+        "0x4088c59Eb3fB713B124f182E7083AEb3358A030B",
+        "0xd3b47D8a6B8e3fc6160Cd02634CF7Ae74aDeB66f"
+      ],
+      "data": {
+        "orderId": "1014",
+        "taker": "0x4088c59Eb3fB713B124f182E7083AEb3358A030B",
+        "maker": "0xd3b47D8a6B8e3fc6160Cd02634CF7Ae74aDeB66f",
+        "recipient": "0x4088c59Eb3fB713B124f182E7083AEb3358A030B",
+        "units": "100",
+        "price": {
+          "raw": "861000",
+          "decimals": 6,
+          "formatted": "0.861"
+        },
+        "premium": {
+          "raw": "861000",
+          "decimals": 6,
+          "formatted": "0.861"
+        },
+        "takerFee": {
+          "raw": "86100",
+          "decimals": 6,
+          "formatted": "0.0861"
+        },
+        "sellerFee": {
+          "raw": "0",
+          "decimals": 6,
+          "formatted": "0"
+        },
+        "makerRebate": {
+          "raw": "43050",
+          "decimals": 6,
+          "formatted": "0.04305"
+        },
+        "primary": true,
+        "takerIsBuyer": true,
+        "tx": "0x9332f31fe0fda41595a156a47958005ad9c765483ba0efae6e998548c70a032e"
+      }
+    },
+    {
+      "id": "0xbdf394ce231703da60985179af3822ca8a2b21381b5861e98f5e4a0d4bf0bc76-2",
+      "kind": "fill",
+      "ts": 1789484400,
+      "longId": "50691615881411955019258825605017018021206063637603990757858374483543864849268",
+      "series": {
+        "longId": "50691615881411955019258825605017018021206063637603990757858374483543864849268",
+        "shortId": "50691615881411955019258825605017018021206063637603990757858374483543864849269",
+        "ticker": "NVDA",
+        "underlying": "0xd0601CE157Db5bdC3162BbaC2a2C8aF5320D9EEC",
+        "isPut": false,
+        "strike": {
+          "raw": "222000000",
+          "decimals": 6,
+          "formatted": "222"
+        },
+        "expiry": 1789761600,
+        "tenor": "weekly",
+        "mintCutoff": 1789759800,
+        "mintFeePpm": 80,
+        "mintFeesHeld": {
+          "raw": "55000000000000",
+          "decimals": 18,
+          "formatted": "0.000055"
+        },
+        "mintFeesAccrued": {
+          "raw": "0",
+          "decimals": 18,
+          "formatted": "0"
+        },
+        "status": "open"
+      },
+      "accounts": [
+        "0xE37876AcBfbA6186E4687f4ef465D9AC21558De3",
+        "0xd3b47D8a6B8e3fc6160Cd02634CF7Ae74aDeB66f"
+      ],
+      "data": {
+        "orderId": "1013",
+        "taker": "0xE37876AcBfbA6186E4687f4ef465D9AC21558De3",
+        "maker": "0xd3b47D8a6B8e3fc6160Cd02634CF7Ae74aDeB66f",
+        "recipient": "0xE37876AcBfbA6186E4687f4ef465D9AC21558De3",
+        "units": "150",
+        "price": {
+          "raw": "911000",
+          "decimals": 6,
+          "formatted": "0.911"
+        },
+        "premium": {
+          "raw": "1366500",
+          "decimals": 6,
+          "formatted": "1.3665"
+        },
+        "takerFee": {
+          "raw": "100000",
+          "decimals": 6,
+          "formatted": "0.1"
+        },
+        "sellerFee": {
+          "raw": "0",
+          "decimals": 6,
+          "formatted": "0"
+        },
+        "makerRebate": {
+          "raw": "50000",
+          "decimals": 6,
+          "formatted": "0.05"
+        },
+        "primary": true,
+        "takerIsBuyer": true,
+        "tx": "0xbdf394ce231703da60985179af3822ca8a2b21381b5861e98f5e4a0d4bf0bc76"
+      }
+    },
+    {
+      "id": "0xef835c8ba4d0b90a1ac02beb0c6cb22cd3bdea7df43673ac3bfacc773bb66bfc-2",
+      "kind": "fill",
+      "ts": 1789482600,
+      "longId": "72401138414287447232486313980404388845353912092883200226851795762225764322966",
+      "series": {
+        "longId": "72401138414287447232486313980404388845353912092883200226851795762225764322966",
+        "shortId": "72401138414287447232486313980404388845353912092883200226851795762225764322967",
+        "ticker": "NVDA",
+        "underlying": "0xd0601CE157Db5bdC3162BbaC2a2C8aF5320D9EEC",
+        "isPut": false,
+        "strike": {
+          "raw": "215000000",
+          "decimals": 6,
+          "formatted": "215"
+        },
+        "expiry": 1789588800,
+        "tenor": "daily",
+        "mintCutoff": 1789587000,
+        "mintFeePpm": 80,
+        "mintFeesHeld": {
+          "raw": "5619047619048",
+          "decimals": 18,
+          "formatted": "0.000005619047619048"
+        },
+        "mintFeesAccrued": {
+          "raw": "0",
+          "decimals": 18,
+          "formatted": "0"
+        },
+        "status": "settling"
+      },
+      "accounts": [
+        "0xE37876AcBfbA6186E4687f4ef465D9AC21558De3",
+        "0xd3b47D8a6B8e3fc6160Cd02634CF7Ae74aDeB66f"
+      ],
+      "data": {
+        "orderId": "1012",
+        "taker": "0xE37876AcBfbA6186E4687f4ef465D9AC21558De3",
+        "maker": "0xd3b47D8a6B8e3fc6160Cd02634CF7Ae74aDeB66f",
+        "recipient": "0xE37876AcBfbA6186E4687f4ef465D9AC21558De3",
+        "units": "40",
+        "price": {
+          "raw": "1380200",
+          "decimals": 6,
+          "formatted": "1.3802"
+        },
+        "premium": {
+          "raw": "552080",
+          "decimals": 6,
+          "formatted": "0.55208"
+        },
+        "takerFee": {
+          "raw": "55208",
+          "decimals": 6,
+          "formatted": "0.055208"
+        },
+        "sellerFee": {
+          "raw": "0",
+          "decimals": 6,
+          "formatted": "0"
+        },
+        "makerRebate": {
+          "raw": "27604",
+          "decimals": 6,
+          "formatted": "0.027604"
+        },
+        "primary": true,
+        "takerIsBuyer": true,
+        "tx": "0xef835c8ba4d0b90a1ac02beb0c6cb22cd3bdea7df43673ac3bfacc773bb66bfc"
+      }
+    },
+    {
+      "id": "0xe49c6ea6403e6f3222c458f25cf660f2bf9ecddea60a68b7690a6de110ad1e22-2",
+      "kind": "fill",
+      "ts": 1789481400,
+      "longId": "60558647635115674919406403683765577243570507269437549868919321410193856009092",
+      "series": {
+        "longId": "60558647635115674919406403683765577243570507269437549868919321410193856009092",
+        "shortId": "60558647635115674919406403683765577243570507269437549868919321410193856009093",
+        "ticker": "NVDA",
+        "underlying": "0xd0601CE157Db5bdC3162BbaC2a2C8aF5320D9EEC",
+        "isPut": false,
+        "strike": {
+          "raw": "218000000",
+          "decimals": 6,
+          "formatted": "218"
+        },
+        "expiry": 1789761600,
+        "tenor": "weekly",
+        "mintCutoff": 1789759800,
+        "mintFeePpm": 80,
+        "mintFeesHeld": {
+          "raw": "37063492063493",
+          "decimals": 18,
+          "formatted": "0.000037063492063493"
+        },
+        "mintFeesAccrued": {
+          "raw": "0",
+          "decimals": 18,
+          "formatted": "0"
+        },
+        "status": "open"
+      },
+      "accounts": [
+        "0x4088c59Eb3fB713B124f182E7083AEb3358A030B",
+        "0xd3b47D8a6B8e3fc6160Cd02634CF7Ae74aDeB66f"
+      ],
+      "data": {
+        "orderId": "1011",
+        "taker": "0x4088c59Eb3fB713B124f182E7083AEb3358A030B",
+        "maker": "0xd3b47D8a6B8e3fc6160Cd02634CF7Ae74aDeB66f",
+        "recipient": "0x4088c59Eb3fB713B124f182E7083AEb3358A030B",
+        "units": "100",
+        "price": {
+          "raw": "1756500",
+          "decimals": 6,
+          "formatted": "1.7565"
+        },
+        "premium": {
+          "raw": "1756500",
+          "decimals": 6,
+          "formatted": "1.7565"
+        },
+        "takerFee": {
+          "raw": "100000",
+          "decimals": 6,
+          "formatted": "0.1"
+        },
+        "sellerFee": {
+          "raw": "0",
+          "decimals": 6,
+          "formatted": "0"
+        },
+        "makerRebate": {
+          "raw": "50000",
+          "decimals": 6,
+          "formatted": "0.05"
+        },
+        "primary": true,
+        "takerIsBuyer": true,
+        "tx": "0xe49c6ea6403e6f3222c458f25cf660f2bf9ecddea60a68b7690a6de110ad1e22"
+      }
+    },
+    {
+      "id": "0xd5bf80f3e3404cf98b199241c0c16691d584bd403f80a7b43a72fe1cc976e632-2",
+      "kind": "fill",
+      "ts": 1789398600,
+      "longId": "9013619290588248846299586614305070637030360841668688133673337726099093849920",
+      "series": {
+        "longId": "9013619290588248846299586614305070637030360841668688133673337726099093849920",
+        "shortId": "9013619290588248846299586614305070637030360841668688133673337726099093849921",
+        "ticker": "TSLA",
+        "underlying": "0x322F0929c4625eD5bAd873c95208D54E1c003b2d",
+        "isPut": false,
+        "strike": {
+          "raw": "360000000",
+          "decimals": 6,
+          "formatted": "360"
+        },
+        "expiry": 1789502400,
+        "tenor": "daily",
+        "mintCutoff": 1789500600,
+        "mintFeePpm": 300,
+        "mintFeesHeld": {
+          "raw": "41190476190477",
+          "decimals": 18,
+          "formatted": "0.000041190476190477"
+        },
+        "mintFeesAccrued": {
+          "raw": "0",
+          "decimals": 18,
+          "formatted": "0"
+        },
+        "status": "held"
+      },
+      "accounts": [
+        "0xdFbfcf5f533505281840cA0d640aE0580D05a2Be",
+        "0xd3b47D8a6B8e3fc6160Cd02634CF7Ae74aDeB66f"
+      ],
+      "data": {
+        "orderId": "1010",
+        "taker": "0xdFbfcf5f533505281840cA0d640aE0580D05a2Be",
+        "maker": "0xd3b47D8a6B8e3fc6160Cd02634CF7Ae74aDeB66f",
+        "recipient": "0xdFbfcf5f533505281840cA0d640aE0580D05a2Be",
+        "units": "80",
+        "price": {
+          "raw": "1537500",
+          "decimals": 6,
+          "formatted": "1.5375"
+        },
+        "premium": {
+          "raw": "1230000",
+          "decimals": 6,
+          "formatted": "1.23"
+        },
+        "takerFee": {
+          "raw": "100000",
+          "decimals": 6,
+          "formatted": "0.1"
+        },
+        "sellerFee": {
+          "raw": "0",
+          "decimals": 6,
+          "formatted": "0"
+        },
+        "makerRebate": {
+          "raw": "50000",
+          "decimals": 6,
+          "formatted": "0.05"
+        },
+        "primary": true,
+        "takerIsBuyer": true,
+        "tx": "0xd5bf80f3e3404cf98b199241c0c16691d584bd403f80a7b43a72fe1cc976e632"
+      }
+    },
+    {
+      "id": "0x6786ab5887212e1c9f52345637aa4ac945d05c01057964bd29b9d375eb921bcb-4",
+      "kind": "redemption",
+      "ts": 1789392900,
+      "longId": "97249294176823841346447828561188452006185490110924851379129375223985952864952",
+      "series": {
+        "longId": "97249294176823841346447828561188452006185490110924851379129375223985952864952",
+        "shortId": "97249294176823841346447828561188452006185490110924851379129375223985952864953",
+        "ticker": "NVDA",
+        "underlying": "0xd0601CE157Db5bdC3162BbaC2a2C8aF5320D9EEC",
+        "isPut": false,
+        "strike": {
+          "raw": "216000000",
+          "decimals": 6,
+          "formatted": "216"
+        },
+        "expiry": 1789156800,
+        "tenor": "weekly",
+        "mintCutoff": 1789155000,
+        "mintFeePpm": 80,
+        "mintFeesHeld": {
+          "raw": "0",
+          "decimals": 18,
+          "formatted": "0"
+        },
+        "mintFeesAccrued": {
+          "raw": "70952380952381",
+          "decimals": 18,
+          "formatted": "0.000070952380952381"
+        },
+        "status": "settled"
+      },
+      "accounts": [
+        "0xD6b49a27Ead99118b61F0827C7aB2782aea07bE6"
+      ],
+      "data": {
+        "holder": "0xD6b49a27Ead99118b61F0827C7aB2782aea07bE6",
+        "side": "short",
+        "tokenId": "97249294176823841346447828561188452006185490110924851379129375223985952864953",
+        "units": "200",
+        "asset": "0xd0601CE157Db5bdC3162BbaC2a2C8aF5320D9EEC",
+        "amount": {
+          "raw": "1969006381039198000",
+          "decimals": 18,
+          "formatted": "1.969006381039198"
+        },
+        "amountInKind": {
+          "raw": "1969006381039198000",
+          "decimals": 18,
+          "formatted": "1.969006381039198"
+        },
+        "settlementPrice": {
+          "raw": "219400000",
+          "decimals": 6,
+          "formatted": "219.4"
+        },
+        "toLedger": true,
+        "tx": "0x6786ab5887212e1c9f52345637aa4ac945d05c01057964bd29b9d375eb921bcb"
+      }
+    },
+    {
+      "id": "0x6786ab5887212e1c9f52345637aa4ac945d05c01057964bd29b9d375eb921bcb-9",
+      "kind": "roll",
+      "ts": 1789392900,
+      "longId": "43462217268812087739261944784956455494004279776534947210729604095134131208790",
+      "series": {
+        "longId": "43462217268812087739261944784956455494004279776534947210729604095134131208790",
+        "shortId": "43462217268812087739261944784956455494004279776534947210729604095134131208791",
+        "ticker": "NVDA",
+        "underlying": "0xd0601CE157Db5bdC3162BbaC2a2C8aF5320D9EEC",
+        "isPut": false,
+        "strike": {
+          "raw": "227000000",
+          "decimals": 6,
+          "formatted": "227"
+        },
+        "expiry": 1789761600,
+        "tenor": "weekly",
+        "mintCutoff": 1789759800,
+        "mintFeePpm": 80,
+        "mintFeesHeld": {
+          "raw": "21714285714286",
+          "decimals": 18,
+          "formatted": "0.000021714285714286"
+        },
+        "mintFeesAccrued": {
+          "raw": "0",
+          "decimals": 18,
+          "formatted": "0"
+        },
+        "status": "open"
+      },
+      "accounts": [
+        "0xD6b49a27Ead99118b61F0827C7aB2782aea07bE6"
+      ],
+      "data": {
+        "writer": "0xD6b49a27Ead99118b61F0827C7aB2782aea07bE6",
+        "orderId": "1009",
+        "price": {
+          "raw": "260100",
+          "decimals": 6,
+          "formatted": "0.2601"
+        },
+        "units": "296",
+        "tx": "0x6786ab5887212e1c9f52345637aa4ac945d05c01057964bd29b9d375eb921bcb"
+      }
+    },
+    {
+      "id": "0xfff51db175ee45e449e356f8d3d946f294283a0137238059328ce867d0e0016e-3",
+      "kind": "redemption",
+      "ts": 1789157082,
+      "longId": "107602460705412833688971388541329334104362255615393312294836650152257273272068",
+      "series": {
+        "longId": "107602460705412833688971388541329334104362255615393312294836650152257273272068",
+        "shortId": "107602460705412833688971388541329334104362255615393312294836650152257273272069",
+        "ticker": "NVDA",
+        "underlying": "0xd0601CE157Db5bdC3162BbaC2a2C8aF5320D9EEC",
+        "isPut": false,
+        "strike": {
+          "raw": "227000000",
+          "decimals": 6,
+          "formatted": "227"
+        },
+        "expiry": 1789156800,
+        "tenor": "weekly",
+        "mintCutoff": 1789155000,
+        "mintFeePpm": 80,
+        "mintFeesHeld": {
+          "raw": "0",
+          "decimals": 18,
+          "formatted": "0"
+        },
+        "mintFeesAccrued": {
+          "raw": "12380952380953",
+          "decimals": 18,
+          "formatted": "0.000012380952380953"
+        },
+        "status": "settled"
+      },
+      "accounts": [
+        "0xd3b47D8a6B8e3fc6160Cd02634CF7Ae74aDeB66f"
+      ],
+      "data": {
+        "holder": "0xd3b47D8a6B8e3fc6160Cd02634CF7Ae74aDeB66f",
+        "side": "short",
+        "tokenId": "107602460705412833688971388541329334104362255615393312294836650152257273272069",
+        "units": "100",
+        "asset": "0xd0601CE157Db5bdC3162BbaC2a2C8aF5320D9EEC",
+        "amount": {
+          "raw": "1000000000000000000",
+          "decimals": 18,
+          "formatted": "1"
+        },
+        "amountInKind": {
+          "raw": "1000000000000000000",
+          "decimals": 18,
+          "formatted": "1"
+        },
+        "settlementPrice": {
+          "raw": "219400000",
+          "decimals": 6,
+          "formatted": "219.4"
+        },
+        "toLedger": true,
+        "tx": "0xfff51db175ee45e449e356f8d3d946f294283a0137238059328ce867d0e0016e"
+      }
+    },
+    {
+      "id": "0x6b7c99c0dc45a6224cf6cb82c86a5abd1e618a884a956454cb81b72faa1565a0-3",
+      "kind": "redemption",
+      "ts": 1789157076,
+      "longId": "107602460705412833688971388541329334104362255615393312294836650152257273272068",
+      "series": {
+        "longId": "107602460705412833688971388541329334104362255615393312294836650152257273272068",
+        "shortId": "107602460705412833688971388541329334104362255615393312294836650152257273272069",
+        "ticker": "NVDA",
+        "underlying": "0xd0601CE157Db5bdC3162BbaC2a2C8aF5320D9EEC",
+        "isPut": false,
+        "strike": {
+          "raw": "227000000",
+          "decimals": 6,
+          "formatted": "227"
+        },
+        "expiry": 1789156800,
+        "tenor": "weekly",
+        "mintCutoff": 1789155000,
+        "mintFeePpm": 80,
+        "mintFeesHeld": {
+          "raw": "0",
+          "decimals": 18,
+          "formatted": "0"
+        },
+        "mintFeesAccrued": {
+          "raw": "12380952380953",
+          "decimals": 18,
+          "formatted": "0.000012380952380953"
+        },
+        "status": "settled"
+      },
+      "accounts": [
+        "0x4088c59Eb3fB713B124f182E7083AEb3358A030B"
+      ],
+      "data": {
+        "holder": "0x4088c59Eb3fB713B124f182E7083AEb3358A030B",
+        "side": "long",
+        "tokenId": "107602460705412833688971388541329334104362255615393312294836650152257273272068",
+        "units": "100",
+        "asset": "0xd0601CE157Db5bdC3162BbaC2a2C8aF5320D9EEC",
+        "amount": {
+          "raw": "0",
+          "decimals": 18,
+          "formatted": "0"
+        },
+        "amountInKind": {
+          "raw": "0",
+          "decimals": 18,
+          "formatted": "0"
+        },
+        "settlementPrice": {
+          "raw": "219400000",
+          "decimals": 6,
+          "formatted": "219.4"
+        },
+        "toLedger": false,
+        "tx": "0x6b7c99c0dc45a6224cf6cb82c86a5abd1e618a884a956454cb81b72faa1565a0"
+      }
+    },
+    {
+      "id": "0xe032d1d0620fbdd6c6dcd949617a04ba797179679565c55459e408d54e462993-3",
+      "kind": "redemption",
+      "ts": 1789157070,
+      "longId": "60007351955554369079247096634152725439243148225240450207526029293925818007156",
+      "series": {
+        "longId": "60007351955554369079247096634152725439243148225240450207526029293925818007156",
+        "shortId": "60007351955554369079247096634152725439243148225240450207526029293925818007157",
+        "ticker": "NVDA",
+        "underlying": "0xd0601CE157Db5bdC3162BbaC2a2C8aF5320D9EEC",
+        "isPut": false,
+        "strike": {
+          "raw": "223000000",
+          "decimals": 6,
+          "formatted": "223"
+        },
+        "expiry": 1789156800,
+        "tenor": "weekly",
+        "mintCutoff": 1789155000,
+        "mintFeePpm": 80,
+        "mintFeesHeld": {
+          "raw": "0",
+          "decimals": 18,
+          "formatted": "0"
+        },
+        "mintFeesAccrued": {
+          "raw": "21071428571429",
+          "decimals": 18,
+          "formatted": "0.000021071428571429"
+        },
+        "status": "settled"
+      },
+      "accounts": [
+        "0xd3b47D8a6B8e3fc6160Cd02634CF7Ae74aDeB66f"
+      ],
+      "data": {
+        "holder": "0xd3b47D8a6B8e3fc6160Cd02634CF7Ae74aDeB66f",
+        "side": "short",
+        "tokenId": "60007351955554369079247096634152725439243148225240450207526029293925818007157",
+        "units": "150",
+        "asset": "0xd0601CE157Db5bdC3162BbaC2a2C8aF5320D9EEC",
+        "amount": {
+          "raw": "1500000000000000000",
+          "decimals": 18,
+          "formatted": "1.5"
+        },
+        "amountInKind": {
+          "raw": "1500000000000000000",
+          "decimals": 18,
+          "formatted": "1.5"
+        },
+        "settlementPrice": {
+          "raw": "219400000",
+          "decimals": 6,
+          "formatted": "219.4"
+        },
+        "toLedger": true,
+        "tx": "0xe032d1d0620fbdd6c6dcd949617a04ba797179679565c55459e408d54e462993"
+      }
+    },
+    {
+      "id": "0x148162d3f13c5571067af1d7fbd1af4cca79210db78840fd1c2644ee5c9551c7-3",
+      "kind": "redemption",
+      "ts": 1789157064,
+      "longId": "60007351955554369079247096634152725439243148225240450207526029293925818007156",
+      "series": {
+        "longId": "60007351955554369079247096634152725439243148225240450207526029293925818007156",
+        "shortId": "60007351955554369079247096634152725439243148225240450207526029293925818007157",
+        "ticker": "NVDA",
+        "underlying": "0xd0601CE157Db5bdC3162BbaC2a2C8aF5320D9EEC",
+        "isPut": false,
+        "strike": {
+          "raw": "223000000",
+          "decimals": 6,
+          "formatted": "223"
+        },
+        "expiry": 1789156800,
+        "tenor": "weekly",
+        "mintCutoff": 1789155000,
+        "mintFeePpm": 80,
+        "mintFeesHeld": {
+          "raw": "0",
+          "decimals": 18,
+          "formatted": "0"
+        },
+        "mintFeesAccrued": {
+          "raw": "21071428571429",
+          "decimals": 18,
+          "formatted": "0.000021071428571429"
+        },
+        "status": "settled"
+      },
+      "accounts": [
+        "0xdFbfcf5f533505281840cA0d640aE0580D05a2Be"
+      ],
+      "data": {
+        "holder": "0xdFbfcf5f533505281840cA0d640aE0580D05a2Be",
+        "side": "long",
+        "tokenId": "60007351955554369079247096634152725439243148225240450207526029293925818007156",
+        "units": "150",
+        "asset": "0xd0601CE157Db5bdC3162BbaC2a2C8aF5320D9EEC",
+        "amount": {
+          "raw": "0",
+          "decimals": 18,
+          "formatted": "0"
+        },
+        "amountInKind": {
+          "raw": "0",
+          "decimals": 18,
+          "formatted": "0"
+        },
+        "settlementPrice": {
+          "raw": "219400000",
+          "decimals": 6,
+          "formatted": "219.4"
+        },
+        "toLedger": false,
+        "tx": "0x148162d3f13c5571067af1d7fbd1af4cca79210db78840fd1c2644ee5c9551c7"
+      }
+    },
+    {
+      "id": "0xf24089f8154a56e88e456313bd9ce4569b23f4274a1340e29f3ddc2027f9c918-3",
+      "kind": "redemption",
+      "ts": 1789157058,
+      "longId": "38893962039984939713403905484162186843296761519009062250958107357483972598796",
+      "series": {
+        "longId": "38893962039984939713403905484162186843296761519009062250958107357483972598796",
+        "shortId": "38893962039984939713403905484162186843296761519009062250958107357483972598797",
+        "ticker": "NVDA",
+        "underlying": "0xd0601CE157Db5bdC3162BbaC2a2C8aF5320D9EEC",
+        "isPut": false,
+        "strike": {
+          "raw": "218000000",
+          "decimals": 6,
+          "formatted": "218"
+        },
+        "expiry": 1789156800,
+        "tenor": "weekly",
+        "mintCutoff": 1789155000,
+        "mintFeePpm": 80,
+        "mintFeesHeld": {
+          "raw": "0",
+          "decimals": 18,
+          "formatted": "0"
+        },
+        "mintFeesAccrued": {
+          "raw": "28992063492064",
+          "decimals": 18,
+          "formatted": "0.000028992063492064"
+        },
+        "status": "settled"
+      },
+      "accounts": [
+        "0xd3b47D8a6B8e3fc6160Cd02634CF7Ae74aDeB66f"
+      ],
+      "data": {
+        "holder": "0xd3b47D8a6B8e3fc6160Cd02634CF7Ae74aDeB66f",
+        "side": "short",
+        "tokenId": "38893962039984939713403905484162186843296761519009062250958107357483972598797",
+        "units": "130",
+        "asset": "0xd0601CE157Db5bdC3162BbaC2a2C8aF5320D9EEC",
+        "amount": {
+          "raw": "1291704649042844140",
+          "decimals": 18,
+          "formatted": "1.29170464904284414"
+        },
+        "amountInKind": {
+          "raw": "1291704649042844140",
+          "decimals": 18,
+          "formatted": "1.29170464904284414"
+        },
+        "settlementPrice": {
+          "raw": "219400000",
+          "decimals": 6,
+          "formatted": "219.4"
+        },
+        "toLedger": true,
+        "tx": "0xf24089f8154a56e88e456313bd9ce4569b23f4274a1340e29f3ddc2027f9c918"
+      }
+    },
+    {
+      "id": "0x0d5cd22a75d481bec85d0024470f89905a7afe421f9f032b25a85d7c4b10409c-3",
+      "kind": "redemption",
+      "ts": 1789157052,
+      "longId": "38893962039984939713403905484162186843296761519009062250958107357483972598796",
+      "series": {
+        "longId": "38893962039984939713403905484162186843296761519009062250958107357483972598796",
+        "shortId": "38893962039984939713403905484162186843296761519009062250958107357483972598797",
+        "ticker": "NVDA",
+        "underlying": "0xd0601CE157Db5bdC3162BbaC2a2C8aF5320D9EEC",
+        "isPut": false,
+        "strike": {
+          "raw": "218000000",
+          "decimals": 6,
+          "formatted": "218"
+        },
+        "expiry": 1789156800,
+        "tenor": "weekly",
+        "mintCutoff": 1789155000,
+        "mintFeePpm": 80,
+        "mintFeesHeld": {
+          "raw": "0",
+          "decimals": 18,
+          "formatted": "0"
+        },
+        "mintFeesAccrued": {
+          "raw": "28992063492064",
+          "decimals": 18,
+          "formatted": "0.000028992063492064"
+        },
+        "status": "settled"
+      },
+      "accounts": [
+        "0x300a7AB2f92B536e3f58422372c964B2Bb535ea2"
+      ],
+      "data": {
+        "holder": "0x300a7AB2f92B536e3f58422372c964B2Bb535ea2",
+        "side": "long",
+        "tokenId": "38893962039984939713403905484162186843296761519009062250958107357483972598796",
+        "units": "30",
+        "asset": "0xd0601CE157Db5bdC3162BbaC2a2C8aF5320D9EEC",
+        "amount": {
+          "raw": "1722880583409300",
+          "decimals": 18,
+          "formatted": "0.0017228805834093"
+        },
+        "amountInKind": {
+          "raw": "1722880583409300",
+          "decimals": 18,
+          "formatted": "0.0017228805834093"
+        },
+        "settlementPrice": {
+          "raw": "219400000",
+          "decimals": 6,
+          "formatted": "219.4"
+        },
+        "toLedger": false,
+        "tx": "0x0d5cd22a75d481bec85d0024470f89905a7afe421f9f032b25a85d7c4b10409c"
+      }
+    },
+    {
+      "id": "0x7f4daf0b48fb870233bff31494c65609b82394dedd800f0781681333f181d216-3",
+      "kind": "redemption",
+      "ts": 1789157046,
+      "longId": "97249294176823841346447828561188452006185490110924851379129375223985952864952",
+      "series": {
+        "longId": "97249294176823841346447828561188452006185490110924851379129375223985952864952",
+        "shortId": "97249294176823841346447828561188452006185490110924851379129375223985952864953",
+        "ticker": "NVDA",
+        "underlying": "0xd0601CE157Db5bdC3162BbaC2a2C8aF5320D9EEC",
+        "isPut": false,
+        "strike": {
+          "raw": "216000000",
+          "decimals": 6,
+          "formatted": "216"
+        },
+        "expiry": 1789156800,
+        "tenor": "weekly",
+        "mintCutoff": 1789155000,
+        "mintFeePpm": 80,
+        "mintFeesHeld": {
+          "raw": "0",
+          "decimals": 18,
+          "formatted": "0"
+        },
+        "mintFeesAccrued": {
+          "raw": "70952380952381",
+          "decimals": 18,
+          "formatted": "0.000070952380952381"
+        },
+        "status": "settled"
+      },
+      "accounts": [
+        "0x83daA58d0a8d82D7b971338a03AA2f99bfADf4F8"
+      ],
+      "data": {
+        "holder": "0x83daA58d0a8d82D7b971338a03AA2f99bfADf4F8",
+        "side": "long",
+        "tokenId": "97249294176823841346447828561188452006185490110924851379129375223985952864952",
+        "units": "200",
+        "asset": "0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168",
+        "amount": {
+          "raw": "6113879",
+          "decimals": 6,
+          "formatted": "6.113879"
+        },
+        "amountInKind": {
+          "raw": "27894257064721800",
+          "decimals": 18,
+          "formatted": "0.0278942570647218"
+        },
+        "settlementPrice": {
+          "raw": "219400000",
+          "decimals": 6,
+          "formatted": "219.4"
+        },
+        "toLedger": false,
+        "tx": "0x7f4daf0b48fb870233bff31494c65609b82394dedd800f0781681333f181d216"
+      }
+    },
+    {
+      "id": "0x30c80bbbbc43798279ac452bf0d328c0cb6d78825078920acdebf2fbcdb3898b-3",
+      "kind": "redemption",
+      "ts": 1789157040,
+      "longId": "109733135889116194008703981926101410916763203979514320802443652863493208496976",
+      "series": {
+        "longId": "109733135889116194008703981926101410916763203979514320802443652863493208496976",
+        "shortId": "109733135889116194008703981926101410916763203979514320802443652863493208496977",
+        "ticker": "NVDA",
+        "underlying": "0xd0601CE157Db5bdC3162BbaC2a2C8aF5320D9EEC",
+        "isPut": false,
+        "strike": {
+          "raw": "214000000",
+          "decimals": 6,
+          "formatted": "214"
+        },
+        "expiry": 1789156800,
+        "tenor": "weekly",
+        "mintCutoff": 1789155000,
+        "mintFeePpm": 80,
+        "mintFeesHeld": {
+          "raw": "0",
+          "decimals": 18,
+          "formatted": "0"
+        },
+        "mintFeesAccrued": {
+          "raw": "36567460317462",
+          "decimals": 18,
+          "formatted": "0.000036567460317462"
+        },
+        "status": "settled"
+      },
+      "accounts": [
+        "0xd3b47D8a6B8e3fc6160Cd02634CF7Ae74aDeB66f"
+      ],
+      "data": {
+        "holder": "0xd3b47D8a6B8e3fc6160Cd02634CF7Ae74aDeB66f",
+        "side": "short",
+        "tokenId": "109733135889116194008703981926101410916763203979514320802443652863493208496977",
+        "units": "100",
+        "asset": "0xd0601CE157Db5bdC3162BbaC2a2C8aF5320D9EEC",
+        "amount": {
+          "raw": "975387420237010100",
+          "decimals": 18,
+          "formatted": "0.9753874202370101"
+        },
+        "amountInKind": {
+          "raw": "975387420237010100",
+          "decimals": 18,
+          "formatted": "0.9753874202370101"
+        },
+        "settlementPrice": {
+          "raw": "219400000",
+          "decimals": 6,
+          "formatted": "219.4"
+        },
+        "toLedger": true,
+        "tx": "0x30c80bbbbc43798279ac452bf0d328c0cb6d78825078920acdebf2fbcdb3898b"
+      }
+    },
+    {
+      "id": "0x8b4d5382bd0879e0af1ea33f326659b5bc4b6bdb9fa2afa5da178762c7067d2f-3",
+      "kind": "redemption",
+      "ts": 1789157034,
+      "longId": "109733135889116194008703981926101410916763203979514320802443652863493208496976",
+      "series": {
+        "longId": "109733135889116194008703981926101410916763203979514320802443652863493208496976",
+        "shortId": "109733135889116194008703981926101410916763203979514320802443652863493208496977",
+        "ticker": "NVDA",
+        "underlying": "0xd0601CE157Db5bdC3162BbaC2a2C8aF5320D9EEC",
+        "isPut": false,
+        "strike": {
+          "raw": "214000000",
+          "decimals": 6,
+          "formatted": "214"
+        },
+        "expiry": 1789156800,
+        "tenor": "weekly",
+        "mintCutoff": 1789155000,
+        "mintFeePpm": 80,
+        "mintFeesHeld": {
+          "raw": "0",
+          "decimals": 18,
+          "formatted": "0"
+        },
+        "mintFeesAccrued": {
+          "raw": "36567460317462",
+          "decimals": 18,
+          "formatted": "0.000036567460317462"
+        },
+        "status": "settled"
+      },
+      "accounts": [
+        "0x83daA58d0a8d82D7b971338a03AA2f99bfADf4F8"
+      ],
+      "data": {
+        "holder": "0x83daA58d0a8d82D7b971338a03AA2f99bfADf4F8",
+        "side": "long",
+        "tokenId": "109733135889116194008703981926101410916763203979514320802443652863493208496976",
+        "units": "100",
+        "asset": "0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168",
+        "amount": {
+          "raw": "4855140",
+          "decimals": 6,
+          "formatted": "4.85514"
+        },
+        "amountInKind": {
+          "raw": "22151321786691000",
+          "decimals": 18,
+          "formatted": "0.022151321786691"
+        },
+        "settlementPrice": {
+          "raw": "219400000",
+          "decimals": 6,
+          "formatted": "219.4"
+        },
+        "toLedger": false,
+        "tx": "0x8b4d5382bd0879e0af1ea33f326659b5bc4b6bdb9fa2afa5da178762c7067d2f"
+      }
+    },
+    {
+      "id": "0xc100bd7592609dd60055086fe02af9ff0e2811f28eba795947816c3e1c27b258-3",
+      "kind": "redemption",
+      "ts": 1789157028,
+      "longId": "87928758254318692721909164101369622513960639781458875980445111726519827316414",
+      "series": {
+        "longId": "87928758254318692721909164101369622513960639781458875980445111726519827316414",
+        "shortId": "87928758254318692721909164101369622513960639781458875980445111726519827316415",
+        "ticker": "NVDA",
+        "underlying": "0xd0601CE157Db5bdC3162BbaC2a2C8aF5320D9EEC",
+        "isPut": false,
+        "strike": {
+          "raw": "210000000",
+          "decimals": 6,
+          "formatted": "210"
+        },
+        "expiry": 1789156800,
+        "tenor": "weekly",
+        "mintCutoff": 1789155000,
+        "mintFeePpm": 80,
+        "mintFeesHeld": {
+          "raw": "0",
+          "decimals": 18,
+          "formatted": "0"
+        },
+        "mintFeesAccrued": {
+          "raw": "25853174603176",
+          "decimals": 18,
+          "formatted": "0.000025853174603176"
+        },
+        "status": "settled"
+      },
+      "accounts": [
+        "0xd3b47D8a6B8e3fc6160Cd02634CF7Ae74aDeB66f"
+      ],
+      "data": {
+        "holder": "0xd3b47D8a6B8e3fc6160Cd02634CF7Ae74aDeB66f",
+        "side": "short",
+        "tokenId": "87928758254318692721909164101369622513960639781458875980445111726519827316415",
+        "units": "50",
+        "asset": "0xd0601CE157Db5bdC3162BbaC2a2C8aF5320D9EEC",
+        "amount": {
+          "raw": "478577939835916150",
+          "decimals": 18,
+          "formatted": "0.47857793983591615"
+        },
+        "amountInKind": {
+          "raw": "478577939835916150",
+          "decimals": 18,
+          "formatted": "0.47857793983591615"
+        },
+        "settlementPrice": {
+          "raw": "219400000",
+          "decimals": 6,
+          "formatted": "219.4"
+        },
+        "toLedger": true,
+        "tx": "0xc100bd7592609dd60055086fe02af9ff0e2811f28eba795947816c3e1c27b258"
+      }
+    },
+    {
+      "id": "0x922681fea2f04f91815708bb95e840a71f3fcefa5ef77af8618f19ef745dacd3-3",
+      "kind": "redemption",
+      "ts": 1789157022,
+      "longId": "87928758254318692721909164101369622513960639781458875980445111726519827316414",
+      "series": {
+        "longId": "87928758254318692721909164101369622513960639781458875980445111726519827316414",
+        "shortId": "87928758254318692721909164101369622513960639781458875980445111726519827316415",
+        "ticker": "NVDA",
+        "underlying": "0xd0601CE157Db5bdC3162BbaC2a2C8aF5320D9EEC",
+        "isPut": false,
+        "strike": {
+          "raw": "210000000",
+          "decimals": 6,
+          "formatted": "210"
+        },
+        "expiry": 1789156800,
+        "tenor": "weekly",
+        "mintCutoff": 1789155000,
+        "mintFeePpm": 80,
+        "mintFeesHeld": {
+          "raw": "0",
+          "decimals": 18,
+          "formatted": "0"
+        },
+        "mintFeesAccrued": {
+          "raw": "25853174603176",
+          "decimals": 18,
+          "formatted": "0.000025853174603176"
+        },
+        "status": "settled"
+      },
+      "accounts": [
+        "0x70556BaA315dD8d467ea452aBcd7deEbEa073Ff9"
+      ],
+      "data": {
+        "holder": "0x70556BaA315dD8d467ea452aBcd7deEbEa073Ff9",
+        "side": "short",
+        "tokenId": "87928758254318692721909164101369622513960639781458875980445111726519827316415",
+        "units": "20",
+        "asset": "0xd0601CE157Db5bdC3162BbaC2a2C8aF5320D9EEC",
+        "amount": {
+          "raw": "191431175934366460",
+          "decimals": 18,
+          "formatted": "0.19143117593436646"
+        },
+        "amountInKind": {
+          "raw": "191431175934366460",
+          "decimals": 18,
+          "formatted": "0.19143117593436646"
+        },
+        "settlementPrice": {
+          "raw": "219400000",
+          "decimals": 6,
+          "formatted": "219.4"
+        },
+        "toLedger": false,
+        "tx": "0x922681fea2f04f91815708bb95e840a71f3fcefa5ef77af8618f19ef745dacd3"
+      }
+    },
+    {
+      "id": "0x7aa2962954508f5a9d2034a58e2c5e187a943c494e91242fa6ce751adce33d26-3",
+      "kind": "redemption",
+      "ts": 1789157016,
+      "longId": "87928758254318692721909164101369622513960639781458875980445111726519827316414",
+      "series": {
+        "longId": "87928758254318692721909164101369622513960639781458875980445111726519827316414",
+        "shortId": "87928758254318692721909164101369622513960639781458875980445111726519827316415",
+        "ticker": "NVDA",
+        "underlying": "0xd0601CE157Db5bdC3162BbaC2a2C8aF5320D9EEC",
+        "isPut": false,
+        "strike": {
+          "raw": "210000000",
+          "decimals": 6,
+          "formatted": "210"
+        },
+        "expiry": 1789156800,
+        "tenor": "weekly",
+        "mintCutoff": 1789155000,
+        "mintFeePpm": 80,
+        "mintFeesHeld": {
+          "raw": "0",
+          "decimals": 18,
+          "formatted": "0"
+        },
+        "mintFeesAccrued": {
+          "raw": "25853174603176",
+          "decimals": 18,
+          "formatted": "0.000025853174603176"
+        },
+        "status": "settled"
+      },
+      "accounts": [
+        "0x4088c59Eb3fB713B124f182E7083AEb3358A030B"
+      ],
+      "data": {
+        "holder": "0x4088c59Eb3fB713B124f182E7083AEb3358A030B",
+        "side": "long",
+        "tokenId": "87928758254318692721909164101369622513960639781458875980445111726519827316414",
+        "units": "50",
+        "asset": "0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168",
+        "amount": {
+          "raw": "4421323",
+          "decimals": 6,
+          "formatted": "4.421323"
+        },
+        "amountInKind": {
+          "raw": "20172060164083850",
+          "decimals": 18,
+          "formatted": "0.02017206016408385"
+        },
+        "settlementPrice": {
+          "raw": "219400000",
+          "decimals": 6,
+          "formatted": "219.4"
+        },
+        "toLedger": false,
+        "tx": "0x7aa2962954508f5a9d2034a58e2c5e187a943c494e91242fa6ce751adce33d26"
+      }
+    },
+    {
+      "id": "0x25976d9e79834b2e0695b7fbb6fe42917ddb03bd29730317fc4748761300798a-3",
+      "kind": "redemption",
+      "ts": 1789157010,
+      "longId": "87928758254318692721909164101369622513960639781458875980445111726519827316414",
+      "series": {
+        "longId": "87928758254318692721909164101369622513960639781458875980445111726519827316414",
+        "shortId": "87928758254318692721909164101369622513960639781458875980445111726519827316415",
+        "ticker": "NVDA",
+        "underlying": "0xd0601CE157Db5bdC3162BbaC2a2C8aF5320D9EEC",
+        "isPut": false,
+        "strike": {
+          "raw": "210000000",
+          "decimals": 6,
+          "formatted": "210"
+        },
+        "expiry": 1789156800,
+        "tenor": "weekly",
+        "mintCutoff": 1789155000,
+        "mintFeePpm": 80,
+        "mintFeesHeld": {
+          "raw": "0",
+          "decimals": 18,
+          "formatted": "0"
+        },
+        "mintFeesAccrued": {
+          "raw": "25853174603176",
+          "decimals": 18,
+          "formatted": "0.000025853174603176"
+        },
+        "status": "settled"
+      },
+      "accounts": [
+        "0x300a7AB2f92B536e3f58422372c964B2Bb535ea2"
+      ],
+      "data": {
+        "holder": "0x300a7AB2f92B536e3f58422372c964B2Bb535ea2",
+        "side": "long",
+        "tokenId": "87928758254318692721909164101369622513960639781458875980445111726519827316414",
+        "units": "20",
+        "asset": "0xd0601CE157Db5bdC3162BbaC2a2C8aF5320D9EEC",
+        "amount": {
+          "raw": "8068824065633540",
+          "decimals": 18,
+          "formatted": "0.00806882406563354"
+        },
+        "amountInKind": {
+          "raw": "8068824065633540",
+          "decimals": 18,
+          "formatted": "0.00806882406563354"
+        },
+        "settlementPrice": {
+          "raw": "219400000",
+          "decimals": 6,
+          "formatted": "219.4"
+        },
+        "toLedger": false,
+        "tx": "0x25976d9e79834b2e0695b7fbb6fe42917ddb03bd29730317fc4748761300798a"
+      }
+    },
+    {
+      "id": "0x9538576bb7f8e50646b6f0d55856aec2f41fa30bb87d82b0bb7179002dfbb61e-1-107602460705412833688971388541329334104362255615393312294836650152257273272068",
+      "kind": "settlement",
+      "ts": 1789156970,
+      "longId": "107602460705412833688971388541329334104362255615393312294836650152257273272068",
+      "series": {
+        "longId": "107602460705412833688971388541329334104362255615393312294836650152257273272068",
+        "shortId": "107602460705412833688971388541329334104362255615393312294836650152257273272069",
+        "ticker": "NVDA",
+        "underlying": "0xd0601CE157Db5bdC3162BbaC2a2C8aF5320D9EEC",
+        "isPut": false,
+        "strike": {
+          "raw": "227000000",
+          "decimals": 6,
+          "formatted": "227"
+        },
+        "expiry": 1789156800,
+        "tenor": "weekly",
+        "mintCutoff": 1789155000,
+        "mintFeePpm": 80,
+        "mintFeesHeld": {
+          "raw": "0",
+          "decimals": 18,
+          "formatted": "0"
+        },
+        "mintFeesAccrued": {
+          "raw": "12380952380953",
+          "decimals": 18,
+          "formatted": "0.000012380952380953"
+        },
+        "status": "settled"
+      },
+      "accounts": [],
+      "data": {
+        "price": {
+          "raw": "219400000",
+          "decimals": 6,
+          "formatted": "219.4"
+        },
+        "longPayoutPerUnit": {
+          "raw": "0",
+          "decimals": 18,
+          "formatted": "0"
+        },
+        "feePerUnit": {
+          "raw": "0",
+          "decimals": 18,
+          "formatted": "0"
+        },
+        "shortPayoutPerUnit": {
+          "raw": "10000000000000000",
+          "decimals": 18,
+          "formatted": "0.01"
+        },
+        "tx": "0x9538576bb7f8e50646b6f0d55856aec2f41fa30bb87d82b0bb7179002dfbb61e"
+      }
+    },
+    {
+      "id": "0xb85dfb766a21ab3f9c63726c623403f7472ef5a87141eb549e071aedb88b1449-1-60007351955554369079247096634152725439243148225240450207526029293925818007156",
+      "kind": "settlement",
+      "ts": 1789156966,
+      "longId": "60007351955554369079247096634152725439243148225240450207526029293925818007156",
+      "series": {
+        "longId": "60007351955554369079247096634152725439243148225240450207526029293925818007156",
+        "shortId": "60007351955554369079247096634152725439243148225240450207526029293925818007157",
+        "ticker": "NVDA",
+        "underlying": "0xd0601CE157Db5bdC3162BbaC2a2C8aF5320D9EEC",
+        "isPut": false,
+        "strike": {
+          "raw": "223000000",
+          "decimals": 6,
+          "formatted": "223"
+        },
+        "expiry": 1789156800,
+        "tenor": "weekly",
+        "mintCutoff": 1789155000,
+        "mintFeePpm": 80,
+        "mintFeesHeld": {
+          "raw": "0",
+          "decimals": 18,
+          "formatted": "0"
+        },
+        "mintFeesAccrued": {
+          "raw": "21071428571429",
+          "decimals": 18,
+          "formatted": "0.000021071428571429"
+        },
+        "status": "settled"
+      },
+      "accounts": [],
+      "data": {
+        "price": {
+          "raw": "219400000",
+          "decimals": 6,
+          "formatted": "219.4"
+        },
+        "longPayoutPerUnit": {
+          "raw": "0",
+          "decimals": 18,
+          "formatted": "0"
+        },
+        "feePerUnit": {
+          "raw": "0",
+          "decimals": 18,
+          "formatted": "0"
+        },
+        "shortPayoutPerUnit": {
+          "raw": "10000000000000000",
+          "decimals": 18,
+          "formatted": "0.01"
+        },
+        "tx": "0xb85dfb766a21ab3f9c63726c623403f7472ef5a87141eb549e071aedb88b1449"
+      }
+    },
+    {
+      "id": "0xbdf213752958c710fbf288cfda2e6f698abc5d7737116fe63003092211544680-1-38893962039984939713403905484162186843296761519009062250958107357483972598796",
+      "kind": "settlement",
+      "ts": 1789156962,
+      "longId": "38893962039984939713403905484162186843296761519009062250958107357483972598796",
+      "series": {
+        "longId": "38893962039984939713403905484162186843296761519009062250958107357483972598796",
+        "shortId": "38893962039984939713403905484162186843296761519009062250958107357483972598797",
+        "ticker": "NVDA",
+        "underlying": "0xd0601CE157Db5bdC3162BbaC2a2C8aF5320D9EEC",
+        "isPut": false,
+        "strike": {
+          "raw": "218000000",
+          "decimals": 6,
+          "formatted": "218"
+        },
+        "expiry": 1789156800,
+        "tenor": "weekly",
+        "mintCutoff": 1789155000,
+        "mintFeePpm": 80,
+        "mintFeesHeld": {
+          "raw": "0",
+          "decimals": 18,
+          "formatted": "0"
+        },
+        "mintFeesAccrued": {
+          "raw": "28992063492064",
+          "decimals": 18,
+          "formatted": "0.000028992063492064"
+        },
+        "status": "settled"
+      },
+      "accounts": [],
+      "data": {
+        "price": {
+          "raw": "219400000",
+          "decimals": 6,
+          "formatted": "219.4"
+        },
+        "longPayoutPerUnit": {
+          "raw": "57429352780310",
+          "decimals": 18,
+          "formatted": "0.00005742935278031"
+        },
+        "feePerUnit": {
+          "raw": "6381039197812",
+          "decimals": 18,
+          "formatted": "0.000006381039197812"
+        },
+        "shortPayoutPerUnit": {
+          "raw": "9936189608021878",
+          "decimals": 18,
+          "formatted": "0.009936189608021878"
+        },
+        "tx": "0xbdf213752958c710fbf288cfda2e6f698abc5d7737116fe63003092211544680"
+      }
+    },
+    {
+      "id": "0xe0bf30ab613f52c02465b6885146af605243f84c34feda5d4f7ff749237bf549-1-97249294176823841346447828561188452006185490110924851379129375223985952864952",
+      "kind": "settlement",
+      "ts": 1789156958,
+      "longId": "97249294176823841346447828561188452006185490110924851379129375223985952864952",
+      "series": {
+        "longId": "97249294176823841346447828561188452006185490110924851379129375223985952864952",
+        "shortId": "97249294176823841346447828561188452006185490110924851379129375223985952864953",
+        "ticker": "NVDA",
+        "underlying": "0xd0601CE157Db5bdC3162BbaC2a2C8aF5320D9EEC",
+        "isPut": false,
+        "strike": {
+          "raw": "216000000",
+          "decimals": 6,
+          "formatted": "216"
+        },
+        "expiry": 1789156800,
+        "tenor": "weekly",
+        "mintCutoff": 1789155000,
+        "mintFeePpm": 80,
+        "mintFeesHeld": {
+          "raw": "0",
+          "decimals": 18,
+          "formatted": "0"
+        },
+        "mintFeesAccrued": {
+          "raw": "70952380952381",
+          "decimals": 18,
+          "formatted": "0.000070952380952381"
+        },
+        "status": "settled"
+      },
+      "accounts": [],
+      "data": {
+        "price": {
+          "raw": "219400000",
+          "decimals": 6,
+          "formatted": "219.4"
+        },
+        "longPayoutPerUnit": {
+          "raw": "139471285323609",
+          "decimals": 18,
+          "formatted": "0.000139471285323609"
+        },
+        "feePerUnit": {
+          "raw": "15496809480401",
+          "decimals": 18,
+          "formatted": "0.000015496809480401"
+        },
+        "shortPayoutPerUnit": {
+          "raw": "9845031905195990",
+          "decimals": 18,
+          "formatted": "0.00984503190519599"
+        },
+        "tx": "0xe0bf30ab613f52c02465b6885146af605243f84c34feda5d4f7ff749237bf549"
+      }
+    },
+    {
+      "id": "0x97a4a63e2dc14a781dbf19b0fa8fe4593c8bfa941886c41c3c6f16ad79851b0f-1-109733135889116194008703981926101410916763203979514320802443652863493208496976",
+      "kind": "settlement",
+      "ts": 1789156954,
+      "longId": "109733135889116194008703981926101410916763203979514320802443652863493208496976",
+      "series": {
+        "longId": "109733135889116194008703981926101410916763203979514320802443652863493208496976",
+        "shortId": "109733135889116194008703981926101410916763203979514320802443652863493208496977",
+        "ticker": "NVDA",
+        "underlying": "0xd0601CE157Db5bdC3162BbaC2a2C8aF5320D9EEC",
+        "isPut": false,
+        "strike": {
+          "raw": "214000000",
+          "decimals": 6,
+          "formatted": "214"
+        },
+        "expiry": 1789156800,
+        "tenor": "weekly",
+        "mintCutoff": 1789155000,
+        "mintFeePpm": 80,
+        "mintFeesHeld": {
+          "raw": "0",
+          "decimals": 18,
+          "formatted": "0"
+        },
+        "mintFeesAccrued": {
+          "raw": "36567460317462",
+          "decimals": 18,
+          "formatted": "0.000036567460317462"
+        },
+        "status": "settled"
+      },
+      "accounts": [],
+      "data": {
+        "price": {
+          "raw": "219400000",
+          "decimals": 6,
+          "formatted": "219.4"
+        },
+        "longPayoutPerUnit": {
+          "raw": "221513217866910",
+          "decimals": 18,
+          "formatted": "0.00022151321786691"
+        },
+        "feePerUnit": {
+          "raw": "24612579762989",
+          "decimals": 18,
+          "formatted": "0.000024612579762989"
+        },
+        "shortPayoutPerUnit": {
+          "raw": "9753874202370101",
+          "decimals": 18,
+          "formatted": "0.009753874202370101"
+        },
+        "tx": "0x97a4a63e2dc14a781dbf19b0fa8fe4593c8bfa941886c41c3c6f16ad79851b0f"
+      }
+    },
+    {
+      "id": "0x91c7b272609697a5254482a644c70ac31848d9cdad28f69c9ae6840d4b84c1a8-1-87928758254318692721909164101369622513960639781458875980445111726519827316414",
+      "kind": "settlement",
+      "ts": 1789156950,
+      "longId": "87928758254318692721909164101369622513960639781458875980445111726519827316414",
+      "series": {
+        "longId": "87928758254318692721909164101369622513960639781458875980445111726519827316414",
+        "shortId": "87928758254318692721909164101369622513960639781458875980445111726519827316415",
+        "ticker": "NVDA",
+        "underlying": "0xd0601CE157Db5bdC3162BbaC2a2C8aF5320D9EEC",
+        "isPut": false,
+        "strike": {
+          "raw": "210000000",
+          "decimals": 6,
+          "formatted": "210"
+        },
+        "expiry": 1789156800,
+        "tenor": "weekly",
+        "mintCutoff": 1789155000,
+        "mintFeePpm": 80,
+        "mintFeesHeld": {
+          "raw": "0",
+          "decimals": 18,
+          "formatted": "0"
+        },
+        "mintFeesAccrued": {
+          "raw": "25853174603176",
+          "decimals": 18,
+          "formatted": "0.000025853174603176"
+        },
+        "status": "settled"
+      },
+      "accounts": [],
+      "data": {
+        "price": {
+          "raw": "219400000",
+          "decimals": 6,
+          "formatted": "219.4"
+        },
+        "longPayoutPerUnit": {
+          "raw": "403441203281677",
+          "decimals": 18,
+          "formatted": "0.000403441203281677"
+        },
+        "feePerUnit": {
+          "raw": "25000000000000",
+          "decimals": 18,
+          "formatted": "0.000025"
+        },
+        "shortPayoutPerUnit": {
+          "raw": "9571558796718323",
+          "decimals": 18,
+          "formatted": "0.009571558796718323"
+        },
+        "tx": "0x91c7b272609697a5254482a644c70ac31848d9cdad28f69c9ae6840d4b84c1a8"
+      }
+    },
+    {
+      "id": "0xc7d51545708bded4b6502a5acfc47e1a8ee9da967b246dc7af4019c3e2b2a466-2",
+      "kind": "fill",
+      "ts": 1789063200,
+      "longId": "107602460705412833688971388541329334104362255615393312294836650152257273272068",
+      "series": {
+        "longId": "107602460705412833688971388541329334104362255615393312294836650152257273272068",
+        "shortId": "107602460705412833688971388541329334104362255615393312294836650152257273272069",
+        "ticker": "NVDA",
+        "underlying": "0xd0601CE157Db5bdC3162BbaC2a2C8aF5320D9EEC",
+        "isPut": false,
+        "strike": {
+          "raw": "227000000",
+          "decimals": 6,
+          "formatted": "227"
+        },
+        "expiry": 1789156800,
+        "tenor": "weekly",
+        "mintCutoff": 1789155000,
+        "mintFeePpm": 80,
+        "mintFeesHeld": {
+          "raw": "0",
+          "decimals": 18,
+          "formatted": "0"
+        },
+        "mintFeesAccrued": {
+          "raw": "12380952380953",
+          "decimals": 18,
+          "formatted": "0.000012380952380953"
+        },
+        "status": "settled"
+      },
+      "accounts": [
+        "0x4088c59Eb3fB713B124f182E7083AEb3358A030B",
+        "0xd3b47D8a6B8e3fc6160Cd02634CF7Ae74aDeB66f"
+      ],
+      "data": {
+        "orderId": "1008",
+        "taker": "0x4088c59Eb3fB713B124f182E7083AEb3358A030B",
+        "maker": "0xd3b47D8a6B8e3fc6160Cd02634CF7Ae74aDeB66f",
+        "recipient": "0x4088c59Eb3fB713B124f182E7083AEb3358A030B",
+        "units": "100",
+        "price": {
+          "raw": "250000",
+          "decimals": 6,
+          "formatted": "0.25"
+        },
+        "premium": {
+          "raw": "250000",
+          "decimals": 6,
+          "formatted": "0.25"
+        },
+        "takerFee": {
+          "raw": "25000",
+          "decimals": 6,
+          "formatted": "0.025"
+        },
+        "sellerFee": {
+          "raw": "0",
+          "decimals": 6,
+          "formatted": "0"
+        },
+        "makerRebate": {
+          "raw": "12500",
+          "decimals": 6,
+          "formatted": "0.0125"
+        },
+        "primary": true,
+        "takerIsBuyer": true,
+        "tx": "0xc7d51545708bded4b6502a5acfc47e1a8ee9da967b246dc7af4019c3e2b2a466"
+      }
+    },
+    {
+      "id": "0x80c07ca809dab64a17c5225d132af44e5521a9e0925c80248add72127e46492a-2",
+      "kind": "fill",
+      "ts": 1789050600,
+      "longId": "60007351955554369079247096634152725439243148225240450207526029293925818007156",
+      "series": {
+        "longId": "60007351955554369079247096634152725439243148225240450207526029293925818007156",
+        "shortId": "60007351955554369079247096634152725439243148225240450207526029293925818007157",
+        "ticker": "NVDA",
+        "underlying": "0xd0601CE157Db5bdC3162BbaC2a2C8aF5320D9EEC",
+        "isPut": false,
+        "strike": {
+          "raw": "223000000",
+          "decimals": 6,
+          "formatted": "223"
+        },
+        "expiry": 1789156800,
+        "tenor": "weekly",
+        "mintCutoff": 1789155000,
+        "mintFeePpm": 80,
+        "mintFeesHeld": {
+          "raw": "0",
+          "decimals": 18,
+          "formatted": "0"
+        },
+        "mintFeesAccrued": {
+          "raw": "21071428571429",
+          "decimals": 18,
+          "formatted": "0.000021071428571429"
+        },
+        "status": "settled"
+      },
+      "accounts": [
+        "0xdFbfcf5f533505281840cA0d640aE0580D05a2Be",
+        "0xd3b47D8a6B8e3fc6160Cd02634CF7Ae74aDeB66f"
+      ],
+      "data": {
+        "orderId": "1007",
+        "taker": "0xdFbfcf5f533505281840cA0d640aE0580D05a2Be",
+        "maker": "0xd3b47D8a6B8e3fc6160Cd02634CF7Ae74aDeB66f",
+        "recipient": "0xdFbfcf5f533505281840cA0d640aE0580D05a2Be",
+        "units": "150",
+        "price": {
+          "raw": "250000",
+          "decimals": 6,
+          "formatted": "0.25"
+        },
+        "premium": {
+          "raw": "375000",
+          "decimals": 6,
+          "formatted": "0.375"
+        },
+        "takerFee": {
+          "raw": "37500",
+          "decimals": 6,
+          "formatted": "0.0375"
+        },
+        "sellerFee": {
+          "raw": "0",
+          "decimals": 6,
+          "formatted": "0"
+        },
+        "makerRebate": {
+          "raw": "18750",
+          "decimals": 6,
+          "formatted": "0.01875"
+        },
+        "primary": true,
+        "takerIsBuyer": true,
+        "tx": "0x80c07ca809dab64a17c5225d132af44e5521a9e0925c80248add72127e46492a"
+      }
+    },
+    {
+      "id": "0xd436665dee55095a87d81c2f0e84a7b77906a21160b528e21a6a789586154582-2",
+      "kind": "fill",
+      "ts": 1789048200,
+      "longId": "38893962039984939713403905484162186843296761519009062250958107357483972598796",
+      "series": {
+        "longId": "38893962039984939713403905484162186843296761519009062250958107357483972598796",
+        "shortId": "38893962039984939713403905484162186843296761519009062250958107357483972598797",
+        "ticker": "NVDA",
+        "underlying": "0xd0601CE157Db5bdC3162BbaC2a2C8aF5320D9EEC",
+        "isPut": false,
+        "strike": {
+          "raw": "218000000",
+          "decimals": 6,
+          "formatted": "218"
+        },
+        "expiry": 1789156800,
+        "tenor": "weekly",
+        "mintCutoff": 1789155000,
+        "mintFeePpm": 80,
+        "mintFeesHeld": {
+          "raw": "0",
+          "decimals": 18,
+          "formatted": "0"
+        },
+        "mintFeesAccrued": {
+          "raw": "28992063492064",
+          "decimals": 18,
+          "formatted": "0.000028992063492064"
+        },
+        "status": "settled"
+      },
+      "accounts": [
+        "0x300a7AB2f92B536e3f58422372c964B2Bb535ea2",
+        "0xd3b47D8a6B8e3fc6160Cd02634CF7Ae74aDeB66f"
+      ],
+      "data": {
+        "orderId": "1006",
+        "taker": "0x300a7AB2f92B536e3f58422372c964B2Bb535ea2",
+        "maker": "0xd3b47D8a6B8e3fc6160Cd02634CF7Ae74aDeB66f",
+        "recipient": "0x300a7AB2f92B536e3f58422372c964B2Bb535ea2",
+        "units": "30",
+        "price": {
+          "raw": "250000",
+          "decimals": 6,
+          "formatted": "0.25"
+        },
+        "premium": {
+          "raw": "75000",
+          "decimals": 6,
+          "formatted": "0.075"
+        },
+        "takerFee": {
+          "raw": "7500",
+          "decimals": 6,
+          "formatted": "0.0075"
+        },
+        "sellerFee": {
+          "raw": "0",
+          "decimals": 6,
+          "formatted": "0"
+        },
+        "makerRebate": {
+          "raw": "3750",
+          "decimals": 6,
+          "formatted": "0.00375"
+        },
+        "primary": true,
+        "takerIsBuyer": true,
+        "tx": "0xd436665dee55095a87d81c2f0e84a7b77906a21160b528e21a6a789586154582"
+      }
+    },
+    {
+      "id": "0x3b10bca39419abed9611512c935897334042e6af1017d46c3aa4948a84a9f03a-2",
+      "kind": "fill",
+      "ts": 1788970200,
+      "longId": "38893962039984939713403905484162186843296761519009062250958107357483972598796",
+      "series": {
+        "longId": "38893962039984939713403905484162186843296761519009062250958107357483972598796",
+        "shortId": "38893962039984939713403905484162186843296761519009062250958107357483972598797",
+        "ticker": "NVDA",
+        "underlying": "0xd0601CE157Db5bdC3162BbaC2a2C8aF5320D9EEC",
+        "isPut": false,
+        "strike": {
+          "raw": "218000000",
+          "decimals": 6,
+          "formatted": "218"
+        },
+        "expiry": 1789156800,
+        "tenor": "weekly",
+        "mintCutoff": 1789155000,
+        "mintFeePpm": 80,
+        "mintFeesHeld": {
+          "raw": "0",
+          "decimals": 18,
+          "formatted": "0"
+        },
+        "mintFeesAccrued": {
+          "raw": "28992063492064",
+          "decimals": 18,
+          "formatted": "0.000028992063492064"
+        },
+        "status": "settled"
+      },
+      "accounts": [
+        "0xE37876AcBfbA6186E4687f4ef465D9AC21558De3",
+        "0xd3b47D8a6B8e3fc6160Cd02634CF7Ae74aDeB66f"
+      ],
+      "data": {
+        "orderId": "1005",
+        "taker": "0xE37876AcBfbA6186E4687f4ef465D9AC21558De3",
+        "maker": "0xd3b47D8a6B8e3fc6160Cd02634CF7Ae74aDeB66f",
+        "recipient": "0xE37876AcBfbA6186E4687f4ef465D9AC21558De3",
+        "units": "100",
+        "price": {
+          "raw": "250000",
+          "decimals": 6,
+          "formatted": "0.25"
+        },
+        "premium": {
+          "raw": "250000",
+          "decimals": 6,
+          "formatted": "0.25"
+        },
+        "takerFee": {
+          "raw": "25000",
+          "decimals": 6,
+          "formatted": "0.025"
+        },
+        "sellerFee": {
+          "raw": "0",
+          "decimals": 6,
+          "formatted": "0"
+        },
+        "makerRebate": {
+          "raw": "12500",
+          "decimals": 6,
+          "formatted": "0.0125"
+        },
+        "primary": true,
+        "takerIsBuyer": true,
+        "tx": "0x3b10bca39419abed9611512c935897334042e6af1017d46c3aa4948a84a9f03a"
+      }
+    },
+    {
+      "id": "0x5a224406c559d7ca06ee65172f490852a73b308299c5dd4c2b76b240a5ae3d96-2",
+      "kind": "fill",
+      "ts": 1788964800,
+      "longId": "109733135889116194008703981926101410916763203979514320802443652863493208496976",
+      "series": {
+        "longId": "109733135889116194008703981926101410916763203979514320802443652863493208496976",
+        "shortId": "109733135889116194008703981926101410916763203979514320802443652863493208496977",
+        "ticker": "NVDA",
+        "underlying": "0xd0601CE157Db5bdC3162BbaC2a2C8aF5320D9EEC",
+        "isPut": false,
+        "strike": {
+          "raw": "214000000",
+          "decimals": 6,
+          "formatted": "214"
+        },
+        "expiry": 1789156800,
+        "tenor": "weekly",
+        "mintCutoff": 1789155000,
+        "mintFeePpm": 80,
+        "mintFeesHeld": {
+          "raw": "0",
+          "decimals": 18,
+          "formatted": "0"
+        },
+        "mintFeesAccrued": {
+          "raw": "36567460317462",
+          "decimals": 18,
+          "formatted": "0.000036567460317462"
+        },
+        "status": "settled"
+      },
+      "accounts": [
+        "0x83daA58d0a8d82D7b971338a03AA2f99bfADf4F8",
+        "0xd3b47D8a6B8e3fc6160Cd02634CF7Ae74aDeB66f"
+      ],
+      "data": {
+        "orderId": "1004",
+        "taker": "0x83daA58d0a8d82D7b971338a03AA2f99bfADf4F8",
+        "maker": "0xd3b47D8a6B8e3fc6160Cd02634CF7Ae74aDeB66f",
+        "recipient": "0x83daA58d0a8d82D7b971338a03AA2f99bfADf4F8",
+        "units": "100",
+        "price": {
+          "raw": "674100",
+          "decimals": 6,
+          "formatted": "0.6741"
+        },
+        "premium": {
+          "raw": "674100",
+          "decimals": 6,
+          "formatted": "0.6741"
+        },
+        "takerFee": {
+          "raw": "67410",
+          "decimals": 6,
+          "formatted": "0.06741"
+        },
+        "sellerFee": {
+          "raw": "0",
+          "decimals": 6,
+          "formatted": "0"
+        },
+        "makerRebate": {
+          "raw": "33705",
+          "decimals": 6,
+          "formatted": "0.033705"
+        },
+        "primary": true,
+        "takerIsBuyer": true,
+        "tx": "0x5a224406c559d7ca06ee65172f490852a73b308299c5dd4c2b76b240a5ae3d96"
+      }
+    },
+    {
+      "id": "0x060e27e2e0614336c4f67dbb73e5d1968c343c47989be08fe347cccb4182b0a4-2",
+      "kind": "fill",
+      "ts": 1788888600,
+      "longId": "97249294176823841346447828561188452006185490110924851379129375223985952864952",
+      "series": {
+        "longId": "97249294176823841346447828561188452006185490110924851379129375223985952864952",
+        "shortId": "97249294176823841346447828561188452006185490110924851379129375223985952864953",
+        "ticker": "NVDA",
+        "underlying": "0xd0601CE157Db5bdC3162BbaC2a2C8aF5320D9EEC",
+        "isPut": false,
+        "strike": {
+          "raw": "216000000",
+          "decimals": 6,
+          "formatted": "216"
+        },
+        "expiry": 1789156800,
+        "tenor": "weekly",
+        "mintCutoff": 1789155000,
+        "mintFeePpm": 80,
+        "mintFeesHeld": {
+          "raw": "0",
+          "decimals": 18,
+          "formatted": "0"
+        },
+        "mintFeesAccrued": {
+          "raw": "70952380952381",
+          "decimals": 18,
+          "formatted": "0.000070952380952381"
+        },
+        "status": "settled"
+      },
+      "accounts": [
+        "0x83daA58d0a8d82D7b971338a03AA2f99bfADf4F8",
+        "0xD6b49a27Ead99118b61F0827C7aB2782aea07bE6"
+      ],
+      "data": {
+        "orderId": "1001",
+        "taker": "0x83daA58d0a8d82D7b971338a03AA2f99bfADf4F8",
+        "maker": "0xD6b49a27Ead99118b61F0827C7aB2782aea07bE6",
+        "recipient": "0x83daA58d0a8d82D7b971338a03AA2f99bfADf4F8",
+        "units": "200",
+        "price": {
+          "raw": "247000",
+          "decimals": 6,
+          "formatted": "0.247"
+        },
+        "premium": {
+          "raw": "494000",
+          "decimals": 6,
+          "formatted": "0.494"
+        },
+        "takerFee": {
+          "raw": "49400",
+          "decimals": 6,
+          "formatted": "0.0494"
+        },
+        "sellerFee": {
+          "raw": "0",
+          "decimals": 6,
+          "formatted": "0"
+        },
+        "makerRebate": {
+          "raw": "24700",
+          "decimals": 6,
+          "formatted": "0.0247"
+        },
+        "primary": true,
+        "takerIsBuyer": true,
+        "tx": "0x060e27e2e0614336c4f67dbb73e5d1968c343c47989be08fe347cccb4182b0a4"
+      }
+    },
+    {
+      "id": "0x6bfadbf6aabeb60a7f8aec79c76ea9171fda89ceae518adf8db34ad0d0586d7b-2",
+      "kind": "fill",
+      "ts": 1788880800,
+      "longId": "87928758254318692721909164101369622513960639781458875980445111726519827316414",
+      "series": {
+        "longId": "87928758254318692721909164101369622513960639781458875980445111726519827316414",
+        "shortId": "87928758254318692721909164101369622513960639781458875980445111726519827316415",
+        "ticker": "NVDA",
+        "underlying": "0xd0601CE157Db5bdC3162BbaC2a2C8aF5320D9EEC",
+        "isPut": false,
+        "strike": {
+          "raw": "210000000",
+          "decimals": 6,
+          "formatted": "210"
+        },
+        "expiry": 1789156800,
+        "tenor": "weekly",
+        "mintCutoff": 1789155000,
+        "mintFeePpm": 80,
+        "mintFeesHeld": {
+          "raw": "0",
+          "decimals": 18,
+          "formatted": "0"
+        },
+        "mintFeesAccrued": {
+          "raw": "25853174603176",
+          "decimals": 18,
+          "formatted": "0.000025853174603176"
+        },
+        "status": "settled"
+      },
+      "accounts": [
+        "0x300a7AB2f92B536e3f58422372c964B2Bb535ea2",
+        "0x70556BaA315dD8d467ea452aBcd7deEbEa073Ff9"
+      ],
+      "data": {
+        "orderId": "1003",
+        "taker": "0x300a7AB2f92B536e3f58422372c964B2Bb535ea2",
+        "maker": "0x70556BaA315dD8d467ea452aBcd7deEbEa073Ff9",
+        "recipient": "0x300a7AB2f92B536e3f58422372c964B2Bb535ea2",
+        "units": "20",
+        "price": {
+          "raw": "2100000",
+          "decimals": 6,
+          "formatted": "2.1"
+        },
+        "premium": {
+          "raw": "420000",
+          "decimals": 6,
+          "formatted": "0.42"
+        },
+        "takerFee": {
+          "raw": "42000",
+          "decimals": 6,
+          "formatted": "0.042"
+        },
+        "sellerFee": {
+          "raw": "0",
+          "decimals": 6,
+          "formatted": "0"
+        },
+        "makerRebate": {
+          "raw": "25200",
+          "decimals": 6,
+          "formatted": "0.0252"
+        },
+        "primary": true,
+        "takerIsBuyer": true,
+        "tx": "0x6bfadbf6aabeb60a7f8aec79c76ea9171fda89ceae518adf8db34ad0d0586d7b"
+      }
+    },
+    {
+      "id": "0xbd6a1a9a3b877f0b1dfe13890b2768abda9429f02e1c56ae23990c1c482c3be8-2",
+      "kind": "fill",
+      "ts": 1788876300,
+      "longId": "87928758254318692721909164101369622513960639781458875980445111726519827316414",
+      "series": {
+        "longId": "87928758254318692721909164101369622513960639781458875980445111726519827316414",
+        "shortId": "87928758254318692721909164101369622513960639781458875980445111726519827316415",
+        "ticker": "NVDA",
+        "underlying": "0xd0601CE157Db5bdC3162BbaC2a2C8aF5320D9EEC",
+        "isPut": false,
+        "strike": {
+          "raw": "210000000",
+          "decimals": 6,
+          "formatted": "210"
+        },
+        "expiry": 1789156800,
+        "tenor": "weekly",
+        "mintCutoff": 1789155000,
+        "mintFeePpm": 80,
+        "mintFeesHeld": {
+          "raw": "0",
+          "decimals": 18,
+          "formatted": "0"
+        },
+        "mintFeesAccrued": {
+          "raw": "25853174603176",
+          "decimals": 18,
+          "formatted": "0.000025853174603176"
+        },
+        "status": "settled"
+      },
+      "accounts": [
+        "0x4088c59Eb3fB713B124f182E7083AEb3358A030B",
+        "0xd3b47D8a6B8e3fc6160Cd02634CF7Ae74aDeB66f"
+      ],
+      "data": {
+        "orderId": "1002",
+        "taker": "0x4088c59Eb3fB713B124f182E7083AEb3358A030B",
+        "maker": "0xd3b47D8a6B8e3fc6160Cd02634CF7Ae74aDeB66f",
+        "recipient": "0x4088c59Eb3fB713B124f182E7083AEb3358A030B",
+        "units": "50",
+        "price": {
+          "raw": "1870400",
+          "decimals": 6,
+          "formatted": "1.8704"
+        },
+        "premium": {
+          "raw": "935200",
+          "decimals": 6,
+          "formatted": "0.9352"
+        },
+        "takerFee": {
+          "raw": "93520",
+          "decimals": 6,
+          "formatted": "0.09352"
+        },
+        "sellerFee": {
+          "raw": "0",
+          "decimals": 6,
+          "formatted": "0"
+        },
+        "makerRebate": {
+          "raw": "46760",
+          "decimals": 6,
+          "formatted": "0.04676"
+        },
+        "primary": true,
+        "takerIsBuyer": true,
+        "tx": "0xbd6a1a9a3b877f0b1dfe13890b2768abda9429f02e1c56ae23990c1c482c3be8"
+      }
+    },
+    {
+      "id": "0xc6f5a1e1dba8d7a86baeca590c6de95817d3bd5e3b9337cf601dca34a883ceb3-9",
+      "kind": "roll",
+      "ts": 1788874500,
+      "longId": "97249294176823841346447828561188452006185490110924851379129375223985952864952",
+      "series": {
+        "longId": "97249294176823841346447828561188452006185490110924851379129375223985952864952",
+        "shortId": "97249294176823841346447828561188452006185490110924851379129375223985952864953",
+        "ticker": "NVDA",
+        "underlying": "0xd0601CE157Db5bdC3162BbaC2a2C8aF5320D9EEC",
+        "isPut": false,
+        "strike": {
+          "raw": "216000000",
+          "decimals": 6,
+          "formatted": "216"
+        },
+        "expiry": 1789156800,
+        "tenor": "weekly",
+        "mintCutoff": 1789155000,
+        "mintFeePpm": 80,
+        "mintFeesHeld": {
+          "raw": "0",
+          "decimals": 18,
+          "formatted": "0"
+        },
+        "mintFeesAccrued": {
+          "raw": "70952380952381",
+          "decimals": 18,
+          "formatted": "0.000070952380952381"
+        },
+        "status": "settled"
+      },
+      "accounts": [
+        "0xD6b49a27Ead99118b61F0827C7aB2782aea07bE6"
+      ],
+      "data": {
+        "writer": "0xD6b49a27Ead99118b61F0827C7aB2782aea07bE6",
+        "orderId": "1001",
+        "price": {
+          "raw": "247000",
+          "decimals": 6,
+          "formatted": "0.247"
+        },
+        "units": "299",
+        "tx": "0xc6f5a1e1dba8d7a86baeca590c6de95817d3bd5e3b9337cf601dca34a883ceb3"
+      }
+    }
+  ],
+  "nextCursor": null
+}

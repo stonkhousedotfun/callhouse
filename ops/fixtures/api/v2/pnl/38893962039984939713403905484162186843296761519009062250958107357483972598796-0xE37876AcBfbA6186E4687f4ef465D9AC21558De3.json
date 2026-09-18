@@ -1,0 +1,61 @@
+{
+  "id": "38893962039984939713403905484162186843296761519009062250958107357483972598796-0xE37876AcBfbA6186E4687f4ef465D9AC21558De3",
+  "holder": "0xE37876AcBfbA6186E4687f4ef465D9AC21558De3",
+  "ticker": "NVDA",
+  "series": {
+    "longId": "38893962039984939713403905484162186843296761519009062250958107357483972598796",
+    "shortId": "38893962039984939713403905484162186843296761519009062250958107357483972598797",
+    "ticker": "NVDA",
+    "underlying": "0xd0601CE157Db5bdC3162BbaC2a2C8aF5320D9EEC",
+    "isPut": false,
+    "strike": {
+      "raw": "218000000",
+      "decimals": 6,
+      "formatted": "218"
+    },
+    "expiry": 1789156800,
+    "tenor": "weekly",
+    "mintCutoff": 1789155000,
+    "mintFeePpm": 80,
+    "mintFeesHeld": {
+      "raw": "0",
+      "decimals": 18,
+      "formatted": "0"
+    },
+    "mintFeesAccrued": {
+      "raw": "28992063492064",
+      "decimals": 18,
+      "formatted": "0.000028992063492064"
+    },
+    "status": "settled"
+  },
+  "cost": {
+    "raw": "275000",
+    "decimals": 6,
+    "formatted": "0.275"
+  },
+  "payout": {
+    "raw": "1260000",
+    "decimals": 6,
+    "formatted": "1.26"
+  },
+  "multiple": 4.58,
+  "settledAt": 1789156962,
+  "tx": "0xbdf213752958c710fbf288cfda2e6f698abc5d7737116fe63003092211544680",
+  "units": "100",
+  "entryPrice": {
+    "raw": "250000",
+    "decimals": 6,
+    "formatted": "0.25"
+  },
+  "settlementPrice": {
+    "raw": "219400000",
+    "decimals": 6,
+    "formatted": "219.4"
+  },
+  "spotAtEntry": {
+    "raw": "207050000",
+    "decimals": 6,
+    "formatted": "207.05"
+  }
+}

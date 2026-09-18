@@ -10,7 +10,9 @@
     "typecheck": "tsc --noEmit && tsc --noEmit -p tests/acceptance/tsconfig.json",
     "test": "vitest run",
     "acceptance:fork": "tsx --tsconfig tests/acceptance/tsconfig.json tests/acceptance/fork.acceptance.ts",
+    "acceptance:v2": "tsx --tsconfig tests/acceptance/tsconfig.json tests/acceptance/v2.acceptance.ts",
     "gen:abis": "node scripts/gen-abis.mjs",
+    "gen:markets": "node scripts/gen-markets.mjs",
     "copy-lint": "node ../scripts/copy-lint.mjs"
   },
   "dependencies": {
@@ -19,7 +21,8 @@
     "react": "^19.3.0",
     "react-dom": "^19.3.0",
     "viem": "^2.56.3",
-    "wagmi": "^3.7.7"
+    "wagmi": "^3.7.7",
+    "zod": "^3.25.76"
   },
   "devDependencies": {
     "@tailwindcss/postcss": "4.3.3",

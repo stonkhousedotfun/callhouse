@@ -1,0 +1,77 @@
+[
+  {
+    "ticker": "NVDA",
+    "name": "NVIDIA • Robinhood Token",
+    "underlying": "0xd0601CE157Db5bdC3162BbaC2a2C8aF5320D9EEC",
+    "status": "live",
+    "spot": {
+      "raw": "215500000",
+      "decimals": 6,
+      "formatted": "215.5"
+    },
+    "spotUpdatedAt": 1789589112,
+    "strikeTick": {
+      "raw": "1000000",
+      "decimals": 6,
+      "formatted": "1"
+    },
+    "puts": false,
+    "mintFeePpm": 80,
+    "expiries": [
+      1789675200,
+      1789761600,
+      1790366400
+    ],
+    "stats": {
+      "volume24h": {
+        "raw": "4306400",
+        "decimals": 6,
+        "formatted": "4.3064"
+      },
+      "premium7d": {
+        "raw": "9248540",
+        "decimals": 6,
+        "formatted": "9.24854"
+      },
+      "openInterestUnits": "875",
+      "seriesOpen": 15
+    }
+  },
+  {
+    "ticker": "TSLA",
+    "name": "Tesla • Robinhood Token",
+    "underlying": "0x322F0929c4625eD5bAd873c95208D54E1c003b2d",
+    "status": "live",
+    "spot": {
+      "raw": "355850000",
+      "decimals": 6,
+      "formatted": "355.85"
+    },
+    "spotUpdatedAt": 1789589080,
+    "strikeTick": {
+      "raw": "5000000",
+      "decimals": 6,
+      "formatted": "5"
+    },
+    "puts": false,
+    "mintFeePpm": 300,
+    "expiries": [
+      1789761600,
+      1790366400
+    ],
+    "stats": {
+      "volume24h": {
+        "raw": "824500",
+        "decimals": 6,
+        "formatted": "0.8245"
+      },
+      "premium7d": {
+        "raw": "2054500",
+        "decimals": 6,
+        "formatted": "2.0545"
+      },
+      "openInterestUnits": "200",
+      "seriesOpen": 10
+    }
+  }
+]

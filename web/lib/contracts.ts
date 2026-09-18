@@ -6,6 +6,7 @@ import { seaportAbi } from "./abi/seaport";
 import { vaultAbi } from "./abi/vault";
 import { accountFactoryAbi } from "./abi/accountFactory";
 import { writerAccountAbi } from "./abi/writerAccount";
+import { GENERATED_MARKETS } from "./markets.generated";
 
 export { valoremClearAbi, erc20Abi, stockTokenAbi, seaportAbi, vaultAbi, accountFactoryAbi, writerAccountAbi };
 
@@ -20,10 +21,19 @@ export { valoremClearAbi, erc20Abi, stockTokenAbi, seaportAbi, vaultAbi, account
  * The vault has NO default. It does not exist until we deploy it, and inventing an address
  * would be worse than rendering "not configured".
  *
- * There is no registry and no third-party fee recipient any more. The vault reads the weekly
- * option type from the clearinghouse itself, numbers its own cycles, and every listing pays ONE
- * USDG leg to the vault (contracts/README.md "No registry"). The clearinghouse is a deploy-time
+ * There is no option registry and no third-party fee recipient any more. The vault reads the
+ * weekly option type from the clearinghouse itself, numbers its own cycles, and every listing pays
+ * ONE USDG leg to the vault (contracts/README.md "No registry"). The clearinghouse is a deploy-time
  * choice: `vault.clear()` is the authority, and NEXT_PUBLIC_CLEARINGHOUSE must agree with it.
+ *
+ * MARKETS ARE NOT HERE. The per-market addresses (Stock Token, feed, factory) come from the market
+ * registry, ops/markets/tier1.json, compiled into lib/markets.generated.ts and read through
+ * lib/markets.ts. The two market-shaped constants that remain in this file, FACTORY and ASSET,
+ * are the DEFAULT market's (NVDA, the first one): they exist so that NEXT_PUBLIC_FACTORY and
+ * NEXT_PUBLIC_ASSET can still point a rehearsal build at a fork's factory and token, and so the
+ * closed pooled vault under app/vault/nvda keeps its asset. Their compiled-in defaults are the
+ * registry's own row, not a second copy of the address. The overrides apply to the default market
+ * ONLY; every other market is exactly what the registry says (lib/markets.ts).
  */
 function fromEnv(name: string, value: string | undefined, fallback?: Address): Address | undefined {
   const raw = value?.trim();
@@ -37,22 +47,32 @@ function fromEnv(name: string, value: string | undefined, fallback?: Address): A
   return getAddress(raw);
 }
 
+/**
+ * The default market's registry row. lib/markets.ts owns the market list; this file needs the
+ * one row so the env overrides below have the registry's addresses as their fallback. A registry
+ * without the default market is a broken registry, and the generator refuses to write one whose
+ * live rows lack a factory, so the `!` on the factory is a statement, not a hope.
+ */
+const DEFAULT_MARKET_ROW = GENERATED_MARKETS.find((m) => m.ticker === "NVDA")!;
+
 /** Stonkhouse vault (cNVDA). Deploy-time only — set NEXT_PUBLIC_VAULT. */
 export const VAULT = fromEnv("NEXT_PUBLIC_VAULT", process.env.NEXT_PUBLIC_VAULT);
 
-/** Isolated 1-lot account factory. The product. Deployed 2026-09-15. */
-export const FACTORY = fromEnv(
-  "NEXT_PUBLIC_FACTORY",
-  process.env.NEXT_PUBLIC_FACTORY,
-  getAddress("0xc4A5Cd0DE91CaB7F5Ebe2114bc63Fbb43E642BBb"),
-)!;
+/**
+ * The DEFAULT market's isolated 1-lot account factory (NVDA, deployed 2026-09-15 at
+ * 0xc4A5Cd0DE91CaB7F5Ebe2114bc63Fbb43E642BBb, block 64038234). The fallback is the registry's row,
+ * so blank NEXT_PUBLIC_FACTORY is safe and is the production value. Set it only to point a
+ * rehearsal build at another factory for the default market; the other markets' factories are
+ * read from the registry and are not affected (lib/markets.ts).
+ */
+export const FACTORY = fromEnv("NEXT_PUBLIC_FACTORY", process.env.NEXT_PUBLIC_FACTORY, getAddress(DEFAULT_MARKET_ROW.factory!))!;
 
-/** NVDA Stock Token, 18 decimals, proxy. The vault's `asset`. */
-export const ASSET = fromEnv(
-  "NEXT_PUBLIC_ASSET",
-  process.env.NEXT_PUBLIC_ASSET,
-  getAddress("0xd0601CE157Db5bdC3162BbaC2a2C8aF5320D9EEC"),
-)!;
+/**
+ * The DEFAULT market's Stock Token (NVDA, 18 decimals, proxy), and the closed pooled vault's
+ * `asset`. Same rule as FACTORY: the fallback is the registry's row, and NEXT_PUBLIC_ASSET moves
+ * the default market only.
+ */
+export const ASSET = fromEnv("NEXT_PUBLIC_ASSET", process.env.NEXT_PUBLIC_ASSET, getAddress(DEFAULT_MARKET_ROW.asset))!;
 
 /** USDG, 6 decimals. Every premium, strike and claim in this app is denominated in it. */
 export const USDG = fromEnv(
@@ -103,7 +123,12 @@ export const LOT_SIZE = 10n ** 18n;
 /** At most this many `approveListing` calls per cycle (Policy.MAX_LISTINGS_PER_CYCLE). */
 export const MAX_LISTINGS_PER_CYCLE = 3;
 
-/** Market label used in URLs and page copy. */
+/**
+ * The CLOSED pooled vault's market label and share ticker. Read only by the vault pages and
+ * components under app/vault/nvda, app/collect and app/activity (the vault's tape), which are kept
+ * as they were. Every other page takes its ticker from a `Market` (lib/markets.ts); do not import
+ * MARKET into new code.
+ */
 export const MARKET = "NVDA";
 export const SHARE_TICKER = "cNVDA";
 

@@ -1,0 +1,78 @@
+{
+  "series": {
+    "longId": "107602460705412833688971388541329334104362255615393312294836650152257273272068",
+    "shortId": "107602460705412833688971388541329334104362255615393312294836650152257273272069",
+    "ticker": "NVDA",
+    "underlying": "0xd0601CE157Db5bdC3162BbaC2a2C8aF5320D9EEC",
+    "isPut": false,
+    "strike": {
+      "raw": "227000000",
+      "decimals": 6,
+      "formatted": "227"
+    },
+    "expiry": 1789156800,
+    "tenor": "weekly",
+    "mintCutoff": 1789155000,
+    "mintFeePpm": 80,
+    "mintFeesHeld": {
+      "raw": "0",
+      "decimals": 18,
+      "formatted": "0"
+    },
+    "mintFeesAccrued": {
+      "raw": "12380952380953",
+      "decimals": 18,
+      "formatted": "0.000012380952380953"
+    },
+    "status": "settled"
+  },
+  "quote": {
+    "bestBid": null,
+    "bestAsk": null,
+    "bidUnits": "0",
+    "askUnits": "0",
+    "fair": null,
+    "iv": null,
+    "delta": null,
+    "last": {
+      "raw": "250000",
+      "decimals": 6,
+      "formatted": "0.25"
+    }
+  },
+  "openInterestUnits": "0",
+  "volume": {
+    "raw": "250000",
+    "decimals": 6,
+    "formatted": "0.25"
+  },
+  "settlement": {
+    "status": "Finalized",
+    "price": {
+      "raw": "219400000",
+      "decimals": 6,
+      "formatted": "219.4"
+    },
+    "longPayoutPerUnit": {
+      "raw": "0",
+      "decimals": 18,
+      "formatted": "0"
+    },
+    "feePerUnit": {
+      "raw": "0",
+      "decimals": 18,
+      "formatted": "0"
+    },
+    "shortPayoutPerUnit": {
+      "raw": "10000000000000000",
+      "decimals": 18,
+      "formatted": "0.01"
+    },
+    "finalizedAt": 1789156925,
+    "settledAt": 1789156970,
+    "sourceIndex": 0,
+    "corroborated": true,
+    "candidate": null
+  },
+  "exerciseFeeBps": 25
+}

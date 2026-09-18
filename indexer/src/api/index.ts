@@ -1,16 +1,17 @@
 import { db } from "ponder:api";
 import schema from "ponder:schema";
-import { Hono, type Context as HonoContext } from "hono";
+import { Hono, type Context as HonoContext, type MiddlewareHandler } from "hono";
 import { logger as honoLogger } from "hono/logger";
-import { and, desc, eq, graphql, sql } from "ponder";
+import { and, count, desc, eq, graphql, sql } from "ponder";
 import { getAddress, isAddress, type Address } from "viem";
 
-import { ACC_PRECISION, ASSET, CHAIN_ID, CHAIN_NAME, CLEARINGHOUSE, SEAPORT, USDG, VAULT, WAD } from "../../lib/env";
+import { ACC_PRECISION, ASSET, CHAIN_ID, CHAIN_NAME, CLEARINGHOUSE, FACTORY, MARKET, SEAPORT, USDG, V2_CLEARINGHOUSE, VAULT, WAD } from "../../lib/env";
 import { capacity, entryStrandShare } from "../../lib/lifecycle";
 import { ROLE_DEFAULT_ADMIN, ROLE_GUARDIAN, ROLE_KEEPER } from "../../lib/roles";
 import { cache15s } from "./cache";
 import { readAccountLive, readChainHead, readOraclePaused, readVaultLive } from "./chain";
 import { asset, iso, num, toJson, usdg } from "./serialize";
+import { v2App } from "./v2";
 
 const app = new Hono();
 
@@ -34,6 +35,12 @@ type CycleStatus = (typeof CYCLE_STATUSES)[number];
 
 export const LISTING_STATUSES = ["approved", "partially_filled", "filled", "cancelled"] as const;
 type ListingStatus = (typeof LISTING_STATUSES)[number];
+
+/** The factory market's account statuses (`writer_account_status`) and settlement outcomes, pinned the same way. */
+export const WRITER_ACCOUNT_STATUSES = ["idle", "pending", "listed", "settled"] as const;
+type WriterAccountStatus = (typeof WRITER_ACCOUNT_STATUSES)[number];
+
+export const SETTLEMENT_OUTCOMES = ["unfilled", "assigned", "expired", "unredeemed"] as const;
 
 const ONE = 10n ** 18n;
 const ZERO_HASH = `0x${"0".repeat(64)}`;
@@ -99,20 +106,46 @@ const clampLimit = (raw: string | undefined, fallback: number, max: number): num
   return Math.min(Math.floor(n), max);
 };
 
-const clampOffset = (raw: string | undefined): number => {
+const MAX_OFFSET = 10_000;
+
+export const clampOffset = (raw: string | undefined): number => {
+  if (raw !== undefined && raw.length > 32) return 0;
   const n = raw === undefined ? 0 : Number(raw);
   if (!Number.isFinite(n) || n < 0) return 0;
-  return Math.floor(n);
+  return Math.min(Math.floor(n), MAX_OFFSET);
 };
 
+/**
+ * The addresses every payload carries. `vault` is null on a factory-only deployment and
+ * `factory` null on a vault-only one; `market` is the ticker label the factory market is
+ * published under. `asset` and `clearinghouse` here are the VAULT's env (the NVDA token and the
+ * Clear the vault was built on), so this group goes out as-is only on the `/v1/vault*` payloads.
+ * The `ASSET` / `CLEARINGHOUSE` env vars are vault-only: a factory market's own asset and Clear
+ * are the factory's, read from it at setup, and the `/v1/market*` payloads publish THOSE instead
+ * (`marketAddresses`) — the env defaults would advertise the NVDA token and the vault's Clear on
+ * every non-NVDA market.
+ */
 const ADDRESSES = {
   chainId: CHAIN_ID,
-  vault: VAULT,
+  market: MARKET,
+  vault: VAULT ?? null,
+  factory: FACTORY ?? null,
   asset: ASSET,
   usdg: USDG,
   clearinghouse: CLEARINGHOUSE,
   seaport: SEAPORT,
 } as const;
+
+/**
+ * The `addresses` group for a factory-market payload: `asset` and `clearinghouse` are the
+ * market's own, from the market row's setup read, null when that read did not answer — never
+ * the vault's env defaults, which are the NVDA token and the vault's Clear and would be wrong
+ * on any other market (and for the Clear even on NVDA: the factory writes into OUR Clear, not
+ * the upstream build the vault was constructed with). Everything else is deployment-wide.
+ */
+export function marketAddresses(m: MarketRow | null) {
+  return { ...ADDRESSES, asset: m?.asset ?? null, clearinghouse: m?.clear ?? null };
+}
 
 /**
  * Serialise and respond without going through `c.json`.
@@ -131,6 +164,32 @@ function sendJson(c: HonoContext, value: unknown, status = 200): Response {
 async function loadState() {
   return await db.select().from(schema.vaultState).limit(1).then((r) => r[0] ?? null);
 }
+
+async function loadMarket() {
+  return await db.select().from(schema.market).limit(1).then((r) => r[0] ?? null);
+}
+
+/**
+ * The two product gates. A deployment indexes the pooled vault, a factory market, or both
+ * (lib/env.ts), and a route for the product it does not index answers 404 `{configured: false}`
+ * rather than an empty tape: an empty `/v1/cycles` on a factory-only deployment would read as
+ * "no week ever happened", which is a claim, and a wrong one. `cache15s` never caches a 404, so
+ * the answer is immediate on every request. Placed BEFORE the cache in every route.
+ */
+const notConfigured = (c: HonoContext, product: string, variable: string) =>
+  c.json({ configured: false, error: `This deployment indexes no ${product} (${variable} is unset).` }, 404);
+
+const requireVault: MiddlewareHandler = async (c, next) => {
+  if (VAULT === undefined) return notConfigured(c, "pooled vault", "VAULT_ADDRESS");
+  await next();
+  return undefined;
+};
+
+const requireFactory: MiddlewareHandler = async (c, next) => {
+  if (FACTORY === undefined) return notConfigured(c, "factory market", "FACTORY_ADDRESS");
+  await next();
+  return undefined;
+};
 
 /*//////////////////////////////////////////////////////////////
                       SHAPES (one per table)
@@ -347,6 +406,205 @@ export function strandJson(s: StrandRow) {
 }
 
 /*//////////////////////////////////////////////////////////////
+                    SHAPES (the factory market)
+//////////////////////////////////////////////////////////////*/
+
+type MarketRow = typeof schema.market.$inferSelect;
+type MarketWeekRow = typeof schema.marketWeek.$inferSelect;
+type WriterAccountRow = typeof schema.writerAccount.$inferSelect;
+type LotFillRow = typeof schema.lotFill.$inferSelect;
+type SettlementRow = typeof schema.accountSettlement.$inferSelect;
+
+/**
+ * The public shape of a factory market: the factory's own state and the totals over its accounts.
+ *
+ * Provenance is part of the shape. `contracts` and `settings` come from the setup read and are
+ * null, with `verified: false`, when it did not answer (the public RPC has no historical state);
+ * a null there means "not read", never "zero". `week` is the factory's CURRENT terms as it holds
+ * them, null before the first `setWeek`; the same week with its totals is `/v1/market.currentWeek`.
+ * `settings.policy` is the policy AS READ AT SETUP: `PolicySet` carries no values, so
+ * `policySetAt` non-null and later than the deploy means the six fields may be stale.
+ */
+export function marketJson(m: MarketRow) {
+  return {
+    factory: m.id,
+    ticker: m.ticker,
+
+    contracts: {
+      verified: m.settingsVerified || m.asset !== null,
+      asset: m.asset,
+      feed: m.feed,
+      clear: m.clear,
+      implementation: m.implementation,
+    },
+
+    settings: {
+      verified: m.settingsVerified,
+      admin: m.admin,
+      feeRecipient: m.feeRecipient,
+      // Per ACCOUNT, in asset base units. `type(uint256).max` on the NVDA factory means uncapped.
+      depositCap: m.depositCap === null ? null : asset(m.depositCap),
+      policy:
+        m.protocolFeeBps === null
+          ? null
+          : {
+              minOtmBps: m.minOtmBps,
+              maxOtmBps: m.maxOtmBps,
+              minPremiumBps: m.minPremiumBps,
+              maxUtilizationBps: m.maxUtilizationBps,
+              protocolFeeBps: m.protocolFeeBps,
+              maxContractsCap: num(m.maxContractsCap),
+            },
+      policySetAt: iso(m.policySetAt),
+      writesHalted: m.writesHalted,
+    },
+
+    week:
+      m.weekId === 0
+        ? null
+        : {
+            id: m.weekId,
+            strikeUsdg: usdg(m.strikeUsdg),
+            askUsdg: usdg(m.askUsdg),
+            exerciseTimestamp: num(m.exerciseTs),
+            exerciseAt: iso(m.exerciseTs),
+            // Each account's expiry is this plus its index, in seconds.
+            baseExpiryTimestamp: num(m.baseExpiryTs),
+            baseExpiryAt: iso(m.baseExpiryTs),
+            setAt: iso(m.weekSetAt),
+          },
+
+    totals: {
+      accounts: m.accountCount,
+      // Requested lots of the accounts currently pending: what the keeper has to list.
+      pendingLots: num(m.pendingLots),
+      lotsListed: num(m.lotsListed),
+      lotsFilled: num(m.lotsFilled),
+      // The whole ask per lot, protocol fee item included. Fee = protocolFeeBps of it.
+      premiumUsdg: usdg(m.premiumUsdg),
+      settlements: m.settlements,
+      assetReturned: asset(m.assetReturned),
+      // Strike proceeds of assigned lots. Returned principal, never premium.
+      assignedUsdg: usdg(m.assignedUsdg),
+      claimedUsdg: usdg(m.claimedUsdg),
+    },
+
+    indexedAt: {
+      blockNumber: m.lastBlock.toString(),
+      timestamp: m.lastTimestamp.toString(),
+      at: iso(m.lastTimestamp),
+    },
+  };
+}
+
+/** One `WeekSet` and what the accounts did under it. A week nobody listed under is a row of zeros. */
+export function marketWeekJson(w: MarketWeekRow) {
+  return {
+    week: w.weekId,
+    strikeUsdg: usdg(w.strikeUsdg),
+    askUsdg: usdg(w.askUsdg),
+    exerciseTimestamp: num(w.exerciseTs),
+    exerciseAt: iso(w.exerciseTs),
+    baseExpiryTimestamp: num(w.baseExpiryTs),
+    baseExpiryAt: iso(w.baseExpiryTs),
+    setAt: iso(w.setAt),
+    setTx: w.setTx,
+    accountsListed: w.accountsListed,
+    accountsSettled: w.accountsSettled,
+    lotsListed: num(w.lotsListed),
+    lotsFilled: num(w.lotsFilled),
+    premiumUsdg: usdg(w.premiumUsdg),
+    assetReturned: asset(w.assetReturned),
+    assignedUsdg: usdg(w.assignedUsdg),
+  };
+}
+
+/**
+ * One `WriterAccount`. `listing` is the week pinned onto it by `list` and is null when nothing
+ * is listed. Balances are absent on purpose: a clone's transfers are not indexed, so
+ * `lifetime.deposited − lifetime.withdrawn` is a lower bound on what it holds (assignment moves
+ * assets out without a `Withdrawn`), and the web reads `idleAssets()` live for the real figure.
+ */
+export function writerAccountJson(a: WriterAccountRow) {
+  return {
+    account: a.id,
+    owner: a.owner,
+    index: a.index,
+    status: a.status,
+    createdAt: iso(a.createdAt),
+    createdTx: a.createdTx,
+
+    request: {
+      // `requestedLots()` on chain: stays through the listing, cleared by settle.
+      lots: num(a.requestedLots),
+      pending: a.status === "pending",
+    },
+
+    listing:
+      a.listedLots === 0n
+        ? null
+        : {
+            week: a.listedWeekId,
+            optionId: a.optionId === null ? null : a.optionId.toString(),
+            lots: num(a.listedLots),
+            filledLots: num(a.filledLots),
+            askUsdg: usdg(a.listedAskUsdg),
+            listedAt: iso(a.listedAt),
+          },
+
+    // Kept after an unredeemed settle, where the account still holds the claim's type.
+    optionId: a.optionId === null ? null : a.optionId.toString(),
+
+    lifetime: {
+      deposited: asset(a.depositedTotal),
+      withdrawn: asset(a.withdrawnTotal),
+      claimedUsdg: usdg(a.claimedUsdg),
+      lotsListed: num(a.lotsListed),
+      lotsFilled: num(a.lotsFilled),
+      premiumUsdg: usdg(a.premiumUsdg),
+      settlements: a.settlements,
+      lastSettledAt: iso(a.lastSettledAt),
+    },
+
+    lastActivityAt: iso(a.lastActivityAt),
+    lastActivityBlock: a.lastActivityBlock.toString(),
+  };
+}
+
+/** One `LotFilled`: one contract written, `premiumUsdg` (the whole ask) paid, one Seaport order gone. */
+export function lotFillJson(f: LotFillRow) {
+  return {
+    account: f.account,
+    owner: f.owner,
+    week: f.weekId,
+    optionId: f.optionId.toString(),
+    orderHash: f.orderHash,
+    premiumUsdg: usdg(f.premiumUsdg),
+    blockNumber: f.blockNumber.toString(),
+    at: iso(f.timestamp),
+    txHash: f.txHash,
+  };
+}
+
+/** One `Settled`: the account's verdict for the week it was listed under (lib/factoryLifecycle.ts `settlementOutcome`). */
+export function settlementJson(s: SettlementRow) {
+  return {
+    account: s.account,
+    owner: s.owner,
+    week: s.weekId,
+    outcome: s.outcome,
+    lotsListed: num(s.lotsListed),
+    lotsFilled: num(s.lotsFilled),
+    assetReturned: asset(s.assetReturned),
+    // Strike proceeds. Returned principal, never premium.
+    strikeUsdg: usdg(s.strikeUsdg),
+    blockNumber: s.blockNumber.toString(),
+    at: iso(s.timestamp),
+    txHash: s.txHash,
+  };
+}
+
+/*//////////////////////////////////////////////////////////////
                           GET /v1/vault
 //////////////////////////////////////////////////////////////*/
 
@@ -357,7 +615,7 @@ export function strandJson(s: StrandRow) {
  * carry (Valorem's live position, the oracle, the deposit gate, capacity). If the RPC is down
  * the route still answers from the index with `live: false` rather than failing.
  */
-app.get("/v1/vault", cache15s, async (c) => {
+app.get("/v1/vault", requireVault, cache15s, async (c) => {
   const state = await loadState();
 
   const [live, oraclePaused] = await Promise.all([readVaultLive(), readOraclePaused()]);
@@ -619,7 +877,7 @@ app.get("/v1/vault", cache15s, async (c) => {
  * (`status: "unfilled"`, every money field 0) and the ones whose close stranded the claim
  * (`status: "stranded"` until the retry lands). That is the point of the route.
  */
-app.get("/v1/cycles", cache15s, async (c) => {
+app.get("/v1/cycles", requireVault, cache15s, async (c) => {
   const limit = clampLimit(c.req.query("limit"), 52, 500);
   const offset = clampOffset(c.req.query("offset"));
   const statusParam = c.req.query("status");
@@ -663,7 +921,7 @@ app.get("/v1/cycles", cache15s, async (c) => {
 });
 
 /** One week by number, so a permalink to a Friday result is a real URL. */
-app.get("/v1/cycles/:cycle", cache15s, async (c) => {
+app.get("/v1/cycles/:cycle", requireVault, cache15s, async (c) => {
   const n = Number(c.req.param("cycle"));
   if (!Number.isInteger(n) || n < 0) {
     return c.json({ error: "cycle must be a non-negative integer." }, 400);
@@ -721,7 +979,7 @@ app.get("/v1/cycles/:cycle", cache15s, async (c) => {
  * the index ahead of a deposit or a flat queue settlement) and the retry rows (`origin:
  * "retry"`: a stranded claim's strike USDG arriving late), which are money but not results.
  */
-app.get("/v1/activity", cache15s, async (c) => {
+app.get("/v1/activity", requireVault, cache15s, async (c) => {
   const limit = clampLimit(c.req.query("limit"), 52, 500);
   const offset = clampOffset(c.req.query("offset"));
   const includeParam = c.req.query("include");
@@ -763,7 +1021,7 @@ app.get("/v1/activity", cache15s, async (c) => {
  * per-account snapshot of the index, and no event exposes it. Everything else is indexed and
  * cross-checked against the chain, so a mismatch is visible rather than hidden.
  */
-app.get("/v1/account/:addr", cache15s, async (c) => {
+app.get("/v1/account/:addr", requireVault, cache15s, async (c) => {
   const raw = c.req.param("addr");
   if (!isAddress(raw)) {
     return c.json({ error: `"${raw}" is not an address.` }, 400);
@@ -887,7 +1145,7 @@ app.get("/v1/account/:addr", cache15s, async (c) => {
 //////////////////////////////////////////////////////////////*/
 
 /** Current and past Seaport orders, newest first, with their hashes and realised fills. */
-app.get("/v1/listings", cache15s, async (c) => {
+app.get("/v1/listings", requireVault, cache15s, async (c) => {
   const limit = clampLimit(c.req.query("limit"), 50, 500);
   const offset = clampOffset(c.req.query("offset"));
   const cycleParam = c.req.query("cycle");
@@ -940,7 +1198,7 @@ app.get("/v1/listings", cache15s, async (c) => {
 });
 
 /** One order by hash. */
-app.get("/v1/listings/:hash", cache15s, async (c) => {
+app.get("/v1/listings/:hash", requireVault, cache15s, async (c) => {
   const hash = c.req.param("hash").toLowerCase();
   if (!/^0x[0-9a-f]{64}$/.test(hash)) {
     return c.json({ error: "hash must be 32 bytes of hex." }, 400);
@@ -962,7 +1220,7 @@ app.get("/v1/listings/:hash", cache15s, async (c) => {
 //////////////////////////////////////////////////////////////*/
 
 /** Every stranded claim, newest first: when it stranded, who owns what of it, whether it recovered. */
-app.get("/v1/strands", cache15s, async (c) => {
+app.get("/v1/strands", requireVault, cache15s, async (c) => {
   const limit = clampLimit(c.req.query("limit"), 50, 500);
   const offset = clampOffset(c.req.query("offset"));
 
@@ -993,7 +1251,7 @@ app.get("/v1/strands", cache15s, async (c) => {
 //////////////////////////////////////////////////////////////*/
 
 /** The raw state trail, for charts that want a series rather than a point. */
-app.get("/v1/snapshots", cache15s, async (c) => {
+app.get("/v1/snapshots", requireVault, cache15s, async (c) => {
   const limit = clampLimit(c.req.query("limit"), 200, 1000);
   const offset = clampOffset(c.req.query("offset"));
 
@@ -1030,6 +1288,200 @@ app.get("/v1/snapshots", cache15s, async (c) => {
         uiMultiplier: s.uiMultiplier.toString(),
         txHash: s.txHash,
       })),
+    }),
+  );
+});
+
+/*//////////////////////////////////////////////////////////////
+                         GET /v1/market
+//////////////////////////////////////////////////////////////*/
+
+/**
+ * The factory market's public tape, from the index alone: the market row, the current week with
+ * its totals, the accounts by status, and who can touch the factory.
+ *
+ * No live read. The web's /account and /book pages read the factory and the clones over RPC
+ * directly (`accountCount`, `liveAt`, each clone's views), and that stays their job for the
+ * per-account balances this index cannot carry; this route is the history and the totals that
+ * an RPC read cannot give — every fill, every settlement, every week — without an archive node.
+ */
+app.get("/v1/market", requireFactory, cache15s, async (c) => {
+  const m = await loadMarket();
+
+  const currentWeek =
+    m === null || m.weekId === 0
+      ? null
+      : await db
+          .select()
+          .from(schema.marketWeek)
+          .where(eq(schema.marketWeek.weekId, m.weekId))
+          .limit(1)
+          .then((r) => r[0] ?? null);
+
+  // The live counts: how many accounts sit in each state right now. Counted, not kept as
+  // counters on the market row, so a replay can never leave them drifting from the rows.
+  const byStatus: Record<WriterAccountStatus, number> = { idle: 0, pending: 0, listed: 0, settled: 0 };
+  const statusRows = await db
+    .select({ status: schema.writerAccount.status, n: count() })
+    .from(schema.writerAccount)
+    .groupBy(schema.writerAccount.status);
+  for (const row of statusRows) {
+    if (WRITER_ACCOUNT_STATUSES.includes(row.status)) byStatus[row.status] = Number(row.n);
+  }
+
+  const roleRows = await db.select().from(schema.marketRole).where(eq(schema.marketRole.granted, true));
+  const holders = (role: string) =>
+    roleRows.filter((r) => r.role.toLowerCase() === role.toLowerCase()).map((r) => r.account);
+
+  return sendJson(
+    c,
+    toJson({
+      configured: true,
+      addresses: marketAddresses(m),
+      market: m === null ? null : marketJson(m),
+      currentWeek: currentWeek === null ? null : marketWeekJson(currentWeek),
+      accounts: {
+        total: m?.accountCount ?? 0,
+        byStatus,
+        // Requested lots of the pending accounts: the keeper's queue, in lots.
+        pendingLots: num(m?.pendingLots),
+      },
+      roles: {
+        admin: holders(ROLE_DEFAULT_ADMIN),
+        keeper: holders(ROLE_KEEPER),
+        guardian: holders(ROLE_GUARDIAN),
+      },
+    }),
+  );
+});
+
+/** Every week the keeper set, newest first, each with what the accounts did under it. `?limit=`, `?offset=`. */
+app.get("/v1/market/weeks", requireFactory, cache15s, async (c) => {
+  const limit = clampLimit(c.req.query("limit"), 52, 500);
+  const offset = clampOffset(c.req.query("offset"));
+
+  const rows = await db
+    .select()
+    .from(schema.marketWeek)
+    .orderBy(desc(schema.marketWeek.weekId))
+    .limit(limit)
+    .offset(offset);
+
+  const m = await loadMarket();
+
+  return sendJson(
+    c,
+    toJson({
+      configured: true,
+      addresses: marketAddresses(m),
+      currentWeek: m?.weekId ?? 0,
+      count: rows.length,
+      limit,
+      offset,
+      weeks: rows.map(marketWeekJson),
+    }),
+  );
+});
+
+/** Every lot filled, newest first. `?account=` (the clone) or `?owner=` narrows it; `?limit=`, `?offset=`. */
+app.get("/v1/market/fills", requireFactory, cache15s, async (c) => {
+  const limit = clampLimit(c.req.query("limit"), 100, 1000);
+  const offset = clampOffset(c.req.query("offset"));
+  const accountParam = c.req.query("account");
+  const ownerParam = c.req.query("owner");
+
+  if (accountParam !== undefined && !isAddress(accountParam)) {
+    return c.json({ error: `"${accountParam}" is not an address.` }, 400);
+  }
+  if (ownerParam !== undefined && !isAddress(ownerParam)) {
+    return c.json({ error: `"${ownerParam}" is not an address.` }, 400);
+  }
+
+  const clauses = [
+    accountParam === undefined ? undefined : eq(schema.lotFill.account, getAddress(accountParam)),
+    ownerParam === undefined ? undefined : eq(schema.lotFill.owner, getAddress(ownerParam)),
+  ].filter((x) => x !== undefined);
+
+  const base = db.select().from(schema.lotFill);
+  const rows = await (clauses.length === 0 ? base : base.where(and(...clauses)))
+    .orderBy(desc(schema.lotFill.blockNumber), desc(schema.lotFill.logIndex))
+    .limit(limit)
+    .offset(offset);
+
+  const m = await loadMarket();
+
+  return sendJson(
+    c,
+    toJson({
+      configured: true,
+      addresses: marketAddresses(m),
+      account: accountParam === undefined ? null : getAddress(accountParam),
+      owner: ownerParam === undefined ? null : getAddress(ownerParam),
+      count: rows.length,
+      limit,
+      offset,
+      fills: rows.map(lotFillJson),
+    }),
+  );
+});
+
+/**
+ * One account with its fills and settlements, newest first. The address may be the clone or
+ * its owner (one account per owner, so either names one row); `resolvedBy` says which matched.
+ */
+app.get("/v1/market/accounts/:address", requireFactory, cache15s, async (c) => {
+  const raw = c.req.param("address");
+  if (!isAddress(raw)) {
+    return c.json({ error: `"${raw}" is not an address.` }, 400);
+  }
+  const address = getAddress(raw) as Address;
+
+  let resolvedBy: "account" | "owner" = "account";
+  let row = await db
+    .select()
+    .from(schema.writerAccount)
+    .where(eq(schema.writerAccount.id, address))
+    .limit(1)
+    .then((r) => r[0] ?? null);
+  if (row === null) {
+    resolvedBy = "owner";
+    row = await db
+      .select()
+      .from(schema.writerAccount)
+      .where(eq(schema.writerAccount.owner, address))
+      .orderBy(desc(schema.writerAccount.index))
+      .limit(1)
+      .then((r) => r[0] ?? null);
+  }
+  if (row === null) {
+    return c.json({ error: `No account at ${address}, and no account owned by it.` }, 404);
+  }
+
+  const [fills, settlements, m] = await Promise.all([
+    db
+      .select()
+      .from(schema.lotFill)
+      .where(eq(schema.lotFill.account, row.id))
+      .orderBy(desc(schema.lotFill.blockNumber), desc(schema.lotFill.logIndex))
+      .limit(500),
+    db
+      .select()
+      .from(schema.accountSettlement)
+      .where(eq(schema.accountSettlement.account, row.id))
+      .orderBy(desc(schema.accountSettlement.blockNumber), desc(schema.accountSettlement.logIndex))
+      .limit(500),
+    loadMarket(),
+  ]);
+
+  return sendJson(
+    c,
+    toJson({
+      configured: true,
+      addresses: marketAddresses(m),
+      resolvedBy,
+      account: writerAccountJson(row),
+      fills: fills.map(lotFillJson),
+      settlements: settlements.map(settlementJson),
     }),
   );
 });
@@ -1093,10 +1545,11 @@ async function readIndexerHead(): Promise<{
  * `/health`, point the dashboard and the keeper's alerting at `/v1/health`.
  */
 app.get("/v1/health", async (c) => {
-  const [head, chainHead, state] = await Promise.all([
+  const [head, chainHead, state, market] = await Promise.all([
     readIndexerHead(),
     readChainHead(),
-    loadState(),
+    VAULT === undefined ? null : loadState(),
+    FACTORY === undefined ? null : loadMarket(),
   ]);
 
   const nowSeconds = BigInt(Math.floor(Date.now() / 1000));
@@ -1128,19 +1581,42 @@ app.get("/v1/health", async (c) => {
         blocks: lagBlocks.toString(),
         seconds: lagSeconds === null ? null : lagSeconds.toString(),
       },
-      vault: {
-        address: VAULT,
-        phase: state?.phase ?? null,
-        phaseName: state === null ? null : (PHASE_NAMES[state.phase] ?? "Unknown"),
-        cycle: state?.cycleNumber ?? 0,
-        writesHalted: state?.writesHalted ?? null,
-        // STRANDED_CLAIM from the relay's alert list: the one state that needs a human to know.
-        stranded: state?.stranded ?? null,
-        // The last block in which this vault did anything. Not the keeper's own heartbeat —
-        // the keeper runs its own /health; this is the on-chain evidence it is alive.
-        lastActivityBlock: (state?.lastBlock ?? 0n).toString(),
-        lastActivityAt: iso(state?.lastTimestamp ?? null),
-      },
+      // The ticker label of the factory market this deployment serves (MARKET; NVDA by default).
+      market: MARKET,
+      // Null on a factory-only deployment.
+      vault:
+        VAULT === undefined
+          ? null
+          : {
+              address: VAULT,
+              phase: state?.phase ?? null,
+              phaseName: state === null ? null : (PHASE_NAMES[state.phase] ?? "Unknown"),
+              cycle: state?.cycleNumber ?? 0,
+              writesHalted: state?.writesHalted ?? null,
+              // STRANDED_CLAIM from the relay's alert list: the one state that needs a human to know.
+              stranded: state?.stranded ?? null,
+              // The last block in which this vault did anything. Not the keeper's own heartbeat —
+              // the keeper runs its own /health; this is the on-chain evidence it is alive.
+              lastActivityBlock: (state?.lastBlock ?? 0n).toString(),
+              lastActivityAt: iso(state?.lastTimestamp ?? null),
+            },
+      // Null on a vault-only deployment (the NVDA vault as deployed today).
+      factory:
+        FACTORY === undefined
+          ? null
+          : {
+              address: FACTORY,
+              ticker: MARKET,
+              week: market?.weekId ?? 0,
+              writesHalted: market?.writesHalted ?? null,
+              accounts: market?.accountCount ?? 0,
+              pendingLots: num(market?.pendingLots),
+              // False means the setup read did not answer (no archive RPC): policy, fee recipient
+              // and cap are unverified on /v1/market until a governance event names them.
+              settingsVerified: market?.settingsVerified ?? false,
+              lastActivityBlock: (market?.lastBlock ?? 0n).toString(),
+              lastActivityAt: iso(market?.lastTimestamp ?? null),
+            },
     }),
     status === "degraded" ? 503 : 200,
   );
@@ -1152,14 +1628,25 @@ app.get("/v1/health", async (c) => {
 
 // Ponder generates a GraphQL API from ponder.schema.ts for free. It is the escape hatch for
 // any query the REST routes above do not cover.
+app.route("/v2", v2App);
 app.use("/graphql", graphql({ db, schema }));
 
-app.get("/", (c) =>
+app.get("/", async (c) =>
   c.json({
     name: "callhouse-indexer",
     chain: { id: CHAIN_ID, name: CHAIN_NAME },
-    addresses: ADDRESSES,
+    // Same rule as the market routes: a factory market's asset and Clear are its own, read from
+    // the factory, not the vault's env defaults.
+    addresses: FACTORY === undefined ? ADDRESSES : marketAddresses(await loadMarket()),
+    configured: { vault: VAULT !== undefined, factory: FACTORY !== undefined, v2: V2_CLEARINGHOUSE !== undefined },
     routes: [
+      "GET  /v2/health", "GET  /v2/config", "GET  /v2/markets", "GET  /v2/markets/:ticker/series",
+      "GET  /v2/series/:longId", "GET  /v2/series/:longId/book", "GET  /v2/series/:longId/holders",
+      "GET  /v2/series/:longId/trades", "GET  /v2/cards", "GET  /v2/cards/hero",
+      "GET  /v2/accounts/:address/positions", "GET  /v2/accounts/:address/history",
+      "GET  /v2/feed/wins", "GET  /v2/feed/activity", "GET  /v2/strategies", "GET  /v2/leaderboard",
+      "GET  /v2/pnl/:id", "GET  /v2/stats", "GET  /v2/makers", "GET  /v2/makers/:address",
+      "GET  /v2/fair/:longId",
       "GET  /v1/vault",
       "GET  /v1/cycles",
       "GET  /v1/cycles/:cycle",
@@ -1169,6 +1656,10 @@ app.get("/", (c) =>
       "GET  /v1/listings/:hash",
       "GET  /v1/strands",
       "GET  /v1/snapshots",
+      "GET  /v1/market",
+      "GET  /v1/market/weeks",
+      "GET  /v1/market/fills",
+      "GET  /v1/market/accounts/:address",
       "GET  /v1/health",
       "POST /graphql",
     ],

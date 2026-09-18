@@ -119,6 +119,18 @@ RUN mkdir -p /data && chown node:node /data
 
 COPY --from=builder --chown=node:node /out ./
 
+# The market registry the v2 modes read at boot (V2_REGISTRY_PATH=/app/ops/markets/tier1.json in
+# ops/v2/env/*.env). Last, so a registry-only change rebuilds one layer. The v1 keeper never reads it.
+#
+# WHICH registry, and why this is an ARG. Production bakes ops/markets/tier1.json and nothing else;
+# leaving V2_REGISTRY_FILE at its default cannot pick up a development registry by accident.
+# A separate private development build may supply another registry in its own build context and
+# set V2_REGISTRY_FILE and V2_REGISTRY_PATH together. A missing file fails COPY at build time.
+ARG V2_REGISTRY_FILE=tier1.json
+COPY --chown=node:node ops/markets/${V2_REGISTRY_FILE} ./ops/markets/${V2_REGISTRY_FILE}
+# The external monitor (ops/deploy.md §15.12): one dependency-free script that loads viem from /app/node_modules.
+COPY --chown=node:node ops/v2/monitor.mjs ./ops/v2/monitor.mjs
+
 USER node
 
 # Railway owns the volume (UI mount at /data). A Dockerfile VOLUME instruction is rejected:

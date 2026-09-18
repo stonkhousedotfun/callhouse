@@ -7,10 +7,21 @@ import { getAddress, isAddress, type Address } from "viem";
  * `eth_getCode` on chain 4663 during recon (see ops/recon/). They are still overridable by
  * env so a fork or a dry-run deployment can point somewhere else without a code change.
  *
- * Two values have no safe default and are therefore required:
- *   VAULT_ADDRESS  — the vault does not exist until we deploy it.
- *   START_BLOCK    — chain 4663 is past block 61,000,000. Scanning from genesis is hours of
- *                    `eth_getLogs` for a contract that did not exist for any of it.
+ * A legacy deployment indexes one product, named by whichever of these two is set (both may be):
+ *   VAULT_ADDRESS    — the pooled vault (closed to new markets; the NVDA deployment keeps it).
+ *   FACTORY_ADDRESS  — a factory market: an `AccountFactory` and the `WriterAccount` clones it
+ *                      creates (contracts/src/solo/). One process per market, per the Tier 1
+ *                      plan; there is no multi-market indexer. `MARKET` is the ticker label the
+ *                      API publishes beside it.
+ * V2_CLEARINGHOUSE enables one v2 source group for all v2 markets. It can run alongside either
+ * legacy product, or on its own. The other four v2 addresses and V2_START_BLOCK are required
+ * with it. Without any V2_* vars, the legacy configuration behaves as before.
+ *
+ * Required for either legacy product:
+ *   START_BLOCK      — chain 4663 is past block 61,000,000. Scanning from genesis is hours of
+ *                      `eth_getLogs` for a contract that did not exist for any of it. For a
+ *                      factory market it is that market's `deployment.deployBlock` in
+ *                      ops/markets/tier1.json.
  *
  * There is no registry and no Overcall here. The redesigned vault (contracts branch
  * redesign/a2-own-strikes-2026-09-13) numbers its own cycles and reads the option tuple from the
@@ -68,42 +79,174 @@ function blockNumber(name: string, fallback?: number): number {
 }
 
 /**
- * RPC. It must serve historical state: during backfill the handlers `eth_call` the vault at past
- * blocks, not only `eth_getLogs`. rpc.mainnet.chain.robinhood.com answers "metadata is not found"
- * on a historical `eth_call` (a backfill against it stalled at 0% on 2026-09-15), and the
- * publicnode backup answers "Archive requests require a personal token". Production uses a keyed
- * Alchemy endpoint.
+ * RPC. A VAULT deployment needs an archive endpoint: during backfill the vault handlers
+ * `eth_call` the vault at past blocks, not only `eth_getLogs`, and
+ * rpc.mainnet.chain.robinhood.com answers "historical state ... is not available" on a
+ * historical `eth_call` (a vault backfill against it stalled at 0% on 2026-09-15), while the
+ * publicnode backup answers "Archive requests require a personal token". A FACTORY market's
+ * handlers are log-only and backfill on the public RPC; the one thing that wants the archive
+ * there is the optional `Factory:setup` read of the constructor-set settings at START_BLOCK,
+ * and without it those stay unverified on `/v1/market` (README "Factory markets"). Production
+ * uses a keyed Alchemy endpoint.
  */
 export const RPC_URL =
   env("PONDER_RPC_URL_4663") ??
   requireEnv(
     "PONDER_RPC_URL_4663",
     "Set it to an archive RPC for chain 4663 that serves historical eth_call and eth_getLogs " +
-      "(production uses https://robinhood-mainnet.g.alchemy.com/v2/<key>). " +
-      "rpc.mainnet.chain.robinhood.com answers 'metadata is not found' on historical eth_call, and " +
-      "the publicnode backup answers 'Archive requests require a personal token'; neither can backfill.",
+      "(production uses https://robinhood-mainnet.g.alchemy.com/v2/<key>). A VAULT deployment " +
+      "cannot backfill without one: the public RPC answers 'historical state ... is not available' " +
+      "on a historical eth_call. A FACTORY market backfills logs on the public RPC and wants the " +
+      "archive only for the optional Factory:setup settings read.",
   );
 
-/** Our vault. The Seaport offerer AND zone, the Valorem writer, the ERC-20 whose shares we track. */
-export const VAULT: Address = (() => {
-  const raw = env("VAULT_ADDRESS") ?? env("VAULT");
-  if (raw === undefined) {
-    throw new Error(
-      "[callhouse/indexer] Missing required env var VAULT_ADDRESS (alias: VAULT). " +
-        "Set it to the deployed Stonkhouse vault on chain 4663.",
-    );
-  }
+/** An address env var with an alias and no default: undefined when neither name is set. */
+function optionalAddress(name: string, alias?: string): Address | undefined {
+  const raw = env(name) ?? (alias === undefined ? undefined : env(alias));
+  if (raw === undefined) return undefined;
   if (!isAddress(raw)) {
-    throw new Error(`[callhouse/indexer] VAULT_ADDRESS="${raw}" is not a valid address.`);
+    throw new Error(`[callhouse/indexer] ${name}="${raw}" is not a valid address.`);
   }
   return getAddress(raw);
+}
+
+/**
+ * Our pooled vault: the Seaport offerer AND zone, the Valorem writer, the ERC-20 whose shares we
+ * track. Undefined on a factory-only deployment, where none of the vault sources is registered
+ * (ponder.config.ts), none of the vault handlers is (lib/registry.ts), and every `/v1/vault*`
+ * route answers 404 `{configured: false}`.
+ */
+export const VAULT: Address | undefined = optionalAddress("VAULT_ADDRESS", "VAULT");
+
+/**
+ * A factory market's `AccountFactory`. Its `WriterAccount` clones are discovered from
+ * `AccountCreated` (Ponder's factory address pattern), so nothing else about the market needs
+ * configuring: the asset, the feed and the policy are the factory's own views, read once at
+ * setup. Undefined on a vault-only deployment (the NVDA vault as deployed today), where the
+ * `/v1/market*` routes answer 404 `{configured: false}`.
+ */
+export const FACTORY: Address | undefined = optionalAddress("FACTORY_ADDRESS", "FACTORY");
+
+/** V2 is a single Clearinghouse that contains every market. No address has a default. */
+export const V2_CLEARINGHOUSE: Address | undefined = optionalAddress("V2_CLEARINGHOUSE");
+
+function v2Address(name: string): Address | undefined {
+  const raw = env(name);
+  if (V2_CLEARINGHOUSE === undefined) {
+    if (raw !== undefined) {
+      throw new Error(`[callhouse/indexer] ${name} is set without V2_CLEARINGHOUSE.`);
+    }
+    return undefined;
+  }
+  if (raw === undefined) {
+    throw new Error(`[callhouse/indexer] Missing required address env var ${name} when V2_CLEARINGHOUSE is set.`);
+  }
+  if (!isAddress(raw)) {
+    throw new Error(`[callhouse/indexer] ${name}="${raw}" is not a valid address.`);
+  }
+  return getAddress(raw);
+}
+
+export const V2_ORDER_BOOK: Address | undefined = v2Address("V2_ORDER_BOOK");
+export const V2_SETTLEMENT_ORACLE: Address | undefined = v2Address("V2_SETTLEMENT_ORACLE");
+export const V2_AUTO_ROLLER: Address | undefined = v2Address("V2_AUTO_ROLLER");
+export const V2_MAKER_REGISTRY: Address | undefined = v2Address("V2_MAKER_REGISTRY");
+
+/** Optional v2 periphery sources. A five-address deployment remains valid without either. */
+function optionalV2Address(name: string): Address | undefined {
+  const raw = env(name);
+  if (V2_CLEARINGHOUSE === undefined) {
+    if (raw !== undefined) throw new Error(`[callhouse/indexer] ${name} is set without V2_CLEARINGHOUSE.`);
+    return undefined;
+  }
+  if (raw === undefined) return undefined;
+  if (!isAddress(raw)) throw new Error(`[callhouse/indexer] ${name}="${raw}" is not a valid address.`);
+  return getAddress(raw);
+}
+
+export const V2_EXPIRY_CALENDAR: Address | undefined = optionalV2Address("V2_EXPIRY_CALENDAR");
+export const V2_KEEPER_REWARDS: Address | undefined = optionalV2Address("V2_KEEPER_REWARDS");
+
+/** V2 deployment block. A genesis scan is never an acceptable implicit default. */
+export const V2_START_BLOCK: number | undefined = (() => {
+  if (V2_CLEARINGHOUSE !== undefined) return blockNumber("V2_START_BLOCK");
+  if (env("V2_START_BLOCK") !== undefined) {
+    throw new Error("[callhouse/indexer] V2_START_BLOCK is set without V2_CLEARINGHOUSE.");
+  }
+  return undefined;
 })();
+
+/** Optional pricing service used by v2 quote and card routes. */
+export const PRICING_URL: string | undefined = (() => {
+  const raw = env("PRICING_URL");
+  if (raw === undefined) return undefined;
+  // A legacy-only process has never interpreted this variable; keep that boot path unchanged.
+  if (V2_CLEARINGHOUSE === undefined) return raw;
+  let url: URL;
+  try {
+    url = new URL(raw);
+  } catch {
+    throw new Error(`[callhouse/indexer] PRICING_URL="${raw}" is not a valid URL.`);
+  }
+  if (url.protocol !== "http:" && url.protocol !== "https:") {
+    throw new Error("[callhouse/indexer] PRICING_URL must use http or https.");
+  }
+  return url.toString().replace(/\/$/, "");
+})();
+
+if (VAULT === undefined && FACTORY === undefined && V2_CLEARINGHOUSE === undefined) {
+  throw new Error(
+    "[callhouse/indexer] Set VAULT_ADDRESS (alias: VAULT) for the pooled vault, FACTORY_ADDRESS " +
+      "(alias: FACTORY) for a factory market, V2_CLEARINGHOUSE for v2, or a combination. None is set. For a factory market use " +
+      "ops/markets/tier1.json → deployment.factory, with START_BLOCK = deployment.deployBlock and " +
+      "MARKET = the ticker.",
+  );
+}
+
+/**
+ * The ticker the factory market is published under (`/v1/market.ticker`, `/v1/health.market`).
+ * A label only: nothing is derived from it. Defaults to NVDA, the one live market, so the
+ * existing deployment's env needs no new variable.
+ */
+export const MARKET: string = env("MARKET") ?? "NVDA";
+
+// The NVDA default exists so the one live market's env needs no variable; on any other market it
+// is silently wrong, so say so at boot rather than let an AAPL deployment publish ticker NVDA.
+if (FACTORY !== undefined && env("MARKET") === undefined) {
+  console.warn(
+    "[callhouse/indexer] FACTORY_ADDRESS is set and MARKET is not: every payload publishes " +
+      "ticker NVDA, the default. Set MARKET to this market's ticker.",
+  );
+}
+
+/**
+ * What src/vault.ts and src/seaport.ts bind their module-scope `VAULT` to when VAULT_ADDRESS is
+ * unset. Ponder loads every file under src/ on every deployment, and those two read the address
+ * at module scope; with their handlers unregistered (lib/registry.ts) the value is never used.
+ * The zero address is chosen because nothing on chain can ever match it.
+ */
+export const ZERO_ADDRESS_PLACEHOLDER: Address = "0x0000000000000000000000000000000000000000";
+
+/**
+ * The vault address for code that cannot run without one: the vault handlers' shared reducers
+ * and the API's live vault reads. Both are reached only on a vault deployment (the handlers are
+ * not registered and the routes answer 404 otherwise), so the throw is a programming error, not
+ * a configuration one; it exists so a mistake fails loudly instead of indexing under a wrong key.
+ */
+export function vaultAddress(): Address {
+  if (VAULT === undefined) {
+    throw new Error("[callhouse/indexer] vault code path reached with VAULT_ADDRESS unset");
+  }
+  return VAULT;
+}
 
 /**
  * The Valorem clearinghouse the vault was constructed with. A deploy-time choice (decision D16):
  * the default is the exact upstream build on chain 4663 (valorem-core @6436c823, solc 0.8.16);
  * a vault deployed against our own `DeployClear.s.sol` instance overrides it. `Vault.clear()`
- * is the authority; ops/addresses.json records which one a deployment used.
+ * is the authority; ops/addresses.json records which one a deployment used. VAULT-ONLY: a
+ * factory market's own Clear is read from the factory at setup (src/factory.ts) and the
+ * `/v1/market*` payloads publish that, never this default.
  */
 export const CLEARINGHOUSE = address(
   "CLEARINGHOUSE",
@@ -119,7 +262,11 @@ export const SEAPORT = address(
 /** USDG. 6 decimals. The exercise asset and the premium currency. */
 export const USDG = address("USDG", getAddress("0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168"));
 
-/** NVDA Stock Token. 18 decimals, upgradeable proxy, exposes uiMultiplier() and oraclePaused(). */
+/**
+ * NVDA Stock Token. 18 decimals, upgradeable proxy, exposes uiMultiplier() and oraclePaused().
+ * VAULT-ONLY: a factory market's own asset is read from the factory at setup (src/factory.ts)
+ * and the `/v1/market*` payloads publish that, never this default.
+ */
 export const ASSET = address("ASSET", getAddress("0xd0601CE157Db5bdC3162BbaC2a2C8aF5320D9EEC"));
 
 /**
@@ -137,8 +284,10 @@ export const MULTICALL3 = address(
   getAddress("0xcA11bde05977b3631167028862bE2a173976CA11"),
 );
 
-/** First block to scan for vault events. Required: see the module docblock. */
-export const START_BLOCK = blockNumber("START_BLOCK");
+/** First block for legacy events; v2-only mode leaves the unused legacy value at its v2 block. */
+export const START_BLOCK = VAULT !== undefined || FACTORY !== undefined
+  ? blockNumber("START_BLOCK")
+  : V2_START_BLOCK!;
 
 /**
  * Optional last block to index, inclusive. Unset means "follow the head forever", which is

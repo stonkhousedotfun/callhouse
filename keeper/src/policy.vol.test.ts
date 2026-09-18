@@ -1,5 +1,5 @@
 /**
- * planWeek and priceListing in vol mode, on the real Cboe chain of 2026-09-14.
+ * planWeek and priceListing in vol mode, on a deterministic synthetic options chain.
  *
  * WHY THIS FILE EXISTS: vol mode moves the strike and the ask off the vault's own arithmetic and
  * onto market data, and the vault does not care. Everything the vault checks must still hold on
@@ -13,7 +13,7 @@
  * DELIBERATELY ABSENT: no RPC, no HTTP. The chain is the fixture, handed in as a VolContext.
  */
 import assert from 'node:assert/strict';
-import { mkdtempSync, readFileSync } from 'node:fs';
+import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
@@ -53,7 +53,7 @@ const {
   withPremiumMargin,
   withPriceEdge,
 } = await import('./policy.js');
-const { parseCboeChain } = await import('./vol.js');
+const { syntheticNvdaChain } = await import('./fixtures/synthetic-chains.js');
 type PolicyParams = import('./policy.js').PolicyParams;
 type PlanInput = import('./policy.js').PlanInput;
 type VolContext = import('./vol.js').VolContext;
@@ -71,10 +71,10 @@ const LAUNCH: PolicyParams = {
   maxContractsCap: 50n,
 };
 const LOT = 1_000_000_000_000_000_000n;
-const CHAIN = parseCboeChain(JSON.parse(readFileSync(new URL('./fixtures/cboe-nvda-2026-09-14.json', import.meta.url), 'utf8')));
-/** Tuesday 2026-09-15 08:30 UTC: the chain is 12.5 h old. */
+const CHAIN = syntheticNvdaChain();
+/** Tuesday 2026-09-15 08:30 UTC: the synthetic chain is recent enough for Monday's session. */
 const NOW = Date.UTC(2026, 8, 15, 8, 30, 0) / 1000;
-/** The vault's token spot beside the fixture's 212.0404 share close (the ~8 bps multiplier). */
+/** The vault's token spot beside the synthetic share close. */
 const SPOT = 212_210_000n;
 
 function ctx(overrides: Partial<VolContext> = {}): VolContext {
@@ -131,55 +131,55 @@ function assertVaultGates(p: ReturnType<typeof plan>, spot: bigint, marginBps = 
                             HAPPY PATHS
 //////////////////////////////////////////////////////////////*/
 
-test('vol mode, 25 Sep: strike at delta 0.15 (225), ask = fair 0.860864 + 10% edge, above the floor; every vault gate holds', () => {
+test('vol mode, 25 Sep: synthetic 0.15-delta strike and fair plus 10% edge pass every vault gate', () => {
   const p = plan();
   assertVaultGates(p, SPOT);
   assert.ok(p.ok);
-  assert.equal(p.strikeUsdg6, 225_000_000n);
+  assert.equal(p.strikeUsdg6, 231_000_000n);
   assert.equal(p.contracts, 23n);
   assert.equal(p.floorUnit6, 848_840n, 'ceil(212.21 x 40 bps)');
-  // ceil(860864 x 11000 / 10000) = ceil(946950.4) = 946951 > ceil(848840 x 1.01) = 857329.
-  assert.equal(p.unitPrice6, 946_951n);
-  assert.equal(p.unitPrice6, withPriceEdge(860_864n, 1000));
+  // The synthetic Black–Scholes fair exceeds the floor, so the edge sets the ask.
+  assert.equal(p.unitPrice6, 1_365_843n);
+  assert.equal(p.unitPrice6, withPriceEdge(1_241_675n, 1000));
   assert.equal(p.priceSource, 'vol-fair');
-  assert.equal(p.gross6, 946_951n * 23n);
+  assert.equal(p.gross6, 1_365_843n * 23n);
 
   const r = p.pricing;
   assert.equal(r.mode, 'vol');
   assert.equal(r.source, 'cboe-delayed');
   assert.equal(r.volPath, 'fresh');
   assert.equal(r.targetDelta, 0.15);
-  assert.ok(r.deltaAtStrike !== null && Math.abs(r.deltaAtStrike - 0.1464) < 1e-3, 'Cboe delta at the armed strike');
-  assert.ok(r.ivAtStrike !== null && Math.abs(r.ivAtStrike - 0.3266) < 1e-3);
-  assert.equal(r.strikeUsdg6, '225000000');
-  assert.equal(r.strikeOtmBps, 602, '(225 - 212.21) / 212.21 = 6.027%');
-  assert.equal(r.deltaStrikeUsdg6, '225000000');
+  assert.ok(r.deltaAtStrike !== null && Math.abs(r.deltaAtStrike - 0.15) < 0.01, 'synthetic delta at the armed strike');
+  assert.equal(r.ivAtStrike, 0.43, 'the synthetic constant-vol recipe');
+  assert.equal(r.strikeUsdg6, '231000000');
+  assert.equal(r.strikeOtmBps, 885, '(231 - 212.21) / 212.21, truncated');
+  assert.equal(r.deltaStrikeUsdg6, '231000000');
   assert.equal(r.strikeClamped, null);
   assert.equal(r.bandBufferBps, 50);
-  assert.equal(r.fairUnit6, '860864');
-  assert.equal(r.volUnit6, '946951');
+  assert.equal(r.fairUnit6, '1241675');
+  assert.equal(r.volUnit6, '1365843');
   assert.equal(r.floorUnit6, '848840');
   assert.equal(r.marginUnit6, '857329');
-  assert.equal(r.unitPrice6, '946951');
+  assert.equal(r.unitPrice6, '1365843');
   assert.equal(r.edgeBps, 1000);
   assert.equal(r.marginBps, 100);
-  assert.equal(r.shareSpot, 212.0404);
+  assert.equal(r.shareSpot, 212.35);
   assert.equal(r.tokenSpot, 212.21);
   assert.equal(r.spotUsdg6, '212210000');
   assert.equal(r.expiry, '2026-09-25');
-  assert.equal(r.chainTimestamp, '2026-09-15 05:57:42');
+  assert.equal(r.chainTimestamp, '2026-09-15 05:45:00');
   assert.equal(r.lastTradeTime, '2026-09-14T15:59:59');
   assert.doesNotThrow(() => JSON.stringify(r), 'the record is plain JSON: it is what the database stores');
 });
 
-test('vol mode, 18 Sep: four days out the market pays less than the vault floor, so the floor with the margin is the ask', () => {
-  const p = plan({ vol: ctx({ closeDay: '2026-09-18' }) });
+test('vol mode, 18 Sep: with no edge the synthetic fair is below the vault floor, so the floor sets the ask', () => {
+  const p = plan({ vol: ctx({ closeDay: '2026-09-18' }), priceEdgeBps: 0 });
   assertVaultGates(p, SPOT);
   assert.ok(p.ok);
-  assert.equal(p.strikeUsdg6, 220_000_000n);
-  assert.equal(p.pricing.fairUnit6, '655415');
-  assert.equal(p.pricing.volUnit6, '720957', 'ceil(655415 x 1.1)');
-  assert.equal(p.unitPrice6, 857_329n, 'max(857329, 720957)');
+  assert.equal(p.strikeUsdg6, 224_000_000n);
+  assert.equal(p.pricing.fairUnit6, '852158');
+  assert.equal(p.pricing.volUnit6, '852158', 'zero edge keeps the fair value');
+  assert.equal(p.unitPrice6, 857_329n, 'max(857329, 852158)');
   assert.equal(p.priceSource, 'fill-floor');
   assert.equal(p.pricing.volPath, 'fresh', 'still priced on fresh data; the floor merely binds');
 });
@@ -187,17 +187,17 @@ test('vol mode, 18 Sep: four days out the market pays less than the vault floor,
 test('the knobs move what they should: a higher delta is a lower strike, a zero edge is the fair value itself', () => {
   const d25 = plan({ targetDelta: 0.25 });
   assertVaultGates(d25, SPOT);
-  assert.equal((d25 as { strikeUsdg6: bigint }).strikeUsdg6, 220_000_000n, '0.25 on 25 Sep: 219.94 x 1.0008 -> 220');
+  assert.equal((d25 as { strikeUsdg6: bigint }).strikeUsdg6, 224_000_000n, 'higher delta selects the lower synthetic strike');
   const flat = plan({ priceEdgeBps: 0 });
   assertVaultGates(flat, SPOT);
-  assert.equal((flat as { unitPrice6: bigint }).unitPrice6, 860_864n);
+  assert.equal((flat as { unitPrice6: bigint }).unitPrice6, 1_241_675n);
   // A bigger margin can out-bid the market: the floor term wins and says so.
-  const wide = plan({ premiumMarginBps: 1000 });
-  assertVaultGates(wide, SPOT, 1000);
-  assert.equal((wide as { unitPrice6: bigint }).unitPrice6, 946_951n, 'ceil(848840 x 1.1) = 933724 < 946951');
-  const wider = plan({ premiumMarginBps: 1000, priceEdgeBps: 500 });
+  const wide = plan({ premiumMarginBps: 7000 });
+  assertVaultGates(wide, SPOT, 7000);
+  assert.equal((wide as { unitPrice6: bigint }).unitPrice6, 1_443_028n, 'ceil(848840 x 1.7) exceeds the market ask');
+  const wider = plan({ premiumMarginBps: 6000, priceEdgeBps: 500 });
   assert.equal((wider as { priceSource: string }).priceSource, 'fill-floor');
-  assert.equal((wider as { unitPrice6: bigint }).unitPrice6, 933_724n);
+  assert.equal((wider as { unitPrice6: bigint }).unitPrice6, 1_358_144n);
 });
 
 /*//////////////////////////////////////////////////////////////
@@ -223,28 +223,27 @@ test('clampStrikeToBand: whole USDG, buffered floor, buffered ceiling, both dire
 });
 
 test('vol mode clamps a delta strike under the buffered band floor UP, and records it', () => {
-  // 0.40 on 18 Sep: between 212.5 (0.4437) and 215 (0.3297) -> 213.46 share -> 213.63 -> 214, which
-  // is under the vault's 3% floor. Clamped to 220 and priced at 220's fair value.
+  // The synthetic 0.40-delta strike rounds to 215, below the buffered floor at 220.
   const p = plan({ vol: ctx({ closeDay: '2026-09-18' }), targetDelta: 0.4 });
   assertVaultGates(p, SPOT);
   assert.ok(p.ok);
   assert.equal(p.strikeUsdg6, 220_000_000n);
-  assert.equal(p.pricing.deltaStrikeUsdg6, '214000000');
+  assert.equal(p.pricing.deltaStrikeUsdg6, '215000000');
   assert.equal(p.pricing.strikeClamped, 'band-floor');
-  assert.equal(p.pricing.fairUnit6, '655415', 'the fair value of the strike actually armed, not the delta strike');
+  assert.equal(p.pricing.fairUnit6, '1541117', 'the fair value of the strike actually armed, not the delta strike');
   assert.ok(p.pricing.deltaAtStrike !== null && p.pricing.deltaAtStrike < 0.4, 'the armed delta is shown honestly');
 });
 
 test('vol mode clamps a delta strike over the band ceiling DOWN, and records it', () => {
-  // A 10% ceiling less the 50 bps arm buffer: 212.21 x 1.095 = 232.37 -> 232. 0.05 on 25 Sep:
-  // 234.51 share -> 234.69 -> 235.
+  // A 10% ceiling less the 50 bps arm buffer: 212.21 x 1.095 = 232.37 -> 232.
+  // The synthetic 0.05-delta strike lies well above it.
   const tight: PolicyParams = { ...LAUNCH, maxOtmBps: 1000n };
   const p = plan({ policy: tight, targetDelta: 0.05 });
   assert.ok(p.ok, reason(p));
   const { lo, hi } = strikeBand(SPOT, tight);
   assert.ok(p.strikeUsdg6 >= lo && p.strikeUsdg6 <= hi);
   assert.equal(p.strikeUsdg6, 232_000_000n);
-  assert.equal(p.pricing.deltaStrikeUsdg6, '235000000');
+  assert.equal(p.pricing.deltaStrikeUsdg6, '242000000');
   assert.equal(p.pricing.strikeClamped, 'band-ceiling');
   assert.ok(p.unitPrice6 <= p.strikeUsdg6);
   // With no room at all between the buffered floor and the ceiling: strike-outside-band.
@@ -273,18 +272,18 @@ test('every way the market data can fail is a named skip, never a fall back to t
   const noBids = { ...CHAIN, options: CHAIN.options.map((o) => ({ ...o, bid: 0 })) };
   assert.equal(reason(plan({ vol: ctx({ chain: noBids }) })), 'vol-no-quotes');
   const diverged = plan({ spotUsdg6: 219_000_000n });
-  assert.equal(reason(diverged), 'vol-spot-divergence', '219.00 token against a 212.04 share: 328 bps');
-  assert.equal(!diverged.ok && diverged.detail.divergenceBps, '328.2');
+  assert.equal(reason(diverged), 'vol-spot-divergence', '219.00 token against a 212.35 share exceeds 300 bps');
+  assert.equal(!diverged.ok && diverged.detail.divergenceBps, '313.2');
   assert.equal(reason(plan({ targetDelta: 0.001 })), 'vol-delta-out-of-range');
-  // Quotes only between 212.5 and 217.5 on 25 Sep: 0.35 lands inside them (216.41 share -> 217),
-  // the clamp lifts it to 220, and 220 is past the last quote: no market price for the armed strike.
+  // Quotes only between 212.5 and 217.5 on 25 Sep: the 0.40-delta target lands inside,
+  // but the clamp lifts the strike to 220, past the last quote.
   const narrow = { ...CHAIN, options: CHAIN.options.filter((o) => o.strike >= 212.5 && o.strike <= 217.5) };
-  const unquoted = plan({ vol: ctx({ chain: narrow }), targetDelta: 0.35 });
+  const unquoted = plan({ vol: ctx({ chain: narrow }), targetDelta: 0.4 });
   assert.equal(reason(unquoted), 'vol-strike-unquoted');
   assert.equal(!unquoted.ok && unquoted.detail.strikeUsdg6, '220000000');
   // And the vault's own refusals keep their names in vol mode.
   assert.equal(reason(plan({ spotUsdg6: 0n })), 'spot-zero');
-  assert.equal(reason(plan({ unitPriceOverride6: 226_000_000n })), 'premium-above-strike');
+  assert.equal(reason(plan({ unitPriceOverride6: 232_000_000n })), 'premium-above-strike');
 });
 
 test('no capacity is decided before any market data is needed', () => {
@@ -315,24 +314,23 @@ test('a manual override in vol mode can only raise the ask, and never arms or li
   assert.ok(high.ok);
   assert.equal(high.unitPrice6, 2_000_000n);
   assert.equal(high.priceSource, 'manual-override');
-  assert.equal(high.pricing.fairUnit6, '860864', 'the market figures are still recorded beside it');
-  // Under the owner's rule the override does not undercut it: not the bare floor (848840), not the
-  // margin (857329), not the market-based ask (946951).
-  for (const override of [20n, 850_000n, 946_950n]) {
+  assert.equal(high.pricing.fairUnit6, '1241675', 'the synthetic market figures are still recorded beside it');
+  // The override cannot undercut the bare floor, margin, or market-based ask.
+  for (const override of [20n, 850_000n, 1_365_842n]) {
     const low = plan({ unitPriceOverride6: override });
     assert.ok(low.ok);
-    assert.equal(low.unitPrice6, 946_951n, `override ${override} is lifted to max(margin, fair with the edge)`);
+    assert.equal(low.unitPrice6, 1_365_843n, `override ${override} is lifted to max(margin, fair with the edge)`);
     assert.equal(low.priceSource, 'vol-fair');
   }
   // A strike the market does not quote is a skip with or without an override (the same unquoted
   // chain as the skip-reason test).
   const narrow = { ...CHAIN, options: CHAIN.options.filter((o) => o.strike >= 212.5 && o.strike <= 217.5) };
-  assert.equal(reason(plan({ vol: ctx({ chain: narrow }), targetDelta: 0.35, unitPriceOverride6: 900_000n })), 'vol-strike-unquoted');
+  assert.equal(reason(plan({ vol: ctx({ chain: narrow }), targetDelta: 0.4, unitPriceOverride6: 900_000n })), 'vol-strike-unquoted');
   assert.equal(reason(plan({ vol: ctx({ chain: null, error: 'down' }), unitPriceOverride6: 900_000n })), 'vol-unavailable');
   // A reprice with the feed dark and an override: still floored at the previous market-based ask...
   const dark = reprice({ vol: ctx({ chain: null, error: 'down' }), unitPriceOverride6: 900_000n });
   assert.ok(dark.ok);
-  assert.equal(dark.unitPrice6, 946_951n);
+  assert.equal(dark.unitPrice6, 1_365_843n);
   assert.equal(dark.priceSource, 'vol-previous-fair');
   // ...and refused with no fair value at all, rather than listed at the override.
   assert.equal(reason(reprice({ vol: ctx({ chain: null, error: 'down' }), previousFairUnit6: null, unitPriceOverride6: 900_000n })), 'vol-unavailable');
@@ -347,7 +345,7 @@ test('a manual override in vol mode can only raise the ask, and never arms or li
                              REPRICES
 //////////////////////////////////////////////////////////////*/
 
-const ARMED = 225_000_000n;
+const ARMED = 231_000_000n;
 
 function reprice(overrides: Partial<Parameters<typeof priceListing>[0]> = {}) {
   return priceListing({
@@ -358,8 +356,8 @@ function reprice(overrides: Partial<Parameters<typeof priceListing>[0]> = {}) {
     feesEnabled: false,
     feeBps: 15,
     vol: ctx(),
-    previousFairUnit6: 860_864n,
-    strikeContext: { targetDelta: 0.15, deltaStrikeUsdg6: '225000000', strikeClamped: null, bandBufferBps: 50 },
+    previousFairUnit6: 1_241_675n,
+    strikeContext: { targetDelta: 0.15, deltaStrikeUsdg6: '231000000', strikeClamped: null, bandBufferBps: 50 },
     pricingMode: 'vol',
     priceEdgeBps: 1000,
     premiumMarginBps: 100,
@@ -377,12 +375,12 @@ test('a reprice with fresh data uses the same formula at the armed strike, after
   assert.ok(p.ok, reason(p));
   assert.equal(p.pricing.volPath, 'fresh');
   assert.equal(p.priceSource, 'vol-fair');
-  assert.ok(p.fairUnit6 !== null && p.fairUnit6 > 860_864n, 'a higher fair value at a higher spot');
+  assert.ok(p.fairUnit6 !== null && p.fairUnit6 > 1_241_675n, 'a higher fair value at a higher spot');
   assert.equal(p.unitPrice6, withPriceEdge(p.fairUnit6, 1000));
   assert.ok(p.unitPrice6 >= withPremiumMargin(fillFloorUnit6(rallied, 16n, LAUNCH, false, 15), 100));
   assert.equal(p.pricing.strikeClamped, null, 'the arm’s strike context is carried');
-  assert.equal(p.pricing.deltaStrikeUsdg6, '225000000');
-  assert.equal(p.pricing.strikeUsdg6, '225000000');
+  assert.equal(p.pricing.deltaStrikeUsdg6, '231000000');
+  assert.equal(p.pricing.strikeUsdg6, '231000000');
 });
 
 test('a reprice without fresh data never drops below the last market-based ask', () => {
@@ -393,17 +391,17 @@ test('a reprice without fresh data never drops below the last market-based ask',
   ] as const) {
     const p = reprice({ vol });
     assert.ok(p.ok, `${why}: ${reason(p)}`);
-    assert.equal(p.unitPrice6, 946_951n, `${why}: ceil(860864 x 1.1), the ask the arm listed at`);
+    assert.equal(p.unitPrice6, 1_365_843n, `${why}: ceil(1241675 x 1.1), the ask the arm listed at`);
     assert.equal(p.priceSource, 'vol-previous-fair');
     assert.equal(p.pricing.volPath, 'previous-fair');
     assert.equal(p.pricing.volUnavailableReason, why);
-    assert.equal(p.pricing.fairUnit6, '860864', 'carried, so a second fallback carries it again');
+    assert.equal(p.pricing.fairUnit6, '1241675', 'carried, so a second fallback carries it again');
     assert.equal(p.pricing.expiry, null, 'no market figures are invented for a fetch that did not happen');
   }
   // The floor still wins when it is higher: a big rally with the feed dark.
-  const rally = reprice({ vol: ctx({ chain: null, error: 'down' }), spotUsdg6: 240_000_000n, strikeUsdg6: 250_000_000n });
+  const rally = reprice({ vol: ctx({ chain: null, error: 'down' }), spotUsdg6: 350_000_000n, strikeUsdg6: 380_000_000n });
   assert.ok(rally.ok);
-  assert.equal(rally.unitPrice6, withPremiumMargin(960_000n, 100), 'ceil(240 x 40 bps) x 1.01 = 969600 > 946951');
+  assert.equal(rally.unitPrice6, withPremiumMargin(1_400_000n, 100), '350 x 40 bps with margin exceeds the previous ask');
   assert.equal(rally.priceSource, 'fill-floor');
   assert.equal(rally.pricing.volPath, 'previous-fair');
   // Neither fresh data nor a previous fair value: refused, with the data's reason.
@@ -418,8 +416,8 @@ test('stored records: the fair value and the strike context read back, garbage r
   const p = plan();
   assert.ok(p.ok);
   const json = JSON.stringify(p.pricing);
-  assert.equal(storedFairUnit6(json), 860_864n);
-  assert.deepEqual(storedStrikeContext(json), { targetDelta: 0.15, deltaStrikeUsdg6: '225000000', strikeClamped: null, bandBufferBps: 50 });
+  assert.equal(storedFairUnit6(json), 1_241_675n);
+  assert.deepEqual(storedStrikeContext(json), { targetDelta: 0.15, deltaStrikeUsdg6: '231000000', strikeClamped: null, bandBufferBps: 50 });
   for (const bad of [null, undefined, '', 'not json', '[]', '{"fairUnit6": 860864}', '{"fairUnit6": "-5"}', '{"fairUnit6": "0"}', '{"fairUnit6": "1e9"}']) {
     assert.equal(storedFairUnit6(bad), null, `refuses ${String(bad)}`);
   }
@@ -455,43 +453,43 @@ test('a gapped strike grid is refused, not interpolated across: the strike is fi
 });
 
 test('quotes that are arbitrageable around the bracket are refused: an inverted quote, a non-convex one', () => {
-  // 225 at 4.90/5.10 while 222.5 is 1.17/1.20: the old rule armed 225 at an ask of 5.20.
-  const inverted = editCalls('2026-09-25', (o) => (o.strike === 225 ? { bid: 4.9, ask: 5.1 } : null));
+  // The target lies in the 230/232.5 bracket. A 232.5 bid above 230's ask is a credit call spread.
+  const inverted = editCalls('2026-09-25', (o) => (o.strike === 232.5 ? { bid: 4.9, ask: 5.1 } : null));
   const p = plan({ vol: ctx({ chain: inverted }) });
   assert.equal(reason(p), 'vol-inconsistent');
   assert.match(!p.ok ? p.detail.why ?? '' : '', /bid above a lower strike/);
-  // 225 at 1.10/1.12: under 222.5's ask, but above the chord of 222.5 and 227.5 (0.905).
-  const bulge = editCalls('2026-09-25', (o) => (o.strike === 225 ? { bid: 1.1, ask: 1.12 } : null));
+  // 230 at 1.60/1.62: below 227.5's ask (1.80), but above the 227.5/232.5 chord (1.445).
+  const bulge = editCalls('2026-09-25', (o) => (o.strike === 230 ? { bid: 1.6, ask: 1.62 } : null));
   const b = plan({ vol: ctx({ chain: bulge }) });
   assert.equal(reason(b), 'vol-inconsistent');
   assert.match(!b.ok ? b.detail.why ?? '' : '', /convex/);
   // A reprice on such a chain does not take its fair value: it falls back to the last market-based one.
   const r = reprice({ vol: ctx({ chain: inverted }) });
   assert.ok(r.ok, reason(r));
-  assert.equal(r.unitPrice6, 946_951n);
+  assert.equal(r.unitPrice6, 1_365_843n);
   assert.equal(r.pricing.volPath, 'previous-fair');
   assert.equal(r.pricing.volUnavailableReason, 'vol-inconsistent');
 });
 
 test('one corrupt in-the-money delta does not hand the strike to the first bracket', () => {
-  // 160's delta 0.9896 -> 0.12: the old loop took 155/160 and armed the band floor at delta 0.25.
-  const corrupt = editCalls('2026-09-25', (o) => (o.strike === 160 ? { delta: 0.12 } : null));
+  // 210's high synthetic delta -> 0.12, then 212.5 climbs back above the target.
+  const corrupt = editCalls('2026-09-25', (o) => (o.strike === 210 ? { delta: 0.12 } : null));
   const p = plan({ vol: ctx({ chain: corrupt }) });
   assert.equal(reason(p), 'vol-inconsistent');
   assert.match(!p.ok ? p.detail.why ?? '' : '', /climbs back above the target/);
 });
 
 test('an unclamped strike whose delta is far from the target is refused', () => {
-  // A steep synthetic chain: 220 at delta 0.40, 222.5 at 0.10. Target 0.24 interpolates to 221.33
-  // share, 221.51 token, rounded to 222, whose delta is 0.18: more than 0.05 off.
+  // A steep synthetic bracket can round to a whole-dollar armed strike whose interpolated delta
+  // is more than 0.05 away from the requested delta. That must be a skip, not a guessed strike.
   const rows: Array<[number, number, number]> = [
     [212.5, 0.7, 5.6],
     [215, 0.6, 4.0],
     [217.5, 0.5, 2.6],
-    [220, 0.4, 1.5],
-    [222.5, 0.1, 0.7],
-    [225, 0.08, 0.45],
-    [227.5, 0.06, 0.3],
+    [220, 0.5, 1.5],
+    [222.5, 0.05, 0.7],
+    [225, 0.04, 0.45],
+    [227.5, 0.03, 0.3],
   ];
   const steep = {
     ...CHAIN,
@@ -509,19 +507,19 @@ test('an unclamped strike whose delta is far from the target is refused', () => 
   const far = plan({ vol: ctx({ chain: steep }), targetDelta: 0.24 });
   assert.equal(reason(far), 'vol-inconsistent');
   assert.match(!far.ok ? far.detail.why ?? '' : '', /far from the target/);
-  // Target 0.30 rounds to 221, delta 0.301: armed.
+  // A nearby target whose armed delta remains within tolerance still gets a plan.
   const near = plan({ vol: ctx({ chain: steep }), targetDelta: 0.3 });
   assertVaultGates(near, SPOT);
-  assert.equal((near as { strikeUsdg6: bigint }).strikeUsdg6, 221_000_000n);
+  assert.ok(near.ok && near.pricing.deltaAtStrike !== null && Math.abs(near.pricing.deltaAtStrike - 0.3) <= 0.05);
 });
 
 test('a corrupt number in the chain is a named skip, never an exception out of the tick', () => {
   // bid = ask = 1.7e308: finite, but the mid is Infinity. The row is not a quote.
-  const huge = editCalls('2026-09-25', (o) => (o.strike === 225 ? { bid: 1.7e308, ask: 1.7e308 } : null));
+  const huge = editCalls('2026-09-25', (o) => (o.strike === 230 ? { bid: 1.7e308, ask: 1.7e308 } : null));
   assert.doesNotThrow(() => plan({ vol: ctx({ chain: huge }) }));
   const p = plan({ vol: ctx({ chain: huge }) });
   assertVaultGates(p, SPOT);
-  assert.equal((p as { pricing: { strikeUsdg6: string } }).pricing.strikeUsdg6, '225000000', 'priced from 222.5 and 227.5 instead');
+  assert.equal((p as { pricing: { strikeUsdg6: string } }).pricing.strikeUsdg6, '231000000', 'priced from valid neighbouring quotes instead');
   assert.doesNotThrow(() => reprice({ vol: ctx({ chain: huge }) }));
   // Anything the checks did not anticipate is caught and named.
   const exploding = {
@@ -537,12 +535,12 @@ test('a corrupt number in the chain is a named skip, never an exception out of t
 });
 
 test('a wide quote at the strike does not set the fair value', () => {
-  // 18 Sep 220 at 0.01/0.11 (a 167% spread): the old 0.10 absolute allowance priced 220 at 0.13.
-  const wide = editCalls('2026-09-18', (o) => (o.strike === 220 ? { bid: 0.01, ask: 0.11 } : null));
+  // A wide 225 quote lies in the short-expiry pricing bracket and must be ignored.
+  const wide = editCalls('2026-09-18', (o) => (o.strike === 225 ? { bid: 0.01, ask: 0.11 } : null));
   const p = plan({ vol: ctx({ chain: wide, closeDay: '2026-09-18' }) });
   assertVaultGates(p, SPOT);
   assert.ok(p.ok);
-  assert.ok(BigInt(p.pricing.fairUnit6 ?? '0') > 500_000n, `fair ${p.pricing.fairUnit6} comes from 217.5 and 222.5, not the 0.06 mid`);
+  assert.ok(BigInt(p.pricing.fairUnit6 ?? '0') > 500_000n, `fair ${p.pricing.fairUnit6} comes from valid neighbours, not the 0.06 mid`);
 });
 
 test('a chain that missed the latest completed session is stale, even inside the four-day limit', () => {
@@ -556,9 +554,9 @@ test('a chain that missed the latest completed session is stale, even inside the
 });
 
 test('the default band buffer (200 bps) leaves a short expiry the rally room the fixed rule has', () => {
-  // 18 Sep: delta 0.15 is 220, only 64 bps over the 3% floor. At 50 bps the week goes unfillable
+  // 18 Sep: the synthetic 0.25-delta strike is near 220. At 50 bps the week goes unfillable
   // (StrikeBelowBand, which no reprice fixes) on a 65 bps rally.
-  const tight = plan({ vol: ctx({ closeDay: '2026-09-18' }) });
+  const tight = plan({ vol: ctx({ closeDay: '2026-09-18' }), targetDelta: 0.25 });
   assert.ok(tight.ok);
   assert.equal(tight.strikeUsdg6, 220_000_000n);
   const listing = (s: bigint, p: typeof tight & { ok: true }) => ({ grossUsdg6: p.gross6, amount: p.contracts, strikeUsdg6: s });
@@ -566,13 +564,13 @@ test('the default band buffer (200 bps) leaves a short expiry the rally room the
   const r65 = at(213_600_000n, tight);
   assert.equal(!r65.fillable && r65.reason, 'strike-below-band');
 
-  const roomy = plan({ vol: ctx({ closeDay: '2026-09-18' }), strikeBandBufferBps: undefined });
+  const roomy = plan({ vol: ctx({ closeDay: '2026-09-18' }), targetDelta: 0.25, strikeBandBufferBps: undefined });
   assertVaultGates(roomy, SPOT);
   assert.ok(roomy.ok);
   assert.equal(roomy.pricing.bandBufferBps, 200, 'the environment default');
   assert.equal(roomy.strikeUsdg6, 223_000_000n, 'ceil(212.21 x 1.05)');
   assert.equal(roomy.pricing.strikeClamped, 'band-floor');
-  assert.equal(roomy.pricing.deltaStrikeUsdg6, '220000000', 'the delta strike is still shown');
+  assert.equal(roomy.pricing.deltaStrikeUsdg6, '219000000', 'the delta strike is still shown');
   for (const spot of [213_600_000n, 215_000_000n, 216_400_000n]) {
     const v = at(spot, roomy);
     assert.ok(v.fillable || v.reason !== 'strike-below-band', `no StrikeBelowBand at ${spot}`);

@@ -1,0 +1,11 @@
+{
+  "fair": {
+    "raw": "369263",
+    "decimals": 6,
+    "formatted": "0.369263"
+  },
+  "iv": 0.5664,
+  "delta": 0.0592,
+  "source": "cboe",
+  "asOf": 1789592280
+}

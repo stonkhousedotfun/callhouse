@@ -726,3 +726,961 @@ export const roleMember = onchainTable(
     byGranted: index().on(t.granted),
   }),
 );
+
+/*//////////////////////////////////////////////////////////////
+                         FACTORY MARKETS
+//////////////////////////////////////////////////////////////*/
+
+/*
+ * Everything below is the factory market (contracts/src/solo/: one `AccountFactory` per market,
+ * one `WriterAccount` clone per user), Tier 1 of the multi-market plan. It is populated only when
+ * FACTORY_ADDRESS is set, from logs alone: no handler below makes an `eth_call` (the public RPC
+ * has no historical state and per-market archive endpoints are not provisioned), and the one
+ * optional read — `Factory:setup`, the factory's immutables and constructor-set settings — is
+ * best-effort and marked `settingsVerified`. The vault tables above are untouched: the two
+ * products share a process only on the NVDA deployment, and nothing joins them.
+ */
+
+/**
+ * `writer_account.status`, the account's place in the week as the logs tell it
+ * (lib/factoryLifecycle.ts `nextStatus`).
+ *
+ *   idle      no write requested (the row default, and `WriteRequested(0)`).
+ *   pending   `WriteRequested(n)`: in the keeper's pending list, waiting for `listFor`.
+ *   listed    `LotsListed`: one-lot orders on the book under a pinned week.
+ *   settled   `Settled`: flat again; the request is cleared on chain, so a new one is needed.
+ */
+export const writerAccountStatus = onchainEnum("writer_account_status", ["idle", "pending", "listed", "settled"]);
+
+/**
+ * One row, keyed by the factory address: the market as the factory's own events describe it,
+ * plus totals summed over every account.
+ *
+ * Three groups of columns have different provenance, and the names say which:
+ *   - `asset`, `feed`, `clear`, `implementation`, the six policy fields, `feeRecipient` and
+ *     `depositCap` are seeded by `Factory:setup` from views (`settingsVerified` says whether the
+ *     read answered; null / unset otherwise). `FeeRecipientSet` and `DepositCapSet` then keep
+ *     the last two current. `PolicySet` carries NO values, so `policySetAt` records that the
+ *     policy changed and the six fields may be stale from that moment.
+ *   - `admin`, `writesHalted`, the week and `accountCount` are exact, from events.
+ *   - the totals are sums of account events: `pendingLots` is the requests of the accounts
+ *     currently pending (the keeper's work queue), the rest are lifetime.
+ */
+export const market = onchainTable("market", (t) => ({
+  id: t.hex().primaryKey(),
+  /** The `MARKET` env label (NVDA, AAPL, ...). A label: nothing is derived from it. */
+  ticker: t.text().notNull(),
+
+  /*── immutables, from the setup read ──*/
+  asset: t.hex(),
+  feed: t.hex(),
+  clear: t.hex(),
+  implementation: t.hex(),
+  /** The setup read answered. False means every nullable column in this group is unverified, not zero. */
+  settingsVerified: t.boolean().notNull().default(false),
+
+  /*── governance-visible settings ──*/
+  /** The DEFAULT_ADMIN_ROLE holder, from `RoleGranted`: the constructor's grant is the deploy tx's first event. */
+  admin: t.hex(),
+  feeRecipient: t.hex(),
+  /** Per-ACCOUNT cap on held assets (`deposit` reverts `DepositCapExceeded` above it). Null until read or set. */
+  depositCap: t.bigint(),
+  minOtmBps: t.integer(),
+  maxOtmBps: t.integer(),
+  minPremiumBps: t.integer(),
+  maxUtilizationBps: t.integer(),
+  /** Charged on every fill as the second consideration item of each lot order, to `feeRecipient`. */
+  protocolFeeBps: t.integer(),
+  /** `list` refuses more lots than this per account. */
+  maxContractsCap: t.bigint(),
+  /** The last `PolicySet`. The event has no arguments, so the six fields above may be stale from here. */
+  policySetAt: t.bigint(),
+  writesHalted: t.boolean().notNull().default(false),
+
+  /*── the current week, from WeekSet ──*/
+  /** The factory's own counter. 0 before the first `setWeek`. */
+  weekId: t.integer().notNull().default(0),
+  strikeUsdg: t.bigint().notNull().default(0n),
+  exerciseTs: t.bigint().notNull().default(0n),
+  /** Every account's expiry is this plus its index (one second each), so no two share a Valorem bucket. */
+  baseExpiryTs: t.bigint().notNull().default(0n),
+  askUsdg: t.bigint().notNull().default(0n),
+  weekSetAt: t.bigint(),
+
+  /*── totals ──*/
+  /** `AccountCreated` count == `nextIndex`. */
+  accountCount: t.integer().notNull().default(0),
+  /** Requested lots of the accounts currently `pending`: what the keeper has to list. */
+  pendingLots: t.bigint().notNull().default(0n),
+  lotsListed: t.bigint().notNull().default(0n),
+  lotsFilled: t.bigint().notNull().default(0n),
+  /** Sum of `LotFilled.premiumUsdg`: the whole ask per lot, protocol fee item included. */
+  premiumUsdg: t.bigint().notNull().default(0n),
+  settlements: t.integer().notNull().default(0),
+  assetReturned: t.bigint().notNull().default(0n),
+  /** Sum of `Settled.strikeUsdg`: strike proceeds of assigned lots. Principal, never premium. */
+  assignedUsdg: t.bigint().notNull().default(0n),
+  claimedUsdg: t.bigint().notNull().default(0n),
+
+  lastBlock: t.bigint().notNull().default(0n),
+  lastTimestamp: t.bigint().notNull().default(0n),
+}));
+
+/**
+ * One row per `WriterAccount` clone, keyed by the clone's address.
+ *
+ * `owner` follows `AccountRekeyed` / `OwnershipTransferred`. The `listed*` group is the week
+ * pinned onto the account by `list` and is cleared by `settle`, exactly as the contract clears
+ * it; `optionId` survives a settle only when the redeem failed (lib/factoryLifecycle.ts
+ * `accountAfterSettled`). Balances are NOT here: a clone's token transfers cannot be filtered
+ * (the set of addresses is dynamic), so `depositedTotal − withdrawnTotal` is a lower bound on
+ * what the account holds, not its balance; assignment moves assets out without a `Withdrawn`.
+ */
+export const writerAccount = onchainTable(
+  "writer_account",
+  (t) => ({
+    id: t.hex().primaryKey(),
+    factory: t.hex().notNull(),
+    owner: t.hex().notNull(),
+    /** `AccountCreated.index`: 1-based, the account's second of expiry offset. */
+    index: t.integer().notNull(),
+    createdAt: t.bigint().notNull(),
+    createdBlock: t.bigint().notNull(),
+    createdTx: t.hex().notNull(),
+
+    status: writerAccountStatus("status").notNull().default("idle"),
+
+    depositedTotal: t.bigint().notNull().default(0n),
+    withdrawnTotal: t.bigint().notNull().default(0n),
+    claimedUsdg: t.bigint().notNull().default(0n),
+
+    /*── the current request / listing ──*/
+    requestedLots: t.bigint().notNull().default(0n),
+    listedLots: t.bigint().notNull().default(0n),
+    /** Fills of the CURRENT listing. Reset by `Settled`. */
+    filledLots: t.bigint().notNull().default(0n),
+    listedWeekId: t.integer(),
+    optionId: t.bigint(),
+    listedAskUsdg: t.bigint().notNull().default(0n),
+    listedAt: t.bigint(),
+
+    /*── lifetime ──*/
+    lotsListed: t.bigint().notNull().default(0n),
+    lotsFilled: t.bigint().notNull().default(0n),
+    premiumUsdg: t.bigint().notNull().default(0n),
+    settlements: t.integer().notNull().default(0),
+    lastSettledAt: t.bigint(),
+
+    lastActivityAt: t.bigint().notNull(),
+    lastActivityBlock: t.bigint().notNull(),
+  }),
+  (t) => ({
+    byOwner: index().on(t.owner),
+    byStatus: index().on(t.status),
+  }),
+);
+
+/**
+ * One row per `WeekSet`, keyed `${factory}-${weekId}`: the terms the keeper set and what the
+ * accounts did under them. A week nobody listed under is a row of zeros, never a missing row —
+ * the same rule as the vault's `cycle`.
+ */
+export const marketWeek = onchainTable(
+  "market_week",
+  (t) => ({
+    id: t.text().primaryKey(),
+    factory: t.hex().notNull(),
+    weekId: t.integer().notNull(),
+    strikeUsdg: t.bigint().notNull(),
+    exerciseTs: t.bigint().notNull(),
+    baseExpiryTs: t.bigint().notNull(),
+    askUsdg: t.bigint().notNull(),
+    setAt: t.bigint().notNull(),
+    setBlock: t.bigint().notNull(),
+    setTx: t.hex().notNull(),
+
+    lotsListed: t.bigint().notNull().default(0n),
+    lotsFilled: t.bigint().notNull().default(0n),
+    premiumUsdg: t.bigint().notNull().default(0n),
+    accountsListed: t.integer().notNull().default(0),
+    accountsSettled: t.integer().notNull().default(0),
+    assetReturned: t.bigint().notNull().default(0n),
+    assignedUsdg: t.bigint().notNull().default(0n),
+  }),
+  (t) => ({
+    byWeek: index().on(t.weekId),
+  }),
+);
+
+/**
+ * One row per `LotFilled`: one contract written, one order gone from the book, `premiumUsdg`
+ * paid (the whole ask; the seller's part and the fee item are split by Seaport, not here).
+ * `orderHash` is the filled Seaport order, so a Seaport `OrderFulfilled` can be joined to it by
+ * anyone who wants the consideration items; this indexer does not follow Seaport for the clones.
+ */
+export const lotFill = onchainTable(
+  "lot_fill",
+  (t) => ({
+    /** `${txHash}-${logIndex}`. */
+    id: t.text().primaryKey(),
+    factory: t.hex().notNull(),
+    account: t.hex().notNull(),
+    owner: t.hex().notNull(),
+    /** The account's pinned week at the fill. Null only on a replay that missed the `LotsListed`. */
+    weekId: t.integer(),
+    optionId: t.bigint().notNull(),
+    orderHash: t.hex().notNull(),
+    premiumUsdg: t.bigint().notNull(),
+    blockNumber: t.bigint().notNull(),
+    logIndex: t.integer().notNull(),
+    timestamp: t.bigint().notNull(),
+    txHash: t.hex().notNull(),
+  }),
+  (t) => ({
+    byAccount: index().on(t.account),
+    byOwner: index().on(t.owner),
+    byWeek: index().on(t.weekId),
+    byBlock: index().on(t.blockNumber),
+  }),
+);
+
+/**
+ * One row per `Settled`: the account's verdict for the week it was listed under, with the
+ * listing's size and fills beside the redeem's two legs so the outcome is reproducible from the
+ * row (lib/factoryLifecycle.ts `settlementOutcome`: unfilled | assigned | expired | unredeemed).
+ */
+export const accountSettlement = onchainTable(
+  "account_settlement",
+  (t) => ({
+    /** `${txHash}-${logIndex}`. */
+    id: t.text().primaryKey(),
+    factory: t.hex().notNull(),
+    account: t.hex().notNull(),
+    owner: t.hex().notNull(),
+    weekId: t.integer(),
+    lotsListed: t.bigint().notNull(),
+    lotsFilled: t.bigint().notNull(),
+    assetReturned: t.bigint().notNull(),
+    strikeUsdg: t.bigint().notNull(),
+    outcome: t.text().notNull(),
+    blockNumber: t.bigint().notNull(),
+    logIndex: t.integer().notNull(),
+    timestamp: t.bigint().notNull(),
+    txHash: t.hex().notNull(),
+  }),
+  (t) => ({
+    byAccount: index().on(t.account),
+    byWeek: index().on(t.weekId),
+    byBlock: index().on(t.blockNumber),
+  }),
+);
+
+/**
+ * Who holds which AccessControl role on the factory. Same rules as `role_member` for the vault
+ * (rows are never deleted; a revoke keeps the row with `granted: false`), in its own table so a
+ * deployment running both products never has one product's grant overwrite the other's.
+ */
+export const marketRole = onchainTable(
+  "market_role",
+  (t) => ({
+    /** `${role}-${account.toLowerCase()}`, the same key convention as `role_member`. */
+    id: t.text().primaryKey(),
+    factory: t.hex().notNull(),
+    role: t.hex().notNull(),
+    /** DEFAULT_ADMIN_ROLE, KEEPER_ROLE, GUARDIAN_ROLE, or UNKNOWN_ROLE (lib/roles.ts: the factory uses the same three hashes). */
+    roleName: t.text().notNull(),
+    account: t.hex().notNull(),
+    granted: t.boolean().notNull(),
+    grantedAt: t.bigint(),
+    grantedTx: t.hex(),
+    revokedAt: t.bigint(),
+    revokedTx: t.hex(),
+  }),
+  (t) => ({
+    byRole: index().on(t.role),
+    byGranted: index().on(t.granted),
+  }),
+);
+
+/*//////////////////////////////////////////////////////////////
+                         V2 CLEARINGHOUSE
+//////////////////////////////////////////////////////////////*/
+
+/** V2 rows live beside v1 rows. No v1 table is reused by the new Clearinghouse. */
+export const v2MarketStatus = onchainEnum("v2_market_status", ["planned", "live", "paused"]);
+export const v2SeriesStatus = onchainEnum("v2_series_status", [
+  "open", "cutoff", "expired", "settling", "held", "settled",
+]);
+export const v2OrderKind = onchainEnum("v2_order_kind", ["Bid", "AskResale", "AskWrite"]);
+export const v2OrderStatus = onchainEnum("v2_order_status", [
+  "open", "filled", "cancelled", "pruned", "expired",
+]);
+export const v2Side = onchainEnum("v2_side", ["long", "short"]);
+export const v2LotSource = onchainEnum("v2_lot_source", ["fill", "transfer", "mint"]);
+export const v2SettlementStatus = onchainEnum("v2_settlement_status", [
+  "None", "Pending", "Finalized", "Held",
+]);
+
+/** One row per registered underlying. Raw money is in asset or USDG base units. */
+export const v2Market = onchainTable(
+  "v2_market",
+  (t) => ({
+    underlying: t.hex().primaryKey(),
+    ticker: t.text().notNull(),
+    enabled: t.boolean().notNull(),
+    mintPaused: t.boolean().notNull(),
+    strikeTick: t.bigint().notNull(),
+    exerciseFeeBps: t.integer().notNull(),
+    oracle: t.hex().notNull(),
+    mintFeePpm: t.integer().notNull(),
+    status: v2MarketStatus("status").notNull(),
+    registeredAt: t.bigint().notNull(),
+    registeredBlock: t.bigint().notNull(),
+    registeredTx: t.hex().notNull(),
+    seriesCreated: t.integer().notNull().default(0),
+    seriesOpen: t.integer().notNull().default(0),
+    openInterestUnits: t.bigint().notNull().default(0n),
+    volumeUnits: t.bigint().notNull().default(0n),
+    volumeUsdg: t.bigint().notNull().default(0n),
+    premiumUsdg: t.bigint().notNull().default(0n),
+    feesUsdg: t.bigint().notNull().default(0n),
+    lastBlock: t.bigint().notNull(),
+    lastTimestamp: t.bigint().notNull(),
+  }),
+  (t) => ({ byTicker: index().on(t.ticker), byStatus: index().on(t.status) }),
+);
+
+/** Clearinghouse-wide governance settings derived from their events. */
+export const v2ProtocolState = onchainTable("v2_protocol_state", (t) => ({
+  id: t.text().primaryKey(),
+  createPaused: t.boolean().notNull().default(false),
+  feeRecipient: t.hex(),
+  payoutAdapter: t.hex(),
+  maxSlippageBps: t.integer(),
+  updatedAt: t.bigint().notNull(),
+}));
+
+/** Latest ERC-1155 metadata URI per token, when the Clearinghouse emits URI. */
+export const v2TokenUri = onchainTable("v2_token_uri", (t) => ({
+  tokenId: t.bigint().primaryKey(),
+  uri: t.text().notNull(),
+  updatedAt: t.bigint().notNull(),
+  blockNumber: t.bigint().notNull(),
+  txHash: t.hex().notNull(),
+}));
+
+/** Append-only treasury fee withdrawal. */
+export const v2FeeSweep = onchainTable("v2_fee_sweep", (t) => ({
+  id: t.text().primaryKey(),
+  asset: t.hex().notNull(),
+  recipient: t.hex().notNull(),
+  amount: t.bigint().notNull(),
+  ts: t.bigint().notNull(),
+  block: t.bigint().notNull(),
+  logIndex: t.integer().notNull(),
+  tx: t.hex().notNull(),
+}), (t) => ({ byAsset: index().on(t.asset), byRecipient: index().on(t.recipient) }));
+
+/** A long ID identifies both the series and its associated short token. */
+export const v2Series = onchainTable(
+  "v2_series",
+  (t) => ({
+    longId: t.bigint().primaryKey(),
+    underlying: t.hex().notNull(),
+    ticker: t.text().notNull(),
+    isPut: t.boolean().notNull(),
+    strike: t.bigint().notNull(),
+    expiry: t.bigint().notNull(),
+    tenor: t.text().notNull(),
+    mintCutoff: t.bigint().notNull(),
+    oracle: t.hex().notNull(),
+    exerciseFeeBps: t.integer().notNull(),
+    mintFeePpm: t.integer().notNull(),
+    /** Native collateral rent: held until close refund or settlement accrual. */
+    mintFeesHeld: t.bigint().notNull().default(0n),
+    mintFeesAccrued: t.bigint().notNull().default(0n),
+    status: v2SeriesStatus("status").notNull().default("open"),
+    settlementPrice: t.bigint(),
+    longPayoutPerUnit: t.bigint(),
+    feePerUnit: t.bigint(),
+    shortPayoutPerUnit: t.bigint(),
+    settledAt: t.bigint(),
+    settledTx: t.hex(),
+    settledBlock: t.bigint(),
+    settledLogIndex: t.integer(),
+    openInterestUnits: t.bigint().notNull().default(0n),
+    volumeUnits: t.bigint().notNull().default(0n),
+    volumeUsdg: t.bigint().notNull().default(0n),
+    lastPrice: t.bigint(),
+    createdAt: t.bigint().notNull(),
+    createdBlock: t.bigint().notNull(),
+    createdTx: t.hex().notNull(),
+  }),
+  (t) => ({
+    byUnderlyingExpiry: index().on(t.underlying, t.expiry),
+    byTickerExpiry: index().on(t.ticker, t.expiry),
+    byStatus: index().on(t.status),
+    byExpiry: index().on(t.expiry),
+    bySettledActivity: index().on(t.settledBlock, t.settledLogIndex, t.longId),
+    bySettledAt: index().on(t.settledAt, t.settledBlock),
+  }),
+);
+
+/** The current state of one on-chain order; remaining units are `units - filled`. */
+export const v2Order = onchainTable(
+  "v2_order",
+  (t) => ({
+    orderId: t.bigint().primaryKey(),
+    maker: t.hex().notNull(),
+    longId: t.bigint().notNull(),
+    kind: v2OrderKind("kind").notNull(),
+    price: t.bigint().notNull(),
+    units: t.bigint().notNull(),
+    filled: t.bigint().notNull().default(0n),
+    validUntil: t.bigint().notNull(),
+    status: v2OrderStatus("status").notNull().default("open"),
+    placedAt: t.bigint().notNull(),
+    placedBlock: t.bigint().notNull(),
+    placedTx: t.hex().notNull(),
+    updatedAt: t.bigint().notNull(),
+    /** A replace emits cancellation followed by a new placement in this transaction. */
+    cancelledTx: t.hex(),
+    cancelledLogIndex: t.integer(),
+    replacedBy: t.bigint(),
+  }),
+  (t) => ({
+    byMaker: index().on(t.maker),
+    bySeriesStatus: index().on(t.longId, t.status),
+    byStatusExpiry: index().on(t.status, t.validUntil),
+  }),
+);
+
+/** Mutable OrderBook policy. A scheduled change becomes active by block time without another log. */
+export const v2OrderBookState = onchainTable("v2_order_book_state", (t) => ({
+  /** The OrderBook address. */
+  id: t.hex().primaryKey(),
+  tradingPaused: t.boolean().notNull().default(false),
+  premiumFeeBps: t.integer(),
+  resaleFeeBps: t.integer(),
+  takerFeeFlat: t.bigint(),
+  takerFeeCapBps: t.integer(),
+  makerRebateBps: t.integer(),
+  pendingPremiumFeeBps: t.integer(),
+  pendingResaleFeeBps: t.integer(),
+  pendingTakerFeeFlat: t.bigint(),
+  pendingTakerFeeCapBps: t.integer(),
+  pendingMakerRebateBps: t.integer(),
+  pendingEffectiveAt: t.bigint(),
+  updatedAt: t.bigint().notNull(),
+}));
+
+/** Current admin-maintained holiday calendar, keyed by UTC day index from ExpiryCalendar. */
+export const v2CalendarHoliday = onchainTable("v2_calendar_holiday", (t) => ({
+  dayIndex: t.integer().primaryKey(),
+  isHoliday: t.boolean().notNull(),
+  changedAt: t.bigint().notNull(),
+  changedBlock: t.bigint().notNull(),
+  changedTx: t.hex().notNull(),
+}));
+
+/** Whitelisted one-off expiries; denied entries remain visible for historical explanation. */
+export const v2SpecialExpiry = onchainTable("v2_special_expiry", (t) => ({
+  ts: t.bigint().primaryKey(),
+  allowed: t.boolean().notNull(),
+  changedAt: t.bigint().notNull(),
+  changedBlock: t.bigint().notNull(),
+  changedTx: t.hex().notNull(),
+}));
+
+/** Latest keeper bounty for each bytes32 action. */
+export const v2KeeperBounty = onchainTable("v2_keeper_bounty", (t) => ({
+  action: t.hex().primaryKey(),
+  amount: t.bigint().notNull(),
+  changedAt: t.bigint().notNull(),
+  changedBlock: t.bigint().notNull(),
+  changedTx: t.hex().notNull(),
+}));
+
+/** One Rewarded event, including zero-paid attempts if the contract emits them. */
+export const v2KeeperReward = onchainTable("v2_keeper_reward", (t) => ({
+  id: t.text().primaryKey(),
+  keeper: t.hex().notNull(),
+  action: t.hex().notNull(),
+  amount: t.bigint().notNull(),
+  ts: t.bigint().notNull(),
+  block: t.bigint().notNull(),
+  logIndex: t.integer().notNull(),
+  tx: t.hex().notNull(),
+}), (t) => ({ byKeeperTime: index().on(t.keeper, t.ts), byActionTime: index().on(t.action, t.ts) }));
+
+/** Event-derived keeper reward totals, never inferred from configured bounty amounts. */
+export const v2KeeperRewardTotal = onchainTable("v2_keeper_reward_total", (t) => ({
+  id: t.text().primaryKey(),
+  keeper: t.hex().notNull(),
+  action: t.hex().notNull(),
+  count: t.integer().notNull(),
+  amount: t.bigint().notNull(),
+}), (t) => ({ byKeeper: index().on(t.keeper), byAction: index().on(t.action) }));
+
+/** One OrderFilled log. `${tx}-${logIndex}` distinguishes multiple makers in one take. */
+export const v2Fill = onchainTable(
+  "v2_fill",
+  (t) => ({
+    id: t.text().primaryKey(),
+    orderId: t.bigint().notNull(),
+    longId: t.bigint().notNull(),
+    maker: t.hex().notNull(),
+    taker: t.hex().notNull(),
+    /** Long receiver on ask hits, USDG receiver on bid hits (interface v4). */
+    recipient: t.hex().notNull(),
+    units: t.bigint().notNull(),
+    price: t.bigint().notNull(),
+    premium: t.bigint().notNull(),
+    sellerFee: t.bigint().notNull(),
+    makerRebate: t.bigint().notNull(),
+    primary: t.boolean().notNull(),
+    takerIsBuyer: t.boolean().notNull(),
+    buyer: t.hex().notNull(),
+    seller: t.hex().notNull(),
+    /** Fair value at fill time, if the pricing service answered; used for feed integrity. */
+    fairAtFill: t.bigint(),
+    /** Seller's realised USDG gain or loss on this fill only; null for a primary sale. */
+    realisedDeltaUsdg: t.bigint(),
+    ts: t.bigint().notNull(),
+    block: t.bigint().notNull(),
+    logIndex: t.integer().notNull(),
+    tx: t.hex().notNull(),
+  }),
+  (t) => ({
+    bySeriesTime: index().on(t.longId, t.ts),
+    byMakerTime: index().on(t.maker, t.ts),
+    byTakerTime: index().on(t.taker, t.ts),
+    byTime: index().on(t.ts),
+    byBuyer: index().on(t.buyer),
+    bySeller: index().on(t.seller),
+    byBlockLog: index().on(t.block, t.logIndex),
+  }),
+);
+
+/** One Taken log, containing the fee for the whole call across its maker fills. */
+export const v2Take = onchainTable(
+  "v2_take",
+  (t) => ({
+    id: t.text().primaryKey(),
+    taker: t.hex().notNull(),
+    longId: t.bigint().notNull(),
+    buying: t.boolean().notNull(),
+    units: t.bigint().notNull(),
+    premium: t.bigint().notNull(),
+    takerFee: t.bigint().notNull(),
+    ts: t.bigint().notNull(),
+    block: t.bigint().notNull(),
+    logIndex: t.integer().notNull(),
+    tx: t.hex().notNull(),
+  }),
+  (t) => ({ byTakerTime: index().on(t.taker, t.ts), bySeriesTime: index().on(t.longId, t.ts) }),
+);
+
+/** Wallet-held ERC-1155 balance; OrderBook escrow is excluded. PnL tracks its beneficial maker separately. */
+export const v2Balance = onchainTable(
+  "v2_balance",
+  (t) => ({
+    /** `${tokenId}-${holder}`. */
+    id: t.text().primaryKey(),
+    tokenId: t.bigint().notNull(),
+    holder: t.hex().notNull(),
+    longId: t.bigint().notNull(),
+    side: v2Side("side").notNull(),
+    units: t.bigint().notNull().default(0n),
+  }),
+  (t) => ({ byHolder: index().on(t.holder), bySeriesSide: index().on(t.longId, t.side) }),
+);
+
+/** Raw long-token transfers for block-end cost-basis reconciliation against fill logs. */
+export const v2Transfer = onchainTable(
+  "v2_transfer",
+  (t) => ({
+    id: t.text().primaryKey(),
+    tokenId: t.bigint().notNull(),
+    longId: t.bigint().notNull(),
+    from: t.hex().notNull(),
+    to: t.hex().notNull(),
+    units: t.bigint().notNull(),
+    ts: t.bigint().notNull(),
+    block: t.bigint().notNull(),
+    logIndex: t.integer().notNull(),
+    tx: t.hex().notNull(),
+  }),
+  (t) => ({ byBlockLog: index().on(t.block, t.logIndex), byTx: index().on(t.tx) }),
+);
+
+/** Last fully reconciled block. A reorg rewinds this row with the other onchain tables. */
+export const v2PnlCursor = onchainTable("v2_pnl_cursor", (t) => ({
+  id: t.text().primaryKey(),
+  block: t.bigint().notNull(),
+}));
+
+/** FIFO long cost basis. Transfer-in lots carry zero cost and cannot produce feed wins. */
+export const v2Lot = onchainTable(
+  "v2_lot",
+  (t) => ({
+    /** `${longId}-${holder}-${seq}`. */
+    id: t.text().primaryKey(),
+    longId: t.bigint().notNull(),
+    holder: t.hex().notNull(),
+    seq: t.integer().notNull(),
+    units: t.bigint().notNull(),
+    unitsRemaining: t.bigint().notNull(),
+    /** Includes this lot's share of the taker fee. USDG base units. */
+    costUsdg: t.bigint().notNull(),
+    costRemainingUsdg: t.bigint().notNull(),
+    acquiredAt: t.bigint().notNull(),
+    source: v2LotSource("source").notNull(),
+    sourceId: t.text().notNull(),
+  }),
+  (t) => ({ byHolderSeriesSeq: index().on(t.holder, t.longId, t.seq), bySeries: index().on(t.longId) }),
+);
+
+/** One holder's realised result in one series. PPM gives an exact sortable multiple. */
+export const v2PositionPnl = onchainTable(
+  "v2_position_pnl",
+  (t) => ({
+    /** `${longId}-${holder}`; also the public win ID. */
+    id: t.text().primaryKey(),
+    longId: t.bigint().notNull(),
+    holder: t.hex().notNull(),
+    unitsBought: t.bigint().notNull().default(0n),
+    costUsdg: t.bigint().notNull().default(0n),
+    unitsSold: t.bigint().notNull().default(0n),
+    proceedsUsdg: t.bigint().notNull().default(0n),
+    unitsTransferredOut: t.bigint().notNull().default(0n),
+    unitsRedeemed: t.bigint().notNull().default(0n),
+    payoutUsdgValue: t.bigint().notNull().default(0n),
+    realisedUsdg: t.bigint().notNull().default(0n),
+    /** Exact decimal display value; `multiplePpm` is for ranking. */
+    multiple: t.text(),
+    multiplePpm: t.bigint(),
+    /** Pricing-service spot from the first observed buy, for the PnL receipt. */
+    spotAtEntry: t.bigint(),
+    closedAt: t.bigint(),
+    closedTx: t.hex(),
+    selfFill: t.boolean().notNull().default(false),
+    belowMinCost: t.boolean().notNull().default(false),
+    offMarket: t.boolean().notNull().default(false),
+    transferIn: t.boolean().notNull().default(false),
+    transferredOut: t.boolean().notNull().default(false),
+  }),
+  (t) => ({
+    byHolder: index().on(t.holder),
+    bySeries: index().on(t.longId),
+    byClosed: index().on(t.closedAt),
+    byMultiple: index().on(t.multiplePpm),
+  }),
+);
+
+/** Per-holder materialized ranking counters for New York week, month and all time. */
+export const v2Leaderboard = onchainTable(
+  "v2_leaderboard",
+  (t) => ({
+    id: t.text().primaryKey(),
+    window: t.text().notNull(),
+    windowStart: t.bigint().notNull(),
+    holder: t.hex().notNull(),
+    bestMultiplePpm: t.bigint().notNull().default(0n),
+    absoluteRealisedUsdg: t.bigint().notNull().default(0n),
+    streak: t.integer().notNull().default(0),
+    wins: t.integer().notNull().default(0),
+    losses: t.integer().notNull().default(0),
+    bestWinId: t.text(),
+    updatedAt: t.bigint().notNull(),
+  }),
+  (t) => ({
+    byWindowMultiple: index().on(t.window, t.windowStart, t.bestMultiplePpm),
+    byWindowAbsolute: index().on(t.window, t.windowStart, t.absoluteRealisedUsdg),
+    byWindowStreak: index().on(t.window, t.windowStart, t.streak),
+    byHolder: index().on(t.holder),
+  }),
+);
+
+/** Writer performance from premiums and released/assigned collateral, per period. */
+export const v2WriterStats = onchainTable(
+  "v2_writer_stats",
+  (t) => ({
+    id: t.text().primaryKey(),
+    writer: t.hex().notNull(),
+    window: t.text().notNull(),
+    windowStart: t.bigint().notNull(),
+    premiumUsdg: t.bigint().notNull().default(0n),
+    collateralUsdg: t.bigint().notNull().default(0n),
+    assignedUsdg: t.bigint().notNull().default(0n),
+    realisedYieldUsdg: t.bigint().notNull().default(0n),
+    updatedAt: t.bigint().notNull(),
+  }),
+  (t) => ({ byWriterWindow: index().on(t.writer, t.window, t.windowStart) }),
+);
+
+/** Exact net primary premiums per writer and series. Updated after Taken fees are
+ * matched to all fills in a block; positions reads this instead of trade history. */
+export const v2WriterSeriesPremium = onchainTable(
+  "v2_writer_series_premium",
+  (t) => ({
+    /** `${longId}-${writer}`. */
+    id: t.text().primaryKey(),
+    longId: t.bigint().notNull(),
+    writer: t.hex().notNull(),
+    premiumUsdg: t.bigint().notNull().default(0n),
+  }),
+  (t) => ({ byWriterSeries: index().on(t.writer, t.longId) }),
+);
+
+/** Free internal asset balance, keyed `${account}-${asset}`. */
+export const v2Ledger = onchainTable(
+  "v2_ledger",
+  (t) => ({
+    id: t.text().primaryKey(),
+    account: t.hex().notNull(),
+    asset: t.hex().notNull(),
+    free: t.bigint().notNull().default(0n),
+  }),
+  (t) => ({ byAccount: index().on(t.account), byAsset: index().on(t.asset) }),
+);
+
+/** Deposit and withdrawal receipts for account history; ledger alone cannot reconstruct them. */
+export const v2CashFlow = onchainTable(
+  "v2_cash_flow",
+  (t) => ({
+    id: t.text().primaryKey(),
+    kind: t.text().notNull(),
+    account: t.hex().notNull(),
+    /** Deposited.from or Withdrawn.to; can differ from the ledger account. */
+    actor: t.hex().notNull(),
+    asset: t.hex().notNull(),
+    amount: t.bigint().notNull(),
+    ts: t.bigint().notNull(),
+    block: t.bigint().notNull(),
+    logIndex: t.integer().notNull(),
+    tx: t.hex().notNull(),
+  }),
+  (t) => ({ byAccountTime: index().on(t.account, t.ts) }),
+);
+
+/** Current payout preferences, permissions, and lifetime writer/buyer statistics. */
+export const v2Account = onchainTable(
+  "v2_account",
+  (t) => ({
+    account: t.hex().primaryKey(),
+    /** USDG is the default payout choice; the holder explicitly opts into Stock Tokens. */
+    inKind: t.boolean().notNull().default(false),
+    toLedger: t.boolean().notNull().default(false),
+    thirdPartyRedeem: t.boolean().notNull().default(true),
+    /** JSON address maps are event-derived; individual updates preserve old entries. */
+    operators: t.text().notNull().default("{}"),
+    delegates: t.text().notNull().default("{}"),
+    approvals: t.text().notNull().default("{}"),
+    firstSeen: t.bigint().notNull(),
+    lastSeen: t.bigint().notNull(),
+    fills: t.integer().notNull().default(0),
+    volumeUsdg: t.bigint().notNull().default(0n),
+    premiumReceivedUsdg: t.bigint().notNull().default(0n),
+    realisedUsdg: t.bigint().notNull().default(0n),
+    wins: t.integer().notNull().default(0),
+    losses: t.integer().notNull().default(0),
+    streak: t.integer().notNull().default(0),
+    bestStreak: t.integer().notNull().default(0),
+  }),
+  (t) => ({ byWins: index().on(t.wins), byStreak: index().on(t.streak) }),
+);
+
+/** Append-only Minted log. Collateral is in the series' collateral asset base units. */
+export const v2Mint = onchainTable(
+  "v2_mint",
+  (t) => ({
+    id: t.text().primaryKey(),
+    longId: t.bigint().notNull(),
+    writer: t.hex().notNull(),
+    longTo: t.hex().notNull(),
+    units: t.bigint().notNull(),
+    collateral: t.bigint().notNull(),
+    fee: t.bigint().notNull(),
+    ts: t.bigint().notNull(),
+    block: t.bigint().notNull(),
+    logIndex: t.integer().notNull(),
+    tx: t.hex().notNull(),
+  }),
+  (t) => ({ byWriter: index().on(t.writer), byLongTo: index().on(t.longTo), bySeries: index().on(t.longId) }),
+);
+
+/** Append-only Closed log. */
+export const v2Close = onchainTable(
+  "v2_close",
+  (t) => ({
+    id: t.text().primaryKey(),
+    longId: t.bigint().notNull(),
+    account: t.hex().notNull(),
+    units: t.bigint().notNull(),
+    collateralFreed: t.bigint().notNull(),
+    feeRefund: t.bigint().notNull(),
+    /** Account's realised USDG gain or loss on this close only. */
+    realisedDeltaUsdg: t.bigint(),
+    ts: t.bigint().notNull(),
+    block: t.bigint().notNull(),
+    logIndex: t.integer().notNull(),
+    tx: t.hex().notNull(),
+  }),
+  (t) => ({ byAccount: index().on(t.account), bySeries: index().on(t.longId) }),
+);
+
+/** Append-only Redeemed log; `amount` is actual delivery, `amountInKind` is owed collateral. */
+export const v2Redemption = onchainTable(
+  "v2_redemption",
+  (t) => ({
+    id: t.text().primaryKey(),
+    tokenId: t.bigint().notNull(),
+    longId: t.bigint().notNull(),
+    side: v2Side("side").notNull(),
+    holder: t.hex().notNull(),
+    to: t.hex().notNull(),
+    units: t.bigint().notNull(),
+    asset: t.hex().notNull(),
+    amount: t.bigint().notNull(),
+    amountInKind: t.bigint().notNull(),
+    toLedger: t.boolean().notNull(),
+    /** Holder's realised USDG gain or loss on a long redemption; null for a short. */
+    realisedDeltaUsdg: t.bigint(),
+    ts: t.bigint().notNull(),
+    block: t.bigint().notNull(),
+    logIndex: t.integer().notNull(),
+    tx: t.hex().notNull(),
+  }),
+  (t) => ({ byHolderTime: index().on(t.holder, t.ts), bySeries: index().on(t.longId), byTime: index().on(t.ts) }),
+);
+
+/** One oracle verdict per `(underlying, expiry)` shared by all strikes and sides. */
+export const v2Settlement = onchainTable(
+  "v2_settlement",
+  (t) => ({
+    id: t.text().primaryKey(),
+    underlying: t.hex().notNull(),
+    expiry: t.bigint().notNull(),
+    status: v2SettlementStatus("status").notNull().default("None"),
+    price: t.bigint(),
+    sourceIndex: t.integer(),
+    corroborated: t.boolean(),
+    candidatePrice: t.bigint(),
+    candidateSourceIndex: t.integer(),
+    candidateDisagreed: t.boolean(),
+    candidateAt: t.bigint(),
+    finalizableAt: t.bigint(),
+    /** JSON map of source index to `{ok, price, recordedAt}`. */
+    recordedSources: t.text().notNull().default("{}"),
+    finalizedAt: t.bigint(),
+    finalizedTx: t.hex(),
+    /** The canonical finalized/resolved log, for stable notifier activity ordering. */
+    finalizedBlock: t.bigint(),
+    finalizedLogIndex: t.integer(),
+    heldAt: t.bigint(),
+  }),
+  (t) => ({ byUnderlyingExpiry: index().on(t.underlying, t.expiry), byStatus: index().on(t.status) }),
+);
+
+/** Current AutoRoller strategy for one writer and underlying. */
+export const v2Strategy = onchainTable(
+  "v2_strategy",
+  (t) => ({
+    id: t.text().primaryKey(),
+    writer: t.hex().notNull(),
+    underlying: t.hex().notNull(),
+    ticker: t.text().notNull(),
+    active: t.boolean().notNull(),
+    weekly: t.boolean().notNull(),
+    smartPricing: t.boolean().notNull(),
+    otmBps: t.integer().notNull(),
+    askBps: t.integer().notNull(),
+    minAskBps: t.integer().notNull(),
+    maxAskBps: t.integer().notNull(),
+    maxUnits: t.bigint().notNull(),
+    currentLongId: t.bigint(),
+    orderId: t.bigint(),
+    expiry: t.bigint(),
+    lastRolledAt: t.bigint(),
+    lastStaleCancelAt: t.bigint(),
+    staleSpot: t.bigint(),
+    updatedAt: t.bigint().notNull(),
+  }),
+  (t) => ({ byWriter: index().on(t.writer), byUnderlyingActive: index().on(t.underlying, t.active) }),
+);
+
+/** Append-only Rolled log, including the new order and its terms. */
+export const v2Roll = onchainTable(
+  "v2_roll",
+  (t) => ({
+    id: t.text().primaryKey(),
+    writer: t.hex().notNull(),
+    underlying: t.hex().notNull(),
+    longId: t.bigint().notNull(),
+    orderId: t.bigint().notNull(),
+    strike: t.bigint().notNull(),
+    expiry: t.bigint().notNull(),
+    price: t.bigint().notNull(),
+    units: t.bigint().notNull(),
+    ts: t.bigint().notNull(),
+    block: t.bigint().notNull(),
+    logIndex: t.integer().notNull(),
+    tx: t.hex().notNull(),
+  }),
+  (t) => ({ byWriterTime: index().on(t.writer, t.ts), bySeries: index().on(t.longId), byTime: index().on(t.ts) }),
+);
+
+/** Materialized quote quality and rebates for a maker in one weekly epoch. */
+export const v2MakerEpoch = onchainTable(
+  "v2_maker_epoch",
+  (t) => ({
+    /** `${maker}-${epoch}`. */
+    id: t.text().primaryKey(),
+    maker: t.hex().notNull(),
+    epoch: t.bigint().notNull(),
+    tierBps: t.integer().notNull().default(0),
+    samples: t.integer().notNull().default(0),
+    twoSidedSamples: t.integer().notNull().default(0),
+    uptimePpm: t.bigint().notNull().default(0n),
+    avgSpreadBps: t.bigint().notNull().default(0n),
+    depthWithin100bps: t.bigint().notNull().default(0n),
+    fills: t.integer().notNull().default(0),
+    volumeUsdg: t.bigint().notNull().default(0n),
+    rebatesUsdg: t.bigint().notNull().default(0n),
+    scorePpm: t.bigint().notNull().default(0n),
+  }),
+  (t) => ({ byEpochScore: index().on(t.epoch, t.scorePpm), byMaker: index().on(t.maker) }),
+);
+
+/** Daily aggregate. `day` is UTC day start; per-market and global rows share this table. */
+export const v2StatsDaily = onchainTable(
+  "v2_stats_daily",
+  (t) => ({
+    /** `${day}-${underlying}`; use `all` for the global row. */
+    id: t.text().primaryKey(),
+    day: t.bigint().notNull(),
+    underlying: t.hex(),
+    volumeUnits: t.bigint().notNull().default(0n),
+    volumeUsdg: t.bigint().notNull().default(0n),
+    premiumUsdg: t.bigint().notNull().default(0n),
+    feesUsdg: t.bigint().notNull().default(0n),
+    contractsFilled: t.integer().notNull().default(0),
+    newHolders: t.integer().notNull().default(0),
+    wins: t.integer().notNull().default(0),
+  }),
+  (t) => ({ byDay: index().on(t.day), byUnderlyingDay: index().on(t.underlying, t.day) }),
+);
+
+/** Rent becoming treasury revenue, in the emitted native collateral asset. */
+export const v2MintFeeAccrual = onchainTable("v2_mint_fee_accrual", (t) => ({
+  id: t.text().primaryKey(), longId: t.bigint().notNull(), asset: t.hex().notNull(), amount: t.bigint().notNull(),
+  ts: t.bigint().notNull(), block: t.bigint().notNull(), logIndex: t.integer().notNull(), tx: t.hex().notNull(),
+}), (t) => ({ bySeries: index().on(t.longId), byAsset: index().on(t.asset) }));
+
+/** Permissionless withdrawal of a stale AutoRoller ask; position remains until expiry. */
+export const v2StaleCancel = onchainTable("v2_stale_cancel", (t) => ({
+  id: t.text().primaryKey(), writer: t.hex().notNull(), underlying: t.hex().notNull(),
+  longId: t.bigint().notNull(), orderId: t.bigint().notNull(), spot: t.bigint().notNull(), spotUpdatedAt: t.bigint().notNull(),
+  ts: t.bigint().notNull(), block: t.bigint().notNull(), logIndex: t.integer().notNull(), tx: t.hex().notNull(),
+}), (t) => ({ byWriter: index().on(t.writer), byActivity: index().on(t.block, t.logIndex, t.id) }));

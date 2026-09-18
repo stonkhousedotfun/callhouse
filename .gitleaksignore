@@ -1,0 +1,10 @@
+# Historical, publicly documented X OAuth 1.0a signature test vector only.
+# These are line-scoped fingerprints; review again if the test changes.
+ops/v2/daily-win.test.mjs:generic-api-key:398
+ops/v2/daily-win.test.mjs:generic-api-key:399
+ops/v2/daily-win.test.mjs:generic-api-key:400
+ops/v2/daily-win.test.mjs:generic-api-key:401
+ops/v2/daily-win.test.mjs:generic-api-key:426
+ops/v2/daily-win.test.mjs:generic-api-key:427
+ops/v2/daily-win.test.mjs:generic-api-key:428
+ops/v2/daily-win.test.mjs:generic-api-key:436

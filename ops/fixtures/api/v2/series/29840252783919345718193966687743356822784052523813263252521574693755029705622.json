@@ -1,0 +1,67 @@
+{
+  "series": {
+    "longId": "29840252783919345718193966687743356822784052523813263252521574693755029705622",
+    "shortId": "29840252783919345718193966687743356822784052523813263252521574693755029705623",
+    "ticker": "TSLA",
+    "underlying": "0x322F0929c4625eD5bAd873c95208D54E1c003b2d",
+    "isPut": false,
+    "strike": {
+      "raw": "355000000",
+      "decimals": 6,
+      "formatted": "355"
+    },
+    "expiry": 1789502400,
+    "tenor": "daily",
+    "mintCutoff": 1789500600,
+    "mintFeePpm": 300,
+    "mintFeesHeld": {
+      "raw": "0",
+      "decimals": 18,
+      "formatted": "0"
+    },
+    "mintFeesAccrued": {
+      "raw": "0",
+      "decimals": 18,
+      "formatted": "0"
+    },
+    "status": "held"
+  },
+  "quote": {
+    "bestBid": null,
+    "bestAsk": null,
+    "bidUnits": "0",
+    "askUnits": "0",
+    "fair": null,
+    "iv": null,
+    "delta": null,
+    "last": null
+  },
+  "openInterestUnits": "0",
+  "volume": {
+    "raw": "0",
+    "decimals": 6,
+    "formatted": "0"
+  },
+  "settlement": {
+    "status": "Held",
+    "price": null,
+    "longPayoutPerUnit": null,
+    "feePerUnit": null,
+    "shortPayoutPerUnit": null,
+    "finalizedAt": null,
+    "settledAt": null,
+    "sourceIndex": null,
+    "corroborated": null,
+    "candidate": {
+      "price": {
+        "raw": "371350000",
+        "decimals": 6,
+        "formatted": "371.35"
+      },
+      "sourceIndex": 0,
+      "disagreed": false,
+      "finalizableAt": 1789524120
+    }
+  },
+  "exerciseFeeBps": 25
+}

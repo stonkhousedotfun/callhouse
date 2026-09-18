@@ -1,0 +1,68 @@
+{
+  "chainId": 4663,
+  "interfaceVersion": 7,
+  "deployBlock": "60213353",
+  "usdg": {
+    "address": "0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168",
+    "symbol": "USDG",
+    "decimals": 6
+  },
+  "contracts": {
+    "clearinghouse": "0x301b1e55217f139123D276B8298284EA2B704ca8",
+    "orderBook": "0xfeb0B18dAc9ae7f3A8acE28ecf5cCf9e60B90c44",
+    "settlementOracle": "0xd47364f6aE6700238d968D2dE564b87Aa45d6953",
+    "expiryCalendar": "0xC6d517A81785B36D88C4feaC06f08cD9ccf7d6a9",
+    "keeperRewards": "0x1170a44F95F08C71823Ce735413E723D9200cC28",
+    "autoRoller": "0x372145148012aFB47C3AF9637E51F5CfEAAa97B1",
+    "payoutAdapter": "0xB8cef81fDAAfF8A4c32D1D84CE104Dcf848aec0C",
+    "makerVault": "0xd3b47D8a6B8e3fc6160Cd02634CF7Ae74aDeB66f",
+    "makerRegistry": "0x29E6e4A14F7B6dC4A82ba03A198F1288Ee9018e8",
+    "rewardsDistributor": "0xA35423709eb22ac7639fd415496018087f409deb",
+    "sources": {
+      "chainlink": "0x5cBB51BA4dE2DCc6E2475453F6B479118DC42585",
+      "univ3": "0xe6F51Cb2922Ac47B487b1f78063a99227ec7e285",
+      "dataStreams": null
+    }
+  },
+  "fees": {
+    "premiumFeeBps": 0,
+    "resaleFeeBps": 0,
+    "takerFeeFlat": {
+      "raw": "100000",
+      "decimals": 6,
+      "formatted": "0.1"
+    },
+    "takerFeeCapBps": 1000,
+    "makerRebateBps": 5000,
+    "exerciseFeeBps": 25,
+    "mintFeePpm": 80
+  },
+  "pendingFees": null,
+  "constants": {
+    "unit": "10000000000000000",
+    "unitsPerShare": 100,
+    "priceTick": 100,
+    "settlementWindow": 1800,
+    "finalizeDelay": 120,
+    "snapshotGrace": 600,
+    "resolveDelay": 172800,
+    "maxTenor": 3888000,
+    "minSeriesLead": 3600,
+    "mintFeePeriod": 604800,
+    "mintFeeCeilPpm": 5000
+  },
+  "ladder": {
+    "weekly": {
+      "rungs": 5,
+      "firstOtmBps": 200,
+      "stepBps": 200,
+      "cardTargetBps": 400
+    },
+    "daily": {
+      "rungs": 5,
+      "firstOtmBps": 100,
+      "stepBps": 100,
+      "cardTargetBps": 200
+    }
+  }
+}

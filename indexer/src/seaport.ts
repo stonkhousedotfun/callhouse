@@ -1,9 +1,14 @@
-import { ponder } from "ponder:registry";
+import { vaultPonder as ponder } from "../lib/registry";
 import schema from "ponder:schema";
 
-import { CLEARINGHOUSE, USDG, VAULT } from "../lib/env";
+import { CLEARINGHOUSE, USDG, VAULT as VAULT_ENV, ZERO_ADDRESS_PLACEHOLDER } from "../lib/env";
 import { getCycle, getState, patchCycle, patchState, safeDiv } from "../lib/indexing";
 import { log } from "../lib/log";
+
+// These handlers are registered only when VAULT_ADDRESS is set (lib/registry.ts), so the address
+// is never read unset; the fallback exists because Ponder loads this module on a factory-only
+// deployment too, and a module-scope throw would stop that build.
+const VAULT = VAULT_ENV ?? ZERO_ADDRESS_PLACEHOLDER;
 
 /** Seaport ItemType. Only these two ever appear in a vault listing. */
 const ITEM_ERC20 = 1;

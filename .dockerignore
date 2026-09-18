@@ -43,6 +43,11 @@
 .github
 .gitignore
 .gitmodules
+AGENTS.md
+CLAUDE.md
+HANDOFF.md
+.codex
+.claude
 **/.DS_Store
 **/*.log
 **/*.tsbuildinfo
@@ -63,6 +68,15 @@ broadcast
 # ---- ops and docs. ops/abis is the source of truth for the ABIs, but generation is a manual
 #      `pnpm gen:abis`, never part of `next build`. ----
 ops
+# … except the market registry: the v2 bots read it at boot (keeper/Dockerfile runner stage,
+# ops/deploy.md §15.2).
+!ops/markets/tier1.json
+# … and the v2 external monitor, which the keeper image runs as the `monitor` service (ops/deploy.md §15.12).
+!ops/v2/monitor.mjs
+# Next type-checks web/lib/v2/config.test.ts during `next build`, and that file statically imports
+# this JSON fixture. Keep the single fixture in the web build context; the runner copies only
+# standalone output, so it is not shipped in the runtime image.
+!ops/fixtures/api/v2/config.json
 docs
 plan.md
 tasks.md
@@ -77,6 +91,12 @@ keeper/*
 !keeper/package.json
 !keeper/tsconfig.json
 !keeper/src
+# Rights review hold: these local, Git-ignored files must not enter a Docker
+# build context either (including builds run from this dirty worktree).
+keeper/src/fixtures/cboe-tsla-2026-09-16.json
+keeper/src/v2/pricing/cboe.test.ts
+keeper/src/v2/pricing/surface.test.ts
+keeper/src/v2/pricing/fair.test.ts
 indexer/*
 !indexer/package.json
 !indexer/tsconfig.json

@@ -1,0 +1,159 @@
+{
+  "items": [
+    {
+      "dayIndex": 20712,
+      "isHoliday": false,
+      "isSessionDay": true
+    },
+    {
+      "dayIndex": 20713,
+      "isHoliday": false,
+      "isSessionDay": true
+    },
+    {
+      "dayIndex": 20714,
+      "isHoliday": false,
+      "isSessionDay": true
+    },
+    {
+      "dayIndex": 20715,
+      "isHoliday": false,
+      "isSessionDay": false
+    },
+    {
+      "dayIndex": 20716,
+      "isHoliday": false,
+      "isSessionDay": false
+    },
+    {
+      "dayIndex": 20717,
+      "isHoliday": true,
+      "isSessionDay": false
+    },
+    {
+      "dayIndex": 20718,
+      "isHoliday": false,
+      "isSessionDay": true
+    },
+    {
+      "dayIndex": 20719,
+      "isHoliday": false,
+      "isSessionDay": true
+    },
+    {
+      "dayIndex": 20720,
+      "isHoliday": false,
+      "isSessionDay": true
+    },
+    {
+      "dayIndex": 20721,
+      "isHoliday": false,
+      "isSessionDay": true
+    },
+    {
+      "dayIndex": 20722,
+      "isHoliday": false,
+      "isSessionDay": false
+    },
+    {
+      "dayIndex": 20723,
+      "isHoliday": false,
+      "isSessionDay": false
+    },
+    {
+      "dayIndex": 20724,
+      "isHoliday": false,
+      "isSessionDay": true
+    },
+    {
+      "dayIndex": 20725,
+      "isHoliday": false,
+      "isSessionDay": true
+    },
+    {
+      "dayIndex": 20726,
+      "isHoliday": false,
+      "isSessionDay": true
+    },
+    {
+      "dayIndex": 20727,
+      "isHoliday": false,
+      "isSessionDay": true
+    },
+    {
+      "dayIndex": 20728,
+      "isHoliday": false,
+      "isSessionDay": true
+    },
+    {
+      "dayIndex": 20729,
+      "isHoliday": false,
+      "isSessionDay": false
+    },
+    {
+      "dayIndex": 20730,
+      "isHoliday": false,
+      "isSessionDay": false
+    },
+    {
+      "dayIndex": 20731,
+      "isHoliday": false,
+      "isSessionDay": true
+    },
+    {
+      "dayIndex": 20732,
+      "isHoliday": false,
+      "isSessionDay": true
+    },
+    {
+      "dayIndex": 20733,
+      "isHoliday": false,
+      "isSessionDay": true
+    },
+    {
+      "dayIndex": 20734,
+      "isHoliday": false,
+      "isSessionDay": true
+    },
+    {
+      "dayIndex": 20735,
+      "isHoliday": false,
+      "isSessionDay": true
+    },
+    {
+      "dayIndex": 20736,
+      "isHoliday": false,
+      "isSessionDay": false
+    },
+    {
+      "dayIndex": 20737,
+      "isHoliday": false,
+      "isSessionDay": false
+    },
+    {
+      "dayIndex": 20738,
+      "isHoliday": false,
+      "isSessionDay": true
+    },
+    {
+      "dayIndex": 20739,
+      "isHoliday": false,
+      "isSessionDay": true
+    },
+    {
+      "dayIndex": 20740,
+      "isHoliday": false,
+      "isSessionDay": true
+    },
+    {
+      "dayIndex": 20741,
+      "isHoliday": false,
+      "isSessionDay": true
+    },
+    {
+      "dayIndex": 20742,
+      "isHoliday": false,
+      "isSessionDay": true
+    }
+  ]
+}

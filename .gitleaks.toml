@@ -1,0 +1,14 @@
+title = "Stonkhouse app: default Gitleaks rules with one public-address exception"
+
+[extend]
+useDefault = true
+
+# The generic API-key heuristic also matches 20-byte EVM addresses assigned to
+# token0/token1 and contract-address fields. An address is public chain data;
+# a 32-byte private key does not match this exact shape. All other rules run.
+[[allowlists]]
+description = "Exact 20-byte EVM address under generic-api-key only"
+targetRules = ["generic-api-key"]
+condition = "AND"
+paths = ['''^ops/''']
+regexes = ['''^0x[0-9a-fA-F]{40}$''']

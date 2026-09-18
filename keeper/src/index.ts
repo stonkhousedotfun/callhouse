@@ -1,126 +1,27 @@
 /**
- * Entry point. One vault per process.
+ * Entry point of the keeper image (`node dist/index.js`): the v1 keeper, or a v2 mode.
  *
- * Boot order matters:
- *   1. config is validated the moment it is imported — a bad address never reaches the loop
- *   2. reconcile() makes the database agree with the chain before any decision is taken
- *   3. the health server comes up
- *   4. the poll loop starts
+ *   V2_MODE unset or blank   → main-v1.ts, byte for byte the keeper this file used to be.
+ *   V2_MODE=cranker|pricing|mm|pricer → v2/index.ts (anything else set there is refused, exit 1).
  *
- * Shutdown is graceful: the in-flight tick is allowed to finish (a half-sent transaction is
- * worse than a slow exit), the HTTP server closes, SQLite is closed, and the process leaves.
+ * WHY THE IMPORTS ARE DYNAMIC. ES module imports are evaluated before a line of this file runs, and
+ * the v1 graph validates its environment the moment config.ts is evaluated: a v2 process has no
+ * VAULT/FACTORY or KEEPER_PK and would exit 1 with v1's message before the switch could look at
+ * V2_MODE. So neither graph is imported until the switch has chosen. mode.ts has no imports.
+ *
+ * DOTENV FIRST. V2_MODE may live in KEEPER_ENV_FILE (or ./.env) like every other key, so the file is
+ * loaded here with the exact call config.ts makes. dotenv never overwrites a key that is already
+ * set, so config.ts's own call on the v1 path then changes nothing: the environment v1 sees is the
+ * one it always saw.
  */
-import { alert } from './alerts.js';
-import { account } from './clients.js';
-import { config } from './config.js';
-import { startHealthServer } from './health.js';
-import { log, logger } from './logger.js';
-import { describeError, reconcile, tick } from './roll.js';
-import { tickSolo } from './solo.js';
-import { store } from './state.js';
+import { config as loadDotenv } from 'dotenv';
+import { requestedV2Mode } from './v2/mode.js';
 
-let stopping = false;
-let tickInFlight: Promise<void> | null = null;
-let timer: NodeJS.Timeout | null = null;
+loadDotenv({ path: process.env.KEEPER_ENV_FILE, quiet: true });
 
-async function runTick(): Promise<void> {
-  if (stopping) return;
-  try {
-    await tick();
-    await tickSolo();
-  } catch (error) {
-    // An unhandled error inside one tick must not kill the loop: the next tick re-reads
-    // everything from chain and this one's work is either done or not, never half-done.
-    const reason = describeError(error);
-    log.roll.error({ err: reason }, 'tick failed');
-    await alert('keeper_error', `tick failed: ${reason}`, { reason });
-  }
+if (requestedV2Mode(process.env) === undefined) {
+  await import('./main-v1.js');
+} else {
+  const { main } = await import('./v2/index.js');
+  await main();
 }
-
-function schedule(): void {
-  timer = setTimeout(() => {
-    tickInFlight = runTick().finally(() => {
-      tickInFlight = null;
-      if (!stopping) schedule();
-    });
-  }, config.POLL_INTERVAL_MS);
-}
-
-async function main(): Promise<void> {
-  log.boot.info(
-    {
-      vault: config.VAULT,
-      factory: config.FACTORY,
-      windDown: config.WIND_DOWN,
-      clearinghouse: config.CLEARINGHOUSE,
-      keeper: account.address,
-      chainId: config.CHAIN_ID,
-      pollIntervalMs: config.POLL_INTERVAL_MS,
-      db: store.path,
-    },
-    'callhouse keeper starting',
-  );
-
-  await reconcile();
-  const server = startHealthServer();
-
-  await alert(
-    'boot',
-    `keeper online for ${config.VAULT}`,
-    { keeper: account.address, chainId: config.CHAIN_ID },
-    { force: true },
-  );
-
-  // First tick immediately, then every POLL_INTERVAL_MS.
-  tickInFlight = runTick().finally(() => {
-    tickInFlight = null;
-    if (!stopping) schedule();
-  });
-
-  const shutdown = (signal: string): void => {
-    if (stopping) return;
-    stopping = true;
-    log.boot.info({ signal }, 'shutting down');
-    if (timer) clearTimeout(timer);
-
-    const finish = async (): Promise<void> => {
-      if (tickInFlight) {
-        log.boot.info({}, 'waiting for the in-flight tick');
-        await tickInFlight;
-      }
-      await new Promise<void>((resolve) => {
-        server.close(() => {
-          resolve();
-        });
-      });
-      store.close();
-      logger.flush();
-      log.boot.info({}, 'stopped');
-      process.exit(0);
-    };
-
-    void finish().catch((error: unknown) => {
-      log.boot.error({ err: describeError(error) }, 'unclean shutdown');
-      process.exit(1);
-    });
-  };
-
-  process.on('SIGINT', () => {
-    shutdown('SIGINT');
-  });
-  process.on('SIGTERM', () => {
-    shutdown('SIGTERM');
-  });
-
-  process.on('unhandledRejection', (reason) => {
-    log.boot.error({ err: String(reason) }, 'unhandled rejection');
-    void alert('keeper_error', `unhandled rejection: ${String(reason)}`, {});
-  });
-}
-
-main().catch((error: unknown) => {
-  // A boot failure is fatal on purpose. A keeper running on a bad config is worse than one
-  // that is visibly down.
-  logger.fatal({ err: describeError(error) }, 'keeper failed to start');
-  process.exit(1);
-});

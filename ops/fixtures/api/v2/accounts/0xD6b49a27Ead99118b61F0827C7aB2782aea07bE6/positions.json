@@ -1,0 +1,148 @@
+{
+  "longs": [],
+  "shorts": [
+    {
+      "series": {
+        "longId": "43462217268812087739261944784956455494004279776534947210729604095134131208790",
+        "shortId": "43462217268812087739261944784956455494004279776534947210729604095134131208791",
+        "ticker": "NVDA",
+        "underlying": "0xd0601CE157Db5bdC3162BbaC2a2C8aF5320D9EEC",
+        "isPut": false,
+        "strike": {
+          "raw": "227000000",
+          "decimals": 6,
+          "formatted": "227"
+        },
+        "expiry": 1789761600,
+        "tenor": "weekly",
+        "mintCutoff": 1789759800,
+        "mintFeePpm": 80,
+        "mintFeesHeld": {
+          "raw": "21714285714286",
+          "decimals": 18,
+          "formatted": "0.000021714285714286"
+        },
+        "mintFeesAccrued": {
+          "raw": "0",
+          "decimals": 18,
+          "formatted": "0"
+        },
+        "status": "open"
+      },
+      "units": "60",
+      "premiumReceived": {
+        "raw": "156060",
+        "decimals": 6,
+        "formatted": "0.15606"
+      },
+      "collateralLocked": {
+        "raw": "600000000000000000",
+        "decimals": 18,
+        "formatted": "0.6"
+      },
+      "claimable": null
+    }
+  ],
+  "orders": [
+    {
+      "orderId": "1009",
+      "series": {
+        "longId": "43462217268812087739261944784956455494004279776534947210729604095134131208790",
+        "shortId": "43462217268812087739261944784956455494004279776534947210729604095134131208791",
+        "ticker": "NVDA",
+        "underlying": "0xd0601CE157Db5bdC3162BbaC2a2C8aF5320D9EEC",
+        "isPut": false,
+        "strike": {
+          "raw": "227000000",
+          "decimals": 6,
+          "formatted": "227"
+        },
+        "expiry": 1789761600,
+        "tenor": "weekly",
+        "mintCutoff": 1789759800,
+        "mintFeePpm": 80,
+        "mintFeesHeld": {
+          "raw": "21714285714286",
+          "decimals": 18,
+          "formatted": "0.000021714285714286"
+        },
+        "mintFeesAccrued": {
+          "raw": "0",
+          "decimals": 18,
+          "formatted": "0"
+        },
+        "status": "open"
+      },
+      "kind": "AskWrite",
+      "price": {
+        "raw": "260100",
+        "decimals": 6,
+        "formatted": "0.2601"
+      },
+      "units": "296",
+      "filled": "60",
+      "validUntil": 1789759800
+    }
+  ],
+  "ledger": [
+    {
+      "asset": "0xd0601CE157Db5bdC3162BbaC2a2C8aF5320D9EEC",
+      "symbol": "NVDA",
+      "free": {
+        "raw": "2368902543737610697",
+        "decimals": 18,
+        "formatted": "2.368902543737610697"
+      }
+    }
+  ],
+  "strategies": [
+    {
+      "ticker": "NVDA",
+      "strategy": {
+        "active": true,
+        "weekly": true,
+        "smartPricing": false,
+        "otmBps": 450,
+        "askBps": 12,
+        "minAskBps": 5,
+        "maxAskBps": 50,
+        "maxUnits": "0"
+      },
+      "currentSeries": {
+        "longId": "43462217268812087739261944784956455494004279776534947210729604095134131208790",
+        "shortId": "43462217268812087739261944784956455494004279776534947210729604095134131208791",
+        "ticker": "NVDA",
+        "underlying": "0xd0601CE157Db5bdC3162BbaC2a2C8aF5320D9EEC",
+        "isPut": false,
+        "strike": {
+          "raw": "227000000",
+          "decimals": 6,
+          "formatted": "227"
+        },
+        "expiry": 1789761600,
+        "tenor": "weekly",
+        "mintCutoff": 1789759800,
+        "mintFeePpm": 80,
+        "mintFeesHeld": {
+          "raw": "21714285714286",
+          "decimals": 18,
+          "formatted": "0.000021714285714286"
+        },
+        "mintFeesAccrued": {
+          "raw": "0",
+          "decimals": 18,
+          "formatted": "0"
+        },
+        "status": "open"
+      },
+      "orderId": "1009",
+      "lastStaleCancelAt": null,
+      "staleSpot": null,
+      "lastRolledAt": 1789392900
+    }
+  ],
+  "prefs": {
+    "inKind": false,
+    "toLedger": true
+  }
+}

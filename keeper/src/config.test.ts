@@ -29,12 +29,58 @@ process.env.KEEPER_LOG_LEVEL = 'fatal';
 const { loadConfig } = await import('./config.js');
 const { NYSE_HOLIDAYS_2026_2027 } = await import('./calendar.js');
 
-/** The minimal valid environment: the three keys without defaults. */
+/** The minimal valid environment for a vault process: RH_RPC, KEEPER_PK and one of VAULT / FACTORY. */
 const VALID: Record<string, string> = {
   RH_RPC: 'http://127.0.0.1:9',
   VAULT: '0x1111111111111111111111111111111111111111',
   KEEPER_PK: `0x${'11'.repeat(32)}`,
 };
+
+test('VAULT or FACTORY: one is enough, neither is refused in the same list as the other problems', () => {
+  const factory = '0x2222222222222222222222222222222222222222';
+  const solo = loadConfig({ RH_RPC: VALID.RH_RPC, KEEPER_PK: VALID.KEEPER_PK, FACTORY: factory });
+  assert.equal(solo.VAULT, undefined, 'a factory-only process has no vault');
+  assert.equal(solo.FACTORY, factory);
+  const both = loadConfig({ ...VALID, FACTORY: factory });
+  assert.equal(both.VAULT, VALID.VAULT);
+  assert.equal(both.FACTORY, factory);
+  assert.throws(
+    () => loadConfig({ RH_RPC: VALID.RH_RPC, KEEPER_PK: VALID.KEEPER_PK }),
+    (err: unknown) => {
+      assert.match(String(err), /VAULT \/ FACTORY: at least one must be set: VAULT \(the pooled vault\) or FACTORY \(the isolated 1-lot factory\)/);
+      return true;
+    },
+  );
+  assert.throws(
+    () => loadConfig({ RH_RPC: VALID.RH_RPC }),
+    (err: unknown) => {
+      // Both problems in one boot failure, not one per restart.
+      assert.match(String(err), /KEEPER_PK: Required/);
+      assert.match(String(err), /VAULT \/ FACTORY: at least one must be set/);
+      return true;
+    },
+  );
+  assert.throws(() => loadConfig({ ...VALID, FACTORY: 'not-an-address' }), /FACTORY: not a 20-byte hex address/);
+});
+
+test('the factory keys: PRICE_FEED defaults to the NVDA proxy, KEEPER_MIN_ASK_USDG6 to 1 USDG, KEEPER_MARKET to NVDA', () => {
+  const parsed = loadConfig(VALID);
+  assert.equal(parsed.PRICE_FEED, '0x379EC4f7C378F34a1B47E4F3cbeBCbAC3E8E9F15', 'the live NVDA keeper needs no new key');
+  assert.equal(parsed.KEEPER_MIN_ASK_USDG6, 1_000_000n, 'the floor the first factory keeper hard-coded');
+  assert.equal(parsed.KEEPER_MARKET, 'NVDA');
+  assert.equal(loadConfig({ ...VALID, PRICE_FEED: '0x4a1166a659a55625345e9515b32adecea5547c38' }).PRICE_FEED, '0x4A1166a659A55625345e9515b32adECea5547C38', 'checksummed on the way in');
+  assert.equal(loadConfig({ ...VALID, KEEPER_MIN_ASK_USDG6: '100000' }).KEEPER_MIN_ASK_USDG6, 100_000n, 'the registry value, 0.10 USDG');
+  assert.equal(loadConfig({ ...VALID, KEEPER_MIN_ASK_USDG6: '0' }).KEEPER_MIN_ASK_USDG6, 0n, 'zero switches the floor off');
+  assert.throws(() => loadConfig({ ...VALID, KEEPER_MIN_ASK_USDG6: '-1' }), /KEEPER_MIN_ASK_USDG6: must not be negative/);
+  assert.throws(() => loadConfig({ ...VALID, PRICE_FEED: '0x12' }), /PRICE_FEED: not a 20-byte hex address/);
+  for (const ok of ['TSLA', 'BRK.B', 'GOOGL', 'X', 'A1B2C3D4']) {
+    assert.equal(loadConfig({ ...VALID, KEEPER_MARKET: ok }).KEEPER_MARKET, ok);
+  }
+  for (const bad of ['tsla', 'TOOLONGTICK', 'TS LA', '', 'TSLA-X']) {
+    if (bad === '') continue; // blank is unset: the default
+    assert.throws(() => loadConfig({ ...VALID, KEEPER_MARKET: bad }), /KEEPER_MARKET/, `refuses ${bad}`);
+  }
+});
 
 test('the three required keys are enough; there is no registry and nothing Overcall', () => {
   const parsed = loadConfig(VALID);
@@ -138,6 +184,21 @@ test('KEEPER_VOL_URL: https only, and never echoed', () => {
   );
 });
 
+test('SOLO_WIND_DOWN: off unless 1 or true, and a value that is neither on nor off is refused at boot', () => {
+  const factory = { RH_RPC: VALID.RH_RPC, KEEPER_PK: VALID.KEEPER_PK, FACTORY: '0x2222222222222222222222222222222222222222' };
+  assert.equal(loadConfig(factory).SOLO_WIND_DOWN, false, 'unset: the factory keeps setting weeks');
+  assert.equal(loadConfig({ ...factory, SOLO_WIND_DOWN: '' }).SOLO_WIND_DOWN, false, 'blank is unset (the .env.example line)');
+  assert.equal(loadConfig({ ...factory, SOLO_WIND_DOWN: '1' }).SOLO_WIND_DOWN, true, 'what ops/keeper-env.sh writes');
+  assert.equal(loadConfig({ ...factory, SOLO_WIND_DOWN: 'true' }).SOLO_WIND_DOWN, true);
+  assert.equal(loadConfig({ ...factory, SOLO_WIND_DOWN: '0' }).SOLO_WIND_DOWN, false);
+  assert.equal(loadConfig({ ...factory, SOLO_WIND_DOWN: 'false' }).SOLO_WIND_DOWN, false);
+  // Neither switch reads a typo as off (WIND_DOWN below).
+  for (const typo of ['yes', 'on', 'TRUE', '2']) {
+    assert.throws(() => loadConfig({ ...factory, SOLO_WIND_DOWN: typo }), /SOLO_WIND_DOWN: Invalid enum value/, typo);
+  }
+  assert.equal(loadConfig(factory).WIND_DOWN, false, 'the two switches are independent');
+});
+
 test('KEEPER_NYSE_HOLIDAYS: unset is the built-in table; a list must be dates', () => {
   assert.deepEqual(loadConfig(VALID).KEEPER_NYSE_HOLIDAYS, NYSE_HOLIDAYS_2026_2027);
   assert.deepEqual(loadConfig({ ...VALID, KEEPER_NYSE_HOLIDAYS: '2028-01-17, 2028-02-21' }).KEEPER_NYSE_HOLIDAYS, ['2028-01-17', '2028-02-21']);
@@ -173,4 +234,15 @@ test('a malformed URL field is refused without echoing its value (RPC keys, rela
 test('ALERT_WEBHOOK_TOKEN must be at least 16 characters when set', () => {
   assert.throws(() => loadConfig({ ...VALID, ALERT_WEBHOOK_TOKEN: 'short' }), /ALERT_WEBHOOK_TOKEN/);
   assert.equal(loadConfig({ ...VALID, ALERT_WEBHOOK_TOKEN: 'x'.repeat(32) }).ALERT_WEBHOOK_TOKEN, 'x'.repeat(32));
+});
+
+test('WIND_DOWN: the pooled vault\'s close is strict too: 1/true on, 0/false/unset off, any other spelling refused at boot, never read as off', () => {
+  assert.equal(loadConfig(VALID).WIND_DOWN, false);
+  assert.equal(loadConfig({ ...VALID, WIND_DOWN: '1' }).WIND_DOWN, true, 'what ops/deploy.md sets on the keeper service');
+  assert.equal(loadConfig({ ...VALID, WIND_DOWN: 'true' }).WIND_DOWN, true);
+  assert.equal(loadConfig({ ...VALID, WIND_DOWN: '0' }).WIND_DOWN, false);
+  assert.equal(loadConfig({ ...VALID, WIND_DOWN: '' }).WIND_DOWN, false, 'blank is unset');
+  for (const typo of ['TRUE', 'yes', 'on', '2']) {
+    assert.throws(() => loadConfig({ ...VALID, WIND_DOWN: typo }), /WIND_DOWN: Invalid enum value/, typo);
+  }
 });

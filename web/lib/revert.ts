@@ -80,7 +80,7 @@ export const EXPLAINED: Record<string, string | ((args: readonly unknown[]) => s
   // Deposits and the queue.
   UseQueue: "A call is open, so this redemption has to go through the queue.",
   DepositCapExceeded: "That is more than this account can hold.",
-  InsufficientIdle: "Not enough idle NVDA in the account for that.",
+  InsufficientIdle: "Not enough idle stock in the account for that.",
   NotOwner: "Only the account owner can do that.",
   NoWeek: "This week is not open for offers yet.",
   AlreadyListed: "This week's offers are already listed.",

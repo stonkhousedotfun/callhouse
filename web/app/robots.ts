@@ -1,19 +1,21 @@
 import type { MetadataRoute } from "next";
+import { DEV_PREVIEW } from "@/lib/devPreview";
 
 /**
- * app.stonkhouse.fun is not indexed. Full disallow, every user agent.
+ * V1 is not indexed. V2 allows the public buyer pages and excludes wallet, writer, settings,
+ * and legacy paths.
  *
- * This file and the `robots: { index: false, follow: true }` block in app/layout.tsx are the
- * same decision expressed twice — a served /robots.txt for crawlers that read it before
- * fetching, and a per-page meta tag for the ones that do not. The reasoning is written out in
- * layout.tsx; read it there before changing either, and change BOTH or neither. A robots.txt
- * that allows what the meta tag forbids is the kind of drift nobody notices until a /legal page
- * is duplicated across two domains in search results.
- *
- * Deliberately absent: a sitemap. There is nothing here we want crawled, so pointing at a map
- * of it would be self-contradictory. The marketing site owns the sitemap.
+ * This file and route metadata in app/layout.tsx and the public pages form one crawl policy.
+ * In v1 there is no public sitemap content. In v2 app/sitemap.ts lists public entry points;
+ * private pages also emit per-page noindex metadata.
  */
 export default function robots(): MetadataRoute.Robots {
+  if (process.env.NEXT_PUBLIC_V2 === "1" && !DEV_PREVIEW) {
+    return {
+      rules: [{ userAgent: "*", allow: "/", disallow: ["/portfolio", "/earn", "/settings", "/legacy", "/account", "/book", "/activity", "/collect", "/vault"] }],
+      sitemap: `${process.env.NEXT_PUBLIC_APP_URL?.replace(/\/+$/, "") ?? "https://app.stonkhouse.fun"}/sitemap.xml`,
+    };
+  }
   return {
     rules: [
       {

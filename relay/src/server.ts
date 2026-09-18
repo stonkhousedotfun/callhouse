@@ -18,14 +18,12 @@
  *     401  missing or wrong token.
  *     413  body over the cap.
  *
- * AUTHENTICATION. The URL is public on Railway, and an unauthenticated relay is a free way to
+ * AUTHENTICATION. If a public domain is attached on Railway, an unauthenticated relay is a way to
  * post anything into the team's alert channel. The token is accepted two ways:
  *   `Authorization: Bearer <RELAY_TOKEN>`   preferred.
- *   `?token=<RELAY_TOKEN>`                  because keeper/src/alerts.ts sends only
- *                                           `content-type` today, so ALERT_WEBHOOK has to carry
- *                                           the token in the URL. A query string lands in
- *                                           proxy access logs; move to the header, and rotate
- *                                           the token, once the keeper can send one.
+ *   `?token=<RELAY_TOKEN>`                  legacy fallback for clients without custom headers.
+ *                                           The keeper uses ALERT_WEBHOOK_TOKEN in the Bearer
+ *                                           header; a query string can land in proxy access logs.
  * Both are compared in constant time over SHA-256 digests, so neither the token's content nor
  * its length leaks through timing. Authentication runs before the body is read.
  *
@@ -167,10 +165,20 @@ export function createRelayServer(config: RelayConfig, deps: RelayDeps): Server 
   };
 
   const server = createServer((req, res) => {
-    // A fixed base: the Host header is client-controlled and never needed here.
-    const url = new URL(req.url ?? '/', 'http://relay.invalid');
+    let routeName = '(invalid)';
 
     const route = async (): Promise<void> => {
+      // Node accepts some raw request targets that WHATWG URL rejects. Parse inside the
+      // guarded route so one unauthenticated request cannot exit the relay process.
+      let url: URL;
+      try {
+        // A fixed base: the Host header is client-controlled and never needed here.
+        url = new URL(req.url ?? '/', 'http://relay.invalid');
+      } catch {
+        sendJson(res, 400, { error: 'invalid request target' });
+        return;
+      }
+      routeName = url.pathname;
       if (url.pathname === '/health') {
         if (req.method !== 'GET' && req.method !== 'HEAD') {
           sendJson(res, 405, { error: 'method not allowed' }, { allow: 'GET, HEAD' });
@@ -192,7 +200,7 @@ export function createRelayServer(config: RelayConfig, deps: RelayDeps): Server 
 
     route().catch((error: unknown) => {
       logger.error(
-        { route: url.pathname, errorName: error instanceof Error ? error.name : typeof error },
+        { route: routeName, errorName: error instanceof Error ? error.name : typeof error },
         'unhandled error in request',
       );
       if (!res.headersSent) sendJson(res, 500, { error: 'internal error' });

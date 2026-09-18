@@ -1,5 +1,6 @@
 /**
- * The two destinations, each a single JSON POST with a deadline.
+ * The two destinations, each a JSON POST with a deadline. One 429 retry is allowed when the
+ * platform's requested wait fits within that same deadline.
  *
  *   Discord   POST <DISCORD_WEBHOOK_URL>                         { content, allowed_mentions }
  *             2xx (204 by default) = accepted. 400 = our body is wrong. 429 = rate limited.
@@ -50,6 +51,25 @@ export function errorCode(error: unknown): string {
   return 'error';
 }
 
+/** Delay requested by a 429, in milliseconds. Discord uses a float; Telegram uses seconds. */
+function retryAfterMs(target: TargetName, header: string | null, json: unknown): number | null {
+  const delays: number[] = [];
+  if (header !== null) {
+    const seconds = Number(header);
+    if (Number.isFinite(seconds) && seconds >= 0) delays.push(seconds * 1000);
+    else {
+      const date = Date.parse(header);
+      if (Number.isFinite(date)) delays.push(Math.max(0, date - Date.now()));
+    }
+  }
+  if (json !== null && typeof json === 'object') {
+    const body = json as { retry_after?: unknown; parameters?: { retry_after?: unknown } };
+    const seconds = target === 'discord' ? body.retry_after : body.parameters?.retry_after;
+    if (typeof seconds === 'number' && Number.isFinite(seconds) && seconds >= 0) delays.push(seconds * 1000);
+  }
+  return delays.length === 0 ? null : Math.max(...delays);
+}
+
 async function postJson(
   target: TargetName,
   url: string,
@@ -57,23 +77,39 @@ async function postJson(
   timeoutMs: number,
   accept: (status: number, json: unknown) => boolean,
 ): Promise<DeliveryResult> {
+  const deadline = performance.now() + timeoutMs;
+  const payload = JSON.stringify(body);
   try {
-    const response = await fetch(url, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify(body),
-      signal: AbortSignal.timeout(timeoutMs),
-      redirect: 'error',
-    });
-    let json: unknown = null;
-    try {
-      const text = await response.text();
-      json = text === '' ? null : JSON.parse(text);
-    } catch {
-      json = null;
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      const remaining = deadline - performance.now();
+      if (remaining <= 0) return { target, ok: false, status: null, error: 'timeout' };
+      const response = await fetch(url, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: payload,
+        signal: AbortSignal.timeout(Math.max(1, Math.ceil(remaining))),
+        redirect: 'error',
+      });
+      let json: unknown = null;
+      try {
+        const text = await response.text();
+        json = text === '' ? null : JSON.parse(text);
+      } catch {
+        json = null;
+      }
+      if (accept(response.status, json)) return { target, ok: true, status: response.status };
+      if (response.status === 429 && attempt === 0) {
+        const delay = retryAfterMs(target, response.headers.get('retry-after'), json);
+        // Leave a little time for the second request and its response. Never extend the
+        // keeper-facing deadline, and never retry indefinitely on repeated 429s.
+        if (delay !== null && delay + 50 < deadline - performance.now()) {
+          await new Promise<void>((resolve) => setTimeout(resolve, delay));
+          continue;
+        }
+      }
+      return { target, ok: false, status: response.status, error: `http_${response.status}` };
     }
-    if (accept(response.status, json)) return { target, ok: true, status: response.status };
-    return { target, ok: false, status: response.status, error: `http_${response.status}` };
+    return { target, ok: false, status: null, error: 'error' };
   } catch (error) {
     return { target, ok: false, status: null, error: errorCode(error) };
   }

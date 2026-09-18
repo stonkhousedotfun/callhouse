@@ -252,7 +252,7 @@ export function ExercisePanel({ snapshot }: { snapshot: VaultSnapshot }) {
         },
         {
           pending: `Exercising ${count.toString()} contract${count === 1n ? "" : "s"}`,
-          success: `Exercised: ${fmtNvdaExact(amounts.nvdaOut)} ${MARKET} is in your wallet`,
+          success: `Exercised: ${fmtNvdaExact(amounts.underlyingOut)} ${MARKET} is in your wallet`,
         },
       );
       if (hash) {
@@ -427,7 +427,7 @@ export function ExercisePanel({ snapshot }: { snapshot: VaultSnapshot }) {
                     "—"
                   ) : (
                     <>
-                      {fmtNvdaExact(amounts.nvdaOut)} <Unit>{MARKET}</Unit>
+                      {fmtNvdaExact(amounts.underlyingOut)} <Unit>{MARKET}</Unit>
                     </>
                   )
                 }

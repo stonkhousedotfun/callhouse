@@ -25,7 +25,7 @@
 import { randomBytes } from 'node:crypto';
 import { getAddress, hashStruct, hashTypedData, keccak256, concatHex, type Address, type Hex } from 'viem';
 import { seaportAbi, vaultAbi } from './abi.js';
-import { config } from './config.js';
+import { config, vaultAddress } from './config.js';
 import { publicClient } from './clients.js';
 import { log } from './logger.js';
 
@@ -430,10 +430,10 @@ export async function readVaultListing(): Promise<{
   listingsThisCycle: number;
 }> {
   const [hash, grossUsdg6, amount, listingsThisCycle] = await Promise.all([
-    publicClient.readContract({ address: config.VAULT, abi: vaultAbi, functionName: 'listingHash' }),
-    publicClient.readContract({ address: config.VAULT, abi: vaultAbi, functionName: 'listingGrossUsdg' }),
-    publicClient.readContract({ address: config.VAULT, abi: vaultAbi, functionName: 'listingAmount' }),
-    publicClient.readContract({ address: config.VAULT, abi: vaultAbi, functionName: 'listingsThisCycle' }),
+    publicClient.readContract({ address: vaultAddress(), abi: vaultAbi, functionName: 'listingHash' }),
+    publicClient.readContract({ address: vaultAddress(), abi: vaultAbi, functionName: 'listingGrossUsdg' }),
+    publicClient.readContract({ address: vaultAddress(), abi: vaultAbi, functionName: 'listingAmount' }),
+    publicClient.readContract({ address: vaultAddress(), abi: vaultAbi, functionName: 'listingsThisCycle' }),
   ]);
   log.seaport.debug(
     { hash, grossUsdg6: grossUsdg6.toString(), amount: amount.toString(), listingsThisCycle },

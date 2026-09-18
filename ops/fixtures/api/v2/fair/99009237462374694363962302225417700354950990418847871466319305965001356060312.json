@@ -1,0 +1,11 @@
+{
+  "fair": {
+    "raw": "628150",
+    "decimals": 6,
+    "formatted": "0.62815"
+  },
+  "iv": 0.424,
+  "delta": 0.2325,
+  "source": "model",
+  "asOf": 1789592280
+}

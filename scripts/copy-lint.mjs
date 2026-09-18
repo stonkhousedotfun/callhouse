@@ -58,21 +58,40 @@ const FORBIDDEN = [
   {re: /backed\s+by\s+nvidia/i, why: 'TECHSPEC 7.3: "backed by Nvidia the company" is not allowed'},
   {re: /dividend\s+paid\s+(in\s+cash\s+)?by\s+nvidia/i, why: "TECHSPEC 7.3: Nvidia does not pay you a dividend"},
   {re: /guaranteed\s+(yield|return|premium)/i, why: "premium is paid only if a buyer fills; nothing is guaranteed"},
+  {re: /\bguaranteed\b/i, why: "do not promise an outcome"},
   {re: /risk[-\s]?free/i, why: "assignment and issuer freeze are real risks"},
+  {re: /\bcan['’]?t\s+lose\b/i, why: "a buyer can lose the full cost"},
+  {re: /\bfree\s+money\b/i, why: "do not describe a risky trade as free money"},
 ];
 
 /**
  * Disclosures required on specific routes. `pkg` names the package the page lives
  * in; `page` is matched against the POSIX relative path of the file inside it.
  *
- * The assignment wording differs by surface on purpose. On web/ the reader is a
+ * The assignment wording differs by surface on purpose. On web/legacy/ the reader is a
  * depositor, so it is "your tokens". On the landing (stonkhousedotfun/callhouse-site) nobody
  * has deposited yet, so it is "the collateral". Do not unify them.
  */
 const REQUIRED = [
   {
     pkg: "web",
-    page: "app/vault/nvda/page.tsx",
+    page: "app/page.tsx",
+    phrases: ["Marketplace"],
+  },
+  {
+    pkg: "web",
+    page: "components/v2/Marketplace.tsx",
+    phrases: ["max loss"],
+  },
+  {
+    pkg: "web",
+    page: "components/v2/PayoffCard.tsx",
+    phrases: ["max loss"],
+  },
+  {
+    pkg: "web",
+    // W2-01 moved the real v1 vault page here; /vault/nvda is only a redirect when v2 is on.
+    page: "app/legacy/vault/nvda/page.tsx",
     phrases: [
       "Premium is paid only if a buyer fills",
       "Assignment can take your tokens at the strike",
@@ -239,13 +258,18 @@ function selfTest() {
       (e) => e.some((x) => x.includes("spans a line break")),
     );
     expect(
+      "an absolute profit promise is caught",
+      () => writeFileSync(join(tmp, "web", "prose.tsx"), "This is free money and you can't lose.\n"),
+      (e) => e.some((x) => x.includes("free money")) && e.some((x) => x.includes("can't lose")),
+    );
+    expect(
       "copy-lint-allow escapes a negation",
       () => writeFileSync(join(tmp, "web", "prose.tsx"), "we do not publish an APY // copy-lint-allow\n"),
       (e) => e.length === 0,
     );
     expect(
       "a missing required disclosure is caught",
-      () => writeFileSync(join(tmp, "web", "app", "vault", "nvda", "page.tsx"), "nothing disclosed here\n"),
+      () => writeFileSync(join(tmp, "web", "app", "legacy", "vault", "nvda", "page.tsx"), "nothing disclosed here\n"),
       (e) => e.some((x) => x.includes("missing required disclosure")),
     );
     expect(

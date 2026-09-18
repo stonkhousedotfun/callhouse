@@ -1,0 +1,76 @@
+{
+  "bids": [
+    {
+      "price": {
+        "raw": "136600",
+        "decimals": 6,
+        "formatted": "0.1366"
+      },
+      "units": "100",
+      "orders": [
+        {
+          "orderId": "1040",
+          "maker": "0xd3b47D8a6B8e3fc6160Cd02634CF7Ae74aDeB66f",
+          "units": "100",
+          "onChainRemainingUnits": "100",
+          "makerFreeUnits": null,
+          "makerFreeCollateral": null,
+          "kind": "Bid",
+          "validUntil": 1789761600
+        }
+      ]
+    }
+  ],
+  "asks": [
+    {
+      "price": {
+        "raw": "250000",
+        "decimals": 6,
+        "formatted": "0.25"
+      },
+      "units": "250",
+      "orders": [
+        {
+          "orderId": "1039",
+          "maker": "0xd3b47D8a6B8e3fc6160Cd02634CF7Ae74aDeB66f",
+          "units": "250",
+          "onChainRemainingUnits": "250",
+          "makerFreeUnits": "5279",
+          "makerFreeCollateral": {
+            "raw": "52795371886099897369",
+            "decimals": 18,
+            "formatted": "52.795371886099897369"
+          },
+          "kind": "AskWrite",
+          "validUntil": 1789759800
+        }
+      ]
+    },
+    {
+      "price": {
+        "raw": "260100",
+        "decimals": 6,
+        "formatted": "0.2601"
+      },
+      "units": "236",
+      "orders": [
+        {
+          "orderId": "1009",
+          "maker": "0xD6b49a27Ead99118b61F0827C7aB2782aea07bE6",
+          "units": "236",
+          "onChainRemainingUnits": "236",
+          "makerFreeUnits": "236",
+          "makerFreeCollateral": {
+            "raw": "2368902543737610697",
+            "decimals": 18,
+            "formatted": "2.368902543737610697"
+          },
+          "kind": "AskWrite",
+          "validUntil": 1789759800
+        }
+      ]
+    }
+  ],
+  "updatedBlock": "64418153",
+  "snapshotTimestamp": 1789592400
+}

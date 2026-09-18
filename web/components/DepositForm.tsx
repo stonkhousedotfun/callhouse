@@ -15,7 +15,7 @@ import {
   listedDepositRisk,
   multiplierIsActive,
   parseAmount,
-  toNvdaEq,
+  toStockEq,
   type DepositsClosedReason,
 } from "@/lib/format";
 import { useNow, type AccountPosition, type VaultSnapshot } from "@/lib/hooks";
@@ -213,7 +213,7 @@ export function DepositForm({
                 {MARKET}-eq <span className="text-ink-3">(display only)</span>
               </>
             }
-            v={fmtAsset(toNvdaEq(amount, snapshot.uiMultiplier))}
+            v={fmtAsset(toStockEq(amount, snapshot.uiMultiplier))}
           />
         ) : null}
         <Row k="Allowance" v={fmtAsset(allowance)} />

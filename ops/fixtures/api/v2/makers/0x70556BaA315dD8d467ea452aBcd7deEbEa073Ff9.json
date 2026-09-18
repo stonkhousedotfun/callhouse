@@ -1,0 +1,50 @@
+{
+  "maker": "0x70556BaA315dD8d467ea452aBcd7deEbEa073Ff9",
+  "tierBps": 6000,
+  "epochs": [
+    {
+      "epoch": {
+        "id": 2958,
+        "start": 1789344000,
+        "end": 1789948800
+      },
+      "uptimePct": 31,
+      "avgSpreadBps": null,
+      "depthWithin100bps": "50",
+      "fills": 2,
+      "volume": {
+        "raw": "1840000",
+        "decimals": 6,
+        "formatted": "1.84"
+      },
+      "rebates": {
+        "raw": "62400",
+        "decimals": 6,
+        "formatted": "0.0624"
+      },
+      "score": 24.3
+    },
+    {
+      "epoch": {
+        "id": 2957,
+        "start": 1788739200,
+        "end": 1789344000
+      },
+      "uptimePct": 12.5,
+      "avgSpreadBps": null,
+      "depthWithin100bps": "0",
+      "fills": 1,
+      "volume": {
+        "raw": "420000",
+        "decimals": 6,
+        "formatted": "0.42"
+      },
+      "rebates": {
+        "raw": "25200",
+        "decimals": 6,
+        "formatted": "0.0252"
+      },
+      "score": 9.8
+    }
+  ]
+}

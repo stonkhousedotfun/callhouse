@@ -60,7 +60,12 @@ export type TxKind =
   | 'lockBook'
   | 'rollClose'
   | 'retryStrandedClaim'
-  | 'settleQueue';
+  | 'settleQueue'
+  // The factory (solo.ts) kinds. `cycle_number` is NULL for all three: a factory has weeks, not
+  // vault cycles, and the week id lives in the alert/log data instead.
+  | 'setWeek'
+  | 'listFor'
+  | 'settle';
 
 /** `dropped`: never mined and no longer pending in the keeper's mempool (the node forgot it, or a
  *  later nonce replaced it). Distinct from `reverted`, which was mined. */

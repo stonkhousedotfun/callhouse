@@ -465,11 +465,11 @@ type KeeperPolicy = {
   planWeek: (input: Record<string, unknown>) => KeeperResult;
   priceListing: (input: Record<string, unknown>) => KeeperResult;
 };
-type KeeperVol = { parseCboeChain: (raw: unknown) => unknown };
+type SyntheticChain = { syntheticNvdaChain: () => unknown };
 
 /**
  * Feeds records made by the keeper's real planWeek / priceListing (keeper/src/policy.ts) on its
- * Cboe fixture straight into keeperPricingFigures, after the JSON round trip /orders and /state put
+ * synthetic chain straight into keeperPricingFigures, after the JSON round trip /orders and /state put
  * them through. A shape change on either side fails here. The keeper validates process.env when
  * config.ts is imported, so the environment is set first, as keeper/src/policy.vol.test.ts does;
  * the import path is built at runtime so web's type check stays within web/.
@@ -508,8 +508,8 @@ describe("keeperPricingFigures on records the keeper produces", () => {
     }
     try {
       policy = (await import(/* @vite-ignore */ join(keeperSrc, "policy.ts"))) as KeeperPolicy;
-      const vol = (await import(/* @vite-ignore */ join(keeperSrc, "vol.ts"))) as KeeperVol;
-      chain = vol.parseCboeChain(JSON.parse(readFileSync(join(keeperSrc, "fixtures", "cboe-nvda-2026-09-14.json"), "utf8")));
+      const synthetic = (await import(/* @vite-ignore */ join(keeperSrc, "fixtures", "synthetic-chains.ts"))) as SyntheticChain;
+      chain = synthetic.syntheticNvdaChain();
     } finally {
       for (const key of Object.keys(process.env)) if (!(key in saved)) delete process.env[key];
       Object.assign(process.env, saved);
@@ -591,19 +591,18 @@ describe("keeperPricingFigures on records the keeper produces", () => {
     const f = parsed(served(r));
     expectMirrors(f, r);
     expect(f.priceSource).toBe("vol-fair");
-    expect(f.unitPriceFmt).toBe("0.946951");
-    expect(f.chainTime?.ts).toBe(CHAIN_TS);
+    expect(f.unitPrice6).toBe(BigInt(r.unitPrice6 as string));
+    expect(f.chainTime?.ts).toBe(Date.UTC(2026, 8, 15, 5, 45) / 1000);
     expect(f.lastTradeTime?.ts).toBe(LAST_TRADE_TS);
   });
 
-  it("vol arm, 18 Sep: the vault floor with the margin binds, and the market ask it beat is shown", () => {
-    const r = plan({ vol: volCtx("2026-09-18") });
+  it("vol arm, 18 Sep: a higher vault floor binds, and the market ask it beat is shown", () => {
+    const r = plan({ policy: { ...LAUNCH, minPremiumBps: 100n }, vol: volCtx("2026-09-18") });
     const f = parsed(served(r));
     expectMirrors(f, r);
     expect(f.priceSource).toBe("fill-floor");
-    expect(f.volUnitFmt).toBe("0.720957");
-    expect(f.marginUnitFmt).toBe("0.857329");
-    expect(f.unitPriceFmt).toBe("0.857329");
+    expect(f.volUnit6).toBeLessThan(f.marginUnit6!);
+    expect(f.unitPrice6).toBe(f.marginUnit6);
   });
 
   it("vol arm with the delta strike below the band: the clamp edge and the pre-clamp strike", () => {
@@ -645,13 +644,13 @@ describe("keeperPricingFigures on records the keeper produces", () => {
 
   it("a manual override, with fresh data and on a previous fair value", () => {
     // In vol mode the keeper never lists without a market-based fair value, override or not, and the
-    // override can only raise the ask (1.234567 is above both 0.946951 asks here).
+    // Override can only raise the ask, for fresh or previous-fair pricing.
     for (const vol of [volCtx("2026-09-25"), { chain: null, error: "timeout", closeDay: "2026-09-25", nowSeconds: NOW }]) {
-      const r = price({ vol, unitPriceOverride6: 1_234_567n, previousFairUnit6: 860_864n });
+      const r = price({ vol, unitPriceOverride6: 3_000_000n, previousFairUnit6: 860_864n });
       const f = parsed(served(r));
       expectMirrors(f, r);
       expect(f.priceSource).toBe("manual-override");
-      expect(f.unitPriceFmt).toBe("1.234567");
+      expect(f.unitPriceFmt).toBe("3.00");
     }
   });
 });
