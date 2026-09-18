@@ -2,8 +2,8 @@
  * The v2 registry loader against today's registry and three fixtures.
  *
  * WHY THIS FILE EXISTS: every v2 bot reads its markets and addresses from ops/markets/tier1.json,
- * whose `v2` blocks do not exist yet (O2-01 adds them). Pinned here: that today's file loads with
- * every address null and the §3 defaults; that §3's block as written parses; that the resolution
+ * whose `v2` blocks record the live deployment. Pinned here: that today's file loads with
+ * the deployment addresses and §3 defaults; that §3's block as written parses; that the resolution
  * order is SPEC_DEFAULTS ← registry defaults ← market overrides, key by key; and that a present but
  * malformed block refuses to load with every problem listed under the market's ticker.
  *
@@ -52,16 +52,15 @@ function refusal(json: unknown): V2RegistryError {
                          ABSENT v2 BLOCKS
 //////////////////////////////////////////////////////////////*/
 
-// O2-01 added the v2 blocks to the real registry before any v2 contract was deployed: the block
-// is present, at this keeper's interface version, with every address still null.
-test('today\'s ops/markets/tier1.json loads: v2 block at this interface version, every address null, all markets planned', () => {
+// The production registry records the dev-origin live deployment and NVDA canary.
+test('today\'s ops/markets/tier1.json loads the live v2 deployment and NVDA market', () => {
   const registry = loadV2Registry(TIER1);
   assert.equal(registry.path, TIER1);
   assert.equal(registry.hasV2Block, true);
   assert.equal(registry.interfaceVersion, INTERFACE_VERSION);
-  assert.equal(registry.deployBlock, null);
-  for (const name of V2_CONTRACT_NAMES) assert.equal(registry.contracts[name], null, name);
-  assert.deepEqual(registry.sources, { chainlink: null, univ3: null, dataStreams: null });
+  assert.equal(registry.deployBlock, 65_780_341n);
+  for (const name of V2_CONTRACT_NAMES) assert.notEqual(registry.contracts[name], null, name);
+  for (const name of ['chainlink', 'univ3', 'dataStreams'] as const) assert.notEqual(registry.sources[name], null, name);
   assert.notEqual(registry.fees, null);
   assert.notEqual(registry.uniswapV3, null);
   assert.deepEqual(registry.defaults, SPEC_DEFAULTS);
@@ -69,8 +68,8 @@ test('today\'s ops/markets/tier1.json loads: v2 block at this interface version,
   assert.equal(registry.usdg, '0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168');
   assert.ok(registry.markets.length >= 35);
   assert.ok(registry.markets.every((m) => m.v2 !== null));
-  assert.equal(v2Markets(registry, ['planned']).length, registry.markets.length);
-  assert.deepEqual(v2Markets(registry, ['live', 'paused']), []);
+  assert.equal(v2Markets(registry, ['planned']).length, registry.markets.length - 1);
+  assert.deepEqual(v2Markets(registry, ['live', 'paused']).map((m) => m.ticker), ['NVDA']);
   const nvda = marketByTicker(registry, 'NVDA');
   assert.equal(nvda?.underlying, '0xd0601CE157Db5bdC3162BbaC2a2C8aF5320D9EEC');
   assert.equal(nvda?.cboe?.root, 'NVDA');
