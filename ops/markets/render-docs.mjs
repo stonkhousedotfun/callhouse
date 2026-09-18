@@ -338,7 +338,7 @@ function render(reg, recon) {
   if (livev2.length === 0 && pausedv2.length === 0) {
     L.push(
       ``,
-      `**No v2 market is marked live for the public production release in this registry.** Every market below is \`planned\` for that release; none of these entries authorizes public production trading. A separately labeled dev preview can use a different registry and does not change these production statuses.${v1Live.length ? ` The v1 ${list(v1Live.map((m) => m.ticker))} ${v1Live.length === 1 ? "factory" : "factories"} at the end of this page ${v1Live.length === 1 ? "is" : "are"} still live.` : ""}`,
+      `**No v2 market is marked live in this registry.** Every market below is \`planned\`; none of these entries authorizes trading.${v1Live.length ? ` The v1 ${list(v1Live.map((m) => m.ticker))} ${v1Live.length === 1 ? "factory" : "factories"} at the end of this page ${v1Live.length === 1 ? "is" : "are"} still live.` : ""}`,
     );
   }
 
@@ -347,14 +347,14 @@ function render(reg, recon) {
     ``,
     `## Status and waves`,
     ``,
-    `* **\`planned\`**: not registered for the public production release according to this registry. It authorizes no public production series, orders, buying, writing or deposits; a separate dev preview has its own status.`,
-    `* **\`live\`**: registered for the public production release. Buying and writing require an open series, usable orders and active launch controls; this status alone does not mean an automated strike ladder is running.`,
+    `* **\`planned\`**: not registered according to this registry. It authorizes no series, orders, buying, writing or deposits.`,
+    `* **\`live\`**: registered on the live v2 contracts. Buying and writing require an open series, usable orders and active launch controls; this status alone does not mean an automated strike ladder is running.`,
     `* **\`paused\`**: registered, but new risk is stopped: no new series and no new contracts written. Contracts already written still settle and pay out; closing, redeeming, withdrawing and cancelling orders cannot be paused.`,
     ``,
-    `Public production markets go live in waves: the canary first, then wave 1, then wave 2. A wave starts only after the previous one has run cleanly, so the order is a plan, not a schedule.`,
+    `Markets go live in waves: the canary first, then wave 1, then wave 2. A wave starts only after the previous one has run cleanly, so the order is a plan, not a schedule.`,
   );
   if (plannedv2.length) {
-    L.push(``, `Do not buy, write or deposit through a public production flow that presents a market listed here as \`planned\` as live. A separately labeled dev preview may use a different registry; verify its addresses and risks independently.`);
+    L.push(``, `Do not buy, write or deposit through a flow that presents a market listed here as \`planned\` as live. Verify the contract addresses and market status on chain.`);
   }
   L.push(``, `| Wave | Live | Paused | Planned |`, `|---|---|---|---|`);
   for (const wave of V2_WAVE_ORDER) {

@@ -568,7 +568,7 @@ export const GENERATED_MARKETS = [
     depositCapUsd: null,
     v1FrozenAt: null,
     v2: {
-      status: "planned",
+      status: "live",
       wave: "canary",
       strikeTick: "2500000",
       puts: false,
@@ -577,8 +577,8 @@ export const GENERATED_MARKETS = [
       univ3MinLiquidity: "1700000000000000000",
       dataStreamsFeedId: "0x000b6aa036224454037bab103184565f6aa9ea589c3b349f6d8471ee753524b9",
       overrides: {},
-      registeredAt: null,
-      registerTx: null,
+      registeredAt: 1789690228,
+      registerTx: "0x193b514124fc9fb83d419e2e981c0e5369ce2a19e44671cbb69bee6f2807a6ea",
     },
   },
   {
@@ -964,25 +964,25 @@ export const GENERATED_MARKETS = [
 /** The registry's top-level v2 block: the interface version it follows and the v2 deploy block (null until deployed). */
 export const V2_REGISTRY = {
   interfaceVersion: 7,
-  deployBlock: null,
+  deployBlock: 65780341,
 } as const;
 
 /** v2 contract addresses, as the registry has them; null until the v2 deploy writes them back. */
 export const V2_CONTRACTS = {
-  clearinghouse: null,
-  orderBook: null,
-  settlementOracle: null,
-  expiryCalendar: null,
-  keeperRewards: null,
-  autoRoller: null,
-  payoutAdapter: null,
-  makerVault: null,
-  makerRegistry: null,
-  rewardsDistributor: null,
+  clearinghouse: "0x22dEf851cD1a3B04Ad7d232bE786d76E6944d424",
+  orderBook: "0x9fcAe743C3fA0aEC7DB9b1d01e86464b85759942",
+  settlementOracle: "0xb205984b5F2F9010c2bD8aCA46d946Fe1c4F2A54",
+  expiryCalendar: "0xd0fCeD9Ee6F533aA900BEe8d0523eF4867a5784a",
+  keeperRewards: "0xFB409E6E253bcC12a65ED02B9D5aa3cAbF8f63f3",
+  autoRoller: "0xca76e9d57992904a14E31C5103454A4906ebFfee",
+  payoutAdapter: "0xf529CE3708bd2002D6bC974dFC0501c92aE72c30",
+  makerVault: "0x5EA899580B3dEB99c6866c7CD14dEDc913C8C1d0",
+  makerRegistry: "0xED816A81F8e311F78496c63c66abaA93A996cD3B",
+  rewardsDistributor: "0xc2Eea33F12e26662c66D632915fD75BCEA13BF4f",
   sources: {
-    chainlink: null,
-    univ3: null,
-    dataStreams: null,
+    chainlink: "0x1a595B2F836b7B76e71C0F85ADA6186ef16fB96A",
+    univ3: "0x030f05E856c79bC215c5683DC201473e4F88a155",
+    dataStreams: "0xeC049Df6F9908374940065cec593Ac83fc1db4d2",
   },
 } as const;
 

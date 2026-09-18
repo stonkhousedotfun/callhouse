@@ -49,7 +49,19 @@ test("the registry as committed renders", () => {
 });
 
 test("an empty production registry does not claim nothing deployed on chain", () => {
-  const s = scratch(() => {});
+  const s = scratch((reg) => {
+    reg.v2.deployBlock = null;
+    for (const market of reg.markets) {
+      market.v2.status = "planned";
+      market.v2.registeredAt = null;
+      market.v2.registerTx = null;
+    }
+    for (const key of Object.keys(reg.v2.contracts)) {
+      if (key === "sources") {
+        for (const source of Object.keys(reg.v2.contracts.sources)) reg.v2.contracts.sources[source] = null;
+      } else reg.v2.contracts[key] = null;
+    }
+  });
   assert.ok(render(s).ok);
   const page = readFileSync(s.page, "utf8");
   assert.match(page, /This registry records no v2 contract deployment/);
@@ -57,14 +69,20 @@ test("an empty production registry does not claim nothing deployed on chain", ()
   assert.doesNotMatch(page, /not deployed yet|has not been deployed|They are not deployed yet/);
 });
 
-test("planned production markets do not erase a separate dev preview", () => {
-  const s = scratch(() => {});
+test("planned markets are not presented as live", () => {
+  const s = scratch((reg) => {
+    for (const market of reg.markets) {
+      market.v2.status = "planned";
+      market.v2.registeredAt = null;
+      market.v2.registerTx = null;
+    }
+  });
   assert.ok(render(s).ok);
   const page = readFileSync(s.page, "utf8");
-  assert.match(page, /No v2 market is marked live for the public production release in this registry/);
-  assert.match(page, /A separately labeled dev preview can use a different registry/);
-  assert.match(page, /planned.*not registered for the public production release/);
-  assert.match(page, /Do not buy, write or deposit through a public production flow/);
+  assert.match(page, /No v2 market is marked live in this registry/);
+  assert.match(page, /planned.*not registered according to this registry/);
+  assert.match(page, /Do not buy, write or deposit through a flow/);
+  assert.doesNotMatch(page, /dev preview/);
   assert.doesNotMatch(page, /No market is live on v2 yet|nothing can be bought, written or deposited for it|is not Stonkhouse/);
 });
 
@@ -78,7 +96,7 @@ test("live status does not claim that a cranker populated strike ladders", () =>
   });
   assert.ok(render(s).ok);
   const page = readFileSync(s.page, "utf8");
-  assert.match(page, /live.*registered for the public production release/);
+  assert.match(page, /live.*registered on the live v2 contracts/);
   assert.match(page, /this status alone does not mean an automated strike ladder is running/);
   assert.match(page, /they do not prove that any series has been created or that a cranker is running/);
   assert.doesNotMatch(page, /The cranker creates its strike ladders|For each live market the cranker creates/);
