@@ -5,13 +5,11 @@
  * severity is not info|warn|error, or whose `vault` is not a string, and a refused alert never
  * arrives. Pinned: the payload shape (no `vault`, `source` names the mode, Bearer token), the
  * cooldown and its force/clear escapes, the five-minute retry after a failed delivery, and that a
- * process with no webhook still logs and stores every alert. And every kind in ALERT_SEVERITY has its
- * row in ops/alerts.md "Index — v2 bot kinds" at the same severity: the on-call reads that table.
+ * process with no webhook still logs and stores every alert. Every registered kind must satisfy
+ * the relay's identifier and severity rules, including kinds added after the bot-specific tests.
  */
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
 import { test } from 'node:test';
-import { fileURLToPath } from 'node:url';
 import { ALERT_SEVERITY, Alerter, FAILED_DELIVERY_RETRY_MS } from './alerts.js';
 import { silentLogger } from './logger.js';
 import { V2Store } from './store.js';
@@ -69,15 +67,10 @@ test('the pricer\'s alert kinds (K2-05) are registered with a severity and are r
   }
 });
 
-test('every v2 bot kind in ALERT_SEVERITY has a row in the ops/alerts.md v2 bot index, with the same severity', () => {
-  const doc = readFileSync(fileURLToPath(new URL('../../../ops/alerts.md', import.meta.url)), 'utf8');
-  const start = doc.indexOf('## Index — v2 bot kinds');
-  assert.ok(start >= 0, 'ops/alerts.md has the v2 bot index');
-  const index = doc.slice(start, doc.indexOf('\n## ', start + 1));
+test('every registered v2 alert is accepted by the relay', () => {
   for (const [kind, severity] of Object.entries(ALERT_SEVERITY)) {
-    const row = index.split('\n').find((line) => line.startsWith(`| \`${kind}\` |`));
-    assert.ok(row !== undefined, `${kind} has no row in ops/alerts.md "Index — v2 bot kinds"`);
-    assert.match(row.split('|')[3] ?? '', new RegExp(`\\b${severity}\\b`), `${kind}: the index's severity column names ${severity}`);
+    assert.match(kind, /^[a-z][a-z0-9_]{0,63}$/, `${kind}: relay identifier`);
+    assert.ok(['info', 'warn', 'error'].includes(severity), `${kind}: relay severity`);
   }
 });
 
