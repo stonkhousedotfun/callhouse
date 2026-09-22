@@ -141,6 +141,9 @@ test('T-496: the survey reads the block it was pinned to, not head', async () =>
 
   const [s] = await survey(answers(), atHead);
   const got = s!.view.candidate;
+  // `candidate` is nullable on the view (a finalizableAt of 0 is "no candidate"); at the pinned block
+  // there is one, and asserting that before reading through it is what keeps this test honest under tsc.
+  assert.ok(got, `block ${PINNED_BLOCK}: the survey reported no candidate at all, so the pin is not being read.`);
   assert.equal(
     got.disagreed,
     true,

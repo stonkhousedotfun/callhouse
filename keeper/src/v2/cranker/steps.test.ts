@@ -296,7 +296,7 @@ function rollHarness(outcome: 'confirmed' | 'simulation-reverted' = 'confirmed')
     log: silentLogger(),
     client: { readContract: async ({ functionName, address }: { functionName: string; address: Address }) => (functionName === 'epochId' ? epochIdOf.get(address.toLowerCase()) ?? 0n : assert.fail(`no chain read ${functionName}`)) } as never,
     logClient: { getLogs: async () => [] } as never,
-    addresses: { clearinghouse: CH, orderBook: config.contracts.orderBook, settlementOracle: DEFAULT_ORACLE, expiryCalendar: config.contracts.expiryCalendar, autoRoller: null, feeSplitter: null, multicall3: config.contracts.multicall3 },
+    addresses: { clearinghouse: CH, orderBook: config.contracts.orderBook, settlementOracle: DEFAULT_ORACLE, expiryCalendar: config.contracts.expiryCalendar, autoRoller: null, feeSplitter: null, multicall3: config.multicall3 },
     store,
     index: new CrankerIndex(store),
     sender,
