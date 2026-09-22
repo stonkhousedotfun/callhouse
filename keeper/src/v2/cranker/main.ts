@@ -42,6 +42,9 @@ export function createCranker(runtime: ModeRuntime<CrankerConfig>, options: { dr
       settlementOracle: config.contracts.settlementOracle,
       expiryCalendar: config.contracts.expiryCalendar,
       autoRoller: config.contracts.autoRoller,
+      // null until the v8 flywheel is deployed; the flywheel step then reports itself skipped rather than
+      // failing the boot (keeper/src/v2/config.ts, ops/v2/env/cranker.env:26-27).
+      feeSplitter: config.contracts.feeSplitter,
       multicall3: config.multicall3,
     },
     store: runtime.store,

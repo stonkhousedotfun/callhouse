@@ -154,13 +154,14 @@ function view(overrides: Partial<CheckView> = {}): CheckView {
     spot: SPOT,
     series: { isPut: false, strike: SPOT * 2n },
     now: NOW,
+    sessionOpen: true,
     memory: null,
     ...overrides,
   };
 }
 
 test('planCheck: the contract\'s refusals first (strategy, position, tracked ask, live ask, cutoff), then the cadence, then spot', () => {
-  const settings = { minIntervalS: 1_800 };
+  const settings = { minIntervalS: 1_800, repriceOffHours: false };
   const reason = (v: CheckView) => {
     const d = planCheck(v, settings);
     return d.check ? `check:${d.why}` : d.reason;
@@ -187,7 +188,7 @@ test('planCheck: the contract\'s refusals first (strategy, position, tracked ask
 });
 
 test('planCheck: an in-the-money ask is not repriced — reprice reverts InTheMoney and cancelStale withdraws it', () => {
-  const settings = { minIntervalS: 1_800 };
+  const settings = { minIntervalS: 1_800, repriceOffHours: false };
   const reason = (v: CheckView) => {
     const d = planCheck(v, settings);
     return d.check ? `check:${d.why}` : d.reason;
@@ -206,6 +207,14 @@ test('planCheck: an in-the-money ask is not repriced — reprice reverts InTheMo
   assert.equal(reason(view({ series: { isPut: false, strike }, spot: null })), 'spot-stale', 'without a spot there is nothing to compare');
   // An unread series does not invent a refusal: the pricer falls through and reports the read failure itself.
   assert.equal(reason(view({ series: null, spot: strike })), 'check:new-position');
+});
+
+test('planCheck: session gate refuses overnight and unread calendars without moving evaluation memory', () => {
+  const settings = { minIntervalS: 1_800, repriceOffHours: false };
+  assert.deepEqual(planCheck(view({ sessionOpen: false }), settings), { check: false, reason: 'market-closed' });
+  assert.deepEqual(planCheck(view({ sessionOpen: null }), settings), { check: false, reason: 'session-unavailable' });
+  assert.deepEqual(planCheck(view({ sessionOpen: false }), { ...settings, repriceOffHours: true }), { check: true, why: 'new-position', spot: SPOT, order: view().order });
+  assert.deepEqual(planCheck(view({ sessionOpen: true }), settings), { check: true, why: 'new-position', spot: SPOT, order: view().order });
 });
 
 test('planReprice: repriced to the clamped target only when it moves more than the threshold', () => {

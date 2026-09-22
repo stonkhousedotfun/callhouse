@@ -1,10 +1,17 @@
 /**
  * The pricer's integration test: a real pricer loop (startPricer, the entry V2_MODE=pricer boots)
  * against ops/devnet's AutoRoller, repricing the seeded writer's live roll ask with account 9's
- * PRICER_ROLE, asserting on-chain state after every tick.
+ * the PRICER role on the AccessManager, asserting on-chain state after every tick.
  *
  *   pnpm --filter @callhouse/keeper v2:devnet-pricer
  *   DEVNET_PORT=8561 CONTRACTS_DIR=/path/to/callhouse-contracts pnpm --filter @callhouse/keeper v2:devnet-pricer
+ *   pnpm --filter @callhouse/keeper v2:devnet-pricer -- --pricing-url http://127.0.0.1:8790
+ *   PRICING_URL=http://127.0.0.1:8790 pnpm --filter @callhouse/keeper v2:devnet-pricer
+ *
+ * --pricing-url (or PRICING_URL): call a real running pricing service instead of the harness's
+ * injected fair value. The steps that set the fair value (0 and A-E) cannot run then — the
+ * harness boots the pricer on the real client, ticks once and checks that what the pricer did
+ * matches what the service answers for the same series. The default path is unchanged.
  *
  * WHAT RUNS. ops/devnet/up.sh brings up the seeded devnet: writer `ben` has a weekly NVDA strategy with
  * smart pricing (ask 60 bps of spot, band 30-150 bps) and a live AskWrite from the seed's roll. The
@@ -46,15 +53,25 @@ import { settlementOracleAbi } from '../abi/settlementOracle.js';
 import { loadV2Config, type PricerConfig } from '../config.js';
 import { BPS, PRICE_TICK } from '../cranker/constants.js';
 import { roundUpToTick } from '../cranker/planner.js';
+import { resolveDevnetPricingUrl } from '../devnet-pricing-url.js';
 import type { RunningMode } from '../mode.js';
-import type { FairAnswer, FairRequest } from './fair-client.js';
+import { PricingClient, type FairAnswer, type FairRequest } from './fair-client.js';
+import { accessManagerAbi } from '../abi/accessManager.js';
 import { startPricer } from './main.js';
 import { differsEnough, priceBand, targetPrice } from './planner.js';
-import { GAS_REPRICE, PRICER_ROLE } from './pricer.js';
+import { GAS_REPRICE } from './pricer.js';
 
 const KEEPER_DIR = fileURLToPath(new URL('../../../', import.meta.url));
 const ROOT = resolve(KEEPER_DIR, '..');
 const DEVNET_DIR = join(ROOT, 'ops', 'devnet');
+/**
+ * The role table, MIRRORED from its source at runtime rather than retyped. `ops/abis/v2/roles.json` is outside
+ * the keeper package's rootDir so it cannot be imported (pricer.ts:266 records the same constraint); reading it
+ * here keeps the id and the delay tied to the file every other lane derives them from.
+ */
+const ROLES = JSON.parse(
+  readFileSync(join(ROOT, 'ops', 'abis', 'v2', 'roles.json'), 'utf8'),
+) as { roles: Record<string, number>; delaysS: Record<string, number> };
 const PORT = Number(process.env.DEVNET_PORT ?? 8546);
 const RPC = `http://127.0.0.1:${PORT}`;
 const OUT = mkdtempSync(join(tmpdir(), 'pricer-devnet-'));
@@ -154,7 +171,11 @@ async function tickOnce(running: RunningMode): Promise<any> {
 }
 
 interface Devnet {
-  contracts: { clearinghouse: Address; orderBook: Address; settlementOracle: Address; autoRoller: Address | null };
+  // `accessManager` is the key the ALREADY-LANDED admin driver reads from the same file
+  // (`ops/v2/devnet-admin.mjs:73`, MANAGER_KEY = "contracts.accessManager"), so the name is mirrored from its
+  // actual consumer rather than guessed. Optional because the devnet bring-up that writes addresses.json is a
+  // separate task: a run against an older addresses.json gets a clear refusal below, not a silent undefined.
+  contracts: { clearinghouse: Address; orderBook: Address; settlementOracle: Address; autoRoller: Address | null; accessManager?: Address };
   markets: Array<{ ticker: string; underlying: Address }>;
   accounts: Record<string, Address>;
   startBlock: number;
@@ -177,6 +198,8 @@ interface OrderRow {
 
 async function main(): Promise<void> {
   say(`pricer devnet test on ${RPC}; output in ${OUT}`);
+  const pricingUrl = resolveDevnetPricingUrl(process.argv.slice(2), process.env);
+  if (pricingUrl.url !== null) say(`real pricing service at ${pricingUrl.url} (${pricingUrl.source}): the harness's fair-value stub is off`);
   if (process.env.DEVNET_REUSE !== '1') {
     step('ops/devnet/up.sh');
     const up = await run(join(DEVNET_DIR, 'up.sh'), [], { DEVNET_PORT: String(PORT), ...(process.env.CONTRACTS_DIR ? { CONTRACTS_DIR: process.env.CONTRACTS_DIR } : {}) }, join(OUT, 'devnet-up.log'));
@@ -212,7 +235,43 @@ async function main(): Promise<void> {
   const o0 = await order(p0.orderId);
   const t0 = await now();
   check(p0.orderId !== 0n && !o0.cancelled && o0.filled < o0.units && Number(o0.validUntil) > t0 + 4 * 3_600, `ben's roll ask is live: order ${p0.orderId} (placed by the seed's roll), ${o0.units - o0.filled} units at ${o0.price}, valid until ${o0.validUntil} (chain ${t0})`);
-  check(await read<boolean>(roller, autoRollerAbi, 'hasRole', [PRICER_ROLE, pricerKey]), `anvil account 9 (${pricerKey}) holds PRICER_ROLE`);
+  // v8: the AutoRoller is `Managed` and has no `hasRole` of its own -- the manager owns the role table. Ask the
+  // manager, with the uint64 role id, and require BOTH that the key is a member and that its execution delay is
+  // zero: a member with a delay cannot send the call directly, it has to schedule, so a non-zero delay here would
+  // be a pricer that silently cannot reprice. Role id and expected delay are READ from ops/abis/v2/roles.json,
+  // never retyped -- PRICER is 8 and its delay is 0 there. The bytes32 PRICER_ROLE from pricer.ts is the v7
+  // AccessControl identifier and must NOT be passed to a uint64 parameter.
+  const manager = D.contracts.accessManager;
+  if (manager === undefined) {
+    throw new Error(
+      'devnet addresses.json has no contracts.accessManager. The bring-up DOES write it -- ops/devnet/devnet.mjs ' +
+        'recovers it from authority() on every Managed target -- so this addresses.json predates that, or the ' +
+        'devnet ran with the periphery switched off. Re-run ops/devnet/up.sh. It is the same key ' +
+        'ops/v2/devnet-admin.mjs:73 reads.',
+    );
+  }
+  // MISSING KEYS ARE THEIR OWN REFUSAL, not a comparison that quietly stops meaning anything.
+  // `roles` and `delaysS` are Record<string, number>, so an absent key reads as undefined. Left alone,
+  // `BigInt(undefined)` throws a TypeError naming nothing, and -- worse -- `Number(undefined)` is NaN, so
+  // `Number(executionDelay) === NaN` is ALWAYS FALSE: the delay check would fail closed for a reason that has
+  // nothing to do with the delay, and send whoever read the message hunting the AccessManager. Name the key
+  // instead, the same way the manager lookup above does.
+  const pricerRoleId = ROLES.roles.PRICER;
+  const pricerDelayS = ROLES.delaysS.PRICER;
+  if (pricerRoleId === undefined || pricerDelayS === undefined) {
+    throw new Error(
+      `ops/abis/v2/roles.json is missing ${pricerRoleId === undefined ? 'roles.PRICER' : 'delaysS.PRICER'}: ` +
+        'this harness reads the role id and its expected execution delay from that file rather than retyping ' +
+        'them, so it cannot assert anything about the pricer without it.',
+    );
+  }
+  const [isMember, executionDelay] = await read<readonly [boolean, number]>(
+    manager, accessManagerAbi, 'hasRole', [BigInt(pricerRoleId), pricerKey],
+  );
+  check(
+    isMember && Number(executionDelay) === pricerDelayS,
+    `anvil account 9 (${pricerKey}) holds PRICER (role id ${pricerRoleId}) on the manager with delay ${executionDelay} (roles.json says ${pricerDelayS})`,
+  );
   const series = await read<{ strike: bigint; expiry: number; isPut: boolean }>(D.contracts.clearinghouse, clearinghouseAbi, 'series', [p0.longId]);
   await setFeed(['--all']);
 
@@ -238,12 +297,14 @@ async function main(): Promise<void> {
   const log = pino({ level: 'info', base: { service: 'callhouse-pricer', mode: 'pricer' } }, destination({ dest: join(OUT, 'pricer.log'), sync: true }));
   const started = await startPricer(config, {
     log,
-    fair: {
-      fair: async (request) => {
-        fairRequests.push(request);
-        return fairAnswer;
-      },
-    },
+    fair: pricingUrl.url === null
+      ? {
+          fair: async (request) => {
+            fairRequests.push(request);
+            return fairAnswer;
+          },
+        }
+      : new PricingClient({ baseUrl: pricingUrl.url, timeoutMs: 1_000 }),
   });
   let closed = false;
   const running: RunningMode = {
@@ -261,6 +322,40 @@ async function main(): Promise<void> {
   const pairOf = (st: any) => (st?.pairs ?? []).find((p: any) => getAddress(p.writer) === ben);
 
   try {
+    if (pricingUrl.url !== null) {
+      /* ------------------------------------------------------------ REAL */
+      step('REAL. one tick against the real pricing service: /state matches what it answers for the same series');
+      await waitFor('the first tick', async () => {
+        const h = await health(running);
+        return h.ticks >= 1 && !h.tickInFlight;
+      }, 120_000);
+      const stReal = await state(running);
+      check(stReal.strategies >= 1 && /^down/.test(stReal.indexerStatus) && stReal.scannedTo !== null, `the strategy list came from the pricer's own StrategySet scan (indexer ${stReal.indexerStatus}; ${stReal.strategies} strateg${stReal.strategies === 1 ? 'y' : 'ies'}, scanned to ${stReal.scannedTo})`);
+      check(stReal.hasRole === true, 'the pricer read its own PRICER_ROLE');
+      const direct = await new PricingClient({ baseUrl: pricingUrl.url, timeoutMs: 1_000 }).fair({ ticker: 'NVDA', strike: series.strike, expiry: Number(series.expiry), type: 'call' });
+      say(`  the service answers the rolled series: ${direct.ok ? `fair ${direct.fair} (${direct.source})` : `null (${direct.reason})`}`);
+      const pairReal = pairOf(stReal);
+      const known = ['repriced', 'not-due', 'within-threshold', 'in-the-money', 'fair-unavailable', 'fair-stale', 'fair-spot-mismatch', 'asOf-unknown'];
+      check(pairReal !== undefined && known.includes(pairReal.outcome), `/state reports a known outcome for the pair (${pairReal?.outcome})`);
+      if (!direct.ok) {
+        check(pairReal?.outcome === 'fair-unavailable' && (await repricedLogs()).length === 0, `the service's refusal (${direct.reason}) left the ask alone: nothing sent (${pairReal?.outcome})`);
+      } else {
+        if (pairReal?.outcome === 'repriced') {
+          const logsReal = await repricedLogs();
+          const argsReal = logsReal.at(-1)?.args as { price: bigint } | undefined;
+          const expectReal = targetPrice({ fair: direct.fair, edgeBps, spot: await spotNow(), minAskBps: strategy.minAskBps, maxAskBps: strategy.maxAskBps });
+          check(expectReal.ok && argsReal?.price === expectReal.price, `the reprice targeted the service's fair ${direct.fair}: ${argsReal?.price} == ${expectReal.ok ? expectReal.price : 'no band'}`);
+        }
+        if (pairReal?.outcome === 'fair-unavailable') say('  (note: the harness read a fair value but the pricer\'s own read refused; see the service log)');
+      }
+      step('REAL. journal and alerts');
+      await running.close();
+      const dbReal = new Database(env.KEEPER_DB_PATH, { readonly: true });
+      const alertsReal = dbReal.prepare('SELECT kind, message FROM v2_alerts ORDER BY id').all() as Array<{ kind: string; message: string }>;
+      const badReal = alertsReal.filter((a) => a.kind === 'v2_error' || a.kind.startsWith('v2_pricer_'));
+      check(badReal.length === 0, `no v2_error / v2_pricer_* alert${badReal.map((a) => `\n         ${a.kind}: ${a.message}`).join('')}`);
+      dbReal.close();
+    } else {
     /* ---------------------------------------------------------------- 0 */
     step('0. the first tick, before any fair value: the ask is left alone');
     await waitFor('the first tick', async () => {
@@ -280,7 +375,7 @@ async function main(): Promise<void> {
     const expectA = targetPrice({ fair: fairA, edgeBps, spot, minAskBps: strategy.minAskBps, maxAskBps: strategy.maxAskBps });
     if (!expectA.ok) throw new Error('band empty at A');
     check(differsEnough(expectA.price, o0.price, repriceThresholdBps), `target ${expectA.price} (fair ${fairA} + ${edgeBps} bps) is more than ${repriceThresholdBps} bps from the live ${o0.price} (spot ${spot})`);
-    fairAnswer = { ok: true, fair: fairA, source: 'harness', asOf: t0 };
+    fairAnswer = { ok: true, fair: fairA, source: 'harness', asOf: await now(), spot };
     const stA = await tickOnce(running);
     const pA = await position();
     const logsA = await repricedLogs();
@@ -307,7 +402,7 @@ async function main(): Promise<void> {
     await warpTo((await now()) + 300);
     await setFeed(['--all']);
     spot = await spotNow();
-    fairAnswer = { ok: true, fair: fairFor(spot, 140n), source: 'harness', asOf: t0 };
+    fairAnswer = { ok: true, fair: fairFor(spot, 140n), source: 'harness', asOf: await now(), spot };
     const requestsBeforeB = fairRequests.length;
     const stB = await tickOnce(running);
     const pairB = pairOf(stB);
@@ -323,7 +418,7 @@ async function main(): Promise<void> {
     const fairC = (roundUpToTick((oA.price * 105n) / 100n, PRICE_TICK) * BPS) / (BPS + BigInt(edgeBps));
     const expectC = targetPrice({ fair: fairC, edgeBps, spot, minAskBps: strategy.minAskBps, maxAskBps: strategy.maxAskBps });
     check(expectC.ok && !differsEnough(expectC.price, oA.price, repriceThresholdBps) && expectC.price !== oA.price, `target ${expectC.ok ? expectC.price : '-'} is within ${repriceThresholdBps} bps of the live ${oA.price} but not equal`);
-    fairAnswer = { ok: true, fair: fairC, source: 'harness', asOf: t0 };
+    fairAnswer = { ok: true, fair: fairC, source: 'harness', asOf: await now(), spot };
     const stC = await tickOnce(running);
     const pairC = pairOf(stC);
     check((await repricedLogs()).length === 1 && (await position()).orderId === pA.orderId, 'no reprice: still one Repriced, the same ask');
@@ -337,7 +432,7 @@ async function main(): Promise<void> {
     await setFeed(['--all']);
     spot = await spotNow();
     const band = priceBand(spot, strategy.minAskBps, strategy.maxAskBps)!;
-    fairAnswer = { ok: true, fair: spot, source: 'harness', asOf: t0 };
+    fairAnswer = { ok: true, fair: spot, source: 'harness', asOf: await now(), spot };
     const stD = await tickOnce(running);
     const pD = await position();
     const logsD = await repricedLogs();
@@ -367,7 +462,7 @@ async function main(): Promise<void> {
     check(spotE >= series.strike, `the NVDA spot ${spotE} has reached the ${series.strike} strike`);
     const liveE = await order((await position()).orderId);
     // A fair value that would otherwise move the ask by far more than the threshold.
-    fairAnswer = { ok: true, fair: fairFor(spotE, 140n), source: 'harness', asOf: t0 };
+    fairAnswer = { ok: true, fair: fairFor(spotE, 140n), source: 'harness', asOf: await now(), spot: spotE };
     const requestsBeforeE = fairRequests.length;
     const stE = await tickOnce(running);
     const pairE = pairOf(stE);
@@ -397,6 +492,7 @@ async function main(): Promise<void> {
     const bad = alerts.filter((a) => a.kind === 'v2_error' || a.kind === 'v2_tx_revert' || a.kind.startsWith('v2_pricer_'));
     check(bad.length === 0, `no v2_error / v2_pricer_* alert${bad.map((a) => `\n         ${a.kind}: ${a.message}`).join('')}`);
     db.close();
+    }
   } finally {
     await running.close().catch(() => undefined);
   }

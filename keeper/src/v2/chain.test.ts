@@ -68,6 +68,9 @@ test('contractHandles: a handle per ABI module, non-null exactly where the mode 
     makerVault: '0x00000000000000000000000000000000000000c8',
     makerRegistry: null,
     rewardsDistributor: null,
+    accessManager: null,
+    feeSplitter: null,
+    buybackExecutor: null,
   };
   const handles = contractHandles(publicClient, contracts);
   // Type level: a required contract's handle needs no null check (typecheck fails otherwise)...
@@ -84,7 +87,13 @@ test('contractHandles: a handle per ABI module, non-null exactly where the mode 
   assert.equal('write' in ch, false, 'writes go through tx.ts only');
   assert.equal(handles.expiryCalendar?.address, CAL, 'present but not required: a handle, typed nullable');
   assert.equal(handles.settlementOracle, null);
-  assert.deepEqual(Object.keys(handles).sort(), ['autoRoller', 'clearinghouse', 'expiryCalendar', 'keeperRewards', 'makerRegistry', 'makerVault', 'orderBook', 'payoutAdapter', 'settlementOracle']);
+  // One handle per ABI module, so this list is V2_ABIS' key set and nothing else. It is spelled out
+  // rather than derived from V2_ABIS on purpose: a name added to the ABI map should fail here until
+  // someone decides the bots really do resolve it.
+  assert.deepEqual(Object.keys(handles).sort(), ['accessManager', 'autoRoller', 'buybackExecutor', 'clearinghouse', 'expiryCalendar', 'feeSplitter', 'keeperRewards', 'makerRegistry', 'makerVault', 'orderBook', 'payoutAdapter', 'settlementOracle']);
+  assert.equal(handles.accessManager, null, 'v8 names the mode does not require are null, like any other optional address');
+  assert.equal(handles.feeSplitter, null);
+  assert.equal(handles.buybackExecutor, null);
   assert.equal(handles.makerVault?.address, '0x00000000000000000000000000000000000000c8', "the MM bot vault (K2-04) has a handle");
 });
 

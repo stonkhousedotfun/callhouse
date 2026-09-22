@@ -23,7 +23,7 @@ import type { TxOutcome } from '../tx.js';
 import { CrankAlerts, type CrankSender, type FixedGasCall } from './effects.js';
 import { CrankerIndex } from './index-store.js';
 import { yieldDeadlineMs } from './planner.js';
-import { settledSeenMetaKey, stepHousekeeping, stepPrune, stepRedeem, stepSettle, stepSnapshot, unprunableMetaKey, type CrankContext } from './steps.js';
+import { settledSeenMetaKey, snapshotMetaKey, stepHousekeeping, stepPrune, stepRedeem, stepSettle, stepSnapshot, unprunableMetaKey, type CrankContext } from './steps.js';
 
 const REGISTRY = fileURLToPath(new URL('../fixtures/registry-v2.json', import.meta.url));
 const CH = getAddress('0x2256c045245288A314048aD2d71006a564343C63');
@@ -85,6 +85,17 @@ export function harness() {
     balances: new Map<string, bigint>(),
     orders: new Map<bigint, FakeOrder>(),
     accruedFees: new Map<string, bigint>(),
+    /**
+     * T-496. State AT A PAST BLOCK, keyed by block number, for the post-reads the cranker pins to a
+     * receipt's block. Empty by default, so a test that registers nothing sees head exactly as before.
+     *
+     * The cranker's post-reads (`settledAtBlock`, `deadAtBlock`, `stillHeldAtBlock`) run at
+     * `outcome.blockNumber`, NOT at head. `multicallMany` omits the key entirely when the pin is
+     * undefined (chain.ts:219), which viem reads as head — so a fake that answered every block from the
+     * live `state` could not fail when the pin was dropped, and none of these tests could see whether
+     * the block reached the RPC.
+     */
+    atBlock: new Map<string, Record<string, (args: readonly unknown[]) => unknown>>(),
     sendFails: false,
     sim: {} as Record<string, SimHandler>,
     sends: [] as Array<{ fn: string; args: readonly unknown[]; gas: bigint; status: TxOutcome['status'] }>,
@@ -116,21 +127,27 @@ export function harness() {
     payoutPrefs: () => [false, false],
     accruedFees: ([asset]) => state.accruedFees.get(String(asset).toLowerCase()) ?? 0n,
   };
+  /** T-496. The views as of `blockNumber`: a registered past block, else head. An absent pin IS head. */
+  const viewsAt = (blockNumber?: bigint) => {
+    const past = blockNumber === undefined ? undefined : state.atBlock.get(String(blockNumber));
+    return past === undefined ? views : { ...views, ...past };
+  };
   const client = {
     getBlock: async () => ({ number: state.block, timestamp: BigInt(state.now) }),
     getBlockNumber: async () => state.block,
     getGasPrice: async () => 1n,
-    multicall: async ({ contracts }: { contracts: Array<{ functionName: string; args?: readonly unknown[] }> }) =>
-      contracts.map((c) => {
-        const handler = views[c.functionName];
+    multicall: async ({ contracts, blockNumber }: { contracts: Array<{ functionName: string; args?: readonly unknown[] }>; blockNumber?: bigint }) => {
+      const at = viewsAt(blockNumber);
+      return contracts.map((c) => {
+        const handler = at[c.functionName];
         if (handler === undefined) return { status: 'failure', error: new Error(`no view ${c.functionName}`) };
         return { status: 'success', result: handler(c.args ?? []) };
-      }),
-    readContract: async ({ functionName, args = [] }: { functionName: string; args?: readonly unknown[] }) => {
-      const handler = views[functionName];
+      });
+    },
+    readContract: async ({ functionName, args = [], blockNumber }: { functionName: string; args?: readonly unknown[]; blockNumber?: bigint }) => {
+      const handler = viewsAt(blockNumber)[functionName];
       if (handler === undefined) throw new Error(`no readContract ${functionName}`);
-      const result = handler(args);
-      return functionName === 'series' ? result : result;
+      return handler(args);
     },
   };
 
@@ -149,9 +166,13 @@ export function harness() {
         state.sends.push({ fn: call.functionName, args, gas: call.gas, status: 'send-failed' });
         return { status: 'send-failed', error: 'HTTP request failed.' };
       }
+      // T-496. The block this tx MINED IN, captured before `apply` runs. A receipt reports where it
+      // landed, not where head drifted to afterwards, and an `apply` that advances head (as the
+      // post-read tests do) must not be able to rewrite its own receipt's block.
+      const minedAt = state.block;
       simulated.apply?.();
       state.sends.push({ fn: call.functionName, args, gas: call.gas, status: 'confirmed' });
-      return { status: 'confirmed', hash: `0x${'ab'.repeat(32)}`, nonce: 1, blockNumber: state.block, gasUsed: 1n, result: simulated.result };
+      return { status: 'confirmed', hash: `0x${'ab'.repeat(32)}`, nonce: 1, blockNumber: minedAt, gasUsed: 1n, result: simulated.result };
     },
   };
 
@@ -168,7 +189,7 @@ export function harness() {
     log: silentLogger(),
     client: client as never,
     logClient: { getLogs: async () => [], getBlockNumber: async () => state.block } as never,
-    addresses: { clearinghouse: CH, orderBook: BOOK, settlementOracle: ORACLE, expiryCalendar: config.contracts.expiryCalendar, autoRoller: null, multicall3: config.multicall3 },
+    addresses: { clearinghouse: CH, orderBook: BOOK, settlementOracle: ORACLE, expiryCalendar: config.contracts.expiryCalendar, autoRoller: null, feeSplitter: null, multicall3: config.multicall3 },
     store,
     index,
     sender,
@@ -286,6 +307,77 @@ test('redeem: a chunk that runs out of gas as a whole (a holder costs more than 
   assert.ok(holders.every((a) => h.state.balances.get(`${a.toLowerCase()}:${longId}`) === 0n));
 });
 
+/*//////////////////////////////////////////////////////////////
+    T-462: A MINED BATCH THAT DID LESS THAN ITS SIMULATION
+//////////////////////////////////////////////////////////////*/
+
+// The sender's confirmed outcome carries the SIMULATED result (tx.ts), and redeemBatch and prune each swallow a
+// per-item failure, so the receipt reads success either way. These handlers make the two diverge: the simulation
+// reports every item done, and the mined effect (`apply`) leaves one item as it was.
+
+test('redeem: a holder the MINED batch skipped is not counted redeemed from the simulation; its expiry stays open and the backlog counts it (T-462)', async () => {
+  const h = harness();
+  const longId = h.addSeries(200_000_000n, { longPayoutPerUnit: 10n ** 16n, shortPayoutPerUnit: 0n }, { long: 300n });
+  const holders = [0xa1, 0xa2, 0xa3].map((n) => getAddress(`0x${n.toString(16).padStart(40, '0')}`));
+  const SKIPPED = holders[1]!;
+  for (const a of holders) h.state.balances.set(`${a.toLowerCase()}:${longId}`, 100n);
+  h.index.applyRange({ series: [], holders: holders.map((holder) => ({ tokenId: longId, holder })), orders: [], strategies: [], block: h.state.block }, h.state.block);
+  // Settled two hours ago, so a holder left behind is old enough for the backlog page.
+  h.store.setMeta(settledSeenMetaKey(longId), String(h.state.now - 7_200));
+  h.state.sim.redeemBatch = (args) => {
+    const [tokenId, batch] = args as [bigint, Address[]];
+    return { ok: true, result: BigInt(batch.length), apply: () => batch.filter((a) => a !== SKIPPED).forEach((a) => h.state.balances.set(`${a.toLowerCase()}:${tokenId}`, 0n)) };
+  };
+
+  const report = await stepRedeem(h.ctx, [h.key]);
+  assert.deepEqual(h.state.sends.filter((s) => s.fn === 'redeemBatch').map((s) => s.status), ['confirmed'], 'one chunk, and its receipt reads success');
+  assert.equal(h.state.balances.get(`${SKIPPED.toLowerCase()}:${longId}`), 100n, 'the break landed: the mined batch left the holder unredeemed');
+  const token = (report.notes.tokens as Array<{ redeemed: number; minedSkipped: string[] }>)[0]!;
+  assert.equal(token.redeemed, 2, `${SKIPPED} was skipped by the mined batch and must not be counted redeemed`);
+  assert.deepEqual(token.minedSkipped, [SKIPPED], 'the holder the mined batch skipped is named');
+  assert.equal(h.index.doneExpiries().size, 0, `${SKIPPED} still holds a redeemable balance, so its expiry must not be marked done`);
+  const backlog = h.alerts.filter((a) => a.kind === 'v2_redeem_backlog');
+  assert.equal(backlog.length, 1, `${SKIPPED} must reach the v2_redeem_backlog accounting`);
+  assert.equal(backlog[0]!.data.holders, 1, `the backlog counts exactly one holder left: ${SKIPPED}`);
+});
+
+test('prune: an order the MINED prune skipped is not marked dead from the simulation; it stays live for the next tick (T-462)', async () => {
+  const h = harness();
+  const longId = h.addSeries(200_000_000n);
+  const ids = [1n, 2n, 3n];
+  const SKIPPED = 2n;
+  for (const id of ids) h.state.orders.set(id, { maker: MAKER, longId, kind: 0, price: 1_000_000n, units: 100n, filled: 0n, validUntil: E - 1_800, cancelled: false });
+  h.index.applyRange({ series: [], holders: [], orders: ids.map((orderId) => ({ orderId, longId, maker: MAKER, kind: 0, validUntil: E - 1_800 })), strategies: [], block: h.state.block }, h.state.block);
+  h.state.sim.prune = (args) => {
+    const batch = args[0] as bigint[];
+    return { ok: true, result: BigInt(batch.length), apply: () => batch.filter((id) => id !== SKIPPED).forEach((id) => (h.state.orders.get(id)!.cancelled = true)) };
+  };
+
+  const report = await stepPrune(h.ctx, [h.key]);
+  assert.deepEqual(h.state.sends.filter((s) => s.fn === 'prune').map((s) => s.status), ['confirmed'], 'one chunk, and its receipt reads success');
+  assert.equal(h.state.orders.get(SKIPPED)!.cancelled, false, 'the break landed: the mined prune left the order live');
+  assert.equal(report.notes.pruned, 2, `order ${SKIPPED} was skipped by the mined prune and must not be counted pruned`);
+  assert.deepEqual(
+    h.index.expiredOpenOrders(h.state.now, 100).map((o) => o.orderId),
+    [SKIPPED],
+    `order ${SKIPPED} must stay live in the index for the next tick, and only orders 1 and 3 are marked dead`,
+  );
+});
+
+test('settle: a mined settle that did not settle does not start the redeem backlog clock from the simulated `true`; one that did, does (T-462)', async () => {
+  const h = harness();
+  // Clearinghouse.settle returns false, with a successful receipt, when the price is not final on chain.
+  const unsettled = h.addSeries(200_000_000n, { settled: false }, { long: 100n });
+  const settles = h.addSeries(210_000_000n, { settled: false }, { long: 100n });
+  h.state.sim.settle = (args) => ({ ok: true, result: true, ...(args[0] === settles ? { apply: () => (h.state.series.get(settles.toString())!.settled = true) } : {}) });
+
+  await stepSettle(h.ctx, [h.key]);
+  assert.deepEqual(h.state.sends.filter((s) => s.fn === 'settle').map((s) => s.status), ['confirmed', 'confirmed'], 'both receipts read success');
+  assert.equal(h.state.series.get(unsettled.toString())!.settled, false, 'the break landed: the mined settle left the series unsettled');
+  assert.equal(h.store.getMeta(settledSeenMetaKey(unsettled)), null, `series ${unsettled} is not settled on chain, so its settled mark must not be set`);
+  assert.notEqual(h.store.getMeta(settledSeenMetaKey(settles)), null, `series ${settles} did settle on chain, so its settled mark is set`);
+});
+
 test('a redeem backlog pages once per expiry, naming its tokens, not once per token id; a settle that does not advance pages once per expiry', async () => {
   const h = harness();
   const holder = getAddress('0x00000000000000000000000000000000000000a1');
@@ -351,7 +443,127 @@ test('a tick that must yield to a time-critical target (an expiry\'s snapshot) s
   assert.equal(h.state.sends.filter((s) => s.fn === 'snapshot').length, 1);
 });
 
+test('snapshot: a mined snapshot whose source recorded nothing does not mark its expiry from the simulated count; one that recorded, does (T-469)', async () => {
+  const h = harness();
+  h.state.openInterest = 100n;
+  h.state.status = 0;
+  // Two expiries inside their snapshot window, each settled on one pool source that prices the window only once a
+  // snapshot is recorded. The simulation says 1 recorded for both; the mined snapshot records only `lit`'s.
+  const POOL = getAddress('0x00000000000000000000000000000000000000b1');
+  const dark = { ...h.key, expiry: h.state.now - 10 };
+  const lit = { ...h.key, expiry: h.state.now - 20 };
+  [dark, lit].forEach((k, i) => {
+    const longId = BigInt(i + 1);
+    h.index.applyRange({ series: [{ longId, underlying: k.underlying, isPut: false, strike: 1n, expiry: k.expiry, oracle: k.oracle }], holders: [], orders: [], strategies: [], block: h.state.block }, h.state.block);
+    h.state.series.set(longId.toString(), { underlying: k.underlying as Address, isPut: false, strike: 1n, expiry: k.expiry, oracle: k.oracle as Address, settled: false, settlementPrice: 0n, longPayoutPerUnit: 0n, shortPayoutPerUnit: 0n });
+  });
+  const recorded = new Set<number>();
+  type Call = { functionName: string; args?: readonly unknown[] };
+  const client = h.ctx.client as unknown as { multicall: (a: { contracts: Call[] }) => Promise<unknown[]> };
+  const inner = client.multicall;
+  h.ctx.client = {
+    ...client,
+    multicall: async ({ contracts }: { contracts: Call[] }) => {
+      const base = await inner({ contracts });
+      return contracts.map((c, i) => {
+        if (c.functionName === 'settlementConfig') return { status: 'success', result: [true, [POOL], 150, 21_600, 90_000] };
+        if (c.functionName === 'recordedSources') return { status: 'success', result: [[POOL], [false], [0n], 0] };
+        if (c.functionName === 'windowPrice') return { status: 'success', result: recorded.has(Number(c.args![2])) ? [true, 10n ** 8n] : [false, 0n] };
+        return base[i];
+      });
+    },
+  } as never;
+  h.state.sim.snapshot = (args) => ({ ok: true, result: 1, ...(Number(args[1]) === lit.expiry ? { apply: () => recorded.add(lit.expiry) } : {}) });
+
+  await stepSnapshot(h.ctx, [dark, lit]);
+  assert.deepEqual(h.state.sends.filter((s) => s.fn === 'snapshot').map((s) => [Number(s.args[1]), s.status]), [[dark.expiry, 'confirmed'], [lit.expiry, 'confirmed']], 'both receipts read success');
+  assert.equal(recorded.has(dark.expiry), false, 'the break landed: the mined snapshot of the dark expiry recorded nothing');
+  assert.equal(h.store.getMeta(snapshotMetaKey(dark)), null, `expiry ${dark.expiry}: its source still does not price the window after the mined snapshot, so it must not be marked snapshotted from the simulated count`);
+  const mark = h.store.getMeta(snapshotMetaKey(lit));
+  assert.notEqual(mark, null, `expiry ${lit.expiry}: its source prices the window after the mined snapshot, so it is marked`);
+  assert.equal(JSON.parse(mark!).recorded, 1, `expiry ${lit.expiry}: the count is the one source that chain state shows recorded`);
+});
+
 test('yieldDeadlineMs: the wall-clock moment the head reaches the earliest future target of this tick; none without one', () => {
   assert.equal(yieldDeadlineMs({ targets: [E + 600, E, null, E - 35], headTimestamp: E - 30, headReadAtMs: 1_000_000 }), 1_000_000 + 30_000);
   assert.equal(yieldDeadlineMs({ targets: [E - 5, null], headTimestamp: E, headReadAtMs: 1_000_000 }), null);
+});
+
+/*//////////////////////////////////////////////////////////////
+    T-496: THE POST-READ MUST READ THE RECEIPT'S BLOCK
+//////////////////////////////////////////////////////////////*/
+
+/**
+ * T-462 and T-469 each recorded the same suspicion: the fake chain ignored `blockNumber`, so their tests
+ * proved the counting logic and not that the block reached the RPC. Both were right, and neither could
+ * test it, because every block answered from the same live state.
+ *
+ * Here the two blocks genuinely differ. The mined `redeemBatch` redeems all three holders at the receipt
+ * block; THEN head moves on and one of them is transferred the token again. The post-read is pinned to the
+ * receipt block (`stillHeldAtBlock`, steps.ts:785-792, at `outcome.blockNumber`), so it must see three
+ * redeemed and an expiry it can mark done.
+ *
+ * Delete `{ blockNumber }` at reads.ts:27 and this goes red: `multicallMany` omits the key (chain.ts:219),
+ * the fake answers from head, the re-acquired holder reads as still holding, and the tick reports a
+ * mined-skipped holder and a redeem backlog that never happened. Note the direction — the failure invents
+ * work rather than losing it, which is why nothing downstream would have caught it either.
+ */
+test('T-496: the redeem post-read reads the receipt block, not head', async () => {
+  const h = harness();
+  const longId = h.addSeries(200_000_000n, { longPayoutPerUnit: 10n ** 16n, shortPayoutPerUnit: 0n }, { long: 300n });
+  const holders = [0xb1, 0xb2, 0xb3].map((n) => getAddress(`0x${n.toString(16).padStart(40, '0')}`));
+  const REACQUIRED = holders[1]!;
+  for (const a of holders) h.state.balances.set(`${a.toLowerCase()}:${longId}`, 100n);
+  h.index.applyRange({ series: [], holders: holders.map((holder) => ({ tokenId: longId, holder })), orders: [], strategies: [], block: h.state.block }, h.state.block);
+  h.store.setMeta(settledSeenMetaKey(longId), String(h.state.now - 7_200));
+
+  const receiptBlock = h.state.block;
+  h.state.sim.redeemBatch = (args) => {
+    const [tokenId, batch] = args as [bigint, Address[]];
+    return {
+      ok: true,
+      result: BigInt(batch.length),
+      apply: () => {
+        batch.forEach((a) => h.state.balances.set(`${a.toLowerCase()}:${tokenId}`, 0n));
+        // Freeze the receipt block: every holder in the batch is redeemed AS OF HERE.
+        const atReceipt = new Map(h.state.balances);
+        h.state.atBlock.set(String(receiptBlock), {
+          balanceOf: ([holder, id]) => atReceipt.get(`${String(holder).toLowerCase()}:${id}`) ?? 0n,
+        });
+        // Head moves past the receipt, and one holder is sent the token again.
+        h.state.block = receiptBlock + 1n;
+        h.state.balances.set(`${REACQUIRED.toLowerCase()}:${tokenId}`, 100n);
+      },
+    };
+  };
+
+  const report = await stepRedeem(h.ctx, [h.key]);
+  assert.equal(h.state.block, receiptBlock + 1n, 'the scenario needs head PAST the receipt block, or it tests nothing');
+  assert.equal(h.state.balances.get(`${REACQUIRED.toLowerCase()}:${longId}`), 100n, 'and it needs the two blocks to disagree');
+
+  const token = (report.notes.tokens as Array<{ redeemed: number; minedSkipped: string[] }>)[0]!;
+  assert.equal(
+    token.redeemed,
+    3,
+    `block ${receiptBlock}: all three holders were redeemed AT THE RECEIPT BLOCK. redeemed=${token.redeemed}`
+      + ` means the post-read answered from head (block ${h.state.block}), where ${REACQUIRED} holds again.`,
+  );
+  assert.deepEqual(
+    token.minedSkipped,
+    [],
+    `block ${receiptBlock}: the mined batch skipped nobody. A name here is a holder who re-acquired AFTER`
+      + ` the receipt block and was read at head (block ${h.state.block}) instead.`,
+  );
+  assert.equal(
+    h.index.doneExpiries().size,
+    1,
+    `block ${receiptBlock}: every holder was redeemed at the receipt block, so the expiry is done.`
+      + ` Reading head (block ${h.state.block}) leaves it open on a balance the tick never saw.`,
+  );
+  assert.deepEqual(
+    h.alerts.filter((a) => a.kind === 'v2_redeem_backlog'),
+    [],
+    `block ${receiptBlock}: no holder was left behind, so there is no backlog. One here is invented by`
+      + ` reading head (block ${h.state.block}).`,
+  );
 });

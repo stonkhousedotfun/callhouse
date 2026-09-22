@@ -4,12 +4,15 @@
  * MM bot quotes around, the pricer reprices to, and the indexer proxies.
  *
  * THE RULE
- *   cboe   Cboe lists the exact contract: the series' expiry is 16:00 New York on a listed expiry
- *          day, and that day lists the same side at the series strike (strikes are USD per token,
- *          listings USD per share; the numbers are compared as they are, to the listing's three
- *          decimals). Its quote passes every gate (cboe.ts isUsableQuote and the window around it,
- *          the expiry's parity forward) and its mid solves to a vol inside [IV_FLOOR, IV_CEILING].
- *          The price is that mid carried to the token (below).
+ *   cboe   The provider lists the exact contract: the series' expiry is 16:00 New York on a listed
+ *          expiry day, and that day lists the same side at the series strike (strikes are USD per
+ *          token, listings USD per share; the numbers are compared as they are, to the listing's
+ *          three decimals). Its quote passes every gate (cboe.ts isUsableQuote and the window around
+ *          it, the expiry's parity forward) and its mid solves to a vol inside [IV_FLOOR, IV_CEILING].
+ *          The price is that mid carried to the token (below). The legacy `source` label says
+ *          "cboe" only when that provider IS Cboe's delayed file (cboe.ts CBOE_PROVIDER); the same
+ *          exact-contract price from any other provider is labelled "model" (method still
+ *          `listed-contract`), so a provider switch can never keep a false Cboe label.
  *   model  otherwise: the surface's vol at the strike and expiry (surface.ts volAt), same pricing.
  *   null   otherwise, with the reason; and before either, whenever the chain or the token spot
  *          fails a gate: chain clocks and root (cboe.ts checkChain), feed freshness (spot.ts), and
@@ -33,19 +36,45 @@
  *
  * UNITS. Strikes arrive as USDG base units per token (bigint) and prices leave the same way,
  * rounded half up to the base unit, once, here. `spot` in the answer is the token spot the price
- * is for. `asOf` is the chain's last trade (unix seconds): the market data the number rests on.
+ * is for. `asOf` is the chain's pricing clock (unix seconds): for Cboe its last trade, the legacy
+ * meaning, unchanged. Every priced answer also carries `provenance` (provenance.ts): provider,
+ * method, the listed inputs used, every source clock (null when the provider gives none), ages,
+ * entitlement and quality. It is internal: server.ts does not serialize it (02-interfaces §5.1 order).
+ *
+ * PROVIDER-NEUTRAL (K3-311). The service reads chains only as chain.ts NormalizedChain, through the
+ * cache's provider (cboe.ts createCboeProvider by default). It never sees a provider payload type.
+ *
+ * SHORT MATURITIES AND THE EXPIRY CLOCK (K3-312). Before pricing, expiry-clock.ts checks the series
+ * against both clocks (the service clock that `yearsToExpiry` runs from, and the surface clock every
+ * listed T runs from) and refuses one with no regular session left as `expired`. After pricing,
+ * short-maturity.ts bounds a read the listings do not identify, with the injected event calendar
+ * (`events`; none by default) and PricingSettings.shortMaturity (proposal defaults). The point price,
+ * iv, delta, source, method and asOf are never changed by either: the bounds and reasons go to
+ * `provenance.quality`, the working to `diagnostics`, and under a `refuse` policy a model-uncertain
+ * read is refused as `model-uncertainty` instead.
  *
  * NEVER THROWS on market data: every failure is a PricingFailure. The service reads the chain
  * first and the RPC only once the chain has passed, so a dead Cboe feed costs no RPC calls.
  */
 import type { Address } from 'viem';
 import { NYSE_HOLIDAYS_2026_2028 } from '../../calendar.js';
-import { mapSpot, type CboeChain } from '../../vol.js';
+import { mapSpot } from '../../vol.js';
 import { bsDelta, bsPrice, impliedVol, tradingYears, type OptionKind } from './bs.js';
-import { ChainCache, checkChain, checkQuoteWindow, failure, mid, type ChainCacheOptions, type ChainEntry, type PricingFailure } from './cboe.js';
+import { CBOE_PROVIDER, ChainCache, checkChain, checkQuoteWindow, failure, mid, type ChainCacheOptions, type ChainEntry, type PricingFailure } from './cboe.js';
+import type { CanonicalIdentity, NormalizedChain } from './chain.js';
+import { checkExpiryClock } from './expiry-clock.js';
+import { buildFairProvenance, type FairProvenance } from './provenance.js';
 import type { PricingMarket } from './markets.js';
 import { tokenSpotFromRound, type FeedRound, type SpotReader, type TokenSpot } from './spot.js';
-import { IV_CEILING, IV_FLOOR, SURFACE_HORIZON_DAYS, buildSurface, volAt, type Surface } from './surface.js';
+import {
+  DEFAULT_SHORT_MATURITY_POLICY,
+  NO_EVENT_INPUT,
+  assessShortMaturity,
+  type EventCalendar,
+  type ShortMaturityDiagnostics,
+  type ShortMaturityPolicy,
+} from './short-maturity.js';
+import { IV_CEILING, IV_FLOOR, SURFACE_HORIZON_DAYS, buildSurface, volAt, type Surface, type SurfaceInput } from './surface.js';
 
 /*//////////////////////////////////////////////////////////////
                               TYPES
@@ -72,11 +101,22 @@ export interface PricedContract {
   method: FairMethod;
   /** The listed expiry days the vol came from. */
   days: string[];
+  /** The listed quotes the vol came from: (day, expiry, side, share strike) and the exact listed input
+   *  used there (chain.ts ListedOption.symbol), so provenance names that instrument and no other row. */
+  used: Array<{ day: string; expiry: number; side: 'C' | 'P'; strike: number; symbol: string }>;
+  /** How each contributing expiry was read at the strike; [] for the exact listed contract. */
+  strikeMethods: Array<SurfaceInput['strikeMethod']>;
+  /** Trading years to expiry the price was computed with. */
+  yearsToExpiry: number;
 }
 
 export interface FairQuote extends PricedContract {
   spotUsdg6: bigint;
   asOf: number;
+  /** Internal; not part of the /fair body. */
+  provenance: FairProvenance;
+  /** Internal working behind the bounds and the expiry clock (short-maturity.ts); not part of the /fair body. */
+  diagnostics: ShortMaturityDiagnostics;
 }
 
 export type FairOutcome = FairQuote | PricingFailure;
@@ -92,6 +132,11 @@ export interface PricingSettings {
   horizonDays: number;
   /** How long one feed read is reused, ms. The feed moves on a 0.5% deviation, not per request. */
   spotTtlMs: number;
+  /** YYYY-MM-DD New York days the NYSE closes early (expiry-clock.ts). None by default: calendar.ts
+   *  models none on this revision, and the price's trading clock never uses them. */
+  earlyCloses: readonly string[];
+  /** Bounds, reasons and the refusal rule for unidentified reads (short-maturity.ts). */
+  shortMaturity: ShortMaturityPolicy;
 }
 
 /** v1's limits (config.ts KEEPER_VOL_MAX_AGE_S, KEEPER_VOL_MAX_SPOT_DIVERGENCE_BPS; the vault's
@@ -103,13 +148,15 @@ export const DEFAULT_PRICING_SETTINGS: PricingSettings = {
   holidays: NYSE_HOLIDAYS_2026_2028,
   horizonDays: SURFACE_HORIZON_DAYS,
   spotTtlMs: 10_000,
+  earlyCloses: [],
+  shortMaturity: DEFAULT_SHORT_MATURITY_POLICY,
 };
 
 /*//////////////////////////////////////////////////////////////
                          PRICING (PURE)
 //////////////////////////////////////////////////////////////*/
 
-type ExactVol = { ok: true; iv: number; day: string } | { ok: false; why: string };
+type ExactVol = { ok: true; iv: number; day: string; expiry: number; strike: number; symbol: string } | { ok: false; why: string };
 
 /** The exact listed contract's own vol, if it exists and passes every gate. See THE RULE. */
 export function exactContractVol(surface: Surface, request: Pick<FairRequest, 'strikeUsdg6' | 'expiry' | 'type'>): ExactVol {
@@ -126,7 +173,23 @@ export function exactContractVol(surface: Surface, request: Pick<FairRequest, 's
   if (window !== null) return { ok: false, why: window.detail.why ?? window.reason };
   const iv = impliedVol(mid(quote), { type: request.type, spot: entry.forward, strike: quote.strike, t: entry.t });
   if (iv === null || iv < IV_FLOOR || iv > IV_CEILING) return { ok: false, why: 'the mid does not solve to a vol inside the band' };
-  return { ok: true, iv, day: entry.day };
+  return { ok: true, iv, day: entry.day, expiry: entry.expiry, strike: quote.strike, symbol: quote.symbol };
+}
+
+/** The listed quotes behind a surface read: each contributing expiry's bracket strikes, on the side
+ *  each surface point was solved from. */
+function usedInputs(surface: Surface, inputs: readonly SurfaceInput[]): PricedContract['used'] {
+  const used: PricedContract['used'] = [];
+  for (const input of inputs) {
+    const entry = surface.expiries.find((e) => e.day === input.day);
+    for (const strike of new Set(input.bracket)) {
+      const point = entry?.points.find((p) => p.strike === strike);
+      if (entry === undefined || point === undefined) continue;
+      const quote = (point.side === 'C' ? entry.calls : entry.puts).find((q) => q.strike === strike);
+      if (quote !== undefined) used.push({ day: input.day, expiry: input.expiry, side: point.side, strike, symbol: quote.symbol });
+    }
+  }
+  return used;
 }
 
 /**
@@ -142,12 +205,16 @@ export function priceContract(input: { surface: Surface; request: Pick<FairReque
   let source: 'cboe' | 'model';
   let method: FairMethod;
   let days: string[];
+  let used: PricedContract['used'];
+  let strikeMethods: PricedContract['strikeMethods'];
   const exact = exactContractVol(surface, request);
   if (exact.ok) {
     iv = exact.iv;
-    source = 'cboe';
+    source = surface.provider === CBOE_PROVIDER.id ? 'cboe' : 'model';
     method = 'listed-contract';
     days = [exact.day];
+    used = [{ day: exact.day, expiry: exact.expiry, side: request.type === 'call' ? 'C' : 'P', strike: exact.strike, symbol: exact.symbol }];
+    strikeMethods = [];
   } else {
     const v = volAt(surface, strike, request.expiry);
     if (!v.ok) return v;
@@ -155,13 +222,25 @@ export function priceContract(input: { surface: Surface; request: Pick<FairReque
     source = 'model';
     method = v.method;
     days = v.days;
+    used = usedInputs(surface, v.inputs);
+    strikeMethods = v.inputs.map((i) => i.strikeMethod);
   }
 
   const t = tradingYears(nowSeconds, request.expiry, surface.holidays);
   const bs = { type: request.type, spot: tokenSpot, strike, vol: iv, t };
   const price = bsPrice(bs);
   if (!Number.isFinite(price) || price < 0) return failure('no-quotes', { why: 'the model price is not a number', price: String(price) });
-  return { ok: true, fairUsdg6: BigInt(Math.round(price * 1e6)), iv, delta: bsDelta(bs), source, method, days };
+  return { ok: true, fairUsdg6: BigInt(Math.round(price * 1e6)), iv, delta: bsDelta(bs), source, method, days, used, strikeMethods, yearsToExpiry: t };
+}
+
+/** The registry's canonical identity of a market (markets.ts); null wherever the registry is silent. */
+export function canonicalIdentity(market: PricingMarket): CanonicalIdentity {
+  return {
+    market: market.ticker,
+    root: market.cboe?.root ?? null,
+    issuer: null,
+    token: { chainId: market.token?.chainId ?? null, address: market.token?.address ?? null, uiMultiplier: market.token?.uiMultiplier ?? null },
+  };
 }
 
 /*//////////////////////////////////////////////////////////////
@@ -186,13 +265,15 @@ export interface PricingServiceOptions {
   /** SEAM: wall clock, ms. Shared with the chain cache unless `chains.nowMs` is given. */
   nowMs?: () => number;
   log?: PricingLog;
+  /** SEAM: per-ticker event input (short-maturity.ts eventCalendar). Default none: every ticker lacks it. */
+  events?: EventCalendar;
 }
 
 export type SurfaceOutcome =
-  | { ok: true; surface: Surface; chain: CboeChain; fetchedAtMs: number }
+  | { ok: true; surface: Surface; chain: NormalizedChain; fetchedAtMs: number }
   | PricingFailure;
 
-type Loaded = { ok: true; chain: CboeChain; surface: Surface; entry: ChainEntry } | PricingFailure;
+type Loaded = { ok: true; chain: NormalizedChain; surface: Surface; entry: ChainEntry } | PricingFailure;
 
 export class PricingService {
   readonly markets: ReadonlyMap<string, PricingMarket>;
@@ -202,7 +283,8 @@ export class PricingService {
   private readonly spotReader: SpotReader;
   private readonly nowMs: () => number;
   private readonly log: PricingLog;
-  private readonly surfaces = new WeakMap<CboeChain, Surface>();
+  private readonly events: EventCalendar;
+  private readonly surfaces = new WeakMap<NormalizedChain, Surface>();
   private readonly spots = new Map<string, { atMs: number; round: Promise<FeedRound | Error> }>();
   private readonly loggedAttempts = new Map<string, number>();
 
@@ -213,6 +295,7 @@ export class PricingService {
     this.chains = new ChainCache({ nowMs: this.nowMs, ...options.chains });
     this.spotReader = options.spotReader;
     this.log = options.log ?? silent;
+    this.events = options.events ?? NO_EVENT_INPUT;
     this.startedAtMs = this.nowMs();
   }
 
@@ -223,12 +306,12 @@ export class PricingService {
   /** The chain, checked, and its surface (built once per downloaded chain). */
   private async loadChain(market: PricingMarket, nowSeconds: number): Promise<Loaded> {
     if (market.cboe === null) return failure('chain-unavailable', { why: 'the registry has no Cboe chain for this market', ticker: market.ticker });
-    const entry = await this.chains.get(market.ticker, market.cboe.url);
+    const entry = await this.chains.get(market.ticker, market.cboe.url, market.cboe.root);
     // Once per download, not per request: a cached failure is logged when it happened.
     if (this.loggedAttempts.get(market.ticker) !== entry.fetchedAtMs) {
       this.loggedAttempts.set(market.ticker, entry.fetchedAtMs);
-      if (entry.error !== null) this.log.warn({ ticker: market.ticker, err: entry.error, servingLastGood: entry.chain !== null }, 'could not fetch the option chain');
-      else if (entry.chain !== null) this.log.debug({ ticker: market.ticker, chainTimestamp: entry.chain.timestamp, lastTradeTime: entry.chain.lastTradeTime, options: entry.chain.options.length, skippedRows: entry.chain.skippedRows }, 'fetched the option chain');
+      if (entry.error !== null) this.log.warn({ ticker: market.ticker, provider: this.chains.descriptor.id, err: entry.error, servingLastGood: entry.chain !== null }, 'could not fetch the option chain');
+      else if (entry.chain !== null) this.log.debug({ ticker: market.ticker, provider: entry.chain.provider.id, chainTimestamp: entry.chain.clocks.publishedAtText, lastTradeTime: entry.chain.underlying.observedAtText, options: entry.chain.rows.length, skippedRows: entry.chain.skippedRows }, 'fetched the option chain');
     }
     if (entry.chain === null) return failure('chain-unavailable', { error: entry.error ?? 'no chain' });
     const check = checkChain(entry.chain, market.cboe.root, nowSeconds, { maxAgeS: this.settings.maxChainAgeS, holidays: this.settings.holidays });
@@ -253,12 +336,17 @@ export class PricingService {
     return round;
   }
 
-  private async loadSpot(market: PricingMarket, chain: CboeChain, nowSeconds: number): Promise<TokenSpot | PricingFailure> {
+  private async loadSpot(market: PricingMarket, chain: NormalizedChain, nowSeconds: number): Promise<TokenSpot | PricingFailure> {
     const round = await this.readRound(market);
     if (round instanceof Error) return failure('spot-unavailable', { why: 'the feed read failed', feed: market.feed, error: round.message.split('\n')[0] ?? '' });
     const spot = tokenSpotFromRound(round, this.settings.maxSpotAgeS, nowSeconds);
     if ('ok' in spot) return { ...spot, detail: { feed: market.feed, ...spot.detail } };
-    const mapped = mapSpot(chain.shareSpot, spot.spotUsdg6, this.settings.maxSpotDivergenceBps);
+    const mapped = mapSpot(
+      chain.underlying.price ?? Number.NaN,
+      spot.spotUsdg6,
+      this.settings.maxSpotDivergenceBps,
+      market.token?.uiMultiplier ?? null,
+    );
     if (!mapped.ok) return failure(mapped.reason === 'vol-spot-divergence' ? 'spot-divergence' : 'chain-inconsistent', mapped.detail);
     return spot;
   }
@@ -270,11 +358,50 @@ export class PricingService {
     if (request.expiry <= nowSeconds) return failure('expired', { expiry: String(request.expiry), nowSeconds: String(nowSeconds) });
     const loaded = await this.loadChain(market, nowSeconds);
     if (!loaded.ok) return loaded;
+    // Before the RPC: a series the trading clock cannot price costs no feed read.
+    const clock = checkExpiryClock({
+      nowSeconds,
+      surfaceAsOf: loaded.surface.asOf,
+      surfaceClockBasis: loaded.chain.clocks.quoteObservedAt !== null ? 'quote' : 'underlying',
+      expiry: request.expiry,
+      holidays: this.settings.holidays,
+      earlyCloses: this.settings.earlyCloses,
+    });
+    if (!clock.ok) return clock;
     const spot = await this.loadSpot(market, loaded.chain, nowSeconds);
     if ('ok' in spot) return spot;
-    const priced = priceContract({ surface: loaded.surface, request, tokenSpot: Number(spot.spotUsdg6) / 1e6, nowSeconds });
+    const tokenSpot = Number(spot.spotUsdg6) / 1e6;
+    const priced = priceContract({ surface: loaded.surface, request, tokenSpot, nowSeconds });
     if (!priced.ok) return priced;
-    return { ...priced, spotUsdg6: spot.spotUsdg6, asOf: loaded.surface.asOf };
+    const policy = this.settings.shortMaturity;
+    const assessed = assessShortMaturity({ surface: loaded.surface, request, priced, tokenSpot, clock, events: this.events.get(market.ticker) ?? null, policy });
+    if (assessed.modelUncertain && policy.onModelUncertainty === 'refuse') {
+      const u = assessed.uncertainty;
+      return failure('model-uncertainty', {
+        why: 'the estimate is less certain than the short-maturity policy allows',
+        method: priced.method,
+        reasons: assessed.reasons.join(','),
+        eventInput: assessed.diagnostics.eventInput,
+        iv: String(priced.iv),
+        ivLow: String(u?.ivLow ?? null),
+        ivHigh: String(u?.ivHigh ?? null),
+        relativeIvWidth: String(assessed.diagnostics.relativeIvWidth),
+        maxRelativeIvWidth: String(policy.maxRelativeIvWidth),
+      });
+    }
+    const maxAgeS = this.settings.maxChainAgeS;
+    const provenance = buildFairProvenance({
+      chain: loaded.chain,
+      canonical: canonicalIdentity(market),
+      request,
+      priced,
+      spotUsdg6: spot.spotUsdg6,
+      nowSeconds,
+      limits: { maxQuoteAgeS: maxAgeS, maxUnderlyingAgeS: maxAgeS, maxVolatilityAgeS: maxAgeS },
+      uncertainty: assessed.uncertainty,
+      uncertaintyReasons: assessed.reasons,
+    });
+    return { ...priced, spotUsdg6: spot.spotUsdg6, asOf: loaded.surface.asOf, provenance, diagnostics: assessed.diagnostics };
   }
 
   /** The ticker's surface, in the listed market's terms. Needs no spot. */

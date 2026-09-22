@@ -8,6 +8,88 @@ The canary is one real week on Robinhood Chain (4663) with the owner's own money
 contracts allow: one call contract, one fill through the app's own fill page, optionally one exercise.
 Everything except about 2 USDG of premium and fees comes back to the owner's wallets.
 
+## Factory markets (read this first)
+
+**Steps A–J below are the pooled vault's canary** (2026-09-14/15, `cNVDA`), kept as the record
+of what was run. That vault is closed. **The live product is the per-market account factory**
+(`src/solo/`: one `AccountFactory` per Stock Token, isolated `WriterAccount` clones, write on
+fill, one FULL 1-lot Seaport order per lot). NVDA's factory has been live since block 64,038,234;
+Tier 1 adds 34 markets in waves, and the **canary wave is TSLA and AAPL** (`ops/markets/tier1.json`
+→ `waves.canary`). Each later wave runs this same page against its own tickers.
+
+**The market loop.** As in `open-week.md`: read the live rows from `ops/markets/tier1.json`,
+never type an address by hand. For the wave being canaried, the rows are `planned` until step 4
+below flips them.
+
+```bash
+REG=ops/markets/tier1.json
+WAVE=canary                                   # then wave1, then wave2
+export RH_RPC=https://rpc.mainnet.chain.robinhood.com
+TICKERS=$(node -e 'const r=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8"));console.log(r.markets.filter(m=>m.wave===process.argv[2]).map(m=>m.ticker).join(" "))' "$REG" "$WAVE")
+for T in $TICKERS; do
+  eval "$(node -e '
+    const r=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8"));
+    const m=r.markets.find(x=>x.ticker===process.argv[2]);
+    console.log(`FACTORY=${m.deployment.factory} ASSET=${m.asset} FEED=${m.feed} KEEPER=${m.deployment.keeper} MODE=${m.mode} STATUS=${m.status}`);
+  ' "$REG" "$T")"
+  echo "== $T status=$STATUS factory=$FACTORY asset=$ASSET feed=$FEED keeper=$KEEPER mode=$MODE"
+  [ "$STATUS" = live ] || continue
+  cast call $FACTORY "week()(uint32,uint256,uint40,uint40,uint256)" --rpc-url $RH_RPC
+  cast call $FACTORY "writesHalted()(bool)"    --rpc-url $RH_RPC
+  cast call $FACTORY "pendingCount()(uint256)" --rpc-url $RH_RPC
+  cast call $FACTORY "liveCount()(uint256)"    --rpc-url $RH_RPC
+done
+```
+
+**The factory canary, per wave** (the ordered version with every flag is `ops/deploy.md` §14.5):
+
+1. `node ops/markets/build-markets.mjs --check` green. Keys derived and funded (~0.05 ETH each;
+   `deployment.keeper` in the registry, keys under `~/.callhouse-keys/markets/`, never printed).
+2. Contracts: `script/DeploySoloBatch.sh --wave $WAVE --rehearse --rpc http://127.0.0.1:8546`
+   on an anvil fork started with `--code-size-limit 98304` (the registry defaults to
+   `../callhouse/ops/markets/tier1.json` from the contracts root; pass `--registry` only as an
+   absolute path); read the preflight (`EXPECTED_TICKER`, feed
+   description / decimals / freshness, `uiMultiplier` / `oraclePaused`). Then `--broadcast --rpc $RH_RPC`,
+   **by the owner**. `ConfigureSolo.s.sol` (`FACTORY`, `KEEPER` = the market's key, `GUARDIAN`,
+   `ADMIN_PK`, `DEPOSIT_CAP`), `VerifySolo.s.sol` PASS per factory.
+3. The batch wrote `deployment.factory` / `implementation` / `deployBlock` / `deployTx` (right
+   after each deploy) and `sourcify` / `configuredAt` (after Configure + Verify) into the
+   registry; set `status: "live"` on the wave's rows; commit.
+4. Keepers: `ops/keeper-env.sh` → `ops/keeper/markets/<TICKER>.env`; `ops/keeper-railway.sh`
+   (dry-run first); seal `KEEPER_PK` on each `keeper-<ticker>`; boot alert seen for each market.
+5. Indexers: `indexer-<ticker>` with `FACTORY_ADDRESS`, `MARKET`, `START_BLOCK` = deploy block;
+   `/ready` 200; `/v1/market` names the factory and ticker.
+6. Web: `pnpm gen:markets`, commit, rebuild; `/<ticker>/account` and `/<ticker>/book` render; the
+   switcher lists the wave. Docs: `node ops/markets/render-docs.mjs`, commit in callhouse-docs.
+7. The week itself, on each market, with the owner's own wallets at the smallest size: an
+   account, a deposit of 1 token, `requestWrite(1)`, the keeper's `setWeek` and `listFor`, one
+   fill from a second wallet on `/<ticker>/book`, optionally one exercise, `settle()` after the
+   account's expiry, `withdraw` and `claimUsdg`. The publish, including `unfilled, 0`.
+
+**Wave gate.** The next wave's step 2 does not start until every box is ticked for every market
+of this wave over one full weekly cycle:
+
+- [ ] **zero keeper failures**: no `tx_revert`, `keeper_error` or `cycle_not_created` alert from any
+      `keeper-<ticker>` for the cycle (`phase_stuck` is the vault process's alert; a factory
+      keeper's "week not set" is `cycle_not_created`, and one whose reason is `stale-oracle` or
+      `vol-stale` inside the Friday-close-to-Monday window is the one allowed exception);
+      `/health` `ok` on each, `keeper.hasKeeperRole: true`
+- [ ] **no stale-price skips outside the weekend windows**: a `stale-oracle` / `StalePrice` /
+      `vol-stale` skip is
+      acceptable only between the Friday close and the Monday feed restart (`ops/README.md`
+      "Six things", item 5); a skip at any other time is a stop (a feed, not a market, is broken)
+- [ ] **indexer complete and correct**: every `indexer-<ticker>` `/ready` 200, `/v1/market`
+      returns this factory, ticker, week id and strike equal to `week()` on chain, and
+      `/v1/market/fills` shows the canary fill
+- [ ] **docs page regenerated**: `node ops/markets/render-docs.mjs --check` green after the wave
+      went live and the page pushed; `build-markets.mjs --check` and `ops/keeper-env.sh --check`
+      green
+- [ ] the publish done per market; the owner has decided the next wave
+
+A failed gate means another full cycle on the same wave after the fix, then the gate again.
+
+---
+
 ## Why a canary when the fork runs pass
 
 A fork of 4663 runs the real Seaport, the real Clear bytecode and the real tokens, but it cannot prove:

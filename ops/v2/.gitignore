@@ -1,1 +1,12 @@
 state/
+# dev_deploy.py: the run state and the run logs. Both are machine-local evidence of one deployment,
+# never source. The state file holds addresses, ids and URLs, and its writer refuses to save a file
+# containing a known secret; the logs are redacted at the handler.
+.dev-deploy-state.json
+.dev-deploy-state.json.tmp
+logs/
+__pycache__/
+# --fork-rpc: its own state file, and the registry copy each fork run writes back to.
+.dev-deploy-state.fork.json
+.dev-deploy-state.fork.json.tmp
+.fork/

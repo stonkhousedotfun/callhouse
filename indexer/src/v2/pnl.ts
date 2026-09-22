@@ -2,14 +2,33 @@ import { and, asc, eq, gt, gte, lte } from "ponder";
 import schema from "ponder:schema";
 import type { Address } from "viem";
 
-import { USDG, V2_ORDER_BOOK, V2_START_BLOCK } from "../../lib/env";
-import type { DB } from "../../lib/indexing";
+import { settlementOracleAbi } from "../../abis/v2/settlementOracle";
+import {
+  USDG,
+  V2_ACCESS_MANAGER,
+  V2_AUTO_ROLLER,
+  V2_BUYBACK_EXECUTOR,
+  V2_CLEARINGHOUSE,
+  V2_EXPIRY_CALENDAR,
+  V2_FEE_SPLITTER,
+  V2_FLYWHEEL_TOKEN_ADDRESS,
+  V2_KEEPER_REWARDS,
+  V2_MAKER_REGISTRY,
+  V2_MAKER_VAULT,
+  V2_ORDER_BOOK,
+  V2_PAYOUT_ROUTER,
+  V2_REWARDS_DISTRIBUTOR,
+  V2_SETTLEMENT_ORACLE,
+  V2_START_BLOCK,
+} from "../../lib/env";
+import type { DB, ReadClient } from "../../lib/indexing";
 import { v2Ponder as ponder } from "../../lib/registry";
 import { consumeFifo, payoutValueUsdg } from "../../lib/v2/fifo";
-import { fairAtFill, isOffMarket, nearbyVwap } from "../../lib/v2/integrity";
+import { isOffMarket, nearbyVwap } from "../../lib/v2/integrity";
 import { buyPosition, closePosition, emptyPosition, isExcludedFromLeaderboard, markTransferIn, redeemPosition, sellPosition, transferOutPosition } from "../../lib/v2/pnl";
-import { fetchFairQuote } from "../../lib/v2/pricing";
 import { matchDeliveries, matchTakeFees } from "../../lib/v2/reconcile";
+import { indexedSelfTradeLinks, reduceSelfTrade, type SelfTradeEvent,
+  type SelfTradeUnseenReason } from "../../lib/v2/selfTrade";
 import { rankTotals, windowStarts } from "../../lib/v2/windows";
 import { assignedValue, collateralValue, primaryPremiumReceived } from "../../lib/v2/writer";
 
@@ -113,14 +132,8 @@ async function refreshRanks(db: DB, holder: Address, at: bigint) {
   }
 }
 
-/** Pricing service responses from a current quote cannot validate a historical backfill fill. */
-async function priceReference(db: DB, fill: typeof schema.v2Fill.$inferSelect,
-  series: typeof schema.v2Series.$inferSelect): Promise<{ fair: bigint | null; spot: bigint | null }> {
-  const quote = await fetchFairQuote({
-    ticker: series.ticker, strike: series.strike, expiry: Number(series.expiry), isPut: series.isPut,
-  });
-  const fair = quote === null ? null : fairAtFill({ fair: quote.fair, asOf: BigInt(quote.asOf) }, fill.ts);
-  if (fair !== null) return { fair, spot: quote!.spot };
+/** A historical fill can only be validated by inputs reconstructed from the same chain tape. */
+async function priceReference(db: DB, fill: typeof schema.v2Fill.$inferSelect): Promise<bigint | null> {
   const nearby = await db.sql.select({
     taker: schema.v2Fill.taker, ts: schema.v2Fill.ts,
     units: schema.v2Fill.units, premium: schema.v2Fill.premium,
@@ -128,13 +141,26 @@ async function priceReference(db: DB, fill: typeof schema.v2Fill.$inferSelect,
     eq(schema.v2Fill.longId, fill.longId),
     gte(schema.v2Fill.ts, fill.ts - 3600n), lte(schema.v2Fill.ts, fill.ts + 3600n),
   ));
-  return { fair: nearbyVwap(nearby, fill.taker, fill.ts), spot: null };
+  return nearbyVwap(nearby, fill.taker, fill.ts);
 }
 
-async function handleFill(db: DB, fill: typeof schema.v2Fill.$inferSelect, takerFee: bigint) {
+async function spotAtFill(client: ReadClient, series: typeof schema.v2Series.$inferSelect,
+  blockNumber: bigint): Promise<bigint | null> {
+  const [ok, price] = await client.readContract({
+    abi: settlementOracleAbi,
+    address: address(series.oracle),
+    functionName: "trySpot",
+    args: [address(series.underlying)],
+    blockNumber,
+  });
+  return ok && price > 0n ? price : null;
+}
+
+async function handleFill(db: DB, client: ReadClient,
+  fill: typeof schema.v2Fill.$inferSelect, takerFee: bigint) {
   const series = await db.find(schema.v2Series, { longId: fill.longId });
   if (series === null) throw new Error(`fill ${fill.id}: unknown series`);
-  const { fair, spot } = await priceReference(db, fill, series);
+  const fair = await priceReference(db, fill);
   if (fair !== null) await db.update(schema.v2Fill, { id: fill.id }).set({ fairAtFill: fair });
   const offMarket = isOffMarket(fill.price, fair);
   const selfFill = address(fill.maker) === address(fill.taker);
@@ -164,10 +190,112 @@ async function handleFill(db: DB, fill: typeof schema.v2Fill.$inferSelect, taker
   if (buyerCost < 0n) throw new Error(`fill ${fill.id}: negative buyer cost`);
   await addLot(db, fill.longId, fill.buyer, fill.units, buyerCost, "fill", fill.id, fill.ts);
   const current = await position(db, fill.longId, fill.buyer);
+  const needsEntrySpot = current.unitsBought === 0n && current.spotAtEntry === null;
+  const spot = needsEntrySpot ? await spotAtFill(client, series, fill.block) : null;
   await savePosition(db, fill.longId, fill.buyer, buyPosition(current, fill.units, buyerCost, selfFill, offMarket));
-  if (current.unitsBought === 0n && current.spotAtEntry === null && spot !== null) await db.update(schema.v2PositionPnl, { id: current.id })
+  if (needsEntrySpot && spot !== null) await db.update(schema.v2PositionPnl, { id: current.id })
     .set({ spotAtEntry: spot });
   if (current.closedAt !== null) await refreshRanks(db, fill.buyer, fill.ts);
+}
+
+type SelfTradeBlockRows = {
+  from: bigint;
+  through: bigint;
+  throughTimestamp: bigint;
+  transfers: (typeof schema.v2Transfer.$inferSelect)[];
+  fills: (typeof schema.v2Fill.$inferSelect)[];
+  mints: (typeof schema.v2Mint.$inferSelect)[];
+  closes: (typeof schema.v2Close.$inferSelect)[];
+  redemptions: (typeof schema.v2Redemption.$inferSelect)[];
+  matchedTransfers: ReadonlySet<string>;
+  matchedMints: ReadonlySet<string>;
+};
+
+/** Materialize the measurement beside the PnL cursor without enrolling writers in maker rewards. */
+async function updateSelfTrade(db: DB, block: SelfTradeBlockRows) {
+  const [storedLinks, storedLots, storedMakers, storedUnseen, accounts, cashFlows, series] = await Promise.all([
+    db.sql.select().from(schema.v2SelfTradeLink),
+    db.sql.select().from(schema.v2SelfTradeLot),
+    db.sql.select().from(schema.v2SelfTradeMaker),
+    db.sql.select().from(schema.v2SelfTradeUnseen),
+    db.sql.select({ account: schema.v2Account.account, operators: schema.v2Account.operators,
+      approvals: schema.v2Account.approvals, delegates: schema.v2Account.delegates }).from(schema.v2Account),
+    db.sql.select({ account: schema.v2CashFlow.account, actor: schema.v2CashFlow.actor })
+      .from(schema.v2CashFlow).where(and(gt(schema.v2CashFlow.block, block.from), lte(schema.v2CashFlow.block, block.through))),
+    db.sql.select({ longId: schema.v2Series.longId, expiry: schema.v2Series.expiry }).from(schema.v2Series),
+  ]);
+
+  const events: SelfTradeEvent[] = [
+    ...block.transfers.map((row) => ({ kind: "transfer" as const, id: row.id, longId: row.longId,
+      from: row.from, to: row.to, units: row.units, block: row.block, logIndex: row.logIndex, ts: row.ts })),
+    ...block.fills.map((row) => ({ kind: "fill" as const, id: row.id, longId: row.longId,
+      maker: row.maker, taker: row.taker, recipient: row.recipient, buyer: row.buyer, seller: row.seller,
+      units: row.units, price: row.price, primary: row.primary, takerIsBuyer: row.takerIsBuyer,
+      fairAtFill: row.fairAtFill, block: row.block, logIndex: row.logIndex, ts: row.ts })),
+    ...block.mints.filter((row) => !block.matchedMints.has(row.id)).map((row) => ({ kind: "mint" as const,
+      id: row.id, longId: row.longId, holder: row.longTo, units: row.units,
+      block: row.block, logIndex: row.logIndex, ts: row.ts })),
+    ...block.closes.map((row) => ({ kind: "close" as const, id: row.id, longId: row.longId,
+      holder: row.account, units: row.units, block: row.block, logIndex: row.logIndex, ts: row.ts })),
+    ...block.redemptions.filter((row) => row.side === "long").map((row) => ({ kind: "redemption" as const,
+      id: row.id, longId: row.longId, holder: row.holder, units: row.units,
+      block: row.block, logIndex: row.logIndex, ts: row.ts })),
+  ];
+  const next = reduceSelfTrade({
+    cursor: block.from,
+    links: storedLinks,
+    lots: storedLots.map((row) => ({ id: row.id, longId: row.longId, holder: row.holder,
+      writer: row.writer, primaryFillId: row.primaryFillId, sourceId: row.sourceId,
+      units: row.units, remaining: row.unitsRemaining,
+      createdBlock: row.createdBlock, createdLogIndex: row.createdLogIndex })),
+    makers: storedMakers.map((row) => ({ writer: row.maker, units: row.units })),
+    // Carried back in, or the blind-spot totals would restart at zero every run and the API
+    // would report a clean zero on a detector that has been refusing legs for weeks.
+    unseen: storedUnseen.map((row) => ({ reason: row.reason as SelfTradeUnseenReason,
+      units: row.units, fills: row.fills })),
+  }, {
+    through: block.through,
+    throughTimestamp: block.throughTimestamp,
+    events,
+    linkEvidence: indexedSelfTradeLinks(accounts, cashFlows),
+    seriesExpiries: series,
+    matchedTransferIds: block.matchedTransfers,
+    protocolAddresses: [V2_ORDER_BOOK, V2_CLEARINGHOUSE, V2_SETTLEMENT_ORACLE, V2_AUTO_ROLLER,
+      V2_MAKER_REGISTRY, V2_EXPIRY_CALENDAR, V2_KEEPER_REWARDS, V2_ACCESS_MANAGER,
+      V2_PAYOUT_ROUTER, V2_FEE_SPLITTER, V2_BUYBACK_EXECUTOR, V2_FLYWHEEL_TOKEN_ADDRESS,
+      V2_MAKER_VAULT, V2_REWARDS_DISTRIBUTOR],
+  });
+
+  const oldLinkIds = new Set(storedLinks.map((row) => row.id));
+  for (const row of next.links) {
+    if (oldLinkIds.has(row.id)) continue;
+    await db.insert(schema.v2SelfTradeLink).values({ id: row.id, left: address(row.left), right: address(row.right) })
+      .onConflictDoNothing();
+  }
+  const oldLots = new Map(storedLots.map((row) => [row.id, row]));
+  for (const row of next.lots) {
+    const values = { longId: row.longId, holder: address(row.holder),
+      writer: row.writer === null ? null : address(row.writer), primaryFillId: row.primaryFillId,
+      sourceId: row.sourceId, units: row.units, unitsRemaining: row.remaining,
+      createdBlock: row.createdBlock, createdLogIndex: row.createdLogIndex };
+    const previous = oldLots.get(row.id);
+    if (previous === undefined) await db.insert(schema.v2SelfTradeLot).values({ id: row.id, ...values });
+    else if (previous.unitsRemaining !== row.remaining) await db.update(schema.v2SelfTradeLot, { id: row.id }).set(values);
+  }
+  const oldMakers = new Map(storedMakers.map((row) => [row.maker.toLowerCase(), row.units]));
+  for (const row of next.makers) {
+    if (oldMakers.get(row.writer) === row.units) continue;
+    const values = { units: row.units, updatedAt: block.throughTimestamp, updatedBlock: block.through };
+    await db.insert(schema.v2SelfTradeMaker).values({ maker: address(row.writer), ...values }).onConflictDoUpdate(values);
+  }
+  const oldUnseen = new Map(storedUnseen.map((row) => [row.reason, row]));
+  for (const row of next.unseen ?? []) {
+    const previous = oldUnseen.get(row.reason);
+    if (previous !== undefined && previous.units === row.units && previous.fills === row.fills) continue;
+    const values = { units: row.units, fills: row.fills,
+      updatedAt: block.throughTimestamp, updatedBlock: block.through };
+    await db.insert(schema.v2SelfTradeUnseen).values({ reason: row.reason, ...values }).onConflictDoUpdate(values);
+  }
 }
 
 /** Every tick processes complete transactions through its block, once. Ponder's block event
@@ -203,7 +331,7 @@ ponder.on("V2PnlClock:block", async ({ event, context }) => {
   for (const item of events) {
     if (item.kind === "fill") {
       const row = item.row;
-      await handleFill(db, row, fees.get(row.id) ?? 0n);
+      await handleFill(db, context.client, row, fees.get(row.id) ?? 0n);
     } else if (item.kind === "mint") {
       const row = item.row;
       const series = await db.find(schema.v2Series, { longId: row.longId });
@@ -267,5 +395,7 @@ ponder.on("V2PnlClock:block", async ({ event, context }) => {
       await maybeClose(db, row.longId, row.holder, row.ts, row.tx);
     }
   }
+  await updateSelfTrade(db, { from, through, throughTimestamp: event.block.timestamp,
+    transfers, fills, mints, closes, redemptions, matchedTransfers, matchedMints });
   await db.insert(schema.v2PnlCursor).values({ id: "global", block: through }).onConflictDoUpdate({ block: through });
 });

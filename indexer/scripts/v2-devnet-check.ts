@@ -34,6 +34,17 @@ type Devnet = {
       itmSettled: { longId: string; settlementPrice: string; redeemedHolders: Address[] }[] } };
 };
 
+type DevnetRegistry = { v2: { interfaceVersion: number } };
+type ConfigFees = {
+  premiumFeeBps: number;
+  resaleFeeBps: number;
+  takerFeeFlat: { raw: string; decimals: number; formatted: string };
+  takerFeeCapBps: number;
+  makerRebateBps: number;
+  exerciseFeeBps: number;
+  mintFeePpm: number;
+};
+
 function envFile(path: string): Record<string, string> {
   const result: Record<string, string> = {};
   for (const line of readFileSync(path, "utf8").split(/\r?\n/)) {
@@ -77,8 +88,10 @@ function equal(actual: unknown, expected: unknown, label: string): void {
 async function main(): Promise<void> {
   const addressFile = join(DEVNET, "addresses.json");
   const devnet = JSON.parse(readFileSync(addressFile, "utf8")) as Devnet;
+  const devnetRegistry = JSON.parse(readFileSync(join(DEVNET, "tier1.devnet.json"), "utf8")) as DevnetRegistry;
   assert.equal(devnet.chainId, 4663);
   assert.equal(devnet.seed.summary.gates, "passed", "run a fresh ops/devnet/up.sh first");
+  equal(devnetRegistry.v2.interfaceVersion, 8, "generated devnet registry uses interface version 8");
   const rpcUrl = new URL(devnet.rpc);
   assert(["127.0.0.1", "localhost", "::1", "[::1]"].includes(rpcUrl.hostname), "devnet RPC must be loopback");
   const rpcResponse = await fetch(devnet.rpc, { method: "POST", headers: { "content-type": "application/json" },
@@ -88,8 +101,10 @@ async function main(): Promise<void> {
   const chain = createPublicClient({ transport: http(devnet.rpc), chain: { id: 4663, name: "Devnet",
     nativeCurrency: { name: "ETH", symbol: "ETH", decimals: 18 }, rpcUrls: { default: { http: [devnet.rpc] } } } });
   equal(await chain.getChainId(), 4663, "chain id");
+  // Source: callhouse-contracts leekzor/v8, test/v2/InterfaceIds.t.sol:1134
+  // (the task snapshot cited :1075 before later interface pins moved the assertion).
   equal(await chain.readContract({ address: devnet.contracts.clearinghouse, abi: clearinghouseAbi,
-    functionName: "supportsInterface", args: ["0xf9e1eb5d"] }), true, "v7 Clearinghouse interface ID");
+    functionName: "supportsInterface", args: ["0x9b75eeed"] }), true, "v8 Clearinghouse interface ID");
   // The PnL reconciler samples every 30 blocks. Give it a full tick after the final redemption.
   const endBlock = BigInt(devnet.seed.summary.block) + 30n;
   const clockDeadline = Date.now() + 90_000;
@@ -106,6 +121,7 @@ async function main(): Promise<void> {
     delete env[name];
   const response = await fetch(`${API}/health`).catch(() => null);
   assert(response === null, `API port ${PORT} is occupied; set V2_DEVNET_API_PORT`);
+  const coldBackfillStartedAt = Date.now();
   const child = spawn(join(INDEXER, "node_modules/.bin/ponder"), ["start", "--schema", "v2_devnet_check"],
     { cwd: INDEXER, env, stdio: ["ignore", "pipe", "pipe"] });
   let output = "";
@@ -128,14 +144,38 @@ async function main(): Promise<void> {
       await sleep(500);
     }
     if (!synced) throw new Error(`Ponder did not reach block ${endBlock} in ${TIMEOUT} ms:\n${output}`);
-    console.log(`Ponder synced to block ${endBlock}`);
-    const config = await json<{ interfaceVersion: number; fees: { premiumFeeBps: number; mintFeePpm: number } }>("/v2/config");
-    equal(config.interfaceVersion, 7, "v7 API interface");
-    equal(config.fees.premiumFeeBps, 0, "v7 launch primary premium fee");
-    assert(config.fees.mintFeePpm > 0, "v7 seed requires nonzero writer rent");
+    const coldBackfillMs = Date.now() - coldBackfillStartedAt;
+    console.log(`Ponder synced to block ${endBlock} in ${coldBackfillMs} ms`);
+    const config = await json<{ interfaceVersion: number; fees: ConfigFees }>("/v2/config");
+    equal(config.interfaceVersion, devnetRegistry.v2.interfaceVersion,
+      "API interface matches generated devnet registry");
 
     const C = devnet.contracts;
     const fromBlock = BigInt(devnet.startBlock);
+    const seededEoa = devnet.accounts.ada;
+    assert(seededEoa, "devnet.accounts.ada is required for the non-minter check");
+    const [feeParams, defaultMarketFees, orderBookIsMinter, seededEoaIsMinter] = await Promise.all([
+      chain.readContract({ address: C.orderBook, abi: orderBookAbi, functionName: "feeParams", blockNumber: endBlock }),
+      chain.readContract({ address: C.clearinghouse, abi: clearinghouseAbi,
+        functionName: "defaultMarketFees", blockNumber: endBlock }),
+      chain.readContract({ address: C.clearinghouse, abi: clearinghouseAbi,
+        functionName: "isMinter", args: [C.orderBook], blockNumber: endBlock }),
+      chain.readContract({ address: C.clearinghouse, abi: clearinghouseAbi,
+        functionName: "isMinter", args: [seededEoa], blockNumber: endBlock }),
+    ]);
+    equal([
+      config.fees.premiumFeeBps, config.fees.resaleFeeBps, config.fees.takerFeeFlat.raw,
+      config.fees.takerFeeCapBps, config.fees.makerRebateBps,
+    ], [
+      feeParams.premiumFeeBps, feeParams.resaleFeeBps, String(feeParams.takerFeeFlat),
+      feeParams.takerFeeCapBps, feeParams.makerRebateBps,
+    ], "API order-book fees equal feeParams() at the indexed end block");
+    equal([config.fees.exerciseFeeBps, config.fees.mintFeePpm],
+      [defaultMarketFees[0], defaultMarketFees[1]],
+      "API default market fees equal defaultMarketFees() at the indexed end block");
+    equal(orderBookIsMinter, true, "OrderBook is an allowed Clearinghouse minter");
+    equal(seededEoaIsMinter, false, "seeded EOA is not an allowed Clearinghouse minter");
+
     const logs = <N extends "SeriesCreated" | "SeriesSettled" | "Redeemed" | "OrderPlaced" | "OrderFilled" | "Taken">(
       name: N, address: Address, abi: typeof clearinghouseAbi | typeof orderBookAbi,
     ) => chain.getContractEvents({ address, abi, eventName: name, fromBlock, toBlock: endBlock });
@@ -151,14 +191,18 @@ async function main(): Promise<void> {
     equal(placed.length, devnet.seed.summary.orders, "on-chain order count matches seed");
     equal(filled.length, devnet.seed.summary.fills, "on-chain fill count matches seed");
     equal(settled.length, devnet.seed.summary.settledSeries, "on-chain settled count matches seed");
+    assert(filled.some((log) => log.args.primary === true && (log.args.sellerFee ?? 0n) > 0n),
+      "seed must include a primary fill with a nonzero seller fee");
 
     const [mints, closes, accruals] = await Promise.all([
       chain.getContractEvents({ address: C.clearinghouse, abi: clearinghouseAbi, eventName: "Minted", fromBlock, toBlock: endBlock }),
       chain.getContractEvents({ address: C.clearinghouse, abi: clearinghouseAbi, eventName: "Closed", fromBlock, toBlock: endBlock }),
       chain.getContractEvents({ address: C.clearinghouse, abi: clearinghouseAbi, eventName: "MintFeesAccrued", fromBlock, toBlock: endBlock }),
     ]);
-    assert(mints.some((log) => (log.args.fee ?? 0n) > 0n), "seed must charge nonzero mint rent");
-    assert(accruals.some((log) => (log.args.amount ?? 0n) > 0n), "seed must accrue nonzero rent at settlement");
+    assert(mints.length > 0, "seed must produce Minted events through OrderBook fills");
+    assert(mints.every((log) => (log.args.fee ?? 0n) === 0n), "v8 seed must charge zero mint rent");
+    assert(accruals.every((log) => (log.args.amount ?? 0n) === 0n),
+      "v8 seed must not accrue nonzero rent at settlement");
     const allSeries: { series: { longId: string; underlying: Address; strike: { raw: string }; expiry: number; isPut: boolean;
       mintFeePpm: number; mintFeesHeld: { raw: string; decimals: number }; mintFeesAccrued: { raw: string; decimals: number } } }[] = [];
     for (const market of devnet.markets) {
@@ -180,6 +224,7 @@ async function main(): Promise<void> {
       const accrued = accruals.filter((log) => log.args.longId === id).reduce((sum, log) => sum + log.args.amount!, 0n);
       const decimals = view.isPut ? 6 : 18;
       assert.equal(charged - refunded - accrued, view.mintFeesHeld, `series ${id} rent conservation`);
+      assert.equal(view.mintFeesHeld, 0n, `series ${id} keeps zero mint fees held`);
       assert.deepEqual([row.series.mintFeesHeld.raw, row.series.mintFeesHeld.decimals,
         row.series.mintFeesAccrued.raw, row.series.mintFeesAccrued.decimals],
       [String(view.mintFeesHeld), decimals, String(accrued), decimals], `series ${id} indexed native-asset rent`);
@@ -305,6 +350,7 @@ async function main(): Promise<void> {
       const fees = taken.filter((log) => log.args.longId === itmId && log.args.buying &&
         log.args.taker?.toLowerCase() === holder.toLowerCase())
         .reduce((sum, log) => sum + (log.args.takerFee ?? 0n), 0n);
+      // Taken is buyer-side and unchanged in v8: seller fees belong to OrderFilled and are not part of buyer cost.
       const cost = premium + fees;
       if (cost >= 100_000n && payoutUsdg > cost) {
         assert(win, `eligible redeemed ITM holder ${holder} missing from wins feed`);
@@ -316,11 +362,11 @@ async function main(): Promise<void> {
       }
     }
     assert(eligibleWins >= 2, "seed did not produce multiple verified wins");
-    console.log(`PASS: ${created.length} series, ${placed.length} orders, ${filled.length} fills, ${settled.length} settlements, ${eligibleWins} verified winners; API ${API}`);
+    console.log(`PASS: ${created.length} series, ${placed.length} orders, ${filled.length} fills, ${settled.length} settlements, ${eligibleWins} verified winners; cold backfill ${coldBackfillMs} ms; API ${API}`);
     writeFileSync(join(OUT, "result.json"), JSON.stringify({ passed: true, endBlock: String(endBlock),
       series: created.length, orders: placed.length, fills: filled.length, settled: settled.length,
       winners: eligibleWins, rentMints: mints.length, rentCloses: closes.length, rentAccruals: accruals.length,
-      api: API, chainTime: String(block.timestamp) }, null, 2) + "\n");
+      coldBackfillMs, api: API, chainTime: String(block.timestamp) }, null, 2) + "\n");
   } finally {
     child.kill("SIGTERM");
     await Promise.race([new Promise<void>((done) => child.once("exit", () => done())), sleep(5000)]);

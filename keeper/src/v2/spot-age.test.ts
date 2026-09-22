@@ -80,6 +80,7 @@ const PARAMS: MmPlanParams = {
   syncIntervalS: 900,
   depositTokens: true,
   maxQuoteLifetimeS: 1_800,
+  epochWindDownS: 0,
 };
 
 const LIVE: LiveOrder[] = [
@@ -114,7 +115,9 @@ function tick(spot: bigint, fresh: boolean, fair: FairInput) {
     lastSync: NOW - 60,
     vault: {
       isQuoter: true,
+      quoterDelay: 0,
       tradingPaused: false,
+      fees: { current: { premiumFeeBps: 500, resaleFeeBps: 0 }, pending: null },
       limits: { maxSeriesUnits: 10_000n, maxTotalNotional: 250_000_000_000n, askToleranceBps: 100, maxBidBpsOfSpot: 1_000, maxOrderLifetime: 0, maxDailyOutflow: 2_500_000_000n },
       outflow: { used: 0n, available: 2_500_000_000n },
       totalNotional: 0n,
@@ -123,12 +126,15 @@ function tick(spot: bigint, fresh: boolean, fair: FairInput) {
       freeCollateral: new Map([[NVDA, 100n * 10n ** 18n]]),
       walletTokens: new Map([[NVDA, 0n]]),
       tracked: [],
+      epoch: null,
     },
     markets: new Map([[NVDA, { underlying: NVDA, ticker: 'NVDA', enabled: true, mintPaused: false, spot: fresh ? spot : null }]]),
     series: [view],
     fairs: new Map([['1', fair]]),
     params: PARAMS,
     refreshS: 600,
+    protocolAccounts: new Set<string>(),
+    protocolBook: [],
   };
   return planTick(input);
 }

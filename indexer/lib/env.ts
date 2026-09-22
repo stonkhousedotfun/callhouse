@@ -1,5 +1,7 @@
 import { getAddress, isAddress, type Address } from "viem";
 
+import { parseRewardDistributors } from "./v2/rewardDistributors";
+
 /**
  * Every address and tuning knob the indexer needs, resolved once from the environment.
  *
@@ -14,8 +16,9 @@ import { getAddress, isAddress, type Address } from "viem";
  *                      plan; there is no multi-market indexer. `MARKET` is the ticker label the
  *                      API publishes beside it.
  * V2_CLEARINGHOUSE enables one v2 source group for all v2 markets. It can run alongside either
- * legacy product, or on its own. The other four v2 addresses and V2_START_BLOCK are required
- * with it. Without any V2_* vars, the legacy configuration behaves as before.
+ * legacy product, or on its own. The four core v2 addresses and V2_START_BLOCK are required
+ * with it; v8 authority, payout and flywheel sources are optional individually. Without any
+ * V2_* vars, the legacy configuration behaves as before.
  *
  * Required for either legacy product:
  *   START_BLOCK      — chain 4663 is past block 61,000,000. Scanning from genesis is hours of
@@ -152,7 +155,7 @@ export const V2_SETTLEMENT_ORACLE: Address | undefined = v2Address("V2_SETTLEMEN
 export const V2_AUTO_ROLLER: Address | undefined = v2Address("V2_AUTO_ROLLER");
 export const V2_MAKER_REGISTRY: Address | undefined = v2Address("V2_MAKER_REGISTRY");
 
-/** Optional v2 periphery sources. A five-address deployment remains valid without either. */
+/** Optional v2 periphery sources. A core-only deployment remains valid without any of them. */
 function optionalV2Address(name: string): Address | undefined {
   const raw = env(name);
   if (V2_CLEARINGHOUSE === undefined) {
@@ -166,6 +169,108 @@ function optionalV2Address(name: string): Address | undefined {
 
 export const V2_EXPIRY_CALENDAR: Address | undefined = optionalV2Address("V2_EXPIRY_CALENDAR");
 export const V2_KEEPER_REWARDS: Address | undefined = optionalV2Address("V2_KEEPER_REWARDS");
+export const V2_ACCESS_MANAGER: Address | undefined = optionalV2Address("V2_ACCESS_MANAGER");
+export const V2_PAYOUT_ROUTER: Address | undefined = optionalV2Address("V2_PAYOUT_ROUTER");
+export const V2_FEE_SPLITTER: Address | undefined = optionalV2Address("V2_FEE_SPLITTER");
+export const V2_BUYBACK_EXECUTOR: Address | undefined = optionalV2Address("V2_BUYBACK_EXECUTOR");
+export const V2_FLYWHEEL_TOKEN_ADDRESS: Address | undefined = optionalV2Address("V2_FLYWHEEL_TOKEN_ADDRESS");
+export const V2_MAKER_VAULT: Address | undefined = optionalV2Address("V2_MAKER_VAULT");
+const V2_REWARDS_DISTRIBUTOR_LEGACY: Address | undefined = optionalV2Address("V2_REWARDS_DISTRIBUTOR");
+const rewardDistributorsRaw = env("V2_REWARDS_DISTRIBUTORS");
+if (V2_CLEARINGHOUSE === undefined && rewardDistributorsRaw !== undefined) {
+  throw new Error("[callhouse/indexer] V2_REWARDS_DISTRIBUTORS is set without V2_CLEARINGHOUSE.");
+}
+export const V2_REWARDS_DISTRIBUTORS = parseRewardDistributors(
+  rewardDistributorsRaw,
+  V2_REWARDS_DISTRIBUTOR_LEGACY,
+);
+/** The current maker instance for older consumers that still need one address. */
+export const V2_REWARDS_DISTRIBUTOR: Address | undefined =
+  V2_REWARDS_DISTRIBUTOR_LEGACY ?? V2_REWARDS_DISTRIBUTORS.find((item) => item.program === "maker")?.address;
+
+/**
+ * P8 lending periphery. V2_EARN_VAULT is the LENDING vault (deposit a Stock Token or USDG, receive
+ * shares) — it is not the `/earn` covered-call writing surface the web app calls "Earn".
+ * V2_ZAP_HELPER is the stateless StockZap (src/v2/periphery/StockZap.sol in callhouse-contracts).
+ */
+export const V2_EARN_VAULT: Address | undefined = optionalV2Address("V2_EARN_VAULT");
+export const V2_ZAP_HELPER: Address | undefined = optionalV2Address("V2_ZAP_HELPER");
+
+/**
+ * P8-06 House vault factory. Optional; a core-only or earn-only deployment stays valid.
+ * Clones are discovered from VaultCreated — do not reuse V2_MAKER_VAULT.
+ */
+export const V2_HOUSE_VAULT_FACTORY: Address | undefined = optionalV2Address("V2_HOUSE_VAULT_FACTORY");
+
+if (V2_BUYBACK_EXECUTOR !== undefined && V2_FEE_SPLITTER === undefined) {
+  throw new Error("[callhouse/indexer] V2_BUYBACK_EXECUTOR is set without V2_FEE_SPLITTER.");
+}
+if ((V2_FEE_SPLITTER === undefined) !== (V2_FLYWHEEL_TOKEN_ADDRESS === undefined)) {
+  throw new Error("[callhouse/indexer] Set V2_FEE_SPLITTER and V2_FLYWHEEL_TOKEN_ADDRESS together.");
+}
+
+/**
+ * The splitter is deployed before the core because it is the core fee recipient. Its events, and
+ * the executor's, therefore start at the flywheel receipt block rather than V2_START_BLOCK.
+ */
+export const V2_FLYWHEEL_START_BLOCK: number | undefined = (() => {
+  if (V2_FEE_SPLITTER !== undefined) {
+    const value = blockNumber("V2_FLYWHEEL_START_BLOCK");
+    if (value === 0) {
+      throw new Error("[callhouse/indexer] V2_FLYWHEEL_START_BLOCK must be a deployment block above zero.");
+    }
+    return value;
+  }
+  if (env("V2_FLYWHEEL_START_BLOCK") !== undefined) {
+    throw new Error("[callhouse/indexer] V2_FLYWHEEL_START_BLOCK is set without V2_FEE_SPLITTER.");
+  }
+  return undefined;
+})();
+
+/**
+ * The P8 lending periphery is deployed AFTER the core, not with it: the Earn vault and the zap are
+ * separate deployments that cannot exist before the Clearinghouse they deposit into. Starting them
+ * at V2_START_BLOCK would backfill every block between the core and the vault for two contracts
+ * that emitted nothing there; starting them too late would silently drop the vault's first
+ * deposits. Neither is recoverable by inspection, so the block is explicit, on the same
+ * required-with-its-address footing as V2_FLYWHEEL_START_BLOCK above.
+ *
+ * One variable covers both contracts because owner decision V3-D29 ships them together
+ * (v8-plan/tasks/P-periphery.md:3: "zaps, the Earn vault and lender rewards are live on day one").
+ */
+export const V2_EARN_START_BLOCK: number | undefined = (() => {
+  const configured = V2_EARN_VAULT !== undefined || V2_ZAP_HELPER !== undefined;
+  if (configured) {
+    const value = blockNumber("V2_EARN_START_BLOCK");
+    if (value === 0) {
+      throw new Error("[callhouse/indexer] V2_EARN_START_BLOCK must be a deployment block above zero.");
+    }
+    return value;
+  }
+  if (env("V2_EARN_START_BLOCK") !== undefined) {
+    throw new Error("[callhouse/indexer] V2_EARN_START_BLOCK is set without V2_EARN_VAULT or V2_ZAP_HELPER.");
+  }
+  return undefined;
+})();
+
+/**
+ * House vaults are deployed after the core (the factory's createVault needs the OrderBook).
+ * Same required-with-its-address footing as V2_EARN_START_BLOCK: a guessed V2_START_BLOCK
+ * either wastes backfill or silently drops VaultCreated.
+ */
+export const V2_HOUSE_START_BLOCK: number | undefined = (() => {
+  if (V2_HOUSE_VAULT_FACTORY !== undefined) {
+    const value = blockNumber("V2_HOUSE_START_BLOCK");
+    if (value === 0) {
+      throw new Error("[callhouse/indexer] V2_HOUSE_START_BLOCK must be a deployment block above zero.");
+    }
+    return value;
+  }
+  if (env("V2_HOUSE_START_BLOCK") !== undefined) {
+    throw new Error("[callhouse/indexer] V2_HOUSE_START_BLOCK is set without V2_HOUSE_VAULT_FACTORY.");
+  }
+  return undefined;
+})();
 
 /** V2 deployment block. A genesis scan is never an acceptable implicit default. */
 export const V2_START_BLOCK: number | undefined = (() => {

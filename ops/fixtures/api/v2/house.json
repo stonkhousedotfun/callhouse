@@ -1,0 +1,29 @@
+{
+  "items": [
+    {
+      "market": "NVDA",
+      "vault": "0x602CA55061735b596380f1e0f775a9D91966e2cD",
+      "currentEpoch": {
+        "id": "1789156800",
+        "start": 1789156800,
+        "end": 1789761600,
+        "nav": null,
+        "resultUsdg": null
+      },
+      "sharesSupply": "1000000000000000000000"
+    },
+    {
+      "market": "TSLA",
+      "vault": "0xDD01a2D05DC1ad373479E6a3cb633a9aaddF3EB4",
+      "currentEpoch": {
+        "id": "1789156800",
+        "start": 1789156800,
+        "end": 1789761600,
+        "nav": null,
+        "resultUsdg": null
+      },
+      "sharesSupply": "250000000000000000000"
+    }
+  ],
+  "nextCursor": null
+}

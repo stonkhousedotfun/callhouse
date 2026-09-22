@@ -3,8 +3,7 @@
 import { useEffect, useState } from "react";
 
 import { PayoffCard } from "@/components/v2/PayoffCard";
-import { Button, Notice, Panel } from "@/components/ui";
-import type { Card } from "@/lib/v2/api-types";
+import { Button, Notice, Panel, Segments } from "@/components/ui";
 import { marketQuoteAsOf } from "@/lib/v2/marketSpot";
 import { useCards, useConfig, useHeroCard, useMarkets } from "@/lib/v2/hooks";
 import type { TakerFeeParams } from "@/lib/v2/payoff";
@@ -13,26 +12,23 @@ type Tenor = "all" | "daily" | "weekly";
 type OptionType = "call" | "put";
 type Sort = "multiple" | "expiry" | "volume";
 
-function nextFriday(now: number): number {
-  const date = new Date(now * 1000);
-  const utcDay = date.getUTCDay();
-  let days = (5 - utcDay + 7) % 7;
-  if (days === 0 && date.getUTCHours() >= 20) days = 7;
-  return Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), date.getUTCDate() + days, 20) / 1000;
-}
-
 /** Clearly labelled illustration, never passed to the trading link. */
-function exampleCard(now: number): Card {
-  const expiry = nextFriday(now);
-  const money = (raw: string, formatted: string) => ({ raw, decimals: 6, formatted });
-  return {
-    series: { longId: "0", shortId: "1", ticker: "NVDA", underlying: "0x0000000000000000000000000000000000000000",
-      isPut: false, strike: money("240000000", "240"), expiry, mintFeePpm: 0, mintFeesHeld: { raw: "0", decimals: 18, formatted: "0" }, mintFeesAccrued: { raw: "0", decimals: 18, formatted: "0" }, tenor: "weekly", mintCutoff: expiry - 1800, status: "open" },
-    spot: money("220000000", "220"), ask: money("909100", "0.9091"), target: money("250000000", "250"),
-    perUnit: { cost: money("10000", "0.01"), payoutAtTarget: money("90000", "0.09"), multiple: 9 },
-    perShare: { cost: money("1000000", "1"), payoutAtTarget: money("9000000", "9"), multiple: 9 },
-    maxLoss: "cost", unitsAvailable: "100", orderIds: [],
-  };
+/**
+ * Why the hero is showing an illustration instead of a live option.
+ *
+ * It used to be one sentence — "live quotes are unavailable OR no option has enough depth" — which
+ * asked the reader to disambiguate a FAILURE from an EMPTY BOOK. Those call for different
+ * responses: one is "come back in a minute", the other is "there is genuinely nothing to buy right
+ * now", and a reader who cannot tell them apart assumes the worse of the two.
+ *
+ * The two states are already distinguishable in the data and nothing was reading them:
+ * `featured` is null both when the hero request errored and when it succeeded with no qualifying
+ * card, and `hero.isError` separates them.
+ */
+export function heroFallbackReason(requestFailed: boolean): string {
+  return requestFailed
+    ? "Example — live quotes could not be loaded. Your positions and balances are unaffected; this refreshes on its own."
+    : "Example — no live option currently has enough depth to feature. The full list below is unaffected.";
 }
 
 function useNow(): number | null {
@@ -78,8 +74,6 @@ export function Marketplace() {
     type: activeType, sort, limit: 200 });
   const fees = feeParams(config.data);
   const featured = !hero.isError ? hero.data?.card : null;
-  const example = !featured && !hero.isPending && now !== null ? exampleCard(now) : null;
-  const heroCard = featured ?? example;
   const heroMultiple = featured ? (hero.data?.maxMultiple ?? featured.perUnit.multiple) : 9;
 
   return <>
@@ -88,19 +82,18 @@ export function Marketplace() {
         <div className="pt-2">
           <p className="text-sm font-bold uppercase tracking-[.15em] text-accent-text">Buy an outcome</p>
           <h1 id="marketplace-title" className="mt-4 max-w-[15ch] font-display text-4xl font-extrabold leading-[1.08] tracking-tight sm:text-6xl">
-            {featured ? <>Potential <span className="num">{heroMultiple.toFixed(1)}×</span> at the target. Lose at most what you pay.</>
+            {featured ? <>Potential <span className="num">{heroMultiple.toFixed(1)}×</span> at the target.</>
               : "Know your upside. Know your max loss."}
           </h1>
           <p className="mt-5 max-w-xl text-lg text-ink-2">Choose a Stock Token option by the payout you want. Every live quote includes fees and shows your max loss before you buy.</p>
-          {example ? <p className="mt-3 rounded-sm bg-warn-soft px-3 py-2 text-sm font-semibold text-warn" role="status">Example — live quotes are unavailable or no option has enough depth for the hero.</p> : null}
           <Button href="#options" className="mt-7">Explore live options</Button>
         </div>
         <div className="min-w-0">
-          {heroCard ? <PayoffCard key={`${heroCard.series.longId}-${featured ? "live" : "example"}`} card={heroCard} featured example={!featured}
-            spotAvailable={!featured || marketQuoteAsOf(featured.series.ticker, Math.floor(hero.dataUpdatedAt / 1000), markets.isError ? undefined : markets.data) !== null}
-            now={now} feeParams={featured ? fees : { takerFeeFlat: 100_000n, takerFeeCapBps: 1_000 }}
-            quoteAsOf={featured ? marketQuoteAsOf(featured.series.ticker, Math.floor(hero.dataUpdatedAt / 1000), markets.isError ? undefined : markets.data) : now} />
-            : <CardSkeleton featured />}
+          {featured ? <PayoffCard key={featured.series.longId} card={featured} featured
+            spotAvailable={marketQuoteAsOf(featured.series.ticker, Math.floor(hero.dataUpdatedAt / 1000), markets.isError ? undefined : markets.data) !== null}
+            now={now} feeParams={fees}
+            quoteAsOf={marketQuoteAsOf(featured.series.ticker, Math.floor(hero.dataUpdatedAt / 1000), markets.isError ? undefined : markets.data)} />
+            : hero.isPending ? <CardSkeleton featured /> : null}
         </div>
       </div>
     </section>
@@ -123,18 +116,11 @@ export function Marketplace() {
             {markets.data?.filter((market) => market.status === "live").map((market) => <option key={market.ticker} value={market.ticker}>{market.ticker}</option>)}
           </select>
         </label>
-        <div className="flex flex-wrap items-center gap-2" role="group" aria-label="Expiry type">
-          {(["all", "daily", "weekly"] as const).map((value) => <button key={value} type="button" aria-pressed={tenor === value} onClick={() => setTenor(value)}
-            className={`min-h-10 rounded-sm border px-3 text-sm font-semibold ${tenor === value ? "border-accent bg-accent-soft text-accent-text" : "border-line-2 bg-surface text-ink hover:bg-surface-2"}`}>
-            {value === "all" ? "All expiries" : value === "daily" ? "Daily" : "Weekly"}
-          </button>)}
-        </div>
-        {supportsPuts ? <div className="flex items-center gap-2" role="group" aria-label="Option type">
-          {(["call", "put"] as const).map((value) => <button key={value} type="button" aria-pressed={activeType === value} onClick={() => setType(value)}
-            className={`min-h-10 rounded-sm border px-3 text-sm font-semibold ${activeType === value ? "border-accent bg-accent-soft text-accent-text" : "border-line-2 bg-surface text-ink hover:bg-surface-2"}`}>
-            {value === "call" ? "Calls" : "Puts"}
-          </button>)}
-        </div> : null}
+        <Segments label="Expiry type" selected={tenor} onSelect={setTenor}
+          options={[{ value: "all", label: "All expiries" }, { value: "daily", label: "Daily" },
+            { value: "weekly", label: "Weekly" }] as const} />
+        {supportsPuts ? <Segments label="Option type" selected={activeType} onSelect={setType}
+          options={[{ value: "call", label: "Calls" }, { value: "put", label: "Puts" }] as const} /> : null}
       </div>
       {cards.isError ? <Notice tone="warn" role="status" className="mt-5" title="Live quotes are delayed.">
         {cards.data ? "Showing the latest available cards." : "The marketplace feed is unavailable. Try again shortly."}

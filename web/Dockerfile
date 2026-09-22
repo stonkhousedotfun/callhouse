@@ -98,7 +98,9 @@ ENV NEXT_PUBLIC_VAULT=$NEXT_PUBLIC_VAULT
 #      web/scripts/gen-markets.mjs writes from ops/markets/tier1.json. The builder copies only a
 #      test JSON fixture from ops/, not the market registry, so it uses the committed file: after
 #      the registry changes, run `pnpm --filter @callhouse/web gen:markets`, commit the output,
-#      and rebuild. The test gate (lib/markets.test.ts) fails on a stale file. ----
+#      and rebuild. The filtered ops/ copy below also contains the Docker-context allow-list, but
+#      the build reads only the committed generated modules plus the one config fixture named by
+#      its tests. The test gate (lib/markets.test.ts) fails on a stale file. ----
 
 # The DEFAULT market's (NVDA) isolated 1-lot factory ONLY. Blank is SAFE and is the production
 # value: lib/contracts.ts falls back to the registry's row in lib/markets.generated.ts
@@ -128,6 +130,9 @@ ENV NEXT_PUBLIC_API_URL=$NEXT_PUBLIC_API_URL
 # Blank follows NEXT_PUBLIC_API_URL for existing deployments.
 ARG NEXT_PUBLIC_V1_API_URL=""
 ENV NEXT_PUBLIC_V1_API_URL=$NEXT_PUBLIC_V1_API_URL
+# Dedicated frozen-v7 run-off indexer. Blank disables /v7; it never falls back to API_URL.
+ARG NEXT_PUBLIC_V7_API_URL=""
+ENV NEXT_PUBLIC_V7_API_URL=$NEXT_PUBLIC_V7_API_URL
 
 # v2 routing, alerts, and wallet connection are client bundle settings.
 ARG NEXT_PUBLIC_V2="0"
@@ -154,6 +159,29 @@ ENV NEXT_PUBLIC_CLEARINGHOUSE=$NEXT_PUBLIC_CLEARINGHOUSE
 ARG NEXT_PUBLIC_SEAPORT=""
 ENV NEXT_PUBLIC_SEAPORT=$NEXT_PUBLIC_SEAPORT
 
+# ---- v8 OVERRIDE-ONLY CONTRACT ADDRESSES. Blank is SAFE and is the intended default: blank means
+#      the feature reads as unconfigured, which is the correct rendering for a contract that is not
+#      deployed. These three have NO key in the generated registry (design B: no new
+#      `v2.contracts` keys), so an override is the ONLY way an address reaches the client for them,
+#      and lib/v2/config.ts validates each one through the same getAddress() path as a registry
+#      address — a malformed value becomes null rather than reaching simulateContract.
+#
+#      They are here because of exactly the failure this whole block documents: a Railway service
+#      variable that is not declared as an ARG is silently absent at build time. Without these
+#      pairs the override would be correct in the repo, correct in .env.example, correct in
+#      config.ts, and simply missing in production, with /lend rendering "not configured" against a
+#      deployed vault. Setting one is also a REBUILD, not a restart.
+#
+#      An address served from an override is not silent: v2AddressProvenanceNotices() names the key
+#      and the variable it came from, and the UI renders that. Keep this list in step with
+#      web/.env.example. ----
+ARG NEXT_PUBLIC_V2_EARN_VAULT=""
+ENV NEXT_PUBLIC_V2_EARN_VAULT=$NEXT_PUBLIC_V2_EARN_VAULT
+ARG NEXT_PUBLIC_V2_LENDER_REWARDS_DISTRIBUTOR=""
+ENV NEXT_PUBLIC_V2_LENDER_REWARDS_DISTRIBUTOR=$NEXT_PUBLIC_V2_LENDER_REWARDS_DISTRIBUTOR
+ARG NEXT_PUBLIC_V2_STOCK_ZAP=""
+ENV NEXT_PUBLIC_V2_STOCK_ZAP=$NEXT_PUBLIC_V2_STOCK_ZAP
+
 # ---- vault deploy block. Blank is safe (falls back to 0n); setting it makes the /activity log
 #      fallback one cheap query instead of a full scan. ----
 ARG NEXT_PUBLIC_VAULT_FROM_BLOCK=""
@@ -173,12 +201,20 @@ ENV NODE_ENV=production
 
 # ---- sources, last ----
 COPY scripts ./scripts
-COPY ops/fixtures/api/v2/config.json ./ops/fixtures/api/v2/config.json
+# Copy the filtered directory, not an optional `ops/maker-epochs/*.json` glob. The context always
+# contains at least the allow-listed config fixture, while `.dockerignore` admits epoch JSON only
+# when one exists. A bare optional glob makes the valid no-epoch launch state fail at COPY time.
+COPY ops ./ops
 COPY web ./web
 
-# `next build` never creates public/, and web/ has none today. An absent directory is a hard COPY
-# failure in the runner, so guarantee it exists rather than making the runner conditional.
-RUN mkdir -p ./web/public
+# `next build` never creates public/. Always create both directories so an empty epoch set ships
+# as an honest 404. When claim files exist, promote only JSON from the filtered build context into
+# Next's public tree; `find -exec` is intentionally safe when the directory exists but has no match.
+RUN mkdir -p ./web/public/maker-epochs && \
+    if [ -d ./ops/maker-epochs ]; then \
+      find ./ops/maker-epochs -maxdepth 1 -type f -name '*.json' \
+        -exec cp '{}' ./web/public/maker-epochs/ ';'; \
+    fi
 
 WORKDIR /app/web
 RUN pnpm run build

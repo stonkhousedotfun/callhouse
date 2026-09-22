@@ -3,8 +3,11 @@
  * tests drive it with `app.request` and a PGlite database, no socket and no network.
  *
  *   GET    /health                    200 always while the process serves (liveness), with the
- *                                     database, per-channel breaker state and the rules engine's
- *                                     last tick (off | starting | ok | failing).
+ *                                     database, per-channel breaker state, the rules engine's last
+ *                                     tick (off | starting | ok | failing) with its watch-set size
+ *                                     and oldest holdings refresh, and the last hour's delivery
+ *                                     outcomes. The stats are null when the database did not
+ *                                     answer: a zero would read as "nothing went wrong".
  *   POST   /v1/challenge              { address } → { message, nonce, expiresAt }
  *   POST   /v1/session                { address, signature, nonce } → { token, address, expiresAt } (v5)
  *   POST   /v1/subscriptions          { address, signature, nonce, channel, target, prefs } → { id }
@@ -31,7 +34,10 @@
  *     address; telegram = omitted (or "" / null). The chat is bound by the bot's /start, never
  *     typed in: POST with channel "telegram" stores or updates PREFS for the wallet's (single)
  *     Telegram subscription, and `GET /v1/telegram/link` produces the link that attaches a chat.
- *   - `prefs` may be partial (prefs.ts): missing toggles are on.
+ *   - `prefs` may be partial (prefs.ts): missing toggles are on. A `priceAlerts` ticker that is not
+ *     in the rules engine's last /v2/markets read is refused with the same 400 `bad-request` shape
+ *     as any other prefs problem, because such an alert could never fire; with no market list
+ *     cached yet, every ticker is accepted (markets.ts).
  *   - Every request is fully validated BEFORE the nonce is spent, so a typo does not cost the user
  *     another wallet prompt. Authentication failures: 401 nonce-invalid | signature-invalid;
  *     503 verifier-unavailable (RPC down, contract wallet).
@@ -70,9 +76,12 @@ import type { ChannelName } from './channels/types.js';
 import { parsePushTarget } from './channels/webpush.js';
 import type { TargetCipher } from './crypto.js';
 import type { Db } from './db.js';
+import type { DeliveryStats } from './delivery.js';
 import { errorCode, type Logger } from './log.js';
+import type { MarketsCache } from './markets.js';
 import { prefsSchema, readPrefs } from './prefs.js';
 import type { RulesHealth } from './rules/engine.js';
+import { loadRulesStats, type RulesStats } from './rules/store.js';
 import { bearerToken, sessionTokens } from './session.js';
 import {
   confirmEmail,
@@ -103,8 +112,16 @@ export interface AppDeps {
   now: () => Date;
   logger: Logger;
   breakerStates: () => Record<ChannelName, BreakerState | 'off'>;
+  /** Delivery outcomes of the last hour, for /health. Absent = not reported. */
+  deliveryStats?: () => Promise<DeliveryStats>;
   /** The rules engine (N2-02). Absent = off. */
   rulesHealth?: () => RulesHealth;
+  /**
+   * The tickers of the rules engine's last /v2/markets read. A price alert on a ticker that is not
+   * in it is refused; while it is empty (engine off, or no successful read yet) every ticker is
+   * accepted, so an indexer outage cannot make alert settings unusable (markets.ts).
+   */
+  markets?: MarketsCache;
   telegram: {
     readonly username: string | null;
     createLink(address: string): Promise<{ deepLink: string; expiresAt: number } | null>;
@@ -178,6 +195,23 @@ export function createApp(deps: AppDeps): Hono {
   const appOrigin = new URL(deps.appUrl).origin;
   const settingsUrl = `${deps.appUrl}/settings/notifications`;
   const sessions = sessionTokens(deps.cipher);
+
+  /**
+   * The first price alert whose ticker is not a market the notifier knows, or null.
+   *
+   * An alert on a ticker the indexer does not list can never fire (nothing gives it a spot), so
+   * saving it silently would leave a wallet waiting for a message that cannot come. FAIL OPEN: with
+   * nothing cached, `allows` is true for every ticker, so an indexer outage or a notifier running
+   * with the rules engine off refuses nothing.
+   */
+  const unknownAlertTicker = (alerts: { ticker: string }[]): { index: number; ticker: string } | null => {
+    const known = deps.markets;
+    if (known === undefined) return null;
+    for (const [index, alert] of alerts.entries()) {
+      if (!known.allows(alert.ticker)) return { index, ticker: alert.ticker };
+    }
+    return null;
+  };
   const challengeClients = new Map<string, { count: number; since: number }>();
 
   const challengeClientKey = (c: Context): string => {
@@ -269,13 +303,30 @@ export function createApp(deps: AppDeps): Hono {
     } catch {
       database = 'unavailable';
     }
+    // Both read the database, so they are only attempted when it answered, and a failure here
+    // reports null rather than a zero the monitor would read as "nothing is going wrong".
+    let delivery: DeliveryStats | null = null;
+    let stats: RulesStats | null = null;
+    if (database === 'ok') {
+      try {
+        delivery = (await deps.deliveryStats?.()) ?? null;
+        stats = await loadRulesStats(db, deps.now());
+      } catch (error) {
+        logger.warn({ errorCode: errorCode(error) }, 'health statistics unavailable');
+      }
+    }
     return c.json({
       status: database === 'ok' ? 'ok' : 'degraded',
       service: 'callhouse-notifier',
       database,
       channels: deps.breakerStates(),
       telegramBot: deps.telegram.username === null ? 'unknown' : 'ok',
-      rules: deps.rulesHealth?.() ?? { status: 'off', lastSuccessAt: null, consecutiveFailures: 0 },
+      delivery: { lastHour: delivery },
+      rules: {
+        ...(deps.rulesHealth?.() ?? { status: 'off' as const, lastSuccessAt: null, consecutiveFailures: 0 }),
+        watchSet: stats?.watchSet ?? null,
+        oldestRefreshAgeS: stats?.oldestRefreshAgeS ?? null,
+      },
     });
   });
 
@@ -327,6 +378,10 @@ export function createApp(deps: AppDeps): Hono {
 
     const prefs = prefsSchema.safeParse(input.prefs ?? {});
     if (!prefs.success) return fail(c, 400, 'bad-request', `prefs: ${zodIssues(prefs.error)}`);
+    const unknownTicker = unknownAlertTicker(prefs.data.priceAlerts);
+    if (unknownTicker !== null) {
+      return fail(c, 400, 'bad-request', `prefs: priceAlerts.${unknownTicker.index}.ticker: ${unknownTicker.ticker} is not a market on this notifier`);
+    }
 
     let canonicalTarget: string | null = null;
     if (input.channel === 'webpush') {

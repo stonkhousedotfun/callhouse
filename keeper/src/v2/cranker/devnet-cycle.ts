@@ -128,6 +128,17 @@ async function warpTo(ts: number): Promise<void> {
   await rpc('evm_mine');
 }
 
+/** OrderKind.AskWrite — write-on-fill (V2Types.sol:64-67); OrderKind 1 is the AskResale below it. */
+const ASK_WRITE = 2;
+/**
+ * ada's AskWrite price for the section-C ITM call, USDG (6 dp) per SHARE. A unit is 0.01 share
+ * (cranker/constants.ts:29 UNIT = 1e16), so 50 units costs dee `price * 50 / 100` = 7.50 USDG and
+ * locks ada 0.5 NVDA of collateral. Both fit the seed's funding with room: ops/devnet/seed.mjs:194-197
+ * deposits ada 200 NVDA, and the five wallets each hold 1,000,000 USDG. It sits below dee's 20 USDG
+ * resale ask on the next line, so the resale is a resale and not a markdown.
+ */
+const ITM_ASK_PRICE = 15_000_000n;
+
 async function sendAs(from: Address, call: { address: Address; abi: Abi; functionName: string; args: readonly unknown[] }): Promise<unknown> {
   const { result } = await pub.simulateContract({ ...call, account: from } as never);
   const wallet = createWalletClient({ account: from, chain, transport: http(RPC) });
@@ -173,8 +184,10 @@ async function settleTicks(running: RunningMode, more: number, timeoutMs = 120_0
   }, { timeoutMs });
 }
 
-async function read<T>(address: Address, abi: Abi, functionName: string, args: readonly unknown[] = []): Promise<T> {
-  return pub.readContract({ address, abi, functionName, args } as never) as Promise<T>;
+async function read<T>(address: Address, abi: Abi, functionName: string, args: readonly unknown[] = [], account?: Address): Promise<T> {
+  // `account` matters for any view that reads msg.sender. OrderBook.quoteTake does, to apply the
+  // caller's own discount, so quoting as the zero address would price a different taker's fill.
+  return pub.readContract({ address, abi, functionName, args, ...(account ? { account } : {}) } as never) as Promise<T>;
 }
 
 /** AutoRoller(book, admin) from CONTRACTS_DIR's forge build, sent from anvil's unlocked admin account. */
@@ -184,8 +197,16 @@ async function deployRoller(D: Devnet): Promise<Address> {
   if (!existsSync(artifactFile)) throw new Error(`CYCLE_DEPLOY_ROLLER=1 needs ${artifactFile} (forge build in CONTRACTS_DIR)`);
   const artifact = JSON.parse(readFileSync(artifactFile, 'utf8')) as { abi: Abi; bytecode: { object: `0x${string}` } };
   const admin = getAddress(D.accounts.admin!);
+  // C8-05 HAS LANDED, AND THE SECOND ARGUMENT CHANGED MEANING WITHOUT CHANGING ARITY.
+  // src/v2/AutoRoller.sol:95 is now `AutoRoller is IAutoRoller, Managed, ...` and :181 is
+  // `constructor(IOrderBook orderBook_, address authority_) Managed(authority_)`. It used to be
+  // (IOrderBook, address admin) on an AccessControl contract. Passing the admin EOA still COMPILES,
+  // still DEPLOYS, and produces a roller whose authority() is an address with no code, so every
+  // `restricted` call on it consults a non-contract. Nothing fails at deploy time. The authority is
+  // the AccessManager, which ops/devnet/addresses.json now records (F8-03/T-119).
+  const authority = getAddress(D.contracts.accessManager);
   const wallet = createWalletClient({ account: admin, chain, transport: http(RPC) });
-  const hash = await wallet.deployContract({ abi: artifact.abi, bytecode: artifact.bytecode.object, args: [D.contracts.orderBook, admin], account: admin, chain, gas: 8_000_000n } as never);
+  const hash = await wallet.deployContract({ abi: artifact.abi, bytecode: artifact.bytecode.object, args: [D.contracts.orderBook, authority], account: admin, chain, gas: 8_000_000n } as never);
   await rpc('evm_mine');
   const receipt = await pub.waitForTransactionReceipt({ hash, pollingInterval: 100 });
   if (receipt.status !== 'success' || !receipt.contractAddress) throw new Error(`AutoRoller deploy failed (${hash})`);
@@ -219,7 +240,7 @@ function parseEnvFile(file: string): Record<string, string> {
 //////////////////////////////////////////////////////////////*/
 
 interface Devnet {
-  contracts: { clearinghouse: Address; orderBook: Address; settlementOracle: Address; expiryCalendar: Address; autoRoller: Address | null; sources: { univ3: Address } };
+  contracts: { clearinghouse: Address; orderBook: Address; settlementOracle: Address; expiryCalendar: Address; accessManager: Address; autoRoller: Address | null; sources: { univ3: Address } };
   markets: Array<{ ticker: string; underlying: Address; feed: Address; pool: Address | null; strikeTick: string }>;
   accounts: Record<string, Address>;
   startBlock: number;
@@ -502,9 +523,41 @@ async function main(): Promise<void> {
     const [, spot] = await read<readonly [boolean, bigint, bigint]>(D.contracts.settlementOracle, settlementOracleAbi, 'trySpot', [NVDA.underlying]);
     const itmStrike = roundDownToTick((spot * 95n) / 100n, BigInt(NVDA.strikeTick));
     const itm = (await sendAs(acct.ada!, { address: D.contracts.clearinghouse, abi: clearinghouseAbi, functionName: 'createSeries', args: [NVDA.underlying, false, itmStrike, e2] })) as bigint;
-    await sendAs(acct.ada!, { address: D.contracts.clearinghouse, abi: clearinghouseAbi, functionName: 'mint', args: [itm, 50n, acct.ada, acct.dee] });
+    // THE POSITION IS MADE THE WAY A USER MAKES ONE. v8 `Clearinghouse.mint` is minter-allowlisted
+    // (src/v2/Clearinghouse.sol:563-564, allowlist :166) and the OrderBook is the only protocol
+    // minter (script/v2/DevDeploy.s.sol:346, T-77). ada is an EOA and never will be one, so the old
+    // direct `mint(itm, 50, ada, dee)` here reverts NotMinter() on any v8 devnet. Instead ada rests
+    // an AskWrite and dee takes it, and the BOOK mints: same end state, ada short 50 and dee long 50.
+    const askWriteId = (await sendAs(acct.ada!, {
+      address: D.contracts.orderBook, abi: orderBookAbi, functionName: 'place',
+      args: [itm, ASK_WRITE, ITM_ASK_PRICE, 50n, 0],
+    })) as bigint;
+    // TakeParams has TEN fields in v8, `maxTotalFee` tenth and last. The order is MIRRORED from the
+    // compiled ABI, not retyped from a doc: ops/abis/v2/OrderBook.json `take`, which agrees
+    // field-for-field with keeper/src/v2/abi/orderBook.ts (both checked, both
+    // longId, buying, orderIds, units, minUnits, limitPrice, writeToSell, recipient, deadline, maxTotalFee).
+    const takeBase = {
+      longId: itm, buying: true, orderIds: [askWriteId], units: 50n, minUnits: 50n,
+      limitPrice: ITM_ASK_PRICE, writeToSell: false, recipient: acct.dee!,
+      deadline: BigInt((await now()) + 3_600), maxTotalFee: 0n,
+    };
+    // v8 quoteTake returns FOUR values (unitsFilled, premium, takerFee, sellerFees) —
+    // src/v2/OrderBook.sol:459-467. This take is BUYING, so the cap is the taker fee alone: the
+    // seller fees of an ask that gets hit are the MAKER's, not the taker's (OrderBook.sol:464-466).
+    // Quoted as dee because quoteTake reads msg.sender for the discount.
+    const [, , quotedTakerFee] = await read<readonly [bigint, bigint, bigint, bigint]>(
+      D.contracts.orderBook, orderBookAbi, 'quoteTake', [takeBase], acct.dee!,
+    );
+    // NOTE: `OrderBook.take` does NOT enforce p.maxTotalFee yet — `grep -n maxTotalFee
+    // src/v2/OrderBook.sol` finds only NatSpec at :416 and :463, and the enforcement is C8-03
+    // (claimed, not landed). The field is correct data either way, so it is filled from the quote
+    // rather than left at a sentinel; do not assert that the cap reverts until C8-03 lands.
+    await sendAs(acct.dee!, {
+      address: D.contracts.orderBook, abi: orderBookAbi, functionName: 'take',
+      args: [{ ...takeBase, maxTotalFee: quotedTakerFee }],
+    });
     const resaleId = (await sendAs(acct.dee!, { address: D.contracts.orderBook, abi: orderBookAbi, functionName: 'place', args: [itm, 1, 20_000_000n, 20n, 0] })) as bigint;
-    say(`  ada wrote 50 units of NVDA call ${itmStrike} (spot ${spot}) to dee; dee lists 20 for resale (order ${resaleId})`);
+    say(`  ada rested an AskWrite for 50 units of NVDA call ${itmStrike} (spot ${spot}) at ${ITM_ASK_PRICE}; dee took it in full (order ${askWriteId}, taker fee cap ${quotedTakerFee}) so the book minted — ada short 50, dee long 50; dee lists 20 for resale (order ${resaleId})`);
 
     await warpTo(e2 - 90);
     await setFeed(['NVDA', '--window', String(e2), '--pool']);

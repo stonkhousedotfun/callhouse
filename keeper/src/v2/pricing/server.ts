@@ -11,7 +11,8 @@
  *       400 { fair: null, reason: "bad-request", detail }      malformed parameters
  *       404 { fair: null, reason: "unknown-ticker", detail }   not in the registry
  *     `strike` is USDG base units per whole token, `expiry` unix seconds, `type` call|put. `spot` is
- *     the token spot the price is for; `asOf` the Cboe chain's last trade (unix seconds). `iv` is
+ *     the token spot the price is for; `asOf` the chain's pricing clock (Cboe: its last trade, unix
+ *     seconds). The service's internal provenance (fair.ts FairQuote.provenance) is NOT in the body. `iv` is
  *     on the trading clock (bs.ts), so it reads below Cboe's calendar-day iv over spans without a
  *     weekend; `iv` and `delta` are rounded to 6 dp.
  *
@@ -36,7 +37,8 @@
 import { Hono } from 'hono';
 import { formatUnits } from 'viem';
 import type { PricingReason } from './cboe.js';
-import type { FairOutcome, PricingLog, PricingService } from './fair.js';
+import type { FairQuote, PricingLog, PricingService } from './fair.js';
+import type { PricingFailure } from './cboe.js';
 
 export type Money = { raw: string; decimals: number; formatted: string };
 
@@ -86,8 +88,11 @@ export function parseFairQuery(query: Query): ParsedFairQuery {
   return { ok: true, ticker, strikeUsdg6, expiry: Number(expiryRaw), type: type as 'call' | 'put' };
 }
 
+/** What the legacy /fair body reads from an outcome: never the internal provenance. */
+export type FairBodyInput = PricingFailure | Pick<FairQuote, 'ok' | 'fairUsdg6' | 'iv' | 'delta' | 'source' | 'method' | 'days' | 'spotUsdg6' | 'asOf'>;
+
 /** The /fair body for an outcome, and its status. */
-export function fairResponse(outcome: FairOutcome): { status: 200 | 404; body: Record<string, unknown> } {
+export function fairResponse(outcome: FairBodyInput): { status: 200 | 404; body: Record<string, unknown> } {
   if (!outcome.ok) {
     return { status: outcome.reason === 'unknown-ticker' ? 404 : 200, body: { fair: null, reason: outcome.reason, detail: outcome.detail } };
   }
@@ -133,7 +138,7 @@ export function createPricingApp(service: PricingService, log?: PricingLog): Hon
       ticker,
       root: surface.root,
       asOf: surface.asOf,
-      chainTimestamp: chain.timestamp,
+      chainTimestamp: chain.clocks.publishedAtText,
       spot: usdMoney(surface.shareSpot),
       expiries: surface.expiries.map((e) => ({
         expiry: e.expiry,
@@ -165,9 +170,9 @@ export function createPricingApp(service: PricingService, log?: PricingLog): Hon
         usable,
         fetchedAt: new Date(entry.fetchedAtMs).toISOString(),
         error: entry.error,
-        chainTimestamp: entry.chain?.timestamp ?? null,
-        lastTradeTime: entry.chain?.lastTradeTime ?? null,
-        options: entry.chain?.options.length ?? null,
+        chainTimestamp: entry.chain?.clocks.publishedAtText ?? null,
+        lastTradeTime: entry.chain?.underlying.observedAtText ?? null,
+        options: entry.chain?.rows.length ?? null,
       };
     }
     return c.json({

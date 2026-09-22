@@ -1,0 +1,19 @@
+{
+  "address": "0xE37876AcBfbA6186E4687f4ef465D9AC21558De3",
+  "items": [
+    {
+      "program": "maker",
+      "distributor": "0xA35423709eb22ac7639fd415496018087f409deb",
+      "epochId": 2958,
+      "index": 0,
+      "amount": {
+        "raw": "20000000",
+        "decimals": 6,
+        "formatted": "20"
+      },
+      "claimed": true,
+      "tx": "0x462b662ea226b1849301c4149d5cb84dd4549fd1a00c76ca71769a2016a090e7"
+    }
+  ],
+  "nextCursor": null
+}

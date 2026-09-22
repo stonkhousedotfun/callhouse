@@ -138,6 +138,12 @@ export const snapshotStateSchema = z.object({
   at: z.number().int().nonnegative(),
   /** Ticker → spot, USDG base units per share. */
   spots: z.record(uint),
+  /**
+   * Ticker → when the oracle last updated that spot (`/v2/markets[].spotUpdatedAt`, unix seconds).
+   * Price-driven payloads carry it so their message can state the observation time (F4 D8). A
+   * ticker is absent when the market gave no spot; snapshots stored before this field parse as {}.
+   */
+  spotTimes: z.record(z.number().int().nonnegative()).default({}),
   /** Checksummed address → that wallet's price alerts (the union over its subscriptions). */
   alerts: z.record(z.array(z.object({ ticker: z.string(), direction: sideSchema, threshold: uint }))),
   /** longId → which side of the strike spot is on, after the 0.25 % hysteresis (derived). */
@@ -155,6 +161,22 @@ export const snapshotStateSchema = z.object({
    * here was unknown then. Absent in snapshots stored before it existed.
    */
   sessionDays: z.record(z.boolean()).default({}),
+  /** pendingFees.effectiveAt, or null when none is scheduled. */
+  pendingFeesEffectiveAt: z.number().int().nonnegative().nullable().default(null),
+  /** Identity of the live fees block; null when /v2/config.fees was absent. */
+  liveFeesKey: z.string().nullable().default(null),
+  /**
+   * Operation `key` (`<operationId>:<nonce>`, T-434) → its operation id and status from
+   * /v2/admin/operations. Keyed on `key` and not `id` since T-435: a rescheduled operation reuses its
+   * id, and a map keyed on id let the second schedule overwrite the first and never be announced.
+   * Snapshots stored before T-435 are keyed by the bare id and carry no `id` field; they still parse
+   * (`id` is optional) and rules.ts reads them once as the previous state, then drops them.
+   */
+  adminOperations: z.record(z.object({
+    id: z.string().min(1).optional(),
+    status: z.enum(['pending', 'executed', 'canceled']),
+    label: z.string().min(1),
+  })).default({}),
 });
 export type SnapshotState = z.infer<typeof snapshotStateSchema>;
 
@@ -164,7 +186,10 @@ export interface Snapshot extends SnapshotState {
 }
 
 export function emptySnapshot(): Snapshot {
-  return { at: 0, spots: {}, alerts: {}, strikeSides: {}, alertStates: {}, settlements: {}, holdings: {}, sessionDays: {} };
+  return {
+    at: 0, spots: {}, spotTimes: {}, alerts: {}, strikeSides: {}, alertStates: {}, settlements: {},
+    holdings: {}, sessionDays: {}, pendingFeesEffectiveAt: null, liveFeesKey: null, adminOperations: {},
+  };
 }
 
 /** Every (holder, position) of a series in a snapshot. */

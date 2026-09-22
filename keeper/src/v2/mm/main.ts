@@ -1,6 +1,7 @@
 /**
  * V2_MODE=mm: two-sided quotes through MakerVault around the pricing service's fair value (K2-04). MM_QUOTER_PK holds
- * QUOTER_ROLE on the vault and nothing else: it can place, replace and cancel the vault's orders and move vault funds
+ * the AccessManager's QUOTER role and nothing else (INTERFACE_VERSION 8, id 10 in script/v2/roles.v8.json; the bot
+ * never needs the id - it asks `canCall`): it can place, replace and cancel the vault's orders and move vault funds
  * between the vault's wallet and its own Clearinghouse ledger, never out of the vault.
  *
  * Files: engine.ts (the pure quote: halts, spread, skew, widening, selection, replace discipline), risk.ts (sizes under

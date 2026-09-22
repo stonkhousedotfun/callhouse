@@ -150,3 +150,24 @@ Runbook: `callhouse-contracts/docs/DEPLOY.md` A4; script `script/HandoverAdmin.s
 
 Until step 6, the deployer key holds every admin power. Keep it offline and use it only for the steps
 in part 6.
+
+---
+
+## 8. Tier 1 waves (2026-09-15)
+
+The pooled vault above is closed; NVDA runs on the account factory (`0xc4A5…2BBb`, block
+64,038,234). Tier 1 brings up the other 34 Stock Tokens with a Chainlink equity feed as factory
+markets, from the registry `ops/markets/tier1.json`, one keeper and one indexer service per market,
+one web build. Design: [TECHSPEC-TIER1-MULTIMARKET.md](./TECHSPEC-TIER1-MULTIMARKET.md). Ordered
+steps and gates: `ops/deploy.md` §14.5; the canary procedure: `ops/runbooks/canary-week.md`.
+
+| Wave | Markets | Starts when | Done when |
+|---|---|---|---|
+| canary | TSLA, AAPL | the registry `--check` is green, keys funded, the owner broadcasts `DeploySoloBatch.sh --wave canary` | one full weekly cycle on both with: zero keeper failures, no stale-price skips outside weekend windows, both indexers `/ready` and `/v1/market` correct, the docs page regenerated |
+| wave1 | MSFT, META, GOOGL, AMZN, AMD, ORCL, PLTR, COIN, MSTR, TSM, QQQ, SPY | the canary gate is ticked | the same gate, on all twelve |
+| wave2 | ASML, BABA, CLSK, CRCL, CRWV, DELL, EWY, GME, INTC, IONQ, MU, NBIS, RGTI, RKLB, SGOV, SLV, SNDK, SPCX, USAR, USO | the wave1 gate is ticked | the same gate, on all twenty |
+
+Out of scope for these waves: the ~170 tokens without a feed, a multi-market keeper, a
+multi-vault indexer schema, and anything to do with the pooled vault. Stop conditions at any step:
+a `VerifySolo` FAIL, a preflight that refuses a ticker or a feed, a keeper alert the runbook does
+not explain, or a gate box that cannot be ticked.

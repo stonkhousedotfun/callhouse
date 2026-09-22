@@ -1,24 +1,94 @@
 #!/usr/bin/env node
 // Re-run R13 against Robinhood Chain's public RPC. No key or archive endpoint required.
+import { execFile } from 'node:child_process';
 import { readFile, writeFile } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
+import { promisify } from 'node:util';
 import path from 'node:path';
 
+const execFileP = promisify(execFile);
 const here = path.dirname(fileURLToPath(import.meta.url));
 const registry = JSON.parse(await readFile(path.join(here, '../markets/tier1.json'), 'utf8'));
 const outputPath = path.join(here, '../markets/v2-sources.json');
 const previous = await readFile(outputPath, 'utf8').then(JSON.parse).catch(() => null);
 const check = process.argv.includes('--check');
 const rpcUrl = process.env.RH_PUBLIC_RPC ?? 'https://rpc.mainnet.chain.robinhood.com';
-const FACTORY = '0x1f7d7550b1b028f7571e69a784071f0205fd2efa';
-const ROUTER = '0xcaf681a66d020601342297493863e78c959e5cb2';
-const QUOTER = '0x33e885ed0ec9bf04ecfb19341582aadcb4c8a9e7';
+// T-OP-131: RE-CASED, NOT RE-DERIVED, like V4_POOL_MANAGER below -- the same twenty bytes in the EIP-55 form
+// `cast to-check-sum-address` prints, so the recon this probe writes (contracts.factory/router/quoter) carries
+// the strings the strict readers accept and build-markets.mjs V2_SKELETON.uniswapV3 pins. The strict guard below
+// covers these three too.
+const FACTORY = '0x1f7d7550B1b028f7571E69A784071F0205FD2EfA';
+const ROUTER = '0xCaf681a66D020601342297493863E78C959E5cb2';
+const QUOTER = '0x33e885eD0Ec9bF04EcfB19341582aADCb4c8A9E7';
 const VERIFIER = '0xcE73c8ad08CBDEaCa6078BF0627C8fe0a9a536E7';
 const PYTH_PRO = '0xACeA761c27A909d4D3895128EBe6370FDE2dF481';
+// T-600-LP: DERIVED ON CHAIN, not copied from a row description. eth_chainId -> 4663 and
+// eth_getCode -> 24009 code bytes, against a positive control (0x...dEaD -> 0 bytes) so the check can
+// fail. ops/recon/R12-overcall-discovery.md:121 records the same address and the same 24009; that
+// column is the CODE SIZE, not a block number, and the size reproduces on chain today.
+// T-608: RE-CASED, NOT RE-DERIVED. The same twenty bytes, now in EIP-55 form; five letters had the wrong
+// case, which viem's isAddress(a, { strict: true }) rejects. `cast to-check-sum-address` and viem's
+// checksumAddress produce this exact string independently. It survived because RPC and every lowercase
+// comparison ignore case. The strict guard below refuses a regression before any RPC is sent.
+const V4_POOL_MANAGER = '0x8366a39CC670B4001A1121B8F6A443A643e40951';
+// v4StateView, the last key DeployV2Batch.sh dies on (T-OP-014). RE-DERIVED on chain before it was
+// written, not taken from the row that supplied it: eth_chainId 0x1237 on
+// https://rpc.mainnet.chain.robinhood.com; eth_getCode 3531 bytes here and 24009 at the pool manager;
+// and the load-bearing one -- eth_call selector 0xdc4c90d3 `poolManager()` returns
+// 0x8366a39cc670b4001a1121b8f6a443a643e40951, so THIS CONTRACT NAMES THE POOL MANAGER ALREADY IN THIS
+// FILE. A table says where a thing is; that call says what it is.
+const V4_STATE_VIEW = '0xF3334192D15450CdD385c8B70e03f9A6bD9E673b';
+// T-600-LP then T-OP-014: BOTH v4 KEYS ARE NOW DERIVED AND APPENDED. NOTHING IS ABSENT.
+//
+// `DeployV8.s.sol:416-417` calls `_code()` on V2_V4_POOL_MANAGER and V2_V4_STATE_VIEW, and
+// `DeployV2Batch.sh:312-313` reads BOTH out of the `contracts` block this file writes and dies by
+// name when either is absent. So appending the pool manager alone does NOT unblock a v8 deploy -- the
+// wrapper still dies, one key later, on `contracts.v4StateView.address ''`. That is stated here so
+// nobody reads a half-filled file as a finished one.
+//
+// T-OP-014 RESOLVED THE ABOVE. `contracts.v4StateView` is now written, so DeployV2Batch.sh:312-313
+// reads both keys and the wrapper no longer dies. The paragraph that follows is KEPT rather than
+// deleted, because it is the record of what was tried and it names the route that finally worked --
+// and because the next person to lose an address will want to know which five failed.
+//
+// HOW IT WAS SETTLED, and it is the second of the two routes the old note predicted: Uniswap's own v4
+// deployment table for 4663. NOT trusted on sight. Three checks were re-run here before the value was
+// written -- chainId 0x1237 first, so nothing later is trusted on the wrong endpoint; eth_getCode
+// non-empty at the address; and the one that makes it load-bearing, eth_call 0xdc4c90d3
+// `poolManager()` returning the pool manager ALREADY IN THIS FILE. The old note specified exactly that
+// cross-check, and it is what turns a plausible address into a proven one.
+//
+// [HISTORY, T-600-LP] WHY v4StateView WAS ABSENT RATHER THAN PLACEHELD, and it was not the old reason. The network
+// gate is LIFTED; the address simply could not be derived with the access available. Five routes were
+// tried and each failed differently: it appears nowhere in this repository; `v2.uniswapV4` is null in
+// tier1.json so there is no registry slot; every `v2.contracts` entry is null so no deployed contract
+// exposes it; the blockscout API returns non-JSON from here; and the public RPC is NOT an archive node
+// ("historical state ... is not available"), which kills the last real derivation -- binary-searching
+// the pool manager's deploy block and scanning the neighbouring blocks for its sibling.
+// WHAT WOULD SETTLE IT: Uniswap's own v4 deployment address for 4663, or an archive RPC. With an
+// archive endpoint, test each contract creation near the pool manager's deploy with `poolManager()`
+// (selector 0xdc4c90d3) and require it to return V4_POOL_MANAGER -- `IV4StateView` exposes that
+// method, and the cross-check is what makes a found address load-bearing instead of merely plausible.
+// A stand-in here would make THIS GENERATOR unrunnable for whoever gets that access, because every
+// run would `eth_getCode` a non-address. An absent key fails closed at the wrapper; a broken probe
+// blocks the fix instead of waiting for it.
+//
+// THE POSITIONAL CONSTRAINT STILL HOLDS AND I OBEYED IT. `codes` is positional and line ~345 reads
+// `codes[4]` for `pythPro`. v4PoolManager is APPENDED at index 5 and v4StateView at index 6, in both
+// the `codes` batch and the `contracts` map, so 0..4 are untouched. An INSERT would have silently re-pointed `codes[4]` at the
+// pool manager and pythPro's deployed-or-not answer would describe a different contract entirely:
+// green, wrong, and invisible.
 const FEES = [100, 500, 3000, 10000];
 const SEL = { getPool: '1698ee82', liquidity: '1a686502', slot0: '3850c7bd', observe: '883bdbfd',
   balanceOf: '70a08231', latestRoundData: 'feaf968c', getRoundData: '9a6fc8f5',
-  decimals: '313ce567', token0: '0dfe1681', token1: 'd21220a7', feeManager: '38416b5b' };
+  decimals: '313ce567', token0: '0dfe1681', token1: 'd21220a7', feeManager: '38416b5b',
+  // T-OP-108: `cast sig 'WETH9()'` -> 0x4aa4a4fc (SwapRouter02 and QuoterV2 both expose it).
+  weth9: '4aa4a4fc' };
+// T-OP-108: the fee tier of the USDG/WETH v3 pool the buyback's first leg swaps through (0.01 %). The
+// contracts spike (callhouse-contracts docs/V2-FLYWHEEL-ROUTE-SPIKE.md) derived it as `factory.getPool(USDG,
+// WETH, 100)`; DeployV2Batch.sh:354 reads the address as contracts.usdgWethV3Pool. All four tiers have a pool
+// with code on 4663 (100/500/3000/10000, measured 2026-09-22 at block 69289315); this is the one the route uses.
+const USDG_WETH_V3_FEE = 100;
 // NYSE official hours/calendar, accessed 2026-09-16:
 // https://www.nyse.com/trade/hours-calendars
 const NYSE_DATES = {
@@ -279,16 +349,134 @@ function drift(now, old) {
   return errors;
 }
 
+// T-608: STRICT EIP-55 GUARD over every address this probe pins or emits. validate() only regex-checks
+// shape, so a mis-cased constant passed it and was published into v2-sources.json verbatim.
+//
+// THE RULE IS viem's isAddress(a, { strict: true }), mirrored line for line from viem 2.x
+// utils/address/isAddress.js: well-formed, and then either all-lowercase (unchecksummed is legal) or
+// exactly equal to its own EIP-55 form. NOT getAddress / to-check-sum-address as a validator: both
+// NORMALISE, so a corrupted checksum goes in and a corrected address comes out with no error.
+//
+// The EIP-55 form comes from `cast to-check-sum-address`, the helper build-markets.mjs:677-679 and
+// DeployV2Batch.sh:180 already use (not exported, so it cannot be imported). Its input is lowercased first
+// so the answer never depends on the casing handed to it. No cast means exit 2: the guard fails closed
+// instead of passing unchecked.
+//
+// Every candidate is found by SCANNING rather than by a hand-kept list: this file's own source for pinned
+// literals, and the whole generated object for emitted values. A list is one more thing the next constant
+// must remember to join, and a check that cannot see its subject passes.
+//
+// Runnable with NO network, so it can be proven by breaking:
+//   --addresses          every address literal in this file, plus the tier1.json asset/feed values this
+//                        probe copies into its output. Exit 0 valid, 1 refused (naming each), 2 unable.
+//   --audit <file.json>  the same check over every address-shaped string in a JSON file, e.g. the
+//                        committed ops/markets/v2-sources.json.
+const ADDRESS = /^0x[\da-fA-F]{40}$/;
+const checksums = new Map();
+function checksum(a) {
+  const key = a.toLowerCase();
+  if (!checksums.has(key)) {
+    checksums.set(key, execFileP('cast', ['to-check-sum-address', key]).then(({ stdout }) => stdout.trim(), (e) => {
+      throw Object.assign(new Error(`address guard unable: cast to-check-sum-address failed (${e.code ?? e.message})`), { unable: true });
+    }));
+  }
+  return checksums.get(key);
+}
+async function isStrictAddress(a) {
+  if (typeof a !== 'string' || !ADDRESS.test(a)) return false;
+  if (a.toLowerCase() === a) return true;
+  return (await checksum(a)) === a;
+}
+async function refuseNonStrict(pairs, where) {
+  // One `cast` process per distinct mixed-case address; start them all before awaiting any, so a 366-address
+  // audit costs one spawn's latency per CPU rather than one per address. `checksum` memoises by lowercase
+  // key, so this is the same set of processes the sequential loop would have run, just not one at a time.
+  await Promise.allSettled(pairs.filter(([, v]) => ADDRESS.test(v) && v.toLowerCase() !== v).map(([, v]) => checksum(v)));
+  const issues = [];
+  for (const [label, value] of pairs) {
+    if (await isStrictAddress(value)) continue;
+    issues.push(ADDRESS.test(value) ? `${label} ${value} is not EIP-55 (checksum form ${await checksum(value)})` : `${label} ${value} is not an address`);
+  }
+  if (issues.length) {
+    throw Object.assign(new Error(`address guard refused ${issues.length} of ${pairs.length} in ${where}:\n  ${issues.join('\n  ')}`), { refused: true });
+  }
+  return pairs.length;
+}
+// A `const NAME = '0x...'` of the wrong length is returned too, so a truncated constant is refused as "not
+// an address" rather than being invisible to a scan that only matches forty hex digits.
+function sourceLiterals(source) {
+  return source.split('\n').flatMap((line, i) => {
+    const named = line.match(/^const ([A-Z0-9_]+) = '(0x[\da-fA-F]*)';/);
+    const label = named ? `pinned ${named[1]} (r13-probe.mjs:${i + 1})` : `literal at r13-probe.mjs:${i + 1}`;
+    const found = [...line.matchAll(/(?<![\da-fA-Fx])0x[\da-fA-F]{40}(?![\da-fA-F])/g)].map(([a]) => [label, a]);
+    return named && !ADDRESS.test(named[2]) ? [...found, [label, named[2]]] : found;
+  });
+}
+function addressStrings(value, at = '') {
+  if (typeof value === 'string') return ADDRESS.test(value) ? [[at, value]] : [];
+  if (Array.isArray(value)) return value.flatMap((v, i) => addressStrings(v, `${at}[${i}]`));
+  if (value && typeof value === 'object') return Object.entries(value).flatMap(([k, v]) => addressStrings(v, at ? `${at}.${k}` : k));
+  return [];
+}
+
+const pinned = sourceLiterals(await readFile(fileURLToPath(import.meta.url), 'utf8'));
+const auditAt = process.argv.indexOf('--audit');
+if (process.argv.includes('--addresses') || auditAt !== -1) {
+  try {
+    const lines = [`${await refuseNonStrict(pinned, 'r13-probe.mjs')} literal(s) in r13-probe.mjs: ${pinned.map(([label]) => label.replace(/^pinned /, '')).join(', ')}`];
+    const inputs = registry.markets.flatMap((m) => [[`tier1.json ${m.ticker}.asset`, m.asset], [`tier1.json ${m.ticker}.feed`, m.feed]]);
+    lines.push(`${await refuseNonStrict(inputs, 'tier1.json')} tier1.json asset/feed value(s) this probe emits`);
+    if (auditAt !== -1) {
+      const file = process.argv[auditAt + 1];
+      if (!file || file.startsWith('--')) throw Object.assign(new Error('--audit needs a JSON file path'), { unable: true });
+      const audited = addressStrings(JSON.parse(await readFile(file, 'utf8')));
+      lines.push(`${await refuseNonStrict(audited, file)} address string(s) in ${file}`);
+    }
+    console.error(`address guard: all strict EIP-55\n  ${lines.join('\n  ')}`);
+    process.exit(0);
+  } catch (e) {
+    console.error(e.message);
+    process.exit(e.refused ? 1 : 2);
+  }
+}
+// Pinned literals are checked on EVERY run, before the first RPC: a mis-cased constant stops the probe here
+// instead of being written into the output. The refusal is printed as the one-line verdict the guard produced,
+// not as an uncaught stack trace, and exits 1 (refused) or 2 (cast unavailable) like the --addresses mode.
+async function guardOrExit(pairs, where) {
+  try {
+    await refuseNonStrict(pairs, where);
+  } catch (e) {
+    console.error(e.message);
+    process.exit(e.refused ? 1 : 2);
+  }
+}
+await guardOrExit(pinned, 'r13-probe.mjs');
+
 const [[chainId, blockNumber], codes, streams] = await Promise.all([
   rpcMany([{ method: 'eth_chainId', params: [] }, { method: 'eth_blockNumber', params: [] }]),
-  rpcMany([FACTORY, ROUTER, QUOTER, VERIFIER, PYTH_PRO].map((a) => ({ method: 'eth_getCode', params: [a, 'latest'] }))),
+  rpcMany([FACTORY, ROUTER, QUOTER, VERIFIER, PYTH_PRO, V4_POOL_MANAGER, V4_STATE_VIEW].map((a) => ({ method: 'eth_getCode', params: [a, 'latest'] }))),
   streamInventory(registry.markets),
 ]);
 if (Number(BigInt(chainId)) !== 4663) throw new Error(`unexpected chain id ${chainId}`);
-const contracts = Object.fromEntries([['factory', FACTORY], ['router', ROUTER], ['quoter', QUOTER], ['verifierProxy', VERIFIER], ['pythPro', PYTH_PRO]]
+const contracts = Object.fromEntries([['factory', FACTORY], ['router', ROUTER], ['quoter', QUOTER], ['verifierProxy', VERIFIER], ['pythPro', PYTH_PRO], ['v4PoolManager', V4_POOL_MANAGER], ['v4StateView', V4_STATE_VIEW]]
   .map(([name, address], i) => [name, { address, codeExists: codeExists(codes[i]) }]));
 const feeManagerRaw = (await rpcMany([ethCall(VERIFIER, SEL.feeManager)]))[0];
 contracts.verifierProxy.feeManager = feeManagerRaw ? addr(feeManagerRaw) : null;
+// T-OP-108. TWO ADDRESSES THE WRAPPER READS THAT THIS RECON NEVER WROTE. DeployV2Batch.sh:354 dies on
+// `contracts.weth.address` and `contracts.usdgWethV3Pool.address` being absent; T-OP-038 copied both into the
+// contracts fixture from the spike doc because they were not here. Derived, not typed: WETH is what the
+// router says it wraps (`SwapRouter02.WETH9()`), the pool is what the factory returns for (USDG, WETH,
+// USDG_WETH_V3_FEE), and both are code-checked like every other contracts.* entry. Checksummed through the
+// same `cast to-check-sum-address` path the guard below verifies against.
+const [wethRaw] = await rpcMany([ethCall(ROUTER, SEL.weth9)]);
+if (!wethRaw || wethRaw === '0x') throw new Error('SwapRouter02.WETH9() answered nothing');
+const weth = await checksum(addr(wethRaw));
+const [usdgWethPoolRaw] = await rpcMany([ethCall(FACTORY, SEL.getPool + addrWord(registry.shared.usdg) + addrWord(weth) + word(USDG_WETH_V3_FEE))]);
+if (!usdgWethPoolRaw || addr(usdgWethPoolRaw) === `0x${'0'.repeat(40)}`) throw new Error(`factory.getPool(USDG, WETH, ${USDG_WETH_V3_FEE}) is the zero address`);
+const usdgWethV3Pool = await checksum(addr(usdgWethPoolRaw));
+const [wethCode, usdgWethPoolCode] = await rpcMany([weth, usdgWethV3Pool].map((a) => ({ method: 'eth_getCode', params: [a, 'latest'] })));
+contracts.weth = { address: weth, codeExists: codeExists(wethCode) };
+contracts.usdgWethV3Pool = { address: usdgWethV3Pool, codeExists: codeExists(usdgWethPoolCode) };
 const currentFeedRounds = await rpcMany(registry.markets.map((m) => ethCall(m.feed, SEL.latestRoundData)));
 const currentMarkets = registry.markets.map((m, i) => {
   const round = decodeRound(currentFeedRounds[i]);
@@ -324,6 +512,9 @@ const data = validate({ _readme: 'R13 recon; generated by ops/recon/r13-probe.mj
   contracts, providers: { gelato: false, chainlinkAutomation: false, pyth: true, pythCore: false, pythPro: codeExists(codes[4]) },
   nyseHolidays,
   roundHistory: roundHistoryByTicker, markets });
+// T-608: every address-shaped string in the output, found by walking it rather than by naming fields, is
+// strict EIP-55 before anything is written or compared.
+await guardOrExit(addressStrings(data), 'the generated v2-sources data');
 if (check) {
   const changes = drift(data, previous);
   if (changes.length) { console.error(changes.join('\n')); process.exitCode = 1; }

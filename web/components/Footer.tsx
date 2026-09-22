@@ -46,13 +46,18 @@ export function Footer() {
                   Docs
                 </Link>
               </li>
-              {process.env.NEXT_PUBLIC_V2 === "1" ? (
+              {process.env.NEXT_PUBLIC_V2 === "1" ? <>
+                {process.env.NEXT_PUBLIC_V7_API_URL?.trim() ? <li>
+                  <Link href="/v7" className={LINK}>
+                    Legacy v7
+                  </Link>
+                </li> : null}
                 <li>
                   <Link href="/legacy" className={LINK}>
                     Legacy v1
                   </Link>
                 </li>
-              ) : null}
+              </> : null}
               <li>
                 <ExternalLink href={TERMS_URL} arrow className={LINK}>
                   Terms

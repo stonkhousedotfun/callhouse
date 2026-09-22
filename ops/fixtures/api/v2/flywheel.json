@@ -1,0 +1,68 @@
+{
+  "configured": true,
+  "splitter": "0x05E1Ec84Bd7a942Ca2f45E5da2BF0DC6A9F46A68",
+  "tokenAddress": "0x5999C404D723c4c929654bAa83C0F0c346aBabBa",
+  "tokenDecimals": 18,
+  "burnedTotal": "1250000000000000000000",
+  "burned7d": "250000000000000000000",
+  "revenue7d": [
+    {
+      "asset": "0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168",
+      "symbol": "USDG",
+      "decimals": 6,
+      "amountRaw": "12500000"
+    },
+    {
+      "asset": "0xd0601CE157Db5bdC3162BbaC2a2C8aF5320D9EEC",
+      "symbol": "NVDA",
+      "decimals": 18,
+      "amountRaw": "80000000000000000"
+    }
+  ],
+  "held": [
+    {
+      "asset": "0xd0601CE157Db5bdC3162BbaC2a2C8aF5320D9EEC",
+      "symbol": "NVDA",
+      "decimals": 18,
+      "amountRaw": "30000000000000000"
+    }
+  ],
+  "lastDistribution": {
+    "id": "0x42fb6846a37f4ac0dd4b3b5902472037f890480a49a6129058b453259cd54224-0",
+    "asset": "0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168",
+    "symbol": "USDG",
+    "decimals": 6,
+    "assetInRaw": "12500000",
+    "usdgInRaw": "12500000",
+    "treasuryOutRaw": "6250000",
+    "buybackAddedRaw": "6250000",
+    "ts": 1789585200,
+    "tx": "0x42fb6846a37f4ac0dd4b3b5902472037f890480a49a6129058b453259cd54224"
+  },
+  "distributions": [
+    {
+      "id": "0x42fb6846a37f4ac0dd4b3b5902472037f890480a49a6129058b453259cd54224-0",
+      "asset": "0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168",
+      "symbol": "USDG",
+      "decimals": 6,
+      "assetInRaw": "12500000",
+      "usdgInRaw": "12500000",
+      "treasuryOutRaw": "6250000",
+      "buybackAddedRaw": "6250000",
+      "ts": 1789585200,
+      "tx": "0x42fb6846a37f4ac0dd4b3b5902472037f890480a49a6129058b453259cd54224"
+    },
+    {
+      "id": "0xc014cf6d231c7d491c2c1186373b78102066ba820b7fe71ed573044e9a2d5798-0",
+      "asset": "0xd0601CE157Db5bdC3162BbaC2a2C8aF5320D9EEC",
+      "symbol": "NVDA",
+      "decimals": 18,
+      "assetInRaw": "80000000000000000",
+      "usdgInRaw": "17000000",
+      "treasuryOutRaw": "8500000",
+      "buybackAddedRaw": "8500000",
+      "ts": 1789581600,
+      "tx": "0xc014cf6d231c7d491c2c1186373b78102066ba820b7fe71ed573044e9a2d5798"
+    }
+  ]
+}

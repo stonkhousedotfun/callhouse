@@ -11,8 +11,12 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import {
+  HALTS,
   haltBeforeFair,
   fairAtSpot,
+  fairCheckOf,
+  intrinsicOf,
+  quotedFairOf,
   haltOf,
   halfSpreadUsdg6,
   isKillTarget,
@@ -24,6 +28,7 @@ import {
   planSeriesActions,
   pullAtOf,
   quotePrices,
+  type QuoteFees,
   quoteValidUntil,
   roundDownToTick,
   roundUpToTick,
@@ -59,8 +64,77 @@ const PARAMS: QuoteParams = {
 
 const series = (over: Partial<SeriesInfo> = {}): SeriesInfo => ({ longId: 1n, underlying: NVDA, isPut: false, strike: 220_000_000n, expiry: EXPIRY, ...over });
 
+/** The v8 launch fee set: 5 % on a first sale, 0 % on a resale (03-INTERFACES §4 registry table). */
+const LAUNCH_FEES: QuoteFees = { current: { premiumFeeBps: 500, resaleFeeBps: 0 }, pending: null };
+/** No fee at all: the pre-v8 arithmetic, so the existing price tests keep asserting what they were written for. */
+const NO_FEES: QuoteFees = { current: { premiumFeeBps: 0, resaleFeeBps: 0 }, pending: null };
+
 const price = (over: Partial<Parameters<typeof quotePrices>[0]> = {}) =>
-  quotePrices({ now: NOW, series: series(), fair: 2_000_000n, delta: 0.4, spot: 210_000_000n, netDeltaShares: 0, askFloor: 0n, bidCap: 21_000_000n, params: PARAMS, ...over });
+  quotePrices({ now: NOW, series: series(), fair: 2_000_000n, delta: 0.4, spot: 210_000_000n, netDeltaShares: 0, askFloor: 0n, bidCap: 21_000_000n, fees: NO_FEES, params: PARAMS, ...over });
+
+/*//////////////////////////////////////////////////////////////
+                    THE SELLER FEE IN THE ASK
+//////////////////////////////////////////////////////////////*/
+
+test('the write ask is grossed up so the seller fee still leaves the target, at the v8 launch parameters', () => {
+  // AC-2. The book credits a selling maker `premium - sellerFee + rebate`, so the ask must be the GROSS
+  // whose fee still leaves fair + halfSpread. Without this, at MM_HALF_SPREAD_BPS 500 and premiumFeeBps
+  // 500, the vault nets fair x 1.05 x 0.95 = 0.9975 x fair - a loss on every option it writes.
+  const fair = 2_000_000n;
+  const halfSpread = (fair * 500n) / 10_000n; // 100_000, above MM_MIN_HALF_SPREAD_USDG6
+  const q = price({ fair, delta: 0, netDeltaShares: 0, fees: LAUNCH_FEES });
+
+  const netToVault = (q.ask * (10_000n - 500n)) / 10_000n;
+  assert.ok(netToVault >= fair + halfSpread, `net ${netToVault} must cover the target ${fair + halfSpread}`);
+  // And it is a GROSS-UP, not a markup: a markup would be target * 1.05 = 2_205_000, which nets only
+  // 2_094_750 and is short of the target for ever.
+  assert.ok(q.ask > ((fair + halfSpread) * 10_500n) / 10_000n, 'a gross-up is strictly above the markup it is mistaken for');
+});
+
+test('resaleFeeBps 0: the resale ask is NOT grossed and stays one tick under the ungrossed write ask', () => {
+  // AC-2, second half, and the trap the whole per-slot design exists for. If the resale ask were derived
+  // from the GROSSED write ask it would carry the 5 % primary fee while owing 0, sit ~5 % too high, never
+  // fill, and the bot would write new options instead of unwinding inventory.
+  const fair = 2_000_000n;
+  const halfSpread = (fair * 500n) / 10_000n;
+  const ungrossedWriteAsk = fair + halfSpread; // already tick-aligned at these numbers
+  const q = price({ fair, delta: 0, netDeltaShares: 0, fees: LAUNCH_FEES });
+
+  assert.equal(q.resale, ungrossedWriteAsk - 100n, 'one tick under the UNGROSSED write ask');
+  assert.ok(q.ask > q.resale + 100n, 'the two asks may sit more than one tick apart on chain, and here they do');
+});
+
+test('resaleFeeBps 300: the two asks are grossed by their own different rates', () => {
+  const fair = 2_000_000n;
+  const halfSpread = (fair * 500n) / 10_000n;
+  const target = fair + halfSpread;
+  const q = price({ fair, delta: 0, netDeltaShares: 0, fees: { current: { premiumFeeBps: 500, resaleFeeBps: 300 }, pending: null } });
+
+  assert.ok((q.ask * 9_500n) / 10_000n >= target, 'the write ask nets the target after 5 %');
+  assert.ok((q.resale * 9_700n) / 10_000n >= target - 100n, 'the resale ask nets one tick under the target after 3 %');
+  assert.ok(q.resale < q.ask, 'inventory is still offered below new supply');
+});
+
+test('a scheduled fee rise is quoted against, because a resting order can fill after it bites', () => {
+  // The horizon rule: `maxOrderLifetime` is 0 on the launch vault and 0 means NO LIMIT, so a rule that
+  // ignored a change beyond that horizon would ignore EVERY change. This takes the max whenever anything
+  // is scheduled.
+  const fair = 2_000_000n;
+  const pendingHigher = price({ fair, delta: 0, netDeltaShares: 0, fees: { current: { premiumFeeBps: 100, resaleFeeBps: 0 }, pending: { params: { premiumFeeBps: 900, resaleFeeBps: 0 }, effectiveAt: NOW + 172_800 } } });
+  const currentOnly = price({ fair, delta: 0, netDeltaShares: 0, fees: { current: { premiumFeeBps: 100, resaleFeeBps: 0 }, pending: null } });
+  assert.ok(pendingHigher.ask > currentOnly.ask, 'the higher scheduled rate is what the ask is grossed by');
+
+  // effectiveAt 0 is the chain saying nothing is scheduled (OrderBook.pendingFeeParams returns the zero
+  // value), NOT a change at the epoch.
+  const none = price({ fair, delta: 0, netDeltaShares: 0, fees: { current: { premiumFeeBps: 100, resaleFeeBps: 0 }, pending: { params: { premiumFeeBps: 900, resaleFeeBps: 0 }, effectiveAt: 0 } } });
+  assert.equal(none.ask, currentOnly.ask, 'effectiveAt 0 means nothing pending');
+});
+
+test('a fee at or above 100 % cannot gross up: the ask stays ungrossed and says so rather than resting garbage', () => {
+  const q = price({ fair: 2_000_000n, delta: 0, netDeltaShares: 0, fees: { current: { premiumFeeBps: 10_000, resaleFeeBps: 0 }, pending: null } });
+  assert.ok(q.clampedBy.includes('fee-out-of-range'), 'the caller is told the ask is too cheap');
+  assert.equal(q.ask, 2_100_000n, 'the ungrossed price, not a division by zero');
+});
 
 /*//////////////////////////////////////////////////////////////
                           PRICES AND TICKS
@@ -344,6 +418,46 @@ test('selectSeries: nearest the money, then nearest expiry, capped per market an
     'NVDA 212.5 is 119 bps from spot (the nearer expiry first), TSLA 400 and 390 are 126; 5 is in its pull window; 1 is past the per-market cap',
   );
   assert.equal(selectSeries({ now: NOW, candidates: [s(9n, '0x1', 1n, EXPIRY)], spots, pullMinutes: 15, maxSeries: 5, maxSeriesPerMarket: 5 }).length, 1, 'no spot: ranked last, still eligible');
+  const epoch = { epochEnd: EXPIRY, index: 1, rollDue: false };
+  const withEpoch = selectSeries({ now: NOW, candidates, spots, pullMinutes: 15, maxSeries: 10, maxSeriesPerMarket: 5, epoch });
+  assert.equal(withEpoch.some((x) => x.expiry > epoch.epochEnd), false);
+  assert.deepEqual(
+    selectSeries({ now: NOW, candidates, spots, pullMinutes: 15, maxSeries: 4, maxSeriesPerMarket: 2, epoch: null }).map((x) => x.longId),
+    picked.map((x) => x.longId),
+    'epoch null does not change selection',
+  );
+});
+
+test('HALTS appends epoch-outside, epoch-winddown, protocol-cross, other-asker and keeps the original sixteen names', () => {
+  assert.deepEqual(HALTS.slice(0, 16), [
+    'killed',
+    'loss-stop',
+    'not-quoter',
+    'trading-paused',
+    'expired',
+    'pull-window',
+    'market-closed',
+    'market-not-quoted',
+    'market-disabled',
+    'spot-stale',
+    'not-selected',
+    'fair-unavailable',
+    'fair-stale',
+    'fair-spot-mismatch',
+    'fair-out-of-bounds',
+    'guards-unreadable',
+  ]);
+  // T-OP-133 appended `other-asker` (MM_ASK_FALLBACK_ONLY): an ask-side-only halt, like protocol-cross.
+  assert.deepEqual(HALTS.slice(16), ['epoch-outside', 'epoch-winddown', 'protocol-cross', 'other-asker']);
+});
+
+test('haltBeforeFair: epoch-outside costs no /fair; epoch-winddown is a pre-fair halt; epoch null is silent', () => {
+  const epoch = { epochEnd: EXPIRY, index: 1, rollDue: false };
+  const wind = 14_400; // longer than the pull window so this halt is the one that fires
+  assert.equal(haltBeforeFair(haltInput({ epoch: null, epochWindDownS: wind })), null);
+  assert.equal(haltBeforeFair(haltInput({ series: series({ expiry: EXPIRY + 1 }), epoch, epochWindDownS: wind }))?.halt, 'epoch-outside');
+  assert.equal(haltBeforeFair(haltInput({ now: EXPIRY - wind, epoch, epochWindDownS: wind }))?.halt, 'epoch-winddown');
+  assert.equal(haltBeforeFair(haltInput({ now: EXPIRY - wind - 1, epoch, epochWindDownS: wind })), null);
 });
 
 test('quoteValidUntil: the tightest of the series limit, the pull time, the session close and the vault lifetime', () => {
@@ -387,4 +501,85 @@ test('fairAtSpot: a fair value priced at a slightly different spot is carried to
   assert.equal(fairAtSpot({ fair: 2_000_000n, delta: 0.4, fairSpot: 208_000_000n, spot: 210_000_000n }), 2_800_000n);
   assert.equal(fairAtSpot({ fair: 500_000n, delta: 0.4, fairSpot: 212_000_000n, spot: 210_000_000n }), 0n, 'never negative');
   assert.equal(fairAtSpot({ fair: 2_000_000n, delta: 0.4, fairSpot: undefined, spot: 210_000_000n }), 2_000_000n, 'no spot in the answer: as it is');
+});
+
+test('halts: T-474, the QUOTED fair is judged, so a positive fair that carries to zero at the oracle\'s spot is fair-unavailable', () => {
+  const spot = 210_000_000n;
+  const params = { ...PARAMS, fairSpotToleranceBps: 300 };
+  // 0.5 USDG at delta 0.4, priced 2 USDG above the oracle's spot: 95 bps apart, inside the tolerance. Raw > 0, quoted 0.
+  const fair = { ok: true as const, fair: 500_000n, delta: 0.4, iv: 0.5, asOf: NOW - 60, source: 'model', spot: 212_000_000n };
+  assert.equal(fairAtSpot({ fair: fair.fair, delta: fair.delta, fairSpot: fair.spot, spot }), 0n, 'the input: quoted at zero');
+  const halt = haltOf(haltInput({ params, spot, fair }));
+  assert.equal(halt?.halt, 'fair-unavailable', 'a zero QUOTED fair halts, whatever the raw fair was');
+  assert.match(halt?.detail ?? '', /is 0 at the oracle's spot/);
+  // Control: the same answer with a raw fair that stays positive after the carry is quoted.
+  assert.equal(haltOf(haltInput({ params, spot, fair: { ...fair, fair: 2_000_000n } })), null, '2 USDG carries to 1.2 USDG: quoted');
+  assert.deepEqual(quotedFairOf({ ...fair, fair: 2_000_000n }, spot), { quoted: 1_200_000n, halt: null });
+});
+
+test('halts: T-484, a QUOTED fair below its intrinsic value at the oracle\'s spot is fair-out-of-bounds, for a call and a put', () => {
+  const ok = (fair: bigint, fairSpot?: bigint, delta = 0.9) => ({ ok: true as const, fair, delta, iv: 0.5, asOf: NOW - 60, source: 'model', ...(fairSpot === undefined ? {} : { spot: fairSpot }) });
+  const params = { ...PARAMS, fairSpotToleranceBps: 300 };
+
+  // CALL, strike 220, oracle spot 230: intrinsic 10 USDG. Exact: 10 USDG passes, one base unit under it halts.
+  const call = series({ strike: 220_000_000n });
+  const callSpot = 230_000_000n;
+  assert.equal(intrinsicOf(call, callSpot), 10_000_000n);
+  const low = haltOf(haltInput({ params, series: call, spot: callSpot, fair: ok(9_999_999n) }));
+  assert.equal(low?.halt, 'fair-out-of-bounds', 'a call quoted under spot - strike');
+  assert.match(low?.detail ?? '', /below the intrinsic 10000000/);
+  assert.equal(haltOf(haltInput({ params, series: call, spot: callSpot, fair: ok(10_000_000n) })), null, 'exactly intrinsic is allowed');
+  assert.equal(haltOf(haltInput({ params, series: call, spot: callSpot, fair: ok(10_500_000n) })), null, 'intrinsic plus time value');
+
+  // PUT, strike 220, oracle spot 210: intrinsic 10 USDG.
+  const put = series({ isPut: true, strike: 220_000_000n });
+  const putSpot = 210_000_000n;
+  assert.equal(intrinsicOf(put, putSpot), 10_000_000n);
+  assert.equal(haltOf(haltInput({ params, series: put, spot: putSpot, fair: ok(9_999_999n, undefined, -0.9) }))?.halt, 'fair-out-of-bounds', 'a put quoted under strike - spot');
+  assert.equal(haltOf(haltInput({ params, series: put, spot: putSpot, fair: ok(10_000_000n, undefined, -0.9) })), null, 'exactly intrinsic is allowed');
+
+  // The bound is on the QUOTED fair: a raw 10.3 USDG (above intrinsic) priced 1 USDG ABOVE the oracle's spot at
+  // delta 0.5 is quoted at 9.8 USDG, under the intrinsic 10 USDG at the oracle's spot (43 bps apart: inside tolerance).
+  const carried = ok(10_300_000n, 231_000_000n, 0.5);
+  assert.equal(fairAtSpot({ fair: carried.fair, delta: carried.delta, fairSpot: carried.spot, spot: callSpot }), 9_800_000n, 'the input: quoted at 9.8');
+  assert.equal(haltOf(haltInput({ params, series: call, spot: callSpot, fair: carried }))?.halt, 'fair-out-of-bounds', 'judged on the quoted fair, not the raw one');
+});
+
+test('halts: T-484, out of the money the intrinsic bound is 0 and a small positive fair is still quoted', () => {
+  const ok = (fair: bigint, delta: number) => ({ ok: true as const, fair, delta, iv: 0.5, asOf: NOW - 60, source: 'model' });
+  const spot = 210_000_000n;
+  const otmCall = series({ strike: 220_000_000n });
+  const otmPut = series({ isPut: true, strike: 200_000_000n });
+  assert.equal(intrinsicOf(otmCall, spot), 0n);
+  assert.equal(intrinsicOf(otmPut, spot), 0n);
+  assert.equal(haltOf(haltInput({ series: otmCall, spot, fair: ok(100n, 0.01) })), null, 'OTM call: one tick of fair is quoted');
+  assert.equal(haltOf(haltInput({ series: otmPut, spot, fair: ok(100n, -0.01) })), null, 'OTM put: one tick of fair is quoted');
+  // At the money the bound is also 0.
+  assert.equal(intrinsicOf(series({ strike: spot }), spot), 0n);
+});
+
+test('fairCheckOf: T-484, the ONE fair check haltOf runs, and the quoted fair it hands the planner', () => {
+  const spot = 210_000_000n;
+  const params = { ...PARAMS, fairSpotToleranceBps: 300 };
+  const base = { now: NOW, series: series(), params, sessionOpen: true, spot };
+  const fair = { ok: true as const, fair: 2_000_000n, delta: 0.4, iv: 0.5, asOf: NOW - 60, source: 'model', spot: 208_000_000n };
+  assert.deepEqual(fairCheckOf({ ...base, fair }), { halt: null, quoted: 2_800_000n }, 'passes, quoted at the oracle spot');
+  // Every fair halt haltOf reports comes from here, with the same name.
+  const cases: Array<[Parameters<typeof fairCheckOf>[0]['fair'], string]> = [
+    [undefined, 'fair-unavailable'],
+    [{ ok: false, reason: 'no-quotes' }, 'fair-unavailable'],
+    [{ ...fair, asOf: NOW - 1_801 }, 'fair-stale'],
+    [{ ...fair, fair: 0n }, 'fair-unavailable'],
+    [{ ...fair, spot: (spot * 10_400n) / 10_000n }, 'fair-spot-mismatch'],
+    [{ ...fair, fair: 500_000n, spot: 212_000_000n }, 'fair-unavailable'],
+    [{ ...fair, fair: spot }, 'fair-out-of-bounds'],
+  ];
+  for (const [f, expected] of cases) {
+    const checked = fairCheckOf({ ...base, fair: f });
+    assert.equal(checked.halt?.halt, expected);
+    assert.equal(checked.quoted, null, 'a halted fair hands the planner nothing to quote');
+    assert.deepEqual(haltOf(haltInput({ params, spot, fair: f })), checked.halt, 'haltOf reports exactly what fairCheckOf said');
+  }
+  // No positive oracle spot: nothing to quote at, and no halt of its own (haltOf's rule before T-484).
+  assert.deepEqual(fairCheckOf({ ...base, spot: null, fair }), { halt: null, quoted: null });
 });

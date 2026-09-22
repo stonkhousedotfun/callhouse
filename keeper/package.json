@@ -18,7 +18,8 @@
     "v2:dryrun": "tsx src/v2/cranker/dryrun.ts",
     "v2:devnet-cycle": "tsx src/v2/cranker/devnet-cycle.ts",
     "v2:devnet-mm": "tsx src/v2/mm/devnet-mm.ts",
-    "v2:devnet-pricer": "tsx src/v2/pricer/devnet-reprice.ts"
+    "v2:devnet-pricer": "tsx src/v2/pricer/devnet-reprice.ts",
+    "v2:pricing-coverage": "tsx src/v2/pricing/coverage-main.ts"
   },
   "dependencies": {
     "viem": "^2.56.3",

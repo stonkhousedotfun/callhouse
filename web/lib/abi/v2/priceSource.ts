@@ -162,8 +162,35 @@ export const priceSourceAbi = [
   },
   {
     "type": "error",
+    "name": "CapExceeded",
+    "inputs": [
+      {
+        "name": "amount",
+        "type": "uint256",
+        "internalType": "uint256"
+      },
+      {
+        "name": "cap",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ]
+  },
+  {
+    "type": "error",
     "name": "CeilingExceeded",
     "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "CooldownActive",
+    "inputs": [
+      {
+        "name": "readyAt",
+        "type": "uint40",
+        "internalType": "uint40"
+      }
+    ]
   },
   {
     "type": "error",
@@ -174,6 +201,22 @@ export const priceSourceAbi = [
     "type": "error",
     "name": "DeadlinePassed",
     "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "FeeAboveMax",
+    "inputs": [
+      {
+        "name": "fee",
+        "type": "uint256",
+        "internalType": "uint256"
+      },
+      {
+        "name": "max",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ]
   },
   {
     "type": "error",
@@ -219,6 +262,11 @@ export const priceSourceAbi = [
   {
     "type": "error",
     "name": "NotExpired",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "NotMinter",
     "inputs": []
   },
   {
@@ -281,6 +329,17 @@ export const priceSourceAbi = [
         "name": "hi",
         "type": "uint256",
         "internalType": "uint256"
+      }
+    ]
+  },
+  {
+    "type": "error",
+    "name": "RouteRejected",
+    "inputs": [
+      {
+        "name": "reason",
+        "type": "bytes32",
+        "internalType": "bytes32"
       }
     ]
   },

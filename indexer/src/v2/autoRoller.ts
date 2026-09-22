@@ -72,8 +72,8 @@ ponder.on("AutoRoller:Rolled", async ({ event, context }) => {
 });
 
 ponder.on("AutoRoller:Repriced", async ({ event, context }) => {
-  const { writer, underlying, oldOrderId, newOrderId } = event.args;
-  await updateStrategy(context.db, writer, underlying, event.block.timestamp, { kind: "Repriced", newOrderId });
+  const { writer, underlying, oldOrderId, newOrderId, price } = event.args;
+  await updateStrategy(context.db, writer, underlying, event.block.timestamp, { kind: "Repriced", newOrderId, price });
   const oldOrder = await context.db.find(schema.v2Order, { orderId: oldOrderId });
   if (oldOrder !== null) {
     await context.db.update(schema.v2Order, { orderId: oldOrderId }).set({ replacedBy: newOrderId });

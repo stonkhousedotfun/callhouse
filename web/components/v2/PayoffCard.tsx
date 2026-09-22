@@ -5,7 +5,7 @@ import { useState } from "react";
 import { Button, Panel } from "@/components/ui";
 import { fmtCountdown } from "@/lib/format";
 import type { Card } from "@/lib/v2/api-types";
-import { formatShareQuantity, formatUsdg, payoffCardView } from "@/lib/v2/payoffCard";
+import { formatShareQuantity, formatUsdg, payoffCardView, type CardState } from "@/lib/v2/payoffCard";
 import type { TakerFeeParams } from "@/lib/v2/payoff";
 
 const SIZES = [1n, 10n, 100n] as const;
@@ -20,6 +20,24 @@ function PayoffGlyph({ isPut }: { isPut: boolean }) {
     <circle cx="58" cy="42" r="3.5" fill="currentColor" />
   </svg>;
 }
+
+/**
+ * Why the buy button is disabled, ON the button.
+ *
+ * It used to read "Buy unavailable" for every reason except cutoff, while the status line
+ * directly above it already said which reason applied (thin / stale / cutoff). The user therefore
+ * had the answer one line up and a button that refused to repeat it — and a disabled control with
+ * no reason reads as a broken page rather than a temporary state.
+ *
+ * Keyed on the same `CardState` the status line switches on, so the two cannot drift apart: add a
+ * state to the union and TypeScript requires a label here.
+ */
+export const UNAVAILABLE_LABEL: Record<CardState, string> = {
+  live: "Buy unavailable",
+  thin: "Not enough depth",
+  stale: "Quote refreshing",
+  cutoff: "Trading closed",
+};
 
 export function PayoffCard({ card, feeParams, now, quoteAsOf, featured = false, example = false, spotAvailable = true }: {
   card: Card;
@@ -83,7 +101,7 @@ export function PayoffCard({ card, feeParams, now, quoteAsOf, featured = false, 
       </p>
       <div className="mt-3 flex flex-wrap items-center gap-2">
         {canBuy ? <Button href={view.buyHref} size="sm">Buy {formatShareQuantity(units)}</Button>
-          : <Button size="sm" disabled>{example ? "Example" : view.state === "cutoff" ? "Trading closed" : "Buy unavailable"}</Button>}
+          : <Button size="sm" disabled>{example ? "Example" : UNAVAILABLE_LABEL[view.state]}</Button>}
         {!example ? <Button href={`/${card.series.ticker.toLowerCase()}/${card.series.longId}`} size="sm" variant="ghost">View option</Button> : null}
       </div>
     </div>

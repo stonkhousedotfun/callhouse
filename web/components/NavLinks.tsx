@@ -5,13 +5,33 @@
  * switcher. "use client" buys usePathname, for two things: aria-current on the active link, and
  * the market the Account and Book links point at.
  *
- * V1 retains its depositor links. V2 leads with Buy, Portfolio, Earn and Wins.
+ * V1 retains its depositor links. V2 has five: Buy, Portfolio, Vaults, Wins and Trust. Two of them
+ * lead to a flow that takes money in -- Buy (pay a premium for a call) and Vaults (deposit into one
+ * of three strategies, compared side by side on /vaults) -- where the nav used to offer four
+ * one-word doors (Buy, Earn, Lend, House) with four different risks and nothing to tell them apart.
  *
- * ACCOUNT AND BOOK ARE PER MARKET. Their hrefs are the current market's (/tsla/account when the
- * URL is under /tsla, lib/markets.ts marketFromPathname), and the default market's (/nvda/…) on a
- * page that belongs to no market, so the two links never send a reader to the bare /account and
- * /book redirects. The active test is an exact match on the lowercased pathname: /nvda/account and
- * /nvda/book are separate destinations, and a prefix test would light both at once.
+ * MARKETS IS NOT AN ENTRY (UX review 2026-09-20, section 2). /markets was a second door to the room
+ * Buy already opens: two top-level links that both read as "go find an option". What it actually
+ * shows is each market's availability, accepted oracle spot and settlement behaviour -- a status
+ * reference, the same kind of fact Trust carries -- so it lives at /trust/markets as "Market
+ * status", linked from the Trust page, and the Trust entry is lit there by the ordinary prefix
+ * match. /markets itself permanently redirects, so no old link breaks.
+ *
+ * VAULTS IS ONE ENTRY FOR THREE DESTINATIONS (W5, plan gap 9). Earn, Lend and House are three
+ * separate deposit surfaces with three different withdrawal rules, and giving each its own
+ * top-level entry spent three of eight slots on a distinction a reader cannot act on from the nav.
+ * They collapse into /vaults, which states the difference once and links onward. The three routes
+ * still exist and are still reachable, so {VAULT_ROUTES} keeps this entry lit on all of them --
+ * otherwise a reader who lands on /lend sees no nav entry marked current and cannot tell where
+ * they are.
+ *
+ * ACCOUNT AND BOOK ARE PER MARKET, and they are V1 entries only: V2's five include neither, and V2
+ * lights Buy on every market page except those two routes. Their hrefs are the current market's
+ * (/tsla/account when the URL is under /tsla, lib/markets.ts marketFromPathname), and the default
+ * market's (/nvda/…) on a page that belongs to no market, so the two links never send a reader to
+ * the bare /account and /book redirects. The active test is an exact match on the lowercased
+ * pathname: /nvda/account and /nvda/book are separate destinations, and a prefix test would light
+ * both at once.
  *
  * One link leaves the app: stonkhouse.fun, the marketing site. It is LAST, it is deliberately not
  * part of the link list (a plain new-tab <a> through ExternalLink, not next/link, because next/link
@@ -33,6 +53,12 @@ const LINK =
 const IDLE = "text-ink-2 hover:bg-surface-2 hover:text-ink";
 const ACTIVE = "bg-surface text-ink shadow-soft";
 
+/**
+ * The routes the single Vaults entry stands for. /vaults itself is covered by the ordinary exact and
+ * prefix match; these are the three surfaces it collapsed, which keep their own routes.
+ */
+const VAULT_ROUTES = ["/earn", "/lend", "/house"] as const;
+
 /** "stonkhouse.fun" in production; whatever host a preview build points at otherwise. */
 const SITE_HOST = SITE_URL.replace(/^https?:\/\//i, "");
 
@@ -49,8 +75,9 @@ export function NavLinks() {
     ? [
         { href: "/", label: "Buy" },
         { href: "/portfolio", label: "Portfolio" },
-        { href: "/earn", label: "Earn" },
+        { href: "/vaults", label: "Vaults" },
         { href: "/wins", label: "Wins" },
+        { href: "/trust/markets", label: "Markets" },
       ]
     : [
         { href: "/", label: "Home" },
@@ -67,7 +94,13 @@ export function NavLinks() {
   return (
     <ul className="flex items-center gap-0.5 sm:gap-1">
       {links.map((link) => {
-        const active = here === link.href || (process.env.NEXT_PUBLIC_V2 === "1" && (link.href === "/" ? onV2Market : here.startsWith(`${link.href}/`)));
+        const active =
+          here === link.href
+          || (process.env.NEXT_PUBLIC_V2 === "1"
+            && (link.href === "/"
+              ? onV2Market
+              : here.startsWith(`${link.href}/`)
+                || (link.href === "/vaults" && VAULT_ROUTES.some((route) => here === route || here.startsWith(`${route}/`)))));
         return (
           <li key={link.label}>
             <Link href={link.href} aria-current={active ? "page" : undefined} className={cn(LINK, active ? ACTIVE : IDLE)}>

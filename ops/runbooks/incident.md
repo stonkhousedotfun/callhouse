@@ -18,6 +18,89 @@ Three rules that apply to every entry on this page:
    Seaport's `authorizeOrder`. So "the inventory" is never at risk, because there is none, and
    assignment is bounded to what was sold.
 
+## Factory markets (read this first)
+
+**The vault-shaped steps below belong to the closed pooled vault.** `rollOpen`, `approveListing`,
+`lockBook`, `rollClose`, the phase machine and the redeem queue are `cNVDA`'s
+(`0x88a98931E3682137E7e4D3426f623247f4A4ecbb`), which is closed and only pays out leftovers
+(`app.stonkhouse.fun/collect`). **The live product is the per-market account factory**
+(`src/solo/` in the contracts repository): one `AccountFactory` per Stock Token, isolated
+`WriterAccount` clones, write on fill, one FULL 1-lot Seaport order per lot, each account on its
+own option type. NVDA's factory is `0xc4A5Cd0DE91CaB7F5Ebe2114bc63Fbb43E642BBb` (block
+64,038,234); the other markets go live in waves (`ops/deploy.md` §14). Keep the vault steps for
+the vault; run the factory equivalents in this preamble for every live market.
+
+**Every market, from the registry.** `ops/markets/tier1.json` is the only list of markets
+(`ops/markets/README.md`). Loop over the `live` rows and never type a factory address by hand:
+
+```bash
+# from the app repo root
+REG=ops/markets/tier1.json
+export RH_RPC=https://rpc.mainnet.chain.robinhood.com
+TICKERS=$(node -e 'const r=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8"));console.log(r.markets.filter(m=>m.status==="live").map(m=>m.ticker).join(" "))' "$REG")
+for T in $TICKERS; do
+  eval "$(node -e '
+    const r=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8"));
+    const m=r.markets.find(x=>x.ticker===process.argv[2]);
+    console.log(`FACTORY=${m.deployment.factory} ASSET=${m.asset} FEED=${m.feed} KEEPER=${m.deployment.keeper} MODE=${m.mode}`);
+  ' "$REG" "$T")"
+  CLEAR=$(cast call $FACTORY "clear()(address)" --rpc-url $RH_RPC)
+  echo "== $T factory=$FACTORY asset=$ASSET feed=$FEED keeper=$KEEPER mode=$MODE"
+  cast call $FACTORY "week()(uint32,uint256,uint40,uint40,uint256)" --rpc-url $RH_RPC   # (id, strike6, exerciseTs, baseExpiryTs, ask6)
+  cast call $FACTORY "writesHalted()(bool)"  --rpc-url $RH_RPC
+  cast call $FACTORY "pendingCount()(uint256)" --rpc-url $RH_RPC   # accounts that requested lots and are not listed yet
+  cast call $FACTORY "liveCount()(uint256)"    --rpc-url $RH_RPC   # accounts with live listings this week
+  # ... the per-market reads for this runbook go here ...
+done
+```
+
+The keeper key for a market is `KEEPER_PK` in `~/.callhouse-keys/markets/$T.env` (mode 600,
+written by `ops/markets/derive-keeper-keys.sh`; NVDA's is the original keeper key, mnemonic
+index 1). Load it into the shell only on the ops machine (`set -a; . ~/.callhouse-keys/markets/$T.env; set +a`),
+pass it as `--private-key "$KEEPER_PK"`, and never print, echo or paste it. `cast` takes a raw key
+only as an argument, so it sits in `ps` for the command's lifetime; that is accepted on the
+single-user ops machine — anywhere shared, `cast wallet import <name>` once and use `--account <name>`. One key per market:
+a key that works on TSLA holds no role on AAPL. The guardian (`0x29741A8d283a253E8Ce10aDfd04C6507438b6F39`)
+and the admin (`0xEb82c3D0F89d47453F94f0C2b2a2752e27a19d9b`) are the same on every factory.
+Each market's keeper is its own Railway service, `keeper-<ticker>`:
+
+```bash
+railway ssh --service keeper-$(echo $T | tr '[:upper:]' '[:lower:]') -- wget -qO- http://127.0.0.1:8787/health
+```
+
+ABIs: `ops/abis/AccountFactory.json`, `ops/abis/WriterAccount.json`. Per-account reads take the
+clone address from `pendingAt(i)` / `liveAt(i)`; `listFor(owner)` takes the **owner**, read with
+`owner()` on the clone.
+
+**Who can send what, on a factory** (compare the vault table below):
+
+| Function | Keeper (per market) | Guardian (shared) | Admin (shared, hot) | Anyone |
+|---|---|---|---|---|
+| `setWeek(strike, exerciseTs, baseExpiryTs, ask)` | yes | no | no | no |
+| `listFor(owner)` | yes | no | no | no (the **owner** calls `list()` on their account) |
+| `setWritesHalted(bool)` | no | **yes**, both directions | no | no |
+| `setPolicy`, `setDepositCap`, `setMaxPriceAge`, `setFeeRecipient`, `setValoremFeeAccepted`, `grantRole` / `revokeRole` | no | no | yes | no |
+| `settle()` on an account | yes | yes | yes | **yes**, after that account's `listedExpiryTs` |
+| `createAccount`, `deposit`, `withdraw`, `requestWrite`, `claimUsdg` | no | no | no | the account owner (`createAccount`: anyone, once) |
+
+**Factory equivalents of the incidents below:**
+
+| Incident | On a factory market |
+|---|---|
+| §1 wrong strike armed | `week()` on the factory. A later `setWeek` does **not** move accounts that already listed (they pinned strike, ask and expiry at `list`); it applies to accounts that list afterwards. There is nothing to cancel on the factory; a listed account's orders end at its `listedExerciseTs` |
+| §2 fill at a bad price | every fill is at that account's pinned `listedAskUsdg`, and the account's `authorizeOrder` re-checks the band floor and the premium floor at live spot. A price you dislike but the policy admits is the keeper's `setWeek`, not a bug |
+| §3 assigned more than expected | per account: `claim(claimKey)` on the Clear versus `contractsWritten()`; each account is its own option type, so assignment on one account cannot come from another Stonkhouse writer |
+| §4 keeper dead mid-week | per market: `railway ssh --service keeper-<ticker> -- wget -qO- http://127.0.0.1:8787/health`. By hand: `setWeek` / `listFor` with **that market's** key from `~/.callhouse-keys/markets/<TICKER>.env`; `settle()` needs no key. One dead keeper affects one market |
+| §5 issuer freezes or blocklists the token | **one issuer, every market**: check `paused()` and the blocklist on every `$ASSET`, not only the one reported. A freeze stops that market's fills and the token leg of `settle`; a `settle` that runs during it keeps the claim with **no retry** (§9 below). The market's keeper holds the settle of every sold account while the freeze holds (alert `v1_settle_held`, `/state` `settleHeld`) and settles it on the first tick after the freeze lifts: leave it running, and settle nothing by hand. A keeper whose `/state` has no `settleHeld` predates that guard: stop it before any sold account's `listedExpiryTs` until the freeze lifts. A registry-wide pause stops every market at once |
+| §6 Valorem fee switch flips on | the Clear is shared: one flip reverts `list` and every fill on **every** factory until the admin `setValoremFeeAccepted(true)` on each factory or the switch goes off |
+| §7–§8 sequencer / RPC | unchanged; every keeper and indexer uses the same RPCs |
+| halt | `cast send $FACTORY "setWritesHalted(bool)" true --rpc-url $RH_RPC --private-key <guardian>` per factory; loop over `$TICKERS` to halt everything. Blocks `list` and fills only: deposits, idle withdrawals, `settle`, exercise and `claimUsdg` keep working |
+| §9 stranded claim | not recoverable through the account: `settle()` cleared `listedExpiryTs`, so a second call reverts `TooEarly`, and `WriterAccount` has no other redeem (callhouse-contracts `docs/V1-RUNOFF.md`, "What the freeze does not do"). Record the account, owner and `claimKey`; tell the writer. Prevention is the keeper's settle guard (`v1_settle_held`), with the check in `ops/runbooks/v1-runoff.md` step 8 as the backup |
+| §10 listing unfillable after a rally | there is no reprice on an account: the ask and strike were pinned at `list`. The next `setWeek` only affects accounts that have not listed. An unfillable week on a listed account is an unfilled week |
+| §11 deposits closed unexpectedly | per account: `depositCap()` on the factory is **per account** (held balance), and `writesHalted` does **not** block deposits; a deposit that reverts is the cap (`DepositCapExceeded`) or the issuer (§5) |
+
+---
+
 ## Shell setup
 
 ```bash

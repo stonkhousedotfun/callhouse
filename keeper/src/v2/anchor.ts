@@ -17,6 +17,21 @@
  *
  * A deploy block the chain does not have (its head is below it) throws: the mode points at another chain or a node far
  * behind, and the store is neither read nor reset until the block is there.
+ *
+ * INTERFACE_VERSION 8, THE v7 -> v8 REDEPLOY. Nothing here changes for v8, and that is the point worth writing down:
+ * the v8 set is deployed at a new block, so `v2.deployBlock` moves, every signing mode's store compares `changed` on
+ * its first v8 boot, and the v7 cursors, adopted orders and "already done" marks are cleared. That is the intended
+ * behaviour, not a fault to work around — the v7 state describes contracts this keeper no longer calls. Expect one
+ * `anchorWarning('changed', ...)` line per mode on the cutover and no second one.
+ *
+ * TWO THINGS ABOUT v8 THAT LOOK LIKE THEY BELONG HERE AND DO NOT:
+ *   - `v2.flywheel.deployBlock` is NOT the anchor. The FeeSplitter is deployed BEFORE the core set, so it has its own,
+ *     lower block; the anchor stays `v2.deployBlock`, the block the core deployment exists from. A store anchored on
+ *     the splitter's block would compare equal across a core redeploy that reused the splitter.
+ *   - Until the O8 write-back fills it, `v2.deployBlock` is null in ops/markets/tier1.json. Every mode therefore boots
+ *     `unanchored` today: it keeps whatever it has, warns that it cannot tell a redeploy at the same addresses, and
+ *     every log scan falls back to block 0. That is a pre-deploy state, not a v8 one, and it ends when the write-back
+ *     lands.
  */
 import type { PublicClient } from 'viem';
 

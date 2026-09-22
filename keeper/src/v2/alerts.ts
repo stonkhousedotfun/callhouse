@@ -17,7 +17,7 @@
  * v2_pin_refused, v2_stale_cancel_failed; K2-04: v2_mm_killed, v2_mm_resumed, v2_mm_loss_stop, v2_mm_delta,
  * v2_mm_not_quoter, v2_mm_pricing, v2_mm_tx_rejected, v2_mm_funds, v2_mm_outflow, v2_mm_outflow_foreign;
  * K2-05: v2_pricer_no_role, v2_pricer_fair_unavailable,
- * v2_pricer_reprice_failed) and a severity for it in ALERT_SEVERITY, else it goes out as `warn`.
+ * v2_pricer_reprice_failed, v2_pricer_clamped) and a severity for it in ALERT_SEVERITY, else it goes out as `warn`.
  *   v2_boot       the mode started (info)
  *   v2_error      a tick threw (error)
  *   v2_tx_revert  a transaction reverted on chain, was not confirmed, or could not be broadcast (error)
@@ -62,7 +62,8 @@ export const ALERT_SEVERITY: Record<string, AlertSeverity> = {
   v2_mm_loss_stop: 'error',
   /** A market's net inventory delta is above MM_DELTA_ALERT_SHARES: hedge by hand. */
   v2_mm_delta: 'warn',
-  /** The MM signer holds neither QUOTER_ROLE nor admin on the vault: it can neither quote nor cancel. */
+  /** INTERFACE_VERSION 8: the AccessManager refuses the MM signer `place` on the vault - not a QUOTER member,
+   *  or a member whose calls must be scheduled. Either way it can neither quote nor cancel. */
   v2_mm_not_quoter: 'error',
   /** Every selected series is halted for its fair value (unreachable, refused, or stale): nothing is quoted. */
   v2_mm_pricing: 'warn',
@@ -78,16 +79,48 @@ export const ALERT_SEVERITY: Record<string, AlertSeverity> = {
   v2_mm_outflow: 'warn',
   /**
    * The vault's outflow bucket is above what this bot's own booked calls account for: USDG left the vault through a
-   * quoter or admin call this bot did not send. A second key on QUOTER_ROLE, or the admin. Forced, never suppressed.
+   * quoter call this bot did not send. A second key the manager admits as QUOTER, or the Admin Safe, which holds
+   * QUOTER in its own right (script/v2/roles.v8.json). Forced, never suppressed.
    */
   v2_mm_outflow_foreign: 'error',
+  /** A configured vault quotes on a different OrderBook than the registry: skipped, others still tick. */
+  v2_mm_wrong_book: 'error',
+  /** A House vault still holds risk at epochEnd: roll is due and the plan is not flat. */
+  v2_mm_epoch_unflat: 'warn',
+  /** A rest that would cross another protocol-owned maker was skipped. */
+  v2_mm_protocol_cross: 'warn',
+  /**
+   * One vault could not be read or failed mid-tick and was skipped; the others still quoted. Error, not warn:
+   * a vault nobody is quoting is a vault whose epoch wind-down cancels are not being sent.
+   */
+  v2_mm_vault_unreadable: 'error',
+  /**
+   * The seller fee read was out of range, so the grossed ask could not be computed and those asks were NOT
+   * rested. Error: quoting below the vault's intended net is a money-losing default, and the previous
+   * behaviour was to rest anyway and record the fact somewhere nothing read.
+   */
+  v2_mm_fee_unreadable: 'error',
+  /**
+   * MM_HOUSE_FACTORY is set but no House vault can be quoted: the factory cannot be enumerated
+   * (no ABI until T-78) or a discovered vault's epoch could not be read. Error, not warn: the
+   * operator configured House quoting and is not getting it, and the bot will not fake an epoch.
+   */
+  v2_mm_house_unavailable: 'error',
+  /** The cranker's key does not hold BUYBACK on the FeeSplitter: the flywheel claims and distributes, and no
+   *  buyback can be sent. Raised only from the buyback probe, because `Managed` gives an unauthorised call the
+   *  same V2Errors.NotAuthorized that `distribute` raises for an unset treasury. */
+  v2_cranker_no_buyback_role: 'error',
+
   /* ---- pricer (K2-05, pricer/pricer.ts) ---- */
-  /** The pricer's key does not hold PRICER_ROLE on the AutoRoller: no smart-pricing ask can be repriced. */
+  /** INTERFACE_VERSION 8: the AccessManager refuses the pricer's key `reprice` on the AutoRoller - not a PRICER
+   *  member, or a member whose calls must be scheduled. No smart-pricing ask can be repriced. */
   v2_pricer_no_role: 'error',
   /** A live smart-pricing ask has had no fair value (pricing service down or `fair: null`) for PRICER_FAIR_ALERT_S. */
   v2_pricer_fair_unavailable: 'warn',
   /** A due reprice did not go through: reverted on chain or not confirmed (error); a refused simulation is sent as warn. */
   v2_pricer_reprice_failed: 'error',
+  /** Four consecutive evaluations landed on the minAsk/maxAsk clamp; streak resets on an unclamped tick. */
+  v2_pricer_clamped: 'warn',
   /* ---- cranker, INTERFACE_VERSION 7 (c16, cranker/steps.ts stepStale) ---- */
   /**
    * An AutoRoller ask the spot has overtaken (at or past its strike) could not be withdrawn: `cancelStale`'s

@@ -72,6 +72,29 @@ test('POST /kill: 200 with the outcome once the cancels are done, 202 while they
   assert.equal((await slow.app.request('/kill', { method: 'POST', headers: { authorization: `Bearer ${TOKEN}` } })).status, 202);
 });
 
+test('POST /kill {vault} still uses the same 401 body; a valid token forwards the vault', async () => {
+  const calls: string[] = [];
+  const target: KillSwitch = {
+    async kill(reason, vault) {
+      calls.push(`kill:${reason}:${vault ?? ''}`);
+      return { killed: true, at: 1, reason, cancelled: 0, remaining: 0, remainingOrderIds: [], done: true, errors: [] };
+    },
+    resume(vault) {
+      calls.push(`resume:${vault ?? ''}`);
+      return { killed: false, at: 2 };
+    },
+  };
+  const app = new Hono();
+  mountKillRoutes(app, { token: () => TOKEN, target });
+  const denied = await app.request('/kill', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ vault: '0xabc' }) });
+  assert.equal(denied.status, 401);
+  assert.equal(await denied.text(), JSON.stringify({ error: 'unauthorized' }));
+  const vault = '0x00000000000000000000000000000000000000aa';
+  const res = await app.request('/kill', { method: 'POST', headers: { authorization: `Bearer ${TOKEN}`, 'content-type': 'application/json' }, body: JSON.stringify({ vault, reason: 'one' }) });
+  assert.equal(res.status, 200);
+  assert.deepEqual(calls, [`kill:one:${vault}`]);
+});
+
 test('POST /resume needs the token too; GET on either path is 405', async () => {
   const { app, calls } = setup();
   assert.equal((await app.request('/resume', { method: 'POST' })).status, 401);

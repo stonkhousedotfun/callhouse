@@ -22,7 +22,9 @@ import { fileURLToPath } from "node:url";
 import type { Address, ContractErrorName, ContractEventName, ContractFunctionName } from "viem";
 import { describe, expect, it } from "vitest";
 
+import { accessManagerAbi } from "../../abis/v2/accessManager";
 import { clearinghouseAbi } from "../../abis/v2/clearinghouse";
+import { payoutAdapterAbi } from "../../abis/v2/payoutAdapter";
 import { isShortId, longIdOf, shortIdOf } from "./seriesId";
 
 const pkgRoot = fileURLToPath(new URL("../..", import.meta.url));
@@ -105,7 +107,7 @@ describe("abis/v2/clearinghouse.ts", () => {
   });
 });
 
-describe("v7 rent tuple and event ABI pins", () => {
+describe("v8 unchanged market tuple and event ABI pins", () => {
   it("retains appended series and market rent fields and changed selectors", async () => {
     const { toFunctionSelector, toEventSelector } = await import("viem");
     const market = clearinghouseAbi.find((item) => item.type === "function" && item.name === "market")!;
@@ -117,7 +119,10 @@ describe("v7 rent tuple and event ABI pins", () => {
     expect(series.outputs[0].components.slice(-2).map((field) => [field.name, field.type])).toEqual([
       ["mintFeePpm", "uint32"], ["mintFeesHeld", "uint128"],
     ]);
-    expect(toFunctionSelector(clearinghouseAbi.find((item) => item.type === "function" && item.name === "registerMarket")!)).toBe("0xfb2a821f");
+    const registerMarket = clearinghouseAbi.find((item) => item.type === "function" &&
+      item.name === "registerMarket" && item.inputs.map((input) => input.type).join(",") === "address,uint64,bool")!;
+    expect(registerMarket.inputs.map((input) => input.type)).toEqual(["address", "uint64", "bool"]);
+    expect(toFunctionSelector(registerMarket)).toBe("0x9ae621ee");
     expect(toFunctionSelector(clearinghouseAbi.find((item) => item.type === "function" && item.name === "mintFee")!)).toBe("0xdb66f63c");
     expect(toEventSelector(clearinghouseAbi.find((item) => item.type === "event" && item.name === "Minted")!)).toBe("0x89b7f2e14bc7bca4f2fd443683827b62e46c6f22ac4145d38f930082a62fcab5");
     expect(toEventSelector(clearinghouseAbi.find((item) => item.type === "event" && item.name === "Closed")!)).toBe("0x895110f6bb596a7019986496b866a4cebf45e0d53ff8946c952974d456540381");
@@ -133,5 +138,32 @@ describe("v7 rent tuple and event ABI pins", () => {
     const limits = makerVaultAbi.find((item) => item.type === "function" && item.name === "limits")!;
     expect(limits.outputs[0].components.at(-1)).toMatchObject({ name: "maxDailyOutflow", type: "uint128" });
     expect(toFunctionSelector(makerVaultAbi.find((item) => item.type === "function" && item.name === "setLimits")!)).toBe("0x6693cc27");
+  });
+});
+
+describe("v8 authority and payout router ABI pins", () => {
+  it("decodes AccessManager events with uint64 roles and the complete scheduled operation", () => {
+    const roleGranted = accessManagerAbi.find((item) => item.type === "event" && item.name === "RoleGranted")!;
+    expect(roleGranted.inputs.map((input) => [input.name, input.type, input.indexed])).toEqual([
+      ["roleId", "uint64", true], ["account", "address", true], ["delay", "uint32", false],
+      ["since", "uint48", false], ["newMember", "bool", false],
+    ]);
+    const scheduled = accessManagerAbi.find((item) => item.type === "event" && item.name === "OperationScheduled")!;
+    expect(scheduled.inputs.map((input) => [input.name, input.type])).toEqual([
+      ["operationId", "bytes32"], ["nonce", "uint32"], ["schedule", "uint48"],
+      ["caller", "address"], ["target", "address"], ["data", "bytes"],
+    ]);
+  });
+
+  it("pins the unchanged routes selector and the v8 router return tuple", async () => {
+    const { toFunctionSelector } = await import("viem");
+    const routes = payoutAdapterAbi.find((item) => item.type === "function" && item.name === "routes")!;
+    expect(toFunctionSelector(routes)).toBe("0xd7409659");
+    expect(routes.outputs).toHaveLength(1);
+    expect(routes.outputs[0]).toMatchObject({ type: "tuple" });
+    expect(routes.outputs[0]!.components.map((field) => [field.name, field.type])).toEqual([
+      ["venue", "uint8"], ["fee", "uint24"], ["tickSpacing", "int24"],
+      ["v3Pool", "address"], ["feeBps", "uint16"],
+    ]);
   });
 });

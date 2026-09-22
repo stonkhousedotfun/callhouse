@@ -1,6 +1,21 @@
 import { ponder } from "ponder:registry";
 
-import { FACTORY, V2_CLEARINGHOUSE, V2_EXPIRY_CALENDAR, V2_KEEPER_REWARDS, VAULT } from "./env";
+import {
+  FACTORY,
+  V2_ACCESS_MANAGER,
+  V2_BUYBACK_EXECUTOR,
+  V2_CLEARINGHOUSE,
+  V2_EARN_VAULT,
+  V2_EXPIRY_CALENDAR,
+  V2_HOUSE_VAULT_FACTORY,
+  V2_FEE_SPLITTER,
+  V2_KEEPER_REWARDS,
+  V2_MAKER_VAULT,
+  V2_PAYOUT_ROUTER,
+  V2_REWARDS_DISTRIBUTORS,
+  V2_ZAP_HELPER,
+  VAULT,
+} from "./env";
 
 /**
  * The three source groups, each either the real registry or a no-op.
@@ -40,3 +55,23 @@ export const v2Ponder: typeof ponder = hasV2() ? ponder : inert;
 /** Optional periphery events are registered only when their individual address is present. */
 export const v2CalendarPonder: typeof ponder = V2_EXPIRY_CALENDAR === undefined ? inert : ponder;
 export const v2RewardsPonder: typeof ponder = V2_KEEPER_REWARDS === undefined ? inert : ponder;
+export const v2AccessManagerPonder: typeof ponder = V2_ACCESS_MANAGER === undefined ? inert : ponder;
+export const v2FeeSplitterPonder: typeof ponder = V2_FEE_SPLITTER === undefined ? inert : ponder;
+export const v2BuybackExecutorPonder: typeof ponder = V2_BUYBACK_EXECUTOR === undefined ? inert : ponder;
+export const v2PayoutRouterPonder: typeof ponder = V2_PAYOUT_ROUTER === undefined ? inert : ponder;
+export const v2MakerVaultPonder: typeof ponder = V2_MAKER_VAULT === undefined ? inert : ponder;
+export const v2RewardsDistributorPonder: typeof ponder = V2_REWARDS_DISTRIBUTORS.length === 0 ? inert : ponder;
+
+/**
+ * P8 lending periphery. `v2EarnVaultPonder` is the LENDING vault, not the `/earn` covered-call
+ * writing surface; see src/v2/earn.ts. Both are inert until their address is configured, so a
+ * deployment without the periphery still builds.
+ */
+export const v2EarnVaultPonder: typeof ponder = V2_EARN_VAULT === undefined ? inert : ponder;
+export const v2ZapPonder: typeof ponder = V2_ZAP_HELPER === undefined ? inert : ponder;
+
+/**
+ * P8-06 House vaults. Inert until V2_HOUSE_VAULT_FACTORY is set so a deployment without
+ * the factory still builds. Do not reuse v2MakerVaultPonder.
+ */
+export const v2HouseVaultPonder: typeof ponder = V2_HOUSE_VAULT_FACTORY === undefined ? inert : ponder;

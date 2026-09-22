@@ -9,8 +9,26 @@ vi.mock("./config", () => ({
     : "0x0000000000000000000000000000000000000002",
 }));
 
-import { assertPortfolioSeries, assertPayoutPrefsMatch, assertSeriesTermsMatch, readMarketSpotOnChain, readOrderPreflight,
-  readPayoutPrefs } from "./chainReads";
+import { assertPortfolioSeries, assertPayoutPrefsMatch, assertSeriesTermsMatch, readMarketEnabledOnChain,
+  readMarketSpotOnChain, readOrderPreflight, readPayoutPrefs } from "./chainReads";
+
+describe("on-chain market enablement fallback", () => {
+  it("reads the compiled market's enabled bit from the Clearinghouse", async () => {
+    const asset = v2Markets().find((row) => row.ticker === "NVDA")!.asset;
+    const readContract = vi.fn(async () => ({ enabled: true }));
+    const client = { readContract } as unknown as PublicClient;
+    await expect(readMarketEnabledOnChain("nvda", client)).resolves.toBe(true);
+    expect(readContract).toHaveBeenCalledWith(expect.objectContaining({ functionName: "market", args: [asset] }));
+    readContract.mockResolvedValueOnce({ enabled: false });
+    await expect(readMarketEnabledOnChain("NVDA", client)).resolves.toBe(false);
+  });
+
+  it("does not query an unknown ticker", async () => {
+    const readContract = vi.fn();
+    await expect(readMarketEnabledOnChain("UNKNOWN", { readContract } as unknown as PublicClient)).rejects.toThrow(/not in this app/);
+    expect(readContract).not.toHaveBeenCalled();
+  });
+});
 
 describe("indexer outage spot fallback", () => {
   it("reads a live registry market through SettlementOracle.spot", async () => {

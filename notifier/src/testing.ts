@@ -173,6 +173,8 @@ export const SAMPLE_PAYLOADS = {
   },
   auto_roll: { ticker: 'NVDA', status: 'rolled', series: SERIES_221, price: usdg('260000'), units: '100' },
   payout_failed_to_ledger: { series: SERIES_216, asset: 'usdg', amount: usdg('1360000') },
+  fee_notice: { phase: 'scheduled', effectiveAt: 1789896000 },
+  admin_operation: { id: `0x${'ab'.repeat(32)}`, status: 'pending', label: 'setMarketFees' },
 } as const;
 
 /* ------------------------------------------------------------------ fake http services */

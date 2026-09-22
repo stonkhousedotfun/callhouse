@@ -77,7 +77,7 @@ export default function VaultPage() {
       />
 
       <div className="grid gap-4 sm:gap-5">
-        {/* The three disclosures below are required, verbatim, by scripts/copy-lint.mjs. They are
+        {/* The three disclosures below are required, verbatim, by disclosure policy (copy-lint enforced this until it was removed on 2026-09-21; nothing checks it now). They are
             compliance text from README "Frontend copy" and TECHSPEC 7.3 — do not reword them. */}
         <Notice
           tone="warn"

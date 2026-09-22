@@ -1,0 +1,35 @@
+{
+  "provenance": {
+    "capturedAt": "2026-09-19",
+    "machine": "Apple M3 Max, darwin arm64",
+    "node": "v26.5.0",
+    "runs": 3,
+    "samples": 20,
+    "method": "Median of three local runs: ordered PGlite replay through real Clearinghouse handlers and the committed holiday-table SQL path; each API p95 uses 20 uncached in-process Hono requests after two warm-ups"
+  },
+  "baseCommit": "2454c8744c445c3f3673ad353169021e21cbcf22",
+  "registryProjectionSha256": "ff8e114ec219b6e0f6e4e9478c24eb30b3190b8a747630e8dea70334c3e173d7",
+  "shape": {
+    "markets": 20,
+    "additions": 19,
+    "requestedSeries": 500,
+    "overlapDeduplicated": 50,
+    "series": 450,
+    "calls": 450,
+    "puts": 0
+  },
+  "metricsMs": {
+    "handlerReplay": 788.13,
+    "marketsP95": 3.74,
+    "cardsP95": 69.85,
+    "marketSeriesP95": 63.29,
+    "seriesDetailP95": 4.05
+  },
+  "ceilingsMs": {
+    "handlerReplay": 6000,
+    "marketsP95": 32,
+    "cardsP95": 650,
+    "marketSeriesP95": 550,
+    "seriesDetailP95": 35
+  }
+}

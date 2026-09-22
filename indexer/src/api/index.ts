@@ -12,6 +12,7 @@ import { cache15s } from "./cache";
 import { readAccountLive, readChainHead, readOraclePaused, readVaultLive } from "./chain";
 import { asset, iso, num, toJson, usdg } from "./serialize";
 import { v2App } from "./v2";
+import { ROUTES } from "./v2/schema";
 
 const app = new Hono();
 
@@ -1640,13 +1641,7 @@ app.get("/", async (c) =>
     addresses: FACTORY === undefined ? ADDRESSES : marketAddresses(await loadMarket()),
     configured: { vault: VAULT !== undefined, factory: FACTORY !== undefined, v2: V2_CLEARINGHOUSE !== undefined },
     routes: [
-      "GET  /v2/health", "GET  /v2/config", "GET  /v2/markets", "GET  /v2/markets/:ticker/series",
-      "GET  /v2/series/:longId", "GET  /v2/series/:longId/book", "GET  /v2/series/:longId/holders",
-      "GET  /v2/series/:longId/trades", "GET  /v2/cards", "GET  /v2/cards/hero",
-      "GET  /v2/accounts/:address/positions", "GET  /v2/accounts/:address/history",
-      "GET  /v2/feed/wins", "GET  /v2/feed/activity", "GET  /v2/strategies", "GET  /v2/leaderboard",
-      "GET  /v2/pnl/:id", "GET  /v2/stats", "GET  /v2/makers", "GET  /v2/makers/:address",
-      "GET  /v2/fair/:longId",
+      ...ROUTES.map(({ route }) => `GET  ${route}`),
       "GET  /v1/vault",
       "GET  /v1/cycles",
       "GET  /v1/cycles/:cycle",

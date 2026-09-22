@@ -1,0 +1,26 @@
+{
+  "configured": true,
+  "vaults": [
+    {
+      "vault": "0x44cA209778e8Efe4973D9DE5e071D8Cd2bc5681d",
+      "asset": "0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168",
+      "adapter": null,
+      "paused": false,
+      "sharesSupply": "100000000000000000000",
+      "deposited": "1000000000",
+      "skimmed": null,
+      "queue": {
+        "depth": 1,
+        "oldestRequestedAt": 1789588800
+      },
+      "lastAdapterMove": {
+        "adapter": null,
+        "direction": "pull",
+        "requested": "50000000",
+        "delivered": null,
+        "ts": 1789590600,
+        "tx": "0x4c9b986695523141168947864942f253d8902993b645ffa4100e412d1e5add0c"
+      }
+    }
+  ]
+}

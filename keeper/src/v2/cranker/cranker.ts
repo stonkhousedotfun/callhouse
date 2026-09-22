@@ -22,6 +22,7 @@ import { describeError } from '../tx.js';
 import { expiryKeyString, scheduleWake, selectExpiries, yieldDeadlineMs, type ExpiryKey, type WakeSchedule } from './planner.js';
 import { CrankerMetrics } from './metrics.js';
 import type { RaisedAlert } from './effects.js';
+import { stepFlywheel } from './flywheel.js';
 import {
   STEP_ORDER,
   stepFinalize,
@@ -195,6 +196,17 @@ export class Cranker {
             async () => {
               this.usdg ??= await ctx.client.readContract({ address: ctx.addresses.clearinghouse, abi: clearinghouseAbi, functionName: 'usdg' });
               return stepHousekeeping(ctx, this.usdg);
+            },
+            report,
+          );
+          break;
+        // Last, so the fees housekeeping just swept into the splitter are split in the same tick.
+        case 'flywheel':
+          await this.run(
+            step,
+            async () => {
+              this.usdg ??= await ctx.client.readContract({ address: ctx.addresses.clearinghouse, abi: clearinghouseAbi, functionName: 'usdg' });
+              return stepFlywheel(ctx, this.usdg);
             },
             report,
           );

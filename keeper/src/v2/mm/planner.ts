@@ -16,12 +16,15 @@
  *
  * KILLED: every managed series is halted `killed` (all its orders cancelled) and no housekeeping is planned. The
  * kill switch itself (quoter.ts) also cancels orders on markets the bot does not manage.
- * NOT QUOTER (the signer lost QUOTER_ROLE): nothing is planned at all, since the vault refuses even a cancel.
+ * NOT QUOTER (the AccessManager no longer admits the signer's `place` on the vault, whether because the role was
+ * revoked or because its calls now carry an execution delay): nothing is planned at all, since the vault refuses
+ * even a cancel.
  */
 import { CANCEL_CHUNK, SYNC_CHUNK, UNITS_PER_SHARE } from './constants.js';
+import { windDownAction, type EpochView } from './epoch.js';
 import { bidEscrowOf, budgetFor } from './outflow.js';
 import {
-  fairAtSpot,
+  fairCheckOf,
   haltBeforeFair,
   haltOf,
   isLiveOrder,
@@ -37,11 +40,13 @@ import {
   type MmAction,
   type NetDelta,
   type QuoteParams,
+  type QuoteFees,
   type QuotePrices,
   type SeriesInfo,
   type Slot,
   type SlotTarget,
 } from './engine.js';
+import { crossesProtocol, type ProtocolBook, type ProtocolResting } from './protocol-accounts.js';
 import type { LossStop } from './pnl.js';
 import { planSizes, type SeriesSizes, type SizeSeries } from './risk.js';
 
@@ -54,6 +59,13 @@ export interface MmPlanParams extends QuoteParams {
   maxSeriesPerMarket: number;
   bidUnits: bigint;
   askUnits: bigint;
+  /**
+   * T-OP-133: hold the ask while another maker's live ask rests on the series (halt `other-asker`, bids untouched).
+   * Optional on the type so fixtures elsewhere keep compiling; ABSENT MEANS ON, the owner's default (config.ts).
+   */
+  askFallbackOnly?: boolean;
+  /** T-OP-133: the per-asset write pool the asks are sized against, bps of free; absent = 10_000, the exact budget. */
+  writeOversubscribeBps?: number;
   maxSeriesUnits: bigint;
   maxTotalNotionalUsdg6: bigint;
   deltaAlertShares: number;
@@ -61,6 +73,8 @@ export interface MmPlanParams extends QuoteParams {
   depositTokens: boolean;
   /** MM_MAX_QUOTE_LIFETIME_S: the longest validUntil a new quote gets, whatever the vault allows (0 = none). */
   maxQuoteLifetimeS: number;
+  /** Seconds of lead before vault epochEnd during which the plan opens no new risk. Runtime-populated. */
+  epochWindDownS: number;
 }
 
 export interface VaultLimits {
@@ -75,7 +89,15 @@ export interface VaultLimits {
 
 export interface VaultView {
   isQuoter: boolean;
+  /** AccessManager.canCall's `delay` for (signer, vault, place): >0 with isQuoter false = member but delayed. */
+  quoterDelay: number;
   tradingPaused: boolean;
+  /**
+   * OrderBook.feeParams() and pendingFeeParams() as this tick read them. It lives HERE and not in
+   * `MmPlanParams` on purpose: `MmPlanParams` is static env configuration built once at boot, and the
+   * seller fee is per-tick CHAIN STATE that an admin can change under the bot.
+   */
+  fees: QuoteFees;
   limits: VaultLimits;
   /** MakerVault.outflow(): the leaky bucket now. */
   outflow: { used: bigint; available: bigint };
@@ -91,6 +113,11 @@ export interface VaultView {
   walletTokens: ReadonlyMap<string, bigint>;
   /** MakerVault.trackedSeries with the stored and the measured notional of each. */
   tracked: ReadonlyArray<{ longId: bigint; stored: bigint; measured: bigint | null }>;
+  /**
+   * Vault epoch as the runtime read it. `null` = treasury MakerVault: unrestricted (today's behaviour).
+   * `epochEnd` is a UNIX second from the vault; never derived here.
+   */
+  epoch: EpochView | null;
 }
 
 export interface MarketView {
@@ -154,6 +181,15 @@ export interface TickInput {
   params: MmPlanParams;
   /** A live quote expiring sooner than this is re-placed when a later validUntil is allowed. */
   refreshS: number;
+  /** Protocol-owned makers (lower-case). Runtime-populated; empty = no protocol-cross check. */
+  protocolAccounts: ReadonlySet<string>;
+  /** Resting book of other makers this tick, for protocol-cross. Runtime-populated. */
+  protocolBook: readonly ProtocolResting[];
+  /**
+   * T-OP-133. Live asks from makers OTHER than the vault, by decimal longId (reads.readOtherAskers). Runtime-populated;
+   * an absent series counts as having none. Only consulted when `params.askFallbackOnly`.
+   */
+  otherAskers?: ReadonlyMap<string, ReadonlyArray<{ id: bigint; maker: string; kind: 'AskWrite' | 'AskResale'; price: bigint; remaining: bigint }>>;
 }
 
 /*//////////////////////////////////////////////////////////////
@@ -227,8 +263,58 @@ const lc = (a: string): string => a.toLowerCase();
 const inventoryOf = (e: ExposureDetail | null): bigint => (e === null ? 0n : e.longs + e.resale - e.shorts);
 const hasInventory = (e: ExposureDetail | null): boolean => e !== null && (e.longs > 0n || e.shorts > 0n || e.resale > 0n);
 
+/*//////////////////////////////////////////////////////////////
+                        SAFETY INPUTS ARE REQUIRED
+//////////////////////////////////////////////////////////////*/
+
+/**
+ * F-APP-KEEPER-01 / T-OP-077 / T-OP-085. The four K8-05 safety inputs used to be read behind permissive defaults:
+ * `vault.epoch ?? null` (an ABSENT epoch became "unrestricted"), `params.epochWindDownS ?? 0` (no wind-down),
+ * `protocolAccounts ?? new Set()` and `protocolBook ?? []` (no protocol-cross check). The types already declare all
+ * four required, so every TypeScript caller supplies them (T-124 wired the runtime), which is exactly why the
+ * defaults were dangerous: they could only ever fire for a caller the compiler did not see -- a refactor that drops
+ * an argument, a JS shim, a `as TickInput` cast -- and when they fired, the loss-stop / wind-down / exclusion set
+ * went inert while every test stayed green. A safety predicate that defaults to "off" when its input is missing is
+ * the fail-open shape this workspace keeps paying for.
+ *
+ * So the inputs are REQUIRED at the entry points that read them. `null` is still a legal `epoch` (a treasury
+ * MakerVault is unrestricted by design, see {VaultView.epoch}); `undefined` is not. An empty `protocolAccounts`
+ * set and an empty `protocolBook` are legal when the runtime says so explicitly; a missing one is not. The throw
+ * names the input so the operator reads which wire came loose rather than a TypeError three frames down.
+ */
+type SafetyInput = 'vault.epoch' | 'params.epochWindDownS' | 'protocolAccounts' | 'protocolBook';
+
+function missing(name: SafetyInput): never {
+  throw new Error(`planner: required safety input "${name}" is missing; refusing to plan with a fail-open default (K8-05, F-APP-KEEPER-01)`);
+}
+
+function requireSafetyInputs(input: {
+  vault?: Partial<Pick<VaultView, 'epoch'>>;
+  params?: Partial<Pick<MmPlanParams, 'epochWindDownS'>>;
+  protocolAccounts?: TickInput['protocolAccounts'];
+  protocolBook?: TickInput['protocolBook'];
+}, which: readonly SafetyInput[]): void {
+  for (const name of which) {
+    switch (name) {
+      case 'vault.epoch':
+        if (input.vault === undefined || input.vault.epoch === undefined) missing(name);
+        break;
+      case 'params.epochWindDownS':
+        if (input.params === undefined || typeof input.params.epochWindDownS !== 'number' || !Number.isFinite(input.params.epochWindDownS)) missing(name);
+        break;
+      case 'protocolAccounts':
+        if (!(input.protocolAccounts instanceof Set)) missing(name);
+        break;
+      case 'protocolBook':
+        if (!Array.isArray(input.protocolBook)) missing(name);
+        break;
+    }
+  }
+}
+
 /** The quoted series, in quoting priority. */
-export function selectedSeries(input: Pick<TickInput, 'now' | 'series' | 'markets' | 'params'>): SeriesInfo[] {
+export function selectedSeries(input: Pick<TickInput, 'now' | 'series' | 'markets' | 'params' | 'vault'>): SeriesInfo[] {
+  requireSafetyInputs(input, ['vault.epoch']);
   const spots = new Map<string, bigint>();
   for (const [u, m] of input.markets) if (m.spot !== null) spots.set(lc(u), m.spot);
   const candidates = input.series.filter((s) => !s.settled && input.markets.has(lc(s.info.underlying))).map((s) => s.info);
@@ -239,6 +325,7 @@ export function selectedSeries(input: Pick<TickInput, 'now' | 'series' | 'market
     pullMinutes: input.params.pullMinutes,
     maxSeries: input.params.maxSeries,
     maxSeriesPerMarket: input.params.maxSeriesPerMarket,
+    epoch: input.vault.epoch,
   });
 }
 
@@ -257,11 +344,14 @@ function haltContext(input: Omit<TickInput, 'fairs'>, view: SeriesView, selected
     marketQuoted: market !== undefined,
     spotFresh: view.spotFresh,
     selected,
+    epoch: input.vault.epoch,
+    epochWindDownS: input.params.epochWindDownS,
   };
 }
 
 /** The series a /fair answer is needed for (decimal longIds, in series order). */
 export function fairRequests(input: Omit<TickInput, 'fairs'>): SeriesView[] {
+  requireSafetyInputs(input, ['vault.epoch', 'params.epochWindDownS']);
   const selected = new Set(selectedSeries(input).map((s) => key(s.longId)));
   return input.series.filter((view) => {
     if (input.now >= view.info.expiry || view.settled) return false;
@@ -277,6 +367,7 @@ export function fairRequests(input: Omit<TickInput, 'fairs'>): SeriesView[] {
 const escrowOf = (o: LiveOrder): bigint => (o.price * (o.units - o.filled)) / UNITS_PER_SHARE;
 
 export function planTick(input: TickInput): TickPlan {
+  requireSafetyInputs(input, ['vault.epoch', 'params.epochWindDownS', 'protocolAccounts', 'protocolBook']);
   const { now, params, vault } = input;
   const selectedInfo = selectedSeries(input);
   const rank = new Map(selectedInfo.map((s, i) => [key(s.longId), i]));
@@ -305,28 +396,42 @@ export function planTick(input: TickInput): TickPlan {
     fairReason: string | null;
     prices: QuotePrices | null;
   }
+  const protocolBook: ProtocolBook = {
+    protocolAccounts: input.protocolAccounts,
+    resting: input.protocolBook,
+  };
   const working: Working[] = input.series.map((view) => {
     const selected = rank.has(key(view.info.longId));
     const fairAnswer = input.fairs.get(key(view.info.longId));
-    const halt = haltOf({
-      ...haltContext(input, view, selected),
+    const context = haltContext(input, view, selected);
+    let halt = haltOf({
+      ...context,
       ...(fairAnswer === undefined ? {} : { fair: fairAnswer }),
       spot: view.spot,
       guardsOk: view.askFloor !== null && view.bidCap !== null && view.exposure !== null,
     });
     const fair = fairAnswer !== undefined && fairAnswer.ok ? fairAnswer : null;
     let prices: QuotePrices | null = null;
-    if (halt === null && fair !== null && view.askFloor !== null && view.bidCap !== null && view.spot !== null) {
-      prices = quotePrices({
+    // epoch-winddown still prices: AskResale may unwind. epoch-outside does not (no /fair).
+    const priceHalt = halt === null || halt.halt === 'epoch-winddown';
+    if (priceHalt && fair !== null && view.askFloor !== null && view.bidCap !== null && view.spot !== null) {
+      // Priced at the pricing service's spot, quoted at the oracle's (within MM_FAIR_SPOT_TOLERANCE_BPS).
+      // T-484: every fair that prices passes fairCheckOf, the SAME checks haltOf runs, because epoch-winddown reaches
+      // this branch from haltBeforeFair without haltOf ever looking at the fair (T-474 had carried over only the zero
+      // case). Stale, spot-mismatched, zero or out-of-bounds: the series halts instead of resting an ask.
+      const checked = fairCheckOf({ ...context, fair, spot: view.spot });
+      if (checked.halt !== null) halt = checked.halt;
+      else if (checked.quoted === null) halt = { halt: 'fair-unavailable', detail: `no positive oracle spot to quote at (${view.spot})` };
+      else prices = quotePrices({
         now,
         series: view.info,
-        // Priced at the pricing service's spot, quoted at the oracle's (within MM_FAIR_SPOT_TOLERANCE_BPS: haltOf).
-        fair: fairAtSpot({ fair: fair.fair, delta: fair.delta, fairSpot: fair.spot, spot: view.spot }),
+        fair: checked.quoted,
         delta: fair.delta,
         spot: view.spot,
         netDeltaShares: byUnderlying.get(lc(view.info.underlying))?.deltaShares ?? 0,
         askFloor: view.askFloor,
         bidCap: view.bidCap,
+        fees: input.vault.fees,
         params,
       });
     }
@@ -343,6 +448,12 @@ export function planTick(input: TickInput): TickPlan {
     return e.longs < e.shorts ? e.longs : e.shorts;
   };
   const quoted = working.filter((w) => w.prices !== null).sort((a, b) => (rank.get(key(a.view.info.longId)) ?? 0) - (rank.get(key(b.view.info.longId)) ?? 0));
+  // T-OP-133, MM_ASK_FALLBACK_ONLY: the vault's ask is the FALLBACK. While another maker's live ask rests on the
+  // series the ask side is not sized (so it does not spend the write pool) and not placed, and a resting vault ask
+  // is cancelled by the null target below; bids are untouched. The vault's OWN resting ask is never an "other
+  // asker" (reads.readOtherAskers drops it), or the ask would flap every tick. Protocol accounts count.
+  const fallbackOnly = params.askFallbackOnly ?? true;
+  const otherAskOn = (longId: bigint) => (fallbackOnly ? input.otherAskers?.get(key(longId)) ?? [] : []);
   const bidEscrow = input.series.reduce((sum, v) => sum + v.orders.filter((o) => o.kind === 'Bid' && isLiveOrder(o, now)).reduce((s, o) => s + escrowOf(o), 0n), 0n);
   const sizeInput: SizeSeries[] = quoted.map((w) => {
     const e = w.view.exposure!;
@@ -360,7 +471,7 @@ export function planTick(input: TickInput): TickPlan {
       mintFeePpm: w.view.mintFeePpm,
       expiry: w.view.info.expiry,
       bidPrice: w.prices!.bid,
-      askPrice: w.prices!.ask,
+      askPrice: otherAskOn(w.view.info.longId).length > 0 ? null : w.prices!.ask,
       writeAllowed: market !== undefined && !market.mintPaused,
     };
   });
@@ -377,6 +488,7 @@ export function planTick(input: TickInput): TickPlan {
     usdgBudget: vault.usdgWallet + bidEscrow,
     outflowBudget,
     freeCollateral: vault.freeCollateral,
+    writeOversubscribeBps: params.writeOversubscribeBps,
     bidUnits: params.bidUnits,
     askUnits: params.askUnits,
   });
@@ -396,6 +508,37 @@ export function planTick(input: TickInput): TickPlan {
         write: s.write > 0n ? { price: w.prices.ask, units: s.write } : null,
         resale: s.resale > 0n ? { price: w.prices.resale, units: s.resale } : null,
       };
+      if (w.halt?.halt === 'epoch-winddown') {
+        const wd = windDownAction(view);
+        if (!wd.bid) targets.bid = null;
+        if (!wd.write) targets.write = null;
+        if (!wd.resale) targets.resale = null;
+      }
+      let crossed = false;
+      if (targets.bid !== null && crossesProtocol({ longId: view.info.longId, side: 'bid', price: targets.bid.price }, protocolBook)) {
+        targets.bid = null;
+        crossed = true;
+      }
+      if (targets.write !== null && crossesProtocol({ longId: view.info.longId, side: 'ask', price: targets.write.price }, protocolBook)) {
+        targets.write = null;
+        crossed = true;
+      }
+      if (targets.resale !== null && crossesProtocol({ longId: view.info.longId, side: 'ask', price: targets.resale.price }, protocolBook)) {
+        targets.resale = null;
+        crossed = true;
+      }
+      if (crossed && w.halt === null) w.halt = { halt: 'protocol-cross' };
+      const others = otherAskOn(view.info.longId);
+      if (others.length > 0) {
+        // Sized with askPrice null above, so write and resale are already 0; nulled here too so the halt reason
+        // is the one /state shows and a resting vault ask is cancelled by the actions planner.
+        targets.write = null;
+        targets.resale = null;
+        if (w.halt === null) {
+          const makers = [...new Set(others.map((o) => o.maker))];
+          w.halt = { halt: 'other-asker', detail: `${others.length} live ask${others.length === 1 ? '' : 's'} from ${makers.join(', ')}; the vault's ask is the fallback` };
+        }
+      }
     }
     const until = (slot: Slot) =>
       quoteValidUntil({ now, expiry: view.info.expiry, slot, pullMinutes: params.pullMinutes, sessionClose, maxOrderLifetime: vault.limits.maxOrderLifetime, maxQuoteLifetime: params.maxQuoteLifetimeS });

@@ -157,7 +157,7 @@ function harness(options: { roller?: Address } = {}) {
     log: silentLogger(),
     client: client as never,
     logClient: { getLogs: async () => [] } as never,
-    addresses: { clearinghouse: CH, orderBook: config.contracts.orderBook, settlementOracle: ORACLE, expiryCalendar: config.contracts.expiryCalendar, autoRoller: options.roller ?? null, multicall3: config.multicall3 },
+    addresses: { clearinghouse: CH, orderBook: config.contracts.orderBook, settlementOracle: ORACLE, expiryCalendar: config.contracts.expiryCalendar, autoRoller: options.roller ?? null, feeSplitter: null, multicall3: config.multicall3 },
     store,
     index,
     sender,

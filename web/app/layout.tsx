@@ -50,7 +50,7 @@ const mono = Geist_Mono({
  *      content splits which of the two a search engine decides to show. The disclosures should
  *      have one address.
  *   2. This is a restricted perimeter, and the marketing surface is the one whose copy is gated
- *      by scripts/copy-lint.mjs on every build. The page a stranger finds first should be the
+ *      by disclosure policy (copy-lint enforced this until it was removed on 2026-09-21; nothing checks it now). The page a stranger finds first should be the
  *      page whose wording is checked before it ships.
  *
  * With NEXT_PUBLIC_V2=1 outside a dev preview, public buyer pages opt into indexing in their

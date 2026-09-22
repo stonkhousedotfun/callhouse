@@ -26,6 +26,8 @@ export { CheckCircleIcon, InfoIcon, StopIcon, WarnIcon } from "./icons";
 export { Notice } from "./Notice";
 export type { NoticeProps, NoticeTone } from "./Notice";
 export { PageHead } from "./PageHead";
+export { Segments } from "./Segments";
+export type { SegmentOption, SegmentsProps } from "./Segments";
 export { Card, CardHead, CardMeta, CardTitle, Panel } from "./Panel";
 export type { PanelPad, PanelProps } from "./Panel";
 export { Row, Rows } from "./Rows";

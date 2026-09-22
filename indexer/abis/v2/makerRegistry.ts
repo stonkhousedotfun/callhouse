@@ -5,7 +5,7 @@ export const makerRegistryAbi = [
     "type": "constructor",
     "inputs": [
       {
-        "name": "admin",
+        "name": "authority_",
         "type": "address",
         "internalType": "address"
       }
@@ -14,74 +14,26 @@ export const makerRegistryAbi = [
   },
   {
     "type": "function",
-    "name": "DEFAULT_ADMIN_ROLE",
+    "name": "authority",
     "inputs": [],
     "outputs": [
       {
         "name": "",
-        "type": "bytes32",
-        "internalType": "bytes32"
+        "type": "address",
+        "internalType": "address"
       }
     ],
     "stateMutability": "view"
   },
   {
     "type": "function",
-    "name": "getRoleAdmin",
-    "inputs": [
-      {
-        "name": "role",
-        "type": "bytes32",
-        "internalType": "bytes32"
-      }
-    ],
+    "name": "isConsumingScheduledOp",
+    "inputs": [],
     "outputs": [
       {
         "name": "",
-        "type": "bytes32",
-        "internalType": "bytes32"
-      }
-    ],
-    "stateMutability": "view"
-  },
-  {
-    "type": "function",
-    "name": "grantRole",
-    "inputs": [
-      {
-        "name": "role",
-        "type": "bytes32",
-        "internalType": "bytes32"
-      },
-      {
-        "name": "account",
-        "type": "address",
-        "internalType": "address"
-      }
-    ],
-    "outputs": [],
-    "stateMutability": "nonpayable"
-  },
-  {
-    "type": "function",
-    "name": "hasRole",
-    "inputs": [
-      {
-        "name": "role",
-        "type": "bytes32",
-        "internalType": "bytes32"
-      },
-      {
-        "name": "account",
-        "type": "address",
-        "internalType": "address"
-      }
-    ],
-    "outputs": [
-      {
-        "name": "",
-        "type": "bool",
-        "internalType": "bool"
+        "type": "bytes4",
+        "internalType": "bytes4"
       }
     ],
     "stateMutability": "view"
@@ -107,33 +59,10 @@ export const makerRegistryAbi = [
   },
   {
     "type": "function",
-    "name": "renounceRole",
+    "name": "setAuthority",
     "inputs": [
       {
-        "name": "role",
-        "type": "bytes32",
-        "internalType": "bytes32"
-      },
-      {
-        "name": "callerConfirmation",
-        "type": "address",
-        "internalType": "address"
-      }
-    ],
-    "outputs": [],
-    "stateMutability": "nonpayable"
-  },
-  {
-    "type": "function",
-    "name": "revokeRole",
-    "inputs": [
-      {
-        "name": "role",
-        "type": "bytes32",
-        "internalType": "bytes32"
-      },
-      {
-        "name": "account",
+        "name": "newAuthority",
         "type": "address",
         "internalType": "address"
       }
@@ -160,95 +89,14 @@ export const makerRegistryAbi = [
     "stateMutability": "nonpayable"
   },
   {
-    "type": "function",
-    "name": "supportsInterface",
-    "inputs": [
-      {
-        "name": "interfaceId",
-        "type": "bytes4",
-        "internalType": "bytes4"
-      }
-    ],
-    "outputs": [
-      {
-        "name": "",
-        "type": "bool",
-        "internalType": "bool"
-      }
-    ],
-    "stateMutability": "view"
-  },
-  {
     "type": "event",
-    "name": "RoleAdminChanged",
+    "name": "AuthorityUpdated",
     "inputs": [
       {
-        "name": "role",
-        "type": "bytes32",
-        "internalType": "bytes32",
-        "indexed": true
-      },
-      {
-        "name": "previousAdminRole",
-        "type": "bytes32",
-        "internalType": "bytes32",
-        "indexed": true
-      },
-      {
-        "name": "newAdminRole",
-        "type": "bytes32",
-        "internalType": "bytes32",
-        "indexed": true
-      }
-    ],
-    "anonymous": false
-  },
-  {
-    "type": "event",
-    "name": "RoleGranted",
-    "inputs": [
-      {
-        "name": "role",
-        "type": "bytes32",
-        "internalType": "bytes32",
-        "indexed": true
-      },
-      {
-        "name": "account",
+        "name": "authority",
         "type": "address",
         "internalType": "address",
-        "indexed": true
-      },
-      {
-        "name": "sender",
-        "type": "address",
-        "internalType": "address",
-        "indexed": true
-      }
-    ],
-    "anonymous": false
-  },
-  {
-    "type": "event",
-    "name": "RoleRevoked",
-    "inputs": [
-      {
-        "name": "role",
-        "type": "bytes32",
-        "internalType": "bytes32",
-        "indexed": true
-      },
-      {
-        "name": "account",
-        "type": "address",
-        "internalType": "address",
-        "indexed": true
-      },
-      {
-        "name": "sender",
-        "type": "address",
-        "internalType": "address",
-        "indexed": true
+        "indexed": false
       }
     ],
     "anonymous": false
@@ -274,28 +122,50 @@ export const makerRegistryAbi = [
   },
   {
     "type": "error",
-    "name": "AccessControlBadConfirmation",
-    "inputs": []
+    "name": "AccessManagedInvalidAuthority",
+    "inputs": [
+      {
+        "name": "authority",
+        "type": "address",
+        "internalType": "address"
+      }
+    ]
   },
   {
     "type": "error",
-    "name": "AccessControlUnauthorizedAccount",
+    "name": "AccessManagedRequiredDelay",
     "inputs": [
       {
-        "name": "account",
+        "name": "caller",
         "type": "address",
         "internalType": "address"
       },
       {
-        "name": "neededRole",
-        "type": "bytes32",
-        "internalType": "bytes32"
+        "name": "delay",
+        "type": "uint32",
+        "internalType": "uint32"
+      }
+    ]
+  },
+  {
+    "type": "error",
+    "name": "AccessManagedUnauthorized",
+    "inputs": [
+      {
+        "name": "caller",
+        "type": "address",
+        "internalType": "address"
       }
     ]
   },
   {
     "type": "error",
     "name": "CeilingExceeded",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "NoSource",
     "inputs": []
   },
   {
@@ -356,6 +226,33 @@ export const makerRegistryAbi = [
   },
   {
     "type": "error",
+    "name": "CapExceeded",
+    "inputs": [
+      {
+        "name": "amount",
+        "type": "uint256",
+        "internalType": "uint256"
+      },
+      {
+        "name": "cap",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ]
+  },
+  {
+    "type": "error",
+    "name": "CooldownActive",
+    "inputs": [
+      {
+        "name": "readyAt",
+        "type": "uint40",
+        "internalType": "uint40"
+      }
+    ]
+  },
+  {
+    "type": "error",
     "name": "CreatePaused",
     "inputs": []
   },
@@ -363,6 +260,22 @@ export const makerRegistryAbi = [
     "type": "error",
     "name": "DeadlinePassed",
     "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "FeeAboveMax",
+    "inputs": [
+      {
+        "name": "fee",
+        "type": "uint256",
+        "internalType": "uint256"
+      },
+      {
+        "name": "max",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ]
   },
   {
     "type": "error",
@@ -397,12 +310,12 @@ export const makerRegistryAbi = [
   },
   {
     "type": "error",
-    "name": "NoSource",
+    "name": "NotExpired",
     "inputs": []
   },
   {
     "type": "error",
-    "name": "NotExpired",
+    "name": "NotMinter",
     "inputs": []
   },
   {
@@ -465,6 +378,17 @@ export const makerRegistryAbi = [
         "name": "hi",
         "type": "uint256",
         "internalType": "uint256"
+      }
+    ]
+  },
+  {
+    "type": "error",
+    "name": "RouteRejected",
+    "inputs": [
+      {
+        "name": "reason",
+        "type": "bytes32",
+        "internalType": "bytes32"
       }
     ]
   },

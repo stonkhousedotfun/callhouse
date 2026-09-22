@@ -4,9 +4,11 @@
  * WHAT IS PINNED:
  *   - every §6 event kind renders, with a link into APP_URL;
  *   - every message about a long position states its cost and its max loss, rounded UP;
- *   - the copy rules: the FORBIDDEN phrases of scripts/copy-lint.mjs and the plan README appear
+ *   - a price-driven message states "as of <New York time>" when its payload dated the spot, and
+ *     states no time at all when it did not;
+ *   - the copy rules: the FORBIDDEN phrases (formerly copy-lint's, inlined here since its removal) and the plan README appear
  *     neither in templates.ts nor in any rendered message, and no rendered message carries an
- *     exclamation mark, an emoji or a promotional word. scripts/copy-lint.mjs scans web/ only (its
+ *     exclamation mark, an emoji or a promotional word. copy-lint scanned web/ only (its
  *     package list is fixed and the file belongs to another lane), so this test is the gate here;
  *   - numbers read as the dapp formats them (web/lib/format.ts, web/lib/v2/payoff.ts);
  *   - the payload schemas N2-02 builds against.
@@ -30,6 +32,9 @@ function event(kind: EventKind, payload: unknown): ParsedEvent {
 
 const usdg = (raw: string) => ({ raw, decimals: 6 });
 
+/** Thu 17 Sep 2026 11:35:00 New York: an oracle spot time, minutes behind the message. */
+const SPOT_SEEN_AT = Date.parse('2026-09-17T15:35:00Z') / 1000;
+
 /** Every template branch, so the copy checks see every sentence a user can receive. */
 const VARIANTS: [string, EventKind, unknown][] = [
   ...EVENT_KINDS.map((kind): [string, EventKind, unknown] => [kind, kind, SAMPLE_PAYLOADS[kind]]),
@@ -40,9 +45,21 @@ const VARIANTS: [string, EventKind, unknown][] = [
   ['fill sell with proceeds to another wallet', 'fill_receipt', { ...SAMPLE_PAYLOADS.fill_receipt, side: 'sell', role: 'taker', recipient: '0x4088c59Eb3fB713B124f182E7083AEb3358A030B', total: usdg('1610000'), fee: usdg('190000') }],
   ['fill sale proceeds received', 'fill_receipt', { ...SAMPLE_PAYLOADS.fill_receipt, side: 'sell', role: 'recipient', seller: '0x4088c59Eb3fB713B124f182E7083AEb3358A030B', total: usdg('1610000'), fee: usdg('190000') }],
   ['strike cross short put below', 'strike_cross', { series: { ...SERIES_221, isPut: true }, position: 'short', direction: 'below', spot: usdg('220000000'), units: '100' }],
+  ['strike cross as of', 'strike_cross', { ...SAMPLE_PAYLOADS.strike_cross, spotUpdatedAt: SPOT_SEEN_AT }],
   ['price alert below', 'price_alert', { ...SAMPLE_PAYLOADS.price_alert, direction: 'below' }],
+  ['price alert as of', 'price_alert', { ...SAMPLE_PAYLOADS.price_alert, spotUpdatedAt: SPOT_SEEN_AT }],
+  ['writer itm as of', 'writer_itm_warning', { ...SAMPLE_PAYLOADS.writer_itm_warning, spotUpdatedAt: SPOT_SEEN_AT }],
   ['expiry 24h short', 'expiry_24h', { series: SERIES_221, position: 'short', units: '50' }],
   ['expiry 1h long', 'expiry_1h', { series: SERIES_221, position: 'long', units: '50', cost: usdg('1900000') }],
+  ['expiry 24h digest', 'expiry_24h', {
+    series: SERIES_221, position: 'long', units: '50', cost: usdg('1900000'),
+    positions: [
+      { series: SERIES_221, position: 'long', units: '50', cost: usdg('1900000') },
+      { series: { ...SERIES_221, strike: usdg('216000000') }, position: 'long', units: '25', cost: usdg('800000') },
+      { series: SERIES_221, position: 'short', units: '100' },
+      { series: { ...SERIES_221, isPut: true }, position: 'long', units: '10', cost: usdg('400000') },
+    ],
+  }],
   ['settlement long worthless', 'settlement_receipt', { series: { ...SERIES_216, strike: usdg('227000000') }, position: 'long', units: '30', settlementPrice: usdg('219400000'), payout: null, cost: usdg('270000'), toLedger: false }],
   ['settlement long in kind to ledger', 'settlement_receipt', { ...SAMPLE_PAYLOADS.settlement_receipt, payout: { asset: 'stock', amount: { raw: '6198723792160437', decimals: 18 } }, payoutValue: usdg('1360000'), toLedger: true }],
   ['settlement short', 'settlement_receipt', { series: SERIES_216, position: 'short', units: '50', settlementPrice: usdg('219400000'), payout: { asset: 'stock', amount: { raw: '492024612579762989', decimals: 18 } }, toLedger: false }],
@@ -79,6 +96,7 @@ test('links go to the page the message is about', () => {
   assert.equal(byLabel.get('auto_roll'), `${APP}/earn/NVDA`);
   assert.equal(byLabel.get('payout_failed_to_ledger'), `${APP}/portfolio`);
   assert.equal(byLabel.get('settlement long in kind to ledger'), `${APP}/portfolio`);
+  assert.equal(byLabel.get('expiry 24h digest'), `${APP}/portfolio`);
 });
 
 test('a buy receipt reads exactly as specified', () => {
@@ -141,6 +159,32 @@ test('auto-roll skipped states when the roll fell due and the last roll; a paylo
   );
 });
 
+test('price-driven messages state when the spot was observed, and say nothing about time when the payload has none', () => {
+  const byLabel = new Map(rendered.map(([label, , , m]) => [label, m.body]));
+  const when = 'Thu 17 Sep, 11:35am EDT';
+  assert.equal(fmtEastern(SPOT_SEEN_AT), when);
+
+  // With the time: one phrase, straight after the price it dates.
+  assert.equal(
+    byLabel.get('price alert as of'),
+    `NVDA is at 221.40 USDG as of ${when}, above your alert at 221.00 USDG.`,
+  );
+  assert.ok(byLabel.get('strike cross as of')?.startsWith(`NVDA is at 221.40 USDG as of ${when}, above the 221.00 USDG strike of your NVDA 221.00 call`), byLabel.get('strike cross as of'));
+  assert.ok(byLabel.get('writer itm as of')?.startsWith(`NVDA is at 222.10 USDG as of ${when}, above the 221.00 USDG strike of the NVDA 221.00 call you wrote`), byLabel.get('writer itm as of'));
+
+  // Without it: the phrase is absent, and no other time takes its place. The price alert's whole
+  // body is pinned, so an invented or empty "as of" cannot hide anywhere in it.
+  assert.equal(byLabel.get('price_alert'), 'NVDA is at 221.40 USDG, above your alert at 221.00 USDG.');
+  for (const label of ['price_alert', 'strike_cross', 'writer_itm_warning', 'price alert below', 'strike cross short put below', 'expiry 24h digest']) {
+    const body = byLabel.get(label);
+    assert.ok(body !== undefined, label);
+    assert.doesNotMatch(body, /as of/, label);
+  }
+  // The untimed price alert names no time at all; the other two still name their expiry, which is
+  // the series' own fact and not an observation time.
+  assert.doesNotMatch(byLabel.get('price_alert') ?? '', /\d{1,2}:\d{2}(am|pm)/);
+});
+
 test('a worthless long says what was lost and that it was the most it could lose', () => {
   const message = rendered.find(([label]) => label === 'settlement long worthless')?.[3];
   assert.ok(message);
@@ -182,8 +226,12 @@ test('every message about a long position states cost and max loss', () => {
   }
 });
 
-/** scripts/copy-lint.mjs FORBIDDEN, plus the plan README copy rules. */
-const FORBIDDEN: RegExp[] = [
+/**
+ * These were copy-lint's FORBIDDEN rules. copy-lint was removed on 2026-09-21 by owner instruction,
+ * so this is no longer a pinned copy of anything - it is the only remaining copy, and it guards
+ * notifier messages only.
+ */
+const NOTIFIER_FORBIDDEN: RegExp[] = [
   /\bAPY\b/i,
   /\bAPR\b/i,
   /10\s*%\s*weekly/i,
@@ -192,10 +240,25 @@ const FORBIDDEN: RegExp[] = [
   /backed\s+by\s+nvidia/i,
   /dividend\s+paid\s+(in\s+cash\s+)?by\s+nvidia/i,
   /guaranteed\s+(yield|return|premium)/i,
+  /\bguaranteed\b/i,
   /risk[-\s]?free/i,
+  /\bcan['’]?t\s+lose\b/i,
+  /\bfree\s+money\b/i,
+];
+
+/** The plan README copy rules the linter never carried. */
+const README_FORBIDDEN: RegExp[] = [
   /tokeni[sz]ed\s+(stocks?|equit(y|ies)|shares?)/i,
   /\bguarantee/i,
 ];
+
+const FORBIDDEN: RegExp[] = [...NOTIFIER_FORBIDDEN, ...README_FORBIDDEN];
+
+// The drift test that compared this list against disclosure policy (copy-lint enforced this until it was removed on 2026-09-21; nothing checks it now) was removed on
+// 2026-09-21 with the linter itself (owner instruction). The list below is now the ONLY copy of
+// these rules in the repository, so it is no longer a mirror that can drift - it is the source.
+// It still guards notifier messages; nothing guards web/ copy any more.
+
 
 /** Tone: nothing a message says may read as a pitch. */
 const PROMOTIONAL: RegExp[] = [

@@ -4,7 +4,9 @@
   "version": "0.1.0",
   "description": "Pooled covered-call vault for Robinhood Chain Stock Tokens",
   "license": "MIT",
-  "engines": { "node": ">=22" },
+  "engines": {
+    "node": ">=22"
+  },
   "packageManager": "pnpm@9.10.0",
   "pnpm": {
     "overrides": {
@@ -15,7 +17,8 @@
     "build": "pnpm -r build",
     "lint": "pnpm -r lint",
     "test": "pnpm -r test",
-    "copy-lint": "node scripts/copy-lint.mjs",
+    "test:release-tooling": "node --test scripts/release-preflight.test.mjs",
+    "release:preflight": "node scripts/release-preflight.mjs",
     "contracts:build": "cd contracts && forge build",
     "contracts:test": "cd contracts && forge test -vv",
     "contracts:fork": "cd contracts && forge test --match-path 'test/fork/*' --fork-url $RH_RPC -vv"

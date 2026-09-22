@@ -10,7 +10,7 @@ export const autoRollerAbi = [
         "internalType": "contract IOrderBook"
       },
       {
-        "name": "admin",
+        "name": "authority_",
         "type": "address",
         "internalType": "address"
       }
@@ -26,19 +26,6 @@ export const autoRollerAbi = [
         "name": "",
         "type": "uint40",
         "internalType": "uint40"
-      }
-    ],
-    "stateMutability": "view"
-  },
-  {
-    "type": "function",
-    "name": "DEFAULT_ADMIN_ROLE",
-    "inputs": [],
-    "outputs": [
-      {
-        "name": "",
-        "type": "bytes32",
-        "internalType": "bytes32"
       }
     ],
     "stateMutability": "view"
@@ -72,6 +59,19 @@ export const autoRollerAbi = [
   {
     "type": "function",
     "name": "MAX_OTM_BPS",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "uint16",
+        "internalType": "uint16"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "MAX_REPRICE_DROP_BPS",
     "inputs": [],
     "outputs": [
       {
@@ -136,6 +136,19 @@ export const autoRollerAbi = [
   },
   {
     "type": "function",
+    "name": "authority",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "address",
+        "internalType": "address"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
     "name": "cancelStale",
     "inputs": [
       {
@@ -173,61 +186,13 @@ export const autoRollerAbi = [
   },
   {
     "type": "function",
-    "name": "getRoleAdmin",
-    "inputs": [
-      {
-        "name": "role",
-        "type": "bytes32",
-        "internalType": "bytes32"
-      }
-    ],
+    "name": "isConsumingScheduledOp",
+    "inputs": [],
     "outputs": [
       {
         "name": "",
-        "type": "bytes32",
-        "internalType": "bytes32"
-      }
-    ],
-    "stateMutability": "view"
-  },
-  {
-    "type": "function",
-    "name": "grantRole",
-    "inputs": [
-      {
-        "name": "role",
-        "type": "bytes32",
-        "internalType": "bytes32"
-      },
-      {
-        "name": "account",
-        "type": "address",
-        "internalType": "address"
-      }
-    ],
-    "outputs": [],
-    "stateMutability": "nonpayable"
-  },
-  {
-    "type": "function",
-    "name": "hasRole",
-    "inputs": [
-      {
-        "name": "role",
-        "type": "bytes32",
-        "internalType": "bytes32"
-      },
-      {
-        "name": "account",
-        "type": "address",
-        "internalType": "address"
-      }
-    ],
-    "outputs": [
-      {
-        "name": "",
-        "type": "bool",
-        "internalType": "bool"
+        "type": "bytes4",
+        "internalType": "bytes4"
       }
     ],
     "stateMutability": "view"
@@ -307,24 +272,6 @@ export const autoRollerAbi = [
   },
   {
     "type": "function",
-    "name": "renounceRole",
-    "inputs": [
-      {
-        "name": "role",
-        "type": "bytes32",
-        "internalType": "bytes32"
-      },
-      {
-        "name": "callerConfirmation",
-        "type": "address",
-        "internalType": "address"
-      }
-    ],
-    "outputs": [],
-    "stateMutability": "nonpayable"
-  },
-  {
-    "type": "function",
     "name": "reprice",
     "inputs": [
       {
@@ -341,24 +288,6 @@ export const autoRollerAbi = [
         "name": "newPrice",
         "type": "uint128",
         "internalType": "uint128"
-      }
-    ],
-    "outputs": [],
-    "stateMutability": "nonpayable"
-  },
-  {
-    "type": "function",
-    "name": "revokeRole",
-    "inputs": [
-      {
-        "name": "role",
-        "type": "bytes32",
-        "internalType": "bytes32"
-      },
-      {
-        "name": "account",
-        "type": "address",
-        "internalType": "address"
       }
     ],
     "outputs": [],
@@ -386,6 +315,19 @@ export const autoRollerAbi = [
         "internalType": "bool"
       }
     ],
+    "stateMutability": "nonpayable"
+  },
+  {
+    "type": "function",
+    "name": "setAuthority",
+    "inputs": [
+      {
+        "name": "newAuthority",
+        "type": "address",
+        "internalType": "address"
+      }
+    ],
+    "outputs": [],
     "stateMutability": "nonpayable"
   },
   {
@@ -570,7 +512,7 @@ export const autoRollerAbi = [
         "internalType": "bool"
       }
     ],
-    "stateMutability": "view"
+    "stateMutability": "pure"
   },
   {
     "type": "function",
@@ -584,6 +526,19 @@ export const autoRollerAbi = [
       }
     ],
     "stateMutability": "view"
+  },
+  {
+    "type": "event",
+    "name": "AuthorityUpdated",
+    "inputs": [
+      {
+        "name": "authority",
+        "type": "address",
+        "internalType": "address",
+        "indexed": false
+      }
+    ],
+    "anonymous": false
   },
   {
     "type": "event",
@@ -644,81 +599,6 @@ export const autoRollerAbi = [
         "type": "uint128",
         "internalType": "uint128",
         "indexed": false
-      }
-    ],
-    "anonymous": false
-  },
-  {
-    "type": "event",
-    "name": "RoleAdminChanged",
-    "inputs": [
-      {
-        "name": "role",
-        "type": "bytes32",
-        "internalType": "bytes32",
-        "indexed": true
-      },
-      {
-        "name": "previousAdminRole",
-        "type": "bytes32",
-        "internalType": "bytes32",
-        "indexed": true
-      },
-      {
-        "name": "newAdminRole",
-        "type": "bytes32",
-        "internalType": "bytes32",
-        "indexed": true
-      }
-    ],
-    "anonymous": false
-  },
-  {
-    "type": "event",
-    "name": "RoleGranted",
-    "inputs": [
-      {
-        "name": "role",
-        "type": "bytes32",
-        "internalType": "bytes32",
-        "indexed": true
-      },
-      {
-        "name": "account",
-        "type": "address",
-        "internalType": "address",
-        "indexed": true
-      },
-      {
-        "name": "sender",
-        "type": "address",
-        "internalType": "address",
-        "indexed": true
-      }
-    ],
-    "anonymous": false
-  },
-  {
-    "type": "event",
-    "name": "RoleRevoked",
-    "inputs": [
-      {
-        "name": "role",
-        "type": "bytes32",
-        "internalType": "bytes32",
-        "indexed": true
-      },
-      {
-        "name": "account",
-        "type": "address",
-        "internalType": "address",
-        "indexed": true
-      },
-      {
-        "name": "sender",
-        "type": "address",
-        "internalType": "address",
-        "indexed": true
       }
     ],
     "anonymous": false
@@ -909,28 +789,50 @@ export const autoRollerAbi = [
   },
   {
     "type": "error",
-    "name": "AccessControlBadConfirmation",
-    "inputs": []
+    "name": "AccessManagedInvalidAuthority",
+    "inputs": [
+      {
+        "name": "authority",
+        "type": "address",
+        "internalType": "address"
+      }
+    ]
   },
   {
     "type": "error",
-    "name": "AccessControlUnauthorizedAccount",
+    "name": "AccessManagedRequiredDelay",
     "inputs": [
       {
-        "name": "account",
+        "name": "caller",
         "type": "address",
         "internalType": "address"
       },
       {
-        "name": "neededRole",
-        "type": "bytes32",
-        "internalType": "bytes32"
+        "name": "delay",
+        "type": "uint32",
+        "internalType": "uint32"
+      }
+    ]
+  },
+  {
+    "type": "error",
+    "name": "AccessManagedUnauthorized",
+    "inputs": [
+      {
+        "name": "caller",
+        "type": "address",
+        "internalType": "address"
       }
     ]
   },
   {
     "type": "error",
     "name": "BadPrice",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "BadUnits",
     "inputs": []
   },
   {
@@ -981,6 +883,27 @@ export const autoRollerAbi = [
   },
   {
     "type": "error",
+    "name": "RepriceDropExceeded",
+    "inputs": [
+      {
+        "name": "current",
+        "type": "uint128",
+        "internalType": "uint128"
+      },
+      {
+        "name": "proposed",
+        "type": "uint128",
+        "internalType": "uint128"
+      },
+      {
+        "name": "floor",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ]
+  },
+  {
+    "type": "error",
     "name": "SafeCastOverflowedUintDowncast",
     "inputs": [
       {
@@ -1022,11 +945,6 @@ export const autoRollerAbi = [
   },
   {
     "type": "error",
-    "name": "BadUnits",
-    "inputs": []
-  },
-  {
-    "type": "error",
     "name": "BelowMinUnits",
     "inputs": [
       {
@@ -1043,6 +961,33 @@ export const autoRollerAbi = [
   },
   {
     "type": "error",
+    "name": "CapExceeded",
+    "inputs": [
+      {
+        "name": "amount",
+        "type": "uint256",
+        "internalType": "uint256"
+      },
+      {
+        "name": "cap",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ]
+  },
+  {
+    "type": "error",
+    "name": "CooldownActive",
+    "inputs": [
+      {
+        "name": "readyAt",
+        "type": "uint40",
+        "internalType": "uint40"
+      }
+    ]
+  },
+  {
+    "type": "error",
     "name": "CreatePaused",
     "inputs": []
   },
@@ -1050,6 +995,22 @@ export const autoRollerAbi = [
     "type": "error",
     "name": "DeadlinePassed",
     "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "FeeAboveMax",
+    "inputs": [
+      {
+        "name": "fee",
+        "type": "uint256",
+        "internalType": "uint256"
+      },
+      {
+        "name": "max",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ]
   },
   {
     "type": "error",
@@ -1070,6 +1031,11 @@ export const autoRollerAbi = [
   {
     "type": "error",
     "name": "NotExpired",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "NotMinter",
     "inputs": []
   },
   {
@@ -1121,6 +1087,17 @@ export const autoRollerAbi = [
         "name": "hi",
         "type": "uint256",
         "internalType": "uint256"
+      }
+    ]
+  },
+  {
+    "type": "error",
+    "name": "RouteRejected",
+    "inputs": [
+      {
+        "name": "reason",
+        "type": "bytes32",
+        "internalType": "bytes32"
       }
     ]
   },

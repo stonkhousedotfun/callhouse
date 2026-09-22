@@ -1,5 +1,5 @@
 import { HTTPException } from "hono/http-exception";
-import { indexedHead, type IndexedHead } from "./machine";
+import { indexedHead, type IndexedHead } from "./head";
 
 /**
  * Ponder publishes normal projection writes and the full checkpoint in one transaction.

@@ -11,13 +11,17 @@ import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { chromium, type BrowserContext, type Page } from "playwright-core";
-import { createPublicClient, decodeFunctionData, encodeAbiParameters, encodeFunctionData, formatUnits, getAddress, http, keccak256, pad, parseEventLogs, toHex,
-  type Address, type Hex } from "viem";
+import { createPublicClient, decodeFunctionData, encodeAbiParameters, encodeFunctionData, formatUnits, getAddress, http, keccak256, pad, parseEventLogs,
+  toFunctionSelector, toHex, type Address, type Hex } from "viem";
 
 import { clearinghouseAbi } from "../../lib/abi/v2/clearinghouse";
 import { orderBookAbi } from "../../lib/abi/v2/orderBook";
 import { autoRollerAbi } from "../../lib/abi/v2/autoRoller";
 import { settlementOracleAbi } from "../../lib/abi/v2/settlementOracle";
+import { payoutAdapterAbi } from "../../lib/abi/v2/payoutAdapter";
+import { accessManagerAbi } from "../../lib/abi/v2/accessManager";
+import { conversionFloorBps } from "../../lib/v2/conversion";
+import { formatUsdgTick, smartPricingPrices } from "../../lib/v2/smartPricing";
 
 const WEB = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 const ROOT = resolve(WEB, "..");
@@ -30,6 +34,29 @@ const SITE = `http://127.0.0.1:${WEB_PORT}`;
 const TIMEOUT = Number(process.env.V2_ACCEPTANCE_TIMEOUT_MS ?? 900_000);
 const MARKET_FILE = join(WEB, "lib/markets.generated.ts");
 const INDEXER_MARKET_FILE = join(ROOT, "indexer/lib/v2/marketRegistry.generated.ts");
+// Mirrors TakeParams.maxTotalFee's uint128 width in contracts/src/v2/interfaces/V2Types.sol.
+const MAX_UINT128 = (1n << 128n) - 1n;
+// Mirrors FEE_CHANGE_DELAY in contracts/src/v2/interfaces/V2Constants.sol:60
+// (`uint40 internal constant FEE_CHANGE_DELAY = 48 hours;`). INTERFACE_VERSION 8 raised it from 24 h
+// (owner decision V3-D13), so OrderBook.setFeeParams records
+// effectiveAt = the timestamp of the block that EXECUTED it + this. Distinct from the AccessManager's
+// own FEE_MANAGER execution delay, which the admin driver waits out before the call is even sent.
+const FEE_CHANGE_DELAY_S = 48 * 60 * 60;
+// Mirrors type(IClearinghouse).interfaceId at INTERFACE_VERSION 8, pinned in the contracts repo at
+// test/v2/InterfaceIds.t.sol:960 ("IClearinghouse 0xf9e1eb5d -> 0x9b75eeed").
+const CLEARINGHOUSE_INTERFACE_ID_V8 = "0x9b75eeed";
+// The v7 id the same test records as superseded; a v8 deployment must no longer answer it.
+const CLEARINGHOUSE_INTERFACE_ID_V7 = "0xf9e1eb5d";
+// V2Types.OrderKind: 0 Bid, 1 AskResale, 2 AskWrite. Only an AskWrite fill mints in v8.
+const ASK_WRITE = 2;
+// IPayoutRouter.Venue in contracts/src/v2/interfaces/IPayoutRouter.sol:41-45 — None, V3, V4.
+const VENUE_V4 = 2;
+// routes(address) keeps this selector across v7 -> v8 while its tuple gained `tickSpacing`
+// (INTERFACE-CHANGES-V8 entry 1, "What deliberately did NOT move"), so the selector can never tell
+// the two apart: the tuple is read from the regenerated ABI, never feature-detected.
+const ROUTES_SELECTOR = "0xd7409659";
+const erc20ApproveAbi = [{ type: "function", name: "approve", stateMutability: "nonpayable",
+  inputs: [{ type: "address" }, { type: "uint256" }], outputs: [{ type: "bool" }] }] as const;
 const sleep = (ms: number) => new Promise<void>((done) => setTimeout(done, ms));
 
 type Devnet = {
@@ -270,7 +297,11 @@ async function main() {
   assert.match(String(await raw("web3_clientVersion")), /anvil/i, "RPC must be anvil");
   assert.equal(await chain.getChainId(), 4663);
   assert.equal(await chain.readContract({ address: D.contracts.clearinghouse, abi: clearinghouseAbi,
-    functionName: "supportsInterface", args: ["0xf9e1eb5d"] }), true, "browser acceptance requires v7 interface ID");
+    functionName: "supportsInterface", args: [CLEARINGHOUSE_INTERFACE_ID_V8] }), true,
+  "browser acceptance requires the INTERFACE_VERSION 8 Clearinghouse ID");
+  assert.equal(await chain.readContract({ address: D.contracts.clearinghouse, abi: clearinghouseAbi,
+    functionName: "supportsInterface", args: [CLEARINGHOUSE_INTERFACE_ID_V7] }), false,
+  "a v8 devnet must not still answer the superseded v7 Clearinghouse ID");
   log(`devnet ${RPC}; evidence ${OUT}`);
 
   const indexerEnv: NodeJS.ProcessEnv = { ...process.env, ...envFile(join(DEVNET, "env/indexer.env")),
@@ -364,11 +395,36 @@ async function main() {
     await deal(usdg, buyer.account, 10_000n * 10n ** 6n);
     if (await tokenBalance(nvda, writer.account) < 10n ** 18n) await deal(nvda, writer.account, 2n * 10n ** 18n);
 
-    // The landing card is the entry point; activation must focus the ticket for keyboard users.
+    // The market search popup participates in the tab order. Moving focus into its
+    // footer must not unmount it; moving onward must close it without losing focus.
     await buyerPage.goto(SITE);
+    const marketSearch = buyerPage.getByRole("combobox", { name: "Search markets" });
+    await marketSearch.focus();
+    const browseMarkets = buyerPage.getByRole("link", { name: "Browse all markets" });
+    await browseMarkets.waitFor({ state: "visible" });
+    await buyerPage.keyboard.press("Tab");
+    assert(await browseMarkets.evaluate((element) => element === document.activeElement),
+      "Tab from market search reaches Browse all markets");
+    await buyerPage.keyboard.press("Tab");
+    const connectButton = buyerPage.locator("header").getByRole("button", { name: "Connect", exact: true });
+    await until("market search exits without focus loss", async () =>
+      await connectButton.evaluate((element) => element === document.activeElement), 10_000);
+    await browseMarkets.waitFor({ state: "hidden" });
+    log("market search tabs through Browse all markets and onward without focus loss");
+
+    // A pointer press on the footer link must not let the search input's blur close the popup
+    // before the click lands (WebKit does not focus a link on mousedown); the click navigates.
+    await marketSearch.focus();
+    await browseMarkets.waitFor({ state: "visible" });
+    await browseMarkets.click();
+    await buyerPage.waitForURL(/\/markets(?:[?#]|$)/, { timeout: 30_000 });
+    log("a pointer press on Browse all markets opens the directory");
+    await buyerPage.goto(SITE);
+
+    // The landing card is the entry point; activation must focus the ticket for keyboard users.
     await connect(buyerPage, buyer);
     await buyerPage.getByText(/max loss/i).first().waitFor({ state: "visible" });
-    const firstBuy = buyerPage.getByRole("link", { name: "Buy 0.01 share", exact: true }).first();
+    const firstBuy = buyerPage.getByRole("link", { name: "Buy 0.01 shares", exact: true }).first();
     await firstBuy.waitFor({ state: "visible", timeout: 60_000 });
     await firstBuy.focus(); await buyerPage.keyboard.press("Enter");
     await buyerPage.locator("#ticket-shares").waitFor({ state: "visible" });
@@ -439,12 +495,13 @@ async function main() {
       chain.readContract({ address: D.contracts.clearinghouse, abi: clearinghouseAbi,
         functionName: "balanceOf", args: [D.contracts.orderBook, BigInt(cardId)] }),
     ]);
-    const resaleParams = { longId: BigInt(cardId), buying: true, orderIds: [resaleId], units: 1n,
+    const resaleQuoteParams = { longId: BigInt(cardId), buying: true, orderIds: [resaleId], units: 1n,
       minUnits: 1n, limitPrice: resaleOrder.price, writeToSell: false, recipient: resaleBuyer,
-      deadline: Number((await chain.getBlock()).timestamp) + 300 };
-    const [quotedUnits, quotedPremium, quotedFee] = await chain.readContract({ account: resaleBuyer,
-      address: D.contracts.orderBook, abi: orderBookAbi, functionName: "quoteTake", args: [resaleParams] });
+      deadline: Number((await chain.getBlock()).timestamp) + 300, maxTotalFee: MAX_UINT128 };
+    const [quotedUnits, quotedPremium, quotedFee, quotedSellerFees] = await chain.readContract({ account: resaleBuyer,
+      address: D.contracts.orderBook, abi: orderBookAbi, functionName: "quoteTake", args: [resaleQuoteParams] });
     assert.equal(quotedUnits, 1n, "listed resale is fillable by another wallet");
+    const resaleParams = { ...resaleQuoteParams, maxTotalFee: quotedFee + quotedSellerFees };
     const resaleFillHash = await raw("eth_sendTransaction", [{ from: resaleBuyer, to: D.contracts.orderBook,
       data: encodeFunctionData({ abi: orderBookAbi, functionName: "take", args: [resaleParams] }) }]) as Hex;
     const resaleFillReceipt = await chain.waitForTransactionReceipt({ hash: resaleFillHash });
@@ -509,6 +566,22 @@ async function main() {
       await action.waitFor({ state: "visible" });
       const saved = roll.getByRole("button", { name: "Load saved strategy into form" });
       if (await saved.isVisible()) await saved.click();
+      const [strategySpotOk, strategySpot] = await chain.readContract({ address: D.contracts.settlementOracle,
+        abi: settlementOracleAbi, functionName: "trySpot", args: [nvda] });
+      assert(strategySpotOk, "smart-pricing acceptance has a fresh oracle spot");
+      const bandPrices = smartPricingPrices(strategySpot, { askBps: 300, minAskBps: 25, maxAskBps: 300 });
+      assert(bandPrices, "smart-pricing acceptance band has valid USDG ticks");
+      const startingAsk = roll.getByLabel("Starting ask · USDG / share");
+      await startingAsk.fill(formatUsdgTick(bandPrices.start));
+      await startingAsk.blur();
+      const smartPricing = roll.getByRole("checkbox", { name: "Smart pricing within my limits" });
+      if (!await smartPricing.isChecked()) await smartPricing.check();
+      const minimumAsk = roll.getByLabel("Minimum ask · USDG / share");
+      await minimumAsk.fill(formatUsdgTick(bandPrices.min));
+      await minimumAsk.blur();
+      const maximumAsk = roll.getByLabel("Maximum ask · USDG / share");
+      await maximumAsk.fill(formatUsdgTick(bandPrices.max));
+      await maximumAsk.blur();
       assert(await action.isEnabled(), "auto-roll action is disabled on a configured devnet");
       const nRoll = writer.calls.length;
       await action.click();
@@ -517,7 +590,11 @@ async function main() {
       const strategy = await chain.readContract({ address: D.contracts.autoRoller, abi: autoRollerAbi,
         functionName: "strategy", args: [writer.account, nvda] });
       assert(strategy.active, "writer strategy should be active on chain");
-      log("auto-roll strategy active on chain");
+      assert(strategy.smartPricing, "writer strategy should opt into smart pricing on chain");
+      assert.equal(Number(strategy.askBps), 300, "writer strategy starts at the selected ceiling");
+      assert.equal(Number(strategy.minAskBps), 25, "writer strategy saves the selected floor");
+      assert.equal(Number(strategy.maxAskBps), 300, "writer strategy saves the selected ceiling");
+      log("auto-roll strategy and editable smart-pricing band active on chain");
     } else {
       assert.equal(process.env.V2_ACCEPTANCE_ALLOW_MISSING_ROLLER, "1",
         "AutoRoller missing: use Claude's periphery devnet commit; interim core-only runs require explicit override");
@@ -538,8 +615,20 @@ async function main() {
     const receipt = await chain.getTransactionReceipt({ hash: full.hash });
     const fills = parseEventLogs({ abi: orderBookAbi, eventName: "OrderFilled", logs: receipt.logs });
     const rents = parseEventLogs({ abi: clearinghouseAbi, eventName: "Minted", logs: receipt.logs });
-    assert(rents.length >= 2 && rents.every((event) => event.args.fee > 0n),
-      "each primary fill charges its own nonzero rounded rent");
+    // 06-QUIRKS.md B.7: the book's two `mint` calls sit inside `try … {gas: 500_000}`, so a mint that
+    // reverts is a SILENT SKIP that still returns a green receipt. Every take whose units come from a
+    // fresh mint therefore asserts the Minted events and the minted unit count, never the status.
+    const primaryFills = fills.filter((fill) => fill.args.primary);
+    assert(primaryFills.length >= 2, "the one-share buy crossed at least two minting AskWrite levels");
+    assert.equal(rents.length, primaryFills.length,
+      "every primary fill emitted its own Minted event; a skipped mint would drop one");
+    assert.equal(rents.reduce((sum, event) => sum + event.args.units, 0n),
+      primaryFills.reduce((sum, fill) => sum + fill.args.units, 0n),
+      "minted units equal the units the primary fills reported");
+    // INVERTED for v8 (was `event.args.fee > 0n`): X8-05's devnet seeds premium 500 / rent 0, so a
+    // primary fill charges no collateral rent. Asserted rather than deleted, so a devnet that
+    // accidentally re-enables rent still fails here.
+    assert(rents.every((event) => event.args.fee === 0n), "a v8 primary fill charges no collateral rent");
     assert.equal(fills.reduce((sum, fill) => sum + fill.args.units, 0n), 100n, "full share filled");
     assert(new Set(fills.map((fill) => fill.args.orderId.toString())).size >= 2, "buy crossed two orders");
     assert(new Set(fills.map((fill) => fill.args.price.toString())).size >= 2, "buy crossed two price levels");
@@ -566,13 +655,21 @@ async function main() {
       await buyerPage.locator("#ticket").getByRole("button", { name: "Buy now", exact: true }).last().click();
       const fallback = await buyer.signed("take", nFallback);
       const fallbackReceipt = await chain.getTransactionReceipt({ hash: fallback.hash });
+      const fallbackFills = parseEventLogs({ abi: orderBookAbi, eventName: "OrderFilled", logs: fallbackReceipt.logs });
       const fallbackRents = parseEventLogs({ abi: clearinghouseAbi, eventName: "Minted", logs: fallbackReceipt.logs });
-      assert(fallbackRents.length > 0 && fallbackRents.every((event) => event.args.fee > 0n),
-        "chain fallback purchase charges nonzero writer rent");
+      // 06-QUIRKS.md B.7 again: prove the mint by its event and its unit count, not by the receipt.
+      assert(fallbackRents.length > 0, "the chain-snapshot fallback bought from a minting AskWrite");
+      assert.equal(fallbackRents.length, fallbackFills.filter((fill) => fill.args.primary).length,
+        "every primary fallback fill emitted its own Minted event");
+      assert.equal(fallbackRents.reduce((sum, event) => sum + event.args.units, 0n), 1n,
+        "the chain-snapshot fallback minted exactly one unit");
+      // INVERTED for v8 (was `event.args.fee > 0n`).
+      assert(fallbackRents.every((event) => event.args.fee === 0n),
+        "a chain-snapshot fallback purchase charges no writer rent in v8");
       assert.equal(await chain.readContract({ address: D.contracts.clearinghouse, abi: clearinghouseAbi,
         functionName: "balanceOf", args: [buyer.account, BigInt(target.longId)] }), beforeFallback + 1n,
       "fallback quote filled exactly one unit");
-      log("indexer book outage: chain snapshot fallback bought one unit with writer rent");
+      log("indexer book outage: chain snapshot fallback minted one unit at zero rent");
     } finally { await buyerPage.unroute(bookRoute); }
 
     // The seeded in-the-money call has already warped, settled and paid out; the
@@ -610,9 +707,96 @@ async function main() {
     await winnerPage.getByText(winner.account, { exact: true }).waitFor({ state: "visible" });
     log("settled payout visible in Portfolio; share page rendered");
 
-    // Eve's seeded 1-unit ITM long was intentionally left unredeemed. Choose an
-    // in-kind payout in the real Portfolio, collect it there, and reconcile the
-    // wallet balance and indexed redemption with the chain receipt.
+    // The v8 payout route, read BY FIELD from the regenerated ABI. INTERFACE-CHANGES-V8 entry 1
+    // ("What deliberately did NOT move") records that routes(address) keeps selector 0xd7409659
+    // while its tuple gained `tickSpacing`, so the selector cannot tell a v7 adapter from a v8
+    // router. Deriving the selector from the regenerated ABI and then checking the tuple's fields is
+    // the proof that this file re-generated rather than feature-detected.
+    const routesAbi = payoutAdapterAbi.find((item) => item.type === "function" && item.name === "routes") as
+      { name: string; inputs: readonly { type: string }[];
+        outputs: readonly { components?: readonly { name: string }[] }[] } | undefined;
+    assert(routesAbi, "the regenerated PayoutRouter ABI still exports routes()");
+    assert.equal(toFunctionSelector(`routes(${routesAbi.inputs.map((input) => input.type).join(",")})`),
+      ROUTES_SELECTOR, "routes() keeps its v7 selector in v8, which is why it must never be feature-detected");
+    assert.deepEqual(routesAbi.outputs[0]?.components?.map((field) => field.name),
+      ["venue", "fee", "tickSpacing", "v3Pool", "feeBps"],
+      "the v8 Route tuple is read by field from the regenerated ABI, not positionally from the v7 one");
+    const payoutRouter = await chain.readContract({ address: D.contracts.clearinghouse, abi: clearinghouseAbi,
+      functionName: "payoutAdapter" });
+    assert.notEqual(payoutRouter, "0x0000000000000000000000000000000000000000",
+      "a v8 devnet configures a PayoutRouter so winning calls can be paid in USDG");
+    const nvdaRoute = await chain.readContract({ address: payoutRouter, abi: payoutAdapterAbi,
+      functionName: "routes", args: [nvda] });
+    assert.equal(nvdaRoute.venue, VENUE_V4, "NVDA converts to USDG over a Uniswap v4 route in v8");
+    assert.notEqual(nvdaRoute.tickSpacing, 0, "the v4 PoolKey leg carries the tuple's new tick spacing");
+    const [routeFeeBps, payoutSlippageBps] = await Promise.all([
+      chain.readContract({ address: payoutRouter, abi: payoutAdapterAbi, functionName: "routeFeeBps", args: [nvda] }),
+      chain.readContract({ address: D.contracts.clearinghouse, abi: clearinghouseAbi, functionName: "maxPayoutSlippageBps" }),
+    ]);
+    const expectedFloorBps = conversionFloorBps(Number(payoutSlippageBps), Number(routeFeeBps));
+
+    // Redeem that route to USDG in the browser, on the default payout preference. X8-05's seed must
+    // leave one settled ITM long unredeemed for a wallet other than Eve's, the same way
+    // ops/devnet/seed.mjs already skips Eve in its redeemBatch pass so the in-kind Collect below has
+    // a unit to spend.
+    let usdgCollectorAccount: Address | null = null;
+    for (const [name, account] of Object.entries(D.accounts) as [string, Address][]) {
+      if (name === "eve") continue;
+      const balance = await chain.readContract({ address: D.contracts.clearinghouse, abi: clearinghouseAbi,
+        functionName: "balanceOf", args: [account, BigInt(itmId)] });
+      if (balance > 0n) { usdgCollectorAccount = account; break; }
+    }
+    assert(usdgCollectorAccount, "seed must leave one settled ITM long unredeemed for a wallet other than Eve's, " +
+      "so the browser can redeem it to USDG over the v4 route (X8-05, ops/devnet/seed.mjs redeemBatch)");
+    const usdgCollector = new BrowserWallet(usdgCollectorAccount);
+    const usdgCollectorContext = await browser.newContext({ viewport: { width: 1280, height: 800 } });
+    await usdgCollector.attach(usdgCollectorContext);
+    const usdgCollectorPage = await usdgCollectorContext.newPage();
+    watchPage(usdgCollectorPage); pages.push(usdgCollectorPage);
+    await usdgCollectorPage.clock.setFixedTime(chainNow);
+    const usdgBefore = await tokenBalance(usdg, usdgCollector.account);
+    await usdgCollectorPage.goto(`${SITE}/portfolio`); await connect(usdgCollectorPage, usdgCollector);
+    const usdgChoice = usdgCollectorPage.getByRole("button", { name: "USDG (default)", exact: true });
+    await usdgChoice.waitFor({ state: "visible", timeout: 60_000 });
+    assert.equal(await usdgChoice.getAttribute("aria-pressed"), "true",
+      "USDG over the route is the default payout preference in v8");
+    // The route preview the long card renders, from the same floor the chain reports.
+    const floorCopy = usdgCollectorPage.getByText(/conversion floor is/i).first();
+    await floorCopy.waitFor({ state: "visible", timeout: 60_000 });
+    assert.match(await floorCopy.innerText(), new RegExp(`${(expectedFloorBps / 100).toFixed(2)}%`),
+      "the long card previews the v4 route's conversion floor, including its route fee");
+    const usdgCard = usdgCollectorPage.locator("article").filter({ hasText: "Long position" })
+      .filter({ hasText: itmLabel });
+    const usdgCollectButton = usdgCard.getByRole("button", { name: "Collect", exact: true });
+    await usdgCollectButton.waitFor({ state: "visible", timeout: 60_000 });
+    const nUsdgCollect = usdgCollector.calls.length;
+    await usdgCollectButton.click();
+    const usdgCollectTx = await usdgCollector.signed("redeem", nUsdgCollect);
+    const usdgCollectReceipt = await chain.getTransactionReceipt({ hash: usdgCollectTx.hash });
+    const converted = parseEventLogs({ abi: clearinghouseAbi, eventName: "Redeemed", logs: usdgCollectReceipt.logs })
+      .find((event) => event.args.tokenId === BigInt(itmId) &&
+        event.args.holder.toLowerCase() === usdgCollector.account.toLowerCase());
+    assert(converted && converted.args.amount > 0n, "the browser Collect emitted a positive redemption");
+    assert.equal(getAddress(converted.args.asset), getAddress(usdg),
+      "the default preference paid USDG, converted over the v4 route");
+    assert(converted.args.amountInKind > 0n && converted.args.amount !== converted.args.amountInKind,
+      "a converted payout reports both the USDG paid and the in-kind amount it replaced");
+    assert.equal(await tokenBalance(usdg, usdgCollector.account) - usdgBefore, converted.args.amount,
+      "the USDG payout reached the collector wallet");
+    await until("USDG Collect indexed", async () => {
+      const history = await json<{ items: { kind: string; longId: string | null;
+        data: { asset?: string; amount?: { raw: string }; tx?: string } }[] }>(
+          `/v2/accounts/${usdgCollector.account}/history?limit=100`);
+      return history.items.some((item) => item.kind === "redemption" && item.longId === itmId &&
+        item.data.tx?.toLowerCase() === usdgCollectTx.hash.toLowerCase() &&
+        item.data.asset?.toLowerCase() === usdg.toLowerCase() &&
+        BigInt(item.data.amount?.raw ?? "0") === converted.args.amount);
+    }, 120_000);
+    log("Portfolio Collect redeemed to USDG over the v4 route with the previewed conversion floor");
+
+    // Eve's seeded 1-unit ITM long was intentionally left unredeemed. Choose the IN-KIND FALLBACK in
+    // the real Portfolio -- the payout a holder gets when conversion is refused or fails -- collect
+    // it there, and reconcile the wallet balance and indexed redemption with the chain receipt.
     const collector = new BrowserWallet(D.accounts.eve);
     const collectorContext = await browser.newContext({ viewport: { width: 1280, height: 800 } });
     await collector.attach(collectorContext);
@@ -671,42 +855,78 @@ async function main() {
     await collectorPage.getByRole("button", { name: "History" }).click();
     await collectorPage.locator("article").filter({ hasText: /redemption/i })
       .filter({ hasText: itmLabel }).getByText("Paid", { exact: true }).waitFor({ state: "visible" });
-    log("Portfolio in-kind preference and Collect paid Stock Tokens, with indexed redemption history");
+    log("Portfolio in-kind fallback: Collect paid Stock Tokens, with indexed redemption history");
 
+    // Accessibility and performance, in both themes, over every v8 surface this run exercises: the
+    // marketplace, the trade ticket and the Portfolio. The last two are where the v4 route preview
+    // (ConversionFloor, Portfolio.tsx:180 and TradeTicket.tsx:250) and the pending-fee /
+    // pending-admin-operation notices render. Add W8-02's trust and fees page to this list when it
+    // lands; the loop then covers it with no other change.
+    const themedPages = [
+      { label: "home", url: SITE, heading: "#marketplace-title" },
+      { label: "trade ticket", url: `${SITE}/nvda/${target.longId}?buy=1&shares=0.01`, heading: "h1" },
+      { label: "portfolio", url: `${SITE}/portfolio`, heading: "h1" },
+    ] as const;
     let homeNavigationMs = 0;
+    let homeResponseMs: number | null = null;
     for (const theme of ["light", "dark"] as const) {
       await buyerPage.emulateMedia({ colorScheme: theme });
-      const navigationStart = Date.now();
-      await buyerPage.goto(SITE);
-      homeNavigationMs = Date.now() - navigationStart;
-      await buyerPage.getByRole("heading", { name: /money|upside/i }).waitFor({ state: "visible" });
-      const ratio = await contrast(buyerPage, "#marketplace-title");
-      assert(ratio >= 4.5, `${theme} hero contrast ${ratio.toFixed(2)}:1`);
-      const overflow = await buyerPage.evaluate(() => document.documentElement.scrollWidth - innerWidth);
-      assert(overflow <= 1, `${theme} 390px horizontal overflow ${overflow}px`);
-      const cards = await buyerPage.locator("#options article").count();
-      assert(cards <= 200, `marketplace rendered ${cards} cards; page limit is 200`);
-      log(`${theme}: hero contrast ${ratio.toFixed(2)}:1, mobile overflow ${overflow}px, ${cards} cards`);
+      for (const surface of themedPages) {
+        const navigationStart = Date.now();
+        await buyerPage.goto(surface.url);
+        if (surface.label === "home") {
+          homeNavigationMs = Date.now() - navigationStart;
+          await buyerPage.getByRole("heading", { name: /money|upside/i }).waitFor({ state: "visible" });
+          homeResponseMs = await buyerPage.evaluate(() => {
+            const navigation = performance.getEntriesByType("navigation")[0] as PerformanceNavigationTiming | undefined;
+            return navigation ? navigation.responseEnd - navigation.startTime : null;
+          });
+        } else {
+          await buyerPage.locator("h1").first().waitFor({ state: "visible", timeout: 60_000 });
+        }
+        const ratio = await contrast(buyerPage, surface.heading);
+        assert(ratio >= 4.5, `${theme} ${surface.label} heading contrast ${ratio.toFixed(2)}:1`);
+        const overflow = await buyerPage.evaluate(() => document.documentElement.scrollWidth - innerWidth);
+        assert(overflow <= 1, `${theme} ${surface.label} 390px horizontal overflow ${overflow}px`);
+        if (surface.label === "home") {
+          const cards = await buyerPage.locator("#options article").count();
+          assert(cards <= 200, `marketplace rendered ${cards} cards; page limit is 200`);
+          log(`${theme} home: hero contrast ${ratio.toFixed(2)}:1, mobile overflow ${overflow}px, ${cards} cards`);
+        } else {
+          log(`${theme} ${surface.label}: heading contrast ${ratio.toFixed(2)}:1, mobile overflow ${overflow}px`);
+        }
+      }
     }
-    const navigationResponseMs = await buyerPage.evaluate(() => {
-      const navigation = performance.getEntriesByType("navigation")[0] as PerformanceNavigationTiming | undefined;
-      return navigation ? navigation.responseEnd - navigation.startTime : null;
-    });
-    const responseMs = navigationResponseMs ?? homeNavigationMs;
+    const responseMs = homeResponseMs ?? homeNavigationMs;
     assert(Number.isFinite(responseMs) && responseMs < 15_000, "local home response exceeded 15s");
     log(`local home response ${responseMs.toFixed(0)}ms`);
 
-    // V7 rent is in the collateral asset. Exercise actual Portfolio closes for a
-    // one-unit call and put, then compare the native ledger and indexed history.
+    // v8 mint lifecycle. Two inversions of the v7 block that stood here:
+    //   (1) the Clearinghouse no longer mints for an EOA — `if (!isMinter[msg.sender]) revert
+    //       V2Errors.NotMinter();`, and DevDeploy allowlists only the book
+    //       (`d.clearinghouse.setMinter(address(d.orderBook), true)`). The direct mint is therefore
+    //       asserted to REVERT and the same matched position is acquired through an AskWrite fill.
+    //   (2) rent is 0 (X8-05 seeds premium 500 / rent 0). Every rent assertion is inverted to zero
+    //       rather than deleted, so a devnet that accidentally re-enables rent still fails here.
+    // The browser-driven Portfolio close below is unchanged and is the only browser proof of a close.
     const rentTemplate = await chain.readContract({ address: D.contracts.clearinghouse, abi: clearinghouseAbi,
       functionName: "series", args: [BigInt(seriesTag("weekly2-r0").longId)] });
     const sendRentTx = async (to: Address, data: Hex) => {
       const hash = await raw("eth_sendTransaction", [{ from: writer.account, to, data }]) as Hex;
       const result = await chain.waitForTransactionReceipt({ hash });
-      assert.equal(result.status, "success", "local v7 lifecycle transaction confirmed");
+      assert.equal(result.status, "success", "local v8 lifecycle transaction confirmed");
       return result;
     };
-    const rentDenominator = 1_000_000n * 604_800n;
+    const sendFrom = async (from: Address, to: Address, data: Hex, label: string) => {
+      const hash = await raw("eth_sendTransaction", [{ from, to, data }]) as Hex;
+      const result = await chain.waitForTransactionReceipt({ hash });
+      assert.equal(result.status, "success", `${label} confirmed`);
+      return result;
+    };
+    // A third wallet fills the writer's AskWrite with `recipient` set to the writer, so the fresh long
+    // and the writer's short land together and the matched close below is the same close v7 proved.
+    // OrderBook: "buying, AskWrite: Clearinghouse.mint(longId, units, maker, recipient)".
+    const lifecycleTaker = D.accounts.dee;
     for (const isPut of [false, true]) {
       const asset = isPut ? usdg : nvda;
       const decimals = isPut ? 6 : 18;
@@ -726,67 +946,114 @@ async function main() {
         return ledger?.free.raw === String(expectedFree) && ledger.free.decimals === decimals &&
           detail.series.mintFeesHeld.raw === String(expectedHeld) && detail.series.mintFeesHeld.decimals === decimals;
       };
-      assert(terms.mintFeePpm > 0, "rent lifecycle series pins a nonzero rate");
+      // INVERTED (was `assert(terms.mintFeePpm > 0, "rent lifecycle series pins a nonzero rate")`).
+      assert.equal(terms.mintFeePpm, 0, "a v8 series carries no collateral rent rate");
+      const heldBefore = terms.mintFeesHeld;
+      // INVERTED: nothing is ever held for a v8 series, so the starting point is zero and stays zero.
+      assert.equal(heldBefore, 0n, "a fresh v8 series holds no rent");
       const collateral = isPut ? terms.strike / 100n : 10n ** 16n;
       const deposit = collateral * 2n;
       if (await tokenBalance(asset, writer.account) < deposit) await deal(asset, writer.account, deposit * 2n);
-      await sendRentTx(asset, encodeFunctionData({ abi: [{ type: "function", name: "approve", stateMutability: "nonpayable",
-        inputs: [{ type: "address" }, { type: "uint256" }], outputs: [{ type: "bool" }] }] as const,
-      functionName: "approve", args: [D.contracts.clearinghouse, deposit] }));
+      await sendRentTx(asset, encodeFunctionData({ abi: erc20ApproveAbi,
+        functionName: "approve", args: [D.contracts.clearinghouse, deposit] }));
       await sendRentTx(D.contracts.clearinghouse, encodeFunctionData({ abi: clearinghouseAbi,
         functionName: "deposit", args: [asset, deposit, writer.account] }));
       const freeBeforeMint = await chain.readContract({ address: D.contracts.clearinghouse, abi: clearinghouseAbi,
         functionName: "free", args: [writer.account, asset] });
-      const mintedReceipt = await sendRentTx(D.contracts.clearinghouse, encodeFunctionData({ abi: clearinghouseAbi,
-        functionName: "mint", args: [id, 1n, writer.account, writer.account] }));
+
+      // INVERTED: the v7 block sent `mint(id, 1n, writer, writer)` straight from the writer EOA here.
+      // In v8 that path is closed, and the allowlist is an in-contract mapping, not a manager role.
+      assert.equal(await chain.readContract({ address: D.contracts.clearinghouse, abi: clearinghouseAbi,
+        functionName: "isMinter", args: [writer.account] }), false, "no EOA is on the v8 minter allowlist");
+      assert.equal(await chain.readContract({ address: D.contracts.clearinghouse, abi: clearinghouseAbi,
+        functionName: "isMinter", args: [D.contracts.orderBook] }), true, "the OrderBook is the v8 minter");
+      await assert.rejects(chain.simulateContract({ account: writer.account, address: D.contracts.clearinghouse,
+        abi: clearinghouseAbi, functionName: "mint", args: [id, 1n, writer.account, writer.account] }),
+      /NotMinter/, "a direct Clearinghouse.mint from an EOA reverts NotMinter in v8");
+
+      // One tick per share (priceTick 100, unitsPerShare 100), so one unit costs one raw USDG of premium.
+      const askPrice = 100n;
+      const placedReceipt = await sendRentTx(D.contracts.orderBook, encodeFunctionData({ abi: orderBookAbi,
+        functionName: "place", args: [id, ASK_WRITE, askPrice, 1n, terms.expiry] }));
+      const placed = parseEventLogs({ abi: orderBookAbi, eventName: "OrderPlaced", logs: placedReceipt.logs })[0]!;
+      assert(placed && placed.args.kind === ASK_WRITE && placed.args.units === 1n,
+        "the writer posted a one-unit AskWrite for the lifecycle series");
+      const lifecycleQuoteParams = { longId: id, buying: true, orderIds: [placed.args.orderId], units: 1n,
+        minUnits: 1n, limitPrice: askPrice, writeToSell: false, recipient: writer.account,
+        deadline: Number((await chain.getBlock()).timestamp) + 300, maxTotalFee: MAX_UINT128 };
+      const lifecycleQuote = await chain.readContract({ account: lifecycleTaker, address: D.contracts.orderBook,
+        abi: orderBookAbi, functionName: "quoteTake", args: [lifecycleQuoteParams] });
+      assert.equal(lifecycleQuote[0], 1n, "the writer's AskWrite quotes one fillable unit");
+      const lifecycleCost = lifecycleQuote[1] + lifecycleQuote[2] + lifecycleQuote[3];
+      if (await tokenBalance(usdg, lifecycleTaker) < lifecycleCost) await deal(usdg, lifecycleTaker, lifecycleCost + 10n ** 9n);
+      await sendFrom(lifecycleTaker, usdg, encodeFunctionData({ abi: erc20ApproveAbi,
+        functionName: "approve", args: [D.contracts.orderBook, lifecycleCost] }), "lifecycle taker USDG approval");
+      const mintedReceipt = await sendFrom(lifecycleTaker, D.contracts.orderBook,
+        encodeFunctionData({ abi: orderBookAbi, functionName: "take",
+          args: [{ ...lifecycleQuoteParams, maxTotalFee: lifecycleQuote[2] + lifecycleQuote[3] }] }),
+        "lifecycle AskWrite fill");
+      // 06-QUIRKS.md B.7: the book's mint sits inside `try … {gas: 500_000}`. A reverted mint is a
+      // silent skip on a green receipt, so the Minted event and its unit count are the only proof.
+      const lifecycleFills = parseEventLogs({ abi: orderBookAbi, eventName: "OrderFilled", logs: mintedReceipt.logs });
       const minted = parseEventLogs({ abi: clearinghouseAbi, eventName: "Minted", logs: mintedReceipt.logs })[0]!;
-      assert(minted, "one-unit mint emits the v7 event");
-      const mintBlock = await chain.getBlock({ blockHash: mintedReceipt.blockHash });
-      const mintNumerator = collateral * BigInt(terms.mintFeePpm) * (BigInt(terms.expiry) - mintBlock.timestamp);
-      assert.equal(minted.args.fee, (mintNumerator + rentDenominator - 1n) / rentDenominator,
-        "one-unit rent rounds up exactly once");
-      assert(minted.args.fee > 0n);
+      assert(minted, "the AskWrite fill minted; a silently skipped mint leaves no Minted log behind");
+      assert.equal(lifecycleFills.length, 1, "exactly the writer's AskWrite was consumed");
+      assert.equal(lifecycleFills[0]!.args.primary, true, "the fill minted rather than moving inventory");
+      assert.equal(minted.args.units, 1n, "the fill minted exactly one unit");
+      assert.equal(minted.args.units, lifecycleFills[0]!.args.units, "minted units equal the filled units");
+      assert.equal(minted.args.longId, id);
+      assert.equal(minted.args.writer.toLowerCase(), writer.account.toLowerCase(), "the maker carries the short");
+      assert.equal(minted.args.longTo.toLowerCase(), writer.account.toLowerCase(),
+        "the fresh long was delivered to the writer, so the close below closes matched units");
+      // INVERTED (was the round-up equality plus `minted.args.fee > 0n`): rent is 0 in v8.
+      assert.equal(minted.args.fee, 0n, "a v8 mint charges no rent");
       const freeAfterMint = await chain.readContract({ address: D.contracts.clearinghouse, abi: clearinghouseAbi,
         functionName: "free", args: [writer.account, asset] });
-      assert.equal(freeBeforeMint - freeAfterMint, collateral + minted.args.fee,
-        `${isPut ? "put USDG" : "call Stock Token"} ledger debits collateral plus rent`);
-      await until("v7 mint rent indexed", async () => {
+      // INVERTED (was `collateral + minted.args.fee`): the ledger debits collateral and nothing else.
+      assert.equal(freeBeforeMint - freeAfterMint, collateral,
+        `${isPut ? "put USDG" : "call Stock Token"} ledger debits collateral and no rent`);
+      // INVERTED: mintFeesHeld does not move across a v8 mint.
+      assert.equal((await chain.readContract({ address: D.contracts.clearinghouse, abi: clearinghouseAbi,
+        functionName: "series", args: [id] })).mintFeesHeld, heldBefore, "a v8 mint holds no rent");
+      await until("v8 mint indexed at zero rent", async () => {
         const history = await json<{ items: { kind: string; longId: string | null;
           data: { tx?: string; fee?: { raw: string; decimals: number } } }[] }>(
           `/v2/accounts/${writer.account}/history?limit=100`);
         return history.items.some((item) => item.kind === "mint" && item.longId === String(id) &&
-          item.data.tx === mintedReceipt.transactionHash && item.data.fee?.raw === String(minted.args.fee) &&
+          item.data.tx === mintedReceipt.transactionHash && item.data.fee?.raw === "0" &&
           item.data.fee.decimals === decimals);
       }, 120_000);
-      await until("v7 mint API free balance and held rent", () =>
-        apiRentStateMatches(freeAfterMint, terms.mintFeesHeld + minted.args.fee), 120_000);
+      await until("v8 mint API free balance and held rent", () =>
+        apiRentStateMatches(freeAfterMint, heldBefore), 120_000);
       await writerPage.goto(`${SITE}/portfolio`);
       const shortCard = writerPage.locator("article").filter({ has: writerPage.locator(`input[id="buyback-size-${id}"]`) });
       await shortCard.getByLabel("Size to close in shares").fill("0.01");
-      assert.match(await shortCard.innerText(), /rent/i, "writer economics disclose native-asset rent");
+      // INVERTED (was `assert.match(..., /rent/i, "writer economics disclose native-asset rent")`).
+      // Word-bounded on purpose: the unbounded /rent/i this replaces also matches "current".
+      assert.doesNotMatch(await shortCard.innerText(), /\brent\b/i, "v8 writer economics disclose no rent");
       const nClose = writer.calls.length;
       await shortCard.getByRole("button", { name: "Close matched units", exact: true }).click();
       const closeTx = await writer.signed("close", nClose);
       const closedReceipt = await chain.getTransactionReceipt({ hash: closeTx.hash });
       const closed = parseEventLogs({ abi: clearinghouseAbi, eventName: "Closed", logs: closedReceipt.logs })[0]!;
       assert(closed && closed.args.longId === id && closed.args.units === 1n);
-      const closeBlock = await chain.getBlock({ blockHash: closedReceipt.blockHash });
-      const refund = collateral * BigInt(terms.mintFeePpm) * (BigInt(terms.expiry) - closeBlock.timestamp) / rentDenominator;
-      assert.equal(closed.args.feeRefund, refund, "unused rent refund rounds down");
-      assert(refund > 0n && refund <= minted.args.fee, "close refunds unused rent without paying more than charged");
+      // INVERTED (was the pro-rata refund equality plus `refund > 0n && refund <= minted.args.fee`):
+      // nothing was charged, so nothing is refunded.
+      assert.equal(closed.args.feeRefund, 0n, "a v8 close refunds no rent, because none was charged");
       assert.equal(await chain.readContract({ address: D.contracts.clearinghouse, abi: clearinghouseAbi,
-        functionName: "free", args: [writer.account, asset] }), freeAfterMint + collateral + refund,
-      "Portfolio close credits collateral plus refund to the closer");
-      await until("v7 close refund indexed", async () => {
+        functionName: "free", args: [writer.account, asset] }), freeAfterMint + collateral,
+      "Portfolio close credits collateral, and only collateral, to the closer");
+      await until("v8 close indexed at zero refund", async () => {
         const history = await json<{ items: { kind: string; longId: string | null;
           data: { tx?: string; feeRefund?: { raw: string; decimals: number } } }[] }>(
           `/v2/accounts/${writer.account}/history?limit=100`);
         return history.items.some((item) => item.kind === "close" && item.longId === String(id) &&
-          item.data.tx === closeTx.hash && item.data.feeRefund?.raw === String(refund) && item.data.feeRefund.decimals === decimals);
+          item.data.tx === closeTx.hash && item.data.feeRefund?.raw === "0" && item.data.feeRefund.decimals === decimals);
       }, 120_000);
-      await until("v7 close API free balance and held rent", () =>
-        apiRentStateMatches(freeAfterMint + collateral + refund, terms.mintFeesHeld + minted.args.fee - refund), 120_000);
-      log(`${isPut ? "put USDG" : "call Stock Token"}: one-unit mint rent, browser close refund and indexed history verified`);
+      // INVERTED: held rent is unchanged across the whole lifecycle, not drawn down by a refund.
+      await until("v8 close API free balance and held rent", () =>
+        apiRentStateMatches(freeAfterMint + collateral, heldBefore), 120_000);
+      log(`${isPut ? "put USDG" : "call Stock Token"}: EOA mint refused, AskWrite fill minted at zero rent, browser close verified`);
     }
 
     // A seeded active strategy keeps its period after a permissionless stale cancel.
@@ -833,9 +1100,10 @@ async function main() {
       log("permissionless stale cancel indexed; writer sees withdrawn ask with current period retained");
     }
 
-    // Schedule a real admin fee change only after all other browser trades and
-    // payout flows. The change waits 24 hours; a resting weekly-two ask remains
-    // open so we can prove that quote and execution use the new fee at activation.
+    // Schedule a real admin fee change only after all other browser trades and payout flows. The
+    // change waits FEE_CHANGE_DELAY_S -- 48 hours in v8, not the 24 the v7 drill assumed -- so a
+    // resting weekly-two ask has to stay open two days longer for the quote and the execution at
+    // activation to prove anything at all.
     const feeTarget = seriesTag("weekly2-r0");
     const beforeFees = await chain.readContract({ address: D.contracts.orderBook, abi: orderBookAbi,
       functionName: "feeParams" });
@@ -846,17 +1114,30 @@ async function main() {
     const beforeConfig = await json<{ fees: { premiumFeeBps: number }; pendingFees: unknown }>("/v2/config");
     assert.equal(beforeConfig.pendingFees, null, "fresh acceptance fork has no pending fee change");
     assert.equal(beforeConfig.fees.premiumFeeBps, beforeFees.premiumFeeBps);
-    const scheduleHash = await raw("eth_sendTransaction", [{ from: D.accounts.admin, to: D.contracts.orderBook,
-      data: encodeFunctionData({ abi: orderBookAbi, functionName: "setFeeParams", args: [nextFees] }) }]) as Hex;
-    const scheduleReceipt = await chain.waitForTransactionReceipt({ hash: scheduleHash });
-    assert.equal(scheduleReceipt.status, "success", "admin fee schedule confirmed");
-    const scheduled = parseEventLogs({ abi: orderBookAbi, eventName: "FeeParamsScheduled",
-      logs: scheduleReceipt.logs });
-    assert.equal(scheduled.length, 1, "one fee schedule event");
+    // INVERTED: the v7 drill sent setFeeParams as a bare eth_sendTransaction from D.accounts.admin.
+    // Under v8 AccessManager delays that is schedule -> warp -> execute as the impersonated Admin
+    // Safe, and 06-QUIRKS.md D.8 says every devnet, rehearsal and acceptance script goes through the
+    // one admin driver F8-03 landed, which reads the role and the delay from ops/abis/v2/roles.json
+    // and never writes either down. Field order mirrors V2Types.FeeParams in the OrderBook ABI --
+    // the order roles.json spells as setFeeParams((uint16,uint16,uint32,uint16,uint16)).
+    const nextFeeArgs = [nextFees.premiumFeeBps, nextFees.resaleFeeBps, nextFees.takerFeeFlat,
+      nextFees.takerFeeCapBps, nextFees.makerRebateBps];
+    const feeScheduleFrom = await chain.getBlockNumber();
+    await command("devnet-admin-setFeeParams", "node", [join(ROOT, "ops/v2/devnet-admin.mjs"), "OrderBook",
+      "setFeeParams((uint16,uint16,uint32,uint16,uint16))", JSON.stringify(nextFeeArgs)], ROOT, devnetHelperEnv);
+    // The driver prints its transactions but returns nothing to this process, so the schedule is
+    // read back from the chain: exactly one FeeParamsScheduled since the driver started.
+    const scheduled = await chain.getContractEvents({ address: D.contracts.orderBook, abi: orderBookAbi,
+      eventName: "FeeParamsScheduled", fromBlock: feeScheduleFrom + 1n, toBlock: "latest" });
+    assert.equal(scheduled.length, 1, "the admin driver scheduled exactly one fee change");
     const effectiveAt = Number(scheduled[0]!.args.effectiveAt);
-    const scheduleBlock = await chain.getBlock({ blockNumber: scheduleReceipt.blockNumber });
-    assert.equal(effectiveAt, Number(scheduleBlock.timestamp) + 86_400, "fee change has a full 24-hour delay");
-    assert(feeTarget.expiry > effectiveAt + 600, "weekly-two series remains open after activation");
+    const scheduleBlock = await chain.getBlock({ blockNumber: scheduled[0]!.blockNumber });
+    assert.equal(effectiveAt, Number(scheduleBlock.timestamp) + FEE_CHANGE_DELAY_S,
+      "the fee change carries the full FEE_CHANGE_DELAY from the block that executed it");
+    // Moved out with the delay: `effectiveAt` is now two days past the executing block, not one, so
+    // a weekly series has to outlive a 48 h activation or the drill silently picks a dead series.
+    assert(feeTarget.expiry > effectiveAt + 600,
+      "weekly-two series remains open past the 48 h fee activation, with slack for interval mining");
     assert.deepEqual(await chain.readContract({ address: D.contracts.orderBook, abi: orderBookAbi,
       functionName: "feeParams" }), beforeFees, "scheduling did not activate fees immediately");
     const [onchainPending, onchainEffectiveAt] = await chain.readContract({ address: D.contracts.orderBook,
@@ -865,7 +1146,7 @@ async function main() {
     assert.equal(Number(onchainEffectiveAt), effectiveAt);
     await until("fee schedule indexed", async () => {
       const health = await json<{ block: string }>("/v2/health");
-      if (BigInt(health.block) < scheduleReceipt.blockNumber) return false;
+      if (BigInt(health.block) < scheduled[0]!.blockNumber) return false;
       const config = await json<{ fees: { premiumFeeBps: number }; pendingFees: null | {
         premiumFeeBps: number; resaleFeeBps: number; takerFeeFlat: { raw: string };
         takerFeeCapBps: number; makerRebateBps: number; effectiveAt: number } }>("/v2/config");
@@ -883,7 +1164,40 @@ async function main() {
     assert.match(await feeNotice.innerText(), /Scheduled taker fee:/);
     assert.equal(await feeNotice.locator("time").getAttribute("datetime"),
       new Date(effectiveAt * 1000).toISOString(), "ticket announces the on-chain activation time");
-    log("24-hour fee schedule indexed and visible on the trade ticket");
+
+    // The pending-ADMIN-OPERATION notice, beside the pending-FEE notice above. They are two
+    // different clocks and both must render their on-chain instant in <time datetime>: the fee
+    // notice counts the OrderBook's own FEE_CHANGE_DELAY after a change was scheduled; this one
+    // counts an AccessManager operation's execution delay (roles.json delaysS) before the call is
+    // even sent. The waiting operation comes from the devnet, not from this file: the admin driver
+    // performs schedule -> warp -> execute in a single invocation (ops/v2/lib/admin.mjs adminCall)
+    // and so cannot leave one waiting, and 06-QUIRKS.md D.8 forbids hand-rolling `schedule` here.
+    // X8-05's devnet leaves one scheduled and unexecuted; W8-02 renders the notice.
+    const adminConfig = await json<{ contracts: { accessManager: string | null };
+      pendingOperations?: { id: string; label: string; role: string; target: string; selector: string;
+        caller: string; scheduledAt: number; readyAt: number }[] }>("/v2/config");
+    const pendingOperations = adminConfig.pendingOperations ?? [];
+    assert(pendingOperations.length > 0,
+      "the devnet must leave one AccessManager operation scheduled and unexecuted so the " +
+      "pending-admin-operation notice has something to announce (X8-05; the admin driver schedules, " +
+      "warps and executes in one call and cannot leave one waiting)");
+    const pendingOperation = pendingOperations[0]!;
+    assert(adminConfig.contracts.accessManager, "a v8 devnet publishes its AccessManager in /v2/config");
+    // The ETA is checked against the manager's own getSchedule, never against the API alone.
+    const onchainReadyAt = Number(await chain.readContract({ address: getAddress(adminConfig.contracts.accessManager),
+      abi: accessManagerAbi, functionName: "getSchedule", args: [pendingOperation.id as Hex] }));
+    assert.equal(onchainReadyAt, pendingOperation.readyAt,
+      "the API's pending-operation ETA is the manager's own getSchedule");
+    assert(onchainReadyAt > Number((await chain.getBlock()).timestamp),
+      "the announced operation is still waiting out its execution delay");
+    const adminNotice = buyerPage.getByRole("status").filter({ hasText: "Admin change scheduled" });
+    await adminNotice.waitFor({ state: "visible", timeout: 60_000 });
+    assert((await adminNotice.innerText()).includes(pendingOperation.label),
+      "the notice names the scheduled action the API reports");
+    assert.equal(await adminNotice.locator("time").getAttribute("datetime"),
+      new Date(onchainReadyAt * 1000).toISOString(),
+      "the pending-admin notice announces the manager's own activation instant");
+    log("48-hour fee schedule and a pending admin operation both announced with their on-chain instants");
 
     const [feeOrderIds] = await chain.readContract({ address: D.contracts.orderBook, abi: orderBookAbi,
       functionName: "ordersOfSeries", args: [BigInt(feeTarget.longId), 0n, 100n] });
@@ -896,10 +1210,11 @@ async function main() {
     const feeTaker = D.accounts.dee;
     const feeTakeBase = { longId: BigInt(feeTarget.longId), buying: true, orderIds: [feeOrderIds[feeAskIndex]!],
       units: 100n, minUnits: 100n, limitPrice: feeAsk.price, writeToSell: false, recipient: feeTaker };
-    const oldTake = { ...feeTakeBase, deadline: effectiveAt - 1 };
+    const oldQuoteParams = { ...feeTakeBase, deadline: effectiveAt + 300, maxTotalFee: MAX_UINT128 };
     const oldQuote = await chain.readContract({ account: feeTaker, address: D.contracts.orderBook,
-      abi: orderBookAbi, functionName: "quoteTake", args: [oldTake] });
+      abi: orderBookAbi, functionName: "quoteTake", args: [oldQuoteParams] });
     assert.equal(oldQuote[0], 100n, "resting ask quotes before activation");
+    const oldTake = { ...oldQuoteParams, maxTotalFee: oldQuote[2] + oldQuote[3] };
 
     // Keep a generous margin before the boundary so interval mining cannot race
     // the pre-activation assertion; then cross it with local Anvil time travel.
@@ -929,14 +1244,16 @@ async function main() {
         config.fees.takerFeeFlat.raw === String(nextFees.takerFeeFlat);
     }, 120_000);
     await assert.rejects(chain.simulateContract({ account: feeTaker, address: D.contracts.orderBook,
-      abi: orderBookAbi, functionName: "take", args: [oldTake] }), /DeadlinePassed/,
-    "a take quoted under old fees cannot execute after activation");
-    const newTake = { ...feeTakeBase, deadline: Number((await chain.getBlock()).timestamp) + 300 };
+      abi: orderBookAbi, functionName: "take", args: [oldTake] }), /FeeAboveMax/,
+    "an exact fee cap rejects a take after fees increase");
+    const newQuoteParams = { ...feeTakeBase, deadline: Number((await chain.getBlock()).timestamp) + 300,
+      maxTotalFee: MAX_UINT128 };
     const newQuote = await chain.readContract({ account: feeTaker, address: D.contracts.orderBook,
-      abi: orderBookAbi, functionName: "quoteTake", args: [newTake] });
+      abi: orderBookAbi, functionName: "quoteTake", args: [newQuoteParams] });
     assert.equal(newQuote[0], oldQuote[0]);
     assert.equal(newQuote[1], oldQuote[1], "premium unchanged while the fee schedule activated");
     assert(newQuote[2] > oldQuote[2], "activated taker fee exceeds the old quote");
+    const newTake = { ...newQuoteParams, maxTotalFee: newQuote[2] + newQuote[3] };
     const feeFillHash = await raw("eth_sendTransaction", [{ from: feeTaker, to: D.contracts.orderBook,
       data: encodeFunctionData({ abi: orderBookAbi, functionName: "take", args: [newTake] }) }]) as Hex;
     const feeFillReceipt = await chain.waitForTransactionReceipt({ hash: feeFillHash });
@@ -946,7 +1263,7 @@ async function main() {
     assert.equal(feeFills[0]!.args.units, newQuote[0]);
     assert.equal(feeFills[0]!.args.premium, newQuote[1]);
     assert.equal(feeFills[0]!.args.takerFee, newQuote[2], "execution charged the activated fee");
-    log("fee activated: stale take rejected; a resting ask filled at the new on-chain taker fee");
+    log("fee activated: stale cap rejected; a resting ask filled at the new on-chain taker fee");
     assert.deepEqual(pageErrors, [], "uncaught browser errors must fail v2 acceptance");
     console.log("V2 FORK ACCEPTANCE PASSED");
   } catch (error) {

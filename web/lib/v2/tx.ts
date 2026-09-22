@@ -6,8 +6,11 @@ import { orderBookAbi } from "../abi/v2/orderBook";
 import { publicClient, robinhoodChain } from "../chain";
 import { requireV2Address } from "./config";
 import { explainV2Error } from "./errors";
-import { feeBoundTakeDeadline } from "./feeDeadline";
 import { V2ReceiptUnknownError, waitForV2Receipt } from "./txStatus";
+
+// Mirrors TakeParams.maxTotalFee's uint128 width in contracts/src/v2/interfaces/V2Types.sol.
+const MAX_UINT128 = (1n << 128n) - 1n;
+const TAKE_QUOTE_LIFETIME_SECONDS = 300;
 
 export type WriteContext = {
   account: Address;
@@ -24,7 +27,7 @@ export class V2WriteError extends Error {
 }
 
 /** Simulate every write against the current chain state, then await inclusion. */
-async function simulatedWrite(
+export async function simulatedWrite(
   context: WriteContext, address: Address, abi: Abi, functionName: string, args: readonly unknown[],
   onMined?: (receipt: TransactionReceipt) => void,
 ): Promise<Hex> {
@@ -77,39 +80,59 @@ export type TakeParams = {
   writeToSell: boolean;
   recipient: Address;
   deadline: number;
+  maxTotalFee: bigint;
 };
 
 export type ExpectedTakeQuote = {
   filled: bigint;
   premium: bigint;
-  fee: bigint;
-  resaleFeeBps?: number;
+  takerFee: bigint;
+  sellerFees: bigint;
 };
 
-/** Read the quote and fee schedule at one chain block, then expire the take before any fee activation. */
+/** Quote without a fee limit, then return the exact quoted taker-side fee as the write cap. */
 export async function recheckTakeQuote(
-  context: WriteContext, paramsWithoutDeadline: Omit<TakeParams, "deadline">, expected: ExpectedTakeQuote,
+  context: WriteContext, request: Omit<TakeParams, "deadline" | "maxTotalFee">, expected: ExpectedTakeQuote,
 ): Promise<TakeParams> {
   const client = context.client ?? publicClient;
   const address = requireV2Address("orderBook");
   const block = await client.getBlock({ blockTag: "latest" });
   const now = Number(block.timestamp);
-  const [pending, effectiveFees] = await Promise.all([
-    client.readContract({ address, abi: orderBookAbi, functionName: "pendingFeeParams", blockNumber: block.number }),
-    expected.resaleFeeBps === undefined ? Promise.resolve(null) :
-      client.readContract({ address, abi: orderBookAbi, functionName: "feeParams", blockNumber: block.number }),
-  ]);
-  const deadline = feeBoundTakeDeadline(now, BigInt(pending[1]));
-  if (deadline <= now) throw new Error("A fee change is too close to this trade. Refresh the quote after it activates.");
-  const params = { ...paramsWithoutDeadline, deadline };
-  const [filled, premium, fee] = await client.readContract({ account: context.account, address,
-    abi: orderBookAbi, functionName: "quoteTake", args: [params], blockNumber: block.number });
-  if (effectiveFees && effectiveFees.resaleFeeBps !== expected.resaleFeeBps)
-    throw new Error("The resale fee changed. Refresh the quote and review the new proceeds.");
-  if (filled !== expected.filled || premium !== expected.premium || fee !== expected.fee)
+  const quoteParams = { ...request, deadline: now + TAKE_QUOTE_LIFETIME_SECONDS, maxTotalFee: MAX_UINT128 };
+  const [filled, premium, takerFee, sellerFees] = await client.readContract({ account: context.account, address,
+    abi: orderBookAbi, functionName: "quoteTake", args: [quoteParams], blockNumber: block.number });
+  // F-APP-01. `filled`, `premium` and `sellerFees` stay STRICTLY equal: a change in any of them is a
+  // real change to the trade and must stop it. `takerFee` is bounded instead, and only downwards.
+  //
+  // WHY. OrderBook applies a taker-fee discount that the client estimate does not model, and it
+  // applies it on BOTH sides of this comparison: `take` sets `ex.discountBps = _discountBps(msg.sender)`
+  // (OrderBook.sol:441) and `quoteTake` does the same at :492, so the on-chain quote is already
+  // discounted while `expected.takerFee` — computed in payoff.ts, which has no discount term at all —
+  // is the undiscounted figure. Under exact equality those two disagree the instant FEE_MANAGER calls
+  // `setDiscountModule` on a wired deployment, and every taker with a non-zero discount is permanently
+  // blocked from buying, selling and buy-back-and-close through this UI. The users a discount
+  // programme rewards would be the only ones locked out.
+  //
+  // WHY A BOUND RATHER THAN MODELLING THE DISCOUNT CLIENT-SIDE. `_takerFee` returns
+  // `base - base * discountBps / BPS` (OrderBook.sol:832) — read at the contracts tip, not from a task
+  // description — so the discount can only ever REDUCE the fee. A bound therefore makes no claim about
+  // what the discount IS, only that the taker is never charged more than was quoted, which is the
+  // property that actually protects them. Mirroring the discount into the estimate would put a second
+  // copy of a chain-side value in the client and desync again the next time it changes; that is the
+  // failure this finding already is, and it is why the config-constant version is a forbidden fix.
+  //
+  // DELIBERATELY NO LOWER BOUND. `_discountBps` clamps to `MAX_DISCOUNT_BPS` (5,000 — IFeeDiscount.sol:10),
+  // so a floor of `expected.takerFee / 2` would be derivable. It is not imposed: it would re-introduce a
+  // mirrored constant, and if the chain ever raised that ceiling the floor would block exactly the
+  // takers this fix unblocks. An unexpectedly LOW fee is not a risk to the taker.
+  if (filled !== expected.filled || premium !== expected.premium || sellerFees !== expected.sellerFees)
     throw new Error("The on-chain quote changed. Refresh and review the trade before continuing.");
-  if (filled < params.minUnits) throw new Error("There is not enough depth for this fill. Choose a smaller size.");
-  return params;
+  if (takerFee > expected.takerFee)
+    throw new Error("The on-chain taker fee is higher than quoted. Refresh and review the trade before continuing.");
+  if (filled < quoteParams.minUnits) throw new Error("There is not enough depth for this fill. Choose a smaller size.");
+  const maxTotalFee = takerFee + sellerFees;
+  if (maxTotalFee > MAX_UINT128) throw new Error("The quoted fee is too large to submit.");
+  return { ...quoteParams, maxTotalFee };
 }
 
 export type TakeResult = { hash: Hex; unitsFilled: bigint | null };
@@ -118,6 +141,7 @@ export async function take(context: WriteContext, params: TakeParams): Promise<T
   if (params.units <= 0n || params.minUnits <= 0n || params.minUnits > params.units || !params.orderIds.length)
     throw new RangeError("Select a positive quantity and at least one order.");
   if (!Number.isSafeInteger(params.deadline) || params.deadline <= 0) throw new RangeError("Refresh this expired quote.");
+  if (params.maxTotalFee < 0n || params.maxTotalFee > MAX_UINT128) throw new RangeError("Refresh this invalid fee quote.");
   const address = requireV2Address("orderBook");
   let unitsFilled: bigint | null = null;
   const hash = await simulatedWrite(context, address, orderBookAbi, "take", [params], (receipt) => {

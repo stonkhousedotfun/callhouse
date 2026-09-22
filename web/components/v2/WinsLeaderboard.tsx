@@ -4,7 +4,7 @@ import { useInfiniteQuery } from "@tanstack/react-query";
 import { useState } from "react";
 import { useAccount } from "wagmi";
 
-import { Button, Notice, PageHead, Panel } from "@/components/ui";
+import { Button, Notice, PageHead, Panel, Segments } from "@/components/ui";
 import { v2Api } from "@/lib/v2/api";
 import type { LeaderboardResponse, Win } from "@/lib/v2/api-types";
 import { useStats } from "@/lib/v2/hooks";
@@ -31,15 +31,8 @@ const date = (unix: number) => new Intl.DateTimeFormat("en-US", {
   month: "short", day: "numeric", year: "numeric", timeZone: "UTC",
 }).format(new Date(unix * 1000));
 
-function Segments<T extends string>({ label, options, selected, onSelect }: {
-  label: string; options: readonly { value: T; label: string }[]; selected: T; onSelect: (value: T) => void;
-}) {
-  return <div className="flex flex-wrap items-center gap-2" role="group" aria-label={label}>
-    {options.map(({ value, label: text }) => <Button key={value} size="sm"
-      variant={value === selected ? "primary" : "ghost"} aria-pressed={value === selected}
-      onClick={() => onSelect(value)}>{text}</Button>)}
-  </div>;
-}
+// `Segments` moved to components/ui (UX review item 7). This file was its original home and is
+// now just another caller, which is the point: one control, one appearance, one keyboard contract.
 
 export function WinTile({ win }: { win: Win }) {
   return <Panel as="article" className="flex h-full flex-col">
@@ -170,5 +163,42 @@ export function Leaderboard() {
           onClick={() => void board.fetchNextPage()}>{board.isFetchingNextPage ? "Loading…" : "Load more ranks"}</Button></div> : null}
       </>}
     <p className="mt-6 text-xs text-ink-2">Weekly rankings reset Monday at midnight New York time. Accounts with flagged or gifted positions are excluded from ranking.</p>
+  </>;
+}
+
+/*//////////////////////////////////////////////////////////////
+          ONE PAGE, TWO TABS — UX review item 4 (section 3)
+//////////////////////////////////////////////////////////////*/
+
+export type WinsTab = "wins" | "leaderboard";
+
+/** The tab a `?tab=` value selects. Anything else is the default rather than an error page. */
+export function winsTabFromParam(raw: string | null | undefined): WinsTab {
+  return raw === "leaderboard" ? "leaderboard" : "wins";
+}
+
+/**
+ * `/wins` and `/leaderboard` as one tabbed page.
+ *
+ * WHY THIS EXISTS: `/leaderboard` was a real page — three windows by three metrics — that NOTHING
+ * LINKED TO. Only `/wins` was in the nav, so the leaderboard could be reached solely by typing the
+ * URL. A page nobody can navigate to is not a feature, and adding a ninth nav destination to fix
+ * it would have worsened the review's item 1 (eight top-level destinations, four of which take
+ * your money).
+ *
+ * `/leaderboard` IS NOT DELETED. It still renders, now as this page with the leaderboard tab
+ * selected, so an existing link, bookmark or share keeps working and lands where the reader
+ * expected. Removing the route would have turned every such link into a 404 to fix a discovery
+ * problem, which trades one silent failure for a louder one.
+ *
+ * The tab idiom is `Segments`, the same control the rest of the app now uses (item 1), so this
+ * page did not invent a third toggle appearance while the row was busy removing the second.
+ */
+export function WinsAndLeaderboard({ initialTab = "wins" }: { initialTab?: WinsTab }) {
+  const [tab, setTab] = useState<WinsTab>(initialTab);
+  return <>
+    <Segments className="mb-6" label="Wins or leaderboard" selected={tab} onSelect={setTab}
+      options={[{ value: "wins", label: "Recent wins" }, { value: "leaderboard", label: "Leaderboard" }] as const} />
+    {tab === "wins" ? <WinsFeed /> : <Leaderboard />}
   </>;
 }

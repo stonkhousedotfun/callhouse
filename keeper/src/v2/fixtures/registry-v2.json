@@ -1,5 +1,5 @@
 {
-  "_readme": "Fixture for keeper/src/v2/registry.test.ts: a trimmed copy of ops/markets/tier1.json (4 markets, verification and explorer blocks dropped). A deployed v2 block (fake addresses, partial defaults) and per-market overrides: NVDA live, TSLA live with puts, SGOV paused without dailies, AAPL without a v2 block.",
+  "_readme": "Fixture for keeper/src/v2/registry.test.ts: a trimmed copy of ops/markets/tier1.json (4 markets, verification and explorer blocks dropped). A deployed INTERFACE_VERSION 8 block (fake addresses, partial defaults) and per-market overrides: NVDA live with a Uniswap v3 payout route, TSLA live with puts and a v4 route, SGOV paused without dailies and without a route, AAPL without a v2 block. It deliberately carries v2.fees.allowRent TRUE and non-zero rent so the per-market rent override stays exercised: that is the one legal way a v8 registry may carry rent, and the real ops/markets/tier1.json (allowRent false, rent 0 everywhere) is loaded directly by the test as the other half of the pair.",
   "generatedAt": "2026-09-16T02:30:56.707Z",
   "verifiedAtBlock": 64151977,
   "shared": {
@@ -46,7 +46,7 @@
     ]
   },
   "v2": {
-    "interfaceVersion": 7,
+    "interfaceVersion": 8,
     "deployBlock": "65100000",
     "contracts": {
       "clearinghouse": "0x00000000000000000000000000000000c0de0001",
@@ -59,6 +59,7 @@
       "makerVault": "0x00000000000000000000000000000000c0de0008",
       "makerRegistry": "0x00000000000000000000000000000000c0de0009",
       "rewardsDistributor": "0x00000000000000000000000000000000c0de000a",
+      "accessManager": "0x00000000000000000000000000000000c0de000b",
       "sources": {
         "chainlink": "0x000000000000000000000000000000005c000001",
         "univ3": "0x000000000000000000000000000000005c000002",
@@ -70,9 +71,15 @@
       "swapRouter02": "0xcaf681a66d020601342297493863e78c959e5cb2",
       "quoterV2": "0x33e885ed0ec9bf04ecfb19341582aadcb4c8a9e7"
     },
+    "flywheel": {
+      "feeSplitter": "0x00000000000000000000000000000000c0de000c",
+      "buybackExecutor": "0x00000000000000000000000000000000c0de000d",
+      "deployBlock": "65099000"
+    },
     "fees": {
-      "premiumFeeBps": 0,
+      "premiumFeeBps": 500,
       "mintFeePpm": 80,
+      "allowRent": true,
       "resaleFeeBps": 0,
       "takerFeeFlat": "100000",
       "takerFeeCapBps": 1000,
@@ -99,7 +106,7 @@
   "markets": [
     {
       "ticker": "AAPL",
-      "name": "Apple • Robinhood Token",
+      "name": "Apple \u2022 Robinhood Token",
       "asset": "0xaF3D76f1834A1d425780943C99Ea8A608f8a93f9",
       "assetSymbol": "AAPL",
       "assetDeployBlock": 48276,
@@ -142,7 +149,7 @@
     },
     {
       "ticker": "NVDA",
-      "name": "NVIDIA • Robinhood Token",
+      "name": "NVIDIA \u2022 Robinhood Token",
       "asset": "0xd0601CE157Db5bdC3162BbaC2a2C8aF5320D9EEC",
       "assetSymbol": "NVDA",
       "assetDeployBlock": 45898,
@@ -182,7 +189,7 @@
         "sourcify": null,
         "configuredAt": "2026-09-15"
       },
-      "notes": "Live since 2026-09-15 (factory deploy block 64038234). depositCap() is type(uint256).max on chain; policy() (300,1200,40,9500,500,50). Keeper key = mnemonic account 1, the original single-market keeper; it is not moved. The pooled cNVDA vault 0x88a98931… is closed and is not this market.",
+      "notes": "Live since 2026-09-15 (factory deploy block 64038234). depositCap() is type(uint256).max on chain; policy() (300,1200,40,9500,500,50). Keeper key = mnemonic account 1, the original single-market keeper; it is not moved. The pooled cNVDA vault 0x88a98931\u2026 is closed and is not this market.",
       "v2": {
         "status": "live",
         "wave": "canary",
@@ -192,6 +199,10 @@
         "univ3Pool": "0xd4eb21209c4d6093f80b5b84f5c45cc093ea14a3",
         "univ3MinLiquidity": "1000000000000000000",
         "dataStreamsFeedId": null,
+        "payoutRoute": {
+          "venue": "v3",
+          "fee": 3000
+        },
         "overrides": {},
         "registeredAt": 1790000000,
         "registerTx": "0xabababababababababababababababababababababababababababababababab"
@@ -199,7 +210,7 @@
     },
     {
       "ticker": "SGOV",
-      "name": "iShares 0-3 Month Treasury Bond • Robinhood Token",
+      "name": "iShares 0-3 Month Treasury Bond \u2022 Robinhood Token",
       "asset": "0x92FD66527192E3e61d4DDd13322Aa222DE86F9B5",
       "assetSymbol": "SGOV",
       "assetDeployBlock": 48290,
@@ -216,7 +227,7 @@
         "weekly": false
       },
       "mode": "fixed",
-      "modeReason": "no weekly expiries (has 260918,261016,261120,261218…)",
+      "modeReason": "no weekly expiries (has 260918,261016,261120,261218\u2026)",
       "depositCapUsd": 10000,
       "depositCap": "98000000000000000000",
       "strikeOtmBps": 500,
@@ -247,6 +258,7 @@
         "univ3Pool": null,
         "univ3MinLiquidity": null,
         "dataStreamsFeedId": null,
+        "payoutRoute": null,
         "overrides": {
           "expiriesAhead": {
             "daily": 0
@@ -265,7 +277,7 @@
     },
     {
       "ticker": "TSLA",
-      "name": "Tesla • Robinhood Token",
+      "name": "Tesla \u2022 Robinhood Token",
       "asset": "0x322F0929c4625eD5bAd873c95208D54E1c003b2d",
       "assetSymbol": "TSLA",
       "assetDeployBlock": 34767,
@@ -314,6 +326,12 @@
         "univ3Pool": null,
         "univ3MinLiquidity": null,
         "dataStreamsFeedId": "0x0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b",
+        "payoutRoute": {
+          "venue": "v4",
+          "fee": 500,
+          "tickSpacing": 10,
+          "poolId": "0x0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c"
+        },
         "overrides": {
           "uncorroboratedDelayS": 1800,
           "ladder": {

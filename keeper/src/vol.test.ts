@@ -238,6 +238,19 @@ test('spot mapping: token / share within the divergence limit, else vol-spot-div
   assert.equal((mapSpot(0, TOKEN_SPOT6, 300) as { reason: string }).reason, 'vol-inconsistent');
 });
 
+test('K3-305: spot mapping divides by uiMultiplier; a 2× token is not vol-spot-divergence against the share', () => {
+  const unit = '1000000000000000000';
+  const double = '2000000000000000000';
+  assert.equal(mapSpot(200, 206_000_000n, 300, unit).ok, true, 'unit multiplier matches the 3-arg path');
+  assert.equal(mapSpot(200, 206_020_000n, 300, unit).ok, false, 'unit: 3.01 % is still refused');
+  // Token prints 400 USDG per token because each token is two shares; share spot is 200.
+  const doubled = mapSpot(200, 400_000_000n, 300, double);
+  assert.ok(doubled.ok, '2× token vs the share is in band after dividing by uiMultiplier');
+  assert.ok(Math.abs(doubled.ratio - 1) < 1e-9);
+  assert.equal(mapSpot(200, 400_000_000n, 300, unit).ok, false, 'the same print without the multiplier is 100 % off');
+  assert.equal(mapSpot(200, 412_040_000n, 300, double).ok, false, '2× token still refuses a 3.01 % share gap');
+});
+
 /*//////////////////////////////////////////////////////////////
                          STRIKE AND PRICE
 //////////////////////////////////////////////////////////////*/

@@ -15,16 +15,16 @@
         "expiry": 1789156800,
         "tenor": "weekly",
         "mintCutoff": 1789155000,
-        "mintFeePpm": 80,
+        "mintFeePpm": 0,
         "mintFeesHeld": {
           "raw": "0",
           "decimals": 18,
           "formatted": "0"
         },
         "mintFeesAccrued": {
-          "raw": "28992063492064",
+          "raw": "0",
           "decimals": 18,
-          "formatted": "0.000028992063492064"
+          "formatted": "0"
         },
         "status": "settled"
       },
@@ -57,11 +57,11 @@
         "expiry": 1789588800,
         "tenor": "daily",
         "mintCutoff": 1789587000,
-        "mintFeePpm": 80,
+        "mintFeePpm": 0,
         "mintFeesHeld": {
-          "raw": "5619047619048",
+          "raw": "0",
           "decimals": 18,
-          "formatted": "0.000005619047619048"
+          "formatted": "0"
         },
         "mintFeesAccrued": {
           "raw": "0",
@@ -95,11 +95,11 @@
         "expiry": 1789761600,
         "tenor": "weekly",
         "mintCutoff": 1789759800,
-        "mintFeePpm": 80,
+        "mintFeePpm": 0,
         "mintFeesHeld": {
-          "raw": "55000000000000",
+          "raw": "0",
           "decimals": 18,
-          "formatted": "0.000055"
+          "formatted": "0"
         },
         "mintFeesAccrued": {
           "raw": "0",
@@ -130,7 +130,7 @@
   "shorts": [],
   "orders": [
     {
-      "orderId": "1023",
+      "orderId": "1024",
       "series": {
         "longId": "99009237462374694363962302225417700354950990418847871466319305965001356060312",
         "shortId": "99009237462374694363962302225417700354950990418847871466319305965001356060313",
@@ -145,7 +145,7 @@
         "expiry": 1789675200,
         "tenor": "daily",
         "mintCutoff": 1789673400,
-        "mintFeePpm": 80,
+        "mintFeePpm": 0,
         "mintFeesHeld": {
           "raw": "0",
           "decimals": 18,

@@ -3,7 +3,8 @@
  * a database: steps.ts gathers the views (one pinned multicall per question), asks these, and acts.
  * Every rule a keeper can get quietly wrong lives here, where planner.test.ts pins it.
  *
- *   ladders     ladderStrikes, planLadder (the registry ladder, completed, re-centred, never deleted)
+ *   ladders     ladderStrikes, planLadder (the registry ladder, completed, re-centred, never deleted),
+ *               upcomingLadderExpiries, ladderSlots (which expiries and sides carry one)
  *   creation    pinGasOf, planPinGroup, chunkCreates (the first series of an expiry pays the settlement pin)
  *   expiries    planExpiry: snapshot → finalize → settle, prune before redeem, the alerts, the wake-up
  *   redemption  selectRedeemable, redeemGasOf, chunkByGas, splitChunk
@@ -17,7 +18,7 @@
  * balances and supplies in 0.01-share units, times in unix seconds of the HEAD BLOCK (never the
  * wall clock), gas in gas units.
  */
-import type { LadderParams } from '../registry.js';
+import { TENORS, type LadderParams, type MarketParams, type Tenor } from '../registry.js';
 import {
   BPS,
   FINALIZE_DELAY,
@@ -154,6 +155,53 @@ export function planLadder(input: LadderInput): LadderPlan {
 /** The earliest expiry a ladder may target now: createSeries needs expiry ≥ now + MIN_SERIES_LEAD when it is MINED. */
 export function ladderSearchStart(now: number): number {
   return now + MIN_SERIES_LEAD + LADDER_LEAD_MARGIN_S;
+}
+
+/** ExpiryCalendar.nextExpiry(afterTs, weekly): the first close strictly after `afterTs`; rejects when none is in its window. */
+export type NextExpiryRead = (afterTs: number, weekly: boolean) => Promise<number>;
+
+/**
+ * The next `count` expiries of one tenor a ladder targets at `now`: nextExpiry from ladderSearchStart(now), each after
+ * the previous one. A rejected read (nothing inside the calendar's search window) ends the list there. The cranker
+ * reads the on-chain ExpiryCalendar; the pricing-coverage report (pricing/coverage.ts) the same read or a local mirror.
+ */
+export async function upcomingLadderExpiries(now: number, weekly: boolean, count: number, nextExpiry: NextExpiryRead): Promise<number[]> {
+  const out: number[] = [];
+  let after = ladderSearchStart(now);
+  while (out.length < count) {
+    let next: number;
+    try {
+      next = await nextExpiry(after, weekly);
+    } catch {
+      break; // nothing within the calendar's search window
+    }
+    out.push(next);
+    after = next;
+  }
+  return out;
+}
+
+/** One (tenor, expiry, side) a market carries a ladder on. */
+export interface LadderSlot {
+  tenor: Tenor;
+  expiry: number;
+  isPut: boolean;
+}
+
+/**
+ * Which ladders a market carries (K2-03 step 1): for each tenor, the first `expiriesAhead[tenor]` of that tenor's
+ * upcoming expiries (0 switches the tenor off), calls always and puts only when the market lists puts. In
+ * TENORS order, then expiry order, calls before puts. `expiries[tenor]` is the shared upcoming list
+ * (upcomingLadderExpiries at the largest `expiriesAhead` of any market).
+ */
+export function ladderSlots(params: Pick<MarketParams, 'expiriesAhead'>, puts: boolean, expiries: Readonly<Record<Tenor, readonly number[]>>): LadderSlot[] {
+  const slots: LadderSlot[] = [];
+  for (const tenor of TENORS) {
+    for (const expiry of expiries[tenor].slice(0, params.expiriesAhead[tenor])) {
+      for (const isPut of puts ? [false, true] : [false]) slots.push({ tenor, expiry, isPut });
+    }
+  }
+  return slots;
 }
 
 /*//////////////////////////////////////////////////////////////

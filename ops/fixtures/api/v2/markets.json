@@ -4,6 +4,7 @@
     "name": "NVIDIA • Robinhood Token",
     "underlying": "0xd0601CE157Db5bdC3162BbaC2a2C8aF5320D9EEC",
     "status": "live",
+    "launch": true,
     "spot": {
       "raw": "215500000",
       "decimals": 6,
@@ -16,7 +17,15 @@
       "formatted": "1"
     },
     "puts": false,
-    "mintFeePpm": 80,
+    "mintFeePpm": 0,
+    "settlement": {
+      "sourceCount": 2,
+      "uncorroboratedDelayS": 21600,
+      "route": {
+        "venue": "v3",
+        "fee": 100
+      }
+    },
     "expiries": [
       1789675200,
       1789761600,
@@ -33,6 +42,7 @@
         "decimals": 6,
         "formatted": "9.24854"
       },
+      "asOf": 1789592400,
       "openInterestUnits": "875",
       "seriesOpen": 15
     }
@@ -42,6 +52,7 @@
     "name": "Tesla • Robinhood Token",
     "underlying": "0x322F0929c4625eD5bAd873c95208D54E1c003b2d",
     "status": "live",
+    "launch": false,
     "spot": {
       "raw": "355850000",
       "decimals": 6,
@@ -54,7 +65,12 @@
       "formatted": "5"
     },
     "puts": false,
-    "mintFeePpm": 300,
+    "mintFeePpm": 0,
+    "settlement": {
+      "sourceCount": 1,
+      "uncorroboratedDelayS": 3600,
+      "route": null
+    },
     "expiries": [
       1789761600,
       1790366400
@@ -70,6 +86,7 @@
         "decimals": 6,
         "formatted": "2.0545"
       },
+      "asOf": 1789592400,
       "openInterestUnits": "200",
       "seriesOpen": 10
     }

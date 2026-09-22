@@ -10,12 +10,7 @@ export const orderBookAbi = [
         "internalType": "contract IClearinghouse"
       },
       {
-        "name": "admin",
-        "type": "address",
-        "internalType": "address"
-      },
-      {
-        "name": "guardian",
+        "name": "authority_",
         "type": "address",
         "internalType": "address"
       },
@@ -61,13 +56,13 @@ export const orderBookAbi = [
   },
   {
     "type": "function",
-    "name": "DEFAULT_ADMIN_ROLE",
+    "name": "authority",
     "inputs": [],
     "outputs": [
       {
         "name": "",
-        "type": "bytes32",
-        "internalType": "bytes32"
+        "type": "address",
+        "internalType": "address"
       }
     ],
     "stateMutability": "view"
@@ -95,6 +90,19 @@ export const orderBookAbi = [
   {
     "type": "function",
     "name": "clearinghouse",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "address",
+        "internalType": "address"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "discountModule",
     "inputs": [],
     "outputs": [
       {
@@ -154,6 +162,30 @@ export const orderBookAbi = [
         "name": "",
         "type": "address",
         "internalType": "address"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "fundingOf",
+    "inputs": [
+      {
+        "name": "maker",
+        "type": "address",
+        "internalType": "address"
+      }
+    ],
+    "outputs": [
+      {
+        "name": "allowed",
+        "type": "bool",
+        "internalType": "bool"
+      },
+      {
+        "name": "on",
+        "type": "bool",
+        "internalType": "bool"
       }
     ],
     "stateMutability": "view"
@@ -221,61 +253,13 @@ export const orderBookAbi = [
   },
   {
     "type": "function",
-    "name": "getRoleAdmin",
-    "inputs": [
-      {
-        "name": "role",
-        "type": "bytes32",
-        "internalType": "bytes32"
-      }
-    ],
+    "name": "isConsumingScheduledOp",
+    "inputs": [],
     "outputs": [
       {
         "name": "",
-        "type": "bytes32",
-        "internalType": "bytes32"
-      }
-    ],
-    "stateMutability": "view"
-  },
-  {
-    "type": "function",
-    "name": "grantRole",
-    "inputs": [
-      {
-        "name": "role",
-        "type": "bytes32",
-        "internalType": "bytes32"
-      },
-      {
-        "name": "account",
-        "type": "address",
-        "internalType": "address"
-      }
-    ],
-    "outputs": [],
-    "stateMutability": "nonpayable"
-  },
-  {
-    "type": "function",
-    "name": "hasRole",
-    "inputs": [
-      {
-        "name": "role",
-        "type": "bytes32",
-        "internalType": "bytes32"
-      },
-      {
-        "name": "account",
-        "type": "address",
-        "internalType": "address"
-      }
-    ],
-    "outputs": [
-      {
-        "name": "",
-        "type": "bool",
-        "internalType": "bool"
+        "type": "bytes4",
+        "internalType": "bytes4"
       }
     ],
     "stateMutability": "view"
@@ -714,6 +698,11 @@ export const orderBookAbi = [
             "name": "deadline",
             "type": "uint40",
             "internalType": "uint40"
+          },
+          {
+            "name": "maxTotalFee",
+            "type": "uint128",
+            "internalType": "uint128"
           }
         ]
       }
@@ -733,27 +722,14 @@ export const orderBookAbi = [
         "name": "takerFee",
         "type": "uint256",
         "internalType": "uint256"
+      },
+      {
+        "name": "sellerFees",
+        "type": "uint256",
+        "internalType": "uint256"
       }
     ],
     "stateMutability": "view"
-  },
-  {
-    "type": "function",
-    "name": "renounceRole",
-    "inputs": [
-      {
-        "name": "role",
-        "type": "bytes32",
-        "internalType": "bytes32"
-      },
-      {
-        "name": "callerConfirmation",
-        "type": "address",
-        "internalType": "address"
-      }
-    ],
-    "outputs": [],
-    "stateMutability": "nonpayable"
   },
   {
     "type": "function",
@@ -786,24 +762,6 @@ export const orderBookAbi = [
   },
   {
     "type": "function",
-    "name": "revokeRole",
-    "inputs": [
-      {
-        "name": "role",
-        "type": "bytes32",
-        "internalType": "bytes32"
-      },
-      {
-        "name": "account",
-        "type": "address",
-        "internalType": "address"
-      }
-    ],
-    "outputs": [],
-    "stateMutability": "nonpayable"
-  },
-  {
-    "type": "function",
     "name": "seriesOrderCount",
     "inputs": [
       {
@@ -823,6 +781,19 @@ export const orderBookAbi = [
   },
   {
     "type": "function",
+    "name": "setAuthority",
+    "inputs": [
+      {
+        "name": "newAuthority",
+        "type": "address",
+        "internalType": "address"
+      }
+    ],
+    "outputs": [],
+    "stateMutability": "nonpayable"
+  },
+  {
+    "type": "function",
     "name": "setDelegate",
     "inputs": [
       {
@@ -834,6 +805,19 @@ export const orderBookAbi = [
         "name": "approved",
         "type": "bool",
         "internalType": "bool"
+      }
+    ],
+    "outputs": [],
+    "stateMutability": "nonpayable"
+  },
+  {
+    "type": "function",
+    "name": "setDiscountModule",
+    "inputs": [
+      {
+        "name": "module",
+        "type": "address",
+        "internalType": "contract IFeeDiscount"
       }
     ],
     "outputs": [],
@@ -887,6 +871,37 @@ export const orderBookAbi = [
         "name": "recipient",
         "type": "address",
         "internalType": "address"
+      }
+    ],
+    "outputs": [],
+    "stateMutability": "nonpayable"
+  },
+  {
+    "type": "function",
+    "name": "setFunding",
+    "inputs": [
+      {
+        "name": "on",
+        "type": "bool",
+        "internalType": "bool"
+      }
+    ],
+    "outputs": [],
+    "stateMutability": "nonpayable"
+  },
+  {
+    "type": "function",
+    "name": "setFundingAllowed",
+    "inputs": [
+      {
+        "name": "maker",
+        "type": "address",
+        "internalType": "address"
+      },
+      {
+        "name": "allowed",
+        "type": "bool",
+        "internalType": "bool"
       }
     ],
     "outputs": [],
@@ -990,6 +1005,11 @@ export const orderBookAbi = [
             "name": "deadline",
             "type": "uint40",
             "internalType": "uint40"
+          },
+          {
+            "name": "maxTotalFee",
+            "type": "uint128",
+            "internalType": "uint128"
           }
         ]
       }
@@ -1041,6 +1061,19 @@ export const orderBookAbi = [
   },
   {
     "type": "event",
+    "name": "AuthorityUpdated",
+    "inputs": [
+      {
+        "name": "authority",
+        "type": "address",
+        "internalType": "address",
+        "indexed": false
+      }
+    ],
+    "anonymous": false
+  },
+  {
+    "type": "event",
     "name": "DelegateSet",
     "inputs": [
       {
@@ -1060,6 +1093,19 @@ export const orderBookAbi = [
         "type": "bool",
         "internalType": "bool",
         "indexed": false
+      }
+    ],
+    "anonymous": false
+  },
+  {
+    "type": "event",
+    "name": "DiscountModuleSet",
+    "inputs": [
+      {
+        "name": "module",
+        "type": "address",
+        "internalType": "address",
+        "indexed": true
       }
     ],
     "anonymous": false
@@ -1159,6 +1205,100 @@ export const orderBookAbi = [
         "type": "address",
         "internalType": "address",
         "indexed": true
+      }
+    ],
+    "anonymous": false
+  },
+  {
+    "type": "event",
+    "name": "Funded",
+    "inputs": [
+      {
+        "name": "maker",
+        "type": "address",
+        "internalType": "address",
+        "indexed": true
+      },
+      {
+        "name": "asset",
+        "type": "address",
+        "internalType": "address",
+        "indexed": true
+      },
+      {
+        "name": "requested",
+        "type": "uint256",
+        "internalType": "uint256",
+        "indexed": false
+      },
+      {
+        "name": "delivered",
+        "type": "uint256",
+        "internalType": "uint256",
+        "indexed": false
+      }
+    ],
+    "anonymous": false
+  },
+  {
+    "type": "event",
+    "name": "FundingAllowedSet",
+    "inputs": [
+      {
+        "name": "maker",
+        "type": "address",
+        "internalType": "address",
+        "indexed": true
+      },
+      {
+        "name": "allowed",
+        "type": "bool",
+        "internalType": "bool",
+        "indexed": false
+      }
+    ],
+    "anonymous": false
+  },
+  {
+    "type": "event",
+    "name": "FundingFailed",
+    "inputs": [
+      {
+        "name": "maker",
+        "type": "address",
+        "internalType": "address",
+        "indexed": true
+      },
+      {
+        "name": "asset",
+        "type": "address",
+        "internalType": "address",
+        "indexed": true
+      },
+      {
+        "name": "requested",
+        "type": "uint256",
+        "internalType": "uint256",
+        "indexed": false
+      }
+    ],
+    "anonymous": false
+  },
+  {
+    "type": "event",
+    "name": "FundingSet",
+    "inputs": [
+      {
+        "name": "maker",
+        "type": "address",
+        "internalType": "address",
+        "indexed": true
+      },
+      {
+        "name": "on",
+        "type": "bool",
+        "internalType": "bool",
+        "indexed": false
       }
     ],
     "anonymous": false
@@ -1350,81 +1490,6 @@ export const orderBookAbi = [
   },
   {
     "type": "event",
-    "name": "RoleAdminChanged",
-    "inputs": [
-      {
-        "name": "role",
-        "type": "bytes32",
-        "internalType": "bytes32",
-        "indexed": true
-      },
-      {
-        "name": "previousAdminRole",
-        "type": "bytes32",
-        "internalType": "bytes32",
-        "indexed": true
-      },
-      {
-        "name": "newAdminRole",
-        "type": "bytes32",
-        "internalType": "bytes32",
-        "indexed": true
-      }
-    ],
-    "anonymous": false
-  },
-  {
-    "type": "event",
-    "name": "RoleGranted",
-    "inputs": [
-      {
-        "name": "role",
-        "type": "bytes32",
-        "internalType": "bytes32",
-        "indexed": true
-      },
-      {
-        "name": "account",
-        "type": "address",
-        "internalType": "address",
-        "indexed": true
-      },
-      {
-        "name": "sender",
-        "type": "address",
-        "internalType": "address",
-        "indexed": true
-      }
-    ],
-    "anonymous": false
-  },
-  {
-    "type": "event",
-    "name": "RoleRevoked",
-    "inputs": [
-      {
-        "name": "role",
-        "type": "bytes32",
-        "internalType": "bytes32",
-        "indexed": true
-      },
-      {
-        "name": "account",
-        "type": "address",
-        "internalType": "address",
-        "indexed": true
-      },
-      {
-        "name": "sender",
-        "type": "address",
-        "internalType": "address",
-        "indexed": true
-      }
-    ],
-    "anonymous": false
-  },
-  {
-    "type": "event",
     "name": "Taken",
     "inputs": [
       {
@@ -1481,22 +1546,39 @@ export const orderBookAbi = [
   },
   {
     "type": "error",
-    "name": "AccessControlBadConfirmation",
-    "inputs": []
+    "name": "AccessManagedInvalidAuthority",
+    "inputs": [
+      {
+        "name": "authority",
+        "type": "address",
+        "internalType": "address"
+      }
+    ]
   },
   {
     "type": "error",
-    "name": "AccessControlUnauthorizedAccount",
+    "name": "AccessManagedRequiredDelay",
     "inputs": [
       {
-        "name": "account",
+        "name": "caller",
         "type": "address",
         "internalType": "address"
       },
       {
-        "name": "neededRole",
-        "type": "bytes32",
-        "internalType": "bytes32"
+        "name": "delay",
+        "type": "uint32",
+        "internalType": "uint32"
+      }
+    ]
+  },
+  {
+    "type": "error",
+    "name": "AccessManagedUnauthorized",
+    "inputs": [
+      {
+        "name": "caller",
+        "type": "address",
+        "internalType": "address"
       }
     ]
   },
@@ -1534,6 +1616,27 @@ export const orderBookAbi = [
   {
     "type": "error",
     "name": "DeadlinePassed",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "FeeAboveMax",
+    "inputs": [
+      {
+        "name": "fee",
+        "type": "uint256",
+        "internalType": "uint256"
+      },
+      {
+        "name": "max",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ]
+  },
+  {
+    "type": "error",
+    "name": "NoSource",
     "inputs": []
   },
   {
@@ -1610,6 +1713,33 @@ export const orderBookAbi = [
   },
   {
     "type": "error",
+    "name": "CapExceeded",
+    "inputs": [
+      {
+        "name": "amount",
+        "type": "uint256",
+        "internalType": "uint256"
+      },
+      {
+        "name": "cap",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ]
+  },
+  {
+    "type": "error",
+    "name": "CooldownActive",
+    "inputs": [
+      {
+        "name": "readyAt",
+        "type": "uint40",
+        "internalType": "uint40"
+      }
+    ]
+  },
+  {
+    "type": "error",
     "name": "CreatePaused",
     "inputs": []
   },
@@ -1646,12 +1776,12 @@ export const orderBookAbi = [
   },
   {
     "type": "error",
-    "name": "NoSource",
+    "name": "NotExpired",
     "inputs": []
   },
   {
     "type": "error",
-    "name": "NotExpired",
+    "name": "NotMinter",
     "inputs": []
   },
   {
@@ -1698,6 +1828,17 @@ export const orderBookAbi = [
         "name": "hi",
         "type": "uint256",
         "internalType": "uint256"
+      }
+    ]
+  },
+  {
+    "type": "error",
+    "name": "RouteRejected",
+    "inputs": [
+      {
+        "name": "reason",
+        "type": "bytes32",
+        "internalType": "bytes32"
       }
     ]
   },

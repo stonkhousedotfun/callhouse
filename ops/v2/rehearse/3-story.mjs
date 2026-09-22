@@ -141,8 +141,17 @@ async function buyOnce(role, longId, units, label, { only } = {}) {
     left -= o.units - o.filled;
   }
   if (left > 0n) fail(`${label}: only ${units - left} of ${units} units on the book`);
-  const p = { longId, buying: true, orderIds: chosen.map((o) => o.id), units, minUnits: units, limitPrice: chosen.at(-1).price, writeToSell: false, recipient: who, deadline: await deadline() };
-  const [qUnits, qPremium, qFee] = await ob("quoteTake", [p]);
+  // INTERFACE_VERSION 8: TakeParams is TEN fields and `maxTotalFee` is the tenth and last. Field order is
+  // MIRRORED from the concrete exported ABI, ops/abis/v2/OrderBook.json, not from a doc or from memory.
+  // quoteTake does not enforce the cap -- FeeAboveMax appears exactly once in OrderBook.sol, at :462, inside
+  // take -- so the quote is taken with the cap at 0 and its answer sets the real cap for the take itself.
+  const base = { longId, buying: true, orderIds: chosen.map((o) => o.id), units, minUnits: units, limitPrice: chosen.at(-1).price, writeToSell: false, recipient: who, deadline: await deadline() };
+  const [qUnits, qPremium, qFee, qSellerFees] = await ob("quoteTake", [{ ...base, maxTotalFee: 0n }]);
+  // Exactly what take charges (OrderBook.sol:461): takerFee + (buying ? 0 : sellerFees). quoteTake already
+  // returns sellerFees as 0 on a buy, so this one expression is correct for both sides and needs no branch.
+  // `ob` sends the quote without a `from`, so the taker discount is not applied and the quoted fee is the
+  // UNdiscounted one -- the cap can only come out at or above what take will charge, never below it.
+  const p = { ...base, maxTotalFee: qFee + qSellerFees };
   if (qUnits !== units) fail(`${label}: quoteTake fills ${qUnits} of ${units}`);
   const before = await ch("balanceOf", [who, longId]);
   const usdgBefore = await bal(USDG, who);
@@ -306,7 +315,9 @@ async function main() {
     const ben = acct.ben;
     if (browser) {
       const w = new browserApi.BrowserWallet(ben, "ben");
-      const r = await browserApi.writerFlow(browser, { wallet: w, depositShares: 3, ask: { expiry: E1, longId: nv0.toString(), shares: "0.50", price: (Number(benAskPrice) / 1e6).toFixed(4) }, roll: ROLL });
+      const r = await browserApi.writerFlow(browser, { wallet: w, depositShares: 3,
+        ask: { expiry: E1, longId: nv0.toString(), shares: "0.50", price: (Number(benAskPrice) / 1e6).toFixed(4) },
+        roll: ROLL, settlementOracle: C.settlementOracle, underlying: M.NVDA.asset });
       ledgerAppend(w.calls.map((c) => ({ step: "3-story", action: `browser-${c.name}`, label: `ben (browser /earn/nvda) ${c.name}`, from: ben, to: c.to, hash: c.hash, status: c.status, gasUsed: c.gasUsed, block: c.block, ts: null })));
       remember("browserWriter", { calls: w.calls });
       info(`ben's page sent ${w.calls.length} transactions: ${w.calls.map((c) => c.name).join(", ")}`);
@@ -426,7 +437,12 @@ async function main() {
     const adaShort0 = await ch("balanceOf", [ada, nv1 | 1n]);
     const gusLong0 = await ch("balanceOf", [acct.gus, nv1]);
     const adaUsdg0 = await bal(USDG, ada);
-    const sp = { longId: nv1, buying: false, orderIds: [bid.orderId], units: 30n, minUnits: 30n, limitPrice: bidPrice, writeToSell: true, recipient: ada, deadline: await deadline() };
+    const spBase = { longId: nv1, buying: false, orderIds: [bid.orderId], units: 30n, minUnits: 30n, limitPrice: bidPrice, writeToSell: true, recipient: ada, deadline: await deadline() };
+    // Selling into a bid, so the taker pays its OWN seller fees on top of the taker fee -- which is why
+    // quoteTake returns sellerFees non-zero here and zero on a buy (OrderBook.sol:481-483), and why the cap
+    // is the sum of both (:461).
+    const [, , spTakerFee, spSellerFees] = await ob("quoteTake", [{ ...spBase, maxTotalFee: 0n }]);
+    const sp = { ...spBase, maxTotalFee: spTakerFee + spSellerFees };
     const hit = await send(ada, { address: C.orderBook, abi: ABI.orderBook, functionName: "take", args: [sp], label: "ada writes 0.30 share NVDA E1 r1 into gus's bid", action: "take-write-to-sell" });
     const hitFill = viem.parseEventLogs({ abi: ABI.orderBook, eventName: "OrderFilled", logs: hit.receipt.logs })[0];
     expect(hitFill.args.primary && !hitFill.args.takerIsBuyer && (await ch("balanceOf", [ada, nv1 | 1n])) === adaShort0 + 30n && (await ch("balanceOf", [acct.gus, nv1])) === gusLong0 + 30n && (await bal(USDG, ada)) > adaUsdg0,

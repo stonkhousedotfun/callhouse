@@ -17,7 +17,13 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import * as vol from '../../vol.js';
 import { syntheticNvdaChain, syntheticTslaChain, syntheticTslaPayload } from '../../fixtures/synthetic-chains.js';
-import { ChainCache, PRICING_MIN_REFETCH_MS, DEFAULT_CHAIN_MAX_BYTES, checkChain, checkQuoteWindow, filterQuotes, isUsableQuote } from './cboe.js';
+import { ChainCache, PRICING_MIN_REFETCH_MS, DEFAULT_CHAIN_MAX_BYTES, cboeToNormalized, checkChain, checkQuoteWindow, filterQuotes, isUsableQuote } from './cboe.js';
+import type { ChainEntry } from './cboe.js';
+
+/** A Cboe file as the service sees it (the Cboe adapter's normalized chain). */
+const n = (chain: vol.CboeChain) => cboeToNormalized(chain, 0);
+/** The cached entry holds `chain`'s file, normalized when it was received. */
+const holds = (entry: ChainEntry, chain: vol.CboeChain) => entry.chain !== null && entry.chain.underlying.providerSymbol === chain.root && entry.chain.clocks.publishedAtText === chain.timestamp && entry.chain.rows.length === chain.options.length;
 
 const TSLA_RAW = JSON.stringify(syntheticTslaPayload());
 const NVDA = syntheticNvdaChain();
@@ -122,25 +128,25 @@ test('checkQuoteWindow for puts: clean synthetic quotes; a put vertical, a risin
 
 test('checkChain: root, both clocks with the session rule, parsed rows; v1 reasons become v2 reasons', () => {
   const settings = { maxAgeS: 345_600 };
-  const ok = checkChain(NVDA, 'NVDA', NVDA_NOW, settings);
+  const ok = checkChain(n(NVDA), 'NVDA', NVDA_NOW, settings);
   assert.ok(ok.ok);
   assert.equal(ok.lastTradeUnix, Date.UTC(2026, 8, 14, 19, 59, 59) / 1000);
   assert.equal(ok.timestampUnix, Date.UTC(2026, 8, 15, 5, 45) / 1000);
-  const tsla = checkChain(TSLA, 'TSLA', TSLA_NOW, settings);
+  const tsla = checkChain(n(TSLA), 'TSLA', TSLA_NOW, settings);
   assert.ok(tsla.ok);
   assert.equal(tsla.lastTradeUnix, Date.UTC(2026, 8, 16, 19, 59, 59) / 1000);
 
   const reason = (r: ReturnType<typeof checkChain>) => (r.ok ? 'ok' : r.reason);
-  assert.equal(reason(checkChain(NVDA, 'TSLA', NVDA_NOW, settings)), 'chain-inconsistent', 'another root');
-  assert.equal(reason(checkChain(NVDA, 'NVDA', NVDA_NOW + 5 * 86_400, settings)), 'chain-stale');
+  assert.equal(reason(checkChain(n(NVDA), 'TSLA', NVDA_NOW, settings)), 'chain-inconsistent', 'another root');
+  assert.equal(reason(checkChain(n(NVDA), 'NVDA', NVDA_NOW + 5 * 86_400, settings)), 'chain-stale');
   // Thursday 04:30 ET needs Wednesday's close: Monday's file is stale well inside four days.
-  assert.equal(reason(checkChain(NVDA, 'NVDA', Date.UTC(2026, 8, 17, 8, 30) / 1000, settings)), 'chain-stale');
-  assert.equal(reason(checkChain({ ...NVDA, lastTradeTime: 'garbage' }, 'NVDA', NVDA_NOW, settings)), 'chain-inconsistent');
-  assert.equal(reason(checkChain(NVDA, 'NVDA', Date.UTC(2026, 8, 15, 4, 0) / 1000, settings)), 'chain-inconsistent', 'a file from the future');
-  const drifted = checkChain({ ...NVDA, skippedRows: 400, firstSkip: 'delta: invalid_type' }, 'NVDA', NVDA_NOW, settings);
+  assert.equal(reason(checkChain(n(NVDA), 'NVDA', Date.UTC(2026, 8, 17, 8, 30) / 1000, settings)), 'chain-stale');
+  assert.equal(reason(checkChain(n({ ...NVDA, lastTradeTime: 'garbage' }), 'NVDA', NVDA_NOW, settings)), 'chain-inconsistent');
+  assert.equal(reason(checkChain(n(NVDA), 'NVDA', Date.UTC(2026, 8, 15, 4, 0) / 1000, settings)), 'chain-inconsistent', 'a file from the future');
+  const drifted = checkChain(n({ ...NVDA, skippedRows: 400, firstSkip: 'delta: invalid_type' }), 'NVDA', NVDA_NOW, settings);
   assert.equal(!drifted.ok && drifted.reason, 'chain-inconsistent');
   assert.equal(!drifted.ok && drifted.detail.firstSkip, 'delta: invalid_type');
-  assert.equal(reason(checkChain({ ...NVDA, skippedRows: 3 }, 'NVDA', NVDA_NOW, settings)), 'ok', 'a few bad rows are noise');
+  assert.equal(reason(checkChain(n({ ...NVDA, skippedRows: 3 }), 'NVDA', NVDA_NOW, settings)), 'ok', 'a few bad rows are noise');
 });
 
 /*//////////////////////////////////////////////////////////////
@@ -174,21 +180,22 @@ test('ChainCache: one download per ticker per five minutes, failures included, s
   const [ea, eb] = await Promise.all([a, b]);
   assert.equal(calls.length, 1);
   assert.equal(ea, eb);
-  assert.equal(ea.chain, NVDA);
+  assert.ok(holds(ea, NVDA));
+  assert.equal(ea.chain?.clocks.receivedAt, 1_000, 'received when the download completed');
   assert.deepEqual(calls[0], { url: URL_NVDA, timeoutMs: 10_000, maxBytes: DEFAULT_CHAIN_MAX_BYTES });
 
   // Inside the floor: reused. Another ticker is its own entry.
   clock += PRICING_MIN_REFETCH_MS - 1;
-  assert.equal((await cache.get('NVDA', URL_NVDA)).chain, NVDA);
+  assert.equal((await cache.get('NVDA', URL_NVDA)).chain, ea.chain, 'the same cached chain, not a refreshed copy');
   assert.equal(calls.length, 1);
-  assert.equal((await cache.get('TSLA', URL_TSLA)).chain, TSLA);
+  assert.ok(holds(await cache.get('TSLA', URL_TSLA), TSLA));
   assert.equal(calls.length, 2);
 
   // At the floor: downloaded again, and this time it fails; the last good chain stays, the failure is reused for a minute.
   clock += 1;
   failNext = true;
   const failed = await cache.get('NVDA', URL_NVDA);
-  assert.equal(failed.chain, NVDA);
+  assert.equal(failed.chain, ea.chain, 'the last good chain, its receivedAt included: a failure refreshes no clock');
   assert.equal(failed.error, 'timeout: no complete response within 10000 ms');
   assert.equal(calls.length, 3);
   clock += 59_999;
@@ -196,7 +203,7 @@ test('ChainCache: one download per ticker per five minutes, failures included, s
   assert.equal(calls.length, 3, 'no retry storm inside the failure retry');
   // A changed URL is not the cached answer.
   failNext = false;
-  assert.equal((await cache.get('NVDA', `${URL_NVDA}?v=2`)).chain, NVDA);
+  assert.ok(holds(await cache.get('NVDA', `${URL_NVDA}?v=2`), NVDA));
   assert.equal(calls.length, 4);
   assert.deepEqual([...cache.snapshot().keys()].sort(), ['NVDA', 'TSLA']);
 });
@@ -205,7 +212,7 @@ test('ChainCache over the injected fetch: the v1 byte cap and redirect rule stil
   const through = (fetchImpl: typeof fetch, maxBytes?: number) =>
     new ChainCache({ maxBytes, fetchChain: (url, options) => vol.fetchCboeChain(url, { ...options, fetchImpl }) });
   const ok = await through(async () => new Response(TSLA_RAW)).get('TSLA', URL_TSLA);
-  assert.equal(ok.chain?.options.length, 370);
+  assert.equal(ok.chain?.rows.length, 370);
   const small = await through(async () => new Response(TSLA_RAW), Buffer.byteLength(TSLA_RAW) - 1).get('TSLA', URL_TSLA);
   assert.match(small.error ?? '', /^oversize/);
   const offHost = await through(async () => new Response(null, { status: 302, headers: { location: 'https://evil.example/TSLA.json' } })).get('TSLA', URL_TSLA);
@@ -226,11 +233,13 @@ test('ChainCache: one failed refetch keeps serving the last good chain (its own 
       return NVDA;
     },
   });
-  assert.equal((await cache.get('NVDA', URL_NVDA)).chain, NVDA);
+  const first = await cache.get('NVDA', URL_NVDA);
+  assert.ok(holds(first, NVDA));
   clock += PRICING_MIN_REFETCH_MS;
   fail = true;
   const failed = await cache.get('NVDA', URL_NVDA);
-  assert.equal(failed.chain, NVDA, 'the 10:00 chain is still served after the 10:05 refetch failed');
+  assert.equal(failed.chain, first.chain, 'the 10:00 chain is still served after the 10:05 refetch failed');
+  assert.equal(failed.chain?.clocks.receivedAt, 1_000, 'and still says it was received at 10:00');
   assert.equal(failed.error, 'http-status: HTTP 503');
   assert.equal(calls, 2);
   clock += 59_999;
@@ -246,5 +255,9 @@ test('ChainCache: one failed refetch keeps serving the last good chain (its own 
   clock += 60_000;
   const back = await cache.get('NVDA', URL_NVDA);
   assert.equal(calls, 4);
-  assert.deepEqual({ chain: back.chain, error: back.error }, { chain: NVDA, error: null });
+  assert.ok(holds(back, NVDA));
+  assert.equal(back.error, null);
+  assert.equal(back.chain?.clocks.receivedAt, Math.floor(clock / 1000), 'a successful refetch advances receivedAt only');
+  assert.equal(back.chain?.clocks.publishedAt, first.chain?.clocks.publishedAt, 'the file time is the file\'s');
+  assert.equal(back.chain?.underlying.observedAt, first.chain?.underlying.observedAt, 'and the last trade is the file\'s');
 });

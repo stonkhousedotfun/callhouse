@@ -10,10 +10,12 @@
     "typecheck": "tsc --noEmit && tsc --noEmit -p tests/acceptance/tsconfig.json",
     "test": "vitest run",
     "acceptance:fork": "tsx --tsconfig tests/acceptance/tsconfig.json tests/acceptance/fork.acceptance.ts",
+    "acceptance:maker-epochs": "tsx --tsconfig tests/acceptance/tsconfig.json tests/acceptance/maker-epochs.acceptance.ts",
+    "acceptance:notifications": "tsx --tsconfig tests/acceptance/tsconfig.json tests/acceptance/notifications.acceptance.ts",
     "acceptance:v2": "tsx --tsconfig tests/acceptance/tsconfig.json tests/acceptance/v2.acceptance.ts",
+    "acceptance:v7legacy": "tsx --tsconfig tests/acceptance/tsconfig.json tests/acceptance/v7-legacy.acceptance.ts",
     "gen:abis": "node scripts/gen-abis.mjs",
-    "gen:markets": "node scripts/gen-markets.mjs",
-    "copy-lint": "node ../scripts/copy-lint.mjs"
+    "gen:markets": "node scripts/gen-markets.mjs"
   },
   "dependencies": {
     "@tanstack/react-query": "^5.102.8",

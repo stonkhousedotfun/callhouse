@@ -1,6 +1,12 @@
 # Architecture
 
-How the four packages fit together, and why each boundary is where it is.
+> **Legacy v1 reference.** This document describes the 2026-09-13 vault, Valorem and
+> Seaport design used for v1 run-off. Its process map, trust table, routes and "only venue"
+> statements do not describe the private v2 protocol. Start with
+> [HANDOFF.md](../HANDOFF.md), [web/README.md](../web/README.md), the pinned
+> `contracts/src/v2/` source and [ops/deploy.md](../ops/deploy.md) §15 for v2.
+
+How the v1 packages fit together, and why each boundary is where it is.
 
 For the money maths see [contracts/docs/ACCOUNTING.md](../contracts/docs/ACCOUNTING.md). For the
 threat model see [contracts/SECURITY.md](../contracts/SECURITY.md). Both live in
@@ -338,3 +344,28 @@ Things that look wrong and are not, or look fine and are not. Each is commented 
     quite true either; arm during the regular session.
 12. **`Vault` is above 24,576 B on purpose.** Chain 4663's limit is 98,304 B. A default anvil, an
     EIP-170 chain, and forge's "margin" line all disagree with the chain; the chain wins.
+
+---
+
+## 9. Many markets
+
+The live product is no longer this vault but the per-market **account factory** (`src/solo/`:
+one `AccountFactory` per Stock Token, isolated `WriterAccount` clones, write on fill, one FULL
+1-lot Seaport order per lot, each account on its own option type). NVDA's factory is
+`0xc4A5…2BBb`; Tier 1 adds the 34 other Stock Tokens with a Chainlink `us_equities_24/5` feed,
+the same way, in waves. The shape is deliberately **more of the same, not a refactor**:
+
+- **one registry**, `ops/markets/tier1.json`, is the only list of markets; every consumer reads it
+  and nothing else hard-codes a ticker (`ops/markets/README.md`);
+- **one process per market** for the keeper (`keeper-<ticker>`, factory-only, one hot key per
+  market, no vault) and the indexer (`indexer-<ticker>`, one Postgres, schema per deployment);
+  the same images as §4 and §5, env-only differences;
+- **one web build** with `/<ticker>/account` and `/<ticker>/book` from a generated market list;
+  `/account` and `/book` redirect to `/nvda/*`;
+- **docs rendered from the registry** (`ops/markets/render-docs.mjs`).
+
+Everything shared stays shared: our Clear, Seaport, USDG, the admin and guardian keys, the fee
+recipient, the relay. Everything per market is per market: token, feed, factory, keeper key,
+week, cap. The design, the registry schema, the pricing rules and the wave gates are in
+[TECHSPEC-TIER1-MULTIMARKET.md](./TECHSPEC-TIER1-MULTIMARKET.md); the Railway layout is
+`ops/deploy.md` §14; the runbooks each open with the per-market loop.

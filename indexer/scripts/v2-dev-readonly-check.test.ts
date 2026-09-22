@@ -11,11 +11,11 @@ function fixture() {
   const contracts = { clearinghouse: address("1"), orderBook: address("2"), settlementOracle: address("3"),
     expiryCalendar: address("4"), keeperRewards: address("5"), autoRoller: address("6"),
     payoutAdapter: address("7"), makerVault: address("0").replace(/0$/, "4"), makerRegistry: address("8"),
-    rewardsDistributor: address("0").replace(/0$/, "5"),
+    rewardsDistributor: address("0").replace(/0$/, "5"), accessManager: address("0").replace(/0$/, "8"),
     sources: { chainlink: address("9"), univ3: address("0").replace(/0$/, "6"), dataStreams: address("0").replace(/0$/, "7") } };
   const registry = { shared: { chainId: 4663, usdg: address("0").replace(/0$/, "1") },
-    v2: { interfaceVersion: 7, deployBlock: 100, contracts,
-      fees: { premiumFeeBps: 0, mintFeePpm: 80, resaleFeeBps: 50, takerFeeFlat: "100000", takerFeeCapBps: 100,
+    v2: { interfaceVersion: 8, deployBlock: 100, contracts,
+      fees: { premiumFeeBps: 500, mintFeePpm: 0, resaleFeeBps: 50, takerFeeFlat: "100000", takerFeeCapBps: 100,
         makerRebateBps: 10, exerciseFeeBps: 25 } },
     markets: [
       { ticker: "NVDA", asset: address("0").replace(/0$/, "2"), v2: { status: "live", puts: false, strikeTick: "1000000" } },
@@ -23,12 +23,12 @@ function fixture() {
     ],
   };
   const responses: Record<string, unknown> = {
-    "/v2/health": { status: "ok", block: "110", lagSeconds: 1, interfaceVersion: 7 },
-    "/v2/config": { chainId: 4663, interfaceVersion: 7, deployBlock: "100",
+    "/v2/health": { status: "ok", block: "110", lagSeconds: 1, interfaceVersion: 8 },
+    "/v2/config": { chainId: 4663, interfaceVersion: 8, deployBlock: "100",
       usdg: { address: registry.shared.usdg, symbol: "USDG", decimals: 6 }, contracts: structuredClone(contracts),
       fees: { ...registry.v2.fees, takerFeeFlat: { raw: registry.v2.fees.takerFeeFlat, decimals: 6, formatted: "0.1" } },
       futureField: "Not part of manifest validation" },
-    "/v2/markets": [{ ticker: "NVDA", underlying: registry.markets[0]!.asset, status: "live", puts: false, mintFeePpm: 80,
+    "/v2/markets": [{ ticker: "NVDA", underlying: registry.markets[0]!.asset, status: "live", puts: false, mintFeePpm: 0,
       strikeTick: { raw: "1000000", decimals: 6, formatted: "1" } }],
   };
   return { registry, responses };
@@ -86,8 +86,8 @@ describe("read-only deployed-dev manifest checker", () => {
   });
 
   it.each([
-    ["config version", "/v2/config", "interfaceVersion", 6],
-    ["health version", "/v2/health", "interfaceVersion", 6],
+    ["config version", "/v2/config", "interfaceVersion", 7],
+    ["health version", "/v2/health", "interfaceVersion", 7],
     ["chain", "/v2/config", "chainId", 1],
     ["deploy block", "/v2/config", "deployBlock", "101"],
     ["old indexed block", "/v2/health", "block", "99"],
@@ -104,13 +104,21 @@ describe("read-only deployed-dev manifest checker", () => {
     const config = data.responses["/v2/config"] as { contracts: typeof data.registry.v2.contracts };
     config.contracts.clearinghouse = address("4");
     config.contracts.payoutAdapter = address("5");
+    config.contracts.accessManager = address("6");
     config.contracts.sources.chainlink = address("6");
     const report = await checkDeployedDev(options);
     expect(report.status).toBe("failed");
     expect(report.checks.find((check) => check.name === "/v2/config")?.details).toEqual([
       "contracts.clearinghouse differs from registry.", "contracts.payoutAdapter differs from registry.",
+      "contracts.accessManager differs from registry.",
       "contracts.sources.chainlink differs from registry.",
     ]);
+  });
+
+  it("allows the consumer-first access manager API field to be absent", async () => {
+    const config = data.responses["/v2/config"] as { contracts: { accessManager?: string } };
+    Reflect.deleteProperty(config.contracts, "accessManager");
+    expect((await checkDeployedDev(options)).status).toBe("manifest_passed");
   });
 
   it("rejects matching registry and API on an unexpected chain", async () => {
@@ -125,7 +133,16 @@ describe("read-only deployed-dev manifest checker", () => {
 
   it.each(["premiumFeeBps", "mintFeePpm", "resaleFeeBps", "takerFeeFlat", "takerFeeCapBps", "makerRebateBps", "exerciseFeeBps"])("rejects effective %s fee drift", async (field) => {
     const fees = (data.responses["/v2/config"] as { fees: Record<string, unknown> }).fees;
-    fees[field] = field === "takerFeeFlat" ? { raw: "500000", decimals: 6, formatted: "0.5" } : 500;
+    // DERIVE THE DRIFT FROM THE REGISTRY VALUE; NEVER USE A FIXED SENTINEL.
+    // This was `500` for every field. The v8 fixture sets premiumFeeBps to 500, so for that one
+    // case the "wrong" value WAS the right value: no drift existed, the guard correctly stayed
+    // silent, and the test failed while reporting the guard as broken. A sentinel that can collide
+    // with real data tests nothing on the day it collides — and it collided the moment the fixture
+    // moved to the real v8 fees. +1 cannot collide, whatever the fixture later becomes.
+    const registryFee = data.registry.v2.fees[field as keyof typeof data.registry.v2.fees];
+    fees[field] = field === "takerFeeFlat"
+      ? { raw: String(Number(registryFee) + 1), decimals: 6, formatted: "0.100001" }
+      : Number(registryFee) + 1;
     const report = await checkDeployedDev(options);
     expect(report.status).toBe("failed");
     expect(report.checks.find((check) => check.name === "/v2/config")?.details).toContain(`fees.${field} differs from registry.`);
@@ -192,7 +209,7 @@ describe("read-only deployed-dev manifest checker", () => {
     { baseUrl: "https://example.test?key=secret" },
     { baseUrl: "http://example.test" },
     { registrySha256: "0".repeat(64) },
-    { expectedInterfaceVersion: 6 },
+    { expectedInterfaceVersion: 7 },
     { timeoutMs: 100_000 },
   ])("refuses invalid inputs before issuing any requests: %j", async (overrides) => {
     const report = await checkDeployedDev({ ...options, ...overrides });
@@ -227,21 +244,57 @@ describe("read-only deployed-dev manifest checker", () => {
 
   it("uses an explicit market override instead of shared rent", async () => {
     const registry = structuredClone(data.registry);
-    Object.assign(registry.markets[0]!.v2, { overrides: { mintFeePpm: 300 } });
+    registry.v2.fees.mintFeePpm = 300;
+    Object.assign(registry.markets[0]!.v2, { overrides: { mintFeePpm: 0 } });
     writeFileSync(options.registryPath, JSON.stringify(registry));
-    (data.responses["/v2/markets"] as { mintFeePpm: number }[])[0]!.mintFeePpm = 300;
+    (data.responses["/v2/config"] as { fees: { mintFeePpm: number } }).fees.mintFeePpm = 300;
     expect((await checkDeployedDev(options)).status).toBe("manifest_passed");
   });
 
-  it.each(["missing", "zero", "zero-market", "over-ceiling"])("refuses %s effective rent before requests", async (mode) => {
+  it.each(["zero", "zero-market"])("allows %s effective rent", async (mode) => {
     const registry = structuredClone(data.registry);
-    if (mode === "missing") Reflect.deleteProperty(registry.v2.fees, "mintFeePpm");
     if (mode === "zero") registry.v2.fees.mintFeePpm = 0;
     if (mode === "zero-market") Object.assign(registry.markets[0]!.v2, { mintFeePpm: 0 });
+    writeFileSync(options.registryPath, JSON.stringify(registry));
+    expect((await checkDeployedDev(options)).status).toBe("manifest_passed");
+    expect(requests).not.toEqual([]);
+  });
+
+  it.each(["missing", "nonzero", "nonzero-market", "over-ceiling"])("refuses %s effective rent before requests", async (mode) => {
+    const registry = structuredClone(data.registry);
+    if (mode === "missing") Reflect.deleteProperty(registry.v2.fees, "mintFeePpm");
+    if (mode === "nonzero") registry.v2.fees.mintFeePpm = 80;
+    if (mode === "nonzero-market") Object.assign(registry.markets[0]!.v2, { mintFeePpm: 80 });
     if (mode === "over-ceiling") registry.v2.fees.mintFeePpm = 5_001;
     writeFileSync(options.registryPath, JSON.stringify(registry));
     expect((await checkDeployedDev(options)).status).toBe("failed");
     expect(requests).toEqual([]);
+  });
+
+  // THE RENT RULE IS KEYED TO THE INTERFACE, NOT REPLACED BY THE v8 ONE.
+  // `--interface-version 7` is still supported so the checker can be pointed at the v7 run-off
+  // deployment, and a v7 registry carries NONZERO rent by design. Applying the v8 rule flat would
+  // refuse every v7 registry for having exactly the rent v7 mandates — which is what the recovered
+  // WIP did, and it is invisible in a diff that reads as a clean inversion. These two cases are the
+  // v7 half of the pair above, and they are the only thing that would catch that regression.
+  it("under interface 7 refuses ZERO effective rent, the inverse of the interface 8 rule", async () => {
+    const registry = structuredClone(data.registry);
+    registry.v2.interfaceVersion = 7;
+    registry.v2.fees.mintFeePpm = 0;
+    writeFileSync(options.registryPath, JSON.stringify(registry));
+    expect((await checkDeployedDev({ ...options, expectedInterfaceVersion: 7 })).status).toBe("failed");
+    expect(requests).toEqual([]);
+  });
+
+  it("under interface 7 allows NONZERO effective rent, which interface 8 refuses", async () => {
+    const registry = structuredClone(data.registry);
+    registry.v2.interfaceVersion = 7;
+    registry.v2.fees.mintFeePpm = 80;
+    writeFileSync(options.registryPath, JSON.stringify(registry));
+    // Past the registry gate: it reaches the API, where the v8 fixture then disagrees on version.
+    // What matters here is that the RENT rule did not stop it, so requests were actually made.
+    await checkDeployedDev({ ...options, expectedInterfaceVersion: 7 });
+    expect(requests).not.toEqual([]);
   });
 });
 
@@ -250,7 +303,9 @@ describe("read-only checker CLI options", () => {
     expect(() => parseOptions([])).toThrow("Explicit --base-url and --registry");
     expect(() => parseOptions(["--secret", "hidden"])).toThrow("Unknown, duplicate or incomplete");
     expect(() => parseOptions(["--registry", "one", "--registry", "two"])).toThrow("Unknown, duplicate or incomplete");
-    expect(parseOptions(["--base-url", "https://dev.example.test", "--registry", "/tmp/dev.json", "--interface-version", "7"]))
-      .toMatchObject({ baseUrl: "https://dev.example.test", registryPath: "/tmp/dev.json", expectedInterfaceVersion: 7 });
+    expect(parseOptions(["--base-url", "https://dev.example.test", "--registry", "/tmp/dev.json", "--interface-version", "8"]))
+      .toMatchObject({ baseUrl: "https://dev.example.test", registryPath: "/tmp/dev.json", expectedInterfaceVersion: 8 });
+    expect(parseOptions(["--base-url", "https://runoff.example.test", "--registry", "/tmp/v7.json", "--interface-version", "7"]))
+      .toMatchObject({ baseUrl: "https://runoff.example.test", registryPath: "/tmp/v7.json", expectedInterfaceVersion: 7 });
   });
 });

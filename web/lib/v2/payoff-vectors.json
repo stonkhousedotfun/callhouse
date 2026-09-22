@@ -1,62 +1,106 @@
-[
-  {
-    "name": "call in the money",
-    "isPut": false,
-    "strike": "231000000",
-    "price": "240000000",
-    "exerciseFeeBps": 25,
-    "grossPerUnit": "375000000000000",
-    "feePerUnit": "25000000000000",
-    "longPerUnit": "350000000000000",
-    "shortPerUnit": "9625000000000000",
-    "usdPerUnit": "84000"
-  },
-  {
-    "name": "call small intrinsic caps the fee",
-    "isPut": false,
-    "strike": "200000000",
-    "price": "201000000",
-    "exerciseFeeBps": 200,
-    "grossPerUnit": "49751243781094",
-    "feePerUnit": "4975124378109",
-    "longPerUnit": "44776119402985",
-    "shortPerUnit": "9950248756218906",
-    "usdPerUnit": "8999"
-  },
-  {
-    "name": "put in the money",
-    "isPut": true,
-    "strike": "200000000",
-    "price": "190000000",
-    "exerciseFeeBps": 25,
-    "grossPerUnit": "100000",
-    "feePerUnit": "5000",
-    "longPerUnit": "95000",
-    "shortPerUnit": "1900000",
-    "usdPerUnit": "95000"
-  },
-  {
-    "name": "put sub-unit intrinsic rounds away",
-    "isPut": true,
-    "strike": "200000000",
-    "price": "199999999",
-    "exerciseFeeBps": 25,
-    "grossPerUnit": "0",
-    "feePerUnit": "0",
-    "longPerUnit": "0",
-    "shortPerUnit": "2000000",
-    "usdPerUnit": "0"
-  },
-  {
-    "name": "put full loss at zero price",
-    "isPut": true,
-    "strike": "200000000",
-    "price": "0",
-    "exerciseFeeBps": 25,
-    "grossPerUnit": "2000000",
-    "feePerUnit": "5000",
-    "longPerUnit": "1995000",
-    "shortPerUnit": "0",
-    "usdPerUnit": "1995000"
-  }
-]
+{
+  "payout": [
+    {
+      "name": "call in the money",
+      "isPut": false,
+      "strike": "231000000",
+      "price": "240000000",
+      "exerciseFeeBps": 25,
+      "grossPerUnit": "375000000000000",
+      "feePerUnit": "25000000000000",
+      "longPerUnit": "350000000000000",
+      "shortPerUnit": "9625000000000000",
+      "usdPerUnit": "84000"
+    },
+    {
+      "name": "call small intrinsic caps the fee",
+      "isPut": false,
+      "strike": "200000000",
+      "price": "201000000",
+      "exerciseFeeBps": 200,
+      "grossPerUnit": "49751243781094",
+      "feePerUnit": "4975124378109",
+      "longPerUnit": "44776119402985",
+      "shortPerUnit": "9950248756218906",
+      "usdPerUnit": "8999"
+    },
+    {
+      "name": "put in the money",
+      "isPut": true,
+      "strike": "200000000",
+      "price": "190000000",
+      "exerciseFeeBps": 25,
+      "grossPerUnit": "100000",
+      "feePerUnit": "5000",
+      "longPerUnit": "95000",
+      "shortPerUnit": "1900000",
+      "usdPerUnit": "95000"
+    },
+    {
+      "name": "put sub-unit intrinsic rounds away",
+      "isPut": true,
+      "strike": "200000000",
+      "price": "199999999",
+      "exerciseFeeBps": 25,
+      "grossPerUnit": "0",
+      "feePerUnit": "0",
+      "longPerUnit": "0",
+      "shortPerUnit": "2000000",
+      "usdPerUnit": "0"
+    },
+    {
+      "name": "put full loss at zero price",
+      "isPut": true,
+      "strike": "200000000",
+      "price": "0",
+      "exerciseFeeBps": 25,
+      "grossPerUnit": "2000000",
+      "feePerUnit": "5000",
+      "longPerUnit": "1995000",
+      "shortPerUnit": "0",
+      "usdPerUnit": "1995000"
+    }
+  ],
+  "conversion": [
+    {
+      "name": "conversion floor at the ceiling (slippage 300 + route fee 100 clamps to 300)",
+      "value": "28199700",
+      "slippageBps": 300,
+      "routeFeeBps": 100,
+      "low": "27353709",
+      "floorBps": 9700
+    },
+    {
+      "name": "conversion floor below the ceiling (150 + 30)",
+      "value": "28199700",
+      "slippageBps": 150,
+      "routeFeeBps": 30,
+      "low": "27692105",
+      "floorBps": 9820
+    },
+    {
+      "name": "conversion route fee clamps to MAX_ROUTE_FEE_BPS (50 + 250 -> 50 + 100)",
+      "value": "1000000",
+      "slippageBps": 50,
+      "routeFeeBps": 250,
+      "low": "985000",
+      "floorBps": 9850
+    },
+    {
+      "name": "conversion with no slippage and no route fee is the value itself",
+      "value": "12345678",
+      "slippageBps": 0,
+      "routeFeeBps": 0,
+      "low": "12345678",
+      "floorBps": 10000
+    },
+    {
+      "name": "conversion floor floors the base unit",
+      "value": "1",
+      "slippageBps": 300,
+      "routeFeeBps": 0,
+      "low": "0",
+      "floorBps": 9700
+    }
+  ]
+}

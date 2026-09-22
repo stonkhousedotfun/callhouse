@@ -15,11 +15,11 @@
         "expiry": 1789761600,
         "tenor": "weekly",
         "mintCutoff": 1789759800,
-        "mintFeePpm": 300,
+        "mintFeePpm": 0,
         "mintFeesHeld": {
-          "raw": "84910714285715",
+          "raw": "0",
           "decimals": 18,
-          "formatted": "0.000084910714285715"
+          "formatted": "0"
         },
         "mintFeesAccrued": {
           "raw": "0",
@@ -60,7 +60,7 @@
       "maxLoss": "cost",
       "unitsAvailable": "40",
       "orderIds": [
-        "1050"
+        "1051"
       ]
     },
     {
@@ -78,7 +78,7 @@
         "expiry": 1789761600,
         "tenor": "weekly",
         "mintCutoff": 1789759800,
-        "mintFeePpm": 300,
+        "mintFeePpm": 0,
         "mintFeesHeld": {
           "raw": "0",
           "decimals": 18,
@@ -135,7 +135,7 @@
       "maxLoss": "cost",
       "unitsAvailable": "120",
       "orderIds": [
-        "1048"
+        "1049"
       ]
     },
     {
@@ -153,11 +153,11 @@
         "expiry": 1789761600,
         "tenor": "weekly",
         "mintCutoff": 1789759800,
-        "mintFeePpm": 80,
+        "mintFeePpm": 0,
         "mintFeesHeld": {
-          "raw": "21714285714286",
+          "raw": "0",
           "decimals": 18,
-          "formatted": "0.000021714285714286"
+          "formatted": "0"
         },
         "mintFeesAccrued": {
           "raw": "0",
@@ -210,7 +210,7 @@
       "maxLoss": "cost",
       "unitsAvailable": "250",
       "orderIds": [
-        "1039"
+        "1040"
       ]
     },
     {
@@ -228,11 +228,11 @@
         "expiry": 1789761600,
         "tenor": "weekly",
         "mintCutoff": 1789759800,
-        "mintFeePpm": 80,
+        "mintFeePpm": 0,
         "mintFeesHeld": {
-          "raw": "77500000000000",
+          "raw": "0",
           "decimals": 18,
-          "formatted": "0.0000775"
+          "formatted": "0"
         },
         "mintFeesAccrued": {
           "raw": "0",
@@ -285,7 +285,7 @@
       "maxLoss": "cost",
       "unitsAvailable": "100",
       "orderIds": [
-        "1041"
+        "1042"
       ]
     },
     {
@@ -303,7 +303,7 @@
         "expiry": 1789675200,
         "tenor": "daily",
         "mintCutoff": 1789673400,
-        "mintFeePpm": 80,
+        "mintFeePpm": 0,
         "mintFeesHeld": {
           "raw": "0",
           "decimals": 18,
@@ -360,7 +360,7 @@
       "maxLoss": "cost",
       "unitsAvailable": "250",
       "orderIds": [
-        "1030"
+        "1031"
       ]
     },
     {
@@ -378,7 +378,7 @@
         "expiry": 1789675200,
         "tenor": "daily",
         "mintCutoff": 1789673400,
-        "mintFeePpm": 80,
+        "mintFeePpm": 0,
         "mintFeesHeld": {
           "raw": "0",
           "decimals": 18,
@@ -435,7 +435,7 @@
       "maxLoss": "cost",
       "unitsAvailable": "250",
       "orderIds": [
-        "1032"
+        "1033"
       ]
     },
     {
@@ -453,7 +453,7 @@
         "expiry": 1789675200,
         "tenor": "daily",
         "mintCutoff": 1789673400,
-        "mintFeePpm": 80,
+        "mintFeePpm": 0,
         "mintFeesHeld": {
           "raw": "0",
           "decimals": 18,
@@ -510,7 +510,7 @@
       "maxLoss": "cost",
       "unitsAvailable": "250",
       "orderIds": [
-        "1028"
+        "1029"
       ]
     },
     {
@@ -528,11 +528,11 @@
         "expiry": 1789761600,
         "tenor": "weekly",
         "mintCutoff": 1789759800,
-        "mintFeePpm": 80,
+        "mintFeePpm": 0,
         "mintFeesHeld": {
-          "raw": "55000000000000",
+          "raw": "0",
           "decimals": 18,
-          "formatted": "0.000055"
+          "formatted": "0"
         },
         "mintFeesAccrued": {
           "raw": "0",
@@ -585,7 +585,7 @@
       "maxLoss": "cost",
       "unitsAvailable": "250",
       "orderIds": [
-        "1037"
+        "1038"
       ]
     },
     {
@@ -603,7 +603,7 @@
         "expiry": 1790366400,
         "tenor": "weekly",
         "mintCutoff": 1790364600,
-        "mintFeePpm": 80,
+        "mintFeePpm": 0,
         "mintFeesHeld": {
           "raw": "0",
           "decimals": 18,
@@ -660,7 +660,7 @@
       "maxLoss": "cost",
       "unitsAvailable": "250",
       "orderIds": [
-        "1060"
+        "1061"
       ]
     },
     {
@@ -678,11 +678,11 @@
         "expiry": 1789761600,
         "tenor": "weekly",
         "mintCutoff": 1789759800,
-        "mintFeePpm": 300,
+        "mintFeePpm": 0,
         "mintFeesHeld": {
-          "raw": "27321428571429",
+          "raw": "0",
           "decimals": 18,
-          "formatted": "0.000027321428571429"
+          "formatted": "0"
         },
         "mintFeesAccrued": {
           "raw": "0",
@@ -723,7 +723,7 @@
       "maxLoss": "cost",
       "unitsAvailable": "90",
       "orderIds": [
-        "1046"
+        "1047"
       ]
     },
     {
@@ -741,7 +741,7 @@
         "expiry": 1789675200,
         "tenor": "daily",
         "mintCutoff": 1789673400,
-        "mintFeePpm": 80,
+        "mintFeePpm": 0,
         "mintFeesHeld": {
           "raw": "0",
           "decimals": 18,
@@ -798,7 +798,7 @@
       "maxLoss": "cost",
       "unitsAvailable": "250",
       "orderIds": [
-        "1026"
+        "1027"
       ]
     },
     {
@@ -816,7 +816,7 @@
         "expiry": 1790366400,
         "tenor": "weekly",
         "mintCutoff": 1790364600,
-        "mintFeePpm": 80,
+        "mintFeePpm": 0,
         "mintFeesHeld": {
           "raw": "0",
           "decimals": 18,
@@ -873,7 +873,7 @@
       "maxLoss": "cost",
       "unitsAvailable": "250",
       "orderIds": [
-        "1058"
+        "1059"
       ]
     },
     {
@@ -891,7 +891,7 @@
         "expiry": 1789761600,
         "tenor": "weekly",
         "mintCutoff": 1789759800,
-        "mintFeePpm": 300,
+        "mintFeePpm": 0,
         "mintFeesHeld": {
           "raw": "0",
           "decimals": 18,
@@ -948,7 +948,7 @@
       "maxLoss": "cost",
       "unitsAvailable": "120",
       "orderIds": [
-        "1044"
+        "1045"
       ]
     },
     {
@@ -966,11 +966,11 @@
         "expiry": 1789761600,
         "tenor": "weekly",
         "mintCutoff": 1789759800,
-        "mintFeePpm": 80,
+        "mintFeePpm": 0,
         "mintFeesHeld": {
-          "raw": "37063492063493",
+          "raw": "0",
           "decimals": 18,
-          "formatted": "0.000037063492063493"
+          "formatted": "0"
         },
         "mintFeesAccrued": {
           "raw": "0",
@@ -1023,7 +1023,7 @@
       "maxLoss": "cost",
       "unitsAvailable": "250",
       "orderIds": [
-        "1035"
+        "1036"
       ]
     },
     {
@@ -1041,7 +1041,7 @@
         "expiry": 1790366400,
         "tenor": "weekly",
         "mintCutoff": 1790364600,
-        "mintFeePpm": 80,
+        "mintFeePpm": 0,
         "mintFeesHeld": {
           "raw": "0",
           "decimals": 18,
@@ -1098,7 +1098,7 @@
       "maxLoss": "cost",
       "unitsAvailable": "250",
       "orderIds": [
-        "1056"
+        "1057"
       ]
     },
     {
@@ -1116,7 +1116,7 @@
         "expiry": 1789761600,
         "tenor": "weekly",
         "mintCutoff": 1789759800,
-        "mintFeePpm": 300,
+        "mintFeePpm": 0,
         "mintFeesHeld": {
           "raw": "0",
           "decimals": 18,
@@ -1173,7 +1173,7 @@
       "maxLoss": "cost",
       "unitsAvailable": "120",
       "orderIds": [
-        "1042"
+        "1043"
       ]
     },
     {
@@ -1191,11 +1191,11 @@
         "expiry": 1789675200,
         "tenor": "daily",
         "mintCutoff": 1789673400,
-        "mintFeePpm": 80,
+        "mintFeePpm": 0,
         "mintFeesHeld": {
-          "raw": "9047619047620",
+          "raw": "0",
           "decimals": 18,
-          "formatted": "0.00000904761904762"
+          "formatted": "0"
         },
         "mintFeesAccrued": {
           "raw": "0",
@@ -1248,7 +1248,7 @@
       "maxLoss": "cost",
       "unitsAvailable": "250",
       "orderIds": [
-        "1024"
+        "1025"
       ]
     },
     {
@@ -1266,11 +1266,11 @@
         "expiry": 1790366400,
         "tenor": "weekly",
         "mintCutoff": 1790364600,
-        "mintFeePpm": 80,
+        "mintFeePpm": 0,
         "mintFeesHeld": {
-          "raw": "51646825396826",
+          "raw": "0",
           "decimals": 18,
-          "formatted": "0.000051646825396826"
+          "formatted": "0"
         },
         "mintFeesAccrued": {
           "raw": "0",
@@ -1323,7 +1323,7 @@
       "maxLoss": "cost",
       "unitsAvailable": "50",
       "orderIds": [
-        "1021"
+        "1022"
       ]
     },
     {
@@ -1341,7 +1341,7 @@
         "expiry": 1789761600,
         "tenor": "weekly",
         "mintCutoff": 1789759800,
-        "mintFeePpm": 80,
+        "mintFeePpm": 0,
         "mintFeesHeld": {
           "raw": "0",
           "decimals": 18,
@@ -1398,7 +1398,7 @@
       "maxLoss": "cost",
       "unitsAvailable": "250",
       "orderIds": [
-        "1033"
+        "1034"
       ]
     },
     {
@@ -1416,7 +1416,7 @@
         "expiry": 1790366400,
         "tenor": "weekly",
         "mintCutoff": 1790364600,
-        "mintFeePpm": 80,
+        "mintFeePpm": 0,
         "mintFeesHeld": {
           "raw": "0",
           "decimals": 18,
@@ -1473,7 +1473,7 @@
       "maxLoss": "cost",
       "unitsAvailable": "250",
       "orderIds": [
-        "1052"
+        "1053"
       ]
     }
   ],

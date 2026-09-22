@@ -1,5 +1,5 @@
 {
-  "projectionSha256": "3bd78c95524ce2ff02614f4a35741adb050f6f00ea0a00e4a7c91b8f0be4a3f0",
+  "projectionSha256": "ff8e114ec219b6e0f6e4e9478c24eb30b3190b8a747630e8dea70334c3e173d7",
   "v2": {
     "fees": {
       "takerFeeFlat": "100000",
@@ -20,6 +20,10 @@
           "stepBps": 100,
           "cardTargetBps": 200
         }
+      },
+      "expiriesAhead": {
+        "daily": 3,
+        "weekly": 2
       }
     }
   },

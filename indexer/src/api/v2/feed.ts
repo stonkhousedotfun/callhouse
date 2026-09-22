@@ -4,7 +4,9 @@ import type { Hono } from "hono";
 import { and, asc, desc, eq, gt, gte, inArray, isNotNull, lt, sql } from "ponder";
 
 import { makerEpoch } from "../../../lib/v2/makerRegistry";
+import { MAKER_SCORING_POLICY } from "../../../lib/v2/makerScoring";
 import { nyDayBounds, windowStarts } from "../../../lib/v2/windows";
+import { indexedHead, windowAsOf } from "./head";
 import { address, error, limit, money, nextOffset, offset, seriesWire, type PnlRow, type SeriesRow } from "./shared";
 
 function eligible(row: PnlRow): boolean {
@@ -53,27 +55,76 @@ async function biggestWin(start: bigint, end: bigint) {
   return row === undefined ? null : (await wins([row]))[0]?.wire ?? null;
 }
 
+/**
+ * The epoch object carries the scoring policy its figures were produced under. `band` is additive, and it
+ * is emitted because this producer DOES compute against a band: publishing the policy is what lets a
+ * consumer tell a 1000 bps figure from a 100 bps one without guessing (02-interfaces.md:886-899).
+ */
 function epochWire(start: bigint) {
   const end = makerEpoch(start + 8n * 86_400n);
-  return { id: Number(start / 604_800n), start: Number(start), end: Number(end) };
+  return {
+    id: Number(start / 604_800n), start: Number(start), end: Number(end),
+    band: { bps: Number(MAKER_SCORING_POLICY.band.bps), minUsdg: money(MAKER_SCORING_POLICY.band.minUsdg) },
+  };
 }
 
 // JavaScript Date stops at 8.64e12 seconds, and epochWire looks eight days ahead.
 const maxMakerEpochId = (8_640_000_000_000n - 8n * 86_400n - 604_800n) / 604_800n;
 
-function makerStats(row: typeof schema.v2MakerEpoch.$inferSelect) {
-  return { uptimePct: Number(row.uptimePpm) / 10_000,
+type UnseenRow = typeof schema.v2SelfTradeUnseen.$inferSelect;
+
+/**
+ * Turn the counted units and the refused legs into a verdict a caller can act on.
+ *
+ * `selfTradeUnits` alone cannot say whether a 0 is an honest market or a blind detector: the
+ * attribution needs `takerIsBuyer && minimumPrice && linked` all at once, so one extra price tick
+ * or an off-chain-funded second wallet produces exactly 0. D18 left the loophole open ON
+ * CONDITION that the indexer flags the pattern, so the refused legs are published beside the
+ * count rather than folded into it.
+ *
+ * `detected` wins over `blind` whenever units were attributed: a measured number is a fact, and
+ * the blind units stay visible next to it in `unseenUnits`.
+ */
+function selfTradeCoverage(units: bigint, unseen: readonly UnseenRow[]) {
+  const rows = [...unseen].sort((left, right) => left.reason.localeCompare(right.reason));
+  const unseenUnits = rows.reduce((sum, row) => sum + row.units, 0n);
+  return {
+    status: units > 0n ? "detected" as const : unseenUnits > 0n ? "blind" as const : "clean" as const,
+    unseenUnits: unseenUnits.toString(),
+    reasons: rows.map((row) => ({
+      reason: row.reason as "price-above-counted-band" | "no-link-evidence",
+      units: row.units.toString(), fills: row.fills })),
+  };
+}
+
+function makerStats(row: typeof schema.v2MakerEpoch.$inferSelect, selfTradeUnits = 0n,
+  unseen: readonly UnseenRow[] = []) {
+  return { benchmarkPolicy: row.benchmarkPolicy,
+    samples: { absent: row.absentSamples, valid: row.validSamples, missingReference: row.missingReferenceSamples },
+    uptimePct: Number(row.uptimePpm) / 10_000,
     avgSpreadBps: row.twoSidedSamples > 0 ? Number(row.avgSpreadBps) : null,
-    depthWithin100bps: row.depthWithin100bps.toString(), fills: row.fills,
-    volume: money(row.volumeUsdg), rebates: money(row.rebatesUsdg), score: Number(row.scorePpm) / 10_000 };
+    depthWithin100bps: row.depthWithin100bps.toString(), depthInBand: row.depthInBand.toString(), fills: row.fills,
+    volume: money(row.volumeUsdg), rebates: money(row.rebatesUsdg), score: Number(row.scorePpm) / 10_000,
+    selfTradeUnits: selfTradeUnits.toString(),
+    selfTradeCoverage: selfTradeCoverage(selfTradeUnits, unseen) };
 }
 
 export function registerFeedRoutes(app: Hono) {
   app.get("/feed/wins", async (c) => {
     const window = c.req.query("window") ?? "all";
     if (!["day", "week", "all"].includes(window)) return error(c, "bad_window", "Window must be day, week, or all.");
-    const now = BigInt(Math.floor(Date.now() / 1000));
-    const bounds = window === "day" ? nyDayBounds(now) : window === "week" ? weekBounds(now) : null;
+    // F-APP-INDEXER-05: "today" and "this week" are windows over INDEXED settlements, so they end at
+    // the indexed head, exactly like /stats's biggestWinDay and biggestWinWeek. On the host clock the
+    // two routes disagree during lag - /stats names yesterday's best win while /feed/wins?window=day
+    // reports an empty today, which is the two-different-numbers failure this row exists to prevent.
+    // `all` spans every settlement and needs no anchor.
+    let bounds: { start: bigint; end: bigint } | null = null;
+    if (window !== "all") {
+      const asOf = windowAsOf(await indexedHead());
+      // A missing checkpoint measures no window at all, rather than inventing one from the host clock.
+      if (asOf === null) return c.json({ items: [], nextCursor: null });
+      bounds = window === "day" ? nyDayBounds(asOf) : weekBounds(asOf);
+    }
     const start = offset(c.req.query("cursor"));
     if (start === null) return error(c, "bad_cursor", "Cursor is outside the supported page range.");
     const size = limit(c.req.query("limit"));
@@ -92,7 +143,13 @@ export function registerFeedRoutes(app: Hono) {
     const window = c.req.query("window") ?? "week";
     if (!["multiple", "absolute", "streak"].includes(metric)) return error(c, "bad_metric", "Unknown leaderboard metric.");
     if (!["week", "month", "all"].includes(window)) return error(c, "bad_window", "Unknown leaderboard window.");
-    const starts = windowStarts(BigInt(Math.floor(Date.now() / 1000)));
+    // F-APP-INDEXER-05: the leaderboard rows are materialized per indexed window, so the window to
+    // read is chosen by the indexed head. On the host clock a lagging index is asked for a window it
+    // has not written yet and the board reads as empty rather than as stale. The "all" window starts
+    // at 0 for every anchor, so it stays answerable with no checkpoint.
+    const asOf = window === "all" ? 0n : windowAsOf(await indexedHead());
+    if (asOf === null) return c.json({ metric, window, items: [], nextCursor: null });
+    const starts = windowStarts(asOf);
     const start = offset(c.req.query("cursor"));
     if (start === null) return error(c, "bad_cursor", "Cursor is outside the supported page range.");
     const size = limit(c.req.query("limit"));
@@ -139,25 +196,37 @@ export function registerFeedRoutes(app: Hono) {
   });
 
   app.get("/stats", async (c) => {
-    const now = BigInt(Math.floor(Date.now() / 1000));
-    const [markets, fillTotals, pnlHolderCount, balanceOnlyHolderCount, biggestDay, biggestWeek] = await Promise.all([
+    // Every window here ends at the INDEXED head, the same anchor /markets uses (see windowAsOf).
+    const asOf = windowAsOf(await indexedHead());
+    const [markets, fillTotals, pnlHolderCount, balanceOnlyHolderCount, selfTradeTotals,
+      selfTradeUnseen, biggestDay, biggestWeek] = await Promise.all([
       db.select().from(schema.v2Market),
-      db.select({ volume24h: sql<string>`coalesce(sum(${schema.v2Fill.premium}), 0)::text` })
-        .from(schema.v2Fill).where(gte(schema.v2Fill.ts, now - 86_400n)),
+      asOf === null ? [] : db.select({ volume24h: sql<string>`coalesce(sum(${schema.v2Fill.premium}), 0)::text` })
+        .from(schema.v2Fill).where(gte(schema.v2Fill.ts, asOf - 86_400n)),
       db.select({ n: sql<number>`count(distinct ${schema.v2PositionPnl.holder})::int` })
         .from(schema.v2PositionPnl),
       db.select({ n: sql<number>`count(distinct ${schema.v2Balance.holder})::int` })
         .from(schema.v2Balance).where(and(gt(schema.v2Balance.units, 0n),
           sql`${schema.v2Balance.holder} not in
             (select ${schema.v2PositionPnl.holder} from ${schema.v2PositionPnl})`)),
-      biggestWin(nyDayBounds(now).start, nyDayBounds(now).end),
-      biggestWin(weekBounds(now).start, weekBounds(now).end),
+      db.select({ units: sql<string>`coalesce(sum(${schema.v2SelfTradeMaker.units}), 0)::text` })
+        .from(schema.v2SelfTradeMaker),
+      db.select().from(schema.v2SelfTradeUnseen),
+      asOf === null ? null : biggestWin(nyDayBounds(asOf).start, nyDayBounds(asOf).end),
+      asOf === null ? null : biggestWin(weekBounds(asOf).start, weekBounds(asOf).end),
     ]);
     const sum = (field: "volumeUsdg" | "premiumUsdg" | "feesUsdg") => markets.reduce((v, row) => v + row[field], 0n);
-    return c.json({ volume24h: money(BigInt(fillTotals[0]?.volume24h ?? "0")),
+    // T-425. The same head the windows above end at, on the wire. volume24h, biggestWinDay and
+    // biggestWinWeek are all measured against it, and /v2/markets publishes the identical value from
+    // its own read, so the two routes state one instant. 0 when no checkpoint was readable, which is
+    // the same condition that makes volume24h 0 and both biggest-win fields null.
+    return c.json({ asOf: Number(asOf ?? 0n), volume24h: money(BigInt(fillTotals[0]?.volume24h ?? "0")),
     volumeAll: money(sum("volumeUsdg")), premiumAll: money(sum("premiumUsdg")), feesAll: money(sum("feesUsdg")),
     contractsFilled: markets.reduce((v, row) => v + row.volumeUnits, 0n).toString(),
     holders: Number(pnlHolderCount[0]?.n ?? 0) + Number(balanceOnlyHolderCount[0]?.n ?? 0),
+    selfTradeUnits: selfTradeTotals[0]?.units ?? "0",
+    // A bare "0" above is exactly the ambiguity this field exists to resolve.
+    selfTradeCoverage: selfTradeCoverage(BigInt(selfTradeTotals[0]?.units ?? "0"), selfTradeUnseen),
     biggestWinDay: biggestDay, biggestWinWeek: biggestWeek });
   });
 
@@ -182,18 +251,37 @@ export function registerFeedRoutes(app: Hono) {
       .where(eq(schema.v2MakerEpoch.epoch, epoch))
       .orderBy(desc(schema.v2MakerEpoch.scorePpm), asc(schema.v2MakerEpoch.maker))
       .limit(size + 1).offset(start);
-    return c.json({ epoch: epochWire(epoch), items: rows.slice(0, size).map((row) => ({ maker: address(row.maker),
-      tierBps: row.tierBps, ...makerStats(row) })), nextCursor: nextOffset(start, size, rows.length > size) });
+    const selected = rows.slice(0, size);
+    const [selfTradeRows, unseenRows] = await Promise.all([
+      selected.length === 0 ? [] : db.select().from(schema.v2SelfTradeMaker)
+        .where(inArray(schema.v2SelfTradeMaker.maker, selected.map((row) => row.maker))),
+      db.select().from(schema.v2SelfTradeUnseen),
+    ]);
+    const selfTradeByMaker = new Map(selfTradeRows.map((row) => [row.maker.toLowerCase(), row.units]));
+    // The blind spots are a property of the detector, not of one maker, so every row carries the
+    // same reasons. Without them a maker at 0 reads as audited rather than as unexamined.
+    return c.json({ epoch: epochWire(epoch), items: selected.map((row) => ({ maker: address(row.maker),
+      tierBps: row.tierBps,
+      ...makerStats(row, selfTradeByMaker.get(row.maker.toLowerCase()) ?? 0n, unseenRows) })),
+    nextCursor: nextOffset(start, size, rows.length > size) });
   });
 
   app.get("/makers/:address", async (c) => {
     const raw = c.req.param("address");
     const maker = /^0x[\da-fA-F]{40}$/.test(raw) ? address(raw) : null;
     if (!maker) return error(c, "bad_address", "Maker must be an EVM address.");
-    const rows = await db.select().from(schema.v2MakerEpoch)
-      .where(sql`lower(${schema.v2MakerEpoch.maker}) = ${maker.toLowerCase()}`)
-      .orderBy(desc(schema.v2MakerEpoch.epoch));
+    const [rows, selfTradeRows, unseenRows] = await Promise.all([
+      db.select().from(schema.v2MakerEpoch)
+        .where(sql`lower(${schema.v2MakerEpoch.maker}) = ${maker.toLowerCase()}`)
+        .orderBy(desc(schema.v2MakerEpoch.epoch)),
+      db.select().from(schema.v2SelfTradeMaker)
+        .where(sql`lower(${schema.v2SelfTradeMaker.maker}) = ${maker.toLowerCase()}`).limit(1),
+      db.select().from(schema.v2SelfTradeUnseen),
+    ]);
     if (rows.length === 0) return error(c, "maker_not_found", "Maker was not found.", 404);
-    return c.json({ maker, tierBps: rows[0]!.tierBps, epochs: rows.map((row) => ({ epoch: epochWire(row.epoch), ...makerStats(row) })) });
+    const selfTradeUnits = selfTradeRows[0]?.units ?? 0n;
+    return c.json({ maker, tierBps: rows[0]!.tierBps,
+      epochs: rows.map((row) => ({ epoch: epochWire(row.epoch),
+        ...makerStats(row, selfTradeUnits, unseenRows) })) });
   });
 }

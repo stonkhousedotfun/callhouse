@@ -1,0 +1,9 @@
+{
+  "pricer": {
+    "healthy": true,
+    "reason": "ready",
+    "reasons": [],
+    "checkedAt": 1789592400,
+    "lastEvaluationAt": 1789592370
+  }
+}

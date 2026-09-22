@@ -3,8 +3,9 @@
  *
  * WHY THIS FILE EXISTS: an AutoRoller ask the spot has overtaken is free money for the first taker, and nothing else
  * withdraws it — `reprice` refuses (`InTheMoney`) and the writer may be asleep. The decision table is pinned in
- * planner.test.ts; what is pinned HERE is the wiring, which is where a keeper goes quietly wrong: reading the market's
- * oracle (not the default one) for the spot, comparing against the SERIES' strike, sending with the fixed
+ * planner.test.ts; what is pinned HERE is the wiring, which is where a keeper goes quietly wrong: reading the SERIES'
+ * OWN pinned oracle for the spot (T-310/T-437 - not the registry default and not `market(u).oracle`, which a
+ * `setMarketOracle` moves away from every series already created), comparing against the SERIES' strike, sending with the fixed
  * `GAS.cancelStale`, not sending for a writer the contract would answer `false` for, ordering the bounty-paying
  * cancels first and capping the rest, and paging `v2_stale_cancel_failed` at `warn` when the writer revoked the
  * roller and at `error` otherwise.
@@ -29,6 +30,13 @@ const CH = getAddress('0x2256c045245288A314048aD2d71006a564343C63');
 const ROLLER = getAddress('0xC42b6f89b9970cd5a8e7bFC21D6CbB02F8f82302');
 /** The market's own oracle, deliberately NOT the registry's default: a spot read from the wrong one is the bug. */
 const MARKET_ORACLE = getAddress('0x4b8c2BEFfecbdc4BeD6e6826e62093F0Cf635E78');
+/**
+ * Two series' pinned oracles, both different from each other AND from the market's pointer: the post-migration shape
+ * a `setMarketOracle` leaves behind. Distinct from MARKET_ORACLE on purpose - a mirror that read the market's would
+ * read neither of these, so the assertion on `spotFrom` fails rather than passing on a coincidence (T-437).
+ */
+const SERIES_ORACLE_A = getAddress('0x1111111111111111111111111111111111111111');
+const SERIES_ORACLE_B = getAddress('0x2222222222222222222222222222222222222222');
 const ZERO = '0x0000000000000000000000000000000000000000';
 const T0 = 1_789_750_000;
 const E = 1_789_934_400;
@@ -41,7 +49,17 @@ interface Writer {
   order: { units: bigint; filled: bigint; validUntil: number; cancelled: boolean; maker: Address };
 }
 
-function harness(writers: Writer[], options: { spot?: bigint; oracle?: Address } = {}) {
+function harness(
+  writers: Writer[],
+  options: {
+    spot?: bigint;
+    oracle?: Address;
+    /** The oracle `series(longId)` reports as pinned. Default: the market's, the pre-migration shape. */
+    seriesOracleOf?: (longId: bigint) => Address;
+    /** The trySpot answer of ONE oracle address, lower-case. Default: the single `state.spot` for every oracle. */
+    spotOf?: (oracle: string) => readonly [boolean, bigint];
+  } = {},
+) {
   const config = loadV2Config({
     V2_MODE: 'cranker',
     RH_RPC: 'http://127.0.0.1:9',
@@ -83,11 +101,15 @@ function harness(writers: Writer[], options: { spot?: bigint; oracle?: Address }
                   : { maker: o.maker, longId: 1n, kind: 2, price: 1_000_000n, units: o.units, filled: o.filled, validUntil: o.validUntil, cancelled: o.cancelled };
               }),
             };
-          case 'series':
-            return { status: 'success', result: { underlying: nvda.underlying, oracle: MARKET_ORACLE, settled: false, settlementPrice: 0n, isPut: false, strike: STRIKE, expiry: E, mintFeePpm: 80 } };
-          case 'trySpot':
+          case 'series': {
+            const oracle = options.seriesOracleOf?.(args[0] as bigint) ?? MARKET_ORACLE;
+            return { status: 'success', result: { underlying: nvda.underlying, oracle, settled: false, settlementPrice: 0n, isPut: false, strike: STRIKE, expiry: E, mintFeePpm: 80 } };
+          }
+          case 'trySpot': {
             state.spotFrom.push(c.address.toLowerCase());
-            return { status: 'success', result: [state.spotOk, state.spot, BigInt(state.now)] };
+            const per = options.spotOf?.(c.address.toLowerCase());
+            return { status: 'success', result: per === undefined ? [state.spotOk, state.spot, BigInt(state.now)] : [per[0], per[1], BigInt(state.now)] };
+          }
           default:
             return { status: 'failure', error: new Error(`no view ${c.functionName}`) };
         }
@@ -124,7 +146,7 @@ function harness(writers: Writer[], options: { spot?: bigint; oracle?: Address }
     log: silentLogger(),
     client: client as never,
     logClient: { getLogs: async () => [] } as never,
-    addresses: { clearinghouse: CH, orderBook: config.contracts.orderBook, settlementOracle: config.contracts.settlementOracle, expiryCalendar: config.contracts.expiryCalendar, autoRoller: ROLLER, multicall3: config.multicall3 },
+    addresses: { clearinghouse: CH, orderBook: config.contracts.orderBook, settlementOracle: config.contracts.settlementOracle, expiryCalendar: config.contracts.expiryCalendar, autoRoller: ROLLER, feeSplitter: null, multicall3: config.multicall3 },
     store,
     index,
     sender,
@@ -145,14 +167,14 @@ test('the stale step runs first of the sending steps, right after the index', ()
   assert.deepEqual([...STEP_ORDER].slice(0, 3), ['index', 'stale', 'snapshot']);
 });
 
-test('stepStale: an overtaken ask is cancelled with the fixed gas, from the MARKET\'s oracle, against the series\' strike', async () => {
+test('stepStale: an overtaken ask is cancelled with the fixed gas, from the SERIES\' pinned oracle, against the series\' strike', async () => {
   const h = harness([writer(1)]);
   const report = await stepStale(h.ctx);
   assert.equal(h.sends.length, 1);
   assert.equal(h.sends[0]!.fn, 'cancelStale');
   assert.equal(h.sends[0]!.gas, GAS.cancelStale);
   assert.deepEqual(h.sends[0]!.args, [getAddress('0x' + '0'.repeat(39) + '1'), getAddress(h.nvda.underlying)]);
-  assert.deepEqual(h.state.spotFrom, [MARKET_ORACLE.toLowerCase()], 'the spot comes from the market\'s own oracle');
+  assert.deepEqual(h.state.spotFrom, [MARKET_ORACLE.toLowerCase()], 'the spot comes from the oracle the SERIES pinned (here the market\'s, pre-migration)');
   assert.deepEqual(report.notes.reasons, { cancel: 1 });
   assert.equal((report.notes.cancelled as unknown[]).length, 1);
   assert.equal(h.alerts.length, 0);
@@ -219,4 +241,44 @@ test('stepStale: no AutoRoller configured is a skip, not an error', async () => 
   const report = await stepStale(h.ctx);
   assert.equal(h.sends.length, 0);
   assert.match(String(report.notes.skipped), /no autoRoller/);
+});
+
+test('stepStale: two series on ONE underlying with different pinned oracles are each judged on their own', async () => {
+  // The shape a setMarketOracle leaves behind: the market's pointer moved, every series already created kept the
+  // oracle createSeries pinned into it, and AutoRoller.cancelStale reads THAT one (T-310). Series 1 is overtaken on
+  // its oracle and series 2 is not, while the market's pointer would say neither is — so a mirror that still read
+  // `market(u).oracle` sends nothing and leaves an in-the-money ask resting for the first taker.
+  const h = harness([writer(1), writer(2, { position: [2n, 1_002n, E] })], {
+    seriesOracleOf: (longId) => (longId === 1n ? SERIES_ORACLE_A : SERIES_ORACLE_B),
+    spotOf: (oracle) => {
+      if (oracle === SERIES_ORACLE_A.toLowerCase()) return [true, STRIKE + 5_000_000n];
+      if (oracle === SERIES_ORACLE_B.toLowerCase()) return [true, STRIKE - 10_000_000n];
+      return [true, STRIKE - 10_000_000n]; // the market's pointer: short of the strike, so reading it cancels nothing
+    },
+  });
+  const report = await stepStale(h.ctx);
+
+  assert.deepEqual(
+    [...new Set(h.state.spotFrom)].sort(),
+    [SERIES_ORACLE_A.toLowerCase(), SERIES_ORACLE_B.toLowerCase()].sort(),
+    'one trySpot per pinned series oracle, and the market\'s pointer is never asked',
+  );
+  assert.ok(!h.state.spotFrom.includes(MARKET_ORACLE.toLowerCase()), 'market(u).oracle is not a spot source for an existing series');
+  assert.deepEqual(report.notes.reasons, { cancel: 1, 'not-overtaken': 1 });
+  assert.equal(h.sends.length, 1, 'only the series whose OWN oracle has overtaken it is withdrawn');
+  assert.equal(String(h.sends[0]!.args[0]).toLowerCase(), writer(1).writer.toLowerCase());
+  const cancelled = report.notes.cancelled as Array<{ oracle: string | null; spot: bigint | null }>;
+  assert.equal(String(cancelled[0]!.oracle).toLowerCase(), SERIES_ORACLE_A.toLowerCase(), 'the report names the oracle the decision was made on');
+  assert.equal(cancelled[0]!.spot, STRIKE + 5_000_000n);
+});
+
+test('stepStale: a series with no pinned oracle is judged on no oracle at all', async () => {
+  // Fail closed. An unreadable or zero oracle means the spot the contract would use is unknown, so no other oracle's
+  // price stands in for it: the series is dropped as unread, no trySpot is issued and nothing is sent. `unread` rather
+  // than `spot-stale` on purpose - the report says the SERIES could not be trusted, not that some oracle was stale.
+  const h = harness([writer(1)], { seriesOracleOf: () => ZERO as Address });
+  const report = await stepStale(h.ctx);
+  assert.deepEqual(h.state.spotFrom, [], 'no spot is read from any oracle for a series with no pinned one');
+  assert.equal(h.sends.length, 0);
+  assert.deepEqual(report.notes.reasons, { unread: 1 });
 });

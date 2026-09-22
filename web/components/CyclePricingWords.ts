@@ -8,7 +8,7 @@ import type { KeeperPricingFigures } from "@/lib/cycleTerms";
  *   1. NO KEEPER FREE TEXT. The report's reason code for unusable market data is matched against
  *      the keeper's known codes (keeper/src/vol.ts, keeper/src/policy.ts) and printed in this
  *      file's words; an unknown code is dropped, never echoed, because runtime data does not pass
- *      scripts/copy-lint.mjs.
+ *      copy-lint, until it was removed on 2026-09-21.
  *   2. NAME A SOURCE ONLY WHEN THE REPORT SAYS SO. Cboe is named only for source "cboe-delayed",
  *      and a fair value carried over from the previous listing is never called a market figure.
  */

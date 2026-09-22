@@ -18,6 +18,7 @@ import {
   toStockEq,
   type DepositsClosedReason,
 } from "@/lib/format";
+import { CHAIN_ID } from "@/lib/chain";
 import { useNow, type AccountPosition, type VaultSnapshot } from "@/lib/hooks";
 import { Button, Card, CardHead, CardMeta, CardTitle, Field, Notice, Row, Rows, Unit } from "@/components/ui";
 import { ConnectButton } from "./ConnectButton";
@@ -63,8 +64,15 @@ export function DepositForm({
   position: AccountPosition;
   onDone: () => void;
 }) {
-  const { address, isConnected } = useAccount();
+  const { address, isConnected, chainId } = useAccount();
   const { writeContractAsync } = useWriteContract();
+  // T-457. wagmi 3.6.5 keys its chain assertion off the TRUTHINESS of `chainId`, so omitting the
+  // argument does not skip a check -- it DISABLES one, and the transaction goes to whatever network
+  // the wallet happens to be on. For an ERC-20 approve that means granting an allowance to whatever
+  // contract sits at `VAULT`'s address on that other network. Both halves of the fix are here and
+  // both are load-bearing: `chainId: CHAIN_ID` on every write below, and the branch in the render
+  // that stops the user reaching the action at all. Same shape as AccountView.tsx:199,216.
+  const wrongNetwork = isConnected && chainId !== CHAIN_ID;
   const run = useTxRunner();
   const nowSeconds = useNow();
   const [raw, setRaw] = useState("");
@@ -109,7 +117,7 @@ export function DepositForm({
     busy || !isConnected || !VAULT || amount === null || amount === 0n || overBalance || overCap || closed || capFull;
 
   async function submit() {
-    if (!VAULT || !address || amount === null || amount === 0n) return;
+    if (!VAULT || !address || amount === null || amount === 0n || wrongNetwork) return;
     // `VAULT` is a module const typed `Address | undefined`; the guard above does not narrow it
     // inside the callbacks passed to run(). Bind it once.
     const vault = VAULT;
@@ -121,6 +129,7 @@ export function DepositForm({
         const approved = await run(
           () =>
             writeContractAsync({
+              chainId: CHAIN_ID,
               address: ASSET,
               abi: stockTokenAbi as unknown as Abi,
               functionName: "approve",
@@ -133,6 +142,7 @@ export function DepositForm({
       const deposited = await run(
         () =>
           writeContractAsync({
+            chainId: CHAIN_ID,
             address: vault,
             abi: vaultAbi as unknown as Abi,
             functionName: "deposit",
@@ -270,6 +280,15 @@ export function DepositForm({
       <div className="mt-5">
         {!isConnected ? (
           <ConnectButton block />
+        ) : wrongNetwork ? (
+          <>
+            <Notice tone="warn" role="status">
+              Switch to Robinhood Chain.
+            </Notice>
+            <div className="mt-3">
+              <ConnectButton block />
+            </div>
+          </>
         ) : (
           <Button variant="primary" className="w-full" disabled={disabled} onClick={submit}>
             {busy

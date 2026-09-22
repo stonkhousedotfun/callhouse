@@ -5,7 +5,7 @@
  *
  *   openBrowser()                      one Chromium for the run
  *   writerFlow(b, ctx)                 /earn/nvda: connect, deposit, manual AskWrite, daily auto-roll strategy
- *   buyerFlow(b, ctx)                  home: connect, "Buy 0.01 share" card -> ticket -> Buy now
+ *   buyerFlow(b, ctx)                  home: connect, "Buy 0.01 shares" card -> ticket -> Buy now
  *   resultsFlow(b, ctx)                /wins, /leaderboard, /pnl/<id>, the PNL image route, a winner's Portfolio
  * Each saves screenshots into out/screenshots and returns the transactions the page sent.
  * ------------------------------------------------------------------------------------------------- */
@@ -16,6 +16,20 @@ import { ABI, ROOT, RPC, SHOTS, WEB_URL, fail, info, pub, until, viem } from "./
 
 const { chromium } = createRequire(path.join(ROOT, "web", "package.json"))("playwright-core");
 const { decodeFunctionData, getAddress, toHex } = viem;
+
+const ceilDiv = (value, divisor) => (value + divisor - 1n) / divisor;
+const tickUp = (value) => ceilDiv(value, 100n) * 100n;
+const tickDown = (value) => value / 100n * 100n;
+const formatUsdgTick = (value) => {
+  const whole = value / 1_000_000n;
+  const fraction = (value % 1_000_000n).toString().padStart(6, "0").slice(0, 4).replace(/0+$/, "");
+  return fraction ? `${whole}.${fraction}` : whole.toString();
+};
+const smartPricingPrices = (spot, roll) => ({
+  start: tickUp(ceilDiv(spot * BigInt(roll.askBps), 10_000n)),
+  min: tickUp(ceilDiv(spot * BigInt(roll.minAskBps), 10_000n)),
+  max: tickDown(spot * BigInt(roll.maxAskBps) / 10_000n),
+});
 
 async function raw(method, params = []) {
   const response = await fetch(RPC, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ jsonrpc: "2.0", id: Date.now(), method, params }) });
@@ -133,7 +147,7 @@ async function connect(page, wallet) {
  * Writer on /earn/nvda: deposit `depositShares` NVDA, a manual AskWrite (`ask`: expiry, longId, shares, price in
  * USDG per share), and a DAILY auto-roll strategy (`roll`: otmBps, askBps, maxShares, minAskBps, maxAskBps).
  */
-export async function writerFlow(browser, { wallet, depositShares, ask, roll }) {
+export async function writerFlow(browser, { wallet, depositShares, ask, roll, settlementOracle, underlying }) {
   const { page, errors } = await newPage(browser, wallet);
   await page.goto(`${WEB_URL}/earn/nvda`);
   await connect(page, wallet);
@@ -157,12 +171,22 @@ export async function writerFlow(browser, { wallet, depositShares, ask, roll }) 
   await action.waitFor({ state: "visible", timeout: 60_000 });
   await r.getByLabel("Cycle").selectOption("daily");
   await r.getByLabel("Strike above spot · bps").fill(String(roll.otmBps));
-  await r.getByLabel("Ask · bps of spot").fill(String(roll.askBps));
+  const [spotOk, spot] = await pub.readContract({ address: settlementOracle, abi: ABI.oracle,
+    functionName: "trySpot", args: [underlying] });
+  if (!spotOk) fail("writer page: SettlementOracle.trySpot is unavailable for the auto-roll form");
+  const prices = smartPricingPrices(spot, roll);
+  const start = r.getByLabel("Starting ask · USDG / share");
+  await start.fill(formatUsdgTick(prices.start));
+  await start.blur();
   await r.getByLabel("Max size · shares").fill(String(roll.maxShares));
   const smart = r.getByLabel("Smart pricing within my limits");
   if (!(await smart.isChecked())) await smart.check();
-  await r.getByLabel("Minimum ask · bps").fill(String(roll.minAskBps));
-  await r.getByLabel("Maximum ask · bps").fill(String(roll.maxAskBps));
+  const minimum = r.getByLabel("Minimum ask · USDG / share");
+  await minimum.fill(formatUsdgTick(prices.min));
+  await minimum.blur();
+  const maximum = r.getByLabel("Maximum ask · USDG / share");
+  await maximum.fill(formatUsdgTick(prices.max));
+  await maximum.blur();
   await shot(page, "3-writer-4-auto-roll-form");
   n = wallet.calls.length;
   await action.click();
@@ -202,7 +226,7 @@ async function buyFromTicket(page, wallet, stoppedShot, attempts = 3) {
 }
 
 /**
- * Buyer on the home page: the first "Buy 0.01 share" card, keyboard into the ticket, Buy now.
+ * Buyer on the home page: the first "Buy 0.01 shares" card, keyboard into the ticket, Buy now.
  *
  * The page is opened with the feeds as they stand — on 4663 the round in force is normally hours old — so a card that
  * offers the buy here is evidence that the cards judge a quote against the oracle's spot age. When no card offers it,
@@ -215,16 +239,16 @@ export async function buyerFlow(browser, { wallet, onStale }) {
   await connect(page, wallet);
   await page.getByText(/max loss/i).first().waitFor({ state: "visible", timeout: 60_000 });
   await shot(page, "3-buyer-1-home-cards");
-  const cardOf = () => page.getByRole("link", { name: "Buy 0.01 share", exact: true }).first();
+  const cardOf = () => page.getByRole("link", { name: "Buy 0.01 shares", exact: true }).first();
   let card = cardOf();
   let natural = await card.waitFor({ state: "visible", timeout: 45_000 }).then(() => true, () => false);
   let notice = null;
   if (!natural) {
     const text = (await page.locator("body").innerText()).replace(/\s+/g, " ");
     notice = /Quote is stale/.test(text) ? "Quote is stale. Refreshing before a trade." : text.slice(0, 300);
-    info(`home cards: no "Buy 0.01 share" with the feed as it stands ("${notice}") — printing a round and reloading`);
+    info(`home cards: no "Buy 0.01 shares" with the feed as it stands ("${notice}") — printing a round and reloading`);
     await shot(page, "3-buyer-1b-cards-not-buyable");
-    if (!onStale) fail('buyer page: no "Buy 0.01 share" card and no onStale workaround');
+    if (!onStale) fail('buyer page: no "Buy 0.01 shares" card and no onStale workaround');
     await onStale();
     await page.reload();
     await page.getByText(/max loss/i).first().waitFor({ state: "visible", timeout: 60_000 });

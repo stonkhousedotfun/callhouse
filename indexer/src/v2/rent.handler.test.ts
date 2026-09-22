@@ -34,7 +34,7 @@ beforeAll(async () => {
   pg = new PGlite();
   for (const table of [schema.v2Market, schema.v2Series, schema.v2Account, schema.v2Ledger,
     schema.v2Mint, schema.v2Close, schema.v2MintFeeAccrual, schema.v2SpecialExpiry, schema.v2CashFlow,
-    schema.v2Strategy, schema.v2Roll, schema.v2StaleCancel]) {
+    schema.v2Order, schema.v2Strategy, schema.v2Roll, schema.v2StaleCancel]) {
     const config = getTableConfig(table);
     const columns = config.columns.map((c) => {
       const value = typeof c.default === "string" ? "'" + c.default.replaceAll("'", "''") + "'" : String(c.default);
@@ -106,19 +106,26 @@ describe("v7 native-rent event replay through real handlers and SQL schema", () 
   });
 });
 
-it("records the permissionless stale withdrawal while retaining the current strategy position", async () => {
+it("records multiple reprices before a permissionless stale withdrawal", async () => {
   await send("AutoRoller:StrategySet", { writer, underlying: asset, strategy: {
     active: true, weekly: true, smartPricing: true, otmBps: 200, askBps: 100,
     minAskBps: 50, maxAskBps: 200, maxUnits: 100n,
   } });
   await send("AutoRoller:Rolled", { writer, underlying: asset, longId: 2n, orderId: 7n,
     strike: 200_000_000n, expiry: 604_900, price: 1_000_000n, units: 100n });
-  await send("AutoRoller:StaleAskCancelled", { writer, underlying: asset, longId: 2n, orderId: 7n,
+  await send("AutoRoller:Repriced", { writer, underlying: asset, oldOrderId: 7n, newOrderId: 8n,
+    price: 1_100_000n }, 120n);
+  await send("AutoRoller:Repriced", { writer, underlying: asset, oldOrderId: 8n, newOrderId: 9n,
+    price: 1_200_000n }, 150n);
+  expect((await sql.select().from(schema.v2Strategy))[0]).toMatchObject({ orderId: 9n,
+    lastRepricedAt: 150n, lastRepricedPrice: 1_200_000n, repriceCount: 2 });
+  await send("AutoRoller:StaleAskCancelled", { writer, underlying: asset, longId: 2n, orderId: 9n,
     spot: 210_000_000n, updatedAt: 190n }, 200n);
   const [strategy] = await sql.select().from(schema.v2Strategy);
   expect(strategy).toMatchObject({ active: true, currentLongId: 2n, expiry: 604_900n, orderId: null,
-    lastRolledAt: 100n, lastStaleCancelAt: 200n, staleSpot: 210_000_000n });
+    lastRolledAt: 100n, lastRepricedAt: 150n, lastRepricedPrice: 1_200_000n, repriceCount: 2,
+    lastStaleCancelAt: 200n, staleSpot: 210_000_000n });
   const [record] = await sql.select().from(schema.v2StaleCancel);
-  expect(record).toMatchObject({ writer, underlying: asset, longId: 2n, orderId: 7n,
+  expect(record).toMatchObject({ writer, underlying: asset, longId: 2n, orderId: 9n,
     spot: 210_000_000n, spotUpdatedAt: 190n, ts: 200n });
 });

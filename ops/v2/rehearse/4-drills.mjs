@@ -26,7 +26,8 @@
  *                                close works, the MM bot pulls its NVDA write quotes, the expiry settles and redeems while
  *                                paused, unpause mints again
  *   fee-change         sandbox   setFeeParams (+1 % seller fee, +0.05 USDG taker fee): a take before effectiveAt pays the
- *                                old fees, a take capped at effectiveAt - 1 reverts DeadlinePassed after activation, a
+ *                                old fees, a take quoted at the old fees and sent after activation reverts FeeAboveMax
+ *                                rather than silently paying the new one, a take past its deadline reverts DeadlinePassed, a
  *                                fresh take pays the new fees
  *   pin-refused        sandbox   ChainlinkFeedSource.setOracle(oracle, false): createSeries of a new expiry reverts
  *                                SourceNotPinned, the cranker pages v2_pin_refused; restored: after its 900 s recheck
@@ -35,6 +36,8 @@
  *                                cranker redeems, a put payout is credited to the ledger (notifier
  *                                payout_failed_to_ledger), a converted call payout falls back to in kind; unpaused, the
  *                                holder withdraws
+ *   stale-cancel-notify forward  permissionless AutoRoller.cancelStale after the spot reaches ben's live roll strike;
+ *                                the fake Telegram receives auto_roll withdrawn (N3-401 path, O3-403)
  *   monitor            both      every drill's monitor.mjs --once run (inside its sandbox, on a copy of the forward state)
  *                                paged the provoked kinds through the relay; a final forward run
  *
@@ -47,7 +50,7 @@
 import { existsSync, rmSync } from "node:fs";
 import path from "node:path";
 import {
-  ABI, INDEXER_URL, RehearsalError, accountOf, contracts, expect, fail, getAddress, getJson, impersonate, info, ledgerAppend, loadState, markets, now, nyTime,
+  ABI, INDEXER_URL, RehearsalError, accountOf, contracts, expect, fail, getAddress, getJson, impersonate, info, ledgerAppend, loadState, markets, now, nyTime, pushRound,
   patchState, placedOrderId, pub, read, say, send, setLedgerTag, setStage, signalService, serviceRunning, sleep, step, stopService, until, usd, viem, warpTo,
 } from "./lib.mjs";
 import {
@@ -71,7 +74,14 @@ const REDEEM_TIMEOUT = 300_000;
 
 const who = (role) => accountOf(role);
 const lower = (a) => a.toLowerCase();
-/** The dapp's take deadline rule (DECISIONS-2026-09-17 §4): under 1 h, capped at effectiveAt - 1 while a fee change is pending. */
+/**
+ * The v7 dapp take deadline rule (DECISIONS-2026-09-17 §4): under 1 h, capped at effectiveAt - 1 while a fee
+ * change is pending. THE DAPP NO LONGER DOES THIS. T-126 retired the workaround in the keeper
+ * (keeper/src/v2/mm/devnet-mm.ts) because v8 states the concern directly with TakeParams.maxTotalFee: the v7
+ * cap refused by TIME, which also refuses perfectly good fills, where the fee cap refuses by PRICE. This helper
+ * survives only because the mint-paused drill below wants an ordinary near-future deadline; the fee-change
+ * drill no longer uses it, and nothing here should treat the effectiveAt clamp as current dapp behaviour.
+ */
 async function dappDeadline() {
   const [, effectiveAt] = await ob("pendingFeeParams");
   const t = await now();
@@ -81,6 +91,20 @@ const fees = (f) => ({ premiumFeeBps: Number(f.premiumFeeBps), resaleFeeBps: Num
 const takerFeeOf = (premium, f) => {
   const byCap = (premium * BigInt(f.takerFeeCapBps)) / BPS;
   return byCap < BigInt(f.takerFeeFlat) ? byCap : BigInt(f.takerFeeFlat);
+};
+/**
+ * A real `maxTotalFee` for a take the book is expected to SKIP. quoteTake cannot supply one here: it reverts
+ * BelowMinUnits at exactly the point take does (OrderBook.sol:494 against :455), so there is no quote to read.
+ * The bound is computed from the LIVE fee params at the take's own limit price, mirroring the contract's own
+ * sum at OrderBook.sol:461 -- the taker fee when buying, plus the taker's own seller fees when selling into a
+ * bid. It is an upper bound on what the call could be charged, never an unbounded value, so FeeAboveMax stays
+ * reachable. These two drills are unaffected by the cap either way: BelowMinUnits is raised at :455, BEFORE
+ * the cap is tested at :462.
+ */
+const skipCap = async (units, limitPrice, buying) => {
+  const f = fees(await ob("feeParams"));
+  const premium = units * limitPrice;
+  return takerFeeOf(premium, f) + (buying ? 0n : (premium * BigInt(f.premiumFeeBps)) / BPS);
 };
 const hashes = (list) => list.filter((x) => x.hash).map((x) => ({ what: x.what ?? x.label ?? x.kind, hash: x.hash, gas: x.gas ?? null }));
 
@@ -447,11 +471,15 @@ async function mintPaused() {
     const mint = await send(whale, { address: C.clearinghouse, abi: ABI.clearinghouse, functionName: "mint", args: [nv, 1n, whale, whale], label: "whale mint while paused", expectRevert: true });
     expect(mint.reverted && /MintPaused/.test(mint.reason), `a writer's mint reverts ${mint.reason}`);
     const deadline = await dappDeadline();
-    const takeAsk = await send(who("cy"), { address: C.orderBook, abi: ABI.orderBook, functionName: "take", args: [{ longId: nv, buying: true, orderIds: [askWrite], units: 10n, minUnits: 10n, limitPrice: 3_000_000n, writeToSell: false, recipient: who("cy"), deadline }], label: "cy take the AskWrite while paused", expectRevert: true });
+    const takeAsk = await send(who("cy"), { address: C.orderBook, abi: ABI.orderBook, functionName: "take", args: [{ longId: nv, buying: true, orderIds: [askWrite], units: 10n, minUnits: 10n, limitPrice: 3_000_000n, writeToSell: false, recipient: who("cy"), deadline, maxTotalFee: await skipCap(10n, 3_000_000n, true) }], label: "cy take the AskWrite while paused", expectRevert: true });
     expect(takeAsk.reverted && /BelowMinUnits/.test(takeAsk.reason), `buying an AskWrite (mint on fill) is skipped by the book: take reverts ${takeAsk.reason}`);
-    const hitBid = await send(whale, { address: C.orderBook, abi: ABI.orderBook, functionName: "take", args: [{ longId: nv, buying: false, orderIds: [bid], units: 10n, minUnits: 10n, limitPrice: 200_000n, writeToSell: true, recipient: whale, deadline }], label: "whale writeToSell into gus's bid while paused", expectRevert: true });
+    const hitBid = await send(whale, { address: C.orderBook, abi: ABI.orderBook, functionName: "take", args: [{ longId: nv, buying: false, orderIds: [bid], units: 10n, minUnits: 10n, limitPrice: 200_000n, writeToSell: true, recipient: whale, deadline, maxTotalFee: await skipCap(10n, 200_000n, false) }], label: "whale writeToSell into gus's bid while paused", expectRevert: true });
     expect(hitBid.reverted && /BelowMinUnits/.test(hitBid.reason), `writing into a bid (writeToSell) is skipped: take reverts ${hitBid.reason}`);
-    const resaleTake = await send(who("fay"), { address: C.orderBook, abi: ABI.orderBook, functionName: "take", args: [{ longId: nv, buying: true, orderIds: [resale], units: 5n, minUnits: 5n, limitPrice: 2_500_000n, writeToSell: false, recipient: who("fay"), deadline }], label: "fay buys eve's resale while paused", action: "take-buy" });
+    // This one is expected to FILL, so its cap comes from a quote of the same params rather than from the
+    // fee-params bound above: quoteTake does not enforce the cap (OrderBook.sol:462 is inside take only).
+    const resaleBase = { longId: nv, buying: true, orderIds: [resale], units: 5n, minUnits: 5n, limitPrice: 2_500_000n, writeToSell: false, recipient: who("fay"), deadline };
+    const [, , rTakerFee, rSellerFees] = await ob("quoteTake", [{ ...resaleBase, maxTotalFee: 0n }]);
+    const resaleTake = await send(who("fay"), { address: C.orderBook, abi: ABI.orderBook, functionName: "take", args: [{ ...resaleBase, maxTotalFee: rTakerFee + rSellerFees }], label: "fay buys eve's resale while paused", action: "take-buy" });
     const resaleFill = viem.parseEventLogs({ abi: ABI.orderBook, eventName: "OrderFilled", logs: resaleTake.receipt.logs })[0];
     expect(resaleFill && !resaleFill.args.primary && (await ch("balanceOf", [who("fay"), nv])) === 5n, `existing longs still trade: fay bought eve's 0.05 share resale (tx ${resaleTake.hash})`);
     const free0 = await ch("free", [whale, M.NVDA.asset]);
@@ -514,9 +542,19 @@ async function feeChange() {
     const mon = await runMonitor("fee-change", { from: MONITOR_STATE });
     const monitor = expectMonitorSent(mon, [["v2_mon_fee_scheduled", /RAISES/]]);
 
-    const takeParams = async (role, deadline) => ({ longId, buying: true, orderIds: [orderId], units: 100n, minUnits: 100n, limitPrice: PRICE, writeToSell: false, recipient: who(role), deadline });
+    // The cap is quoted per call, at the fees in force when the params are BUILT. That matters for `capped`
+    // below, which is built before the fee change activates and sent after it: the take then reverts
+    // DeadlinePassed, not FeeAboveMax, because _checkTake tests the deadline at OrderBook.sol:815 before any
+    // fee is computed and long before the cap is tested at :462. The drill still proves what it always did.
+    const takeParams = async (role, deadline) => {
+      const base = { longId, buying: true, orderIds: [orderId], units: 100n, minUnits: 100n, limitPrice: PRICE, writeToSell: false, recipient: who(role), deadline };
+      const [, , qTakerFee, qSellerFees] = await ob("quoteTake", [{ ...base, maxTotalFee: 0n }]);
+      return { ...base, maxTotalFee: qTakerFee + qSellerFees };
+    };
     const takeAndCheck = async (role, feesIn, label) => {
-      const p = await takeParams(role, await dappDeadline());
+      // An ORDINARY one-hour deadline, not the retired effectiveAt - 1 clamp: these takes are meant to
+      // execute and pay, and what protects them from a fee change is their maxTotalFee, not their deadline.
+      const p = await takeParams(role, (await now()) + 3_600);
       const r = await send(who(role), { address: C.orderBook, abi: ABI.orderBook, functionName: "take", args: [p], label, action: "take-buy" });
       const fill = viem.parseEventLogs({ abi: ABI.orderBook, eventName: "OrderFilled", logs: r.receipt.logs })[0];
       const taken = viem.parseEventLogs({ abi: ABI.orderBook, eventName: "Taken", logs: r.receipt.logs })[0];
@@ -526,22 +564,56 @@ async function feeChange() {
       return { r, fill, taken, ok: okSeller && okTaker, deadline: p.deadline, premium };
     };
     const a = await takeAndCheck("dee", F0, "dee take before effectiveAt");
-    expect(a.ok && a.deadline <= effectiveAt - 1, `a take before effectiveAt pays the old fees: premium ${usd(a.premium)}, seller fee ${usd(a.fill.args.sellerFee)} (${F0.premiumFeeBps} bps), taker fee ${usd(a.taken.args.takerFee)} (tx ${a.r.hash})`);
+    expect(a.ok, `a take before effectiveAt pays the old fees: premium ${usd(a.premium)}, seller fee ${usd(a.fill.args.sellerFee)} (${F0.premiumFeeBps} bps), taker fee ${usd(a.taken.args.takerFee)} (tx ${a.r.hash})`);
 
+    // THE PROPERTY, THROUGH THE v8 MECHANISM. A fee change must not silently overcharge a take that was
+    // quoted before it. v7 protected that by TIME -- a deadline clamped to effectiveAt - 1, so the take
+    // expired rather than paid -- which also refused perfectly good fills. v8 protects it by PRICE:
+    // TakeParams.maxTotalFee is the most the taker will pay, and OrderBook reverts FeeAboveMax above it.
+    // T-126 retired the time-based workaround; this proves the replacement actually holds.
     await warpTo(effectiveAt - 600, "ten minutes before the fee change takes effect");
-    const capped = await takeParams("fay", await dappDeadline());
-    const [, qPremium, qFee] = await ob("quoteTake", [capped]);
-    expect(capped.deadline === effectiveAt - 1 && qFee === takerFeeOf(qPremium, F0), `the dapp's take built ten minutes before activation is capped at effectiveAt - 1 (${capped.deadline}) and quoted at the old taker fee ${usd(qFee)}`);
+    const quotedOld = await takeParams("fay", (await now()) + 3_600);
+    const [, qPremium, qFee] = await ob("quoteTake", [quotedOld]);
+    expect(qFee === takerFeeOf(qPremium, F0) && quotedOld.maxTotalFee === qFee,
+      `fay's take is quoted at the OLD taker fee ${usd(qFee)} and carries exactly that as maxTotalFee (${usd(quotedOld.maxTotalFee)}), derived from quoteTake and not from a constant`);
     await warpTo(effectiveAt, "effectiveAt: the scheduled fees apply from this block");
     const [, zeroAt] = await ob("pendingFeeParams");
     expect(JSON.stringify(fees(await ob("feeParams"))) === JSON.stringify(F1) && Number(zeroAt) === 0, "at effectiveAt feeParams() returns the new fees and pendingFeeParams() is empty");
-    const late = await send(who("fay"), { address: C.orderBook, abi: ABI.orderBook, functionName: "take", args: [capped], label: "fay sends the capped take after activation", expectRevert: true, sendReverting: true, gas: 1_000_000n });
-    expect(late.reverted && /DeadlinePassed/.test(late.reason) && late.receipt.status === "reverted", `the capped take mined after activation reverts ${late.reason}: it never pays the new fees (tx ${late.hash}, status reverted)`);
+    // PROVE THE PRECONDITION BEFORE ASSERTING THE REVERT. takerFeeOf is min(premium x takerFeeCapBps, flat),
+    // so raising takerFeeFlat only raises the fee while the FLAT term binds. If the cap term bound instead,
+    // the new fee would equal the old one, FeeAboveMax could never fire, and a revert assertion here would be
+    // passing for a reason that has nothing to do with the cap. So quote the same params at the NEW fees and
+    // require that they really do exceed what fay agreed to.
+    const [, qPremiumNew, qFeeNew] = await ob("quoteTake", [quotedOld]);
+    expect(qFeeNew === takerFeeOf(qPremiumNew, F1) && qFeeNew > quotedOld.maxTotalFee,
+      `the scheduled change really does raise this take's taker fee, ${usd(quotedOld.maxTotalFee)} -> ${usd(qFeeNew)}: the cap is about to be exceeded, so FeeAboveMax is reachable`);
+    // AND THE DEADLINE IS STILL AHEAD, PROVED RATHER THAN DONE ON PAPER (O8's first suspicion, T-545). quotedOld was
+    // built at effectiveAt - 600 with a one-hour deadline, so at activation it has about 3000 s left. _checkTake tests
+    // the deadline (OrderBook.sol:815) BEFORE any fee is computed, so if the warps above ever move, the take would
+    // revert DeadlinePassed and the FeeAboveMax assertion below would go red for a reason that looks like the wrong bug.
+    // Fail here instead, on the arithmetic, with both numbers in the message.
+    const atActivation = await now();
+    expect(quotedOld.deadline > atActivation,
+      `fay's quoted take is still inside its deadline at activation (deadline ${quotedOld.deadline}, now ${atActivation}, ${quotedOld.deadline - atActivation} s left), so the revert below can only be the fee cap`);
+    const overcharged = await send(who("fay"), { address: C.orderBook, abi: ABI.orderBook, functionName: "take", args: [quotedOld], label: "fay sends the take she quoted at the old fees, after activation", expectRevert: true, sendReverting: true, gas: 1_000_000n });
+    expect(overcharged.reverted && /FeeAboveMax/.test(overcharged.reason) && overcharged.receipt.status === "reverted",
+      `a take quoted at the old fees REFUSES the new one on price: reverts ${overcharged.reason} (tx ${overcharged.hash}, status reverted). It never silently pays ${usd(qFeeNew)} against a ${usd(quotedOld.maxTotalFee)} cap`);
+
+    // DEADLINE COVERAGE, SEPARATE AND SMALLER. The deadline check is still real and still FIRST --
+    // _checkTake tests it at OrderBook.sol:815 before any fee is computed, long before the cap at :462 -- so
+    // a take past its deadline must still revert DeadlinePassed. This is its own assertion about deadlines
+    // and NOT a fee-change workaround: folding it into the fee case is how the fee assertion would later be
+    // deleted as redundant, and a drill asserting only FeeAboveMax would still pass with the deadline check
+    // removed entirely.
+    const stale = { ...(await takeParams("cy", (await now()) - 1)) };
+    const expired = await send(who("cy"), { address: C.orderBook, abi: ABI.orderBook, functionName: "take", args: [stale], label: "cy sends a take whose deadline has already passed", expectRevert: true, sendReverting: true, gas: 1_000_000n });
+    expect(expired.reverted && /DeadlinePassed/.test(expired.reason) && expired.receipt.status === "reverted",
+      `a take past its deadline still reverts ${expired.reason}, checked before any fee is computed (tx ${expired.hash}, status reverted)`);
     const c = await takeAndCheck("cy", F1, "cy take after activation");
     expect(c.ok, `a fresh take after activation pays the new fees: premium ${usd(c.premium)}, seller fee ${usd(c.fill.args.sellerFee)} (${F1.premiumFeeBps} bps), taker fee ${usd(c.taken.args.takerFee)} (tx ${c.r.hash})`);
     return {
       mode: "sandbox", seriesExpiry: Ef, effectiveAt, feesBefore: F0, feesAfter: F1,
-      txs: [{ what: "setFeeParams (schedule)", hash: sched.hash }, { what: "take before effectiveAt (old fees)", hash: a.r.hash }, { what: "capped take after activation (reverted DeadlinePassed)", hash: late.hash }, { what: "take after activation (new fees)", hash: c.r.hash }],
+      txs: [{ what: "setFeeParams (schedule)", hash: sched.hash }, { what: "take before effectiveAt (old fees)", hash: a.r.hash }, { what: "take quoted at old fees, sent after activation (reverted FeeAboveMax)", hash: overcharged.hash }, { what: "take past its deadline (reverted DeadlinePassed)", hash: expired.hash }, { what: "take after activation (new fees)", hash: c.r.hash }],
       monitor,
     };
   });
@@ -674,6 +746,49 @@ async function monitorSummary(results) {
   return { mode: "both", kinds, final: { code: final.code, findings: final.report.findings.map((f) => `${f.severity} ${f.id}`), sent: final.sent.map((s) => s.kind), resolved: final.resolved.map((r) => r.id) } };
 }
 
+/* ------------------------------------------------------------------ stale-cancel-notify (forward, O3-403) */
+async function staleCancelNotify() {
+  const M = markets();
+  const C = contracts();
+  const S = loadState();
+  const ben = who("ben");
+  const [longId, orderId, expiry] = await read(C.autoRoller, ABI.autoRoller, "position", [ben, M.NVDA.asset]);
+  expect(orderId !== 0n, `ben still has a live AutoRoller ask to withdraw (orderId ${orderId}, expiry ${nyTime(Number(expiry))})`);
+  const rolls = await pub.getContractEvents({ address: C.autoRoller, abi: ABI.autoRoller, eventName: "Rolled", args: { writer: ben }, fromBlock: BigInt(S.deployBlock) });
+  const last = rolls.at(-1);
+  expect(Boolean(last), "ben has a Rolled log so the strike of the live ask is known");
+  const strike = last.args.strike;
+  const t = await now();
+  const above = strike * 100n + 10n ** 8n;
+  await pushRound(M.NVDA.feed, above, t, `NVDA spot ${usd(strike + 1_000_000n)} above ben's ${usd(strike)} roll strike`);
+  const tg = await telegramMark();
+  const fromBlock = await pub.getBlockNumber();
+  const cancelled = await send(who("whale"), {
+    address: C.autoRoller,
+    abi: ABI.autoRoller,
+    functionName: "cancelStale",
+    args: [ben, M.NVDA.asset],
+    label: "whale cancelStale(ben, NVDA) permissionless",
+    action: "cancelStale",
+  });
+  expect(!cancelled.reverted, `cancelStale withdrew ben's ask (tx ${cancelled.hash})`);
+  const note = await until("ben's auto_roll withdrawn notification", async () => {
+    const all = await telegramMessages();
+    return all.find((m) => m.n > tg && m.bot === NOTIFIER_BOT && /Auto-roll withdrew your NVDA ask/.test(m.text)) ?? null;
+  }, { timeoutMs: 240_000, intervalMs: 3_000, service: "notifier" });
+  expect(note.chatId === String(S.story.subscriptions.ben.chatId), `notifier sent auto_roll withdrawn to ben's fake Telegram chat: "${note.text.split("\n")[0]}"`);
+  const logs = await events(C.autoRoller, ABI.autoRoller, "StaleAskCancelled", { writer: ben }, fromBlock).catch(() => []);
+  return {
+    mode: "forward",
+    tx: cancelled.hash,
+    orderId: orderId.toString(),
+    longId: longId.toString(),
+    strike: strike.toString(),
+    staleLogs: logs.length,
+    telegram: note.text.split("\n")[0],
+  };
+}
+
 export const DRILLS = [
   { id: "indexer-down", title: "Indexer down: the web ticket still buys via the on-chain book", run: indexerDown },
   { id: "feed-paused", title: "Feed paused flag during finalize: retry later works", run: feedPaused },
@@ -684,6 +799,7 @@ export const DRILLS = [
   { id: "fee-change", title: "Scheduled fee change (24 h): old fees before effectiveAt, a capped take reverts after", run: feeChange },
   { id: "pin-refused", title: "Source removed from the allow-list: createSeries fails closed, v2_pin_refused, recovery", run: pinRefused },
   { id: "usdg-paused", title: "USDG paused during redemption: ledger credit, later withdraw", run: usdgPaused },
+  { id: "stale-cancel-notify", title: "cancelStale withdraws ben's overtaken ask; fake Telegram gets auto_roll withdrawn", run: staleCancelNotify },
   { id: "monitor", title: "monitor.mjs --once reports the provoked admin events", run: null },
 ];
 

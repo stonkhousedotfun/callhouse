@@ -1,5 +1,53 @@
 # Stonkhouse
 
+Stonkhouse is an options protocol for Robinhood Chain Stock Tokens. This repository contains
+the app, indexer, bots, notifier, relay, operations scripts and integration docs. The Foundry
+contracts live in `callhouse-contracts`, pinned here as the `contracts/` submodule; the landing
+and GitBook docs live in `callhouse-site` and `callhouse-docs`. Names inside code still say
+`callhouse` for compatibility.
+
+## Current development: v2
+
+The private `v2` branch contains a buyer-first app and a new protocol: a shared Clearinghouse
+for option series and collateral, an OrderBook for asks, bids and resales, settlement sources,
+and optional auto-roll, payout and maker components. Series can include calls or puts and daily
+or weekly expiries according to each market's configuration. The v1 vault, solo accounts and
+Seaport fill flow are retained as legacy run-off paths. The v2 app shell is selected at build
+time with `NEXT_PUBLIC_V2=1`; see [web/README.md](web/README.md) for routes and write guards.
+
+**V2 mainnet deployment is not established by code in this branch.** The deployment addresses
+in [ops/markets/tier1.json](ops/markets/tier1.json) are null until the owner deploys and records
+verified values. The seeded addresses in [ops/devnet/README.md](ops/devnet/README.md) are local
+devnet only. Check the registry and the current task board in the adjacent `stonkhouse-plan`
+checkout before describing anything as live. Do not copy an address from this historical v1
+section into v2 configuration.
+
+| Need | Start here |
+|---|---|
+| New agent orientation and integration rules | [HANDOFF.md](HANDOFF.md) |
+| Contract behavior and tests | `contracts/src/v2/`, `contracts/docs/`, `contracts/SECURITY.md` |
+| Registry, market lifecycle and generated consumers | [ops/markets/README.md](ops/markets/README.md) |
+| Web routes, config guard and acceptance | [web/README.md](web/README.md) |
+| V2 services and owner deployment | [ops/deploy.md](ops/deploy.md) §15 |
+| Local chain rehearsal | [ops/devnet/README.md](ops/devnet/README.md) |
+
+```bash
+pnpm install
+pnpm --filter @callhouse/web typecheck
+pnpm --filter @callhouse/web test
+pnpm --filter @callhouse/web lint
+```
+
+The repository's current v2 architecture is defined by the pinned contracts, `ops/markets`,
+the package source, and `ops/deploy.md` §15. The two older integration notes,
+[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) and [docs/WIRING.md](docs/WIRING.md), describe v1.
+
+## Legacy v1 reference (historical)
+
+The remainder of this README records the 2026-09-13 v1 vault and solo-factory design. It is
+kept for v1 run-off and audit history; its rollout plan, gate counts, and statements about what
+"v2" would add are not current work instructions.
+
 Renamed from Callhouse (callhouse.finance) to Stonkhouse (stonkhouse.fun) on 2026-09-15. Repo, package, service, env and on-chain names still say callhouse.
 
 Let your stonks work for you. Deposit NVDA into your own account, choose how much is for sale this week, and get paid in USDG if someone buys. Unsold stock comes back. Only your offered stock can be sold.

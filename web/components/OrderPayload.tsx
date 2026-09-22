@@ -107,8 +107,14 @@ export function OrderPayload({
    *  hash; it then decides how many contracts are left, whatever the row says. */
   seaportStatus?: SeaportFillStatus;
 }) {
-  const { address, isConnected } = useAccount();
+  const { address, isConnected, chainId } = useAccount();
   const { writeContractAsync } = useWriteContract();
+  // T-457, same defect and same two halves as DepositForm. wagmi 3.6.5 treats a missing `chainId`
+  // as "no assertion", not "assert nothing changed", so a bare write follows the wallet's network.
+  // NOTE the one `chainId` already in this file that is NOT a second source of truth: the
+  // `listing.chainId` in {payloadJson} is a field of the exported order JSON, not a transaction
+  // argument. Every write below takes CHAIN_ID, the same constant AccountView.tsx uses.
+  const wrongNetwork = isConnected && chainId !== CHAIN_ID;
   const publicClient = usePublicClient();
   const run = useTxRunner();
   const notice = useNotice();
@@ -265,7 +271,9 @@ export function OrderPayload({
 
   async function fill() {
     // The buttons are not rendered when the check fails; this is the belt to that brace.
-    if (!verified || !address || want === 0n || !canFill || publicClient === undefined) return;
+    // `wrongNetwork` is in the same list for the same reason: the render branch below removes the
+    // button, and this stops the handler if anything ever calls it another way.
+    if (!verified || !address || want === 0n || !canFill || publicClient === undefined || wrongNetwork) return;
     setBusy(true);
     try {
       // Simulate the same fill once more before anything is sent. The verdict on screen can be a
@@ -286,6 +294,7 @@ export function OrderPayload({
         const approved = await run(
           () =>
             writeContractAsync({
+              chainId: CHAIN_ID,
               address: USDG,
               abi: stockTokenAbi as unknown as Abi,
               functionName: "approve",
@@ -301,6 +310,7 @@ export function OrderPayload({
       await run(
         () =>
           writeContractAsync({
+            chainId: CHAIN_ID,
             address: SEAPORT,
             abi: seaportAbi as unknown as Abi,
             functionName: "fulfillAdvancedOrder",
@@ -498,6 +508,13 @@ export function OrderPayload({
           <div className="mt-5 grid items-center gap-2.5 sm:grid-cols-[minmax(0,1fr)_auto]">
             {!isConnected ? (
               <div className="min-w-0">
+                <ConnectButton block />
+              </div>
+            ) : wrongNetwork ? (
+              <div className="min-w-0">
+                <Notice tone="warn" role="status" className="mb-3">
+                  Switch to Robinhood Chain.
+                </Notice>
                 <ConnectButton block />
               </div>
             ) : (

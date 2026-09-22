@@ -9,27 +9,32 @@
 #   ops/go-live-v2.sh --apply --ref <reviewed-SHA>       # do it (asks for a typed "yes")
 #   ops/go-live-v2.sh --apply --ref <reviewed-SHA> --services cranker  # one service
 #   ops/go-live-v2.sh --apply --ref <reviewed-SHA> --services web      # flip app.stonkhouse.fun to v2
+#   ops/go-live-v2.sh --project <dev-project-id> --environment <dev-environment-id> --offline
+#     selects dev.json, env-dev and leekzor/callhouse-dev; notifier/web also need --notifier-domain
 #
 # Services, in this order (the order is fixed; --services selects from it):
-#   relay       existing; requires RELAY_TOKEN and a Discord/Telegram target before alert producers deploy
+#   relay       existing; required only for pricer, mm-bot and monitor (O3-004). pricing, notifier,
+#               indexer-v2 and cranker may deploy without it. Signing bots (cranker, pricer, mm-bot)
+#               are refused when the stonkhouse-dev project is selected.
 #   indexer-v2  indexer/Dockerfile, shared Postgres, generated public domain, /ready
 #   pricing     keeper/Dockerfile V2_MODE=pricing, private only
 #   cranker     keeper/Dockerfile V2_MODE=cranker, /data volume, replicas 1, CRANKER_PK
 #   pricer      keeper/Dockerfile V2_MODE=pricer, /data volume, replicas 1, PRICER_PK
 #   mm-bot      keeper/Dockerfile V2_MODE=mm, /data volume, replicas 1, MM_QUOTER_PK + MM_KILL_TOKEN, NO public domain
 #   notifier    notifier/Dockerfile, schema notifier on the shared Postgres, notify.stonkhouse.fun
+#   monitor     keeper/Dockerfile, read-only external checks, /data volume, no port or domain
 #   web         only with --services …,web: NEXT_PUBLIC_V2=1 + the two API URLs, then a REBUILD
 #
 # PREFLIGHT (runs in the dry run too, and refuses in both):
 #   - registry v2 is deployed: v2.deployBlock and every v2.contracts address set (sources.dataStreams
 #     may stay null: DataStreamsSource ships disabled, C2-12), v2.bots set for each selected bot;
-#   - ops/v2/env/*.env equal what ops/v2-env.mjs renders from the registry (--check), and every
+#   - the selected ops/v2/env or ops/v2/env-dev files equal what ops/v2-env.mjs renders (--check), and every
 #     assignment the selected services take is non-empty; the apply run also compares this render
 #     with the reviewed clone and takes Railway public values from that clone;
 #     build-markets.mjs --check is green;
 #   - on chain (skip with --offline, dry run only): chain 4663, code at every contract, the deploy
 #     block behind the head; bot gas and roles are reported (warnings: a role grant is the admin's);
-#   - a bot key file ~/.callhouse-keys/v2/<bot>.env, when present, is mode 600 and derives to the
+#   - a bot key file ~/.callhouse-keys/v8/<bot>.env, when present, is mode 600 and derives to the
 #     registry's v2.bots address.
 #   Repository shape (keeper/Dockerfile ships the registry, notifier/Dockerfile exists, web/Dockerfile
 #   declares the v2 build ARGs, web/lib/markets.generated.ts carries the deployed addresses) is
@@ -37,7 +42,7 @@
 #   that is actually built.
 #
 # SECRETS never appear on a command line or in a file this writes. Each is set only when the
-# service does not already have it (sealed or not): bot keys from ~/.callhouse-keys/v2/<bot>.env
+# service does not already have it (sealed or not): bot keys from ~/.callhouse-keys/v8/<bot>.env
 # (ops/v2/derive-bot-keys.sh) after checking the derived address, or pasted with `read -rs` and
 # checked the same way; PONDER_RPC_URL_4663, MM_KILL_TOKEN, NOTIFIER_DATA_KEY, TELEGRAM_BOT_TOKEN and the VAPID
 # pair pasted with `read -rs`; both go to Railway through `railway variables --set-from-stdin`.
@@ -53,7 +58,7 @@
 # alert references on existing services and reports an incomplete run if any live service needs a redeploy.
 #
 # Every deploy is built from a fresh clone at an explicit commit SHA in a temp dir, never from this working
-# tree, and that clone's ops/markets/tier1.json must equal the registry planned against: the bots
+# tree, and that clone's selected registry must equal the registry planned against: the bots
 # read the copy baked into their image. What the CLI cannot do (seal, healthcheck path, restart
 # policy, DNS) is printed as a TODO. There are no GitHub watch paths on these reviewed CLI uploads;
 # code or registry changes require a new reviewed --ref and manual redeploy. Nothing here sends a chain transaction.
@@ -63,28 +68,40 @@ set -euo pipefail
 
 RW_PROJECT=9988a803-0b8f-4b0e-8ada-ba71e5a505ae     # Railway project "callhouse"
 RW_ENV=319fcb44-0e25-4367-947c-09351a349d2e         # production
+DEV_PROJECT=d8952b22-6bd8-4fd7-984a-7868ee353879    # Railway project "stonkhouse-dev"
+DEV_ENV=a87aa3a2-1c68-41e7-9866-d0e72810035b
 REPO=stonkhousedotfun/callhouse
 CHAIN_ID=4663
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd "$HERE/.." && pwd)"
 DEFAULT_REGISTRY="$HERE/markets/tier1.json"
-KEYS_DIR="${CALLHOUSE_V2_KEYS_DIR:-$HOME/.callhouse-keys/v2}"
+DEV_REGISTRY="$HERE/markets/dev.json"
+ENV_DIR="$HERE/v2/env"
+KEYS_DIR="${CALLHOUSE_V2_KEYS_DIR:-$HOME/.callhouse-keys/v8}"
 RPC=${RH_RPC:-https://rpc.mainnet.chain.robinhood.com}
 export ETH_RPC_URL="$RPC"                                # cast reads this without putting a keyed URL in argv
-APP_URL=${APP_URL:-https://app.stonkhouse.fun}
+APP_URL=${APP_URL:-}
 NOTIFIER_DOMAIN=notify.stonkhouse.fun
 RELAY_PRIVATE_URL=http://relay.railway.internal:8080/alert
+MONITOR_RPC=https://rpc.mainnet.chain.robinhood.com
+MONITOR_START='node ops/v2/monitor.mjs --interval 60'
+MONITOR_HEALTH=""
 READY_WAIT_SECS=${READY_WAIT_SECS:-1200}
 DEPLOY_WAIT_SECS=${DEPLOY_WAIT_SECS:-900}
 MIN_RAILWAY_CLI="5.47.2"                             # first release that lists sealed variables (as null)
 MIN_BOT_WEI=10000000000000000                        # 0.01 ETH, the bots' KEEPER_MIN_GAS_WEI default
 
-ORDER="relay indexer-v2 pricing cranker pricer mm-bot notifier web"
+# ORDER is owned by ops/v2/go-live-gating.mjs (O3-004). A helper failure is a REFUSED line, not a stack.
+ORDER=$(node "$HERE/v2/go-live-gating.mjs" --print-order) \
+  || { echo "REFUSED: O3-004 gating helper failed while reading ORDER" >&2; exit 1; }
 # mm-bot is NOT here: every other service reads or cranks, while the MM bot puts the vault's
 # inventory on the book, and with MM_MARKETS unset and the bot caps at 0 it quotes every live
 # market up to the vault's own limits. What it should quote, and how much, is the canary runbook
 # (O2-04 ops/runbooks/v2-canary.md). Name it explicitly once that has been read.
-DEFAULT_SERVICES="relay indexer-v2 pricing cranker pricer notifier"
+# cranker and pricer are NOT here either (O8-05 / V3-D12): a bare --apply would otherwise
+# deploy signing bots — a second cranker on the same key in the shared-contract world, and
+# the prod pricer that waits for v8. Name them explicitly. Always pass --services anyway.
+DEFAULT_SERVICES="relay indexer-v2 pricing notifier monitor"
 
 # service    dockerfile          port   health   timeout drain volume public     bot       keyvar
 TABLE="
@@ -93,14 +110,16 @@ indexer-v2   indexer/Dockerfile  42069  /ready   3600    30    -      generated 
 pricing      keeper/Dockerfile   8790   /health  120     30    -      none       -         -
 cranker      keeper/Dockerfile   8792   /health  300     120   /data  none       cranker   CRANKER_PK
 pricer       keeper/Dockerfile   8794   /health  300     120   /data  none       pricer    PRICER_PK
-mm-bot       keeper/Dockerfile   8793   /health  300     120   /data  forbidden  mmQuoter  MM_QUOTER_PK
+mm-bot       keeper/Dockerfile   8793   /health  300     120   /data  forbidden  quoter    MM_QUOTER_PK
 notifier     notifier/Dockerfile 8791   /health  60      30    -      custom     -         -
+monitor      keeper/Dockerfile   -      -        -       -     /data  forbidden  -         -
 web          web/Dockerfile      3000   /        120     -     -      custom     -         -
 "
 DOCKERFILE=2; PORT_COL=3; HEALTH=4; TIMEOUT=5; DRAIN=6; VOLUME=7; PUBLIC=8; BOT=9; KEYVAR=10
 col() { printf '%s\n' "$TABLE" | awk -v s="$1" -v c="$2" '$1 == s { print $c }'; }
 
-REGISTRY="$DEFAULT_REGISTRY"; APPLY=0; OFFLINE=0; ASSUME_YES=0; ROTATE_KEYS=0; IGNORE_WINDOW=0; REF=main; SERVICES=""
+REGISTRY=""; APPLY=0; OFFLINE=0; ASSUME_YES=0; ROTATE_KEYS=0; IGNORE_WINDOW=0; REF=main; SERVICES=""
+PROJECT_SET=0; ENV_SET=0; NOTIFIER_DOMAIN_SET=0; DEV=0; PLAN_GATING=0; CHECK_V7_PIN=0; CHECK_PUBLIC_REF=0
 
 usage() {
   sed -n '3,56p' "$0" | sed 's/^# \{0,1\}//'
@@ -109,11 +128,18 @@ Options:
   --apply                   create/update services, set variables and deploy (default: dry run)
   --services a,b            which services, from: $ORDER
                             (default: $DEFAULT_SERVICES; web and mm-bot must be named)
-  --ref REF                 full reviewed commit SHA for --apply (dry run defaults to main)
-  --registry FILE           plan against another registry (a rehearsal copy); dry run only
+  --ref REF                 full reviewed commit SHA for --apply (dry run defaults to main or dev v2)
+  --project ID              Railway project; with --environment, use the known dev pair for dev
+  --environment ID          Railway environment; must match --project
+  --notifier-domain HOST    notifier hostname (required for dev notifier or web)
+  --registry FILE           plan against a rehearsal copy (dry run only); dev uses dev.json automatically
   --offline                 skip the chain reads and build-markets.mjs --check; dry run only
   --rotate-keys             set the bot keys even if the services already have them
   --ignore-expiry-window    redeploy the signing bots inside 15:40-16:20 New York time
+  --plan-gating             print O3-004 service-gating decisions (no Railway, no network, no secrets) and exit
+  --check-v7-pin            read docs/V7-RUNOFF.md's v7 pin, report it, exit. Deploys nothing.
+  --check-public-ref        is every path the selected services need present on the PUBLIC ref
+                            (PUBLIC_REF, default origin/main)? Reads local refs, never fetches.
   --yes                     skip the typed confirmation
 EOF
 }
@@ -125,11 +151,20 @@ while [ $# -gt 0 ]; do
     --services) SERVICES=${2:-}; shift 2 ;;
     --services=*) SERVICES=${1#*=}; shift ;;
     --ref) REF=${2:-}; shift 2 ;;
+    --project) RW_PROJECT=${2:-}; PROJECT_SET=1; shift 2 ;;
+    --project=*) RW_PROJECT=${1#*=}; PROJECT_SET=1; shift ;;
+    --environment) RW_ENV=${2:-}; ENV_SET=1; shift 2 ;;
+    --environment=*) RW_ENV=${1#*=}; ENV_SET=1; shift ;;
+    --notifier-domain) NOTIFIER_DOMAIN=${2:-}; NOTIFIER_DOMAIN_SET=1; shift 2 ;;
+    --notifier-domain=*) NOTIFIER_DOMAIN=${1#*=}; NOTIFIER_DOMAIN_SET=1; shift ;;
     --registry) REGISTRY=${2:-}; shift 2 ;;
     --registry=*) REGISTRY=${1#*=}; shift ;;
     --offline) OFFLINE=1; shift ;;
     --rotate-keys) ROTATE_KEYS=1; shift ;;
     --ignore-expiry-window) IGNORE_WINDOW=1; shift ;;
+    --plan-gating) PLAN_GATING=1; shift ;;
+    --check-v7-pin) CHECK_V7_PIN=1; shift ;;
+    --check-public-ref) CHECK_PUBLIC_REF=1; shift ;;
     --yes|-y) ASSUME_YES=1; shift ;;
     -h|--help) usage; exit 0 ;;
     *) echo "unknown argument: $1" >&2; usage >&2; exit 2 ;;
@@ -137,10 +172,173 @@ while [ $# -gt 0 ]; do
 done
 
 die()  { echo "REFUSED: $*" >&2; exit 1; }
+[ "$PROJECT_SET" = "$ENV_SET" ] || die "--project and --environment must be supplied together"
+if [ "$RW_PROJECT" = "$DEV_PROJECT" ] && [ "$RW_ENV" = "$DEV_ENV" ]; then
+  DEV=1
+  REPO=leekzor/callhouse-dev
+  DEFAULT_REGISTRY="$DEV_REGISTRY"
+  ENV_DIR="$HERE/v2/env-dev"
+  APP_URL=${APP_URL:-https://dev.app.stonkhouse.fun}
+  # Signing bots (cranker, pricer, mm-bot) hold CRANKER_PK/PRICER_PK/MM_QUOTER_PK and are
+  # refused on stonkhouse-dev. Keep them out of the default set so the documented
+  # `go-live-v2.sh --project <dev> --environment <dev>` invocation plans instead of
+  # self-refusing. Name a signing bot explicitly only on a prod-shaped project.
+  DEFAULT_SERVICES="relay indexer-v2 pricing monitor"
+  [ "$REF" = main ] && REF=v2
+elif [ "$RW_PROJECT" != 9988a803-0b8f-4b0e-8ada-ba71e5a505ae ] || [ "$RW_ENV" != 319fcb44-0e25-4367-947c-09351a349d2e ]; then
+  die "unknown Railway project/environment pair; use the recorded production or dev IDs"
+fi
+[ -n "$APP_URL" ] || APP_URL=https://app.stonkhouse.fun
+[ -n "$RW_PROJECT" ] && [ -n "$RW_ENV" ] || die "project and environment must be nonempty"
+if [ -z "$REGISTRY" ]; then REGISTRY="$DEFAULT_REGISTRY"; fi
+[ -n "$NOTIFIER_DOMAIN" ] || die "--notifier-domain must be nonempty"
+case "$NOTIFIER_DOMAIN" in *[!a-zA-Z0-9.-]*|.*|*..*|*.) die "invalid notifier hostname" ;; esac
 [ "$APPLY" != 1 ] || [[ "$REF" =~ ^[0-9a-f]{40}$ ]] \
   || die "--apply requires --ref with the full 40-character reviewed commit SHA (ops/deploy.md §15.7)"
 step() { printf '\n== %s ==\n' "$*"; }
 note() { printf '  %s\n' "$*"; }
+
+# ---------------------------------------------------------------------------------------------
+# T-233 / draft-3 row 13 — the v7 deployment pin.
+#
+# The v7 indexer and cranker are NOT separate services: they are `indexer-v2` and `cranker`, the
+# same names this script deploys into (ops/deploy.md:1584 probes them and records
+# interfaceVersion 7). Nothing in this repository pins an image -- every railway.json builds from
+# source -- so a v8 cutover of either service replaces the running v7 binary, and a v8 keeper
+# handed ops/markets/v7-legacy.json refuses TOTALLY and exits (keeper/src/v2/registry.ts:573-585).
+# The v7 cranker stopping is how expired v7 series stop settling.
+#
+# So: while docs/V7-RUNOFF.md says the run-off is open, this script will not deploy those two.
+# It FAILS CLOSED. A missing file, a missing block, a missing field and an empty field all refuse,
+# exactly as an open run-off does -- an unfilled pin is not permission, it is an unanswered
+# question. Check it on its own with `--check-v7-pin`; override the path with V7_PIN_FILE.
+v7_pin_gate() {
+  local selected_csv="${1:-}"
+  local pin_file="${V7_PIN_FILE:-$ROOT/docs/V7-RUNOFF.md}"
+  # `if out=$(...)` and not `out=$(...); rc=$?`: under `set -e` the second form kills the script
+  # before die() can say why, which is a silent exit 1 -- the exact shape this gate exists to stop.
+  local out
+  if out=$(PIN="$pin_file" SEL="$selected_csv" node -e '
+    const fs = require("node:fs");
+    const refuse = (m) => { process.stdout.write(m); process.exit(1); };
+    const file = process.env.PIN;
+    let text;
+    try { text = fs.readFileSync(file, "utf8"); }
+    catch { refuse(file + " not found or unreadable. An absent pin is a refusal, not an open road."); }
+    const block = text.match(/```v7-pin\n([\s\S]*?)```/);
+    if (!block) refuse("no ```v7-pin block in " + file);
+    const pin = {};
+    for (const line of block[1].split("\n")) {
+      if (!line.trim() || line.trim().startsWith("#")) continue;
+      const at = line.indexOf(":");
+      if (at < 0) refuse("malformed pin line: " + JSON.stringify(line.trim()));
+      pin[line.slice(0, at).trim()] = line.slice(at + 1).trim();
+    }
+    const required = ["project_id", "environment_id", "indexer_service", "indexer_service_id",
+      "indexer_commit", "indexer_image_digest", "cranker_service", "cranker_service_id",
+      "cranker_commit", "cranker_image_digest", "runoff_open"];
+    for (const key of required) {
+      if (!(key in pin)) refuse(key + " is absent from the pin block in " + file);
+      if (pin[key] === "") refuse(key + " is empty: the pin was committed as a template and never filled in");
+    }
+    if (pin.runoff_open !== "yes" && pin.runoff_open !== "no") {
+      refuse("runoff_open must be yes or no, got " + JSON.stringify(pin.runoff_open));
+    }
+    if (pin.runoff_open === "no") {
+      for (const key of ["released_by", "released_at"]) {
+        if (!pin[key]) refuse("runoff_open is no but " + key + " is empty: an unattributed release is refused");
+      }
+      process.stdout.write("run-off CLOSED by " + pin.released_by + " at " + pin.released_at);
+      process.exit(0);
+    }
+    const selected = (process.env.SEL || "").split(",").map((x) => x.trim()).filter(Boolean);
+    const held = [pin.indexer_service, pin.cranker_service];
+    const clash = selected.filter((svc) => held.includes(svc));
+    if (clash.length) {
+      refuse("cannot deploy " + clash.join(" and ") + " while the v7 run-off is open (" + file +
+        "). Those services run the v7 images the run-off depends on; release the pin or deselect them.");
+    }
+    process.stdout.write("run-off OPEN; " + held.join(" and ") + " are pinned at " +
+      pin.indexer_commit + " / " + pin.cranker_commit);
+  '); then
+    note "v7 pin: $out"
+  else
+    die "v7 pin: ${out:-the pin check failed without a reason, which is itself a refusal}"
+  fi
+}
+
+# ---------------------------------------------------------------------------------------------
+# T-239 — can the selected services be created from the PUBLIC ref at all?
+#
+# Production builds from `stonkhousedotfun/callhouse` (REPO above); the private branch is not what
+# Railway sees. `ops/v2/monitor.mjs` is already public, which is the trap: asking "is the monitor
+# public?" gets yes, while the path that CREATES the service is not published. Today a
+# `--services monitor` run against the public ref dies at its own line 175 with
+# `unknown service 'monitor'`, because the public script's ORDER is a hard-coded list without it.
+#
+# The packet is defined ONCE, in ops/runbooks/ops-only-publication.md's ```publication-manifest
+# block, and read from there -- a second copy in this script is a second thing to drift.
+#
+# This reads the LOCAL remote-tracking ref and never fetches: a worker does not call off this
+# machine. It prints the ref's SHA and date so its age is visible, and it FAILS CLOSED -- an
+# unresolvable ref, a missing runbook, a missing manifest block and a service the manifest does not
+# describe are all refusals, never passes.
+public_ref_gate() {
+  local selected_csv="${1:-}"
+  local ref="${PUBLIC_REF:-origin/main}"
+  local manifest="${PUBLICATION_MANIFEST:-$ROOT/ops/runbooks/ops-only-publication.md}"
+  local sha date paths missing present differ
+
+  sha=$(git -C "$ROOT" rev-parse --verify --quiet "$ref^{commit}" || true)
+  [ -n "$sha" ] || die "public ref: cannot resolve '$ref' locally. Fetch it yourself (this script never does) - an unresolvable ref proves nothing."
+  date=$(git -C "$ROOT" log -1 --format=%ci "$sha")
+  note "public ref: $ref = $sha ($date). This is the LOCAL tracking ref; it is only as fresh as your last fetch."
+
+  [ -f "$manifest" ] || die "public ref: $manifest not found - the packet list has no source"
+  if ! paths=$(SEL="$selected_csv" MAN="$manifest" node -e '
+    const fs = require("node:fs");
+    const refuse = (m) => { process.stderr.write(m); process.exit(1); };
+    const text = fs.readFileSync(process.env.MAN, "utf8");
+    const block = text.match(/```publication-manifest\n([\s\S]*?)```/);
+    if (!block) refuse("no ```publication-manifest block in " + process.env.MAN);
+    const lists = {};
+    for (const line of block[1].split("\n")) {
+      if (!line.trim() || line.trim().startsWith("#")) continue;
+      const at = line.indexOf(":");
+      if (at < 0) refuse("malformed manifest line: " + JSON.stringify(line.trim()));
+      lists[line.slice(0, at).trim()] = line.slice(at + 1).trim().split(/\s+/).filter(Boolean);
+    }
+    if (!lists.core) refuse("the manifest has no core: list");
+    const selected = (process.env.SEL || "").split(",").map((x) => x.trim()).filter(Boolean);
+    if (!selected.length) refuse("no services selected: there is nothing to check");
+    const out = new Set(lists.core);
+    for (const svc of selected) {
+      if (!lists[svc]) refuse("the manifest does not describe the service " + JSON.stringify(svc) +
+        ". A service with no packet list is an unanswered question, not an empty one.");
+      for (const p of lists[svc]) out.add(p);
+    }
+    process.stdout.write([...out].join("\n"));
+  ' 2>&1); then
+    die "public ref: $paths"
+  fi
+
+  missing=""; present=0; differ=""
+  while IFS= read -r path; do
+    [ -n "$path" ] || continue
+    if git -C "$ROOT" cat-file -e "$sha:$path" 2>/dev/null; then
+      present=$((present + 1))
+      git -C "$ROOT" show "$sha:$path" 2>/dev/null | diff -q - "$ROOT/$path" >/dev/null 2>&1 || differ="$differ $path"
+    else
+      missing="$missing $path"
+    fi
+  done <<< "$paths"
+
+  [ -z "$differ" ] || note "public ref: present but DIFFERENT from this checkout:$differ (a stale public copy still deploys, and may not be the one you tested)"
+  if [ -n "$missing" ]; then
+    die "public ref: these paths are NOT on $ref and the selected services cannot be created from it:$missing. Publication is the owner's action (ops/runbooks/ops-only-publication.md)."
+  fi
+  note "public ref: every path the selected services need is present ($present checked)"
+}
 lc()   { tr '[:upper:]' '[:lower:]'; }
 # A command the plan would run, copyable: the first argument, then continuation fragments (joined
 # with backslash-newlines), then any argument starting with "#" as a comment line under it.
@@ -175,6 +373,68 @@ if [ -z "$SERVICES" ]; then SERVICES="$DEFAULT_SERVICES"; else SERVICES=$(printf
 for s in $SERVICES; do in_list "$s" "$ORDER" || die "unknown service '$s' (one of: $ORDER)"; done
 ordered=""; for s in $ORDER; do selected "$s" && ordered="$ordered $s"; done; SERVICES="${ordered# }"
 note "services: $SERVICES"
+[ "$APPLY" = 1 ] && [ "$PLAN_GATING" = 1 ] && die "--plan-gating is dry-only; never with --apply"
+
+# --check-public-ref is an independent read-only query and runs BEFORE the v7 pin gate: asking
+# "is the packet published?" must not be blocked by an unrelated, deliberately-unfilled pin.
+if [ "$CHECK_PUBLIC_REF" = 1 ]; then
+  public_ref_gate "$(printf '%s' "$SERVICES" | tr ' ' ',')"
+  exit 0
+fi
+
+# The v7 pin (T-233). Runs in the dry run too, before any Railway call, so a refusal costs nothing.
+# Skipped on the dev project: the v7 run-off is a production fact and dev has no v7 deployment.
+if [ "$DEV" = 1 ]; then
+  note "v7 pin: SKIPPED on the dev project (the run-off pin guards the production indexer-v2 and cranker only)"
+else
+  v7_pin_gate "$(printf '%s' "$SERVICES" | tr ' ' ',')"
+fi
+# --check-v7-pin stops here, having checked the pin against the SELECTED services -- so
+# `--check-v7-pin --services cranker` exercises the clash path the cutover would hit.
+if [ "$CHECK_V7_PIN" = 1 ]; then exit 0; fi
+
+# O3-004: one owner of the service-gating block (ops/v2/go-live-gating.mjs). --plan-gating
+# never calls Railway. At --apply, already-deployed service names are unioned into
+# MONITOR_HEALTH so a monitor-only deploy keeps its targets. EXISTING_SERVICES is a
+# test/dry-run override and is ignored at --apply.
+EXISTING=${EXISTING_SERVICES:-}
+if [ "$APPLY" = 1 ]; then
+  EXISTING=$(railway service list --json 2>/dev/null | node -e '
+    let s=""; process.stdin.on("data",d=>s+=d).on("end",()=>{
+      let rows; try { rows=JSON.parse(s) } catch { process.exit(1) }
+      if (!Array.isArray(rows)) process.exit(1);
+      process.stdout.write(rows.map(x=>x && x.name).filter(Boolean).join(" "));
+    })
+  ') || die "could not read Railway service list for MONITOR_HEALTH"
+fi
+GATING_ARGS=(--services "$(printf '%s' "$SERVICES" | tr ' ' ',')")
+[ "$DEV" = 1 ] && GATING_ARGS+=(--dev)
+[ -n "$EXISTING" ] && GATING_ARGS+=(--existing "$(printf '%s' "$EXISTING" | tr ' ' ',')")
+GATING_ERR=$(mktemp)
+if ! GATING_JSON=$(node "$HERE/v2/go-live-gating.mjs" "${GATING_ARGS[@]}" 2>"$GATING_ERR"); then
+  err=$(tr '\n' ' ' < "$GATING_ERR")
+  rm -f "$GATING_ERR"
+  die "O3-004 gating helper: ${err:-failed}"
+fi
+rm -f "$GATING_ERR"
+MONITOR_HEALTH=$(printf '%s' "$GATING_JSON" | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{process.stdout.write(JSON.parse(s).monitorHealth||"")})')
+RELAY_REQUIRED_FOR=$(printf '%s' "$GATING_JSON" | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{process.stdout.write((JSON.parse(s).relayRequiredFor||[]).join(" "))})')
+note "gating (O3-004): relay required only for $RELAY_REQUIRED_FOR; MONITOR_HEALTH from selected ∪ existing services that expose a health URL"
+printf '%s' "$GATING_JSON" | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{for (const d of JSON.parse(s).decisions) console.log("  "+d.service+": "+d.action+" ("+d.reason+")")})'
+REFUSED=$(printf '%s' "$GATING_JSON" | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{process.stdout.write((JSON.parse(s).refused||[]).join(" "))})')
+if [ -n "$REFUSED" ]; then
+  die "service(s) $REFUSED refused (O3-004): see gating reasons above"
+fi
+if selected monitor && [ -z "$MONITOR_HEALTH" ]; then
+  die "MONITOR_HEALTH is empty while monitor is selected; it is built from selected ∪ existing services that expose a health URL"
+fi
+if [ "$PLAN_GATING" = 1 ]; then
+  printf '%s\n' "$GATING_JSON"
+  exit 0
+fi
+if [ "$DEV" = 1 ] && { selected notifier || selected web; } && [ "$NOTIFIER_DOMAIN_SET" != 1 ]; then
+  die "dev notifier or web needs --notifier-domain with the approved dev hostname"
+fi
 selected web || note "web: not selected (add web to --services to flip $APP_URL to v2; §15.5)"
 if selected mm-bot; then
   CANARY="$HERE/runbooks/v2-canary.md"
@@ -219,10 +479,12 @@ const out = [];
 const v2 = r.v2;
 if (!v2 || typeof v2 !== "object") { console.log("the registry has no top-level v2 block"); process.exit(0); }
 if (v2.deployBlock === null || v2.deployBlock === undefined) out.push("v2.deployBlock is null");
-const names = ["clearinghouse","orderBook","settlementOracle","expiryCalendar","keeperRewards","autoRoller","payoutAdapter","makerVault","makerRegistry","rewardsDistributor"];
+// INTERFACE_VERSION 8: accessManager joined the set (11 named slots + 3 sources = 14 addresses).
+const names = ["clearinghouse","orderBook","settlementOracle","expiryCalendar","keeperRewards","autoRoller","payoutAdapter","makerVault","makerRegistry","rewardsDistributor","accessManager"];
 for (const k of names) if (!v2.contracts || !v2.contracts[k]) out.push(`v2.contracts.${k} is null`);
 for (const k of ["chainlink","univ3"]) if (!v2.contracts?.sources?.[k]) out.push(`v2.contracts.sources.${k} is null`);
-const bots = { cranker: "cranker", pricer: "pricer", "mm-bot": "mmQuoter" };
+// INTERFACE_VERSION 8 bot keys: mmQuoter became quoter, and the guardian is a bot key now.
+const bots = { cranker: "cranker", pricer: "pricer", "mm-bot": "quoter" };
 for (const [svc, bot] of Object.entries(bots)) if (sel.has(svc) && !v2.bots?.[bot]) out.push(`v2.bots.${bot} is null (ops/v2/derive-bot-keys.sh)`);
 console.log(out.join("\n"));
 ')
@@ -237,16 +499,90 @@ note "registry v2: interface version $(reg 'r.v2.interfaceVersion'), deploy bloc
 LIVE=$(reg 'r.markets.filter(m=>m.v2&&m.v2.status==="live").map(m=>m.ticker).join(" ")')
 if [ -n "$LIVE" ]; then note "v2 live markets: $LIVE"; else note "WARNING: no market has v2.status live; the bots will boot and idle (RegisterMarkets first, ops/runbooks/v2-canary.md)"; fi
 
+# ---------------------------------------------------------------------------------------------
+# 0b. mm-bot pool preflight (T-OP-133): per quoted market, what the ladder lists and what ONE
+#     oversubscribed collateral pool per asset needs against what the vault holds. WARNS, never
+#     refuses: funding the vault is owner-gated, and a short pool only means the bot's asks size
+#     down (risk.ts caps every single ask at what the ledger covers).
+#
+#   listed  = sum over tenors of rungs x expiriesAhead x (puts ? 2 : 1), the count keeper/config.ts
+#             ladderSeriesCount derives the MM_MAX_SERIES caps from (SPEC defaults <- v2.defaults <- overrides)
+#   calls   = listed / sides series x MM_ASK_UNITS / 100 shares of the Stock Token, / (bps / 10_000)
+#   puts    = (sum of put strikes ~ series x spot) x MM_ASK_UNITS / 100 USDG, / (bps / 10_000)
+#   held    = the vault's wallet balance + Clearinghouse.free(vault, asset), read from chain (skipped --offline)
+# ---------------------------------------------------------------------------------------------
+if selected mm-bot; then
+  MM_ASK_UNITS_PF="${MM_ASK_UNITS:-100}"
+  MM_OVERSUB_PF="${MM_WRITE_OVERSUBSCRIBE_BPS:-10000}"
+  MM_MARKETS_PF="${MM_MARKETS:-}"
+  VAULT_PF=$(reg 'r.v2.contracts.makerVault')
+  CH_PF=$(reg 'r.v2.contracts.clearinghouse')
+  ORACLE_PF=$(reg 'r.v2.contracts.settlementOracle')
+  USDG_PF=$(reg 'r.shared && r.shared.usdg')
+  note "mm-bot pool preflight: MM_ASK_UNITS=$MM_ASK_UNITS_PF MM_WRITE_OVERSUBSCRIBE_BPS=$MM_OVERSUB_PF (10000 = the exact budget; the runbook suggests 50000) MM_MARKETS=${MM_MARKETS_PF:-<every live market>}"
+  QUOTED_PF=$(MM_MARKETS_PF="$MM_MARKETS_PF" reg 'r.markets.filter(m=>m.v2&&(process.env.MM_MARKETS_PF?process.env.MM_MARKETS_PF.split(",").map(s=>s.trim()).includes(m.ticker):m.v2.status==="live")).map(m=>m.ticker).join(" ")')
+  [ -n "$QUOTED_PF" ] || note "mm-bot pool preflight: no quoted market, nothing to size"
+  for T in $QUOTED_PF; do
+    # listed / calls / puts / underlying, from the resolved ladder (defaults <- overrides), as the keeper resolves it.
+    LADDER_PF=$(T="$T" reg '(()=>{const m=r.markets.find(x=>x.ticker===process.env.T);const d=(r.v2&&r.v2.defaults)||{};const o=(m.v2&&m.v2.overrides)||{};const spec={ladder:{weekly:{rungs:5},daily:{rungs:5}},expiriesAhead:{weekly:2,daily:3}};const rungs=t=>((o.ladder&&o.ladder[t]&&o.ladder[t].rungs)??(d.ladder&&d.ladder[t]&&d.ladder[t].rungs)??spec.ladder[t].rungs);const ahead=t=>((o.expiriesAhead&&o.expiriesAhead[t])??(d.expiriesAhead&&d.expiriesAhead[t])??spec.expiriesAhead[t]);const sides=m.v2.puts?2:1;let per=0;for(const t of ["weekly","daily"])per+=rungs(t)*ahead(t);return [per*sides,per,m.v2.puts?per:0,(m.asset||m.underlying||"")].join(" ")})()')
+    set -- $LADDER_PF
+    LISTED_PF=$1; CALLS_PF=$2; PUTS_PF=$3; UNDER_PF=$4
+    SPOT_PF=""; WALLET_STOCK_PF=""; FREE_STOCK_PF=""; WALLET_USDG_PF=""; FREE_USDG_PF=""
+    if [ "$OFFLINE" = 0 ]; then
+      SPOT_PF=$(cast call "$ORACLE_PF" 'trySpot(address)(bool,uint256,uint256)' "$UNDER_PF" 2>/dev/null | sed -n '2p' | awk '{print $1}')
+      WALLET_STOCK_PF=$(cast call "$UNDER_PF" 'balanceOf(address)(uint256)' "$VAULT_PF" 2>/dev/null | awk '{print $1}')
+      FREE_STOCK_PF=$(cast call "$CH_PF" 'free(address,address)(uint256)' "$VAULT_PF" "$UNDER_PF" 2>/dev/null | awk '{print $1}')
+      WALLET_USDG_PF=$(cast call "$USDG_PF" 'balanceOf(address)(uint256)' "$VAULT_PF" 2>/dev/null | awk '{print $1}')
+      FREE_USDG_PF=$(cast call "$CH_PF" 'free(address,address)(uint256)' "$VAULT_PF" "$USDG_PF" 2>/dev/null | awk '{print $1}')
+    fi
+    LINE_PF=$(LISTED="$LISTED_PF" CALLS="$CALLS_PF" PUTS="$PUTS_PF" ASK="$MM_ASK_UNITS_PF" BPS="$MM_OVERSUB_PF" SPOT="$SPOT_PF" WS="$WALLET_STOCK_PF" FS="$FREE_STOCK_PF" WU="$WALLET_USDG_PF" FU="$FREE_USDG_PF" OFF="$OFFLINE" node -e '
+      const e = process.env; const b = (v) => (v === undefined || v === "" || !/^[0-9]+$/.test(v) ? null : BigInt(v));
+      const listed = Number(e.LISTED), calls = BigInt(e.CALLS), puts = BigInt(e.PUTS), ask = BigInt(e.ASK), bps = BigInt(e.BPS);
+      const spot = b(e.SPOT), ws = b(e.WS), fs = b(e.FS), wu = b(e.WU), fu = b(e.FU);
+      // calls: series x askUnits/100 shares, one share = 1e18 base units, / (bps/1e4)
+      const needStock = calls * ask * 10n ** 16n * 10000n / bps;
+      // puts: sum(strike) ~ series x spot (6 dp per share) x askUnits/100, / (bps/1e4); unknown without a spot
+      const needUsdg = spot === null ? null : puts * spot * ask / 100n * 10000n / bps;
+      const fmt18 = (v) => (Number(v / 10n ** 14n) / 10000).toFixed(4);
+      const fmt6 = (v) => (Number(v / 10n ** 2n) / 10000).toFixed(2);
+      const held = (w, f) => (w === null || f === null ? null : w + f);
+      const heldStock = held(ws, fs), heldUsdg = held(wu, fu);
+      const out = [];
+      out.push(`listed ${listed} series (${calls} calls${puts > 0n ? `, ${puts} puts` : ""}), ask ${ask} units each at ${bps} bps`);
+      out.push(`stock pool: needs ${fmt18(needStock)} shares, vault holds ${heldStock === null ? (e.OFF === "1" ? "(offline)" : "unreadable") : `${fmt18(heldStock)} (wallet ${fmt18(ws)} + ledger ${fmt18(fs)})`}`);
+      if (puts > 0n) out.push(`usdg pool: needs ${needUsdg === null ? "unknown (no spot)" : fmt6(needUsdg) + " USDG"}, vault holds ${heldUsdg === null ? (e.OFF === "1" ? "(offline)" : "unreadable") : `${fmt6(heldUsdg)} USDG (wallet ${fmt6(wu)} + ledger ${fmt6(fu)})`}`);
+      let warn = "";
+      if (heldStock !== null && heldStock < needStock) warn += ` WARNING: stock pool short by ${fmt18(needStock - heldStock)} shares (asks size down, never refused; funding is owner-gated).`;
+      if (puts > 0n && needUsdg !== null && heldUsdg !== null && heldUsdg < needUsdg) warn += ` WARNING: usdg pool short by ${fmt6(needUsdg - heldUsdg)} USDG.`;
+      process.stdout.write(out.join("; ") + warn);
+    ')
+    note "mm-bot $T: $LINE_PF"
+  done
+fi
+
 # ---- the env files ----
 ENV_OUT=$(mktemp -d "${TMPDIR:-/tmp}/callhouse-v2env.XXXXXX")
 WORK=""
 cleanup() { rm -rf "$ENV_OUT"; [ -z "$WORK" ] || rm -rf "$WORK"; }
 trap cleanup EXIT
-if [ "$REHEARSAL" = 0 ]; then
-  node "$HERE/v2-env.mjs" --check >/dev/null || die "ops/v2/env is out of date with the registry: run node ops/v2-env.mjs and commit"
-  note "ops/v2/env/*.env match the registry (v2-env.mjs --check)"
+ENV_SERVICES=""
+if [ "$DEV" = 1 ] && [ "$REHEARSAL" = 0 ]; then
+  ENV_SERVICES="indexer-v2,cranker,pricing,pricer,mm-bot,notifier"
 fi
-node "$HERE/v2-env.mjs" --registry "$REGISTRY" --out "$ENV_OUT" >/dev/null
+if [ "$REHEARSAL" = 0 ]; then
+  if [ -n "$ENV_SERVICES" ]; then
+    node "$HERE/v2-env.mjs" --check --registry "$REGISTRY" --out "$ENV_DIR" --services "$ENV_SERVICES" >/dev/null \
+      || die "ops/v2/env-dev is out of date: re-render the dev files and commit"
+  else
+    node "$HERE/v2-env.mjs" --check >/dev/null || die "ops/v2/env is out of date with the registry: run node ops/v2-env.mjs and commit"
+  fi
+  note "$ENV_DIR/*.env match the registry (v2-env.mjs --check)"
+fi
+if [ -n "$ENV_SERVICES" ]; then
+  node "$HERE/v2-env.mjs" --registry "$REGISTRY" --out "$ENV_OUT" --services "$ENV_SERVICES" >/dev/null
+else
+  node "$HERE/v2-env.mjs" --registry "$REGISTRY" --out "$ENV_OUT" >/dev/null
+fi
 for s in $SERVICES; do
   [ -f "$ENV_OUT/$s.env" ] || continue
   empty=$(grep -E '^[A-Z0-9_]+=$' "$ENV_OUT/$s.env" | cut -d= -f1 | tr '\n' ' ' || true)
@@ -255,8 +591,8 @@ done
 note "env rendered for: $(cd "$ENV_OUT" && ls *.env | sed 's/\.env$//' | tr '\n' ' ' | sed 's/ $//')"
 
 if [ "$OFFLINE" = 0 ] && [ "$REHEARSAL" = 0 ]; then
-  node "$HERE/markets/build-markets.mjs" --check >/dev/null 2>&1 \
-    || die "node ops/markets/build-markets.mjs --check is not green; run it and fix what it prints"
+  node "$HERE/markets/build-markets.mjs" --check --registry "$REGISTRY" >/dev/null 2>&1 \
+    || die "node ops/markets/build-markets.mjs --check --registry $REGISTRY is not green; run it and fix what it prints"
   note "build-markets.mjs --check green"
 fi
 
@@ -268,14 +604,26 @@ else
   [ "$chain" = "$CHAIN_ID" ] || die "RPC endpoint is chain $chain, expected $CHAIN_ID"
   head=$(cast block-number 2>/dev/null) || die "could not read the chain head"
   [ "$DEPLOY_BLOCK" -le "$head" ] || die "v2.deployBlock $DEPLOY_BLOCK is above the head $head"
-  for k in clearinghouse orderBook settlementOracle expiryCalendar keeperRewards autoRoller payoutAdapter makerVault makerRegistry rewardsDistributor sources.chainlink sources.univ3; do
+  for k in clearinghouse orderBook settlementOracle expiryCalendar keeperRewards autoRoller payoutAdapter makerVault makerRegistry rewardsDistributor accessManager sources.chainlink sources.univ3; do
     a=$(reg "r.v2.contracts.$k")
     code=$(cast code "$a" 2>/dev/null || true)
     { [ -n "$code" ] && [ "$code" != "0x" ]; } || die "v2.contracts.$k $a has NO CODE on chain $CHAIN_ID"
   done
-  note "chain $chain head $head: code at all 12 contract addresses"
-  for pair in "cranker:cranker:" "pricer:pricer:PRICER_ROLE:autoRoller" "mm-bot:mmQuoter:QUOTER_ROLE:makerVault"; do
-    svc=${pair%%:*}; rest=${pair#*:}; bot=${rest%%:*}; rest=${rest#*:}; role=${rest%%:*}; on=${rest#*:}
+  note "chain $chain head $head: code at all 13 contract addresses"
+  # INTERFACE_VERSION 8: roles live on ONE AccessManager, not per target (V8-DESIGN §2). Role ids and
+  # their names come from ops/abis/v2/roles.json, which travels with the ABI export, so this script
+  # has no role table of its own to go stale. AccessManager.hasRole returns (bool, uint32 delay); a
+  # bot key is expected to have NO delay -- V8Roles pins PRICER, QUOTER and BUYBACK to 0
+  # (callhouse-contracts v8 1c536ffe, src/v2/access/V8Roles.sol:99-101).
+  # A delayed bot key does NOT fail silently: Managed._checkCanCall routes a delayed caller to the
+  # scheduled path, so a direct call reverts on the manager with AccessManagerNotScheduled when no
+  # operation was scheduled (src/v2/access/Managed.sol:21-26). That is loud, and it is why this check
+  # reads the delay rather than only the membership: the bot dies on its first call instead of quietly
+  # doing nothing, and a non-zero delay here is the thing that predicts it.
+  ROLES_JSON="$ROOT/ops/abis/v2/roles.json"
+  MANAGER=$(reg 'r.v2.contracts.accessManager')
+  for pair in "cranker:cranker:BUYBACK" "pricer:pricer:PRICER" "mm-bot:quoter:QUOTER"; do
+    svc=${pair%%:*}; rest=${pair#*:}; bot=${rest%%:*}; role=${rest#*:}
     selected "$svc" || continue
     addr=$(reg "r.v2.bots.$bot")
     wei=$(cast balance "$addr" 2>/dev/null || echo 0)
@@ -284,11 +632,15 @@ else
     else
       note "WARNING: $bot $addr holds $wei wei, under 0.01 ETH: fund it before the service is useful (§15.6)"
     fi
-    if [ -n "$role" ]; then
-      target=$(reg "r.v2.contracts.$on")
-      has=$(cast call "$target" 'hasRole(bytes32,address)(bool)' "$(cast keccak "$role")" "$addr" 2>/dev/null || echo "unreadable")
-      [ "$has" = "true" ] && note "$bot holds $role on $on" \
-        || note "WARNING: $bot $addr $role on $on is '$has': the admin grants it (contracts script/v2), or $svc's transactions revert"
+    if [ -f "$ROLES_JSON" ]; then
+      role_id=$(ROLES="$ROLES_JSON" ROLE="$role" node -e 'const r=JSON.parse(require("fs").readFileSync(process.env.ROLES,"utf8"));const v=r.roles&&r.roles[process.env.ROLE];process.stdout.write(v===undefined?"":String(v))')
+      if [ -z "$role_id" ]; then
+        note "WARNING: role $role is not in $ROLES_JSON: re-export the ABIs (contracts script/v2/export-abis.sh)"
+      else
+        has=$(cast call "$MANAGER" 'hasRole(uint64,address)(bool,uint32)' "$role_id" "$addr" 2>/dev/null | head -1 || echo "unreadable")
+        [ "$has" = "true" ] && note "$bot holds $role ($role_id) on the AccessManager" \
+          || note "WARNING: $bot $addr $role ($role_id) on the AccessManager is '$has': OPS_ADMIN grants it (ops/runbooks/v8-roles.md), or $svc's transactions revert"
+      fi
     fi
   done
 fi
@@ -318,11 +670,18 @@ done
 # ---- repository shape: what the images will be built from ----
 repo_shape() {  # dir -> one line per problem
   d=$1
-  if selected pricing || selected cranker || selected pricer || selected mm-bot; then
-    grep -Eq '^COPY .*ops/markets/tier1\.json' "$d/keeper/Dockerfile" \
-      || echo "keeper/Dockerfile does not COPY ops/markets/tier1.json into the runner: the bots boot without a registry (ops/deploy.md §15.2)"
-    grep -Eq '^!ops/markets/tier1\.json' "$d/.dockerignore" \
-      || echo ".dockerignore keeps ops/markets/tier1.json out of the build context (ops/deploy.md §15.2)"
+  if selected pricing || selected cranker || selected pricer || selected mm-bot || selected monitor; then
+    grep -Fq 'ARG V2_REGISTRY_FILE=tier1.json' "$d/keeper/Dockerfile" \
+      && grep -Fq 'COPY --chown=node:node ops/markets/${V2_REGISTRY_FILE}' "$d/keeper/Dockerfile" \
+      || echo "keeper/Dockerfile does not COPY the selected V2_REGISTRY_FILE into the runner (ops/deploy.md §15.2)"
+    grep -Fqx "!ops/markets/$(basename "$REGISTRY")" "$d/.dockerignore" \
+      || echo ".dockerignore keeps ops/markets/$(basename "$REGISTRY") out of the build context (ops/deploy.md §15.2)"
+  fi
+  if selected monitor; then
+    grep -Fq 'COPY --chown=node:node ops/v2/monitor.mjs ./ops/v2/monitor.mjs' "$d/keeper/Dockerfile" \
+      || echo "keeper/Dockerfile does not ship ops/v2/monitor.mjs"
+    grep -Fqx '!ops/v2/monitor.mjs' "$d/.dockerignore" \
+      || echo ".dockerignore keeps ops/v2/monitor.mjs out of the build context"
   fi
   if selected notifier; then
     [ -f "$d/notifier/Dockerfile" ] || echo "notifier/Dockerfile does not exist (N2-01)"
@@ -381,6 +740,13 @@ var_names() {
 has_var() {
   local names
   names=$(var_names "$1") || die "could not read Railway variable names for $1"
+  printf '%s\n' "$names" | grep -qx "$2"
+}
+# Like has_var, but a read that fails answers "not set" instead of dying. Only set_variables' O3-401
+# NOTIFIER_PUBLIC_URL decision uses it, and there "not set" is the direction that cannot break a boot.
+var_is_set() {
+  local names
+  names=$(var_names "$1") || return 1
   printf '%s\n' "$names" | grep -qx "$2"
 }
 domains_of() {
@@ -442,10 +808,37 @@ ensure_service() {
 # Variables: Railway settings + the rendered env file + reference variables. Public values only.
 set_variables() {
   svc=$1; relay_on=$2
-  SETS=("RAILWAY_DOCKERFILE_PATH=$(col "$svc" $DOCKERFILE)" "RAILWAY_HEALTHCHECK_TIMEOUT_SEC=$(col "$svc" $TIMEOUT)")
+  NOTIFIER_URL_NOTE=""
+  SETS=("RAILWAY_DOCKERFILE_PATH=$(col "$svc" $DOCKERFILE)")
+  [ "$(col "$svc" $TIMEOUT)" = "-" ] || SETS+=("RAILWAY_HEALTHCHECK_TIMEOUT_SEC=$(col "$svc" $TIMEOUT)")
   [ "$(col "$svc" $DRAIN)" = "-" ] || SETS+=("RAILWAY_DEPLOYMENT_DRAINING_SECONDS=$(col "$svc" $DRAIN)")
   [ "$(col "$svc" $VOLUME)" = "-" ] || SETS+=("RAILWAY_RUN_UID=0")
+  if [ "$DEV" = 1 ]; then
+    case "$svc" in pricing|cranker|pricer|mm-bot|monitor) SETS+=("V2_REGISTRY_FILE=dev.json") ;; esac
+    # O3-401: NOTIFIER_PUBLIC_URL is one third of the email trio, not a general "where am I" value.
+    # notifier/src/config.ts refuses to start when EMAIL_FROM or NOTIFIER_PUBLIC_URL is set while
+    # SMTP_URL is not ("set all three or none"), because half an email setup is a typo in SMTP_URL's
+    # name more often than a choice. The dev path never sets SMTP_URL — email there is a UI-only
+    # opt-in (see the notifier step below) — so setting NOTIFIER_PUBLIC_URL with it made every dev
+    # notifier deploy fail its healthcheck on a config error naming a variable nobody had touched.
+    # It is now set only on a service that already carries SMTP_URL. A Railway read that fails
+    # counts as "not set": that is the direction that cannot stop the service from booting.
+    if [ "$svc" = notifier ]; then
+      if [ "$APPLY" != 1 ]; then
+        NOTIFIER_URL_NOTE="# NOTIFIER_PUBLIC_URL=https://$NOTIFIER_DOMAIN only when SMTP_URL is already set on notifier: with the email channel off, the notifier refuses to boot on half an email setup (O3-401)"
+      elif var_is_set notifier SMTP_URL; then
+        SETS+=("NOTIFIER_PUBLIC_URL=https://$NOTIFIER_DOMAIN")
+      else
+        note "notifier: NOTIFIER_PUBLIC_URL not set — SMTP_URL is unset, so the email channel is off and the notifier refuses half an email setup (O3-401). Set all three in the UI to turn email on."
+      fi
+    fi
+  fi
   case "$svc" in indexer-v2|notifier) SETS+=('DATABASE_URL=${{Postgres.DATABASE_URL}}') ;; esac
+  if [ "$svc" = monitor ]; then
+    SETS+=("RH_RPC=$MONITOR_RPC" "V2_REGISTRY_PATH=/app/ops/markets/$(basename "$REGISTRY")"
+      "MONITOR_STATE_PATH=/data/monitor-v2.json" "MONITOR_HEALTH=$MONITOR_HEALTH"
+      "ALERT_WEBHOOK=$RELAY_PRIVATE_URL" 'ALERT_WEBHOOK_TOKEN=${{relay.RELAY_TOKEN}}')
+  fi
   if [ -f "$ENV_OUT/$svc.env" ]; then
     while IFS= read -r line; do
       case "$line" in
@@ -460,9 +853,10 @@ set_variables() {
     lines=()
     for kv in "${SETS[@]}"; do case "$kv" in *'$'*) lines+=("--set '$kv'") ;; *) lines+=("--set $kv") ;; esac; done
     c="# Railway settings"
-    [ -f "$ENV_OUT/$svc.env" ] && c="$c + every assignment in ops/v2/env/$svc.env"
+    [ -f "$ENV_OUT/$svc.env" ] && c="$c + every assignment in $ENV_DIR/$svc.env"
     { [ -f "$ENV_OUT/$svc.env" ] && grep -q '^ALERT_WEBHOOK=' "$ENV_OUT/$svc.env"; } && c="$c; ALERT_WEBHOOK and its token only when the relay is deployed"
     show "railway variables --service $svc --skip-deploys" "${lines[@]}" "$c"
+    if [ -n "$NOTIFIER_URL_NOTE" ]; then note "$NOTIFIER_URL_NOTE"; fi
     return 0
   fi
   ARGS=(); for kv in "${SETS[@]}"; do ARGS+=(--set "$kv"); done
@@ -487,7 +881,10 @@ prompted_secret() {  # svc VAR regex "where it comes from"
   note "$var set on $svc. SEAL IT in the Railway UI now (ops/deploy.md §9.15)"
 }
 
-# A bot key: from ~/.callhouse-keys/v2/<bot>.env or read -rs, and only if it derives to v2.bots.<bot>.
+# A bot key: from ~/.callhouse-keys/v8/<bot>.env or read -rs, and only if it derives to v2.bots.<bot>.
+# v8, not v2: T-477 moved the v8 bots to their own directory because v7 derived indices 50-52 into
+# ~/.callhouse-keys/v2 and both stacks run at once. CALLHOUSE_V2_KEYS_DIR still overrides. There is
+# deliberately NO fallback from v8 to v2: a missing v8 file must fail here, not load a v7 key.
 bot_key() {
   svc=$1; bot=$(col "$svc" $BOT); var=$(col "$svc" $KEYVAR); file="$KEYS_DIR/$bot.env"; want=$(reg "r.v2.bots.$bot")
   if [ "$APPLY" != 1 ]; then
@@ -516,9 +913,13 @@ ensure_volume() {
   svc=$1; mount=$(col "$svc" $VOLUME)
   [ "$mount" != "-" ] || return 0
   if [ "$APPLY" != 1 ]; then show "railway volume --service $svc add --mount-path $mount" "# only if $svc has no volume"; return; fi
-  local volumes
-  volumes=$(svc_query "$svc" 's&&s.volumes&&s.volumes.length?"y":""') || die "could not read Railway volumes for $svc"
-  if [ -n "$volumes" ]; then note "volume present"; return; fi
+  local mounts expected
+  mounts=$(svc_query "$svc" 's&&Array.isArray(s.volumes)?JSON.stringify(s.volumes.map(v=>v.mountPath)):"UNKNOWN"') \
+    || die "could not read Railway volumes for $svc"
+  expected="[\"$mount\"]"
+  [ "$mounts" != UNKNOWN ] || die "Railway did not report the volume mount path for $svc"
+  if [ "$mounts" = "$expected" ]; then note "volume mounted at $mount"; return; fi
+  [ "$mounts" = '[]' ] || die "$svc has volume mounts $mounts; expected exactly $mount. Fix the mount in Railway before deploying"
   railway volume --service "$svc" add --mount-path "$mount" >/dev/null
   note "volume mounted at $mount"
 }
@@ -535,9 +936,17 @@ ensure_domain() {
       fi
       return 0 ;;
     forbidden)
-      if [ "$APPLY" != 1 ]; then note "# $svc: refuses to deploy while it has any public domain (the kill switch is on port $port)"; return; fi
+      if [ "$APPLY" != 1 ]; then
+        if [ "$svc" = monitor ]; then note "# monitor: refuses to deploy while it has any public domain (no port is served)"
+        else note "# $svc: refuses to deploy while it has any public domain (the kill switch is on port $port)"; fi
+        return
+      fi
       domains=$(domains_of "$svc") || die "could not read Railway domains for $svc"
-      [ -z "$domains" ] || die "$svc has a public domain; delete it in the UI first: /kill must be reachable on the private network only (§15.1)"
+      if [ "$svc" = monitor ]; then
+        [ -z "$domains" ] || die "monitor has a public domain; remove it in the UI (the monitor serves no port)"
+      else
+        [ -z "$domains" ] || die "$svc has a public domain; delete it in the UI first: /kill must be reachable on the private network only (§15.1)"
+      fi
       return 0 ;;
     generated)
       if [ "$APPLY" != 1 ]; then show "railway domain --service $svc --port $port" "# only if $svc has no domain; the https://<domain> becomes web's NEXT_PUBLIC_API_URL"; return; fi
@@ -601,6 +1010,11 @@ container_health() {  # svc -> "<code> status=<status>" from inside the containe
 
 todo() {  # svc: what the CLI cannot set
   svc=$1
+  if [ "$svc" = monitor ]; then
+    TODOS="$TODOS
+  monitor: verify no healthcheck or public domain; exactly 1 replica; /data volume. Start command and restart policy are set by the CLI. Redeploy from a new reviewed --ref after code or registry changes"
+    return
+  fi
   TODOS="$TODOS
   $svc: healthcheck path $(col "$svc" $HEALTH); restart On Failure, 10 retries; replicas 1; no GitHub/image source. Redeploy manually from a new reviewed --ref after a code or registry change"
 }
@@ -610,7 +1024,7 @@ todo() {  # svc: what the CLI cannot set
 # ---------------------------------------------------------------------------------------------
 if [ "$APPLY" = 1 ]; then
   [ "$ASSUME_YES" = 1 ] || {
-    printf '\nDeploy %s to Railway production from %s@%s? Type "yes": ' "$SERVICES" "$REPO" "$REF"
+    printf '\nDeploy %s to Railway %s/%s from %s@%s? Type "yes": ' "$SERVICES" "$RW_PROJECT" "$RW_ENV" "$REPO" "$REF"
     read -r answer; [ "$answer" = "yes" ] || die "not confirmed"
   }
   WORK=$(mktemp -d "${TMPDIR:-/tmp}/callhouse-golive-v2.XXXXXX")
@@ -621,22 +1035,37 @@ if [ "$APPLY" = 1 ]; then
   git checkout --quiet "$REF"
   [ "$(git rev-parse HEAD)" = "$REF" ] || die "the clone did not resolve to the reviewed commit SHA $REF"
   note "HEAD $(git rev-parse --short HEAD) $(git log -1 --format=%s | cut -c1-70)"
-  cmp -s ops/markets/tier1.json "$REGISTRY" \
-    || die "$REF carries a different ops/markets/tier1.json than this checkout; the bots bake the clone's copy. Commit and push the registry, then re-run"
-  node ops/v2-env.mjs --check >/dev/null || die "$REF's ops/v2/env is out of date with its registry"
+  cmp -s "ops/markets/$(basename "$REGISTRY")" "$REGISTRY" \
+    || die "$REF carries a different ops/markets/$(basename "$REGISTRY") than this checkout; commit and push the reviewed registry, then re-run"
+  if [ "$DEV" = 1 ]; then
+    node ops/v2-env.mjs --check --registry ops/markets/dev.json --out ops/v2/env-dev --services "$ENV_SERVICES" >/dev/null \
+      || die "$REF's ops/v2/env-dev is out of date with its registry"
+    clone_env=ops/v2/env-dev
+  else
+    node ops/v2-env.mjs --check >/dev/null || die "$REF's ops/v2/env is out of date with its registry"
+    clone_env=ops/v2/env
+  fi
   # Preflight may inspect a local renderer, but deployed variables must come from the reviewed SHA.
-  # Refuse a local-only renderer/env change rather than silently deploying a different value.
-  diff -qr "$ENV_OUT" ops/v2/env >/dev/null \
-    || die "local rendered v2 env differs from $REF; review, commit and re-run from the same SHA"
+  # O8-05: compare assignment lines of the selected services only. Comment-only drift in an
+  # unselected file (the historic ops/v2/env/pricer.env one-line refusal) must not block a
+  # production monitor. Assignment drift in a selected service still refuses. The helper lives
+  # next to this script, not in the clone: a public SHA may not have it yet.
+  ENV_EQUAL_ERR=$(mktemp)
+  if ! node "$HERE/v2/env-equal.mjs" --local "$ENV_DIR" --clone "$(pwd)/$clone_env" --services "$(printf '%s' "$SERVICES" | tr ' ' ',')" 2>"$ENV_EQUAL_ERR"; then
+    err=$(tr '\n' ' ' < "$ENV_EQUAL_ERR")
+    rm -f "$ENV_EQUAL_ERR"
+    die "local checked v2 env differs from $REF; ${err:-review, commit and re-run from the same SHA}"
+  fi
+  rm -f "$ENV_EQUAL_ERR"
   rm -rf "$ENV_OUT"
-  ENV_OUT="$WORK/callhouse/ops/v2/env"
-  note "Railway public variables come from reviewed $REF ops/v2/env"
+  ENV_OUT="$WORK/callhouse/$clone_env"
+  note "Railway public variables come from reviewed $REF $clone_env"
   SHAPE=$(repo_shape "$WORK/callhouse")
   [ -z "$SHAPE" ] || { echo "REFUSED: $REF cannot build what was selected:" >&2; printf '%s\n' "$SHAPE" | sed 's/^/  /' >&2; exit 1; }
   railway link -p "$RW_PROJECT" -e "$RW_ENV" >/dev/null
 else
   step "Plan (dry run: every railway command --apply runs, in order; nothing was changed)"
-  show "git clone $REPO (temp dir); git checkout $REF; railway link -p $RW_PROJECT -e $RW_ENV" "# the clone's ops/markets/tier1.json must equal the registry planned against, and the shape checks run on it"
+  show "git clone $REPO (temp dir); git checkout $REF; railway link -p $RW_PROJECT -e $RW_ENV" "# the clone's ops/markets/$(basename "$REGISTRY") must equal the registry planned against, and the shape checks run on it"
 fi
 TODOS=""
 
@@ -668,9 +1097,9 @@ elif [ "$APPLY" = 1 ]; then
   fi
 fi
 if [ "$APPLY" = 1 ] && [ "$RELAY_ON" = 0 ]; then
-  for alert_svc in indexer-v2 pricing cranker pricer mm-bot notifier; do
+  for alert_svc in $RELAY_REQUIRED_FOR; do
     selected "$alert_svc" || continue
-    die "relay is not live with RELAY_TOKEN and a target; refusing to deploy $alert_svc without ALERT_WEBHOOK. Deploy relay, then re-run --services relay,$alert_svc"
+    die "relay is not live with RELAY_TOKEN and a target; refusing to deploy $alert_svc without ALERT_WEBHOOK (O3-004: relay is required only for $RELAY_REQUIRED_FOR). Deploy relay, then re-run --services relay,$alert_svc"
   done
 fi
 
@@ -747,20 +1176,64 @@ if selected notifier; then
   prompted_secret notifier TELEGRAM_BOT_TOKEN '^[0-9]+:[A-Za-z0-9_-]{30,}$' "@BotFather, a user-facing bot, never the relay's operator bot"
   prompted_secret notifier VAPID_PUBLIC_KEY '^[A-Za-z0-9_-]{80,100}$' "npx web-push generate-vapid-keys (public, but generated with the private key)"
   prompted_secret notifier VAPID_PRIVATE_KEY '^[A-Za-z0-9_-]{40,50}$' "the same generate-vapid-keys run"
-  if [ "$APPLY" != 1 ]; then note "# SMTP_URL (+ EMAIL_FROM, NOTIFIER_PUBLIC_URL) is not touched: set it in the UI to turn email on"; fi
+  if [ "$APPLY" != 1 ]; then
+    if [ "$DEV" = 1 ]; then note "# SMTP_URL (+ EMAIL_FROM) is not touched: set both in the UI to turn email on, then re-run — NOTIFIER_PUBLIC_URL is set only alongside an SMTP_URL that is already there (O3-401)"
+    else note "# SMTP_URL (+ EMAIL_FROM, NOTIFIER_PUBLIC_URL) is not touched: set it in the UI to turn email on"; fi
+  fi
   ensure_domain notifier
   if deploy notifier; then container_health notifier; else FAIL=1; fi
   todo notifier
 fi
 
+# ---- external monitor: no signer, port or health endpoint. Override keeper/Dockerfile's CMD. ----
+if selected monitor; then
+  step "monitor"
+  ensure_service monitor
+  set_variables monitor "$RELAY_ON"
+  ensure_volume monitor
+  ensure_domain monitor
+  if [ "$APPLY" != 1 ]; then
+    show "railway environment edit --environment $RW_ENV" \
+      "--service-config monitor deploy.startCommand '$MONITOR_START'" \
+      "--service-config monitor deploy.restartPolicyType ON_FAILURE" \
+      "--service-config monitor deploy.restartPolicyMaxRetries 10" \
+      "# the keeper image's default CMD runs the keeper, not the monitor"
+  else
+    railway environment edit --help | grep -q -- '--service-config' \
+      || die "Railway CLI cannot set the monitor start command; upgrade before --apply"
+    railway environment edit --environment "$RW_ENV" \
+      --service-config monitor deploy.startCommand "$MONITOR_START" \
+      --service-config monitor deploy.restartPolicyType ON_FAILURE \
+      --service-config monitor deploy.restartPolicyMaxRetries 10 \
+      --message "go-live-v2: monitor start and restart policy" >/dev/null \
+      || die "could not set monitor start command and restart policy"
+    note "monitor start command and restart policy set"
+  fi
+  if deploy monitor; then
+    if [ "$APPLY" = 1 ]; then
+      monitor_check=$(railway ssh --service monitor -- node -e \
+        "const fs=require('node:fs');const cmd=fs.readFileSync('/proc/1/cmdline','utf8').split('\\0').filter(Boolean).join(' ');const ok=cmd.includes('ops/v2/monitor.mjs --interval 60')&&process.env.MONITOR_STATE_PATH==='/data/monitor-v2.json'&&process.env.V2_REGISTRY_PATH==='/app/ops/markets/$(basename "$REGISTRY")'&&fs.existsSync('/data');process.stdout.write(ok?'ok':'wrong-process-or-config')" 2>/dev/null || true)
+      if [ "$monitor_check" = ok ]; then note "monitor process and registry/state path verified"
+      else note "monitor process or registry/state path differs from the reviewed plan"; FAIL=1; fi
+    else
+      show "railway ssh --service monitor -- node -e '<check PID 1 and monitor paths>'" \
+        "# must run $MONITOR_START with state /data/monitor-v2.json and registry $(basename "$REGISTRY")"
+    fi
+  else FAIL=1; fi
+  todo monitor
+fi
+
 # A relay-only run prepares alert references on existing producers. A running service must then
 # be redeployed: --skip-deploys changes its next deployment, not the process already serving.
 if [ "$APPLY" = 1 ] && selected relay && [ "$RELAY_ON" = 1 ]; then
-  for alert_svc in indexer-v2 pricing cranker pricer mm-bot notifier; do
+  for alert_svc in indexer-v2 pricing cranker pricer mm-bot notifier monitor; do
     selected "$alert_svc" && continue
     service_exists "$alert_svc" || continue
-    [ -f "$ENV_OUT/$alert_svc.env" ] || continue
-    alert_line=$(grep -m1 '^ALERT_WEBHOOK=' "$ENV_OUT/$alert_svc.env" || true)
+    if [ "$alert_svc" = monitor ]; then alert_line="ALERT_WEBHOOK=$RELAY_PRIVATE_URL"
+    else
+      [ -f "$ENV_OUT/$alert_svc.env" ] || continue
+      alert_line=$(grep -m1 '^ALERT_WEBHOOK=' "$ENV_OUT/$alert_svc.env" || true)
+    fi
     [ -n "$alert_line" ] || continue
     alert_status=$(latest_status "$alert_svc") || die "could not read Railway deployment status for $alert_svc"
     if ! has_var "$alert_svc" ALERT_WEBHOOK || ! has_var "$alert_svc" ALERT_WEBHOOK_TOKEN; then
@@ -808,8 +1281,8 @@ step "What the CLI cannot do (Railway UI / owner)"
 { selected indexer-v2 || selected cranker || selected pricer || selected mm-bot || selected notifier; } \
   && note "seal every secret just set: CRANKER_PK, PRICER_PK, MM_QUOTER_PK, MM_KILL_TOKEN, PONDER_RPC_URL_4663, NOTIFIER_DATA_KEY, TELEGRAM_BOT_TOKEN, VAPID_PRIVATE_KEY (§9.15)"
 printf '%s\n' "$TODOS" | sed '/^$/d'
-selected notifier && note "DNS (owner): CNAME notify -> the Railway target, TXT _railway-verify.notify; Cloudflare DNS only (§4)"
-note "then ops/deploy.md §15.7: private-network reachability from each caller, the relay wiring test, the external monitors"
+selected notifier && note "DNS (owner): CNAME and _railway-verify TXT for $NOTIFIER_DOMAIN; Cloudflare DNS only (§4)"
+note "then ops/deploy.md §15.7: private-network reachability from each caller, the relay wiring test, and the monitor delivery probe"
 echo
 if [ "$APPLY" != 1 ]; then echo "DRY RUN COMPLETE: nothing was changed. Re-run with --apply to do it."; exit 0; fi
 if [ "$FAIL" = 0 ]; then echo "V2 GO-LIVE OK: $SERVICES"; else echo "V2 GO-LIVE INCOMPLETE — see the lines above"; exit 1; fi

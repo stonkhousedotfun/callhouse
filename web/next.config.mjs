@@ -1,6 +1,51 @@
 import path from "node:path";
 
 /**
+ * Browser response policy, shipped report-only until launch verification exercises every route.
+ *
+ * The network origin classes are deliberately documented here beside `connect-src`:
+ * - Wallet providers come from the MetaMask SDK fallback or injected extensions
+ *   (`web/lib/wagmi.ts:11-18,21-39`); the SDK may negotiate over HTTPS/WSS.
+ * - Chain reads use the two build-time RPC origins (`web/lib/chain.ts:19-20,31-52`). They are
+ *   HTTP transports at this base; local rehearsals may use loopback HTTP.
+ * - The browser indexer client reads NEXT_PUBLIC_API_URL (`web/lib/v2/api.ts:66,129-154`).
+ * - The optional alert client reads NEXT_PUBLIC_NOTIFIER_URL (`web/lib/v2/notifier.ts:61-80`).
+ *
+ * Keep this as Content-Security-Policy-Report-Only until launch verification loads the app with
+ * browser devtools open and accounts for every violation. Enforcing an unobserved policy risks
+ * disabling wallet or read traffic. `unsafe-inline` reflects Next's current bootstrap/style
+ * output; moving to nonces requires separately scoped request middleware.
+ *
+ * HSTS intentionally omits `preload`. Preloading is an owner decision and a one-way door whose
+ * removal takes months; a parent-domain `includeSubDomains` commitment also binds `app.` and
+ * `dev.`. The reversible response header ships now, without enrolling the domain in preload.
+ */
+const SECURITY_HEADERS = [
+  {
+    key: "Content-Security-Policy-Report-Only",
+    value: [
+      "default-src 'self'",
+      "base-uri 'self'",
+      "connect-src 'self' https: wss: http://localhost:* http://127.0.0.1:*",
+      "font-src 'self' data: https:",
+      "form-action 'self'",
+      "frame-ancestors 'none'",
+      "frame-src 'self' https:",
+      "img-src 'self' data: blob: https:",
+      "object-src 'none'",
+      "script-src 'self' 'unsafe-inline'",
+      "style-src 'self' 'unsafe-inline'",
+      "worker-src 'self' blob:",
+    ].join("; "),
+  },
+  { key: "X-Content-Type-Options", value: "nosniff" },
+  { key: "Referrer-Policy", value: "strict-origin-when-cross-origin" },
+  { key: "X-Frame-Options", value: "DENY" },
+  { key: "Permissions-Policy", value: "camera=(), geolocation=(), microphone=(), payment=(), usb=()" },
+  { key: "Strict-Transport-Security", value: "max-age=31536000; includeSubDomains" },
+];
+
+/**
  * Next 16 builds with Turbopack by default.
  *
  * The scaffold carried a `webpack()` block that marked `pino-pretty`, `lokijs` and
@@ -32,13 +77,16 @@ import path from "node:path";
 /** @type {import('next').NextConfig} */
 const nextConfig = {
   reactStrictMode: true,
+  poweredByHeader: false,
   turbopack: {},
   output: "standalone",
   outputFileTracingRoot: path.join(import.meta.dirname, ".."),
   async headers() {
-    return process.env.NEXT_PUBLIC_DEV_PREVIEW === "1"
-      ? [{ source: "/:path*", headers: [{ key: "X-Robots-Tag", value: "noindex, nofollow, noarchive" }] }]
-      : [];
+    const headers = [...SECURITY_HEADERS];
+    if (process.env.NEXT_PUBLIC_DEV_PREVIEW === "1") {
+      headers.push({ key: "X-Robots-Tag", value: "noindex, nofollow, noarchive" });
+    }
+    return [{ source: "/:path*", headers }];
   },
 };
 

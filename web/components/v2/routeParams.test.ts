@@ -1,14 +1,16 @@
 import { describe, expect, it } from "vitest";
 
-import { ALL_MARKETS } from "@/lib/markets";
+import { v2Markets } from "@/lib/markets";
 import { longIdOf } from "@/lib/v2/seriesId";
 import { parseV2Series, parseV2Ticker } from "@/app/v2-route-params";
 
 describe("v2 route params", () => {
-  const market = ALL_MARKETS.find((row) => row.ticker === "NVDA")!;
+  const market = v2Markets().find((row) => row.ticker === "NVDA")!;
 
   it("accepts canonical registry ticker slugs only", () => {
     expect(parseV2Ticker("nvda")?.ticker).toBe("NVDA");
+    const planned = v2Markets().find((row) => row.v2.status !== "live")!;
+    expect(parseV2Ticker(planned.ticker.toLowerCase())).toBe(planned);
     expect(parseV2Ticker("NVDA")).toBeUndefined();
     expect(parseV2Ticker("unknown")).toBeUndefined();
   });

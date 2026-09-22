@@ -13,11 +13,36 @@ describe("v2 deployment guard", () => {
     }
   });
 
+  it("includes the access manager in the compiled deployment guard", () => {
+    const config = configResponseSchema.parse(configFixture);
+    const aligned = {
+      ...config,
+      contracts: { ...config.contracts, accessManager: V2_DEPLOYMENT.contracts.accessManager },
+    };
+    expect(v2ConfigWarnings(aligned)).not.toContain("accessManager address differs from the generated registry.");
+
+    const mismatched = V2_DEPLOYMENT.contracts.accessManager === null
+      ? config.contracts.clearinghouse
+      : null;
+    expect(v2ConfigWarnings({
+      ...aligned,
+      contracts: { ...aligned.contracts, accessManager: mismatched },
+    })).toContain("accessManager address differs from the generated registry.");
+  });
+
   it("flags fixture addresses that disagree with the compiled registry", () => {
     const config = configResponseSchema.parse(configFixture);
     expect(v2ConfigWarnings({ ...config, chainId: config.chainId + 1 })).toContain("Indexer chain differs from this app.");
     expect(v2ConfigWarnings({ ...config, constants: { ...config.constants, priceTick: 999 } }))
       .toContain("priceTick constant differs from the app's option maths.");
+  });
+
+  it("requires the v8 interface on both the indexer and compiled registry", () => {
+    const config = configResponseSchema.parse(configFixture);
+    expect(v2ConfigWarnings({ ...config, interfaceVersion: 8 }))
+      .not.toContain("This build requires interface version 8.");
+    expect(v2ConfigWarnings({ ...config, interfaceVersion: 7 }))
+      .toContain("This build requires interface version 8.");
   });
 
   it("allows live fees to change without disabling writes", () => {

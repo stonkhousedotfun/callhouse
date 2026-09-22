@@ -6,11 +6,26 @@
       "epoch": {
         "id": 2958,
         "start": 1789344000,
-        "end": 1789948800
+        "end": 1789948800,
+        "band": {
+          "bps": 1000,
+          "minUsdg": {
+            "raw": "20000",
+            "decimals": 6,
+            "formatted": "0.02"
+          }
+        }
+      },
+      "benchmarkPolicy": 2,
+      "samples": {
+        "absent": 650,
+        "valid": 350,
+        "missingReference": 24
       },
       "uptimePct": 31,
       "avgSpreadBps": null,
       "depthWithin100bps": "50",
+      "depthInBand": "420",
       "fills": 2,
       "volume": {
         "raw": "1840000",
@@ -28,11 +43,26 @@
       "epoch": {
         "id": 2957,
         "start": 1788739200,
-        "end": 1789344000
+        "end": 1789344000,
+        "band": {
+          "bps": 1000,
+          "minUsdg": {
+            "raw": "20000",
+            "decimals": 6,
+            "formatted": "0.02"
+          }
+        }
+      },
+      "benchmarkPolicy": 2,
+      "samples": {
+        "absent": 850,
+        "valid": 150,
+        "missingReference": 0
       },
       "uptimePct": 12.5,
       "avgSpreadBps": null,
       "depthWithin100bps": "0",
+      "depthInBand": "0",
       "fills": 1,
       "volume": {
         "raw": "420000",

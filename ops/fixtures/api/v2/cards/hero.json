@@ -14,7 +14,7 @@
       "expiry": 1789761600,
       "tenor": "weekly",
       "mintCutoff": 1789759800,
-      "mintFeePpm": 300,
+      "mintFeePpm": 0,
       "mintFeesHeld": {
         "raw": "0",
         "decimals": 18,
@@ -71,7 +71,7 @@
     "maxLoss": "cost",
     "unitsAvailable": "120",
     "orderIds": [
-      "1048"
+      "1049"
     ]
   },
   "maxMultiple": 43.3

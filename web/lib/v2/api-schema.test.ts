@@ -30,21 +30,34 @@ import { encodeAbiParameters, formatUnits, getAddress, keccak256, type Address }
 import { describe, expect, it } from "vitest";
 
 import {
+  MAX_RENDERABLE_DECIMALS,
   ROUTES,
   cardSchema,
   configResponseSchema,
   errorSchema,
+  fairResponseSchema,
+  flywheelAssetSchema,
+  flywheelDistributionSchema,
+  flywheelResponseSchema,
   healthResponseSchema,
   heroCardResponseSchema,
   cardsResponseSchema,
   marketsResponseSchema,
+  moneySchema,
+  positionsResponseSchema,
+  pricingProvenanceSchema,
+  quoteSchema,
+  rewardEpochsResponseSchema,
   seriesDetailResponseSchema,
+  signedMoneySchema,
   bookResponseSchema,
+  strategiesResponseSchema,
   winsResponseSchema,
   pnlResponseSchema,
+  earnVaultSchema,
   type RouteSpec,
 } from "./api-schema";
-import type { Card, SeriesRef } from "./api-types";
+import type { Card, PricingProvenance, SeriesRef } from "./api-types";
 
 type Json = null | boolean | number | string | Json[] | { [k: string]: Json };
 type JsonObject = { [k: string]: Json };
@@ -122,6 +135,38 @@ const min = (a: bigint, b: bigint) => (a < b ? a : b);
 const ceilDiv = (a: bigint, b: bigint) => (a + b - 1n) / b;
 
 const BPS = 10_000n;
+const wireMoney = (raw: string) => ({ raw, decimals: 6, formatted: raw });
+
+const pricingProvenance = (overrides: Partial<PricingProvenance> = {}): PricingProvenance => ({
+  contract: "O3-307/1",
+  provider: "listed-live",
+  providerProduct: "quotes",
+  method: "listed",
+  methodDetail: "listed-contract",
+  contributingExpiries: [1_790_020_800],
+  identity: {
+    market: "NVDA",
+    issuer: null,
+    token: { chainId: 4663, address: getAddress("0x0000000000000000000000000000000000000011"), uiMultiplier: null },
+    option: { side: "call", strike: wireMoney("231000000"), expiry: 1_790_020_800,
+      timeZone: "America/New_York", exercise: "european", payoff: "cash-value", settlement: "oracle-twap" },
+    listed: [{ providerInstrumentId: "NVDA260920C00231000", root: "NVDA", side: "call", strike: "231",
+      expiry: 1_790_020_800, multiplier: 100, exercise: "american", settlement: "physical" }],
+  },
+  observations: {
+    listedQuotes: [{ providerInstrumentId: "NVDA260920C00231000", bid: "2.4", ask: "2.6",
+      bidSize: "10", askSize: "12", currency: "USD", observedAt: 190 }],
+    vendorTheoretical: [],
+  },
+  clocks: { quoteObservedAt: 190, tradeObservedAt: null, underlyingObservedAt: 180,
+    volatilityObservedAt: null, publishedAt: 195, receivedAt: 198, computedAt: 200 },
+  ages: { quoteS: 10, tradeS: null, underlyingS: 20, volatilityS: null },
+  entitlement: { class: "real-time", declaredDelayS: 0, rightsRef: "test" },
+  expiryClock: { expiry: 1_790_020_800, timeZone: "America/New_York", basis: "trading-time", yearsToExpiry: 0.2 },
+  quality: { readiness: "ready", reasons: [], uncertainty: null, disagreement: null, fallback: null },
+  pricedSpot: wireMoney("215500000"),
+  ...overrides,
+});
 
 /**
  * ADR-12 card maths per unit, restated from contract OptionMath at P = T, in USDG
@@ -176,6 +221,11 @@ describe("ops/fixtures/api/v2: every file is one §4 route and parses strictly",
     }
   });
 
+  it("keeps reward programme names open for future distributors", () => {
+    const maker = rewardEpochsResponseSchema.parse(fixture("rewards/epochs.json"));
+    expect(rewardEpochsResponseSchema.safeParse({ ...maker, program: "future-lenders" }).success).toBe(true);
+  });
+
   it("route params are real: known tickers, series with files, checksummed addresses, win ids", () => {
     const markets = marketsResponseSchema.parse(fixture("markets.json"));
     const tickers = new Set(markets.map((m) => m.ticker));
@@ -216,6 +266,248 @@ describe("ops/fixtures/api/v2: every file is one §4 route and parses strictly",
     expect(errorSchema.safeParse({ error: { code: "not_found", message: "x", status: 404 } }).success).toBe(false);
   });
 
+  it("bounds every renderable decimal scale without capping unrelated counts", () => {
+    const validMoney = { raw: "1", decimals: 6, formatted: "0.000001" };
+    for (const decimals of [6, 18, MAX_RENDERABLE_DECIMALS]) {
+      expect(moneySchema.safeParse({ ...validMoney, decimals }).success).toBe(true);
+      expect(signedMoneySchema.safeParse({ ...validMoney, raw: "-1", decimals }).success).toBe(true);
+    }
+
+    const tooManyMoneyDecimals = moneySchema.safeParse({
+      ...validMoney,
+      decimals: MAX_RENDERABLE_DECIMALS + 1,
+    });
+    expect(tooManyMoneyDecimals.success).toBe(false);
+    if (!tooManyMoneyDecimals.success) expect(issues(tooManyMoneyDecimals.error)).toContain("decimals:");
+
+    const asset = getAddress("0x0000000000000000000000000000000000000011");
+    const flywheelAsset = { asset, symbol: "NVDA", decimals: null, amountRaw: "1" };
+    const flywheelDistribution = {
+      id: "distribution-1",
+      asset,
+      symbol: "NVDA",
+      decimals: null,
+      assetInRaw: "1",
+      usdgInRaw: "2",
+      treasuryOutRaw: "3",
+      buybackAddedRaw: "4",
+      ts: 1,
+      tx: `0x${"11".repeat(32)}`,
+    };
+    for (const decimals of [null, 6, 18, MAX_RENDERABLE_DECIMALS]) {
+      expect(flywheelAssetSchema.safeParse({ ...flywheelAsset, decimals }).success).toBe(true);
+      expect(flywheelDistributionSchema.safeParse({ ...flywheelDistribution, decimals }).success).toBe(true);
+    }
+    expect(flywheelAssetSchema.safeParse({
+      ...flywheelAsset,
+      decimals: MAX_RENDERABLE_DECIMALS + 1,
+    }).success).toBe(false);
+    expect(flywheelDistributionSchema.safeParse({
+      ...flywheelDistribution,
+      decimals: MAX_RENDERABLE_DECIMALS + 1,
+    }).success).toBe(false);
+
+    const flywheel = flywheelResponseSchema.parse(fixture("flywheel.json"));
+    expect(flywheelResponseSchema.safeParse({ ...flywheel, tokenDecimals: 18 }).success).toBe(true);
+    expect(flywheelResponseSchema.safeParse({
+      ...flywheel,
+      tokenDecimals: MAX_RENDERABLE_DECIMALS + 1,
+    }).success).toBe(false);
+
+    const config = configResponseSchema.parse(fixture("config.json"));
+    const chainPayload = { ...config, chainId: 4663, usdg: { ...config.usdg, decimals: 6 } };
+    const validConfig = configResponseSchema.safeParse(chainPayload);
+    expect(validConfig.success, validConfig.success ? "" : issues(validConfig.error)).toBe(true);
+
+    const tooManyUsdgDecimals = configResponseSchema.safeParse({
+      ...chainPayload,
+      usdg: { ...chainPayload.usdg, decimals: MAX_RENDERABLE_DECIMALS + 1 },
+    });
+    expect(tooManyUsdgDecimals.success).toBe(false);
+    if (!tooManyUsdgDecimals.success) expect(issues(tooManyUsdgDecimals.error)).toContain("usdg.decimals:");
+
+    // T-OP-120 (G7): fees.maxPayoutSlippageBps is the Clearinghouse bound the explorer prices a call's USDG band
+    // with. Null until a payout adapter is set (the committed fixture), any count up to the contract ceiling
+    // MAX_PAYOUT_SLIPPAGE_CEIL_BPS = 300 (V2Constants.sol:88 at callhouse-contracts v8 ee14bfbc), never above it,
+    // and never absent: the strict schema refuses a producer that dropped the field.
+    expect(config.fees.maxPayoutSlippageBps).toBeNull();
+    for (const bound of [0, 150, 300]) {
+      expect(configResponseSchema.safeParse({ ...chainPayload, fees: { ...chainPayload.fees, maxPayoutSlippageBps: bound } }).success, String(bound)).toBe(true);
+    }
+    const aboveCeiling = configResponseSchema.safeParse({ ...chainPayload, fees: { ...chainPayload.fees, maxPayoutSlippageBps: 301 } });
+    expect(aboveCeiling.success).toBe(false);
+    if (!aboveCeiling.success) expect(issues(aboveCeiling.error)).toContain("fees.maxPayoutSlippageBps:");
+    const { maxPayoutSlippageBps: _dropped, ...withoutBound } = chainPayload.fees;
+    expect(configResponseSchema.safeParse({ ...chainPayload, fees: withoutBound }).success).toBe(false);
+    expect(configResponseSchema.safeParse({ ...chainPayload, fees: { ...chainPayload.fees, maxPayoutSlippageBps: 1.5 } }).success).toBe(false);
+  });
+
+  it("accepts legacy market payloads plus valid synthetic settlement modes and rejects malformed blocks", () => {
+    const markets = marketsResponseSchema.parse(fixture("markets.json"));
+    const nvda = markets.find((market) => market.ticker === "NVDA")!;
+    const tsla = markets.find((market) => market.ticker === "TSLA")!;
+    const legacyNvda = { ...nvda };
+    const legacyTsla = { ...tsla };
+    delete legacyNvda.settlement;
+    delete legacyTsla.settlement;
+    expect(marketsResponseSchema.safeParse([legacyNvda, legacyTsla]).success).toBe(true);
+
+    const pooled = { ...legacyNvda,
+      settlement: { sourceCount: 2, uncorroboratedDelayS: 21_600,
+        route: { venue: "v3" as const, fee: 500 } } };
+    const pooledV4 = { ...legacyNvda,
+      settlement: { sourceCount: 2, uncorroboratedDelayS: 21_600,
+        route: { venue: "v4" as const, fee: 100, tickSpacing: 10, poolId: `0x${"11".repeat(32)}` } } };
+    const oneHourUnrouted = { ...legacyTsla,
+      settlement: { sourceCount: 1, uncorroboratedDelayS: 3_600, route: null } };
+    expect(marketsResponseSchema.safeParse([pooled, oneHourUnrouted]).success).toBe(true);
+    expect(marketsResponseSchema.safeParse([pooledV4, oneHourUnrouted]).success).toBe(true);
+    expect(marketsResponseSchema.safeParse([{ ...pooled,
+      settlement: { sourceCount: 2, uncorroboratedDelayS: 21_600 } }]).success).toBe(false);
+    expect(marketsResponseSchema.safeParse([{ ...pooled,
+      settlement: { ...pooled.settlement, route: "not-a-route" } }]).success).toBe(false);
+    expect(marketsResponseSchema.safeParse([{ ...pooled,
+      settlement: { ...pooled.settlement, extra: true } }]).success).toBe(false);
+    for (const uncorroboratedDelayS of [1_800, 86_400]) {
+      expect(marketsResponseSchema.safeParse([{ ...pooled,
+        settlement: { ...pooled.settlement, uncorroboratedDelayS } }]).success).toBe(true);
+    }
+    for (const uncorroboratedDelayS of [0, 1_799, 86_401]) {
+      expect(marketsResponseSchema.safeParse([{ ...pooled,
+        settlement: { ...pooled.settlement, uncorroboratedDelayS } }]).success).toBe(false);
+    }
+  });
+
+  it("accepts optional pricing provenance scenarios without losing legacy payloads", () => {
+    const freshListed = pricingProvenance();
+    const vendorEstimate = pricingProvenance({
+      provider: "vendor-fmv",
+      providerProduct: "theoretical",
+      method: "external-indicative",
+      methodDetail: "fmv",
+      contributingExpiries: [],
+      identity: { ...freshListed.identity, listed: [] },
+      observations: { listedQuotes: [], vendorTheoretical: [{ product: "fmv", value: "2.5", iv: 0.31,
+        currency: "USD", observedAt: 190 }] },
+      clocks: { ...freshListed.clocks, quoteObservedAt: null, volatilityObservedAt: 190 },
+      ages: { ...freshListed.ages, quoteS: null, volatilityS: 10 },
+      entitlement: { class: "indicative", declaredDelayS: null, rightsRef: "vendor-terms" },
+      quality: { readiness: "degraded", reasons: ["external-indicative"], uncertainty: null,
+        disagreement: null, fallback: null },
+    });
+    const extrapolated = pricingProvenance({
+      provider: "cboe-delayed",
+      method: "extrapolated",
+      methodDetail: "flat-after-last",
+      entitlement: { class: "delayed", declaredDelayS: 900, rightsRef: null },
+      quality: { readiness: "degraded", reasons: ["extrapolated"], uncertainty: null,
+        disagreement: null, fallback: null },
+    });
+    const delayedFallback = pricingProvenance({
+      provider: "backup-delayed",
+      entitlement: { class: "delayed", declaredDelayS: 900, rightsRef: null },
+      quality: { readiness: "degraded", reasons: ["fallback-provider", "upstream-timeout"],
+        uncertainty: null, disagreement: null,
+        fallback: { from: "primary-live", to: "backup-delayed", reason: "upstream-timeout" } },
+    });
+    const disagreement = pricingProvenance({
+      quality: { readiness: "degraded", reasons: ["source-disagreement", "future-provider-code"],
+        uncertainty: { ivLow: 0.2, ivHigh: 0.4, fairLow: wireMoney("200000"), fairHigh: wireMoney("300000") },
+        disagreement: { provider: "second-source", fairBps: 850 }, fallback: null },
+    });
+    const unavailable = pricingProvenance({
+      quality: { readiness: "unavailable", reasons: ["chain-unavailable"], uncertainty: null,
+        disagreement: null, fallback: null },
+      pricedSpot: null,
+    });
+    const providerExpiryOmitted = pricingProvenance({
+      identity: { ...freshListed.identity,
+        listed: [{ ...freshListed.identity.listed[0]!, expiry: null }] },
+    });
+    for (const p of [freshListed, providerExpiryOmitted, vendorEstimate, extrapolated, delayedFallback,
+      disagreement, unavailable]) {
+      expect(pricingProvenanceSchema.safeParse(p).success).toBe(true);
+    }
+    for (const body of [
+      { fair: wireMoney("250000"), iv: 0.3, delta: 0.2, source: "model", asOf: 190,
+        spot: wireMoney("215500000"), provenance: freshListed },
+      { fair: wireMoney("250000"), iv: 0.31, delta: 0.2, source: "model", asOf: 190,
+        spot: wireMoney("215500000"), provenance: vendorEstimate },
+      { fair: wireMoney("250000"), iv: 0.3, delta: 0.2, source: "model", asOf: 190,
+        spot: wireMoney("215500000"), provenance: extrapolated },
+      { fair: wireMoney("250000"), iv: 0.3, delta: 0.2, source: "model", asOf: 190,
+        spot: wireMoney("215500000"), provenance: delayedFallback },
+      { fair: wireMoney("0"), iv: 0.3, delta: 0, source: "model", asOf: 190,
+        spot: wireMoney("215500000"), provenance: disagreement },
+      { fair: null, reason: "Pricing service is unavailable.", reasonCode: "chain-unavailable",
+        provenance: unavailable },
+    ]) expect(fairResponseSchema.safeParse(body).success).toBe(true);
+
+    const legacyFair = FILES.find((f) => f.rel.startsWith("fair/"))!.body;
+    expect(fairResponseSchema.safeParse(legacyFair).success).toBe(true);
+    const detail = seriesDetailResponseSchema.parse(FILES.find((f) => /^series\/\d+\.json$/.test(f.rel))!.body);
+    const legacyQuote = { ...detail.quote };
+    delete legacyQuote.fairProvenance;
+    expect(quoteSchema.safeParse(legacyQuote).success).toBe(true);
+    expect(quoteSchema.safeParse({ ...legacyQuote, fairProvenance: null }).success).toBe(true);
+    expect(quoteSchema.safeParse({ ...legacyQuote, fairProvenance: freshListed }).success).toBe(true);
+    const positions = FILES.filter((f) => f.rel.endsWith("/positions.json"))
+      .map((f) => positionsResponseSchema.parse(f.body)).find((body) => body.longs.length > 0)!;
+    const long = positions.longs[0]!;
+    const legacyLong = { ...long };
+    delete legacyLong.markSource;
+    expect(positionsResponseSchema.safeParse({ ...positions, longs: [legacyLong] }).success).toBe(true);
+    const sourcedLong = { ...legacyLong, markSource: legacyLong.mark === null ? null : "fair" as const };
+    expect(positionsResponseSchema.safeParse({ ...positions, longs: [sourcedLong] }).success).toBe(true);
+    expect(positionsResponseSchema.safeParse({ ...positions, longs: [{ ...legacyLong,
+      markSource: legacyLong.mark === null ? "fair" : null }] }).success).toBe(false);
+
+    expect(pricingProvenanceSchema.safeParse({ ...freshListed,
+      quality: { ...freshListed.quality, reasons: ["quote-stale"] } }).success).toBe(false);
+    expect(pricingProvenanceSchema.safeParse({ ...freshListed,
+      ages: { ...freshListed.ages, quoteS: 11 } }).success).toBe(false);
+    expect(pricingProvenanceSchema.safeParse({ ...freshListed,
+      method: "future-method" }).success).toBe(false);
+    expect(pricingProvenanceSchema.safeParse({ ...freshListed,
+      identity: { ...freshListed.identity, token: { ...freshListed.identity.token, extra: true } } }).success).toBe(false);
+    expect(pricingProvenanceSchema.safeParse({ ...freshListed,
+      identity: { ...freshListed.identity, listed: [] },
+      observations: { listedQuotes: [], vendorTheoretical: [{ product: "fmv", value: "2.5", iv: 0.3,
+        currency: "USD", observedAt: 190 }] } }).success).toBe(false);
+    expect(pricingProvenanceSchema.safeParse({ ...freshListed,
+      observations: { ...freshListed.observations,
+        listedQuotes: [{ ...freshListed.observations.listedQuotes[0]!, providerInstrumentId: "OTHER" }] } }).success).toBe(false);
+    for (const listed of [
+      { ...freshListed.identity.listed[0]!, providerInstrumentId: null },
+      { ...freshListed.identity.listed[0]!, root: "TSLA" },
+      { ...freshListed.identity.listed[0]!, strike: "232" },
+      { ...freshListed.identity.listed[0]!, expiry: freshListed.identity.option.expiry + 1 },
+      { ...freshListed.identity.listed[0]!, multiplier: 150 },
+      { ...freshListed.identity.listed[0]!, side: "put" as const },
+    ]) expect(pricingProvenanceSchema.safeParse({ ...freshListed,
+      identity: { ...freshListed.identity, listed: [listed] } }).success).toBe(false);
+    for (const quote of [
+      { ...freshListed.observations.listedQuotes[0]!, bid: null },
+      { ...freshListed.observations.listedQuotes[0]!, bid: "invalid" },
+      { ...freshListed.observations.listedQuotes[0]!, bid: "-1" },
+      { ...freshListed.observations.listedQuotes[0]!, bid: "0" },
+      { ...freshListed.observations.listedQuotes[0]!, bid: "2.7", ask: "2.6" },
+      { ...freshListed.observations.listedQuotes[0]!,
+        bid: "1.0000000000000001", ask: "1.0000000000000000" },
+    ]) expect(pricingProvenanceSchema.safeParse({ ...freshListed,
+      observations: { ...freshListed.observations, listedQuotes: [quote] } }).success).toBe(false);
+    expect(pricingProvenanceSchema.safeParse({ ...freshListed,
+      contributingExpiries: [] }).success).toBe(false);
+    expect(fairResponseSchema.safeParse({ fair: wireMoney("250000"), iv: 0.3, delta: 0.2,
+      source: "cboe", asOf: 190, provenance: extrapolated }).success).toBe(false);
+    expect(fairResponseSchema.safeParse({ fair: wireMoney("250000"), iv: 0.3, delta: 0.2,
+      source: "model", asOf: 190, spot: wireMoney("215500000"), provenance: unavailable }).success).toBe(false);
+    expect(quoteSchema.safeParse({ ...legacyQuote, fair: wireMoney("250000"),
+      fairProvenance: unavailable }).success).toBe(false);
+    expect(fairResponseSchema.safeParse({ fair: null, reason: "unavailable",
+      provenance: delayedFallback }).success).toBe(false);
+  });
+
   it("requires a nullable series settlement time distinct from the oracle verdict", () => {
     const detail = FILES.find((f) => /^series\/\d+\.json$/.test(f.rel) &&
       isObject(f.body) && isObject(f.body.settlement) && f.body.settlement.status === "Finalized");
@@ -229,6 +521,33 @@ describe("ops/fixtures/api/v2: every file is one §4 route and parses strictly",
       settlement: { ...settlement, settledAt: null } }).success).toBe(true);
     expect(seriesDetailResponseSchema.safeParse({ ...body,
       settlement: { ...settlement, settledAt: Number(settlement.finalizedAt) + 60 } }).success).toBe(true);
+  });
+
+  it("accepts legacy strategies and strict optional USDG6 pricing-state fixtures", () => {
+    const legacy = strategiesResponseSchema.parse(fixture("strategies.json"));
+    expect(legacy.items[0]!.pricing).toBeUndefined();
+    const usd = (raw: string, formatted: string) => ({ raw, decimals: 6, formatted });
+    const pricing = {
+      currentAsk: usd("3183100", "3.1831"),
+      band: { min: usd("636700", "0.6367"), max: usd("3183100", "3.1831") },
+      lastRepricedAt: 1_789_392_000,
+      lastRepricedPrice: usd("3100000", "3.1"),
+      repriceCount: 2,
+      fair: usd("0", "0"),
+    };
+    const withPricing = { ...legacy, items: [{ ...legacy.items[0]!, pricing }] };
+    expect(strategiesResponseSchema.safeParse(withPricing).success).toBe(true);
+    expect(strategiesResponseSchema.safeParse({ ...legacy,
+      items: [{ ...legacy.items[0]!, pricing: { ...pricing, fair: null } }] }).success).toBe(true);
+    expect(strategiesResponseSchema.safeParse({ ...legacy, items: [{ ...legacy.items[0]!, pricing: {
+      ...pricing, currentAsk: { ...pricing.currentAsk, decimals: 18 },
+    } }] }).success).toBe(false);
+    const partial = { ...pricing } as Partial<typeof pricing>;
+    delete partial.repriceCount;
+    expect(strategiesResponseSchema.safeParse({ ...legacy,
+      items: [{ ...legacy.items[0]!, pricing: partial }] }).success).toBe(false);
+    expect(strategiesResponseSchema.safeParse({ ...legacy,
+      items: [{ ...legacy.items[0]!, pricing: { ...pricing, extra: true } }] }).success).toBe(false);
   });
 });
 
@@ -542,4 +861,34 @@ describe("ops/fixtures/serve-v2.mjs", () => {
     },
     30_000,
   );
+});
+
+/**
+ * T-OP-086 (SEC-19 / T-OP-065). The lending-vault row carries the vault's DISPLAY-ONLY mark and the flag that
+ * says whether it is the figure to show. Pinned here because the twin strict schemas (this file and
+ * indexer/src/api/v2/schema.ts) are the only thing that stops the indexer from sending a field the dapp cannot
+ * read -- or the dapp from reading one the indexer never sends.
+ */
+describe("earnVaultSchema: the indicative mark and the open-position flag", () => {
+  const base = {
+    vault: "0x0000000000000000000000000000000000000066", asset: "0x0000000000000000000000000000000000000001",
+    adapter: null, paused: false, sharesSupply: "100", deposited: "1000", skimmed: null,
+  };
+  it("accepts the three fields, each nullable, and keeps null distinct from an observed zero", () => {
+    expect(earnVaultSchema.parse({ ...base,
+      indicativeAssetsPerShare: "1004000", indicativeTotalAssets: "10040000000", hasOpenPosition: true,
+    })).toMatchObject({ indicativeAssetsPerShare: "1004000", indicativeTotalAssets: "10040000000", hasOpenPosition: true });
+    expect(earnVaultSchema.parse({ ...base,
+      indicativeAssetsPerShare: null, indicativeTotalAssets: null, hasOpenPosition: null,
+    })).toMatchObject({ indicativeAssetsPerShare: null, indicativeTotalAssets: null, hasOpenPosition: null });
+    expect(earnVaultSchema.parse({ ...base, indicativeAssetsPerShare: "0" }).indicativeAssetsPerShare).toBe("0");
+  });
+  it("is optional on the wire so a pre-T-OP-086 fixture still parses, and strict about the value types", () => {
+    expect(earnVaultSchema.safeParse(base).success).toBe(true);
+    expect(earnVaultSchema.safeParse({ ...base, indicativeAssetsPerShare: 1004000 }).success).toBe(false);
+    expect(earnVaultSchema.safeParse({ ...base, indicativeAssetsPerShare: "-1" }).success).toBe(false);
+    expect(earnVaultSchema.safeParse({ ...base, hasOpenPosition: "true" }).success).toBe(false);
+    // Unknown keys are refused: this is what makes the twin-file rule load-bearing.
+    expect(earnVaultSchema.safeParse({ ...base, indicativePerShare: "1" }).success).toBe(false);
+  });
 });

@@ -48,6 +48,33 @@ const INT_RE = /^(0|-?[1-9]\d*)$/;
 const ADDRESS_RE = /^0x[0-9a-fA-F]{40}$/;
 const TX_RE = /^0x[0-9a-f]{64}$/;
 
+function decimalRaw(value: string, decimals: number): string | null {
+  const match = /^(\d+)(?:\.(\d+))?$/.exec(value);
+  if (match === null || decimals > 100) return null;
+  const fraction = match[2] ?? "";
+  if (fraction.length > decimals && /[1-9]/.test(fraction.slice(decimals))) return null;
+  return `${match[1]}${fraction.slice(0, decimals).padEnd(decimals, "0")}`.replace(/^0+(?=\d)/, "");
+}
+
+function compareDecimalStrings(left: string, right: string): -1 | 0 | 1 | null {
+  const leftMatch = /^(0|[1-9]\d*)(?:\.(\d+))?$/.exec(left);
+  const rightMatch = /^(0|[1-9]\d*)(?:\.(\d+))?$/.exec(right);
+  if (leftMatch === null || rightMatch === null) return null;
+  const leftWhole = leftMatch[1]!;
+  const rightWhole = rightMatch[1]!;
+  if (leftWhole.length !== rightWhole.length) return leftWhole.length < rightWhole.length ? -1 : 1;
+  if (leftWhole !== rightWhole) return leftWhole < rightWhole ? -1 : 1;
+  const leftFraction = leftMatch[2] ?? "";
+  const rightFraction = rightMatch[2] ?? "";
+  const fractionLength = Math.max(leftFraction.length, rightFraction.length);
+  for (let index = 0; index < fractionLength; index++) {
+    const leftDigit = leftFraction[index] ?? "0";
+    const rightDigit = rightFraction[index] ?? "0";
+    if (leftDigit !== rightDigit) return leftDigit < rightDigit ? -1 : 1;
+  }
+  return 0;
+}
+
 /** A non-negative base-unit integer as a canonical decimal string. */
 export const uintStringSchema = z.string().regex(UINT_RE, "expected a canonical decimal uint string");
 
@@ -70,23 +97,246 @@ export const txHashSchema = z.string().regex(TX_RE, "expected a lowercase 0x-pre
 /** Unix seconds. */
 export const unixSchema = z.number().int().nonnegative();
 
+/**
+ * Highest decimal scale the UI will render. claude-24 measured viem 2.56.3 producing 99,983
+ * characters in 5,072 ms for 100,000 decimals, while 1e9 threw "Invalid string length"
+ * immediately. 36 is twice the system's real maximum of 18 and stays far below the silent,
+ * multi-second denial-of-service range.
+ */
+export const MAX_RENDERABLE_DECIMALS = 36;
+
 /** Basis points and other small non-negative integers. */
 const countSchema = z.number().int().nonnegative();
+const decimalsSchema = countSchema.max(MAX_RENDERABLE_DECIMALS);
 
 const finiteSchema = z.number().finite();
+const openStringSchema = z.string().min(1);
 
 // ---------------------------------------------------------------------------------------------
 // Shared objects (§4 "Shared objects")
 // ---------------------------------------------------------------------------------------------
 
 export const moneySchema = z
-  .object({ raw: uintStringSchema, decimals: countSchema, formatted: z.string() })
+  .object({ raw: uintStringSchema, decimals: decimalsSchema, formatted: z.string() })
   .strict();
 
 /** Money that may be negative: unrealised and realised PnL only. */
 export const signedMoneySchema = z
-  .object({ raw: intStringSchema, decimals: countSchema, formatted: z.string() })
+  .object({ raw: intStringSchema, decimals: decimalsSchema, formatted: z.string() })
   .strict();
+
+/** The provider, method, inputs, clocks and quality state behind one fair-value estimate (§5.1). */
+export const pricingProvenanceSchema = z
+  .object({
+    contract: z.literal("O3-307/1"),
+    provider: openStringSchema,
+    providerProduct: openStringSchema.nullable(),
+    method: z.enum(["listed", "interpolated", "extrapolated", "modeled", "external-indicative"]),
+    methodDetail: openStringSchema.nullable(),
+    contributingExpiries: z.array(unixSchema),
+    identity: z
+      .object({
+        market: openStringSchema,
+        issuer: openStringSchema.nullable(),
+        token: z
+          .object({ chainId: countSchema.min(1), address: addressSchema, uiMultiplier: openStringSchema.nullable() })
+          .strict(),
+        option: z
+          .object({
+            side: z.enum(["call", "put"]),
+            strike: moneySchema,
+            expiry: unixSchema,
+            timeZone: z.literal("America/New_York"),
+            exercise: z.literal("european"),
+            payoff: z.literal("cash-value"),
+            settlement: z.literal("oracle-twap"),
+          })
+          .strict(),
+        listed: z.array(
+          z
+            .object({
+              providerInstrumentId: openStringSchema.nullable(),
+              root: openStringSchema.nullable(),
+              side: z.enum(["call", "put"]),
+              strike: openStringSchema,
+              expiry: unixSchema.nullable(),
+              multiplier: finiteSchema.positive().nullable(),
+              exercise: openStringSchema.nullable(),
+              settlement: openStringSchema.nullable(),
+            })
+            .strict(),
+        ),
+      })
+      .strict(),
+    observations: z
+      .object({
+        listedQuotes: z.array(
+          z
+            .object({
+              providerInstrumentId: openStringSchema.nullable(),
+              bid: openStringSchema.nullable(),
+              ask: openStringSchema.nullable(),
+              bidSize: openStringSchema.nullable(),
+              askSize: openStringSchema.nullable(),
+              currency: openStringSchema,
+              observedAt: unixSchema.nullable(),
+            })
+            .strict(),
+        ),
+        vendorTheoretical: z.array(
+          z
+            .object({
+              product: openStringSchema,
+              value: openStringSchema.nullable(),
+              iv: finiteSchema.nonnegative().nullable(),
+              currency: openStringSchema,
+              observedAt: unixSchema.nullable(),
+            })
+            .strict(),
+        ),
+      })
+      .strict(),
+    clocks: z
+      .object({
+        quoteObservedAt: unixSchema.nullable(),
+        tradeObservedAt: unixSchema.nullable(),
+        underlyingObservedAt: unixSchema.nullable(),
+        volatilityObservedAt: unixSchema.nullable(),
+        publishedAt: unixSchema.nullable(),
+        receivedAt: unixSchema,
+        computedAt: unixSchema,
+      })
+      .strict(),
+    ages: z
+      .object({
+        quoteS: finiteSchema.nullable(),
+        tradeS: finiteSchema.nullable(),
+        underlyingS: finiteSchema.nullable(),
+        volatilityS: finiteSchema.nullable(),
+      })
+      .strict(),
+    entitlement: z
+      .object({
+        class: z.enum(["real-time", "delayed", "end-of-day", "indicative", "unknown"]),
+        declaredDelayS: countSchema.nullable(),
+        rightsRef: openStringSchema.nullable(),
+      })
+      .strict(),
+    expiryClock: z
+      .object({
+        expiry: unixSchema,
+        timeZone: z.literal("America/New_York"),
+        basis: z.enum(["trading-time", "calendar-time"]),
+        yearsToExpiry: finiteSchema.nullable(),
+      })
+      .strict(),
+    quality: z
+      .object({
+        readiness: z.enum(["ready", "degraded", "unavailable"]),
+        reasons: z.array(openStringSchema),
+        uncertainty: z
+          .object({
+            ivLow: finiteSchema.nonnegative().nullable(),
+            ivHigh: finiteSchema.nonnegative().nullable(),
+            fairLow: moneySchema.nullable(),
+            fairHigh: moneySchema.nullable(),
+          })
+          .strict()
+          .nullable(),
+        disagreement: z
+          .object({ provider: openStringSchema, fairBps: finiteSchema.nonnegative().nullable() })
+          .strict()
+          .nullable(),
+        fallback: z
+          .object({ from: openStringSchema, to: openStringSchema, reason: openStringSchema })
+          .strict()
+          .nullable(),
+      })
+      .strict(),
+    pricedSpot: moneySchema.nullable(),
+  })
+  .strict()
+  .superRefine((value, ctx) => {
+    if ((value.quality.readiness === "ready") !== (value.quality.reasons.length === 0)) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["quality", "reasons"],
+        message: "reasons must be empty exactly when pricing is ready" });
+    }
+    if (value.method === "listed") {
+      const listed = value.identity.listed[0];
+      const quote = value.observations.listedQuotes[0];
+      if (value.identity.listed.length !== 1) {
+        ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["identity", "listed"],
+          message: "listed pricing requires exactly one listed instrument" });
+      }
+      if (value.observations.listedQuotes.length !== 1) {
+        ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["observations", "listedQuotes"],
+          message: "listed pricing requires exactly one listed quote" });
+      }
+      if (listed !== undefined) {
+        if (listed.providerInstrumentId === null) {
+          ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["identity", "listed", 0, "providerInstrumentId"],
+            message: "listed pricing requires an exact provider instrument id" });
+        }
+        if (listed.root !== null && listed.root !== value.identity.market) {
+          ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["identity", "listed", 0, "root"],
+            message: "listed instrument root must match the canonical market when stated" });
+        }
+        if (listed.side !== value.identity.option.side) {
+          ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["identity", "listed", 0, "side"],
+            message: "listed instrument side must match the priced option" });
+        }
+        if (decimalRaw(listed.strike, value.identity.option.strike.decimals) !== value.identity.option.strike.raw) {
+          ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["identity", "listed", 0, "strike"],
+            message: "listed instrument strike must match the priced option" });
+        }
+        if (listed.expiry !== null && listed.expiry !== value.identity.option.expiry) {
+          ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["identity", "listed", 0, "expiry"],
+            message: "listed instrument expiry must match the priced option when stated" });
+        }
+        if (listed.multiplier !== null && listed.multiplier !== 100) {
+          ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["identity", "listed", 0, "multiplier"],
+            message: "listed instrument multiplier must be 100 when stated" });
+        }
+      }
+      if (quote !== undefined) {
+        const bidIsPositive = quote.bid === null ? null : compareDecimalStrings(quote.bid, "0");
+        const askVsBid = quote.bid === null || quote.ask === null
+          ? null : compareDecimalStrings(quote.ask, quote.bid);
+        if (bidIsPositive === null || askVsBid === null || bidIsPositive <= 0 || askVsBid < 0) {
+          ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["observations", "listedQuotes", 0],
+            message: "listed pricing requires a finite, positive, uncrossed two-sided quote" });
+        }
+      }
+      if (listed !== undefined && quote !== undefined &&
+          listed.providerInstrumentId !== quote.providerInstrumentId) {
+        ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["observations", "listedQuotes", 0, "providerInstrumentId"],
+          message: "listed quote must identify the priced listed instrument" });
+      }
+      if (value.contributingExpiries.length !== 1 ||
+          value.contributingExpiries[0] !== value.identity.option.expiry) {
+        ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["contributingExpiries"],
+          message: "listed pricing must use exactly the priced option expiry" });
+      }
+    }
+    const clocks = [
+      ["quoteS", "quoteObservedAt"],
+      ["tradeS", "tradeObservedAt"],
+      ["underlyingS", "underlyingObservedAt"],
+      ["volatilityS", "volatilityObservedAt"],
+    ] as const;
+    for (const [ageKey, clockKey] of clocks) {
+      const observedAt = value.clocks[clockKey];
+      const expected = observedAt === null ? null : value.clocks.computedAt - observedAt;
+      if (value.ages[ageKey] !== expected) {
+        ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["ages", ageKey],
+          message: `${ageKey} must derive from computedAt and ${clockKey}` });
+      }
+    }
+    if (value.expiryClock.expiry !== value.identity.option.expiry) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["expiryClock", "expiry"],
+        message: "expiry clocks must describe the priced option" });
+    }
+  });
 
 /**
  * status: open (now < mintCutoff) · cutoff (mintCutoff ≤ now < expiry) · expired (past expiry, no
@@ -124,8 +374,15 @@ export const quoteSchema = z
     iv: finiteSchema.nonnegative().nullable(),
     delta: finiteSchema.min(-1).max(1).nullable(),
     last: moneySchema.nullable(),
+    fairProvenance: pricingProvenanceSchema.nullable().optional(),
   })
-  .strict();
+  .strict()
+  .superRefine((value, ctx) => {
+    if (value.fair !== null && value.fairProvenance?.quality.readiness === "unavailable") {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["fairProvenance", "quality", "readiness"],
+        message: "numeric fair provenance cannot be unavailable" });
+    }
+  });
 
 /** A ticket's cost (USDG, taker fee included), its net payout at the card target and payout/cost rounded down to 2 dp. */
 const cardTicketSchema = z
@@ -197,10 +454,303 @@ export const errorSchema = z
   .strict();
 
 const nextCursorSchema = z.string().min(1).nullable();
+const maybeAddress = addressSchema.nullable();
+
+/**
+ * `<operationId>:<nonce>`, lowercase, exactly as the indexer keys the ingest row.
+ *
+ * `nonce` is AccessManager's `uint32`, so ten digits is its whole range; a leading zero is refused
+ * so one row can never have two spellings of the same key.
+ */
+const OPERATION_KEY_RE = /^0x[0-9a-f]{64}:(0|[1-9]\d{0,9})$/;
+
+export const adminOperationSchema = z
+  .object({
+    /**
+     * THE UNIQUE ONE. `id` is AccessManager's operation id and it REPEATS: rescheduling the same
+     * call reuses it, and the indexer keys its row on `operationId:nonce` for exactly that reason
+     * (`indexer/src/v2/accessManager.ts:135-137`). Two live rows can therefore carry the same `id`,
+     * so anything that needs a per-row identity -- a React key, a dedupe, a map -- uses this.
+     * `id` is unchanged in meaning and stays on the wire for readers that key on the operation.
+     */
+    key: z.string().regex(OPERATION_KEY_RE, "expected <operationId>:<nonce>"),
+    id: txHashSchema,
+    role: openStringSchema,
+    target: addressSchema,
+    /** Null when scheduled calldata is shorter than a four-byte selector. */
+    selector: z.string().regex(/^0x[0-9a-f]{8}$/, "expected a lowercase 4-byte selector").nullable(),
+    label: openStringSchema,
+    caller: addressSchema,
+    scheduledAt: unixSchema,
+    readyAt: unixSchema,
+    status: z.enum(["pending", "executed", "canceled"]),
+  })
+  .strict();
+
+export const adminOperationsResponseSchema = z
+  .object({ items: z.array(adminOperationSchema), nextCursor: nextCursorSchema })
+  .strict();
+
+export const flywheelAssetSchema = z
+  .object({
+    asset: addressSchema,
+    symbol: z.string().min(1).nullable(),
+    decimals: decimalsSchema.nullable(),
+    amountRaw: uintStringSchema,
+  })
+  .strict();
+
+export const flywheelDistributionSchema = z
+  .object({
+    id: openStringSchema,
+    asset: addressSchema,
+    symbol: z.string().min(1).nullable(),
+    decimals: decimalsSchema.nullable(),
+    assetInRaw: uintStringSchema,
+    usdgInRaw: uintStringSchema,
+    treasuryOutRaw: uintStringSchema,
+    buybackAddedRaw: uintStringSchema,
+    ts: unixSchema,
+    tx: txHashSchema,
+  })
+  .strict();
+
+export const flywheelResponseSchema = z
+  .object({
+    configured: z.boolean(),
+    splitter: maybeAddress,
+    tokenAddress: maybeAddress,
+    tokenDecimals: decimalsSchema.nullable(),
+    burnedTotal: uintStringSchema.nullable(),
+    burned7d: uintStringSchema.nullable(),
+    revenue7d: z.array(flywheelAssetSchema),
+    held: z.array(flywheelAssetSchema),
+    lastDistribution: flywheelDistributionSchema.nullable(),
+    distributions: z.array(flywheelDistributionSchema),
+  })
+  .strict();
+
+/**
+ * Lending vault wire (the `/v2/earn` route; not the `/earn` covered-call writer page).
+ * Every figure that can be "not yet observed" is nullable: null is unavailable, "0" is observed
+ * zero. The route projects v2EarnVault* rows and does not compute a rate.
+ */
+export const earnQueuedRequestSchema = z
+  .object({
+    id: openStringSchema,
+    status: z.enum(["queued", "fulfilled", "cancelled"]),
+    sharesQueued: uintStringSchema,
+    /** Null: the request did not quote an asset amount. "0" would be an observed ask of nothing. */
+    assetsRequested: uintStringSchema.nullable(),
+    /** Null: still queued or cancelled — not a zero payout. "0" is a fulfilment that delivered nothing. */
+    fulfilledAssets: uintStringSchema.nullable(),
+    requestedAt: unixSchema,
+  })
+  .strict();
+
+export const earnAccountSchema = z
+  .object({
+    address: addressSchema,
+    /** Null: no per-account share balance is stored. "0" would be an observed empty holding. */
+    shares: uintStringSchema.nullable(),
+    queued: z.array(earnQueuedRequestSchema).optional(),
+  })
+  .strict();
+
+export const earnAdapterMoveSchema = z
+  .object({
+    adapter: maybeAddress,
+    direction: z.enum(["pull", "push"]).nullable(),
+    requested: uintStringSchema,
+    /** Null: the move failed or was not reported. "0" is an observed empty delivery. */
+    delivered: uintStringSchema.nullable(),
+    ts: unixSchema,
+    tx: txHashSchema,
+  })
+  .strict();
+
+export const earnQueueSchema = z
+  .object({
+    depth: countSchema,
+    /** Null when depth is 0 (no open request). */
+    oldestRequestedAt: unixSchema.nullable(),
+  })
+  .strict();
+
+export const earnVaultSchema = z
+  .object({
+    vault: addressSchema,
+    /** Null until an asset-naming event is observed. */
+    asset: maybeAddress,
+    /** Null until an adapter is observed; the zero address would be a real detached adapter. */
+    adapter: maybeAddress,
+    /** Null: pause not observed. false: observed and running. */
+    paused: z.boolean().nullable(),
+    /** Null: share supply not observed. "0" is an observed empty supply. */
+    sharesSupply: uintStringSchema.nullable(),
+    /** Null: no deposit row yet. "0" is observed deposits that net to zero. */
+    deposited: uintStringSchema.nullable(),
+    /** Null: no skim row yet. "0" is an observed skim of nothing. */
+    skimmed: uintStringSchema.nullable(),
+    queue: earnQueueSchema.optional(),
+    lastAdapterMove: earnAdapterMoveSchema.nullable().optional(),
+    /**
+     * T-OP-086 (SEC-19 / T-OP-065). Live `indicativeAssetsPerShare()`: asset base units per 1e18 shares,
+     * a DISPLAY-ONLY mark -- locked collateral less the option's intrinsic value at the oracle spot,
+     * floored at zero -- never a price the vault pays. `convertToShares` / `convertToAssets` revert
+     * `PositionOpen()` while a position is open, so this is the figure to show then. Null: not read (no
+     * client, RPC down, or a deployment older than the view). "0" is an observed zero.
+     */
+    indicativeAssetsPerShare: uintStringSchema.nullable().optional(),
+    /** Live `indicativeTotalAssets()`, same mark over the whole vault, asset base units. Null: not read. */
+    indicativeTotalAssets: uintStringSchema.nullable().optional(),
+    /** Live `hasOpenPosition()`: true while the convert views refuse. Null: not read. */
+    hasOpenPosition: z.boolean().nullable().optional(),
+  })
+  .strict();
+
+export const earnResponseSchema = z
+  .object({
+    configured: z.boolean(),
+    vaults: z.array(earnVaultSchema).optional(),
+    account: earnAccountSchema.nullable().optional(),
+  })
+  .strict();
+
+/**
+ * House vault tape. NAV exists only at a Friday settlement boundary after positions are
+ * redeemed (P8-06 weekly epochs). While the current epoch is running, `nav` is null — never 0,
+ * never omitted. Zero would mean a published empty book at a boundary, which is a fact.
+ */
+export const houseNavSchema = z
+  .object({
+    epoch: uintStringSchema,
+    at: unixSchema,
+    /**
+     * MIRRORS indexer/ponder.schema.ts `v2HouseNav.usdg`, which is nullable because EpochRolled
+     * does not name the USDG leg. Read from the column, not reasoned: the ingest can only ever
+     * store null here, so a non-nullable wire field could be satisfied only by publishing a 0
+     * that this file's own header calls a fact. Null means "the log did not say".
+     */
+    usdg: moneySchema.nullable(),
+    /** Null for the same reason as `usdg` (`v2HouseNav.stockUnits`). Never 0. */
+    stockUnits: uintStringSchema.nullable(),
+    settlementPrice: moneySchema,
+    navUsdg: moneySchema,
+  })
+  .strict();
+
+export const houseEpochSchema = z
+  .object({
+    id: uintStringSchema,
+    /**
+     * MIRRORS `v2HouseEpoch.start` / `.end`, both nullable ("Null until observed"). Coercing an
+     * unobserved boundary to 0 would publish 1970-01-01 as an epoch boundary, which reads as a
+     * fact rather than as a gap.
+     */
+    start: unixSchema.nullable(),
+    end: unixSchema.nullable(),
+    nav: houseNavSchema.nullable(),
+    /** Null while running. Signed USDG fact after the boundary; a losing epoch is negative. */
+    resultUsdg: signedMoneySchema.nullable(),
+  })
+  .strict();
+
+export const houseQueueItemSchema = z
+  .object({
+    kind: z.enum(["deposit", "withdraw"]),
+    account: addressSchema,
+    /** Deposit USDG in raw six-decimal units; null for a withdrawal. */
+    assets: uintStringSchema.nullable(),
+    /** Deposit Stock Tokens in raw 18-decimal units; null for a withdrawal. Optional for old snapshots. */
+    stockAmount: uintStringSchema.nullable().optional(),
+    shares: uintStringSchema.nullable(),
+    requestedAt: unixSchema,
+  })
+  .strict();
+
+export const houseSharesSchema = z
+  .object({
+    address: addressSchema,
+    /** Null: no share row observed. "0" is an observed empty holding. */
+    shares: uintStringSchema.nullable(),
+    queued: z.array(houseQueueItemSchema).optional(),
+  })
+  .strict();
+
+export const houseVaultSchema = z
+  .object({
+    market: openStringSchema,
+    vault: maybeAddress,
+    /**
+     * Null: no epoch row observed for this vault yet. The vault is still LISTED when that
+     * happens - dropping it from the list would hide a real vault behind a missing row, which
+     * is the failure this row exists to kill.
+     */
+    currentEpoch: houseEpochSchema.nullable(),
+    /** Null: supply not observed. */
+    sharesSupply: uintStringSchema.nullable(),
+  })
+  .strict();
+
+export const houseListResponseSchema = z
+  .object({
+    items: z.array(houseVaultSchema),
+    nextCursor: nextCursorSchema,
+  })
+  .strict();
+
+export const houseMarketResponseSchema = z
+  .object({
+    market: openStringSchema,
+    vault: maybeAddress,
+    /** Null for the same reason as on `houseVaultSchema`. */
+    currentEpoch: houseEpochSchema.nullable(),
+    epochs: z.array(houseEpochSchema),
+    shares: houseSharesSchema.nullable().optional(),
+    queue: z.array(houseQueueItemSchema).optional(),
+  })
+  .strict();
+
+const payoutRouteSchema = z.discriminatedUnion("venue", [
+  z.object({ venue: z.literal("v3"), fee: countSchema }).strict(),
+  z
+    .object({ venue: z.literal("v4"), fee: countSchema, tickSpacing: z.number().int(), poolId: txHashSchema })
+    .strict(),
+]);
 
 // ---------------------------------------------------------------------------------------------
 // /v2/health, /v2/config, /v2/markets
 // ---------------------------------------------------------------------------------------------
+
+/**
+ * /v2/services — readiness of the services the indexer DOES NOT run. Additive (T-424); nothing
+ * above this line changed.
+ *
+ * `healthy` is true only when `reason` is `"ready"`. Every other reason is a distinct failure and
+ * is never healthy, so a consumer can branch on `healthy` alone and still be fail-closed, and read
+ * `reason` only to say WHY. `reasons` is the pricer's own closed set (keeper/src/v2/health.ts
+ * READY_REASONS), passed through untouched so a consumer never has to guess what a new string
+ * means; it is empty unless the pricer answered validly.
+ *
+ * Times are unix SECONDS, per this file's convention at the top. The pricer emits ISO strings on
+ * its own `/ready`; `services.ts` converts at the boundary. Neither side is wrong — the wire
+ * conventions differ, and the conversion is deliberate rather than a mismatch.
+ */
+export const pricerServiceSchema = z
+  .object({
+    healthy: z.boolean(),
+    reason: z.enum(["ready", "not_configured", "timeout", "http_error", "malformed_body", "not_ready", "stale"]),
+    reasons: z.array(z.enum([
+      "loop-wedged", "no-completed-tick", "tick-failed", "role-unread",
+      "role-refused", "role-delayed", "fair-stale", "state-unknown",
+    ])),
+    checkedAt: unixSchema,
+    lastEvaluationAt: unixSchema.nullable(),
+  })
+  .strict();
+
+export const servicesResponseSchema = z.object({ pricer: pricerServiceSchema }).strict();
 
 export const healthResponseSchema = z
   .object({
@@ -211,15 +761,13 @@ export const healthResponseSchema = z
   })
   .strict();
 
-const maybeAddress = addressSchema.nullable();
-
 /** Everything the dapp needs to boot. A contract that is not deployed yet is null. */
 export const configResponseSchema = z
   .object({
     chainId: countSchema,
     interfaceVersion: countSchema,
     deployBlock: uintStringSchema.nullable(),
-    usdg: z.object({ address: addressSchema, symbol: z.string().min(1), decimals: countSchema }).strict(),
+    usdg: z.object({ address: addressSchema, symbol: z.string().min(1), decimals: decimalsSchema }).strict(),
     contracts: z
       .object({
         clearinghouse: maybeAddress,
@@ -232,9 +780,30 @@ export const configResponseSchema = z
         makerVault: maybeAddress,
         makerRegistry: maybeAddress,
         rewardsDistributor: maybeAddress,
+        accessManager: maybeAddress.optional(),
+        stockZap: maybeAddress.optional(),
         sources: z.object({ chainlink: maybeAddress, univ3: maybeAddress, dataStreams: maybeAddress }).strict(),
       })
       .strict(),
+    flywheel: z.object({ feeSplitter: maybeAddress, buybackExecutor: maybeAddress }).strict().optional(),
+    safes: z.object({ admin: maybeAddress, treasury: maybeAddress }).strict().optional(),
+    access: z
+      .object({
+        manager: addressSchema,
+        roles: z.array(
+          z
+            .object({
+              id: countSchema,
+              name: openStringSchema,
+              delayS: countSchema,
+              holders: z.array(z.object({ address: addressSchema, delayS: countSchema }).strict()),
+            })
+            .strict(),
+        ),
+      })
+      .strict()
+      .optional(),
+    pendingOperations: z.array(adminOperationSchema.omit({ status: true })).optional(),
     fees: z
       .object({
         premiumFeeBps: countSchema,
@@ -244,6 +813,10 @@ export const configResponseSchema = z
         makerRebateBps: countSchema,
         exerciseFeeBps: countSchema,
         mintFeePpm: countSchema.max(5_000),
+        // T-OP-120 (G7). The Clearinghouse's `maxPayoutSlippageBps`, from the indexed PayoutAdapterSet event; the
+        // conversion floor of a call payout is value * (BPS - min(this + routeFee, 300)) / BPS. Null until an adapter
+        // has been set. Ceiling: MAX_PAYOUT_SLIPPAGE_CEIL_BPS = 300 (V2Constants.sol:88, setPayoutAdapter reverts above it).
+        maxPayoutSlippageBps: countSchema.max(300).nullable(),
       })
       .strict(),
     pendingFees: z.object({
@@ -267,6 +840,7 @@ export const configResponseSchema = z
         minSeriesLead: countSchema,
         mintFeePeriod: countSchema,
         mintFeeCeilPpm: countSchema,
+        feeChangeDelay: countSchema.optional(),
       })
       .strict(),
     ladder: z
@@ -288,17 +862,44 @@ export const marketSchema = z
     name: z.string().min(1),
     underlying: addressSchema,
     status: z.enum(["planned", "live", "paused"]),
+    /**
+     * T-OP-099. Whether the market is in the owner's launch set (registry `launchSet.markets`, projected by
+     * gen-v2-registry.mjs). `status` is what the CHAIN says about registration; `launch` is what the REGISTRY says
+     * about the launch, and a registered market outside the set is served with `launch: false` rather than dropped.
+     * The app never offers a trade on a non-launch market whatever `status` says.
+     */
+    launch: z.boolean(),
     // A failed live oracle read leaves only this market's spot unavailable.
     spot: moneySchema.nullable(),
     spotUpdatedAt: unixSchema.nullable(),
     strikeTick: moneySchema,
     puts: z.boolean(),
     mintFeePpm: countSchema.max(5_000),
+    settlement: z
+      .object({
+        sourceCount: countSchema.min(1).max(8),
+        uncorroboratedDelayS: countSchema.min(1_800).max(86_400),
+        route: payoutRouteSchema.nullable(),
+      })
+      .strict()
+      .optional(),
     expiries: z.array(unixSchema),
     stats: z
       .object({
         volume24h: moneySchema,
         premium7d: moneySchema,
+        /**
+         * T-425. The indexed head's block time, in Unix seconds, that `volume24h` and `premium7d`
+         * were measured up to. NEVER the host clock: the data only reaches the Ponder checkpoint, so
+         * a host-clock window shrinks silently toward zero while the indexer lags and a quiet day
+         * cannot be told from a stalled index.
+         *
+         * REQUIRED, and 0 rather than absent when no checkpoint could be read. 0 is not a timestamp
+         * anyone can mistake for a real one, and it is the same condition under which both figures
+         * above are 0 -- together they say "no window was measured", which is precisely the sentence
+         * the old shape could not say.
+         */
+        asOf: unixSchema,
         openInterestUnits: uintStringSchema,
         seriesOpen: countSchema,
       })
@@ -326,6 +927,8 @@ export const marketSeriesResponseSchema = z
         })
         .strict(),
     ),
+    /** T-425. The indexed head each item's `volume24h` window ends at. See marketSchema.stats.asOf. */
+    asOf: unixSchema,
     nextCursor: nextCursorSchema,
   })
   .strict();
@@ -438,10 +1041,17 @@ export const positionsResponseSchema = z
           units: uintStringSchema,
           avgCost: moneySchema, // USDG per whole share, taker fees included
           mark: moneySchema.nullable(), // fair value per whole share; null once expired
+          markSource: z.enum(["fair", "best-bid"]).nullable().optional(),
           unrealised: signedMoneySchema.nullable(), // USDG, (mark − avgCost) × units / 100
           claimable: moneySchema.nullable(), // collateral-asset amount `redeem` pays; null unless settled
         })
-        .strict(),
+        .strict()
+        .superRefine((value, ctx) => {
+          if (value.markSource !== undefined && ((value.mark === null) !== (value.markSource === null))) {
+            ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["markSource"],
+              message: "markSource must be null exactly when mark is null" });
+          }
+        }),
     ),
     shorts: z.array(
       z
@@ -518,7 +1128,8 @@ const historyMintSchema = z
     ts: unixSchema,
     longId: uintStringSchema,
     series: seriesRefSchema,
-    data: z.object({ units: uintStringSchema, collateral: moneySchema, fee: moneySchema, longTo: addressSchema, tx: txHashSchema }).strict(),
+    data: z.object({ units: uintStringSchema, collateral: moneySchema, fee: moneySchema,
+      payer: addressSchema.optional(), longTo: addressSchema, tx: txHashSchema }).strict(),
   })
   .strict();
 
@@ -722,6 +1333,18 @@ export const calendarHolidaysResponseSchema = z.object({
   }).strict()),
 }).strict();
 
+/** Optional consumer-first state for the current AutoRoller position. All prices are USDG6 per whole share. */
+const strategyUsdgPriceSchema = moneySchema.extend({ decimals: z.literal(6) });
+
+export const strategyPricingSchema = z.object({
+  currentAsk: strategyUsdgPriceSchema.nullable(),
+  band: z.object({ min: strategyUsdgPriceSchema, max: strategyUsdgPriceSchema }).strict().nullable(),
+  lastRepricedAt: unixSchema.nullable(),
+  lastRepricedPrice: strategyUsdgPriceSchema.nullable(),
+  repriceCount: countSchema,
+  fair: strategyUsdgPriceSchema.nullable(),
+}).strict();
+
 export const strategiesResponseSchema = z
   .object({
     items: z.array(
@@ -737,6 +1360,7 @@ export const strategiesResponseSchema = z
           lastRolledAt: unixSchema.nullable(),
           lastStaleCancelAt: unixSchema.nullable(),
           staleSpot: moneySchema.nullable(),
+          pricing: strategyPricingSchema.optional(),
         })
         .strict(),
     ),
@@ -790,14 +1414,56 @@ export const pnlResponseSchema = winSchema
   })
   .strict();
 
+/**
+ * THE READABILITY OF A SELF-TRADE ZERO.
+ *
+ * The detector attributes a writer only on `takerIsBuyer && minimumPrice && linked`
+ * (indexer/lib/v2/selfTrade.ts), so pricing the primary leg one tick higher, or funding the
+ * second wallet off chain so no indexed edge exists, both drive `selfTradeUnits` to exactly 0.
+ * D18 accepted the self-trade loophole ON CONDITION that the indexer flags the pattern, and a
+ * bare 0 does not satisfy that condition - it is indistinguishable from an honest market.
+ *
+ *   detected - units were attributed; the number means what it says.
+ *   clean    - nothing attributed AND nothing shaped like the pattern was refused. A real zero.
+ *   blind    - nothing attributed, but legs WERE refused for a reason an evader controls. The
+ *              zero is an artefact of the detector, not a statement about the market.
+ *
+ * `unseenUnits` is never added to `selfTradeUnits`: a suspicion is not a measurement.
+ */
+export const selfTradeCoverageSchema = z
+  .object({
+    status: z.enum(["detected", "clean", "blind"]),
+    unseenUnits: uintStringSchema,
+    reasons: z.array(z.object({
+      reason: z.enum(["price-above-counted-band", "no-link-evidence"]),
+      units: uintStringSchema,
+      fills: countSchema,
+    }).strict()),
+  })
+  .strict();
+
 export const statsResponseSchema = z
   .object({
+    /**
+     * T-425. The indexed head's block time, in Unix seconds, that `volume24h`, `biggestWinDay` and
+     * `biggestWinWeek` were measured up to -- never the host clock. REQUIRED, and 0 when no
+     * checkpoint could be read, which is the same condition that makes `volume24h` 0 and both
+     * biggest-win fields null. See marketSchema.stats.asOf, which carries the identical value.
+     */
+    asOf: unixSchema,
     volume24h: moneySchema,
     volumeAll: moneySchema,
     premiumAll: moneySchema,
     feesAll: moneySchema,
     contractsFilled: uintStringSchema,
     holders: countSchema,
+    selfTradeUnits: uintStringSchema.optional(),
+    /**
+     * Whether `selfTradeUnits` means what it appears to mean. See selfTradeCoverageSchema: a
+     * bare 0 cannot distinguish "nobody is self-trading" from "the detector could not see it",
+     * and both cheap evasions produce exactly 0.
+     */
+    selfTradeCoverage: selfTradeCoverageSchema.optional(),
     biggestWinDay: winSchema.nullable(),
     biggestWinWeek: winSchema.nullable(),
   })
@@ -807,16 +1473,50 @@ export const statsResponseSchema = z
 // Makers, fair value
 // ---------------------------------------------------------------------------------------------
 
-export const makerEpochSchema = z.object({ id: countSchema, start: unixSchema, end: unixSchema }).strict();
+/**
+ * The scoring policy the epoch's figures were produced under. ADDITIVE and optional: an absent `band`
+ * means the producer does not publish its policy (an older producer), and a consumer must not infer one
+ * (02-interfaces.md:886-899). `bps` with `minUsdg` is the band a price is inside when
+ * `|price - fair| <= max(fair * bps / 10_000, minUsdg)`.
+ *
+ * The values are OQ-14 PLACEHOLDERS and are not approved for funded use.
+ */
+export const makerBandSchema = z.object({ bps: countSchema.max(10_000), minUsdg: moneySchema }).strict();
+
+export const makerEpochSchema = z
+  .object({ id: countSchema, start: unixSchema, end: unixSchema, band: makerBandSchema.optional() })
+  .strict();
 
 const makerStatFields = {
+  /**
+   * Which benchmark produced uptimePct, avgSpreadBps, depthWithin100bps and score. THEY ARE COMPARABLE
+   * ONLY WITHIN ONE POLICY. 1 = the live /fair estimate, used until callhouse 109e664b and never
+   * labelled: a maker item WITHOUT this field is a policy-1 figure. 2 = chain-only reference from other
+   * participants' fills (T-307). A new policy is a new number, never a silent redefinition.
+   */
+  benchmarkPolicy: countSchema.min(1),
+  /**
+   * Series-ticks by kind. absent: no quote on either side (downtime). valid: quoted and measured, possibly
+   * at zero. missingReference: quoted but unmeasurable, and outside uptime and depth. A maker that never
+   * quoted and one that quoted badly can share a score; they never share these counts.
+   */
+  samples: z.object({ absent: countSchema, valid: countSchema, missingReference: countSchema }).strict(),
   uptimePct: finiteSchema.min(0).max(100),
   avgSpreadBps: finiteSchema.nonnegative().nullable(), // null: never quoted both sides in the epoch
-  depthWithin100bps: uintStringSchema, // units
+  depthWithin100bps: uintStringSchema, // units, always inside 100 bps of fair whatever the epoch band is
+  /**
+   * The same statistic inside the epoch's `band`, optional and new (F2 D10 lands as add-then-drop, so
+   * `depthWithin100bps` keeps its name AND its meaning until a separately logged migration drops it).
+   * Absent means the producer does not compute it; it is never an alias of the field above.
+   */
+  depthInBand: uintStringSchema.optional(), // units
   fills: countSchema,
   volume: moneySchema,
   rebates: moneySchema,
   score: finiteSchema.nonnegative(),
+  selfTradeUnits: uintStringSchema.optional(),
+  /** Same three-state verdict as on /stats, scoped to this maker. */
+  selfTradeCoverage: selfTradeCoverageSchema.optional(),
 };
 
 export const makersResponseSchema = z
@@ -836,6 +1536,68 @@ export const makerResponseSchema = z
   })
   .strict();
 
+export const rewardEpochSchema = z.object({
+  distributor: addressSchema,
+  epochId: countSchema,
+  root: z.string().regex(/^0x[0-9a-fA-F]{64}$/),
+  total: moneySchema,
+  claimed: moneySchema,
+}).strict();
+
+export const rewardEpochsResponseSchema = z.object({
+  program: z.string(),
+  distributors: z.array(z.object({
+    distributor: addressSchema,
+    funded: moneySchema,
+    defunded: moneySchema,
+    balance: moneySchema,
+  }).strict()),
+  items: z.array(rewardEpochSchema),
+  nextCursor: nextCursorSchema,
+}).strict();
+
+export const rewardClaimSchema = z.object({
+  program: z.string(),
+  distributor: addressSchema,
+  epochId: countSchema,
+  index: countSchema,
+  amount: moneySchema,
+  claimed: z.boolean(),
+  tx: txHashSchema.nullable(),
+}).strict();
+
+export const rewardClaimsResponseSchema = z.object({
+  address: addressSchema,
+  items: z.array(rewardClaimSchema),
+  nextCursor: nextCursorSchema,
+}).strict();
+
+const vaultBalanceSchema = z.object({
+  asset: addressSchema,
+  symbol: z.string().min(1),
+  free: moneySchema,
+}).strict();
+
+export const vaultResponseSchema = z.object({
+  vault: addressSchema,
+  protocol: z.literal(true),
+  balances: z.object({
+    wallet: z.array(vaultBalanceSchema),
+    ledger: z.array(vaultBalanceSchema),
+  }).strict(),
+  limits: z.object({
+    maxSeriesUnits: uintStringSchema,
+    maxTotalNotional: uintStringSchema,
+    askToleranceBps: countSchema,
+    maxBidBpsOfSpot: countSchema,
+    maxOrderLifetime: countSchema,
+    maxDailyOutflow: uintStringSchema,
+  }).strict(),
+  outflow: z.object({ used: moneySchema, cap: moneySchema }).strict(),
+  liveOrderCount: countSchema,
+  trackedSeries: z.array(uintStringSchema),
+}).strict();
+
 /**
  * Proxied from the pricing service (§5), which never throws on bad market data and answers
  * `{ fair: null, reason }` instead; the indexer passes that through rather than inventing a 5xx.
@@ -848,9 +1610,42 @@ export const fairResponseSchema = z.union([
       delta: finiteSchema.min(-1).max(1),
       source: z.enum(["cboe", "model"]),
       asOf: unixSchema,
+      spot: moneySchema.optional(),
+      provenance: pricingProvenanceSchema.optional(),
     })
-    .strict(),
-  z.object({ fair: z.null(), reason: z.string().min(1) }).strict(),
+    .strict()
+    .superRefine((value, ctx) => {
+      if (value.provenance === undefined) return;
+      if (value.provenance.quality.readiness === "unavailable") {
+        ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["provenance", "quality", "readiness"],
+          message: "numeric fair provenance cannot be unavailable" });
+      }
+      const source = value.provenance.provider === "cboe-delayed" && value.provenance.method === "listed"
+        ? "cboe" : "model";
+      if (value.source !== source) {
+        ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["source"],
+          message: "legacy source must agree with pricing provenance" });
+      }
+      if (value.spot !== undefined && value.provenance.pricedSpot !== null &&
+          (value.spot.raw !== value.provenance.pricedSpot.raw || value.spot.decimals !== value.provenance.pricedSpot.decimals)) {
+        ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["spot"],
+          message: "spot must agree with provenance.pricedSpot" });
+      }
+    }),
+  z
+    .object({
+      fair: z.null(),
+      reason: z.string().min(1),
+      reasonCode: openStringSchema.optional(),
+      provenance: pricingProvenanceSchema.optional(),
+    })
+    .strict()
+    .superRefine((value, ctx) => {
+      if (value.provenance !== undefined && value.provenance.quality.readiness !== "unavailable") {
+        ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["provenance", "quality", "readiness"],
+          message: "null fair provenance must be unavailable" });
+      }
+    }),
 ]);
 
 // ---------------------------------------------------------------------------------------------
@@ -872,7 +1667,13 @@ export type RouteSpec = {
  */
 export const ROUTES: readonly RouteSpec[] = [
   { route: "/v2/health", schema: healthResponseSchema, cache: 0 },
+  // Cache 0: services.ts holds its own short cache, and a status route that the edge could
+  // serve from a 15s copy would report a dead pricer as healthy for 15 seconds after it died.
+  { route: "/v2/services", schema: servicesResponseSchema, cache: 0 },
   { route: "/v2/config", schema: configResponseSchema, cache: 0 },
+  { route: "/v2/admin/operations", schema: adminOperationsResponseSchema, cache: 15 },
+  { route: "/v2/flywheel", schema: flywheelResponseSchema, cache: 15 },
+  { route: "/v2/earn", schema: earnResponseSchema, cache: 15 },
   { route: "/v2/markets", schema: marketsResponseSchema, cache: 15 },
   { route: "/v2/calendar/holidays", schema: calendarHolidaysResponseSchema, cache: 15 },
   { route: "/v2/markets/:ticker/series", schema: marketSeriesResponseSchema, cache: 15 },
@@ -892,5 +1693,10 @@ export const ROUTES: readonly RouteSpec[] = [
   { route: "/v2/stats", schema: statsResponseSchema, cache: 15 },
   { route: "/v2/makers", schema: makersResponseSchema, cache: 15 },
   { route: "/v2/makers/:address", schema: makerResponseSchema, cache: 15 },
+  { route: "/v2/rewards/epochs", schema: rewardEpochsResponseSchema, cache: 15 },
+  { route: "/v2/rewards/:address/claims", schema: rewardClaimsResponseSchema, cache: 15 },
+  { route: "/v2/vault", schema: vaultResponseSchema, cache: 15 },
   { route: "/v2/fair/:longId", schema: fairResponseSchema, cache: 15 },
+  { route: "/v2/house", schema: houseListResponseSchema, cache: 15 },
+  { route: "/v2/house/:market", schema: houseMarketResponseSchema, cache: 15 },
 ];

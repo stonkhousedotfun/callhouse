@@ -48,6 +48,10 @@ test('the MM bot\'s alert kinds (K2-04) are registered with a severity and are r
     // INTERFACE_VERSION 7 (c21): the vault's daily outflow cap binding, and USDG this bot did not spend.
     v2_mm_outflow: 'warn',
     v2_mm_outflow_foreign: 'error',
+    v2_mm_wrong_book: 'error',
+    v2_mm_epoch_unflat: 'warn',
+    v2_mm_protocol_cross: 'warn',
+    v2_mm_house_unavailable: 'error',
   };
   for (const [kind, severity] of Object.entries(mm)) {
     assert.equal(ALERT_SEVERITY[kind], severity, kind);
@@ -60,6 +64,7 @@ test('the pricer\'s alert kinds (K2-05) are registered with a severity and are r
     v2_pricer_no_role: 'error',
     v2_pricer_fair_unavailable: 'warn',
     v2_pricer_reprice_failed: 'error',
+    v2_pricer_clamped: 'warn',
   };
   for (const [kind, severity] of Object.entries(pricer)) {
     assert.equal(ALERT_SEVERITY[kind], severity, kind);

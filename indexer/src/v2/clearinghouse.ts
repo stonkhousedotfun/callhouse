@@ -167,7 +167,7 @@ ponder.on("Clearinghouse:SeriesCreated", async ({ event, context }) => {
   let weekly: boolean;
   if (V2_EXPIRY_CALENDAR === undefined) {
     const calendar = await context.client.readContract({ abi: clearinghouseAbi, address: clearinghouse(),
-      functionName: "calendar", cache: "immutable" });
+      functionName: "calendar", blockNumber: event.block.number });
     weekly = await context.client.readContract({ abi: expiryCalendarAbi, address: calendar,
       functionName: "isWeekly", args: [expiry] });
   } else {
@@ -337,6 +337,33 @@ ponder.on("Clearinghouse:CreatePausedSet", async ({ event, context }) => {
   await context.db.update(schema.v2ProtocolState, { id: "global" }).set({
     createPaused: event.args.paused, updatedAt: event.block.timestamp,
   });
+});
+
+ponder.on("Clearinghouse:DefaultMarketFeesSet", async ({ event, context }) => {
+  await protocol(context.db, event.block.timestamp);
+  await context.db.update(schema.v2ProtocolState, { id: "global" }).set({
+    defaultExerciseFeeBps: event.args.exerciseFeeBps,
+    defaultMintFeePpm: event.args.mintFeePpm,
+    updatedAt: event.block.timestamp,
+  });
+});
+
+ponder.on("Clearinghouse:DefaultOracleSet", async ({ event, context }) => {
+  await protocol(context.db, event.block.timestamp);
+  await context.db.update(schema.v2ProtocolState, { id: "global" }).set({
+    defaultOracle: key(event.args.oracle), updatedAt: event.block.timestamp,
+  });
+});
+
+ponder.on("Clearinghouse:MinterSet", async ({ event, context }) => {
+  const minter = key(event.args.minter);
+  const values = {
+    allowed: event.args.allowed,
+    changedAt: event.block.timestamp,
+    changedBlock: event.block.number,
+    changedTx: event.transaction.hash,
+  };
+  await context.db.insert(schema.v2Minter).values({ minter, ...values }).onConflictDoUpdate(values);
 });
 
 ponder.on("Clearinghouse:FeeRecipientSet", async ({ event, context }) => {

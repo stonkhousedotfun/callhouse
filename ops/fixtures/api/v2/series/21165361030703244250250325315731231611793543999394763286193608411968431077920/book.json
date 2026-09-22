@@ -9,7 +9,7 @@
       "units": "100",
       "orders": [
         {
-          "orderId": "1049",
+          "orderId": "1050",
           "maker": "0xd3b47D8a6B8e3fc6160Cd02634CF7Ae74aDeB66f",
           "units": "100",
           "onChainRemainingUnits": "100",
@@ -31,15 +31,15 @@
       "units": "120",
       "orders": [
         {
-          "orderId": "1048",
+          "orderId": "1049",
           "maker": "0xd3b47D8a6B8e3fc6160Cd02634CF7Ae74aDeB66f",
           "units": "120",
           "onChainRemainingUnits": "120",
-          "makerFreeUnits": "2309",
+          "makerFreeUnits": "2310",
           "makerFreeCollateral": {
-            "raw": "23099855773809523808",
+            "raw": "23100000000000000000",
             "decimals": 18,
-            "formatted": "23.099855773809523808"
+            "formatted": "23.1"
           },
           "kind": "AskWrite",
           "validUntil": 1789759800

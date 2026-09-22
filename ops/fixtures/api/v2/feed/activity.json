@@ -1,7 +1,7 @@
 {
   "items": [
     {
-      "id": "0x34147ef9a21fcd12524e310dd64171391a9fed61aaad4e9721faf1de96b83f4e-2",
+      "id": "0xf66abf0384210b54868105a4821dc59b2c809e268ff10b44c23f59ca90e39aea-3",
       "kind": "fill",
       "ts": 1789585500,
       "longId": "29578741721805883636096061263188069692265858688783836537835344212255512771642",
@@ -19,11 +19,11 @@
         "expiry": 1790366400,
         "tenor": "weekly",
         "mintCutoff": 1790364600,
-        "mintFeePpm": 80,
+        "mintFeePpm": 0,
         "mintFeesHeld": {
-          "raw": "51646825396826",
+          "raw": "0",
           "decimals": 18,
-          "formatted": "0.000051646825396826"
+          "formatted": "0"
         },
         "mintFeesAccrued": {
           "raw": "0",
@@ -37,7 +37,7 @@
         "0x70556BaA315dD8d467ea452aBcd7deEbEa073Ff9"
       ],
       "data": {
-        "orderId": "1021",
+        "orderId": "1022",
         "taker": "0x4088c59Eb3fB713B124f182E7083AEb3358A030B",
         "maker": "0x70556BaA315dD8d467ea452aBcd7deEbEa073Ff9",
         "recipient": "0x4088c59Eb3fB713B124f182E7083AEb3358A030B",
@@ -58,9 +58,9 @@
           "formatted": "0.1"
         },
         "sellerFee": {
-          "raw": "0",
+          "raw": "90000",
           "decimals": 6,
-          "formatted": "0"
+          "formatted": "0.09"
         },
         "makerRebate": {
           "raw": "60000",
@@ -69,11 +69,11 @@
         },
         "primary": true,
         "takerIsBuyer": true,
-        "tx": "0x34147ef9a21fcd12524e310dd64171391a9fed61aaad4e9721faf1de96b83f4e"
+        "tx": "0xf66abf0384210b54868105a4821dc59b2c809e268ff10b44c23f59ca90e39aea"
       }
     },
     {
-      "id": "0xdd9d81052020032364801a571908dee82b4bfb574f6de302f022bf8249d8b732-2",
+      "id": "0x34147ef9a21fcd12524e310dd64171391a9fed61aaad4e9721faf1de96b83f4e-3",
       "kind": "fill",
       "ts": 1789585200,
       "longId": "43293694946995027951420864636341246531661381642010273628732417116006111144922",
@@ -91,11 +91,11 @@
         "expiry": 1789675200,
         "tenor": "daily",
         "mintCutoff": 1789673400,
-        "mintFeePpm": 80,
+        "mintFeePpm": 0,
         "mintFeesHeld": {
-          "raw": "9047619047620",
+          "raw": "0",
           "decimals": 18,
-          "formatted": "0.00000904761904762"
+          "formatted": "0"
         },
         "mintFeesAccrued": {
           "raw": "0",
@@ -110,7 +110,7 @@
         "0xF9806B161b1d09106C63E25907F50B4a93EF8fda"
       ],
       "data": {
-        "orderId": "1022",
+        "orderId": "1023",
         "taker": "0x70556BaA315dD8d467ea452aBcd7deEbEa073Ff9",
         "maker": "0xd3b47D8a6B8e3fc6160Cd02634CF7Ae74aDeB66f",
         "recipient": "0xF9806B161b1d09106C63E25907F50B4a93EF8fda",
@@ -131,9 +131,9 @@
           "formatted": "0.08006"
         },
         "sellerFee": {
-          "raw": "0",
+          "raw": "40030",
           "decimals": 6,
-          "formatted": "0"
+          "formatted": "0.04003"
         },
         "makerRebate": {
           "raw": "40030",
@@ -142,11 +142,11 @@
         },
         "primary": true,
         "takerIsBuyer": false,
-        "tx": "0xdd9d81052020032364801a571908dee82b4bfb574f6de302f022bf8249d8b732"
+        "tx": "0x34147ef9a21fcd12524e310dd64171391a9fed61aaad4e9721faf1de96b83f4e"
       }
     },
     {
-      "id": "0x04b0d4dcde3e0275052cbf0b99c4f495e89bf7eec8077a72dfaf224cf29e649e-2",
+      "id": "0xdd9d81052020032364801a571908dee82b4bfb574f6de302f022bf8249d8b732-3",
       "kind": "fill",
       "ts": 1789581600,
       "longId": "43293694946995027951420864636341246531661381642010273628732417116006111144922",
@@ -164,11 +164,11 @@
         "expiry": 1789675200,
         "tenor": "daily",
         "mintCutoff": 1789673400,
-        "mintFeePpm": 80,
+        "mintFeePpm": 0,
         "mintFeesHeld": {
-          "raw": "9047619047620",
+          "raw": "0",
           "decimals": 18,
-          "formatted": "0.00000904761904762"
+          "formatted": "0"
         },
         "mintFeesAccrued": {
           "raw": "0",
@@ -182,7 +182,7 @@
         "0xd3b47D8a6B8e3fc6160Cd02634CF7Ae74aDeB66f"
       ],
       "data": {
-        "orderId": "1020",
+        "orderId": "1021",
         "taker": "0x300a7AB2f92B536e3f58422372c964B2Bb535ea2",
         "maker": "0xd3b47D8a6B8e3fc6160Cd02634CF7Ae74aDeB66f",
         "recipient": "0x300a7AB2f92B536e3f58422372c964B2Bb535ea2",
@@ -203,9 +203,9 @@
           "formatted": "0.05058"
         },
         "sellerFee": {
-          "raw": "0",
+          "raw": "25290",
           "decimals": 6,
-          "formatted": "0"
+          "formatted": "0.02529"
         },
         "makerRebate": {
           "raw": "25290",
@@ -214,11 +214,11 @@
         },
         "primary": true,
         "takerIsBuyer": true,
-        "tx": "0x04b0d4dcde3e0275052cbf0b99c4f495e89bf7eec8077a72dfaf224cf29e649e"
+        "tx": "0xdd9d81052020032364801a571908dee82b4bfb574f6de302f022bf8249d8b732"
       }
     },
     {
-      "id": "0x04d0825e610571570d30e091170393d248e346bf277b0f923a1069353da0a0f6-2",
+      "id": "0x04b0d4dcde3e0275052cbf0b99c4f495e89bf7eec8077a72dfaf224cf29e649e-3",
       "kind": "fill",
       "ts": 1789578000,
       "longId": "46588051945214594507881385412189524467283696705776886860822256214930033866522",
@@ -236,11 +236,11 @@
         "expiry": 1789761600,
         "tenor": "weekly",
         "mintCutoff": 1789759800,
-        "mintFeePpm": 300,
+        "mintFeePpm": 0,
         "mintFeesHeld": {
-          "raw": "27321428571429",
+          "raw": "0",
           "decimals": 18,
-          "formatted": "0.000027321428571429"
+          "formatted": "0"
         },
         "mintFeesAccrued": {
           "raw": "0",
@@ -254,7 +254,7 @@
         "0xd3b47D8a6B8e3fc6160Cd02634CF7Ae74aDeB66f"
       ],
       "data": {
-        "orderId": "1019",
+        "orderId": "1020",
         "taker": "0xdFbfcf5f533505281840cA0d640aE0580D05a2Be",
         "maker": "0xd3b47D8a6B8e3fc6160Cd02634CF7Ae74aDeB66f",
         "recipient": "0xdFbfcf5f533505281840cA0d640aE0580D05a2Be",
@@ -275,9 +275,9 @@
           "formatted": "0.052554"
         },
         "sellerFee": {
-          "raw": "0",
+          "raw": "26277",
           "decimals": 6,
-          "formatted": "0"
+          "formatted": "0.026277"
         },
         "makerRebate": {
           "raw": "26277",
@@ -286,11 +286,11 @@
         },
         "primary": true,
         "takerIsBuyer": true,
-        "tx": "0x04d0825e610571570d30e091170393d248e346bf277b0f923a1069353da0a0f6"
+        "tx": "0x04b0d4dcde3e0275052cbf0b99c4f495e89bf7eec8077a72dfaf224cf29e649e"
       }
     },
     {
-      "id": "0xef1baab5d64911a91404b681ad0ebe65095c6edbd389ba525fdbef25e54bf0a8-2",
+      "id": "0x04d0825e610571570d30e091170393d248e346bf277b0f923a1069353da0a0f6-3",
       "kind": "fill",
       "ts": 1789576200,
       "longId": "106061210522032153259223709687936706376356793520792570208645879620069429413222",
@@ -308,11 +308,11 @@
         "expiry": 1789761600,
         "tenor": "weekly",
         "mintCutoff": 1789759800,
-        "mintFeePpm": 300,
+        "mintFeePpm": 0,
         "mintFeesHeld": {
-          "raw": "84910714285715",
+          "raw": "0",
           "decimals": 18,
-          "formatted": "0.000084910714285715"
+          "formatted": "0"
         },
         "mintFeesAccrued": {
           "raw": "0",
@@ -326,7 +326,7 @@
         "0x70556BaA315dD8d467ea452aBcd7deEbEa073Ff9"
       ],
       "data": {
-        "orderId": "1018",
+        "orderId": "1019",
         "taker": "0x83daA58d0a8d82D7b971338a03AA2f99bfADf4F8",
         "maker": "0x70556BaA315dD8d467ea452aBcd7deEbEa073Ff9",
         "recipient": "0x83daA58d0a8d82D7b971338a03AA2f99bfADf4F8",
@@ -347,9 +347,9 @@
           "formatted": "0.004"
         },
         "sellerFee": {
-          "raw": "0",
+          "raw": "2000",
           "decimals": 6,
-          "formatted": "0"
+          "formatted": "0.002"
         },
         "makerRebate": {
           "raw": "2400",
@@ -358,11 +358,11 @@
         },
         "primary": true,
         "takerIsBuyer": true,
-        "tx": "0xef1baab5d64911a91404b681ad0ebe65095c6edbd389ba525fdbef25e54bf0a8"
+        "tx": "0x04d0825e610571570d30e091170393d248e346bf277b0f923a1069353da0a0f6"
       }
     },
     {
-      "id": "0x87ee9338ca0b3976e898f3078a757e20ce09b1841f53ec8bc270a997cf84cb4b-2",
+      "id": "0xef1baab5d64911a91404b681ad0ebe65095c6edbd389ba525fdbef25e54bf0a8-1",
       "kind": "fill",
       "ts": 1789572600,
       "longId": "60558647635115674919406403683765577243570507269437549868919321410193856009092",
@@ -380,11 +380,11 @@
         "expiry": 1789761600,
         "tenor": "weekly",
         "mintCutoff": 1789759800,
-        "mintFeePpm": 80,
+        "mintFeePpm": 0,
         "mintFeesHeld": {
-          "raw": "37063492063493",
+          "raw": "0",
           "decimals": 18,
-          "formatted": "0.000037063492063493"
+          "formatted": "0"
         },
         "mintFeesAccrued": {
           "raw": "0",
@@ -398,7 +398,7 @@
         "0x4088c59Eb3fB713B124f182E7083AEb3358A030B"
       ],
       "data": {
-        "orderId": "1016",
+        "orderId": "1017",
         "taker": "0x83daA58d0a8d82D7b971338a03AA2f99bfADf4F8",
         "maker": "0x4088c59Eb3fB713B124f182E7083AEb3358A030B",
         "recipient": "0x83daA58d0a8d82D7b971338a03AA2f99bfADf4F8",
@@ -430,11 +430,11 @@
         },
         "primary": false,
         "takerIsBuyer": true,
-        "tx": "0x87ee9338ca0b3976e898f3078a757e20ce09b1841f53ec8bc270a997cf84cb4b"
+        "tx": "0xef1baab5d64911a91404b681ad0ebe65095c6edbd389ba525fdbef25e54bf0a8"
       }
     },
     {
-      "id": "0x0c4c526d444d60f94a98e9e471cc2fed740c0dca3d9e7f34b8d3ac78c578cf53-2",
+      "id": "0x87ee9338ca0b3976e898f3078a757e20ce09b1841f53ec8bc270a997cf84cb4b-3",
       "kind": "fill",
       "ts": 1789570800,
       "longId": "106061210522032153259223709687936706376356793520792570208645879620069429413222",
@@ -452,11 +452,11 @@
         "expiry": 1789761600,
         "tenor": "weekly",
         "mintCutoff": 1789759800,
-        "mintFeePpm": 300,
+        "mintFeePpm": 0,
         "mintFeesHeld": {
-          "raw": "84910714285715",
+          "raw": "0",
           "decimals": 18,
-          "formatted": "0.000084910714285715"
+          "formatted": "0"
         },
         "mintFeesAccrued": {
           "raw": "0",
@@ -470,7 +470,7 @@
         "0xd3b47D8a6B8e3fc6160Cd02634CF7Ae74aDeB66f"
       ],
       "data": {
-        "orderId": "1017",
+        "orderId": "1018",
         "taker": "0xdFbfcf5f533505281840cA0d640aE0580D05a2Be",
         "maker": "0xd3b47D8a6B8e3fc6160Cd02634CF7Ae74aDeB66f",
         "recipient": "0xdFbfcf5f533505281840cA0d640aE0580D05a2Be",
@@ -491,9 +491,9 @@
           "formatted": "0.025896"
         },
         "sellerFee": {
-          "raw": "0",
+          "raw": "12948",
           "decimals": 6,
-          "formatted": "0"
+          "formatted": "0.012948"
         },
         "makerRebate": {
           "raw": "12948",
@@ -502,11 +502,11 @@
         },
         "primary": true,
         "takerIsBuyer": true,
-        "tx": "0x0c4c526d444d60f94a98e9e471cc2fed740c0dca3d9e7f34b8d3ac78c578cf53"
+        "tx": "0x87ee9338ca0b3976e898f3078a757e20ce09b1841f53ec8bc270a997cf84cb4b"
       }
     },
     {
-      "id": "0xe3f7222375fdc35fc61b235035e26c94692e2ad0193193cd7d0453c38b2d2569-2",
+      "id": "0x0c4c526d444d60f94a98e9e471cc2fed740c0dca3d9e7f34b8d3ac78c578cf53-3",
       "kind": "fill",
       "ts": 1789566300,
       "longId": "53049387840509124880347138772092641306875327769503654725941913402917970002896",
@@ -524,11 +524,11 @@
         "expiry": 1789761600,
         "tenor": "weekly",
         "mintCutoff": 1789759800,
-        "mintFeePpm": 80,
+        "mintFeePpm": 0,
         "mintFeesHeld": {
-          "raw": "77500000000000",
+          "raw": "0",
           "decimals": 18,
-          "formatted": "0.0000775"
+          "formatted": "0"
         },
         "mintFeesAccrued": {
           "raw": "0",
@@ -542,7 +542,7 @@
         "0xd3b47D8a6B8e3fc6160Cd02634CF7Ae74aDeB66f"
       ],
       "data": {
-        "orderId": "1015",
+        "orderId": "1016",
         "taker": "0xdFbfcf5f533505281840cA0d640aE0580D05a2Be",
         "maker": "0xd3b47D8a6B8e3fc6160Cd02634CF7Ae74aDeB66f",
         "recipient": "0xdFbfcf5f533505281840cA0d640aE0580D05a2Be",
@@ -563,9 +563,9 @@
           "formatted": "0.075"
         },
         "sellerFee": {
-          "raw": "0",
+          "raw": "37500",
           "decimals": 6,
-          "formatted": "0"
+          "formatted": "0.0375"
         },
         "makerRebate": {
           "raw": "37500",
@@ -574,11 +574,11 @@
         },
         "primary": true,
         "takerIsBuyer": true,
-        "tx": "0xe3f7222375fdc35fc61b235035e26c94692e2ad0193193cd7d0453c38b2d2569"
+        "tx": "0x0c4c526d444d60f94a98e9e471cc2fed740c0dca3d9e7f34b8d3ac78c578cf53"
       }
     },
     {
-      "id": "0x1e293d0219102876414ec954396afd399869ec59d84a38558cdf1ede4b672bea-2",
+      "id": "0xe3f7222375fdc35fc61b235035e26c94692e2ad0193193cd7d0453c38b2d2569-3",
       "kind": "fill",
       "ts": 1789488000,
       "longId": "43462217268812087739261944784956455494004279776534947210729604095134131208790",
@@ -596,11 +596,11 @@
         "expiry": 1789761600,
         "tenor": "weekly",
         "mintCutoff": 1789759800,
-        "mintFeePpm": 80,
+        "mintFeePpm": 0,
         "mintFeesHeld": {
-          "raw": "21714285714286",
+          "raw": "0",
           "decimals": 18,
-          "formatted": "0.000021714285714286"
+          "formatted": "0"
         },
         "mintFeesAccrued": {
           "raw": "0",
@@ -614,7 +614,7 @@
         "0xD6b49a27Ead99118b61F0827C7aB2782aea07bE6"
       ],
       "data": {
-        "orderId": "1009",
+        "orderId": "1010",
         "taker": "0x300a7AB2f92B536e3f58422372c964B2Bb535ea2",
         "maker": "0xD6b49a27Ead99118b61F0827C7aB2782aea07bE6",
         "recipient": "0x300a7AB2f92B536e3f58422372c964B2Bb535ea2",
@@ -635,9 +635,9 @@
           "formatted": "0.015606"
         },
         "sellerFee": {
-          "raw": "0",
+          "raw": "7803",
           "decimals": 6,
-          "formatted": "0"
+          "formatted": "0.007803"
         },
         "makerRebate": {
           "raw": "7803",
@@ -646,11 +646,11 @@
         },
         "primary": true,
         "takerIsBuyer": true,
-        "tx": "0x1e293d0219102876414ec954396afd399869ec59d84a38558cdf1ede4b672bea"
+        "tx": "0xe3f7222375fdc35fc61b235035e26c94692e2ad0193193cd7d0453c38b2d2569"
       }
     },
     {
-      "id": "0x9332f31fe0fda41595a156a47958005ad9c765483ba0efae6e998548c70a032e-2",
+      "id": "0x1e293d0219102876414ec954396afd399869ec59d84a38558cdf1ede4b672bea-3",
       "kind": "fill",
       "ts": 1789487100,
       "longId": "16806637460361860723066303679148593183455019340475891529427188140971423202060",
@@ -668,11 +668,11 @@
         "expiry": 1789588800,
         "tenor": "daily",
         "mintCutoff": 1789587000,
-        "mintFeePpm": 80,
+        "mintFeePpm": 0,
         "mintFeesHeld": {
-          "raw": "13452380952381",
+          "raw": "0",
           "decimals": 18,
-          "formatted": "0.000013452380952381"
+          "formatted": "0"
         },
         "mintFeesAccrued": {
           "raw": "0",
@@ -686,7 +686,7 @@
         "0xd3b47D8a6B8e3fc6160Cd02634CF7Ae74aDeB66f"
       ],
       "data": {
-        "orderId": "1014",
+        "orderId": "1015",
         "taker": "0x4088c59Eb3fB713B124f182E7083AEb3358A030B",
         "maker": "0xd3b47D8a6B8e3fc6160Cd02634CF7Ae74aDeB66f",
         "recipient": "0x4088c59Eb3fB713B124f182E7083AEb3358A030B",
@@ -707,9 +707,9 @@
           "formatted": "0.0861"
         },
         "sellerFee": {
-          "raw": "0",
+          "raw": "43050",
           "decimals": 6,
-          "formatted": "0"
+          "formatted": "0.04305"
         },
         "makerRebate": {
           "raw": "43050",
@@ -718,11 +718,11 @@
         },
         "primary": true,
         "takerIsBuyer": true,
-        "tx": "0x9332f31fe0fda41595a156a47958005ad9c765483ba0efae6e998548c70a032e"
+        "tx": "0x1e293d0219102876414ec954396afd399869ec59d84a38558cdf1ede4b672bea"
       }
     },
     {
-      "id": "0xbdf394ce231703da60985179af3822ca8a2b21381b5861e98f5e4a0d4bf0bc76-2",
+      "id": "0x9332f31fe0fda41595a156a47958005ad9c765483ba0efae6e998548c70a032e-3",
       "kind": "fill",
       "ts": 1789484400,
       "longId": "50691615881411955019258825605017018021206063637603990757858374483543864849268",
@@ -740,11 +740,11 @@
         "expiry": 1789761600,
         "tenor": "weekly",
         "mintCutoff": 1789759800,
-        "mintFeePpm": 80,
+        "mintFeePpm": 0,
         "mintFeesHeld": {
-          "raw": "55000000000000",
+          "raw": "0",
           "decimals": 18,
-          "formatted": "0.000055"
+          "formatted": "0"
         },
         "mintFeesAccrued": {
           "raw": "0",
@@ -758,7 +758,7 @@
         "0xd3b47D8a6B8e3fc6160Cd02634CF7Ae74aDeB66f"
       ],
       "data": {
-        "orderId": "1013",
+        "orderId": "1014",
         "taker": "0xE37876AcBfbA6186E4687f4ef465D9AC21558De3",
         "maker": "0xd3b47D8a6B8e3fc6160Cd02634CF7Ae74aDeB66f",
         "recipient": "0xE37876AcBfbA6186E4687f4ef465D9AC21558De3",
@@ -779,9 +779,9 @@
           "formatted": "0.1"
         },
         "sellerFee": {
-          "raw": "0",
+          "raw": "68325",
           "decimals": 6,
-          "formatted": "0"
+          "formatted": "0.068325"
         },
         "makerRebate": {
           "raw": "50000",
@@ -790,11 +790,11 @@
         },
         "primary": true,
         "takerIsBuyer": true,
-        "tx": "0xbdf394ce231703da60985179af3822ca8a2b21381b5861e98f5e4a0d4bf0bc76"
+        "tx": "0x9332f31fe0fda41595a156a47958005ad9c765483ba0efae6e998548c70a032e"
       }
     },
     {
-      "id": "0xef835c8ba4d0b90a1ac02beb0c6cb22cd3bdea7df43673ac3bfacc773bb66bfc-2",
+      "id": "0xbdf394ce231703da60985179af3822ca8a2b21381b5861e98f5e4a0d4bf0bc76-3",
       "kind": "fill",
       "ts": 1789482600,
       "longId": "72401138414287447232486313980404388845353912092883200226851795762225764322966",
@@ -812,11 +812,11 @@
         "expiry": 1789588800,
         "tenor": "daily",
         "mintCutoff": 1789587000,
-        "mintFeePpm": 80,
+        "mintFeePpm": 0,
         "mintFeesHeld": {
-          "raw": "5619047619048",
+          "raw": "0",
           "decimals": 18,
-          "formatted": "0.000005619047619048"
+          "formatted": "0"
         },
         "mintFeesAccrued": {
           "raw": "0",
@@ -830,7 +830,7 @@
         "0xd3b47D8a6B8e3fc6160Cd02634CF7Ae74aDeB66f"
       ],
       "data": {
-        "orderId": "1012",
+        "orderId": "1013",
         "taker": "0xE37876AcBfbA6186E4687f4ef465D9AC21558De3",
         "maker": "0xd3b47D8a6B8e3fc6160Cd02634CF7Ae74aDeB66f",
         "recipient": "0xE37876AcBfbA6186E4687f4ef465D9AC21558De3",
@@ -851,9 +851,9 @@
           "formatted": "0.055208"
         },
         "sellerFee": {
-          "raw": "0",
+          "raw": "27604",
           "decimals": 6,
-          "formatted": "0"
+          "formatted": "0.027604"
         },
         "makerRebate": {
           "raw": "27604",
@@ -862,11 +862,11 @@
         },
         "primary": true,
         "takerIsBuyer": true,
-        "tx": "0xef835c8ba4d0b90a1ac02beb0c6cb22cd3bdea7df43673ac3bfacc773bb66bfc"
+        "tx": "0xbdf394ce231703da60985179af3822ca8a2b21381b5861e98f5e4a0d4bf0bc76"
       }
     },
     {
-      "id": "0xe49c6ea6403e6f3222c458f25cf660f2bf9ecddea60a68b7690a6de110ad1e22-2",
+      "id": "0xef835c8ba4d0b90a1ac02beb0c6cb22cd3bdea7df43673ac3bfacc773bb66bfc-3",
       "kind": "fill",
       "ts": 1789481400,
       "longId": "60558647635115674919406403683765577243570507269437549868919321410193856009092",
@@ -884,11 +884,11 @@
         "expiry": 1789761600,
         "tenor": "weekly",
         "mintCutoff": 1789759800,
-        "mintFeePpm": 80,
+        "mintFeePpm": 0,
         "mintFeesHeld": {
-          "raw": "37063492063493",
+          "raw": "0",
           "decimals": 18,
-          "formatted": "0.000037063492063493"
+          "formatted": "0"
         },
         "mintFeesAccrued": {
           "raw": "0",
@@ -902,7 +902,7 @@
         "0xd3b47D8a6B8e3fc6160Cd02634CF7Ae74aDeB66f"
       ],
       "data": {
-        "orderId": "1011",
+        "orderId": "1012",
         "taker": "0x4088c59Eb3fB713B124f182E7083AEb3358A030B",
         "maker": "0xd3b47D8a6B8e3fc6160Cd02634CF7Ae74aDeB66f",
         "recipient": "0x4088c59Eb3fB713B124f182E7083AEb3358A030B",
@@ -923,9 +923,9 @@
           "formatted": "0.1"
         },
         "sellerFee": {
-          "raw": "0",
+          "raw": "87825",
           "decimals": 6,
-          "formatted": "0"
+          "formatted": "0.087825"
         },
         "makerRebate": {
           "raw": "50000",
@@ -934,11 +934,11 @@
         },
         "primary": true,
         "takerIsBuyer": true,
-        "tx": "0xe49c6ea6403e6f3222c458f25cf660f2bf9ecddea60a68b7690a6de110ad1e22"
+        "tx": "0xef835c8ba4d0b90a1ac02beb0c6cb22cd3bdea7df43673ac3bfacc773bb66bfc"
       }
     },
     {
-      "id": "0xd5bf80f3e3404cf98b199241c0c16691d584bd403f80a7b43a72fe1cc976e632-2",
+      "id": "0xe49c6ea6403e6f3222c458f25cf660f2bf9ecddea60a68b7690a6de110ad1e22-3",
       "kind": "fill",
       "ts": 1789398600,
       "longId": "9013619290588248846299586614305070637030360841668688133673337726099093849920",
@@ -956,11 +956,11 @@
         "expiry": 1789502400,
         "tenor": "daily",
         "mintCutoff": 1789500600,
-        "mintFeePpm": 300,
+        "mintFeePpm": 0,
         "mintFeesHeld": {
-          "raw": "41190476190477",
+          "raw": "0",
           "decimals": 18,
-          "formatted": "0.000041190476190477"
+          "formatted": "0"
         },
         "mintFeesAccrued": {
           "raw": "0",
@@ -974,7 +974,7 @@
         "0xd3b47D8a6B8e3fc6160Cd02634CF7Ae74aDeB66f"
       ],
       "data": {
-        "orderId": "1010",
+        "orderId": "1011",
         "taker": "0xdFbfcf5f533505281840cA0d640aE0580D05a2Be",
         "maker": "0xd3b47D8a6B8e3fc6160Cd02634CF7Ae74aDeB66f",
         "recipient": "0xdFbfcf5f533505281840cA0d640aE0580D05a2Be",
@@ -995,9 +995,9 @@
           "formatted": "0.1"
         },
         "sellerFee": {
-          "raw": "0",
+          "raw": "61500",
           "decimals": 6,
-          "formatted": "0"
+          "formatted": "0.0615"
         },
         "makerRebate": {
           "raw": "50000",
@@ -1006,7 +1006,7 @@
         },
         "primary": true,
         "takerIsBuyer": true,
-        "tx": "0xd5bf80f3e3404cf98b199241c0c16691d584bd403f80a7b43a72fe1cc976e632"
+        "tx": "0xe49c6ea6403e6f3222c458f25cf660f2bf9ecddea60a68b7690a6de110ad1e22"
       }
     },
     {
@@ -1028,16 +1028,16 @@
         "expiry": 1789156800,
         "tenor": "weekly",
         "mintCutoff": 1789155000,
-        "mintFeePpm": 80,
+        "mintFeePpm": 0,
         "mintFeesHeld": {
           "raw": "0",
           "decimals": 18,
           "formatted": "0"
         },
         "mintFeesAccrued": {
-          "raw": "70952380952381",
+          "raw": "0",
           "decimals": 18,
-          "formatted": "0.000070952380952381"
+          "formatted": "0"
         },
         "status": "settled"
       },
@@ -1048,17 +1048,17 @@
         "holder": "0xD6b49a27Ead99118b61F0827C7aB2782aea07bE6",
         "side": "short",
         "tokenId": "97249294176823841346447828561188452006185490110924851379129375223985952864953",
-        "units": "200",
+        "units": "150",
         "asset": "0xd0601CE157Db5bdC3162BbaC2a2C8aF5320D9EEC",
         "amount": {
-          "raw": "1969006381039198000",
+          "raw": "1476754785779398500",
           "decimals": 18,
-          "formatted": "1.969006381039198"
+          "formatted": "1.4767547857793985"
         },
         "amountInKind": {
-          "raw": "1969006381039198000",
+          "raw": "1476754785779398500",
           "decimals": 18,
-          "formatted": "1.969006381039198"
+          "formatted": "1.4767547857793985"
         },
         "settlementPrice": {
           "raw": "219400000",
@@ -1088,11 +1088,11 @@
         "expiry": 1789761600,
         "tenor": "weekly",
         "mintCutoff": 1789759800,
-        "mintFeePpm": 80,
+        "mintFeePpm": 0,
         "mintFeesHeld": {
-          "raw": "21714285714286",
+          "raw": "0",
           "decimals": 18,
-          "formatted": "0.000021714285714286"
+          "formatted": "0"
         },
         "mintFeesAccrued": {
           "raw": "0",
@@ -1106,13 +1106,13 @@
       ],
       "data": {
         "writer": "0xD6b49a27Ead99118b61F0827C7aB2782aea07bE6",
-        "orderId": "1009",
+        "orderId": "1010",
         "price": {
           "raw": "260100",
           "decimals": 6,
           "formatted": "0.2601"
         },
-        "units": "296",
+        "units": "297",
         "tx": "0x6786ab5887212e1c9f52345637aa4ac945d05c01057964bd29b9d375eb921bcb"
       }
     },
@@ -1135,16 +1135,16 @@
         "expiry": 1789156800,
         "tenor": "weekly",
         "mintCutoff": 1789155000,
-        "mintFeePpm": 80,
+        "mintFeePpm": 0,
         "mintFeesHeld": {
           "raw": "0",
           "decimals": 18,
           "formatted": "0"
         },
         "mintFeesAccrued": {
-          "raw": "12380952380953",
+          "raw": "0",
           "decimals": 18,
-          "formatted": "0.000012380952380953"
+          "formatted": "0"
         },
         "status": "settled"
       },
@@ -1195,16 +1195,16 @@
         "expiry": 1789156800,
         "tenor": "weekly",
         "mintCutoff": 1789155000,
-        "mintFeePpm": 80,
+        "mintFeePpm": 0,
         "mintFeesHeld": {
           "raw": "0",
           "decimals": 18,
           "formatted": "0"
         },
         "mintFeesAccrued": {
-          "raw": "12380952380953",
+          "raw": "0",
           "decimals": 18,
-          "formatted": "0.000012380952380953"
+          "formatted": "0"
         },
         "status": "settled"
       },
@@ -1255,16 +1255,16 @@
         "expiry": 1789156800,
         "tenor": "weekly",
         "mintCutoff": 1789155000,
-        "mintFeePpm": 80,
+        "mintFeePpm": 0,
         "mintFeesHeld": {
           "raw": "0",
           "decimals": 18,
           "formatted": "0"
         },
         "mintFeesAccrued": {
-          "raw": "21071428571429",
+          "raw": "0",
           "decimals": 18,
-          "formatted": "0.000021071428571429"
+          "formatted": "0"
         },
         "status": "settled"
       },
@@ -1315,16 +1315,16 @@
         "expiry": 1789156800,
         "tenor": "weekly",
         "mintCutoff": 1789155000,
-        "mintFeePpm": 80,
+        "mintFeePpm": 0,
         "mintFeesHeld": {
           "raw": "0",
           "decimals": 18,
           "formatted": "0"
         },
         "mintFeesAccrued": {
-          "raw": "21071428571429",
+          "raw": "0",
           "decimals": 18,
-          "formatted": "0.000021071428571429"
+          "formatted": "0"
         },
         "status": "settled"
       },
@@ -1375,16 +1375,16 @@
         "expiry": 1789156800,
         "tenor": "weekly",
         "mintCutoff": 1789155000,
-        "mintFeePpm": 80,
+        "mintFeePpm": 0,
         "mintFeesHeld": {
           "raw": "0",
           "decimals": 18,
           "formatted": "0"
         },
         "mintFeesAccrued": {
-          "raw": "28992063492064",
+          "raw": "0",
           "decimals": 18,
-          "formatted": "0.000028992063492064"
+          "formatted": "0"
         },
         "status": "settled"
       },
@@ -1435,16 +1435,16 @@
         "expiry": 1789156800,
         "tenor": "weekly",
         "mintCutoff": 1789155000,
-        "mintFeePpm": 80,
+        "mintFeePpm": 0,
         "mintFeesHeld": {
           "raw": "0",
           "decimals": 18,
           "formatted": "0"
         },
         "mintFeesAccrued": {
-          "raw": "28992063492064",
+          "raw": "0",
           "decimals": 18,
-          "formatted": "0.000028992063492064"
+          "formatted": "0"
         },
         "status": "settled"
       },
@@ -1495,16 +1495,16 @@
         "expiry": 1789156800,
         "tenor": "weekly",
         "mintCutoff": 1789155000,
-        "mintFeePpm": 80,
+        "mintFeePpm": 0,
         "mintFeesHeld": {
           "raw": "0",
           "decimals": 18,
           "formatted": "0"
         },
         "mintFeesAccrued": {
-          "raw": "70952380952381",
+          "raw": "0",
           "decimals": 18,
-          "formatted": "0.000070952380952381"
+          "formatted": "0"
         },
         "status": "settled"
       },
@@ -1515,17 +1515,17 @@
         "holder": "0x83daA58d0a8d82D7b971338a03AA2f99bfADf4F8",
         "side": "long",
         "tokenId": "97249294176823841346447828561188452006185490110924851379129375223985952864952",
-        "units": "200",
+        "units": "150",
         "asset": "0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168",
         "amount": {
-          "raw": "6113879",
+          "raw": "4585409",
           "decimals": 6,
-          "formatted": "6.113879"
+          "formatted": "4.585409"
         },
         "amountInKind": {
-          "raw": "27894257064721800",
+          "raw": "20920692798541350",
           "decimals": 18,
-          "formatted": "0.0278942570647218"
+          "formatted": "0.02092069279854135"
         },
         "settlementPrice": {
           "raw": "219400000",
@@ -1555,16 +1555,16 @@
         "expiry": 1789156800,
         "tenor": "weekly",
         "mintCutoff": 1789155000,
-        "mintFeePpm": 80,
+        "mintFeePpm": 0,
         "mintFeesHeld": {
           "raw": "0",
           "decimals": 18,
           "formatted": "0"
         },
         "mintFeesAccrued": {
-          "raw": "36567460317462",
+          "raw": "0",
           "decimals": 18,
-          "formatted": "0.000036567460317462"
+          "formatted": "0"
         },
         "status": "settled"
       },
@@ -1615,16 +1615,16 @@
         "expiry": 1789156800,
         "tenor": "weekly",
         "mintCutoff": 1789155000,
-        "mintFeePpm": 80,
+        "mintFeePpm": 0,
         "mintFeesHeld": {
           "raw": "0",
           "decimals": 18,
           "formatted": "0"
         },
         "mintFeesAccrued": {
-          "raw": "36567460317462",
+          "raw": "0",
           "decimals": 18,
-          "formatted": "0.000036567460317462"
+          "formatted": "0"
         },
         "status": "settled"
       },
@@ -1675,16 +1675,16 @@
         "expiry": 1789156800,
         "tenor": "weekly",
         "mintCutoff": 1789155000,
-        "mintFeePpm": 80,
+        "mintFeePpm": 0,
         "mintFeesHeld": {
           "raw": "0",
           "decimals": 18,
           "formatted": "0"
         },
         "mintFeesAccrued": {
-          "raw": "25853174603176",
+          "raw": "0",
           "decimals": 18,
-          "formatted": "0.000025853174603176"
+          "formatted": "0"
         },
         "status": "settled"
       },
@@ -1735,16 +1735,16 @@
         "expiry": 1789156800,
         "tenor": "weekly",
         "mintCutoff": 1789155000,
-        "mintFeePpm": 80,
+        "mintFeePpm": 0,
         "mintFeesHeld": {
           "raw": "0",
           "decimals": 18,
           "formatted": "0"
         },
         "mintFeesAccrued": {
-          "raw": "25853174603176",
+          "raw": "0",
           "decimals": 18,
-          "formatted": "0.000025853174603176"
+          "formatted": "0"
         },
         "status": "settled"
       },
@@ -1795,16 +1795,16 @@
         "expiry": 1789156800,
         "tenor": "weekly",
         "mintCutoff": 1789155000,
-        "mintFeePpm": 80,
+        "mintFeePpm": 0,
         "mintFeesHeld": {
           "raw": "0",
           "decimals": 18,
           "formatted": "0"
         },
         "mintFeesAccrued": {
-          "raw": "25853174603176",
+          "raw": "0",
           "decimals": 18,
-          "formatted": "0.000025853174603176"
+          "formatted": "0"
         },
         "status": "settled"
       },
@@ -1855,16 +1855,16 @@
         "expiry": 1789156800,
         "tenor": "weekly",
         "mintCutoff": 1789155000,
-        "mintFeePpm": 80,
+        "mintFeePpm": 0,
         "mintFeesHeld": {
           "raw": "0",
           "decimals": 18,
           "formatted": "0"
         },
         "mintFeesAccrued": {
-          "raw": "25853174603176",
+          "raw": "0",
           "decimals": 18,
-          "formatted": "0.000025853174603176"
+          "formatted": "0"
         },
         "status": "settled"
       },
@@ -1915,16 +1915,16 @@
         "expiry": 1789156800,
         "tenor": "weekly",
         "mintCutoff": 1789155000,
-        "mintFeePpm": 80,
+        "mintFeePpm": 0,
         "mintFeesHeld": {
           "raw": "0",
           "decimals": 18,
           "formatted": "0"
         },
         "mintFeesAccrued": {
-          "raw": "12380952380953",
+          "raw": "0",
           "decimals": 18,
-          "formatted": "0.000012380952380953"
+          "formatted": "0"
         },
         "status": "settled"
       },
@@ -1972,16 +1972,16 @@
         "expiry": 1789156800,
         "tenor": "weekly",
         "mintCutoff": 1789155000,
-        "mintFeePpm": 80,
+        "mintFeePpm": 0,
         "mintFeesHeld": {
           "raw": "0",
           "decimals": 18,
           "formatted": "0"
         },
         "mintFeesAccrued": {
-          "raw": "21071428571429",
+          "raw": "0",
           "decimals": 18,
-          "formatted": "0.000021071428571429"
+          "formatted": "0"
         },
         "status": "settled"
       },
@@ -2029,16 +2029,16 @@
         "expiry": 1789156800,
         "tenor": "weekly",
         "mintCutoff": 1789155000,
-        "mintFeePpm": 80,
+        "mintFeePpm": 0,
         "mintFeesHeld": {
           "raw": "0",
           "decimals": 18,
           "formatted": "0"
         },
         "mintFeesAccrued": {
-          "raw": "28992063492064",
+          "raw": "0",
           "decimals": 18,
-          "formatted": "0.000028992063492064"
+          "formatted": "0"
         },
         "status": "settled"
       },
@@ -2086,16 +2086,16 @@
         "expiry": 1789156800,
         "tenor": "weekly",
         "mintCutoff": 1789155000,
-        "mintFeePpm": 80,
+        "mintFeePpm": 0,
         "mintFeesHeld": {
           "raw": "0",
           "decimals": 18,
           "formatted": "0"
         },
         "mintFeesAccrued": {
-          "raw": "70952380952381",
+          "raw": "0",
           "decimals": 18,
-          "formatted": "0.000070952380952381"
+          "formatted": "0"
         },
         "status": "settled"
       },
@@ -2143,16 +2143,16 @@
         "expiry": 1789156800,
         "tenor": "weekly",
         "mintCutoff": 1789155000,
-        "mintFeePpm": 80,
+        "mintFeePpm": 0,
         "mintFeesHeld": {
           "raw": "0",
           "decimals": 18,
           "formatted": "0"
         },
         "mintFeesAccrued": {
-          "raw": "36567460317462",
+          "raw": "0",
           "decimals": 18,
-          "formatted": "0.000036567460317462"
+          "formatted": "0"
         },
         "status": "settled"
       },
@@ -2200,16 +2200,16 @@
         "expiry": 1789156800,
         "tenor": "weekly",
         "mintCutoff": 1789155000,
-        "mintFeePpm": 80,
+        "mintFeePpm": 0,
         "mintFeesHeld": {
           "raw": "0",
           "decimals": 18,
           "formatted": "0"
         },
         "mintFeesAccrued": {
-          "raw": "25853174603176",
+          "raw": "0",
           "decimals": 18,
-          "formatted": "0.000025853174603176"
+          "formatted": "0"
         },
         "status": "settled"
       },
@@ -2239,7 +2239,7 @@
       }
     },
     {
-      "id": "0xc7d51545708bded4b6502a5acfc47e1a8ee9da967b246dc7af4019c3e2b2a466-2",
+      "id": "0xd5bf80f3e3404cf98b199241c0c16691d584bd403f80a7b43a72fe1cc976e632-3",
       "kind": "fill",
       "ts": 1789063200,
       "longId": "107602460705412833688971388541329334104362255615393312294836650152257273272068",
@@ -2257,16 +2257,16 @@
         "expiry": 1789156800,
         "tenor": "weekly",
         "mintCutoff": 1789155000,
-        "mintFeePpm": 80,
+        "mintFeePpm": 0,
         "mintFeesHeld": {
           "raw": "0",
           "decimals": 18,
           "formatted": "0"
         },
         "mintFeesAccrued": {
-          "raw": "12380952380953",
+          "raw": "0",
           "decimals": 18,
-          "formatted": "0.000012380952380953"
+          "formatted": "0"
         },
         "status": "settled"
       },
@@ -2275,7 +2275,7 @@
         "0xd3b47D8a6B8e3fc6160Cd02634CF7Ae74aDeB66f"
       ],
       "data": {
-        "orderId": "1008",
+        "orderId": "1009",
         "taker": "0x4088c59Eb3fB713B124f182E7083AEb3358A030B",
         "maker": "0xd3b47D8a6B8e3fc6160Cd02634CF7Ae74aDeB66f",
         "recipient": "0x4088c59Eb3fB713B124f182E7083AEb3358A030B",
@@ -2296,9 +2296,9 @@
           "formatted": "0.025"
         },
         "sellerFee": {
-          "raw": "0",
+          "raw": "12500",
           "decimals": 6,
-          "formatted": "0"
+          "formatted": "0.0125"
         },
         "makerRebate": {
           "raw": "12500",
@@ -2307,11 +2307,11 @@
         },
         "primary": true,
         "takerIsBuyer": true,
-        "tx": "0xc7d51545708bded4b6502a5acfc47e1a8ee9da967b246dc7af4019c3e2b2a466"
+        "tx": "0xd5bf80f3e3404cf98b199241c0c16691d584bd403f80a7b43a72fe1cc976e632"
       }
     },
     {
-      "id": "0x80c07ca809dab64a17c5225d132af44e5521a9e0925c80248add72127e46492a-2",
+      "id": "0xc7d51545708bded4b6502a5acfc47e1a8ee9da967b246dc7af4019c3e2b2a466-3",
       "kind": "fill",
       "ts": 1789050600,
       "longId": "60007351955554369079247096634152725439243148225240450207526029293925818007156",
@@ -2329,16 +2329,16 @@
         "expiry": 1789156800,
         "tenor": "weekly",
         "mintCutoff": 1789155000,
-        "mintFeePpm": 80,
+        "mintFeePpm": 0,
         "mintFeesHeld": {
           "raw": "0",
           "decimals": 18,
           "formatted": "0"
         },
         "mintFeesAccrued": {
-          "raw": "21071428571429",
+          "raw": "0",
           "decimals": 18,
-          "formatted": "0.000021071428571429"
+          "formatted": "0"
         },
         "status": "settled"
       },
@@ -2347,7 +2347,7 @@
         "0xd3b47D8a6B8e3fc6160Cd02634CF7Ae74aDeB66f"
       ],
       "data": {
-        "orderId": "1007",
+        "orderId": "1008",
         "taker": "0xdFbfcf5f533505281840cA0d640aE0580D05a2Be",
         "maker": "0xd3b47D8a6B8e3fc6160Cd02634CF7Ae74aDeB66f",
         "recipient": "0xdFbfcf5f533505281840cA0d640aE0580D05a2Be",
@@ -2368,9 +2368,9 @@
           "formatted": "0.0375"
         },
         "sellerFee": {
-          "raw": "0",
+          "raw": "18750",
           "decimals": 6,
-          "formatted": "0"
+          "formatted": "0.01875"
         },
         "makerRebate": {
           "raw": "18750",
@@ -2379,11 +2379,11 @@
         },
         "primary": true,
         "takerIsBuyer": true,
-        "tx": "0x80c07ca809dab64a17c5225d132af44e5521a9e0925c80248add72127e46492a"
+        "tx": "0xc7d51545708bded4b6502a5acfc47e1a8ee9da967b246dc7af4019c3e2b2a466"
       }
     },
     {
-      "id": "0xd436665dee55095a87d81c2f0e84a7b77906a21160b528e21a6a789586154582-2",
+      "id": "0x80c07ca809dab64a17c5225d132af44e5521a9e0925c80248add72127e46492a-3",
       "kind": "fill",
       "ts": 1789048200,
       "longId": "38893962039984939713403905484162186843296761519009062250958107357483972598796",
@@ -2401,16 +2401,16 @@
         "expiry": 1789156800,
         "tenor": "weekly",
         "mintCutoff": 1789155000,
-        "mintFeePpm": 80,
+        "mintFeePpm": 0,
         "mintFeesHeld": {
           "raw": "0",
           "decimals": 18,
           "formatted": "0"
         },
         "mintFeesAccrued": {
-          "raw": "28992063492064",
+          "raw": "0",
           "decimals": 18,
-          "formatted": "0.000028992063492064"
+          "formatted": "0"
         },
         "status": "settled"
       },
@@ -2419,7 +2419,7 @@
         "0xd3b47D8a6B8e3fc6160Cd02634CF7Ae74aDeB66f"
       ],
       "data": {
-        "orderId": "1006",
+        "orderId": "1007",
         "taker": "0x300a7AB2f92B536e3f58422372c964B2Bb535ea2",
         "maker": "0xd3b47D8a6B8e3fc6160Cd02634CF7Ae74aDeB66f",
         "recipient": "0x300a7AB2f92B536e3f58422372c964B2Bb535ea2",
@@ -2440,9 +2440,9 @@
           "formatted": "0.0075"
         },
         "sellerFee": {
-          "raw": "0",
+          "raw": "3750",
           "decimals": 6,
-          "formatted": "0"
+          "formatted": "0.00375"
         },
         "makerRebate": {
           "raw": "3750",
@@ -2451,11 +2451,11 @@
         },
         "primary": true,
         "takerIsBuyer": true,
-        "tx": "0xd436665dee55095a87d81c2f0e84a7b77906a21160b528e21a6a789586154582"
+        "tx": "0x80c07ca809dab64a17c5225d132af44e5521a9e0925c80248add72127e46492a"
       }
     },
     {
-      "id": "0x3b10bca39419abed9611512c935897334042e6af1017d46c3aa4948a84a9f03a-2",
+      "id": "0xd436665dee55095a87d81c2f0e84a7b77906a21160b528e21a6a789586154582-3",
       "kind": "fill",
       "ts": 1788970200,
       "longId": "38893962039984939713403905484162186843296761519009062250958107357483972598796",
@@ -2473,16 +2473,16 @@
         "expiry": 1789156800,
         "tenor": "weekly",
         "mintCutoff": 1789155000,
-        "mintFeePpm": 80,
+        "mintFeePpm": 0,
         "mintFeesHeld": {
           "raw": "0",
           "decimals": 18,
           "formatted": "0"
         },
         "mintFeesAccrued": {
-          "raw": "28992063492064",
+          "raw": "0",
           "decimals": 18,
-          "formatted": "0.000028992063492064"
+          "formatted": "0"
         },
         "status": "settled"
       },
@@ -2491,7 +2491,7 @@
         "0xd3b47D8a6B8e3fc6160Cd02634CF7Ae74aDeB66f"
       ],
       "data": {
-        "orderId": "1005",
+        "orderId": "1006",
         "taker": "0xE37876AcBfbA6186E4687f4ef465D9AC21558De3",
         "maker": "0xd3b47D8a6B8e3fc6160Cd02634CF7Ae74aDeB66f",
         "recipient": "0xE37876AcBfbA6186E4687f4ef465D9AC21558De3",
@@ -2512,9 +2512,9 @@
           "formatted": "0.025"
         },
         "sellerFee": {
-          "raw": "0",
+          "raw": "12500",
           "decimals": 6,
-          "formatted": "0"
+          "formatted": "0.0125"
         },
         "makerRebate": {
           "raw": "12500",
@@ -2523,11 +2523,83 @@
         },
         "primary": true,
         "takerIsBuyer": true,
+        "tx": "0xd436665dee55095a87d81c2f0e84a7b77906a21160b528e21a6a789586154582"
+      }
+    },
+    {
+      "id": "0x3b10bca39419abed9611512c935897334042e6af1017d46c3aa4948a84a9f03a-1",
+      "kind": "fill",
+      "ts": 1788965400,
+      "longId": "97249294176823841346447828561188452006185490110924851379129375223985952864952",
+      "series": {
+        "longId": "97249294176823841346447828561188452006185490110924851379129375223985952864952",
+        "shortId": "97249294176823841346447828561188452006185490110924851379129375223985952864953",
+        "ticker": "NVDA",
+        "underlying": "0xd0601CE157Db5bdC3162BbaC2a2C8aF5320D9EEC",
+        "isPut": false,
+        "strike": {
+          "raw": "216000000",
+          "decimals": 6,
+          "formatted": "216"
+        },
+        "expiry": 1789156800,
+        "tenor": "weekly",
+        "mintCutoff": 1789155000,
+        "mintFeePpm": 0,
+        "mintFeesHeld": {
+          "raw": "0",
+          "decimals": 18,
+          "formatted": "0"
+        },
+        "mintFeesAccrued": {
+          "raw": "0",
+          "decimals": 18,
+          "formatted": "0"
+        },
+        "status": "settled"
+      },
+      "accounts": [
+        "0xD6b49a27Ead99118b61F0827C7aB2782aea07bE6",
+        "0x83daA58d0a8d82D7b971338a03AA2f99bfADf4F8"
+      ],
+      "data": {
+        "orderId": "1004",
+        "taker": "0xD6b49a27Ead99118b61F0827C7aB2782aea07bE6",
+        "maker": "0x83daA58d0a8d82D7b971338a03AA2f99bfADf4F8",
+        "recipient": "0xD6b49a27Ead99118b61F0827C7aB2782aea07bE6",
+        "units": "50",
+        "price": {
+          "raw": "300000",
+          "decimals": 6,
+          "formatted": "0.3"
+        },
+        "premium": {
+          "raw": "150000",
+          "decimals": 6,
+          "formatted": "0.15"
+        },
+        "takerFee": {
+          "raw": "15000",
+          "decimals": 6,
+          "formatted": "0.015"
+        },
+        "sellerFee": {
+          "raw": "0",
+          "decimals": 6,
+          "formatted": "0"
+        },
+        "makerRebate": {
+          "raw": "7500",
+          "decimals": 6,
+          "formatted": "0.0075"
+        },
+        "primary": false,
+        "takerIsBuyer": true,
         "tx": "0x3b10bca39419abed9611512c935897334042e6af1017d46c3aa4948a84a9f03a"
       }
     },
     {
-      "id": "0x5a224406c559d7ca06ee65172f490852a73b308299c5dd4c2b76b240a5ae3d96-2",
+      "id": "0x5a224406c559d7ca06ee65172f490852a73b308299c5dd4c2b76b240a5ae3d96-3",
       "kind": "fill",
       "ts": 1788964800,
       "longId": "109733135889116194008703981926101410916763203979514320802443652863493208496976",
@@ -2545,16 +2617,16 @@
         "expiry": 1789156800,
         "tenor": "weekly",
         "mintCutoff": 1789155000,
-        "mintFeePpm": 80,
+        "mintFeePpm": 0,
         "mintFeesHeld": {
           "raw": "0",
           "decimals": 18,
           "formatted": "0"
         },
         "mintFeesAccrued": {
-          "raw": "36567460317462",
+          "raw": "0",
           "decimals": 18,
-          "formatted": "0.000036567460317462"
+          "formatted": "0"
         },
         "status": "settled"
       },
@@ -2563,7 +2635,7 @@
         "0xd3b47D8a6B8e3fc6160Cd02634CF7Ae74aDeB66f"
       ],
       "data": {
-        "orderId": "1004",
+        "orderId": "1005",
         "taker": "0x83daA58d0a8d82D7b971338a03AA2f99bfADf4F8",
         "maker": "0xd3b47D8a6B8e3fc6160Cd02634CF7Ae74aDeB66f",
         "recipient": "0x83daA58d0a8d82D7b971338a03AA2f99bfADf4F8",
@@ -2584,9 +2656,9 @@
           "formatted": "0.06741"
         },
         "sellerFee": {
-          "raw": "0",
+          "raw": "33705",
           "decimals": 6,
-          "formatted": "0"
+          "formatted": "0.033705"
         },
         "makerRebate": {
           "raw": "33705",
@@ -2599,7 +2671,7 @@
       }
     },
     {
-      "id": "0x060e27e2e0614336c4f67dbb73e5d1968c343c47989be08fe347cccb4182b0a4-2",
+      "id": "0x060e27e2e0614336c4f67dbb73e5d1968c343c47989be08fe347cccb4182b0a4-3",
       "kind": "fill",
       "ts": 1788888600,
       "longId": "97249294176823841346447828561188452006185490110924851379129375223985952864952",
@@ -2617,16 +2689,16 @@
         "expiry": 1789156800,
         "tenor": "weekly",
         "mintCutoff": 1789155000,
-        "mintFeePpm": 80,
+        "mintFeePpm": 0,
         "mintFeesHeld": {
           "raw": "0",
           "decimals": 18,
           "formatted": "0"
         },
         "mintFeesAccrued": {
-          "raw": "70952380952381",
+          "raw": "0",
           "decimals": 18,
-          "formatted": "0.000070952380952381"
+          "formatted": "0"
         },
         "status": "settled"
       },
@@ -2656,9 +2728,9 @@
           "formatted": "0.0494"
         },
         "sellerFee": {
-          "raw": "0",
+          "raw": "24700",
           "decimals": 6,
-          "formatted": "0"
+          "formatted": "0.0247"
         },
         "makerRebate": {
           "raw": "24700",
@@ -2671,7 +2743,7 @@
       }
     },
     {
-      "id": "0x6bfadbf6aabeb60a7f8aec79c76ea9171fda89ceae518adf8db34ad0d0586d7b-2",
+      "id": "0x6bfadbf6aabeb60a7f8aec79c76ea9171fda89ceae518adf8db34ad0d0586d7b-3",
       "kind": "fill",
       "ts": 1788880800,
       "longId": "87928758254318692721909164101369622513960639781458875980445111726519827316414",
@@ -2689,16 +2761,16 @@
         "expiry": 1789156800,
         "tenor": "weekly",
         "mintCutoff": 1789155000,
-        "mintFeePpm": 80,
+        "mintFeePpm": 0,
         "mintFeesHeld": {
           "raw": "0",
           "decimals": 18,
           "formatted": "0"
         },
         "mintFeesAccrued": {
-          "raw": "25853174603176",
+          "raw": "0",
           "decimals": 18,
-          "formatted": "0.000025853174603176"
+          "formatted": "0"
         },
         "status": "settled"
       },
@@ -2728,9 +2800,9 @@
           "formatted": "0.042"
         },
         "sellerFee": {
-          "raw": "0",
+          "raw": "21000",
           "decimals": 6,
-          "formatted": "0"
+          "formatted": "0.021"
         },
         "makerRebate": {
           "raw": "25200",
@@ -2743,7 +2815,7 @@
       }
     },
     {
-      "id": "0xbd6a1a9a3b877f0b1dfe13890b2768abda9429f02e1c56ae23990c1c482c3be8-2",
+      "id": "0xbd6a1a9a3b877f0b1dfe13890b2768abda9429f02e1c56ae23990c1c482c3be8-3",
       "kind": "fill",
       "ts": 1788876300,
       "longId": "87928758254318692721909164101369622513960639781458875980445111726519827316414",
@@ -2761,16 +2833,16 @@
         "expiry": 1789156800,
         "tenor": "weekly",
         "mintCutoff": 1789155000,
-        "mintFeePpm": 80,
+        "mintFeePpm": 0,
         "mintFeesHeld": {
           "raw": "0",
           "decimals": 18,
           "formatted": "0"
         },
         "mintFeesAccrued": {
-          "raw": "25853174603176",
+          "raw": "0",
           "decimals": 18,
-          "formatted": "0.000025853174603176"
+          "formatted": "0"
         },
         "status": "settled"
       },
@@ -2800,9 +2872,9 @@
           "formatted": "0.09352"
         },
         "sellerFee": {
-          "raw": "0",
+          "raw": "46760",
           "decimals": 6,
-          "formatted": "0"
+          "formatted": "0.04676"
         },
         "makerRebate": {
           "raw": "46760",
@@ -2833,16 +2905,16 @@
         "expiry": 1789156800,
         "tenor": "weekly",
         "mintCutoff": 1789155000,
-        "mintFeePpm": 80,
+        "mintFeePpm": 0,
         "mintFeesHeld": {
           "raw": "0",
           "decimals": 18,
           "formatted": "0"
         },
         "mintFeesAccrued": {
-          "raw": "70952380952381",
+          "raw": "0",
           "decimals": 18,
-          "formatted": "0.000070952380952381"
+          "formatted": "0"
         },
         "status": "settled"
       },
@@ -2857,7 +2929,7 @@
           "decimals": 6,
           "formatted": "0.247"
         },
-        "units": "299",
+        "units": "350",
         "tx": "0xc6f5a1e1dba8d7a86baeca590c6de95817d3bd5e3b9337cf601dca34a883ceb3"
       }
     }

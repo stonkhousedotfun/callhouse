@@ -9,7 +9,7 @@ import { V2_REGISTRY } from "../../../lib/v2/marketRegistry.generated";
 import { aggregateBook, makerKey, quoteFromBook, type AggregatedBook, type BookOrder, type BookSeries } from "../../../lib/v2/book";
 import { buildCardMath, pickHero, type CardFees, type CardMath, type Ladder } from "../../../lib/v2/cards";
 import { effectiveFees, feeStateFromRow, type OrderBookFees } from "../../../lib/v2/fees";
-import { fetchFairQuote } from "../../../lib/v2/pricing";
+import { fetchFairResult } from "../../../lib/v2/pricing";
 import { money, seriesWire } from "./shared";
 import { usdg } from "../serialize";
 import { compute15s } from "../cache";
@@ -159,8 +159,9 @@ async function loadBookAt(longId: bigint, now: bigint, depth: number | undefined
 
 export async function loadQuote(loaded: LoadedBook) {
   const series = loaded.series;
-  const fair = await fetchFairQuote({ ticker: series.ticker, strike: series.strike, expiry: Number(series.expiry), isPut: series.isPut });
-  const quote = quoteFromBook(loaded.book, series.lastPrice, fair);
+  const fair = await fetchFairResult({ ticker: series.ticker, underlying: series.underlying,
+    strike: series.strike, expiry: Number(series.expiry), isPut: series.isPut });
+  const quote = quoteFromBook(loaded.book, series.lastPrice, fair.quote);
   return {
     bestBid: quote.bestBid === null ? null : usdg(quote.bestBid),
     bestAsk: quote.bestAsk === null ? null : usdg(quote.bestAsk),
@@ -170,6 +171,7 @@ export async function loadQuote(loaded: LoadedBook) {
     iv: quote.iv,
     delta: quote.delta,
     last: quote.last === null ? null : usdg(quote.last),
+    fairProvenance: fair.provenance,
   };
 }
 

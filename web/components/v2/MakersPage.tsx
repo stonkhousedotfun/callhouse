@@ -1,19 +1,19 @@
 "use client";
 
-import { useInfiniteQuery, useQuery, useQueryClient } from "@tanstack/react-query";
-import { useMemo, useState } from "react";
-import { formatUnits, getAddress, type Address, type WalletClient } from "viem";
-import { useAccount, useWalletClient } from "wagmi";
+import { useInfiniteQuery } from "@tanstack/react-query";
+import { useMemo } from "react";
+import { getAddress } from "viem";
+import { useAccount } from "wagmi";
 
-import { ConnectButton } from "@/components/ConnectButton";
-import { useNotice, useV2ReceiptNotice } from "@/components/TxToast";
 import { Button, CodeBlock, Notice, PageHead, Panel, Table } from "@/components/ui";
+import { RewardClaims } from "@/components/v2/RewardClaims";
+import { TableOrCards } from "@/components/v2/RecordCards";
 import { addressUrl } from "@/lib/chain";
 import { v2Api } from "@/lib/v2/api";
 import type { MakersResponse } from "@/lib/v2/api-types";
 import { V2_DEPLOYMENT } from "@/lib/v2/config";
 import { useMaker } from "@/lib/v2/hooks";
-import { claimMakerReward, parseMakerEpochFile, readMakerClaim } from "@/lib/v2/makerRewards";
+import { makerProgram } from "@/lib/v2/rewardPrograms";
 
 const shortAddress = (address: string) => `${address.slice(0, 6)}…${address.slice(-4)}`;
 const date = (unix: number) => new Intl.DateTimeFormat("en-US", { timeZone: "UTC", month: "short", day: "numeric", year: "numeric" })
@@ -45,67 +45,20 @@ if (orderId === undefined) throw new Error('OrderPlaced event missing');
 await wallet.writeContract({ address: orderBook, abi: orderBookAbi,
   functionName: 'replace', args: [orderId, parseUnits('0.27', 6), units] });`;
 
-function ClaimForEpoch({ epoch, account, distributor }: { epoch: number; account: Address; distributor: Address }) {
-  const wallet = useWalletClient();
-  const notice = useNotice();
-  const unknownReceipt = useV2ReceiptNotice();
-  const client = useQueryClient();
-  const [pending, setPending] = useState(false);
-  const file = useQuery({ queryKey: ["maker-epoch-file", epoch], queryFn: async () => {
-    const response = await fetch(`/maker-epochs/${epoch}.json`, { cache: "no-store" });
-    if (response.status === 404) return null; // operator has not published a root for this epoch
-    if (!response.ok) throw new Error("Reward file could not be loaded.");
-    return parseMakerEpochFile(await response.json(), epoch);
-  }, staleTime: 60_000, refetchInterval: 60_000, retry: 0 });
-  const claim = useQuery({ queryKey: ["maker-claim", epoch, account, file.data?.root, distributor],
-    enabled: Boolean(file.data), queryFn: () => readMakerClaim(distributor, file.data!, account),
-    staleTime: 15_000, retry: 0 });
-  if (file.isPending) return <p className="text-sm text-ink-2">Epoch {epoch}: checking published rewards…</p>;
-  if (file.isError) return <Notice tone="warn" role="status">Epoch {epoch}: {file.error.message}
-    <Button size="xs" variant="ghost" className="ml-2" disabled={file.isFetching}
-      onClick={() => void file.refetch()}>{file.isFetching ? "Retrying…" : "Try again"}</Button>
-  </Notice>;
-  if (!file.data) return <p className="text-sm text-ink-2">Epoch {epoch}: no reward file published yet.</p>;
-  if (claim.isPending) return <p className="text-sm text-ink-2">Epoch {epoch}: checking the chain…</p>;
-  if (claim.isError) return <Notice tone="warn" role="status">Epoch {epoch}: {claim.error.message}
-    <Button size="xs" variant="ghost" className="ml-2" disabled={claim.isFetching}
-      onClick={() => void claim.refetch()}>{claim.isFetching ? "Retrying…" : "Try again"}</Button>
-  </Notice>;
-  const reward = claim.data;
-  if (!reward || reward.status === "no-reward") return <p className="text-sm text-ink-2">Epoch {epoch}: no reward for this wallet.</p>;
-  return <div className="flex flex-wrap items-center justify-between gap-3 border-t border-line py-3 first:border-0">
-    <p className="text-sm"><span className="font-semibold">Epoch {epoch}</span> · {formatUnits(BigInt(reward.entry!.amount), 6)} USDG
-      {reward.status === "claimed" ? <span className="ml-2 text-ink-2">Claimed</span> : null}</p>
-    {reward.status === "ready" ? <Button size="sm" disabled={pending || !wallet.data} onClick={async () => {
-      if (!wallet.data || !file.data || !reward.entry) return;
-      setPending(true);
-      try {
-        notice("pending", "Confirm maker reward", "Review the USDG claim in your wallet.");
-        await claimMakerReward(wallet.data as WalletClient, account, distributor, file.data, reward.entry);
-        await client.invalidateQueries({ queryKey: ["maker-claim", epoch, account] });
-        notice("success", "Reward claimed", "USDG was sent to your wallet.");
-      } catch (error) {
-        if (!unknownReceipt(error))
-          notice("error", "Claim stopped", error instanceof Error ? error.message : "The claim could not be completed.");
-      } finally { setPending(false); }
-    }}>{pending ? "Claiming…" : "Claim USDG"}</Button> : null}
-  </div>;
-}
-
+/**
+ * The maker program's claims panel. T-133 moved the rendering into `RewardClaims`, which is shared
+ * with the lender program; every string below is the one this page rendered before the extraction.
+ */
 function MakerClaims({ epoch }: { epoch: number }) {
   const { address } = useAccount();
-  const distributor = V2_DEPLOYMENT.contracts.rewardsDistributor;
+  const program = makerProgram(V2_DEPLOYMENT.contracts.rewardsDistributor);
   const profile = useMaker(address);
   const epochs = useMemo(() => [...new Set([epoch, ...(profile.data?.epochs.map((item) => item.epoch.id) ?? [])])]
     .sort((a, b) => b - a).slice(0, 12), [epoch, profile.data]);
-  return <Panel as="section" id="maker-rewards" className="mt-6">
-    <h2 className="font-display text-xl font-bold">Claim epoch rewards</h2>
-    <p className="mt-2 text-sm text-ink-2">The operator publishes a reward file after an epoch and posts its root on chain. The app checks your proof against that root before asking your wallet to claim.</p>
-    {!address ? <div className="mt-4"><ConnectButton /></div> : !distributor
-      ? <Notice tone="info" className="mt-4">Reward claims will open after the RewardsDistributor is deployed.</Notice>
-      : <div className="mt-4 space-y-2">{profile.isError ? <Notice tone="warn">Older maker epochs are unavailable right now. The current epoch is still shown.</Notice> : null}
-        {epochs.map((id) => <ClaimForEpoch key={`${address}-${id}`} epoch={id} account={address} distributor={distributor} />)}</div>}
-  </Panel>;
+  return <RewardClaims program={program} address={address} epochs={epochs}
+    heading="Claim epoch rewards"
+    lede="The operator publishes a reward file after an epoch and posts its root on chain. The app checks your proof against that root before asking your wallet to claim."
+    unavailable={profile.isError ? <Notice tone="warn">Older maker epochs are unavailable right now. The current epoch is still shown.</Notice> : null} />;
 }
 
 export function MakersPage() {
@@ -128,7 +81,7 @@ export function MakersPage() {
     </div>
     <Panel as="section" className="mt-6">
       <h2 className="font-display text-xl font-bold">How scoring works</h2>
-      <p className="mt-2 text-sm text-ink-2">Each week starts Monday at 00:00 UTC. The indexer samples eligible makers with quotes near fair value; stale pricing does not count as maker downtime. The score combines two-sided quote uptime (40%), depth near fair value (30%), tighter spreads (20%), and filled volume (10%).</p>
+      <p className="mt-2 text-sm text-ink-2">Each week starts Monday at 00:00 UTC. The indexer samples eligible makers with quotes near fair value; stale pricing does not count as maker downtime. The score combines two-sided quote uptime, depth near fair value, and tighter spreads, each with a published weight; the weights are part of the epoch&apos;s scoring policy and change with it.</p>
       <p className="mt-2 text-sm text-ink-2">Depth is measured within 100 basis points of fair value. Rebates and score are separate: a fill may earn a rebate even if the week has no published reward budget.</p>
     </Panel>
     <Panel as="section" className="mt-6">
@@ -140,7 +93,26 @@ export function MakersPage() {
         : <>
           {makers.isError ? <Notice tone="warn" className="mt-4">Showing saved scores while live updates recover.</Notice> : null}
           {items.length === 0 ? <p className="mt-4 text-sm text-ink-2">No maker scores have been recorded for this week.</p>
-            : <Table label="Maker scores for the latest epoch" className="mt-5" minWidth={790}>
+            : <TableOrCards cardsLabel="Maker scores for the latest epoch" className="mt-5"
+              cards={items.map((row) => ({
+                id: row.maker,
+                highlighted: address?.toLowerCase() === row.maker.toLowerCase(),
+                title: <a className="underline decoration-line-2 underline-offset-2" href={addressUrl(row.maker)}
+                  target="_blank" rel="noopener noreferrer" title={row.maker}>{shortAddress(row.maker)}</a>,
+                // EVERY column the table carries, none dropped. A figure a phone user cannot see
+                // and cannot know about is the defect this row exists to remove, not a fix for it.
+                fields: [
+                  { label: "Score", value: row.score.toFixed(1) },
+                  { label: "Uptime", value: `${row.uptimePct.toFixed(1)}%` },
+                  { label: "Spread", value: row.avgSpreadBps === null ? "—" : `${row.avgSpreadBps} bps` },
+                  { label: "Depth (units)", value: number(row.depthWithin100bps) },
+                  { label: "Fills", value: number(row.fills) },
+                  { label: "Volume", value: `${row.volume.formatted} USDG` },
+                  { label: "Rebates", value: `${row.rebates.formatted} USDG` },
+                  { label: "Tier share", value: row.tierBps ? `${row.tierBps / 100}%` : "Default" },
+                ],
+              }))}>
+              <Table label="Maker scores for the latest epoch" minWidth={790}>
               <thead><tr><th>Maker</th><th>Score</th><th>Uptime</th><th>Spread</th><th>Depth (units)</th><th>Fills</th><th>Volume</th><th>Rebates</th><th>Tier share</th></tr></thead>
               <tbody>{items.map((row) => <tr key={row.maker} className={address?.toLowerCase() === row.maker.toLowerCase() ? "bg-accent-soft" : ""}>
                 <td><a className="underline decoration-line-2 underline-offset-2" href={addressUrl(row.maker)} target="_blank" rel="noopener noreferrer" title={row.maker}>{shortAddress(row.maker)}</a></td>
@@ -148,7 +120,8 @@ export function MakersPage() {
                 <td>{number(row.depthWithin100bps)}</td><td>{number(row.fills)}</td><td>{row.volume.formatted} USDG</td><td>{row.rebates.formatted} USDG</td>
                 <td>{row.tierBps ? `${row.tierBps / 100}%` : "Default"}</td>
               </tr>)}</tbody>
-            </Table>}
+              </Table>
+            </TableOrCards>}
           {makers.hasNextPage ? <Button size="sm" variant="ghost" className="mt-5" disabled={makers.isFetchingNextPage}
             onClick={() => void makers.fetchNextPage()}>{makers.isFetchingNextPage ? "Loading…" : "Load more makers"}</Button> : null}
         </>}

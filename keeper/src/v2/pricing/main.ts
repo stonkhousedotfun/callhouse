@@ -30,6 +30,7 @@ import { serve, type ServerType } from '@hono/node-server';
 import { pino } from 'pino';
 import { z } from 'zod';
 import type { FetchChain } from './cboe.js';
+import type { OptionChainProvider } from './chain.js';
 import { PricingService, type PricingSettings } from './fair.js';
 import { loadPricingRegistry } from './markets.js';
 import { createPricingApp } from './server.js';
@@ -109,6 +110,8 @@ export interface StartPricingOptions {
   spotReader?: SpotReader;
   /** SEAM: replaces the Cboe download. */
   fetchChain?: FetchChain;
+  /** SEAM: replaces the data provider (chain.ts); takes precedence over `fetchChain`. */
+  provider?: OptionChainProvider;
   settings?: Partial<PricingSettings>;
 }
 
@@ -133,7 +136,10 @@ export async function startPricingService(options: StartPricingOptions = {}): Pr
   const service = new PricingService({
     markets: registry.markets,
     spotReader: options.spotReader ?? createFeedSpotReader(env.rpcUrls),
-    chains: options.fetchChain === undefined ? {} : { fetchChain: options.fetchChain },
+    chains: {
+      ...(options.fetchChain === undefined ? {} : { fetchChain: options.fetchChain }),
+      ...(options.provider === undefined ? {} : { provider: options.provider }),
+    },
     settings: {
       ...(registry.maxPriceAgeS === null ? {} : { maxChainAgeS: registry.maxPriceAgeS, maxSpotAgeS: registry.maxPriceAgeS }),
       ...(registry.maxSpotDivergenceBps === null ? {} : { maxSpotDivergenceBps: registry.maxSpotDivergenceBps }),

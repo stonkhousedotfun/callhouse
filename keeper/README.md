@@ -1,6 +1,8 @@
 # Stonkhouse keeper
 
-The weekly roll, as a single Node 22 process. One vault per process.
+The weekly roll, as a single Node 22 process. One market per process: the pooled vault (`VAULT`),
+one isolated-account factory (`FACTORY`), or both for the transition. Every new market is a
+factory-only process ("Factory-only mode" below); the pooled vault is closed.
 
 It watches the vault's own phase and the clock of the head block, creates the week's option type
 on the Valorem clearinghouse, ARMS it on the vault (`rollOpen` writes nothing), authorises one
@@ -80,6 +82,10 @@ What is pinned, because each of these is a week of premium when it drifts:
 | `alerts.test.ts` | the cooldown clock: a failed webhook delivery retries after five minutes, a successful one suppresses for the full `KEEPER_ALERT_COOLDOWN_MS` |
 | `config.test.ts` | the schema's hard edges: bigint fields reject `-1` loudly, `KEEPER_PREMIUM_MARGIN_BPS` in 0..1000, the week's knobs, the vol pricing keys' defaults and bounds (`KEEPER_VOL_URL` https only), no registry or Overcall key |
 | `health.test.ts` | the HTTP server answers on `127.0.0.1` and on `::1` (Railway's private network is IPv6) |
+| `health.solo.test.ts` | the surface of a process with NO `VAULT`: `/` and `/health` name the factory and the market with `vault: null`, `/orders` is an empty book with a note, `/state` is a 503 that names the market before the first tick |
+| `feed.test.ts` | the Chainlink read pinned to `Policy.normalizeSpot` / `ValoremLib.spotUsdg`: 8 dp → 6 dp by integer division on the real NVDA and TSLA prints, 18 / 6 / 4 dp, zero and negative answers refused, round 0 refused, stale at `maxPriceAge` inclusive |
+| `solo.winddown.test.ts` | v1 run-off through the real solo tick: no `setWeek`, no `listFor`, every expired account settled, `v1_drained` once per factory across restarts; the settle guard in both modes: its one multicall (`claimKey` plus USDG `paused`/`isFrozen`, the Stock Token's `paused` and its registry's `isBlocked`, for the account and the Clear), each shut gate holding every sold account it touches with `v1_settle_held` once per account, a failed read (a gate, the registry address, `claimKey`, the whole multicall) holding rather than passing, `claimKey == 0` settling regardless, the hold lifted and the account settled once the gate opens; and the registry `v1RunOff` flag through `ops/keeper-env.sh` into the config |
+| `solo.test.ts` | the factory week (`planSoloWeek`): the fixed strike rounds DOWN and must sit in the factory's band (GME at 21.42 with 5% is skipped, 8% is not), the ask is the one-lot fill floor with the margin from the factory's `minPremiumBps`, `KEEPER_MIN_ASK_USDG6` lifts it (`min-ask`) and is capped at the strike, vol mode lands on the pooled figures for one lot (225 / 0.946951 on the fixture), every `vol-*` reason skips and never falls back to fixed, and solo.ts loads without a `VAULT` |
 
 ### Dry run against a fork
 
@@ -265,8 +271,8 @@ worse than one that will not start. `keeper/.env.example` lists every key with i
 | Key | What it is |
 |---|---|
 | `RH_RPC` | Primary RPC. **Must be an archive node** — it is the only endpoint used for `eth_getLogs`. |
-| `VAULT` | The Stonkhouse vault this process drives. |
-| `KEEPER_PK` | The hot key. Needs gas and `KEEPER_ROLE`. Keep ~0.05 ETH on it. |
+| `VAULT` **or** `FACTORY` | At least one. `VAULT` is the pooled vault (closed; its keeper runs `WIND_DOWN`). `FACTORY` is an isolated-account factory (`contracts/src/solo/AccountFactory.sol`): one process per market. With only `FACTORY` set, nothing in `roll.ts` runs ("Factory-only mode" below). Neither set is a boot failure that names both. |
+| `KEEPER_PK` | The hot key. Needs gas and `KEEPER_ROLE` on the vault or the factory. Keep ~0.05 ETH on it. One key per market (`ops/markets/derive-keeper-keys.sh`). |
 
 ### Chain, with working defaults
 
@@ -282,7 +288,75 @@ worse than one that will not start. `keeper/.env.example` lists every key with i
 | `SEAPORT_CONDUIT_KEY` | zero | Zero means Seaport pulls the ERC-1155 itself, so the vault approves **Seaport**, not a conduit. The zone is the vault itself and is derived, not configured. |
 
 All of these are cross-checked against the deployed vault at boot (`asset`, `usdg`, `clear`,
-`seaport`, `conduitKey`, `seaportZone == VAULT`). A mismatch is fatal.
+`seaport`, `conduitKey`, `seaportZone == VAULT`). A mismatch is fatal. A factory is cross-checked
+the same way (`asset`, `priceFeed`, `usdg`, `clear`, `seaport`); see the next section.
+
+### Factory-only mode
+
+Every market but the closed pooled vault is a factory: one `AccountFactory`, its `WriterAccount`
+clones, one keeper process, one hot key, one Railway service (`ops/keeper/markets/README.md`).
+The environment for each is rendered from the registry by `ops/keeper-env.sh` into
+`ops/keeper/markets/<TICKER>.env`; these are the keys that matter to it, on top of the shared ones
+above and the pricing keys below, which the factory path reuses unchanged.
+
+| Key | Default | Notes |
+|---|---|---|
+| `FACTORY` | — | The factory this process drives. Its `asset()`, `priceFeed()`, `usdg()`, `clear()` and `seaport()` are compared with `ASSET`, `PRICE_FEED`, `USDG`, `CLEARINGHOUSE`, `SEAPORT` at boot; a mismatch exits 1. A keeper without `KEEPER_ROLE` on it alerts `keeper_role` and keeps running: `settle()` is permissionless, `setWeek`/`listFor` are not. |
+| `PRICE_FEED` | `0x379E…9F15` (NVDA) | The Chainlink proxy the factory prices against. The solo path reads `latestRoundData()` itself (there is no `vault.spotUsdg()` to ask), refuses a round older than `factory.maxPriceAge()` at the head block's clock, and normalises exactly like `Policy.normalizeSpot` (`feed.ts`). The default keeps the live NVDA keeper's env unchanged; every other market sets its own. |
+| `KEEPER_MIN_ASK_USDG6` | `1000000` (1 USDG) | The week's ask is never below this, whatever the fill floor says. The default is the floor the first factory keeper hard-coded, kept so NVDA's behaviour does not change with the key's arrival; it is 4% a week on a $25 token, so the registry sets `100000` (0.10 USDG) per market and the env generator writes that. Capped at the strike (`setWeek` reverts `AskAboveStrike`). `0` switches it off. |
+| `SOLO_WIND_DOWN` | unset (off) | v1 run-off (ADR-10), for a factory the owner has frozen (`writesHalted`, `depositCap` 0). `1`/`true`: the tick never calls `setWeek` or `listFor`, still settles every expired account and raises `low_gas` / `rpc_lag` / `oracle_paused`, and alerts `v1_drained` once when `liveCount() == 0 && pendingCount() == 0` (remembered in SQLite, so a restart does not repeat it). `/health` and `/state` show `windDown: true`; `/state` has `nextWeek: null` and `drainedAt`. As in every factory tick, a sold account's `settle()` is held while USDG or the Stock Token would refuse its redeem (the settle guard below, alert `v1_settle_held`). `0`/`false`/unset: off. Any other value is refused at boot. Rendered from the registry's `v1RunOff`. |
+| `KEEPER_MARKET` | `NVDA` | A label: the registry ticker (`^[A-Z0-9.]{1,8}$`). On every log line, every alert payload (`market`, beside `factory` and `vault`), `/health` and `/state`, so 35 keepers behind one relay can be told apart. Read by no pricing decision. |
+
+**How a factory week is priced** (`src/solo.ts` header has the long version). Once a week, when
+the factory has no week or the current one's base expiry has passed, the keeper calls
+`setWeek(strike, exerciseTs, baseExpiryTs, ask)` with the next NYSE Friday window
+(`KEEPER_ARM_LEAD_S`, the same clock as the vault). Every account then lists every lot at that
+one strike and that one ask all week; there is no per-account price and no reprice. The numbers
+come from `factory.policy()` (band, premium floor; never hard-coded) and the feed:
+
+- **fixed**: strike = spot + `KEEPER_STRIKE_OTM_BPS` rounded **down** to a whole USDG, refused
+  (`strike-outside-band`) unless inside `[spot × (1 + minOtm), spot × (1 + maxOtm)]`. On a token
+  under ~25 USDG a 5% strike rounded down lands under a 3% floor; tune the registry's
+  `strikeOtmBps`, not the keeper.
+- **vol**: the pooled machinery for ONE contract: the chain for the close day (throttled by
+  `VOL_MIN_REFETCH_MS`), the `KEEPER_TARGET_DELTA` strike clamped into the buffered band, the fair
+  value at that strike lifted by `KEEPER_PRICE_EDGE_BPS`. Any `vol-*` reason skips the week,
+  alerts once per (week, reason) across restarts, retries next tick, never falls back to fixed.
+- **ask**: `max(one-lot fill floor with KEEPER_PREMIUM_MARGIN_BPS, vol fair value with the edge)`,
+  then lifted to `KEEPER_MIN_ASK_USDG6` (`min-ask`), then capped at the strike.
+
+Every tick between weeks: `listFor(owner)` for each pending account (simulated first; a
+reverting one is logged and skipped, not sent 25 times), nothing while `factory.writesHalted()`,
+nothing inside the last hour before the close; `settle()` for each live account past its expiry.
+The last pricing record and the last skip reason are in the meta table and served by `/state`
+(`lastPricing`, `lastSkipReason`).
+
+**The settle guard** (every factory tick, run-off or not). `settle()` redeems a sold account's
+Valorem claim with a caught call; if the issuers refuse that redeem, `settle()` still completes,
+zeroes `listedExpiryTs` and keeps the claim for good (a second `settle()` reverts `TooEarly`, and
+the account has no other redeem). So before it simulates `settle()` for an expired account, the
+keeper reads, in **one multicall**, `claimKey()` on the account and the six gates of `settle_safe`
+(`ops/runbooks/v1-runoff.md` step 8): USDG `paused()`, USDG `isFrozen(account)`, USDG
+`isFrozen(CLEARINGHOUSE)`, `ASSET.paused()`, and `isBlocked(account)` / `isBlocked(CLEARINGHOUSE)`
+on the Stock Token's `ACCESS_CONTROLLED_REGISTRY()` (read once per tick). With `claimKey() != 0`
+and any gate true, or any read failed (a failed read is never taken as open), nothing is sent for
+that account: alert `v1_settle_held` once per account per reason, and `/state` lists it under
+`settleHeld` (`account`, `claimKey`, `listedExpiryTs`, `reasons`, `since`). It settles on the first
+tick every read is false again, and the alert state is cleared. An account with `claimKey() == 0`
+sold nothing, has no redeem, and settles regardless. Holds are kept in memory: a restart re-reads
+the gates and says each hold once more.
+
+**The per-market dry run** (`solo:quote`) prints what the keeper would set right now, from the
+real feed, the real factory policy (or the launch defaults with `--factory none`, for a market
+whose factory is not deployed) and, in vol mode, the real Cboe chain. It sends nothing and needs
+no role; with no `KEEPER_PK` in the environment it uses the dry-run harness's throwaway key.
+
+```bash
+KEEPER_ENV_FILE=../ops/keeper/markets/NVDA.env pnpm solo:quote                  # live: factory.policy()
+KEEPER_ENV_FILE=../ops/keeper/markets/TSLA.env pnpm solo:quote --factory none   # planned: launch defaults
+KEEPER_ENV_FILE=../ops/keeper/markets/SGOV.env pnpm solo:quote --factory none   # fixed mode: no Cboe
+pnpm solo:quote --mode fixed --json                                             # override the mode, machine-readable
+```
 
 ### The week
 
@@ -330,8 +404,8 @@ All of these are cross-checked against the deployed vault at boot (`asset`, `usd
 | `KEEPER_ALERT_COOLDOWN_MS` | `3600000` | Repeat suppression per alert kind. State changes ignore it. |
 | `KEEPER_TX_TIMEOUT_MS` | `180000` | Receipt wait before the tick gives up and alerts. |
 | `ALERT_WEBHOOK` | — | Generic JSON `POST`. Unset means alerts are still logged and stored, just not delivered. In production this is the relay (`relay/`). |
-| `ALERT_WEBHOOK_TOKEN` | — | ≥ 16 chars. Sent as `authorization: Bearer <token>` with every webhook POST; the relay requires it. |
-| `KEEPER_ENV_FILE` | `.env` | Alternative dotenv path. |
+| `ALERT_WEBHOOK_TOKEN` | — | ≥ 16 chars (v1); ≥ 32 and required with `ALERT_WEBHOOK` in the v2 modes, the relay's `RELAY_TOKEN` minimum. Sent as `authorization: Bearer <token>` with every webhook POST; the relay requires it. |
+| `KEEPER_ENV_FILE` | `.env` | Alternative dotenv path. `ops/keeper/markets/<TICKER>.env` is one. |
 
 ---
 
@@ -629,6 +703,8 @@ source of truth for the names; `ops/alerts.md` is the runbook for them.
 | `rpc_lag` | warn | Head block trails the wall clock by over `KEEPER_RPC_LAG_ALERT_MS`, or both RPCs are unreachable. |
 | `phase_stuck` | error | The vault is still not `Idle` more than an hour after expiry, by the head block's clock. **Anyone can call `rollClose()` now.** |
 | `keeper_error` | error | An unhandled error inside a tick. The loop keeps running; the next tick re-reads everything from chain. |
+| `v1_drained` | info | Factory in v1 run-off (`SOLO_WIND_DOWN`): no account is live or pending, so nothing is left to settle. Once per factory, remembered across restarts; a failed delivery is retried on the five-minute clock. The run-off is over for that market. |
+| `v1_settle_held` | warn | Factory, any mode: an expired account with `claimKey() != 0` was **not** settled this tick, because its Valorem redeem would be refused and `settle()` would keep the claim for good. `data.reason`: `usdg_paused`, `usdg_frozen` (the account), `clear_usdg_frozen`, `asset_paused`, `asset_blocked` (the account), `clear_asset_blocked`, or `read_failed` (`data.failedReads` names the reads that did not answer). Once per account per reason while it holds; retried every tick; settles on the first tick every gate reads open. Do not settle that account by hand while it holds. `ops/runbooks/v1-runoff.md` step 8. |
 | `boot` / `roll_open` / `listing` / `fill` / `queue_settled` / `roll_close` | info, forced | State changes, always delivered, never suppressed. `boot` also has a **warn** variant — the keeper lacks `KEEPER_ROLE` and can close but not open. |
 
 ---
@@ -674,20 +750,23 @@ Exercisable` and kills any listing still live.
 premium, settles the redeem queue and returns the vault to `Idle`, all in one transaction, and a
 redeem the token issuers refuse strands the claim instead of failing the close. **`settleQueue()`
 and `retryStrandedClaim()` are permissionless too.** The guardian does not need the keeper's key,
-its database, or its order components:
+its database, or its order components. A key never goes on the command line (`--private-key` puts it in the
+process list for the command's lifetime): import it once into Foundry's encrypted keystore and name the account.
 
 ```bash
-cast send $VAULT "rollClose()"             --rpc-url $RH_RPC --private-key <any funded key>   # from expiry + 1h
-cast send $VAULT "settleQueue()"           --rpc-url $RH_RPC --private-key <any funded key>   # Idle, shares queued
-cast send $VAULT "retryStrandedClaim()"    --rpc-url $RH_RPC --private-key <any funded key>   # while isStranded()
+cast wallet import ops-any --interactive                   # once: paste the key, set a password (never echoed)
+cast send $VAULT "rollClose()"             --rpc-url $RH_RPC --account ops-any   # from expiry + 1h
+cast send $VAULT "settleQueue()"           --rpc-url $RH_RPC --account ops-any   # Idle, shares queued
+cast send $VAULT "retryStrandedClaim()"    --rpc-url $RH_RPC --account ops-any   # while isStranded()
 ```
 
 **The guardian can kill listings without any keeper state.** `invalidateAllListings()` bumps the
 vault's Seaport counter, which invalidates every outstanding order at once and needs no order data:
 
 ```bash
-cast send $VAULT "invalidateAllListings()" --rpc-url $RH_RPC --private-key $GUARDIAN_PK
-cast send $VAULT "haltWrites()"            --rpc-url $RH_RPC --private-key $GUARDIAN_PK
+cast wallet import guardian --interactive                  # once, on the machine that holds the guardian key
+cast send $VAULT "invalidateAllListings()" --rpc-url $RH_RPC --account guardian
+cast send $VAULT "haltWrites()"            --rpc-url $RH_RPC --account guardian
 ```
 
 **Depositors are never trapped.** `queueRedeem`, `settleQueue`, `completeRedeem` and `claimUsdg`
@@ -699,6 +778,470 @@ keeper is a week with no premium, published as **unfilled, 0**.
 Just start it. Reconciliation adopts whatever state the vault is in. If anyone already called
 `rollClose`, the keeper sees `Idle` and closes the row from logs. If the vault is still `Listed`,
 it picks the listing back up from `seaport.getOrderStatus` and carries on.
+
+---
+
+## v2 modes
+
+The same image runs the Stonkhouse v2 bots. `V2_MODE` picks one; unset (or blank), the process is
+the v1 keeper above, unchanged (`src/v2/index.test.ts` runs both entries and compares their
+output). Everything v2 lives under `src/v2/` and imports nothing from the v1 modules, whose config
+exits without `VAULT`/`FACTORY` and `KEEPER_PK`.
+
+| `V2_MODE` | What | Key | Port | Also required | Contracts it needs |
+|---|---|---|---|---|---|
+| `pricing` | fair value / IV service (`src/v2/pricing/`) | none | `PRICING_PORT` 8790 | `RH_RPC` | none |
+| `cranker` | permissionless lifecycle loop (K2-03, "The cranker" below) | `CRANKER_PK` | `CRANKER_PORT` 8792 | `RH_RPC`; `INDEXER_URL` optional | clearinghouse, orderBook, settlementOracle, expiryCalendar; autoRoller optional (rolls skipped without it), feeSplitter optional (distribute and buyback skipped without it) |
+| `mm` | MakerVault quoter (K2-04, "The MM bot" below) | `MM_QUOTER_PK` | `MM_PORT` 8793 | `RH_RPC`, `PRICING_URL`, `MM_KILL_TOKEN`; `INDEXER_URL` accepted, unused | clearinghouse, orderBook, makerVault, accessManager |
+| `pricer` | AutoRoller repricer (K2-05, "The pricer" below) | `PRICER_PK` | `PRICER_PORT` 8794 | `RH_RPC`, `PRICING_URL`; `INDEXER_URL` optional | clearinghouse, orderBook, settlementOracle, autoRoller, accessManager |
+
+INTERFACE_VERSION 8 adds one required address: the MM bot and the pricer need `accessManager`, because
+under `Managed` a target has no `hasRole` of its own and each bot reads its own role from the manager
+(K8-03). Without it the pricer would not fail — it would reprice nothing for ever while reporting
+healthy — so a bot that cannot find out whether it may act refuses to start instead. The cranker does not
+need it, and its `feeSplitter` is optional exactly like `autoRoller`: with `V2_FEE_SPLITTER` empty the
+distribute and buyback steps skip and every other step keeps running, which is what the cranker does
+before the flywheel is deployed (`ops/v2/env/cranker.env`).
+
+Markets come from `V2_REGISTRY_PATH` (default `../ops/markets/tier1.json`, resolved against this
+package). The image carries the registry at `/app/ops/markets/tier1.json` (`Dockerfile`: a registry change is
+an image rebuild, ops/deploy.md §15.2), and a container sets `V2_REGISTRY_PATH=/app/ops/markets/tier1.json`
+(ops/v2/env). Do not mount another copy: the monitor and an image rollback read the baked one. This
+image implements INTERFACE_VERSION 8, and a registry declaring any other `v2.interfaceVersion` is
+refused outright at boot — including `ops/markets/v7-legacy.json`, the frozen v7 registry the v7 run-off
+image reads and this one must not, because one process never serves two interface versions.
+Each contract address is read from its env var when set, else from the registry. `V2_CLEARINGHOUSE`,
+`V2_ORDER_BOOK`, `V2_SETTLEMENT_ORACLE`, `V2_EXPIRY_CALENDAR`, `V2_KEEPER_REWARDS`, `V2_AUTO_ROLLER`,
+`V2_PAYOUT_ROUTER`, `MAKER_VAULT`, `V2_MAKER_REGISTRY`, `V2_REWARDS_DISTRIBUTOR` and
+`V2_ACCESS_MANAGER` come from `v2.contracts`; `V2_FEE_SPLITTER` and `V2_BUYBACK_EXECUTOR` come from
+`v2.flywheel`, which INTERFACE_VERSION 8 gave its own block because the `v2.contracts` set is closed and
+counted by the deploy tooling. The registry key behind `V2_PAYOUT_ROUTER` is still `payoutAdapter`, and
+`V2_PAYOUT_ADAPTER` is the deprecated v7 spelling of the variable: still read when `V2_PAYOUT_ROUTER` is
+unset (a rename of ours must not break a working deployment) and never preferred, but both set to
+different addresses is a boot failure naming both. A missing one is a boot failure only for a mode that
+needs it, and names both places. An env var that **disagrees** with the registry is a boot failure too:
+the baked registry is the release, so a variable set at an earlier one would survive the rebuild that
+replaced the contract and keep the bot pointed at it. `V2_CONTRACTS_FROM_ENV=1` takes the environment on
+purpose (a devnet, or an override before the registry is rebuilt); `ops/v2/env` sets no contract
+address on a bot for this reason, except the flywheel pair on the cranker, which it renders empty (an
+empty variable reads as unset) until the flywheel is deployed. The v1 names keep their meaning and
+defaults: `RH_RPC_2`, `CHAIN_ID` (must match the registry's `shared.chainId`), `MULTICALL3`,
+`KEEPER_DB_PATH` (default `./keeper-v2.db`; tables are `v2_*`), `KEEPER_LOG_LEVEL`,
+`KEEPER_MIN_GAS_WEI`, `KEEPER_RPC_LAG_ALERT_MS`,
+`KEEPER_ALERT_COOLDOWN_MS`, `KEEPER_TX_TIMEOUT_MS`, `ALERT_WEBHOOK`, `ALERT_WEBHOOK_TOKEN`,
+`POLL_INTERVAL_MS` (floor 1000 in v2). v2 only: `KEEPER_BOOT_RETRY_MS` (300000): how long a signing mode retries a chain
+it cannot read at boot, with its health server and routes (the MM kill switch) already up, before it exits 1.
+
+| File | What it holds |
+|---|---|
+| `v2/config.ts` | zod env per mode; every problem (env, registry, missing contracts) in one list. |
+| `v2/registry.ts` | The registry's `v2` blocks typed (02-interfaces.md §3); absent blocks tolerated; ladder and oracle parameters resolved as §3 defaults ← `v2.defaults` ← the market's `overrides`. |
+| `v2/chain.ts` | Clients (as `clients.ts`), read-only typed handles over the generated `v2/abi`, chunked multicalls pinned to one block, the head block's clock, the wiring check. |
+| `v2/tx.ts` | In flight? → already advanced? → simulate → worth sending? → send (tracked nonce, one at a time) → journal → wait. |
+| `v2/store.ts` | SQLite: `v2_txs`, `v2_alerts`, `v2_meta`. |
+| `v2/anchor.ts` | The deployment anchor: registry `v2.deployBlock` and its block hash, read once per process by the cranker, the MM bot and the pricer before they read their store. A file written for another deployment at the same addresses (a fresh devnet: `up.sh` deploys from a pinned nonce), or holding state from before anchors, is reset with a warning (rows, cursors and marks; pending journal rows marked `dropped`; the MM kill switch kept). Same anchor: the state survives restarts. No deploy block in the registry: bound on addresses alone, with a warning. |
+| `v2/runtime.ts` | What a signing mode runs on, and `runSigningMode(runtime, { tick, state })`: wiring check, health server, `v2_boot`, the loop with the chain probe, gas and lag alerts, shutdown. |
+| `v2/health.ts`, `v2/loop.ts`, `v2/alerts.ts`, `v2/logger.ts` | `/health` `/state` `/` with v1's 503 rule; the non-overlapping poll loop; relay alerts (`v2_*` kinds, `source: callhouse-<mode>`); pino. |
+| `v2/index.ts`, `v2/mode.ts`, `v2/{cranker,mm,pricer}/main.ts` | The mode switch, exit codes and signals; the per-mode entries. |
+| `v2/pricer/*` | The pricer (K2-05): `planner.ts` (band, target, threshold, cadence), `fair-client.ts` (`/fair`), `strategies.ts` (StrategySet scan ∪ indexer), `pricer.ts` (the tick, `/state`), `devnet-reprice.ts`. |
+| `v2/abi/*`, `v2/seriesId.ts` | GENERATED by `scripts/gen-abis.mjs` from `ops/abis/v2` and `ops/shared/v2`. Never edited by hand. |
+| `v2/fixtures/registry-*.json` | Registries before O2-01, with §3's unset block, and deployed with overrides. |
+| `v2/pricing/*` | The pricing service: `chain.ts` (the provider-neutral chain contract and its quality checks), `cboe.ts` (the Cboe adapter, quote gates, chain check and cache), `surface.ts`, `fair.ts`, `provenance.ts` (internal per-price provenance), `fake-provider.ts` (deterministic test providers), `server.ts`, `main.ts`, `coverage.ts` and `coverage-main.ts` (the `v2:pricing-coverage` report). |
+
+### Pricing data providers (K3-311)
+
+The pricing service reads option chains only through a provider-neutral contract
+(`src/v2/pricing/chain.ts` `NormalizedChain`). A data provider is an `OptionChainProvider`. Cboe's
+free delayed file is the default one (`cboe.ts` `createCboeProvider`), and a paid feed (K3-308) will
+be another adapter. No code after the adapter reads a provider's payload type. The contract keeps
+four things apart:
+
+- **Identity.** Each instrument as the provider states it: its own id, root, side, strike, expiry day,
+  and its multiplier, exercise and settlement convention. A value the provider does not give is
+  `null`. The canonical market, Stock Token (`asset`, `shared.chainId`, `verification.uiMultiplier`)
+  and issuer come from the registry, and the registry has no issuer.
+- **Observation.** A raw listed quote (bid, ask, sizes and its own time), the provider's greeks on
+  that quote, and any provider model value (`theoretical`) in a separate field. A theoretical value
+  never becomes a listed input.
+- **Method.** How `fair.ts` priced the series: exact listed contract, interpolation or extrapolation.
+- **Quality.** Book state (empty, one-sided, crossed; a missing side is kept apart from a zero side),
+  clock ages, source disagreement, and identity or multiplier mismatch, each with its own reason code.
+
+A clock the provider does not give stays `null` through the cache and a failed refetch. Quote age
+comes only from a quote time, never from the download, the file or the underlying's last trade. A
+chain is priced on its quote time when the provider gives one, otherwise on the underlying's last
+trade (Cboe, unchanged). A refetch advances only `receivedAt`. An underlying price with no stated
+time is reported as `underlying-age-unknown`, so that estimate is never `ready`.
+
+The `/fair` body is unchanged. Every priced answer carries an internal `provenance` (02-interfaces.md
+§5.1 shape) that `server.ts` does not serialize. It names only the listed inputs the price actually
+used (matched by instrument, not by expiry, side and strike alone). Producers emit it only in the consumer-first order
+of §5.1. The legacy `source` is `"cboe"` only for Cboe's own exact listed contract; the same price
+from any other provider is `"model"`.
+
+`startPricingService({ provider })` replaces the provider. `fetchChain` still replaces only the Cboe
+download. Tests use `fake-provider.ts`, which serves committed fixtures with no network, credentials
+or provider contact:
+
+- `chain.test.ts` covers the pure checks;
+- `fake-provider.test.ts` covers listed parity with Cboe, theoretical-only and mixed chains, frozen
+  underlying with fresh quotes, unknown clocks (including an untimed underlying), refetch clocks,
+  identity and multiplier mismatch, same-key decoy rows kept out of provenance, and zero versus
+  unavailable.
+
+### Short maturities, events and the expiry clock (K3-312)
+
+A daily before the first listed expiry is priced at that listing's vol (`flat-before-first`). One
+listed expiry cannot separate an earnings jump from ordinary variance. `short-maturity.ts` keeps that
+point price. It adds bounds (`ivLow`/`ivHigh`, `fairLow`/`fairHigh`) and reason codes to the
+internal provenance (`quality.uncertainty`, `quality.reasons`) and working to `FairQuote.diagnostics`.
+The `/fair` body is unchanged, and `fixtures/pricing-parity.ts` pins the base answers.
+
+- **Event input** is injected (`PricingService({ events })`, built by `eventCalendar`): per ticker,
+  `{ date, kind, timing: 'bmo' | 'amc' | null }`, optionally with a `through` day. None is wired in
+  production, and no real dates are committed. A before-first read without input for its ticker is
+  `event-uncertainty`. An event between now and the first listing widens the bound up when the
+  expiry includes it and down when it excludes it. A bracketed read is flagged only for a known event
+  between its listings. An event realized since the chain's clock bounds any read down.
+- **Policy** (`PricingSettings.shortMaturity`). These defaults are proposals, not approved limits
+  (OQ-15): `maxEventVariance` 0.0144, `gapVariance` 0.0001 per overnight/weekend/holiday gap,
+  `closedDayVariance` 0.000025, `termStructureMultiplier` 1, `requireEventInput` true,
+  `maxRelativeIvWidth` 0.5 (above it: `model-uncertainty`), `onModelUncertainty` `bound`. `refuse`
+  answers `{ fair: null, reason: "model-uncertainty" }`. A read with any of these reasons is never
+  `ready`.
+- **Clocks** (`expiry-clock.ts`). `yearsToExpiry` is trading time from the service clock. Listed T and
+  solved vols run from the chain's pricing clock: the quote time, else Cboe's last trade. Neither
+  clock uses file or download times. A series whose expiry is not after both clocks, or that has no
+  regular session left, is `expired`. Early closes (`PricingSettings.earlyCloses`, none by default)
+  are flagged `clock-early-close` and widen the bound. They do not change the price.
+
+### Replaying real and synthetic chains (K3-304)
+
+`src/v2/pricing/replay.ts` replays chains through the same `PricingService` onto the cranker's
+ladder — the weekly (Friday walked back over full-day holidays) and daily (every session day)
+closes from the NYSE calendar, `expiriesAhead` of each tenor, crossed with `ladderStrikes` at the
+market's `strikeTick`, exactly as `cranker/steps.ts` maintains them. A rung the chain does not list
+prices interpolated or modeled or refuses, like the live service; the replay records every outcome
+and never throws on bad data. No network, no credentials, no provider contact: chains come from
+files, and the spot is a synthetic round over the chain's own underlying.
+
+- **Committed neutral replay** (`replay.test.ts`): the committed synthetic chain and its fake-provider
+  variants — listed quotes, vendor theoretical estimates, stale, empty, crossed and zero-bid books,
+  and missing timestamps — asserting the method and every source clock are preserved (`null` stays
+  `null`; a zero fair is a price, never "unavailable").
+- **Private real-data replay**: point `PRICING_PRIVATE_FIXTURES_DIR` at a directory OUTSIDE the repo
+  holding real Cboe downloads (`*.json`, one per root). The replay converts them through
+  `cboeToNormalized` and prices the registry ladder of each live market they name. Private data is
+  never committed; when the variable is unset the private test **skips with an explicit reason** and
+  is never reported as passing.
+- **Real `--pricing-url` devnet paths**: `v2:devnet-pricer` and `v2:devnet-mm` accept
+  `--pricing-url <url>` (or `PRICING_URL`) to call a real running pricing service — for example one
+  serving replayed chains — instead of their in-process stubs. Flag parsing and the default path are
+  covered by `devnet-pricing-url.test.ts`.
+
+### Pricing coverage (K3-303)
+
+`v2:pricing-coverage` prices every rung the cranker would list and reports on each one. Its output is
+derived only. It holds no key, sends nothing and never writes the registry.
+
+```bash
+RH_RPC=… pnpm --filter @callhouse/keeper v2:pricing-coverage                               # live markets, table
+RH_RPC=… pnpm --filter @callhouse/keeper v2:pricing-coverage -- --status live,planned --suggest
+RH_RPC=… pnpm --filter @callhouse/keeper v2:pricing-coverage -- --mode quote-readiness --tickers NVDA
+RH_RPC=… pnpm --filter @callhouse/keeper v2:pricing-coverage -- --watch 300 --out coverage.jsonl
+```
+
+- **The ladder is the cranker's.** Expiries come from `upcomingLadderExpiries`, which walks
+  `ExpiryCalendar.nextExpiry` from `ladderSearchStart`. By default it reads the on-chain calendar at the
+  registry's address; `--calendar local` uses a mirror of its grid built from the NYSE holiday table. Slots
+  come from `ladderSlots` (each tenor's `expiriesAhead`, plus puts where the market has them), and strikes
+  from `planLadder`'s first ladder. All of these live in `cranker/planner.ts`, which the cranker also uses.
+  The ladder is centred on the Stock Token feed's spot, where the cranker uses `SettlementOracle.trySpot`.
+  It is today's ladder: a live ladder keeps its anchored strikes until it re-centres.
+- **Each rung is priced in process** by `PricingService` through the provider seam (Cboe by default).
+  A rung record (one JSON line) carries:
+  - identity: ticker, expiry (unix and New York day), tenor, side, strike, and the canonical identity
+    (token, chain id, uiMultiplier; issuer `null`);
+  - source and method: provider, product, entitlement, method, method detail and contributing expiries;
+  - clocks and ages: every clock with its age, `null` when the source does not give it;
+  - verdict: readiness and reasons, fair (`null` when refused, with the refusal reason; `"0"` is a
+    price), iv and delta;
+  - listing: whether the exact contract is listed, and its bid, ask and sizes as supplied;
+  - `belowFloor`, measured against the house floor.
+
+  Some reasons are added only here. `early-close` marks an expiry on an NYSE early close
+  (`calendar.ts NYSE_EARLY_CLOSES_2026_2028`), where the listed market stops at 13:00 and no clock models
+  it. The `--events` calendar is also the pricing service's K3-312 event input (single source of truth):
+  the service flags and bounds `event-uncertainty` (K3-312) and the rung reports its reasons verbatim,
+  while the rung's `events` field only reports which of those events it spans (inside-series /
+  inside-inputs), which the service does not say. Without `--events` the rung's events are `null`
+  (unknown), and a before-first read still assumes one unknown event per the K3-312 policy.
+- **The floor is a proposal.** The default of 0.05 USDG fair comes from F3 D9 and is not an approved
+  value. `--floor` replaces it.
+- **Summaries.** Each market and tenor gets its own line of ready, degraded, unavailable and below-floor
+  counts, so a weekly pass never hides a daily failure. A market without a fresh feed spot has no ladder,
+  and that blocks every enabled tenor; it never counts as an empty pass. The F1 registration inputs are
+  printed separately from MM/pricer quote readiness. They cover identity, the strike tick against the
+  listed strike spacing near the money, the ladder, each ladder expiry (whether it is listed, whether it
+  is an early close) and per-tenor listing and floor counts.
+- **Modes.** `--mode diagnostic` (the default) always exits 0 and always prints the F1 inputs.
+  `--mode quote-readiness` exits 1 unless every enabled series of every selected market is `ready`, and
+  lists the failing series. Cboe states no quote time, so every Cboe-priced rung is `degraded`
+  (`quote-age-unknown`) and a Cboe-only run is never quote-ready. A usage or configuration error exits 2.
+  pnpm reports any failing script as exit 1. To tell 1 from 2, run
+  `npx tsx src/v2/pricing/coverage-main.ts …` from `keeper/`.
+- **`--suggest`** prints a candidate `overrides.ladder` and a strike-tick flag per market (`match`,
+  `coarser-than-listed`, `off-listed-grid` with the listed spacing, `no-listing`). If rungs k and beyond
+  are below the floor at every priced expiry, it suggests `rungs: k` (k ≥ 1). If even rung 0 is below,
+  it suggests the largest smaller `firstOtmBps` whose first rung reprices above the floor. It never
+  suggests `expiriesAhead` or zero rungs, so it never turns a daily off (owner D6).
+- **`--watch <s>`** writes one JSON line per market per refresh to `--out` (default stdout). Each line
+  has the chain's quote, trade, underlying, volatility, published and received clocks, their ages
+  (`null` kept), the refusal state and per-tenor readiness counts. `--iterations n` bounds the run.
+  Chains are still refetched at most every five minutes, so only `receivedAt` moves on a refetch.
+- Selection: `--tickers` (any v2 status) or `--status` (default `live`). Output: `--format table|jsonl`,
+  and `--out` also appends the JSON lines. Environment: `V2_REGISTRY_PATH`, `RH_RPC` (feeds and calendar),
+  `RH_RPC_2`, `PRICING_NYSE_HOLIDAYS`.
+
+`coverage.test.ts` runs it on the synthetic NVDA and TSLA chains, through the Cboe adapter and the fake
+providers, with injected feed rounds and no network.
+
+### The cranker (`V2_MODE=cranker`)
+
+One loop (`POLL_INTERVAL_MS`) plus a precise wake-up at each time-critical moment (an expiry with open
+interest, `expiry + 120`, a candidate's `finalizableAt`), measured on the head block's clock. Each tick
+runs its steps in this order, each isolated (a failing step is paged as `v2_error` and the next runs),
+bounded (`CRANKER_MAX_TX_PER_STEP`) and idempotent:
+
+| step | what |
+|---|---|
+| index | scan `SeriesCreated`, `TransferSingle`/`TransferBatch`, `OrderPlaced`, `StrategySet` into SQLite (`v2_cranker_*`) from the registry's deploy block: the holder, series, order and strategy lists the cranker uses alone while the indexer is down |
+| snapshot | `SettlementOracle.snapshot` once inside `[expiry, expiry + 600]` for every expiry with open interest |
+| finalize | from `expiry + 120`, after the snapshot attempt, only when a view says it advances (a source prices the window, an upgrade can corroborate, a candidate is past `finalizableAt`); the sources judged are the expiry's (recorded, else `settlementConfig(u, E)`: the configuration pinned at its first series), never the market's current list; alerts `v2_sources_disagree`, `v2_settlement_held`, `v2_snapshot_missed`, `v2_settle_stuck` |
+| settle | `Clearinghouse.settle` every series of a final expiry with long supply |
+| prune | every open order of an expired series, resale asks first (they hold longs about to be redeemed); a chunk that prunes nothing or runs out of gas is split down to one order, and one the book still skips alone (its maker rejects the refund) is marked and left out, so it cannot keep its expiry open |
+| redeem | `redeemBatch` holders (indexer pages ∪ the log index, balances read from chain), longs then shorts; opted-out and zero-payout holders skipped (`CRANKER_ZERO_PAYOUT_MAX_GAS_PRICE_WEI`); chunks sized by fixed per-holder gas budgets and split when a simulation under the limit redeems fewer or runs out of gas; `v2_redeem_backlog` once per expiry |
+| ladders | the registry ladder (`v2.defaults.ladder` ← overrides) for the next `expiriesAhead` expiries of each live market and tenor, created in Multicall3 batches; completed if half-made, re-centred when fewer than two rungs are OTM, never deleted. Since INTERFACE_VERSION 6 the first series of an (underlying, expiry) pins its settlement configuration on the oracle and every source, and the pin fails closed: an expiry this Clearinghouse has not pinned is budgeted `GAS.createSeriesPinBase` + `createSeriesPinPerSource` per source on top of `createSeriesEach`, and first probed alone with ample gas. A refused pin (`PinMismatch`, `SourceNotPinned(source, reason)`, the oracle's `NotAuthorized` / `NoSource`: `cranker/pin.ts`) skips that expiry, pages `v2_pin_refused` once per oracle and cause, and is asked again after 15 min |
+| rolls | `AutoRoller.roll` for due strategies (skipped without a roller; reverting writers skipped; a roll refused by its new series' pin pages `v2_pin_refused`); close-outs and rolls that earn the ROLL bounty (at least `minRollUnits`) first, at most 10 below it per tick, from a rotating start |
+| housekeeping | prune orders past `validUntil`; `sweepFees` per asset weekly; **House vault epoch roll** (T-OP-117): for every vault of `CRANKER_HOUSE_FACTORY` / `MM_HOUSE_FACTORY`, `rollEpoch()` once the head is past `epochEnd` AND the vault's `oracle.settlementPrice(underlying, epochEnd)` is Finalized AND every tracked series is settled with no longs, shorts or live orders — the contract's own three preconditions, so a `NotSettled` revert is predicted rather than provoked. Fixed gas `HOUSE_ROLL_GAS` (2.5M), `kind: house-roll`, key `<vault>:<epochId>`, on the housekeeping budget. A boundary due for more than 7 h (the oracle's 6 h uncorroborated delay + 1 h) without rolling pages `v2_house_roll_overdue`; `rollEpoch` is permissionless, so a human can send it from any key (`ops/alerts.md`). Rides this step rather than its own `STEP_ORDER` entry because the dispatcher `case` lives in `cranker.ts`; the factory address is read from the environment because `CrankerTuning` has no field for it yet — both are named follow-ups. |
+
+Every lifecycle call is sent with a FIXED gas limit (`cranker/constants.ts GAS`): `snapshot`, `finalize`,
+`settle`, `redeemBatch` and `roll` swallow an inner out-of-gas, so `eth_estimateGas` finds a limit at which
+they silently do nothing. `/state` carries per-step metrics (runs, errors, outcome counts, last actions and
+what the step saw), the armed wake-up, the index counts and the latest journal rows. The pure decisions are
+in `cranker/planner.ts` (unit tests in `planner.test.ts`).
+
+```bash
+KEEPER_ENV_FILE=../ops/devnet/env/cranker.env pnpm --filter @callhouse/keeper v2:dryrun   # what each step would do; sends nothing
+DEVNET_PORT=8552 CONTRACTS_DIR=<callhouse-contracts on v2> pnpm --filter @callhouse/keeper v2:devnet-cycle
+```
+
+`v2:devnet-cycle` brings up `ops/devnet`, runs the cranker in process through two expiries (a single-source
+candidate past its delay; a corroborated NVDA expiry snapshotted by the precise wake-up, with resale asks
+pruned before an ITM long is redeemed) and asserts the on-chain end state, the journal and the alerts. It also
+measures the pin: per market, the first series of an unpinned expiry against its budget, a later series of the
+pinned expiry against `createSeriesEach`, and a lone first series batched at its limit (created) and at the
+pre-v6 limit (refused); every createSeries batch and roll of the journal under 90 % of its limit.
+
+### The MM bot (`V2_MODE=mm`)
+
+Two-sided quotes through `MakerVault` around the pricing service's fair value. `MM_QUOTER_PK` holds
+the AccessManager's `QUOTER` role on the vault and nothing else (INTERFACE_VERSION 8; the bot asks
+`AccessManager.canCall(signer, vault, place-selector)` and never needs the role id): it places, replaces and
+cancels the vault's orders and moves
+vault funds between the vault's wallet and the vault's own Clearinghouse ledger, never out of the vault.
+Every quoted price and size is checked by the vault on chain (ask floor, bid cap, per-series units, total
+notional, 16 live orders per series); the bot sizes inside those guards so its calls do not revert.
+
+Per series, each tick (`POLL_INTERVAL_MS`):
+
+```
+halfSpread = max(fair × MM_HALF_SPREAD_BPS, MM_MIN_HALF_SPREAD_USDG6) × widen   (widen: 1 → 1 + MM_EXPIRY_WIDEN_BPS
+                                                                                  over the last MM_EXPIRY_WIDEN_S before the pull time)
+skew       = seriesDelta × spot × MM_SKEW_BPS_PER_DELTA_SHARE × netDeltaShares(market), capped at MM_MAX_SKEW_BPS of fair
+bid        = roundDown(fair − halfSpread − skew), at most MakerVault.bidCap
+target     = fair + halfSpread − skew                                  (the NET the vault must keep)
+writeAsk   = roundUp(target / (1 − premiumFeeBps/1e4)), at least MakerVault.askFloor
+resaleAsk  = roundUp((target − PRICE_TICK) / (1 − resaleFeeBps/1e4))
+```
+
+The seller fee is taken from the MAKER, so it belongs in the ask: the book credits a selling maker
+`premium − sellerFee + rebate`. It is a GROSS-UP (divide by one minus the rate), never a markup. Each ask is
+grossed by ITS OWN rate — `premiumFeeBps` for the write ask, `resaleFeeBps` for the resale ask — because the
+book picks the rate per order kind, and v8 launches at 500 / 0. So the "one tick under" relation holds on the
+UNGROSSED prices and **the two asks may sit more than one tick apart on chain**. Bids carry no fee term: a
+selling taker is paid `premium − sellerFees − takerFee` and the bid maker is credited only its rebate.
+
+```
+```
+
+A vault that is long delta (bids filled) lowers every call quote on that market; short delta (asks lifted)
+raises them. The ask side is `MM_ASK_UNITS` in total: inventory first (`AskResale`), `AskWrite` from the
+vault's ledger collateral for the rest; bids are `MM_BID_UNITS`, escrowed from the vault's USDG. Series are
+chosen nearest the money first (`MM_MAX_SERIES`, `MM_MAX_SERIES_PER_MARKET`). Unset, both caps are DERIVED
+from the registry ladder of the quoted markets so that every listed series carries a quote (T-OP-123/T-OP-133,
+owner: "each option should have a pre-filled ask"): per market the resolved ladder count -- rungs x expiries
+ahead x sides per tenor, 5 x (2 weekly + 3 daily) x call/put = 50 at launch -- and in all their sum. A cap SET
+below what a quoted market lists is refused at boot with the unquoted count, because a silently partial book
+was the failure. `/state` reports `coverage` per market: listed, live, selected, and every trim by name.
+
+**Fallback-only asks (`MM_ASK_FALLBACK_ONLY`, default 1 -- the owner's model).** The vault's ask on a series is the
+FALLBACK: it rests only while no other maker's live ask (`AskWrite` or `AskResale`) rests on that series. Each tick
+reads the tail of every managed series' order list (`OrderBook.ordersOfSeries` + `getOrders`, reads.ts
+`readOtherAskers`); while another asker is found the series halts `other-asker` ON THE ASK SIDE ONLY -- no ask is
+sized or placed, a resting vault ask is cancelled, the bid is untouched -- and the ask returns at the next tick once
+the book clears. The vault's OWN resting ask is never "another asker" (the read drops it), so the ask does not flap.
+**Protocol accounts count as another asker** (the HouseVault's covered-call ask, `protocolBook`): a listed option
+already offered by the house is left to the house. That is a choice, not a mechanism -- to let the MM bot quote
+alongside protocol asks, filter `protocolAccounts` out in `planner.ts` `otherAskOn` and say so here. `0` restores the
+always-quote. `MM_QUOTE_OFF_HOURS` is unchanged by this flag (still 0; an open owner question).
+
+**One oversubscribed write pool (`MM_WRITE_OVERSUBSCRIBE_BPS`, default 10000).** The per-asset write budget the asks
+are SIZED against is `Clearinghouse.free(vault, asset) x bps / 10000`. At 10000 (the default) it is today's exact
+budget: the advertised sum of every write ask on an asset never exceeds what the ledger holds. Above it the ledger is
+ONE POOL shared by every ask on that asset -- the launch runbook suggests 50000 -- while EVERY SINGLE ask still fits
+`maxWriteUnits(free)`, so any one fill is always covered; only several fills of different series inside one tick can
+outrun the pool, and then the book SKIPS the uncoverable fill at plan time (`OrderBook._plan` budgets each write ask
+against the maker's free collateral, "filled whole or skipped, never cut") and catches a mint that still fails at
+delivery -- a taker never reverts on our shortfall. Bids are untouched: they escrow real USDG at placement. The
+vault's on-chain `maxTotalNotional` counts ADVERTISED write units, so the notional the advertised sum reaches must
+fit `V2_VAULT_MAX_TOTAL_NOTIONAL` (ops/runbooks/v2-canary.md states the number). `ops/go-live-v2.sh` prints, per
+quoted market, the listed series and the pool each asset needs at the chosen bps next to what the vault holds
+(wallet + ledger), and WARNS when short -- never refuses; funding is owner-gated.
+
+A live quote is replaced only
+when its target moved more than `MM_REQUOTE_BPS`, its size is off (`MM_RESIZE_BPS`), it broke a guard, or it
+is about to expire (re-placed: `replace` keeps `validUntil`). Every new quote is valid until the pull time, the
+session close (unless `MM_QUOTE_OFF_HOURS=1`), the vault's `maxOrderLifetime`, and at most `MM_MAX_QUOTE_LIFETIME_S`
+(1800) from now: the book does not re-check the vault's guards at fill time and the launch vault has no lifetime, so
+a bot that dies, or whose sends all fail, leaves no quote fillable for longer than that.
+
+Nothing is quoted on a series (its orders are cancelled) when, in this order: the kill switch is engaged;
+the day's realised loss reached `MM_DAILY_LOSS_LIMIT_USDG6`; the signer lost its role (then nothing is sent
+at all); the book is paused; the series expired or is inside `MM_PULL_MINUTES` before its mint cutoff; the
+regular session is closed and `MM_QUOTE_OFF_HOURS=0`; the market is outside the quoted set (`MM_MARKETS`, or
+no longer live in the registry: its vault orders are still pulled and its inventory counted); the market is disabled; the series' oracle spot is
+stale (vault calls would revert `StaleSpot`); the series is not selected; `/fair` is null, unreachable or
+older than `MM_FAIR_MAX_AGE_S` (`MM_FAIR_MAX_AGE_OFF_HOURS_S` outside the session), priced at a spot more than
+`MM_FAIR_SPOT_TOLERANCE_BPS` (300) from the series oracle's (inside it, the fair value is carried to the oracle's
+spot along its delta), or outside the no-arbitrage bounds (a call at or above spot, a put at or above strike); the
+guards are unreadable. Two halts are ONE-SIDED and leave the other side resting: `protocol-cross` (a quote that
+would rest across a protocol account's order) and `other-asker` (`MM_ASK_FALLBACK_ONLY`, above: another maker's
+live ask rests on the series, so only the vault's ask is held back). Housekeeping: expired bids and resale asks are cancelled to reclaim their escrow, long/short
+pairs are closed, `owed` USDG is claimed, idle Stock Tokens in the vault wallet go into its ledger
+(`MM_DEPOSIT_TOKENS`), and `MakerVault.sync` refreshes series whose stored notional is above the measured
+one (fills and expiries leave it stale-high) at most every `MM_SYNC_INTERVAL_S`.
+
+Realised PnL: a growing `filled` on a vault order (read every tick, fills written to SQLite in the same
+transaction as the new `filled`, so a crash never counts one twice) at average cost per series, seller fees
+included, rebates ignored; settlement closes a position at intrinsic value. Orders that existed when the
+database was first bound are adopted at their current fills. A sale is booked at the seller fee the book took,
+from its `OrderFilled` logs (`mm/fills.ts`), not at the fees in effect when the bot sees it: since
+INTERFACE_VERSION 6 a fee change takes effect 24 h after it is scheduled, so a fill made before `effectiveAt` and
+seen after it would be mispriced (a fee cut understates the loss and weakens the loss stop). When the logs cannot
+account for a sale it is booked at the highest seller fee of the regimes in effect at the previous look and now
+(the compiled ceiling, 10 %, across a gap of a day or more), with a warning; `/state` shows each fill's `fee`
+basis and the tick's `lastSales`.
+
+| endpoint | what |
+|---|---|
+| `GET /state` | process-wide kill plus a `vaults[]` row per quoted vault (killed, caps, inventory, epoch, current plan). Treasury fields at the top stay the first vault for existing readers |
+| `POST /kill` | `Authorization: Bearer <MM_KILL_TOKEN>` (constant-time compare; anything else 401). No body still kills **every** vault. `{ "vault": "0x.." }` kills one. Stored first (a restart stays killed), `v2_mm_killed` pages, then every vault order that is live or still holds escrow (an expired Bid or AskResale; never an expired AskWrite) is cancelled, on every market, until a re-read finds none: 200 `{ cancelled, remaining: 0, done: true }`; 202 if still running after a minute, or if orders are left after every pass (`remaining`, `remainingOrderIds`, the failed cancels in `errors`; later ticks keep cancelling) |
+| `POST /resume` | same header; optional `{ "vault": "0x.." }`. Quoting resumes at the next tick (`v2_mm_resumed`) |
+
+Per-vault env (K8-05). `MM_MAX_TX_PER_TICK` is a **process** budget, treasury first then `MM_VAULTS` extras.
+
+| key | default | meaning |
+|---|---|---|
+| `MM_EPOCH_WIND_DOWN_S` | `14400` | Seconds of lead before a House vault `epochEnd` during which the plan opens no new risk. `epochEnd` is read from the vault when a House ABI exists; treasury is `epoch: null`. |
+| `MM_VAULTS` | empty | Extra vault addresses, comma-separated, quoted in this process with the treasury `MAKER_VAULT`. |
+| `CRANKER_HOUSE_FACTORY` | empty (falls back to `MM_HOUSE_FACTORY`) | HouseVaultFactory address the **cranker** enumerates for the weekly `rollEpoch` (housekeeping step, T-OP-117). Set it on the cranker's env, or set `MM_HOUSE_FACTORY` there too; unset = the roll is a documented no-op. Must be a 20-byte hex address; anything else is treated as unset (fail closed), never a partial read. |
+| `MM_HOUSE_FACTORY` | empty | HouseVaultFactory address. House vaults are **enumerated** from its `vaults()`. Blocked on **T-78**: `ops/abis/v2` publishes no `HouseVault`/`HouseVaultFactory` artifact, so `gen-abis` renders no module and there is nothing to call. Set it anyway and the bot pages `v2_mm_house_unavailable` every tick rather than quietly quoting no House vault. Do not hand-write those ABIs. |
+| `MM_VAULT_CAPS` | empty | Per-vault overrides of `MM_MAX_SERIES_UNITS`, `MM_MAX_TOTAL_NOTIONAL_USDG6` and `MM_DAILY_LOSS_LIMIT_USDG6`, as JSON keyed by vault address: `{"0xVault":{"maxSeriesUnits":"25","dailyLossLimitUsdg6":"250000000"}}`. Fields are optional and decimal; an omitted one falls back to the process-wide value. It can only **tighten** — the result is still clamped to that vault's own on-chain limit, and an unknown field name is refused at boot rather than ignored. |
+
+**A House vault whose epoch cannot be read is not quoted.** `epoch: null` means *treasury MakerVault,
+no epoch discipline* to every consumer, so falling back to it would be permission to open risk past
+`epochEnd` in the one kind of vault that has to be flat when `rollEpoch` is due. The bot skips the
+vault and pages instead.
+
+**The tx budget is shared, treasury first, with a reserve.** `MM_MAX_TX_PER_TICK` is spent by the
+treasury first, because it is the live vault and carries the protocol's existing inventory, but each
+vault still to come reserves an equal share so a saturating treasury cannot starve a House vault of
+even its cancels — and a vault that cannot cancel cannot wind down for its roll. **Gas / key model:**
+one `MM_QUOTER_PK` serves every vault in one process, deliberately: two processes on one key collide
+on nonces (`NonceTracker` is per-process, `src/v2/tx.ts:158`) and cannot see each other's resting
+quotes, which is what makes the protocol-cross guard possible at all. If one key cannot serve the
+configured vaults inside that budget, that is the trigger for the parked shard mode `K3-205`, not a
+reason to run a second process.
+
+Private networking only: `mm-bot` never gets a public domain (`ops/deploy.md` §15). Alerts: `v2_mm_killed`,
+`v2_mm_resumed`, `v2_mm_loss_stop`, `v2_mm_wrong_book` (a vault on another OrderBook: skipped, the rest still tick),
+`v2_mm_epoch_unflat` (a House vault still holding risk at `epochEnd`), `v2_mm_protocol_cross` (a rest that would have
+crossed another protocol-owned maker), `v2_mm_house_unavailable`,
+`v2_mm_delta` (net delta above `MM_DELTA_ALERT_SHARES`), `v2_mm_not_quoter`,
+`v2_mm_pricing` (no `/fair` answered), `v2_mm_tx_rejected` (a vault call's simulation reverted),
+`v2_mm_funds` (quoted series left one-sided by USDG or collateral), plus the shared `v2_*`.
+
+Vault calls use FIXED gas limits (`mm/constants.ts MM_GAS`; place and replace 1.2M, cancel 150k + 250k per id).
+Measured on the devnet: place ≤ 436k, replace ≤ 348k, a 20-order cancel ≈ 1.06M.
+
+```bash
+DEVNET_PORT=8560 CONTRACTS_DIR=<callhouse-contracts on v2> pnpm --filter @callhouse/keeper v2:devnet-mm
+```
+
+`v2:devnet-mm` brings up `ops/devnet`, warps into a session, serves `/fair` from the pricing service's own
+Black-Scholes at the devnet oracle's spot, runs the MM bot in process and asserts on chain: two-sided vault
+quotes on at least 5 series inside the guards and around fair; a second tick sends nothing; a null `/fair`
+pulls that market; a taker lifting a vault ask (deadline capped before any pending fee change) is booked at its
+`OrderFilled` seller fee, turns the net delta negative and gets the quotes replaced higher; `/kill` refuses a wrong token, clears the vault's book and keeps it clear, `/resume` quotes again;
+every journalled transaction confirmed under its gas limit. With `--pricing-url <url>` (or `PRICING_URL`)
+it calls a real pricing service instead of the stand-in; the null-`/fair` step belongs to the stand-in and
+is skipped with an explicit note.
+
+### The pricer (`V2_MODE=pricer`)
+
+Reprices the live AutoRoller ask of every strategy with `smartPricing` (roadmap 5.3). `PRICER_PK` holds
+the AccessManager's `PRICER` role on the AutoRoller and nothing else (INTERFACE_VERSION 8; the bot asks
+`AccessManager.canCall(signer, roller, reprice-selector)`): the role can only move a smart-pricing writer's ask
+inside the writer's own `[minAskBps, maxAskBps]` band of spot, keeping its units and expiry (C2-09). It
+cannot touch collateral, but a leaked key is not harmless: it can move every smart-pricing writer's ask to the
+bottom of that writer's band, where a colluding taker lifts it (each writer sells at its band minimum instead of
+fair plus edge; callhouse-contracts `SECURITY.md`). Revoke it at once — `PRICER`'s role admin is `OPS_ADMIN` at delay 0, so it is one Safe transaction with no
+wait (`script/v2/roles.v8.json`).
+
+Each tick (`POLL_INTERVAL_MS`): the strategy list (its own `StrategySet` scan ∪ the indexer's
+`/v2/strategies?active=1`), one pinned multicall of `hasRole`, `strategy`, `position`, the market's
+oracle `trySpot`, the tracked ask and its series, then per writer:
+
+| rule | |
+|---|---|
+| eligible | strategy active with `smartPricing`; a tracked ask not cancelled, not filled, more than 60 s before its `validUntil`; a fresh spot |
+| cadence | right after each roll (a position the pricer has not evaluated yet), then at most every `PRICER_MIN_INTERVAL_S` (1800) on the head block's clock; only an evaluation that reached a decision restarts it |
+| /fair gates | `PRICER_FAIR_MAX_AGE_S` (1800): refuse unknown or stale source times. Legacy `asOf` is the Cboe underlying last-trade clock, not an option quote time. When additive `provenance` is present it is used and never required: quote age is only `quoteObservedAt`; a refetch does not refresh an old observation; unknown reason codes and non-ready quality refuse. `PRICER_FAIR_SPOT_TOLERANCE_BPS` (300): `/fair.spot` vs oracle `trySpot`, 300 bps accepted, 301 refused. Zero `fair` is a number, not unavailable. Each skip reason is on `/state` and feeds the fair-unavailable timer |
+| target | `clamp(fair × (1 + PRICER_EDGE_BPS), minAskBps · spot, maxAskBps · spot)`: fair from `PRICING_URL` `/fair` for the series' strike and expiry; the raw target rounded UP to `PRICE_TICK` (100) and the band's ends rounded INWARD, so every price passes the contract's exact inclusive check |
+| send | only when the target differs from the live ask by more than `PRICER_REPRICE_THRESHOLD_BPS` (1000 = 10 %): `AutoRoller.reprice` through `tx.ts` with a fixed gas limit (600k; 251k measured), keyed by the ask it replaces |
+
+No fair value (the service down or `fair: null`), an unqualified /fair (stale/unknown source time, spot gap, provenance not ready), a stale spot, a refused simulation, a reverted or
+unconfirmed transaction: nothing is remembered, and the next tick tries again. Alerts:
+`v2_pricer_no_role` (error: the key lacks `PRICER_ROLE`, nothing is sent), `v2_pricer_fair_unavailable`
+(warn: a due ask has had no usable fair value for `PRICER_FAIR_ALERT_S`, 7200), `v2_pricer_reprice_failed` (warn
+for a refused simulation, error for an on-chain revert or a lost receipt). Tuning: `PRICER_EDGE_BPS` (500,
+-5000..10000), `PRICER_REPRICE_THRESHOLD_BPS`, `PRICER_MIN_INTERVAL_S`, `PRICER_MAX_TX_PER_TICK` (50),
+`PRICER_HTTP_TIMEOUT_MS` (5000), `PRICER_FAIR_ALERT_S`, `PRICER_FAIR_MAX_AGE_S` (1800), `PRICER_FAIR_SPOT_TOLERANCE_BPS` (300), `PRICER_LOG_CHUNK_BLOCKS` (50000),
+`PRICER_LOG_CHUNKS_PER_TICK` (40). `/state` shows each writer's live price, spot, fair, target, band, the
+decision and the next check. The pure rules are `pricer/planner.ts` (`planner.test.ts`) and `pricer/fair-gates.ts`; the tick on
+fakes is `pricer.test.ts`.
+
+```bash
+DEVNET_PORT=8561 CONTRACTS_DIR=<callhouse-contracts on v2> pnpm --filter @callhouse/keeper v2:devnet-pricer
+```
+
+`v2:devnet-pricer` brings up `ops/devnet` and runs the pricer in process, with an injected fair value,
+against the seeded writer's smart-pricing roll ask: repriced by account 9 right after the roll, not
+again inside 30 minutes, left alone within 10 %, then clamped to the band's ceiling tick. It asserts the
+`Repriced` events, the replacement asks, the journal and the alerts. With `--pricing-url <url>` (or
+`PRICING_URL`) it boots on the real pricing client instead of the injected value, ticks once and checks
+that what the pricer did matches what the service answers for the same series.
 
 ---
 
@@ -718,7 +1261,8 @@ it picks the listing back up from `seaport.getOrderStatus` and carries on.
 | `health.ts` | `/health`, `/state`, `/orders`, `/cycles`. |
 | `vol.ts` | Cboe delayed option chain: the hardened fetch, parsing, freshness, expiry and quote selection, strike by delta, fair value by strike. |
 | `alerts.ts` | Webhook alerting with per-kind cooldown. |
-| `index.ts` | Wiring, the poll loop, graceful shutdown. |
+| `index.ts` | The image's entry: `V2_MODE` unset or blank imports `main-v1.ts`, set imports `v2/index.ts` (see "v2 modes"). |
+| `main-v1.ts` | The v1 keeper: wiring, the poll loop, graceful shutdown. Moved out of `index.ts` unchanged so a v2 process never evaluates the v1 config. |
 | `dryrun.ts` | The production keeper driven through three weeks against an anvil fork (unfilled; filled + exercised; stranded by a USDG freeze and recovered) and a fourth arm, with assertions. `DRYRUN.md` is the recorded run. |
 | `dryrun-extended.ts` | The scenarios the three-week run does not reach: the compiled `index.ts` process under SIGTERM mid-tick, partial fills / a guardian cancel / a reprice after a rally / refused fills / the listing budget, several exercisers, an anyone-`rollClose` reconciled from logs, and Valorem's fee switch on and accepted. |
 | `dryrun-common.ts` | What both harnesses share: chain constants, derived actors, anvil RPC, storage-written balances, the linked deploy from `contracts/out`, the USDG freeze, a buyer's fill and exercise, the fill simulation, the alert capture, the report writer. |

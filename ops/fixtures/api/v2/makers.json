@@ -2,15 +2,30 @@
   "epoch": {
     "id": 2958,
     "start": 1789344000,
-    "end": 1789948800
+    "end": 1789948800,
+    "band": {
+      "bps": 1000,
+      "minUsdg": {
+        "raw": "20000",
+        "decimals": 6,
+        "formatted": "0.02"
+      }
+    }
   },
   "items": [
     {
       "maker": "0xd3b47D8a6B8e3fc6160Cd02634CF7Ae74aDeB66f",
       "tierBps": 5000,
+      "benchmarkPolicy": 2,
+      "samples": {
+        "absent": 6,
+        "valid": 994,
+        "missingReference": 0
+      },
       "uptimePct": 99.4,
       "avgSpreadBps": 1480,
       "depthWithin100bps": "2240",
+      "depthInBand": "3100",
       "fills": 10,
       "volume": {
         "raw": "8606980",
@@ -27,9 +42,16 @@
     {
       "maker": "0x70556BaA315dD8d467ea452aBcd7deEbEa073Ff9",
       "tierBps": 6000,
+      "benchmarkPolicy": 2,
+      "samples": {
+        "absent": 650,
+        "valid": 350,
+        "missingReference": 24
+      },
       "uptimePct": 31,
       "avgSpreadBps": null,
       "depthWithin100bps": "50",
+      "depthInBand": "420",
       "fills": 2,
       "volume": {
         "raw": "1840000",
@@ -46,9 +68,16 @@
     {
       "maker": "0xD6b49a27Ead99118b61F0827C7aB2782aea07bE6",
       "tierBps": 5000,
+      "benchmarkPolicy": 2,
+      "samples": {
+        "absent": 25,
+        "valid": 975,
+        "missingReference": 5
+      },
       "uptimePct": 96.5,
       "avgSpreadBps": null,
       "depthWithin100bps": "0",
+      "depthInBand": "240",
       "fills": 1,
       "volume": {
         "raw": "156060",

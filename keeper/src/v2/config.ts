@@ -21,7 +21,7 @@
  *            settings below (mmTuningFields).
  *   pricer   PRICER_PK, PRICER_PORT (8794), PRICING_URL, INDEXER_URL optional (K2-05 falls back to
  *            its own StrategySet scan). Contracts: clearinghouse, orderBook, settlementOracle,
- *            autoRoller. PRICER_* tuning below (pricerSchema).
+ *            autoRoller, expiryCalendar. PRICER_* tuning below (pricerSchema).
  *   pricing  holds no key and sends nothing: pricing/main.ts's own loader (PRICING_PORT 8790,
  *            V2_REGISTRY_PATH, RH_RPC, RH_RPC_2, KEEPER_LOG_LEVEL) is the whole schema.
  * The ports are this file's choice (§7 names CRANKER_PORT only): 8787 is the v1 keeper, 8790 the
@@ -42,7 +42,19 @@ import { getAddress, isAddress, type Address, type Hex } from 'viem';
 import { z } from 'zod';
 import { loadPricingEnv, type PricingEnv } from './pricing/main.js';
 import { V2_MODES, type SigningMode } from './mode.js';
-import { V2RegistryError, loadV2Registry, type V2ContractName, type V2Registry } from './registry.js';
+import {
+  TENORS,
+  V2_ADDRESS_NAMES,
+  V2_ADDRESS_PATH,
+  V2RegistryError,
+  loadV2Registry,
+  v2Address,
+  v2Markets,
+  type MarketParams,
+  type V2AddressName,
+  type V2Market,
+  type V2Registry,
+} from './registry.js';
 
 export { V2_MODES, type SigningMode, type V2Mode } from './mode.js';
 
@@ -50,30 +62,72 @@ export { V2_MODES, type SigningMode, type V2Mode } from './mode.js';
 export const KEEPER_PACKAGE_DIR = fileURLToPath(new URL('../../', import.meta.url));
 export const DEFAULT_REGISTRY_PATH = '../ops/markets/tier1.json';
 
-/** Where each contract's explicit address is read from. `MAKER_VAULT` is §7's spelling. */
-export const CONTRACT_ENV: Record<V2ContractName, string> = {
+/**
+ * Where each address's explicit value is read from. `MAKER_VAULT` is §7's spelling.
+ *
+ * MIRRORED, NOT CHOSEN. Every v8 name here is the name ops already renders, so a variable an operator sets
+ * from the generated env file reaches the bot: `V2_ACCESS_MANAGER` (ops/v2-env.mjs:245),
+ * `V2_FEE_SPLITTER` (:251) and `V2_BUYBACK_EXECUTOR` (:252) — the last two are the only contract addresses
+ * ops sets on any keeper process at all (ops/v2/env/cranker.env:23,25).
+ *
+ * `payoutAdapter` is the one slot where the repo disagreed with itself: ops (`ops/v2-env.mjs`:308) and the
+ * indexer (`indexer/lib/env.ts`:171) both say `V2_PAYOUT_ROUTER`, while the keeper said
+ * `V2_PAYOUT_ADAPTER`. v8 puts the `PayoutRouter` in that slot, so the keeper takes the router spelling and
+ * keeps the adapter spelling as a deprecated alias rather than ignoring a variable somebody already set —
+ * see PAYOUT_ENV_ALIAS below. The REGISTRY key stays `payoutAdapter` in v8 and is not renamed here.
+ */
+export const CONTRACT_ENV: Record<V2AddressName, string> = {
   clearinghouse: 'V2_CLEARINGHOUSE',
   orderBook: 'V2_ORDER_BOOK',
   settlementOracle: 'V2_SETTLEMENT_ORACLE',
   expiryCalendar: 'V2_EXPIRY_CALENDAR',
   keeperRewards: 'V2_KEEPER_REWARDS',
   autoRoller: 'V2_AUTO_ROLLER',
-  payoutAdapter: 'V2_PAYOUT_ADAPTER',
+  payoutAdapter: 'V2_PAYOUT_ROUTER',
   makerVault: 'MAKER_VAULT',
   makerRegistry: 'V2_MAKER_REGISTRY',
   rewardsDistributor: 'V2_REWARDS_DISTRIBUTOR',
+  accessManager: 'V2_ACCESS_MANAGER',
+  feeSplitter: 'V2_FEE_SPLITTER',
+  buybackExecutor: 'V2_BUYBACK_EXECUTOR',
+};
+
+/**
+ * The keeper's pre-v8 spelling of the payout slot, still read so that an environment written against
+ * `keeper/README.md`'s v7 table keeps working. It is a fallback, never an override: if both are set and they
+ * disagree the boot refuses and names both, because silently preferring one of two spellings of one contract
+ * is how a bot ends up pointed at a replaced address with nothing failing.
+ */
+export const PAYOUT_ENV_ALIAS = { name: 'payoutAdapter', env: 'V2_PAYOUT_ADAPTER' } as const satisfies {
+  name: V2AddressName;
+  env: string;
 };
 
 /**
  * The contracts each signing mode cannot run without. A later task that needs one more adds it here.
  * The cranker's autoRoller is deliberately absent: rolls are one of six steps, and a deployment
  * without the roller must still snapshot, settle and redeem (the step reports itself skipped).
+ *
+ * INTERFACE_VERSION 8 adds `accessManager` to mm and pricer, and NOT to the cranker, for reasons that are
+ * not symmetric:
+ *
+ *   - Under `Managed` a target has no `hasRole` of its own, so the mm bot and the pricer read their own role
+ *     from the manager (K8-03). Without the manager address the pricer does not fail — it falls through to
+ *     `role-unread` and reprices nothing, for ever, while reporting healthy. A bot that cannot find out
+ *     whether it is allowed to act must refuse to start rather than run blind, so the manager is REQUIRED.
+ *   - The cranker's `feeSplitter` is deliberately absent, exactly like `autoRoller`: distribute and buyback
+ *     are steps, the other five must keep running before the flywheel exists, and ops says so in the
+ *     generated file it hands the operator — "With V2_FEE_SPLITTER empty the cranker runs every other step
+ *     and skips these, which is what it does before the flywheel is deployed" (ops/v2/env/cranker.env:26-27,
+ *     rendered by ops/v2-env.mjs). K8-02 skips the step; it does not fail the boot.
+ *   - `buybackExecutor` is nobody's required address: the keeper never calls it. Only the splitter may, and
+ *     the splitter holds its own pointer. The keeper resolves it so the cranker can report and compare it.
  */
 export const MODE_CONTRACTS = {
   cranker: ['clearinghouse', 'orderBook', 'settlementOracle', 'expiryCalendar'],
-  mm: ['clearinghouse', 'orderBook', 'makerVault'],
-  pricer: ['clearinghouse', 'orderBook', 'settlementOracle', 'autoRoller'],
-} as const satisfies Record<SigningMode, readonly V2ContractName[]>;
+  mm: ['clearinghouse', 'orderBook', 'makerVault', 'accessManager'],
+  pricer: ['clearinghouse', 'orderBook', 'settlementOracle', 'autoRoller', 'expiryCalendar', 'accessManager'],
+} as const satisfies Record<SigningMode, readonly V2AddressName[]>;
 
 export const MODE_KEY_ENV = { cranker: 'CRANKER_PK', mm: 'MM_QUOTER_PK', pricer: 'PRICER_PK' } as const satisfies Record<SigningMode, string>;
 export const MODE_PORT_ENV = { cranker: 'CRANKER_PORT', mm: 'MM_PORT', pricer: 'PRICER_PORT' } as const satisfies Record<SigningMode, string>;
@@ -118,6 +172,9 @@ const httpUrlField = z.string().transform((raw, ctx): string => {
 });
 
 const intField = (min: number, max: number) => z.coerce.number().int().min(min).max(max);
+
+/** A `0` / `1` switch. */
+const flagField = z.enum(['0', '1']).transform((raw) => raw === '1');
 
 const bigintField = z.string().transform((raw, ctx): bigint => {
   let value: bigint;
@@ -175,10 +232,16 @@ const commonFields = {
   V2_EXPIRY_CALENDAR: addressField.optional(),
   V2_KEEPER_REWARDS: addressField.optional(),
   V2_AUTO_ROLLER: addressField.optional(),
+  V2_PAYOUT_ROUTER: addressField.optional(),
+  /** Deprecated spelling of V2_PAYOUT_ROUTER; read, never preferred (PAYOUT_ENV_ALIAS). */
   V2_PAYOUT_ADAPTER: addressField.optional(),
   MAKER_VAULT: addressField.optional(),
   V2_MAKER_REGISTRY: addressField.optional(),
   V2_REWARDS_DISTRIBUTOR: addressField.optional(),
+  /* ---- INTERFACE_VERSION 8; the ops spellings (see CONTRACT_ENV) ---- */
+  V2_ACCESS_MANAGER: addressField.optional(),
+  V2_FEE_SPLITTER: addressField.optional(),
+  V2_BUYBACK_EXECUTOR: addressField.optional(),
 };
 
 /**
@@ -206,6 +269,29 @@ const crankerTuningFields = {
   CRANKER_SWEEP_INTERVAL_S: intField(3_600, 90 * 86_400).default(7 * 86_400),
   /** Timeout of one indexer request (holders, strategies). */
   CRANKER_INDEXER_TIMEOUT_MS: intField(500, 120_000).default(5_000),
+  /* ---- the v8 flywheel step (K8-02, cranker/flywheel.ts) ---- */
+  /** Claim, distribute and buy back. Default OFF: the flywheel is not deployed, and it spends protocol USDG. */
+  CRANKER_FLYWHEEL_ENABLED: flagField.default('0'),
+  /**
+   * One flywheel pass at most this often. The floor is the compiled BUYBACK_COOLDOWN
+   * (V2Constants.sol:63, 5 minutes): a shorter interval cannot buy back more often, it can only produce
+   * cooldown skips. Distribution has no cooldown, so the default is an hour rather than the floor.
+   */
+  CRANKER_FLYWHEEL_INTERVAL_S: intField(300, 30 * 86_400).default(3_600),
+  /**
+   * How far below the probe's quote the buyback's `minTokenOut` is set, in bps. It covers drift between the
+   * probe and inclusion, and nothing else — the route's real protections are on chain (the executor's
+   * raise-never-lower v3 TWAP floor and its fee caps). 50 bps at a 5-minute cooldown and a 50 USDG launch cap:
+   * wide enough that an ordinary block or two of drift does not waste the call, tight enough that the fill is
+   * still bounded. NEVER 0: `minTokenOut == burned` exactly, and the smallest drift reverts TooLittleTokens.
+   */
+  CRANKER_BUYBACK_TOLERANCE_BPS: intField(1, 5_000).default(50),
+  /**
+   * Probe the buyback and report it, but never send it, while every other step runs live. NOT the process-wide
+   * dry run (`ctx.sender.dryRun`, cranker/effects.ts), which stops the whole cranker sending: this is the one
+   * switch that lets an operator watch the route for a few days before it is allowed to spend.
+   */
+  CRANKER_BUYBACK_DRY_RUN: flagField.default('0'),
 };
 
 const crankerSchema = z.object({
@@ -215,9 +301,6 @@ const crankerSchema = z.object({
   INDEXER_URL: httpUrlField.optional(),
   ...crankerTuningFields,
 });
-
-/** A `0` / `1` switch. */
-const flagField = z.enum(['0', '1']).transform((raw) => raw === '1');
 
 /**
  * The MM bot's quoting, risk and kill-switch settings (K2-04, mm/engine.ts and mm/risk.ts use them).
@@ -229,9 +312,15 @@ const mmTuningFields = {
   MM_KILL_TOKEN: z.string().min(32, 'must be at least 32 characters (openssl rand -hex 32); the value is not shown'),
   /** Comma-separated tickers to quote; unset = every live v2 market in the registry. */
   MM_MARKETS: z.string().optional(),
-  /** Most series quoted at once, and per market (nearest the money first, then nearest expiry). */
-  MM_MAX_SERIES: intField(1, 1_000).default(40),
-  MM_MAX_SERIES_PER_MARKET: intField(1, 500).default(10),
+  /**
+   * Most series quoted at once, and per market (nearest the money first, then nearest expiry). UNSET, both are
+   * DERIVED from the registry ladder of the quoted markets so that every listed series carries our quote
+   * (T-OP-123, owner: "each option should have a pre-filled ask ... which is our MM bot's quote"); SET below that
+   * ladder count, boot refuses and names the unquoted series -- a silent partial book was the failure. The old
+   * literal defaults (40 / 10) covered ten of the fifty series a launch market lists.
+   */
+  MM_MAX_SERIES: intField(1, 5_000).optional(),
+  MM_MAX_SERIES_PER_MARKET: intField(1, 1_000).optional(),
   /** bid = fair − halfSpread − skew, ask = fair + halfSpread − skew; halfSpread = max(fair × bps, the minimum). */
   MM_HALF_SPREAD_BPS: intField(1, 5_000).default(500),
   MM_MIN_HALF_SPREAD_USDG6: bigintField.default('20000'),
@@ -248,6 +337,20 @@ const mmTuningFields = {
   /** Size of the bid, and of the ask side (resale of inventory first, AskWrite for the rest). 0 turns a side off. */
   MM_BID_UNITS: intField(0, 100_000_000).default(100),
   MM_ASK_UNITS: intField(0, 100_000_000).default(100),
+  /**
+   * T-OP-133, the owner's model and therefore the DEFAULT: the vault's ask on a series is the FALLBACK, resting only
+   * while no other maker's live ask (AskWrite or AskResale, protocol accounts included) rests there. 1: a series with
+   * another asker halts `other-asker` on the ask side (a resting vault ask is cancelled, the ask returns at the next
+   * tick once the book clears); bids are untouched. 0: today's always-quote.
+   */
+  MM_ASK_FALLBACK_ONLY: flagField.default('1'),
+  /**
+   * T-OP-133. The per-asset write POOL the asks are sized against, as bps of Clearinghouse.free(vault, asset).
+   * 10_000 = today's exact budget (the advertised sum never exceeds free). Above it, every single ask still fits
+   * `maxWriteUnits(free)` so any ONE fill is covered; several fills of different series in one tick can outrun the
+   * pool, and the book then skips the uncoverable fill (never a revert). The launch runbook value is the owner's.
+   */
+  MM_WRITE_OVERSUBSCRIBE_BPS: intField(10_000, 1_000_000).default(10_000),
   /** skew = seriesDelta × spot × (MM_SKEW_BPS_PER_DELTA_SHARE / 1e4) × the market's net inventory delta in shares,
    *  capped at MM_MAX_SKEW_BPS of fair. */
   MM_SKEW_BPS_PER_DELTA_SHARE: intField(0, 100_000).default(10),
@@ -281,6 +384,34 @@ const mmTuningFields = {
    * Chainlink feed, so a gap is a lagging read. 0: unchecked.
    */
   MM_FAIR_SPOT_TOLERANCE_BPS: intField(0, 10_000).default(300),
+  /**
+   * Seconds of lead before a House vault's epochEnd during which the plan opens no new risk.
+   * Fed to planTick as MmPlanParams.epochWindDownS. 0 = only at/after epochEnd.
+   */
+  MM_EPOCH_WIND_DOWN_S: intField(0, 7 * 86_400).default(14_400),
+  /**
+   * Extra MakerVault / House vault addresses to quote in this process, comma-separated.
+   * The treasury vault is always included from MAKER_VAULT. Empty = treasury only.
+   * House factory enumeration needs IHouseVaultFactory in ops/abis/v2 (T-78); until then this list is the discovery path.
+   */
+  MM_VAULTS: z.string().optional().default(''),
+  /**
+   * HouseVaultFactory address (src/v2/periphery/house/HouseVaultFactory.sol). When set, the House
+   * vaults are ENUMERATED from it through `vaults()` (:90) rather than listed by hand.
+   * BLOCKED ON T-78: ops/abis/v2 publishes no HouseVaultFactory artifact, so gen-abis renders no
+   * module for it and the keeper has no ABI to call it with. Until then a set factory is a
+   * configured expectation the bot cannot meet, and it says so every tick (v2_mm_house_unavailable)
+   * instead of quietly quoting nothing. See mm/house.ts.
+   */
+  MM_HOUSE_FACTORY: z.string().optional().default(''),
+  /**
+   * Per-vault overrides of the three bot caps, JSON keyed by vault address:
+   *   {"0xVault":{"maxSeriesUnits":"100","maxTotalNotionalUsdg6":"50000000000","dailyLossLimitUsdg6":"2000000000"}}
+   * Every field is optional and decimal; an omitted one falls back to the process-wide MM_* value.
+   * This can only ever TIGHTEN: the result is still clamped at tick time to the vault's own on-chain
+   * limit (quoter.ts capAtMost), and 0 keeps today's "the vault's limit alone" meaning.
+   */
+  MM_VAULT_CAPS: z.string().optional().default(''),
 };
 
 const mmSchema = z.object({
@@ -304,12 +435,18 @@ const pricerTuningFields = {
   PRICER_REPRICE_THRESHOLD_BPS: intField(1, 10_000).default(1_000),
   /** A position is evaluated right after its roll, then at most once per this many seconds (head clock). */
   PRICER_MIN_INTERVAL_S: intField(60, 7 * 86_400).default(1_800),
+  /** 0: do not reprice outside ExpiryCalendar's regular session. */
+  PRICER_REPRICE_OFF_HOURS: flagField.default('0'),
   /** Most reprice transactions sent in one tick. */
   PRICER_MAX_TX_PER_TICK: intField(1, 1_000).default(50),
   /** Timeout of one pricing-service or indexer request. */
   PRICER_HTTP_TIMEOUT_MS: intField(500, 120_000).default(5_000),
   /** Alert v2_pricer_fair_unavailable when a live smart-pricing ask has had no fair value this long. */
   PRICER_FAIR_ALERT_S: intField(60, 7 * 86_400).default(7_200),
+  /** Refuse a /fair whose source observation (legacy asOf, or provenance quoteObservedAt) is older than this. */
+  PRICER_FAIR_MAX_AGE_S: intField(1, 7 * 86_400).default(1_800),
+  /** Refuse when /fair.spot and the oracle trySpot differ by more than this many bps of the oracle spot. 300 accepted, 301 refused. */
+  PRICER_FAIR_SPOT_TOLERANCE_BPS: intField(0, 10_000).default(300),
   /** eth_getLogs range of the StrategySet scan; halved on a refused range. */
   PRICER_LOG_CHUNK_BLOCKS: intField(100, 10_000_000).default(50_000),
   /** Most eth_getLogs ranges scanned per tick while catching up. */
@@ -331,7 +468,7 @@ const pricerSchema = z.object({
 //////////////////////////////////////////////////////////////*/
 
 /** Every contract address, with the mode's required ones known to be present. */
-export type ContractsWith<R extends V2ContractName> = { [K in V2ContractName]: K extends R ? Address : Address | null };
+export type ContractsWith<R extends V2AddressName> = { [K in V2AddressName]: K extends R ? Address : Address | null };
 
 export interface SigningModeBase<M extends SigningMode> {
   mode: M;
@@ -343,7 +480,7 @@ export interface SigningModeBase<M extends SigningMode> {
   registry: V2Registry;
   contracts: ContractsWith<(typeof MODE_CONTRACTS)[M][number]>;
   /** Where each address came from, for the boot line: an env var, the registry, or nowhere. */
-  contractSources: Record<V2ContractName, 'env' | 'registry' | null>;
+  contractSources: Record<V2AddressName, 'env' | 'registry' | null>;
   /** The signer key, behind a function: a `log.info({ config })` serialises no function, so a
    *  config object dumped whole can never print the key. */
   privateKey: () => Hex;
@@ -376,6 +513,10 @@ export interface CrankerTuning {
   pendingStuckS: number;
   sweepIntervalS: number;
   indexerTimeoutMs: number;
+  flywheelEnabled: boolean;
+  flywheelIntervalS: number;
+  buybackToleranceBps: number;
+  buybackDryRun: boolean;
 }
 
 export interface CrankerConfig extends SigningModeBase<'cranker'> {
@@ -384,11 +525,20 @@ export interface CrankerConfig extends SigningModeBase<'cranker'> {
 }
 
 /** The MM_* keys, parsed (see mmTuningFields for each one's meaning). */
+/** How the two series caps were settled at boot, per quoted market (T-OP-123): what the ladder lists vs the cap. */
+export interface MmSeriesCoverage {
+  /** true: MM_MAX_SERIES / MM_MAX_SERIES_PER_MARKET were unset and derived from the registry ladder. */
+  derived: boolean;
+  /** Listed series per quoted market, from its resolved ladder (rungs x expiries ahead x sides, per tenor). */
+  listedByMarket: Readonly<Record<string, number>>;
+}
+
 export interface MmTuning {
   /** Upper-case tickers, or null for every live v2 market. */
   markets: readonly string[] | null;
   maxSeries: number;
   maxSeriesPerMarket: number;
+  seriesCoverage: MmSeriesCoverage;
   halfSpreadBps: number;
   minHalfSpreadUsdg6: bigint;
   expiryWidenS: number;
@@ -399,6 +549,10 @@ export interface MmTuning {
   fairMaxAgeOffHoursS: number;
   bidUnits: bigint;
   askUnits: bigint;
+  /** MM_ASK_FALLBACK_ONLY (T-OP-133). */
+  askFallbackOnly: boolean;
+  /** MM_WRITE_OVERSUBSCRIBE_BPS (T-OP-133); 10_000 = the exact budget. */
+  writeOversubscribeBps: number;
   skewBpsPerDeltaShare: number;
   maxSkewBps: number;
   requoteBps: number;
@@ -415,6 +569,20 @@ export interface MmTuning {
   depositTokens: boolean;
   maxQuoteLifetimeS: number;
   fairSpotToleranceBps: number;
+  epochWindDownS: number;
+  /** Extra vaults besides MAKER_VAULT, lower-cased, unique, order preserved from env. */
+  extraVaults: readonly Address[];
+  /** HouseVaultFactory if set; null when unset or not a 0x address. */
+  houseFactory: Address | null;
+  /** Per-vault cap overrides, keyed lower-case. Absent vault, or absent field, = the process-wide value. */
+  vaultCaps: ReadonlyMap<string, VaultCapOverride>;
+}
+
+/** A vault's overrides of the three bot caps. Every field is optional; all of them only tighten. */
+export interface VaultCapOverride {
+  maxSeriesUnits?: bigint;
+  maxTotalNotionalUsdg6?: bigint;
+  dailyLossLimitUsdg6?: bigint;
 }
 
 export interface MmConfig extends SigningModeBase<'mm'> {
@@ -431,9 +599,12 @@ export interface PricerTuning {
   edgeBps: number;
   repriceThresholdBps: number;
   minIntervalS: number;
+  repriceOffHours: boolean;
   maxTxPerTick: number;
   httpTimeoutMs: number;
   fairAlertS: number;
+  fairMaxAgeS: number;
+  fairSpotToleranceBps: number;
   logChunkBlocks: number;
   logChunksPerTick: number;
 }
@@ -465,8 +636,137 @@ export class V2ConfigError extends Error {
 }
 
 /** `NVDA, tsla,,AAPL` → ['NVDA', 'TSLA', 'AAPL'] (trimmed, upper-cased, blanks and repeats dropped). */
+/**
+ * How many series a market's resolved ladder lists: for each tenor, `rungs` strikes on each of the first
+ * `expiriesAhead` expiries, calls always and puts only when the market lists puts. This is the count of the
+ * slots `cranker/planner.ts` `ladderSlots` builds (K2-03 step 1) times that tenor's rungs; the RESOLUTION of the
+ * ladder (SPEC_DEFAULTS <- registry v2.defaults <- market overrides) is `registry.ts` `applyOverrides`, read here
+ * from `market.v2.params` exactly as the cranker reads it -- nothing is re-resolved. Pure.
+ */
+export function ladderSeriesCount(params: Pick<MarketParams, 'ladder' | 'expiriesAhead'>, puts: boolean): number {
+  const sides = puts ? 2 : 1;
+  let n = 0;
+  for (const tenor of TENORS) n += params.ladder[tenor].rungs * params.expiriesAhead[tenor] * sides;
+  return n;
+}
+
+/** The markets the bot quotes, as `mm/quoter.ts` `quotedMarkets` picks them: MM_MARKETS (any status), else every live v2 market. */
+function quotedMarketsOf(registry: V2Registry, tickers: readonly string[] | null): V2Market[] {
+  if (tickers === null) return v2Markets(registry, ['live']);
+  return v2Markets(registry, ['live', 'paused', 'planned']).filter((m) => tickers.includes(m.ticker));
+}
+
+/**
+ * The two series caps, settled (T-OP-123). Unset: derived so the whole ladder of every quoted market is selectable
+ * -- per market the largest listed count among them, in all their sum. Set below the ladder: one problem line per
+ * market naming how many of its listed series the cap leaves unquoted, in the shape the MM_MARKETS typo refusal
+ * uses, because a cap that trims the book silently is the failure the owner named. A registry with no quoted
+ * market (the bot boots and idles) keeps a cap of 1 so the schema's floor holds.
+ */
+export function settleSeriesCaps(input: {
+  registry: V2Registry;
+  markets: readonly string[] | null;
+  maxSeries: number | undefined;
+  maxSeriesPerMarket: number | undefined;
+}): { maxSeries: number; maxSeriesPerMarket: number; coverage: MmSeriesCoverage; problems: string[] } {
+  const quoted = quotedMarketsOf(input.registry, input.markets);
+  const listedByMarket: Record<string, number> = {};
+  for (const m of quoted) listedByMarket[m.ticker] = ladderSeriesCount(m.v2.params, m.v2.puts);
+  const counts = Object.values(listedByMarket);
+  const largest = counts.length === 0 ? 1 : Math.max(1, ...counts);
+  const total = counts.length === 0 ? 1 : Math.max(1, counts.reduce((a, b) => a + b, 0));
+  const problems: string[] = [];
+  const perMarket = input.maxSeriesPerMarket ?? largest;
+  const overall = input.maxSeries ?? total;
+  if (input.maxSeriesPerMarket !== undefined) {
+    for (const [ticker, listed] of Object.entries(listedByMarket)) {
+      if (input.maxSeriesPerMarket < listed) {
+        problems.push(`MM_MAX_SERIES_PER_MARKET=${input.maxSeriesPerMarket} leaves ${listed - input.maxSeriesPerMarket} of ${ticker}'s ${listed} listed series unquoted; unset it to derive ${largest} from the registry ladder, or set it to at least ${listed}`);
+      }
+    }
+  }
+  if (input.maxSeries !== undefined && input.maxSeries < total) {
+    problems.push(`MM_MAX_SERIES=${input.maxSeries} leaves ${total - input.maxSeries} of the ${total} series listed across ${quoted.map((m) => m.ticker).join(', ') || 'the quoted markets'} unquoted; unset it to derive ${total} from the registry ladder, or set it to at least ${total}`);
+  }
+  return {
+    maxSeries: overall,
+    maxSeriesPerMarket: perMarket,
+    coverage: { derived: input.maxSeries === undefined && input.maxSeriesPerMarket === undefined, listedByMarket },
+    problems,
+  };
+}
+
 export function parseTickerList(raw: string): string[] {
   return [...new Set(raw.split(',').map((t) => t.trim().toUpperCase()).filter((t) => t !== ''))];
+}
+
+/** Comma-separated 0x addresses, checksummed, unique, first-seen order. */
+export function parseAddressList(raw: string): Address[] {
+  const out: Address[] = [];
+  const seen = new Set<string>();
+  for (const part of raw.split(',')) {
+    const t = part.trim();
+    if (t === '') continue;
+    if (!isAddress(t, { strict: false })) throw new V2ConfigError(`not an address: ${t}`);
+    const a = getAddress(t);
+    if (seen.has(a.toLowerCase())) continue;
+    seen.add(a.toLowerCase());
+    out.push(a);
+  }
+  return out;
+}
+
+const CAP_FIELDS = ['maxSeriesUnits', 'maxTotalNotionalUsdg6', 'dailyLossLimitUsdg6'] as const;
+
+/**
+ * MM_VAULT_CAPS. Refuses an unknown field rather than ignoring it: a typo in a cap key is a cap that
+ * silently did not apply, which is the failure mode this whole task exists to remove.
+ */
+export function parseVaultCaps(raw: string): Map<string, VaultCapOverride> {
+  const out = new Map<string, VaultCapOverride>();
+  const trimmed = raw.trim();
+  if (trimmed === '') return out;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(trimmed);
+  } catch {
+    throw new V2ConfigError('MM_VAULT_CAPS is not JSON');
+  }
+  if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
+    throw new V2ConfigError('MM_VAULT_CAPS must be a JSON object keyed by vault address');
+  }
+  for (const [addr, value] of Object.entries(parsed as Record<string, unknown>)) {
+    if (!isAddress(addr, { strict: false })) throw new V2ConfigError(`MM_VAULT_CAPS: not an address: ${addr}`);
+    if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+      throw new V2ConfigError(`MM_VAULT_CAPS: ${addr} must map to an object`);
+    }
+    const row: VaultCapOverride = {};
+    for (const [field, amount] of Object.entries(value as Record<string, unknown>)) {
+      if (!(CAP_FIELDS as readonly string[]).includes(field)) {
+        throw new V2ConfigError(`MM_VAULT_CAPS: ${addr}: unknown cap ${field} (expected ${CAP_FIELDS.join(', ')})`);
+      }
+      if (typeof amount !== 'string' && typeof amount !== 'number') {
+        throw new V2ConfigError(`MM_VAULT_CAPS: ${addr}.${field} must be a decimal string or number`);
+      }
+      let v: bigint;
+      try {
+        v = BigInt(amount);
+      } catch {
+        throw new V2ConfigError(`MM_VAULT_CAPS: ${addr}.${field} is not an integer: ${String(amount)}`);
+      }
+      if (v < 0n) throw new V2ConfigError(`MM_VAULT_CAPS: ${addr}.${field} must not be negative`);
+      row[field as (typeof CAP_FIELDS)[number]] = v;
+    }
+    out.set(addr.toLowerCase(), row);
+  }
+  return out;
+}
+
+export function parseOptionalAddress(raw: string): Address | null {
+  const t = raw.trim();
+  if (t === '') return null;
+  if (!isAddress(t, { strict: false })) throw new V2ConfigError(`not an address: ${t}`);
+  return getAddress(t);
 }
 
 /** Blank values are unset, as in v1's config.ts: `.env` files ship with `KEY=` lines. */
@@ -521,12 +821,34 @@ function loadSigningModeConfig(mode: SigningMode, cleaned: Record<string, string
     lines.push(...problems.map((p) => `V2_REGISTRY_PATH (${registryPath}): ${p}`));
   }
 
-  const envAddress = (name: V2ContractName): Address | null => {
-    const raw = cleaned[CONTRACT_ENV[name]];
-    return raw !== undefined && isAddress(raw, { strict: false }) ? getAddress(raw) : null;
+  const parseAddress = (raw: string | undefined): Address | null =>
+    raw !== undefined && isAddress(raw, { strict: false }) ? getAddress(raw) : null;
+  // The deprecated payout spelling is a FALLBACK, never an override, and a disagreement is refused rather
+  // than resolved: two spellings of one contract that quietly pick a winner is how a bot ends up pointed at
+  // a replaced address with nothing failing.
+  const payoutRouter = parseAddress(cleaned[CONTRACT_ENV[PAYOUT_ENV_ALIAS.name]]);
+  const payoutAlias = parseAddress(cleaned[PAYOUT_ENV_ALIAS.env]);
+  if (payoutRouter !== null && payoutAlias !== null && payoutRouter !== payoutAlias) {
+    lines.push(
+      `${PAYOUT_ENV_ALIAS.env}: ${payoutAlias} disagrees with ${CONTRACT_ENV[PAYOUT_ENV_ALIAS.name]} ${payoutRouter}; ` +
+        `they are two spellings of the same contract (v2.contracts.${PAYOUT_ENV_ALIAS.name}). ` +
+        `${CONTRACT_ENV[PAYOUT_ENV_ALIAS.name]} is the v8 name ops renders — unset ${PAYOUT_ENV_ALIAS.env}.`,
+    );
+  }
+  // Deliberately NOT a problem when it is the only spelling present: `lines` is fatal here, and refusing a
+  // boot over the NAME of an address that is otherwise correct would break a working deployment for a rename
+  // that is ours, not the operator's. The deprecation is recorded in CONTRACT_ENV's comment and in
+  // keeper/README.md instead; the disagreement above is the case that is genuinely a misconfiguration.
+  const envAddress = (name: V2AddressName): Address | null => {
+    const explicit = parseAddress(cleaned[CONTRACT_ENV[name]]);
+    if (name === PAYOUT_ENV_ALIAS.name) return explicit ?? payoutAlias;
+    return explicit;
   };
-  const contracts = {} as Record<V2ContractName, Address | null>;
-  const contractSources = {} as Record<V2ContractName, 'env' | 'registry' | null>;
+  /** True when SOMETHING named this address in the environment, however it was spelled. */
+  const envNamed = (name: V2AddressName): boolean =>
+    cleaned[CONTRACT_ENV[name]] !== undefined || (name === PAYOUT_ENV_ALIAS.name && cleaned[PAYOUT_ENV_ALIAS.env] !== undefined);
+  const contracts = {} as Record<V2AddressName, Address | null>;
+  const contractSources = {} as Record<V2AddressName, 'env' | 'registry' | null>;
   // An explicit address wins over the registry's, which is what a devnet and a registry with no v2
   // block need. But when BOTH name an address and they differ, the environment is almost always
   // stale: the image carries the release's registry (ops/deploy.md §15.2), so a redeployed contract
@@ -534,14 +856,17 @@ function loadSigningModeConfig(mode: SigningMode, cleaned: Record<string, string
   // silently keeps the bot pointed at the replaced contract. That is refused; V2_CONTRACTS_FROM_ENV=1
   // takes the environment on purpose (an override before the registry is rebuilt).
   const envOverrideAllowed = cleaned.V2_CONTRACTS_FROM_ENV === '1';
-  for (const name of Object.keys(CONTRACT_ENV) as V2ContractName[]) {
+  // Driven by V2_ADDRESS_NAMES, not by the keys of CONTRACT_ENV: the name list is the canonical set, and a
+  // name that reached one and not the other would land here as `undefined` rather than `null` and read as
+  // "present" to every `=== null` check downstream.
+  for (const name of V2_ADDRESS_NAMES) {
     const fromEnv = envAddress(name);
-    const fromRegistry = registry?.contracts[name] ?? null;
+    const fromRegistry = registry === null ? null : v2Address(registry, name);
     contracts[name] = fromEnv ?? fromRegistry;
     contractSources[name] = fromEnv !== null ? 'env' : fromRegistry !== null ? 'registry' : null;
     if (fromEnv !== null && fromRegistry !== null && fromEnv !== fromRegistry && !envOverrideAllowed) {
       lines.push(
-        `${CONTRACT_ENV[name]}: ${fromEnv} disagrees with v2.contracts.${name} ${fromRegistry} in ${registryPath}; ` +
+        `${CONTRACT_ENV[name]}: ${fromEnv} disagrees with ${V2_ADDRESS_PATH[name]} ${fromRegistry} in ${registryPath}; ` +
           'the registry in the image is the release. Unset the variable, or set V2_CONTRACTS_FROM_ENV=1 to use the environment on purpose.',
       );
     }
@@ -549,9 +874,9 @@ function loadSigningModeConfig(mode: SigningMode, cleaned: Record<string, string
   if (registry !== null) {
     for (const name of MODE_CONTRACTS[mode]) {
       // An env var that failed to parse is already listed; do not also call it missing.
-      if (contracts[name] === null && cleaned[CONTRACT_ENV[name]] === undefined) {
+      if (contracts[name] === null && !envNamed(name)) {
         lines.push(
-          `${CONTRACT_ENV[name]}: V2_MODE=${mode} needs the ${name} address; set ${CONTRACT_ENV[name]} or v2.contracts.${name} in ${registryPath}` +
+          `${CONTRACT_ENV[name]}: V2_MODE=${mode} needs the ${name} address; set ${CONTRACT_ENV[name]} or ${V2_ADDRESS_PATH[name]} in ${registryPath}` +
             (registry.hasV2Block ? '' : ' (the registry has no v2 block yet)'),
         );
       }
@@ -568,6 +893,24 @@ function loadSigningModeConfig(mode: SigningMode, cleaned: Record<string, string
     for (const ticker of parseTickerList(cleaned.MM_MARKETS)) {
       const row = registry.markets.find((m) => m.ticker === ticker);
       if (row === undefined || row.v2 === null) lines.push(`MM_MARKETS: ${ticker} is not a v2 market in ${registryPath}`);
+    }
+  }
+  // The series caps against the ladder (T-OP-123): a cap set below what a quoted market lists is refused here, by
+  // count, for the same reason as the MM_MARKETS typo above -- a partial book with no error is the silent failure.
+  // Read from the cleaned environment through the two cap fields alone, so the ladder check joins the one list
+  // even when another key is malformed (a malformed cap is reported by the main parse, and skipped here).
+  let seriesCaps: ReturnType<typeof settleSeriesCaps> | null = null;
+  if (mode === 'mm' && registry !== null) {
+    const caps = z.object({ MM_MAX_SERIES: mmTuningFields.MM_MAX_SERIES, MM_MAX_SERIES_PER_MARKET: mmTuningFields.MM_MAX_SERIES_PER_MARKET }).safeParse(cleaned);
+    const known = cleaned.MM_MARKETS === undefined || parseTickerList(cleaned.MM_MARKETS).every((t) => registry!.markets.some((m) => m.ticker === t && m.v2 !== null));
+    if (caps.success && known) {
+      seriesCaps = settleSeriesCaps({
+        registry,
+        markets: cleaned.MM_MARKETS === undefined ? null : parseTickerList(cleaned.MM_MARKETS),
+        maxSeries: caps.data.MM_MAX_SERIES,
+        maxSeriesPerMarket: caps.data.MM_MAX_SERIES_PER_MARKET,
+      });
+      lines.push(...seriesCaps.problems);
     }
   }
 
@@ -622,6 +965,10 @@ function loadSigningModeConfig(mode: SigningMode, cleaned: Record<string, string
         pendingStuckS: c.CRANKER_PENDING_STUCK_S,
         sweepIntervalS: c.CRANKER_SWEEP_INTERVAL_S,
         indexerTimeoutMs: c.CRANKER_INDEXER_TIMEOUT_MS,
+        flywheelEnabled: c.CRANKER_FLYWHEEL_ENABLED,
+        flywheelIntervalS: c.CRANKER_FLYWHEEL_INTERVAL_S,
+        buybackToleranceBps: c.CRANKER_BUYBACK_TOLERANCE_BPS,
+        buybackDryRun: c.CRANKER_BUYBACK_DRY_RUN,
       },
     };
   }
@@ -642,8 +989,10 @@ function loadSigningModeConfig(mode: SigningMode, cleaned: Record<string, string
       killToken: () => killToken,
       tuning: {
         markets: markets.length === 0 ? null : markets,
-        maxSeries: c.MM_MAX_SERIES,
-        maxSeriesPerMarket: c.MM_MAX_SERIES_PER_MARKET,
+        // settled above, against the registry ladder; seriesCaps is non-null on every path that reaches here
+        maxSeries: seriesCaps!.maxSeries,
+        maxSeriesPerMarket: seriesCaps!.maxSeriesPerMarket,
+        seriesCoverage: seriesCaps!.coverage,
         halfSpreadBps: c.MM_HALF_SPREAD_BPS,
         minHalfSpreadUsdg6: c.MM_MIN_HALF_SPREAD_USDG6,
         expiryWidenS: c.MM_EXPIRY_WIDEN_S,
@@ -654,6 +1003,8 @@ function loadSigningModeConfig(mode: SigningMode, cleaned: Record<string, string
         fairMaxAgeOffHoursS: c.MM_FAIR_MAX_AGE_OFF_HOURS_S,
         bidUnits: BigInt(c.MM_BID_UNITS),
         askUnits: BigInt(c.MM_ASK_UNITS),
+        askFallbackOnly: c.MM_ASK_FALLBACK_ONLY,
+        writeOversubscribeBps: c.MM_WRITE_OVERSUBSCRIBE_BPS,
         skewBpsPerDeltaShare: c.MM_SKEW_BPS_PER_DELTA_SHARE,
         maxSkewBps: c.MM_MAX_SKEW_BPS,
         requoteBps: c.MM_REQUOTE_BPS,
@@ -668,6 +1019,10 @@ function loadSigningModeConfig(mode: SigningMode, cleaned: Record<string, string
         depositTokens: c.MM_DEPOSIT_TOKENS,
         maxQuoteLifetimeS: c.MM_MAX_QUOTE_LIFETIME_S,
         fairSpotToleranceBps: c.MM_FAIR_SPOT_TOLERANCE_BPS,
+        epochWindDownS: c.MM_EPOCH_WIND_DOWN_S,
+        extraVaults: parseAddressList(c.MM_VAULTS),
+        houseFactory: parseOptionalAddress(c.MM_HOUSE_FACTORY),
+        vaultCaps: parseVaultCaps(c.MM_VAULT_CAPS),
       },
     };
   }
@@ -686,9 +1041,12 @@ function loadSigningModeConfig(mode: SigningMode, cleaned: Record<string, string
       edgeBps: c.PRICER_EDGE_BPS,
       repriceThresholdBps: c.PRICER_REPRICE_THRESHOLD_BPS,
       minIntervalS: c.PRICER_MIN_INTERVAL_S,
+      repriceOffHours: c.PRICER_REPRICE_OFF_HOURS,
       maxTxPerTick: c.PRICER_MAX_TX_PER_TICK,
       httpTimeoutMs: c.PRICER_HTTP_TIMEOUT_MS,
       fairAlertS: c.PRICER_FAIR_ALERT_S,
+      fairMaxAgeS: c.PRICER_FAIR_MAX_AGE_S,
+      fairSpotToleranceBps: c.PRICER_FAIR_SPOT_TOLERANCE_BPS,
       logChunkBlocks: c.PRICER_LOG_CHUNK_BLOCKS,
       logChunksPerTick: c.PRICER_LOG_CHUNKS_PER_TICK,
     },

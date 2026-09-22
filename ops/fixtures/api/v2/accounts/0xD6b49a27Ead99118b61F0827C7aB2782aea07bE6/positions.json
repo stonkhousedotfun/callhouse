@@ -16,11 +16,11 @@
         "expiry": 1789761600,
         "tenor": "weekly",
         "mintCutoff": 1789759800,
-        "mintFeePpm": 80,
+        "mintFeePpm": 0,
         "mintFeesHeld": {
-          "raw": "21714285714286",
+          "raw": "0",
           "decimals": 18,
-          "formatted": "0.000021714285714286"
+          "formatted": "0"
         },
         "mintFeesAccrued": {
           "raw": "0",
@@ -31,9 +31,9 @@
       },
       "units": "60",
       "premiumReceived": {
-        "raw": "156060",
+        "raw": "148257",
         "decimals": 6,
-        "formatted": "0.15606"
+        "formatted": "0.148257"
       },
       "collateralLocked": {
         "raw": "600000000000000000",
@@ -45,7 +45,7 @@
   ],
   "orders": [
     {
-      "orderId": "1009",
+      "orderId": "1010",
       "series": {
         "longId": "43462217268812087739261944784956455494004279776534947210729604095134131208790",
         "shortId": "43462217268812087739261944784956455494004279776534947210729604095134131208791",
@@ -60,11 +60,11 @@
         "expiry": 1789761600,
         "tenor": "weekly",
         "mintCutoff": 1789759800,
-        "mintFeePpm": 80,
+        "mintFeePpm": 0,
         "mintFeesHeld": {
-          "raw": "21714285714286",
+          "raw": "0",
           "decimals": 18,
-          "formatted": "0.000021714285714286"
+          "formatted": "0"
         },
         "mintFeesAccrued": {
           "raw": "0",
@@ -79,7 +79,7 @@
         "decimals": 6,
         "formatted": "0.2601"
       },
-      "units": "296",
+      "units": "297",
       "filled": "60",
       "validUntil": 1789759800
     }
@@ -89,9 +89,9 @@
       "asset": "0xd0601CE157Db5bdC3162BbaC2a2C8aF5320D9EEC",
       "symbol": "NVDA",
       "free": {
-        "raw": "2368902543737610697",
+        "raw": "2376754785779398500",
         "decimals": 18,
-        "formatted": "2.368902543737610697"
+        "formatted": "2.3767547857793985"
       }
     }
   ],
@@ -122,11 +122,11 @@
         "expiry": 1789761600,
         "tenor": "weekly",
         "mintCutoff": 1789759800,
-        "mintFeePpm": 80,
+        "mintFeePpm": 0,
         "mintFeesHeld": {
-          "raw": "21714285714286",
+          "raw": "0",
           "decimals": 18,
-          "formatted": "0.000021714285714286"
+          "formatted": "0"
         },
         "mintFeesAccrued": {
           "raw": "0",
@@ -135,7 +135,7 @@
         },
         "status": "open"
       },
-      "orderId": "1009",
+      "orderId": "1010",
       "lastStaleCancelAt": null,
       "staleSpot": null,
       "lastRolledAt": 1789392900

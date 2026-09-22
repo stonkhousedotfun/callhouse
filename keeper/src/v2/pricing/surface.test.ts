@@ -14,7 +14,10 @@ import { test } from 'node:test';
 import { type CboeChain, type CboeOption } from '../../vol.js';
 import { syntheticNvdaChain, syntheticTslaChain } from '../../fixtures/synthetic-chains.js';
 import { SESSION_SECONDS, TRADING_YEAR_SECONDS, bsPrice, impliedVol, tradingYears } from './bs.js';
-import { filterQuotes, mid } from './cboe.js';
+import { cboeToNormalized, filterQuotes, mid } from './cboe.js';
+
+/** The surface reads a provider-neutral chain: the Cboe adapter's. */
+const n = (chain: CboeChain) => cboeToNormalized(chain, 0);
 import {
   IV_CEILING,
   IV_FLOOR,
@@ -35,8 +38,8 @@ const TSLA_AS_OF = Date.UTC(2026, 8, 16, 19, 59, 59) / 1000;
 /** 16:00 New York (EDT) on a September day. */
 const closeOf = (day: number) => Date.UTC(2026, 8, day, 20) / 1000;
 
-const NVDA_SURFACE = buildSurface(NVDA, NVDA_AS_OF);
-const TSLA_SURFACE = buildSurface(TSLA, TSLA_AS_OF);
+const NVDA_SURFACE = buildSurface(n(NVDA), NVDA_AS_OF);
+const TSLA_SURFACE = buildSurface(n(TSLA), TSLA_AS_OF);
 
 const close = (actual: number, expected: number, tolerance: number, what: string) =>
   assert.ok(Math.abs(actual - expected) <= tolerance, `${what}: ${actual} vs ${expected} (±${tolerance})`);
@@ -67,7 +70,7 @@ test('buildSurface: the expiries kept, their trading-clock T, and the same-day e
   assert.equal(entry(NVDA_SURFACE, '2026-09-18').points.length, 27);
   assert.equal(entry(TSLA_SURFACE, '2026-09-21').points.length, 37);
   // A horizon shorter than the second expiry keeps only the first.
-  assert.deepEqual(buildSurface(NVDA, NVDA_AS_OF, { horizonDays: 5 }).expiries.map((e) => e.day), ['2026-09-18']);
+  assert.deepEqual(buildSurface(n(NVDA), NVDA_AS_OF, { horizonDays: 5 }).expiries.map((e) => e.day), ['2026-09-18']);
 });
 
 test('put-call parity sanity: one forward per expiry, C - P = F - K near the money, call and put vols agree', () => {
@@ -182,16 +185,16 @@ test('volAtStrike: listed, interpolated between listed points, flat on both wing
   assert.equal(at(last.strike + 50).iv, last.iv);
 
   // A hole of three listings (217.5-225 gone) is 10 wide at 215: more than max(2.5, 5.375).
-  const holed = buildSurface({ ...NVDA, options: NVDA.options.filter((o) => o.expiry !== '2026-09-18' || o.strike < 216 || o.strike > 226) }, NVDA_AS_OF);
+  const holed = buildSurface(n({ ...NVDA, options: NVDA.options.filter((o) => o.expiry !== '2026-09-18' || o.strike < 216 || o.strike > 226) }), NVDA_AS_OF);
   const gap = volAtStrike(entry(holed, '2026-09-18'), 221);
   assert.equal(!gap.ok && gap.reason, 'quotes-inconsistent');
   assert.match(!gap.ok ? gap.detail.why ?? '' : '', /too far apart/);
   // A corrupt call delta next to 222.5 breaks the window of the point the read leans on.
   const corrupt: CboeChain = { ...NVDA, options: NVDA.options.map((o) => (o.symbol === 'NVDA260918C00225000' ? { ...o, delta: 0.2 } : o)) };
-  const bad = volAtStrike(entry(buildSurface(corrupt, NVDA_AS_OF), '2026-09-18'), 221);
+  const bad = volAtStrike(entry(buildSurface(n(corrupt), NVDA_AS_OF), '2026-09-18'), 221);
   assert.equal(!bad.ok && bad.reason, 'quotes-inconsistent');
   assert.match(!bad.ok ? bad.detail.why ?? '' : '', /delta rises/);
-  assert.equal(volAtStrike(entry(buildSurface(corrupt, NVDA_AS_OF), '2026-09-18'), 205).ok, true, 'far from the corruption it is not this read’s business');
+  assert.equal(volAtStrike(entry(buildSurface(n(corrupt), NVDA_AS_OF), '2026-09-18'), 205).ok, true, 'far from the corruption it is not this read’s business');
 });
 
 test('volAt: a listed expiry, total variance between two, flat before the first and after the last, the horizon', () => {
@@ -243,7 +246,7 @@ test('volAt: an expiry the read needs that failed fails the read; nothing listed
   assert.equal(volAt(s, 231, closeOf(17)).ok, true, 'a read that does not need the 25th is unaffected');
   const empty = volAt({ ...NVDA_SURFACE, expiries: [] }, 231, closeOf(18));
   assert.equal(!empty.ok && empty.reason, 'no-quotes');
-  const junk = buildSurface({ ...NVDA, options: NVDA.options.map((o) => ({ ...o, bid: 0 })) }, NVDA_AS_OF);
+  const junk = buildSurface(n({ ...NVDA, options: NVDA.options.map((o) => ({ ...o, bid: 0 })) }), NVDA_AS_OF);
   assert.deepEqual(junk.expiries.map((x) => x.failure?.reason), ['no-quotes', 'no-quotes']);
   const read = volAt(junk, 220, closeOf(18));
   assert.equal(!read.ok && read.reason, 'no-quotes');

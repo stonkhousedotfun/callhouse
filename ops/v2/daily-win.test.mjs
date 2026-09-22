@@ -42,13 +42,13 @@ const readJson = (...p) => JSON.parse(readFileSync(join(FIXTURES, ...p), "utf8")
 const FIXTURE_NOW = 1789592400;
 const STATS = readJson("stats.json");
 const WEEK_WIN = STATS.biggestWinWeek;
-const WEEK_ID = "97249294176823841346447828561188452006185490110924851379129375223985952864952-0x83daA58d0a8d82D7b971338a03AA2f99bfADf4F8";
+const WEEK_ID = "109733135889116194008703981926101410916763203979514320802443652863493208496976-0x83daA58d0a8d82D7b971338a03AA2f99bfADf4F8";
 const WEEK_PNL = readJson("pnl", `${WEEK_ID}.json`);
 const ALL_WINS = readJson("feed", "wins.json").items;
 
 const expectedWeekPost = (appUrl) =>
-  "This week's biggest win on Stonkhouse: NVDA $216 call, expired Sep 11, 2026. The buyer paid 0.55 USDG, " +
-  "and the most they could lose was 0.55 USDG. It settled for 6.11 USDG, 11.25x the cost.\n" +
+  "This week's biggest win on Stonkhouse: NVDA $214 call, expired Sep 11, 2026. The buyer paid 0.75 USDG, " +
+  "and the most they could lose was 0.75 USDG. It settled for 4.85 USDG, 6.54x the cost.\n" +
   "Most options expire worthless.\n" +
   `Receipt: ${appUrl}/pnl/${WEEK_ID}`;
 
@@ -289,15 +289,27 @@ describe("qualification rule", () => {
 // ---------------------------------------------------------------------------------------------
 
 describe("post copy", () => {
-  /** scripts/copy-lint.mjs's FORBIDDEN regexes, read from its source (importing it would run it). */
+  /**
+   * The forbidden-copy rules, INLINED. They were read out of scripts/copy-lint.mjs until that
+   * script was removed on 2026-09-21 by owner instruction. This is now the only copy in this
+   * file's reach, so it cannot drift from an upstream that no longer exists - and nothing
+   * outside this test checks post copy any more.
+   */
   function copyLintForbidden() {
-    const src = readFileSync(join(REPO, "scripts", "copy-lint.mjs"), "utf8");
-    const start = src.indexOf("const FORBIDDEN = [");
-    const block = src.slice(start, src.indexOf("\n];", start));
-    const res = [...block.matchAll(/re:\s*\/((?:\\.|[^/\\\n])+)\/([a-z]*)/g)].map((m) => new RegExp(m[1], m[2]));
-    assert.equal(res.length, (block.match(/\bre:/g) ?? []).length, "every copy-lint rule parsed");
-    assert.ok(res.length >= 9);
-    return res;
+    return [
+      /\bAPY\b/i,
+      /\bAPR\b/i,
+      /10\s*%\s*weekly/i,
+      /projected\s+(yield|return|apy|income)/i,
+      /annuali[sz]ed/i,
+      /backed\s+by\s+nvidia/i,
+      /dividend\s+paid\s+(in\s+cash\s+)?by\s+nvidia/i,
+      /guaranteed\s+(yield|return|premium)/i,
+      /\bguaranteed\b/i,
+      /risk[-\s]?free/i,
+      /\bcan['\u2019]?t\s+lose\b/i,
+      /\bfree\s+money\b/i,
+    ];
   }
 
   const posts = ALL_WINS.flatMap((win) =>

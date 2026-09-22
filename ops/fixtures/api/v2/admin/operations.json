@@ -1,0 +1,17 @@
+{
+  "items": [
+    {
+      "key": "0x67834fcc172f6a1d7d86ad24c576cabfe3650ba4cf79632aa6c7c1697bfb5fa7:1",
+      "id": "0x67834fcc172f6a1d7d86ad24c576cabfe3650ba4cf79632aa6c7c1697bfb5fa7",
+      "role": "CONFIG_ADMIN",
+      "target": "0x301b1e55217f139123D276B8298284EA2B704ca8",
+      "selector": "0xc44014d2",
+      "label": "Clearinghouse.setDefaultOracle(address)",
+      "caller": "0x31D35771AaE6676aE6DFb4EdF2399D6115b3Af14",
+      "scheduledAt": 1789588800,
+      "readyAt": 1789675200,
+      "status": "pending"
+    }
+  ],
+  "nextCursor": null
+}

@@ -56,11 +56,6 @@ export function payoffSentence(position: LongPosition): string {
 export type SellQuote = { orderIds: string[]; filled: bigint; premium: bigint; fee: bigint; sellerFee: bigint;
   net: bigint; limitPrice: bigint | null; selected: { orderId: string; maker: string; price: bigint; units: bigint }[] };
 
-export function assertResaleFeeMatches(quotedBps: number, effectiveBps: number): void {
-  if (quotedBps !== effectiveBps)
-    throw new Error("The on-chain resale fee changed. Refresh and review the sale proceeds.");
-}
-
 /** An API order row must identify the same on-chain order before cancel or replace. */
 export function orderIdentityMatches(displayed: AccountOrder, chain: { longId: bigint; kind: number }): boolean {
   const kind = displayed.kind === "Bid" ? 0 : displayed.kind === "AskResale" ? 1 : 2;

@@ -200,7 +200,13 @@ test('GET /health: 200 while serving; degraded once a chain download has failed,
 test('the registry: every tier-1 market with its feed and Cboe chain, strict about what it cannot trust', () => {
   const registry = loadPricingRegistry(REGISTRY_PATH);
   assert.equal(registry.markets.size, 35);
-  assert.deepEqual(registry.markets.get('NVDA'), { ticker: 'NVDA', feed: NVDA_FEED, cboe: { root: 'NVDA', url: cboeUrl('NVDA') } });
+  assert.deepEqual(registry.markets.get('NVDA'), {
+    ticker: 'NVDA',
+    feed: NVDA_FEED,
+    cboe: { root: 'NVDA', url: cboeUrl('NVDA') },
+    // The canonical Stock Token (K3-311 identity): the registry's asset, chain id and verified uiMultiplier.
+    token: { chainId: 4663, address: '0xd0601CE157Db5bdC3162BbaC2a2C8aF5320D9EEC', uiMultiplier: '1000775159164630595' },
+  });
   assert.deepEqual(registry.markets.get('TSLA')?.cboe, { root: 'TSLA', url: cboeUrl('TSLA') });
   assert.equal(registry.maxPriceAgeS, 345_600);
   assert.equal(registry.maxSpotDivergenceBps, 300);

@@ -1,0 +1,41 @@
+{
+  "program": "maker",
+  "distributors": [
+    {
+      "distributor": "0xA35423709eb22ac7639fd415496018087f409deb",
+      "funded": {
+        "raw": "100000000",
+        "decimals": 6,
+        "formatted": "100"
+      },
+      "defunded": {
+        "raw": "5000000",
+        "decimals": 6,
+        "formatted": "5"
+      },
+      "balance": {
+        "raw": "75000000",
+        "decimals": 6,
+        "formatted": "75"
+      }
+    }
+  ],
+  "items": [
+    {
+      "distributor": "0xA35423709eb22ac7639fd415496018087f409deb",
+      "epochId": 2958,
+      "root": "0x25f574711d91ceabadb1810446bacea623b34626ec4da33528affac192ea1707",
+      "total": {
+        "raw": "25000000",
+        "decimals": 6,
+        "formatted": "25"
+      },
+      "claimed": {
+        "raw": "20000000",
+        "decimals": 6,
+        "formatted": "20"
+      }
+    }
+  ],
+  "nextCursor": null
+}

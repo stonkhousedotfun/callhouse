@@ -132,8 +132,77 @@ test('GET /health: database and channel state', async () => {
     database: 'ok',
     channels: { telegram: 'closed', webpush: 'closed', email: 'off' },
     telegramBot: 'unknown',
-    rules: { status: 'starting', lastSuccessAt: null, consecutiveFailures: 0 },
+    delivery: { lastHour: { sent: 0, failed: 0, dropped: 0, rateLimited: 0 } },
+    rules: { status: 'starting', lastSuccessAt: null, consecutiveFailures: 0, watchSet: 0, oldestRefreshAgeS: null },
   });
+});
+
+test('GET /health: the last hour’s delivery outcomes, the watch set and the oldest holdings refresh', async () => {
+  const mine = await subscribeWebPush(alice);
+  const subscription = mine.body.id;
+  assert.ok(subscription !== undefined);
+  await subscribeWebPush(bob, 'https://fcm.googleapis.com/fcm/send/SECRET-ENDPOINT-bob');
+
+  const row = (key: string, kind: string, status: string, code: string | null, minutesAgo: number) =>
+    db.query(
+      `INSERT INTO notifier.delivery (subscription_id, kind, dedupe_key, payload, status, created_at, next_attempt_at, sent_at, last_error_code)
+       VALUES ($1, $2, $3, '{}'::jsonb, $4, $5::timestamptz, $5::timestamptz, $6::timestamptz, $7)`,
+      [subscription, kind, key, status, new Date(clock.ms - minutesAgo * 60_000), status === 'sent' ? new Date(clock.ms) : null, code],
+    );
+  await row('k1', 'fill_receipt', 'sent', null, 10);
+  await row('k2', 'expiry_1h', 'failed', 'http_400', 20);
+  await row('k3', 'expiry_1h', 'dropped', 'rate_limited:alerts', 30);
+  await row('k4', 'strike_cross', 'dropped', 'pref_off', 40);
+  await row('k5', 'fill_receipt', 'sent', null, 120); // older than the window
+  await row('k6', 'fill_receipt', 'pending', null, 5); // no outcome yet
+
+  // The engine read one wallet's positions 15 minutes ago and the other's 5 minutes ago.
+  for (const [address, secondsAgo] of [[alice.address, 900], [bob.address, 300]] as const) {
+    await db.query(`INSERT INTO notifier.rules_holdings (address, holdings, fetched_at) VALUES ($1, '{}'::jsonb, $2::timestamptz)`, [
+      address,
+      new Date(clock.ms - secondsAgo * 1000),
+    ]);
+  }
+
+  const health = (await (await request('/health')).json()) as {
+    delivery: { lastHour: { sent: number; failed: number; dropped: number; rateLimited: number } };
+    rules: { watchSet: number; oldestRefreshAgeS: number | null };
+  };
+  assert.deepEqual(health.delivery.lastHour, { sent: 1, failed: 1, dropped: 2, rateLimited: 1 }, 'the hour before now, by outcome');
+  assert.equal(health.rules.watchSet, 2, 'both verified, enabled wallets');
+  assert.equal(health.rules.oldestRefreshAgeS, 900, 'the wallet furthest behind, in seconds');
+
+  // A wallet that leaves the watch set leaves both numbers.
+  await db.query('UPDATE notifier.subscription SET disabled_at = now() WHERE address = $1', [alice.address]);
+  await db.query('DELETE FROM notifier.rules_holdings WHERE address = $1', [alice.address]);
+  const after = (await (await request('/health')).json()) as { rules: { watchSet: number; oldestRefreshAgeS: number | null } };
+  assert.deepEqual([after.rules.watchSet, after.rules.oldestRefreshAgeS], [1, 300]);
+});
+
+test('a price alert on a ticker the notifier has no market for is refused with the prefs 400 shape', async () => {
+  notifier.markets.set(['NVDA', 'TSLA']);
+  try {
+    const bad = await subscribeWebPush(alice, ENDPOINT, { priceAlerts: [{ ticker: 'AAPL', above: '221000000' }] });
+    assert.equal(bad.res.status, 400);
+    assert.deepEqual(bad.body, {
+      error: { code: 'bad-request', message: 'prefs: priceAlerts.0.ticker: AAPL is not a market on this notifier' },
+    });
+    assert.equal((await db.query('SELECT 1 FROM notifier.subscription')).rows.length, 0, 'nothing was saved');
+
+    // A ticker that is a market is saved as before.
+    const good = await subscribeWebPush(alice, ENDPOINT, { priceAlerts: [{ ticker: 'TSLA', below: '400000000' }] });
+    assert.equal(good.res.status, 201);
+  } finally {
+    notifier.markets.set([]);
+  }
+});
+
+test('with no market list cached the check fails open: an indexer outage cannot refuse every alert', async () => {
+  assert.deepEqual(notifier.markets.tickers(), [], 'nothing has filled the cache in this suite');
+  const res = await subscribeWebPush(alice, ENDPOINT, { priceAlerts: [{ ticker: 'AAPL', above: '221000000' }] });
+  assert.equal(res.res.status, 201, 'an empty cache means “unknown”, never “no markets”');
+  const { rows } = await db.query<{ prefs: { priceAlerts: { ticker: string }[] } }>('SELECT prefs FROM notifier.subscription');
+  assert.deepEqual(rows[0]?.prefs.priceAlerts.map((a) => a.ticker), ['AAPL']);
 });
 
 test('POST /v1/challenge validates the address', async () => {

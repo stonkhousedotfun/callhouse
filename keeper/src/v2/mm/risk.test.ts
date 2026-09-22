@@ -164,3 +164,42 @@ test('planSizes: inventory is offered for resale before writing; a mint-paused m
   const [noAsk] = planSizes([s({ askPrice: null, bidPrice: null })], limits());
   assert.deepEqual([noAsk!.bid, noAsk!.write, noAsk!.resale], [0n, 0n, 0n]);
 });
+
+/*//////////////////////////////////////////////////////////////
+   T-OP-133: ONE OVERSUBSCRIBED WRITE POOL (MM_WRITE_OVERSUBSCRIBE_BPS)
+//////////////////////////////////////////////////////////////*/
+
+// PROVE BY BREAKING (authored): size every ask against `collateralLeft` alone (drop the `single` bound) and the
+// "each ask <= maxWriteUnits(free)" assertion below goes red at 20_000 bps with free = 150 units: the first ask
+// would advertise 100 and the second 100 too, the second above what one fill of it can be covered by after the
+// first fills. Drop the oversubscription factor instead and the "sum advertised == free x bps / 1e4" line goes red.
+test('planSizes: the write pool is free x bps / 1e4 for SIZING, while every single ask still fits maxWriteUnits(free)', () => {
+  const free = 150n * UNIT;
+  const four = [s({ longId: 1n }), s({ longId: 2n }), s({ longId: 3n }), s({ longId: 4n })];
+
+  // 10_000 bps: today's exact budget, unchanged -- the advertised sum never exceeds free.
+  const exact = planSizes(four, limits({ freeCollateral: new Map([[NVDA, free]]), writeOversubscribeBps: 10_000 }));
+  assert.deepEqual(exact.map((x) => x.write), [100n, 50n, 0n, 0n]);
+  assert.deepEqual(planSizes(four, limits({ freeCollateral: new Map([[NVDA, free]]) })).map((x) => x.write), [100n, 50n, 0n, 0n], 'absent = 10_000');
+
+  // 20_000 bps: the pool is 300 units for sizing; 100 + 100 + 100 = 300 advertised, each ask alone coverable by 150.
+  const twice = planSizes(four, limits({ freeCollateral: new Map([[NVDA, free]]), writeOversubscribeBps: 20_000 }));
+  assert.deepEqual(twice.map((x) => x.write), [100n, 100n, 100n, 0n]);
+  const advertised = twice.reduce((sum, x) => sum + x.write, 0n);
+  assert.equal(advertised * UNIT, (free * 20_000n) / 10_000n, 'sum advertised == free x bps / 1e4 (rent 0 here)');
+  for (const x of twice) assert.ok(x.write * UNIT <= free, `ask ${x.longId} advertises ${x.write} units, above what one fill of it can be covered by`);
+
+  // 50_000 bps (the runbook suggestion): five asks of the per-series size from the same 150 units.
+  const five = planSizes([...four, s({ longId: 5n }), s({ longId: 6n })], limits({ freeCollateral: new Map([[NVDA, free]]), writeOversubscribeBps: 50_000 }));
+  assert.deepEqual(five.map((x) => x.write), [100n, 100n, 100n, 100n, 100n, 100n]);
+
+  // A single ask can never exceed what the chain covers, whatever the factor: free of 60 units caps EVERY ask at 60.
+  const small = planSizes(four, limits({ freeCollateral: new Map([[NVDA, 60n * UNIT]]), writeOversubscribeBps: 50_000 }));
+  assert.deepEqual(small.map((x) => [x.write, x.capped.includes('collateral')]), [[60n, true], [60n, true], [60n, true], [60n, true]]);
+  assert.deepEqual(small.map((x) => x.write), [60n, 60n, 60n, 60n], 'sizing pool 300, but each ask <= maxWriteUnits(60)');
+});
+
+test('planSizes: oversubscription touches asks only; bids escrow real USDG and keep their exact budget', () => {
+  const bids = planSizes([s({ longId: 1n }), s({ longId: 2n })], limits({ usdgBudget: 3_000_000n, writeOversubscribeBps: 50_000 }));
+  assert.deepEqual(bids.map((x) => [x.bid, x.capped.includes('usdg')]), [[100n, false], [50n, true]]);
+});

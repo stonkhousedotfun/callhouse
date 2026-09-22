@@ -1,0 +1,60 @@
+{
+  "market": "NVDA",
+  "vault": "0x602CA55061735b596380f1e0f775a9D91966e2cD",
+  "currentEpoch": {
+    "id": "1789156800",
+    "start": 1789156800,
+    "end": 1789761600,
+    "nav": null,
+    "resultUsdg": null
+  },
+  "epochs": [
+    {
+      "id": "1788552000",
+      "start": 1788552000,
+      "end": 1789156800,
+      "nav": {
+        "epoch": "1788552000",
+        "at": 1789156800,
+        "usdg": {
+          "raw": "800000000",
+          "decimals": 6,
+          "formatted": "800"
+        },
+        "stockUnits": "40000000000000000000",
+        "settlementPrice": {
+          "raw": "215500000",
+          "decimals": 6,
+          "formatted": "215.5"
+        },
+        "navUsdg": {
+          "raw": "9420000000",
+          "decimals": 6,
+          "formatted": "9420"
+        }
+      },
+      "resultUsdg": {
+        "raw": "-180000000",
+        "decimals": 6,
+        "formatted": "-180"
+      }
+    },
+    {
+      "id": "1789156800",
+      "start": 1789156800,
+      "end": 1789761600,
+      "nav": null,
+      "resultUsdg": null
+    }
+  ],
+  "shares": null,
+  "queue": [
+    {
+      "kind": "withdraw",
+      "account": "0xE37876AcBfbA6186E4687f4ef465D9AC21558De3",
+      "assets": null,
+      "shares": "10000000000000000000",
+      "requestedAt": 1789585200
+    }
+  ]
+}

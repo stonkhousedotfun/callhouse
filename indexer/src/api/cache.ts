@@ -27,7 +27,7 @@ type Computation = { promise: Promise<Computed<unknown>>; expires: number; pendi
 /** Fixed internal keys only: share an expensive read across URL variants and concurrent callers. */
 const computations = new Map<string, Computation>();
 
-const v2QueryKeys: readonly [RegExp, readonly string[]][] = [
+export const v2QueryKeys: readonly [RegExp, readonly string[]][] = [
   [/^\/v2\/calendar\/holidays$/, ["fromDay", "toDay"]],
   [/^\/v2\/markets\/[^/]+\/series$/, ["expiry", "type", "status", "cursor", "limit"]],
   [/^\/v2\/series\/[^/]+\/book$/, ["depth"]],
@@ -40,7 +40,10 @@ const v2QueryKeys: readonly [RegExp, readonly string[]][] = [
   [/^\/v2\/feed\/wins$/, ["window", "cursor", "limit"]],
   [/^\/v2\/leaderboard$/, ["metric", "window", "cursor", "limit"]],
   [/^\/v2\/makers$/, ["epoch", "cursor", "limit"]],
-  [/^\/v2\/(?:accounts\/[^/]+\/positions|config|markets|series\/[^/]+|cards\/hero|fair\/[^/]+|pnl\/[^/]+|stats|makers\/[^/]+)$/, []],
+  [/^\/v2\/admin\/operations$/, ["status", "cursor", "limit"]],
+  [/^\/v2\/earn$/, ["address"]],
+  [/^\/v2\/house\/[^/]+$/, ["address"]],
+  [/^\/v2\/(?:accounts\/[^/]+\/positions|config|markets|series\/[^/]+|cards\/hero|fair\/[^/]+|pnl\/[^/]+|stats|flywheel|house|makers\/[^/]+)$/, []],
 ];
 
 export function compute15s<T>(key: string, run: () => Promise<T>): Promise<Computed<T>> {
@@ -58,6 +61,25 @@ export function compute15s<T>(key: string, run: () => Promise<T>): Promise<Compu
   entry = { promise, expires: Infinity, pending: true };
   computations.set(key, entry);
   return promise;
+}
+
+/**
+ * One computation per key PER INDEXED CHECKPOINT, shared by every concurrent and later caller until
+ * the checkpoint moves. For a route that must never be staler than the index itself (so no TTL is
+ * acceptable) but is too expensive to recompute on every hit. Ponder publishes projection writes and
+ * the checkpoint in one transaction, so an unchanged checkpoint means unchanged indexed state; the
+ * cost is bounded by the block rate, not the request rate. A failed computation is dropped, never
+ * served again. {clearCache} empties it like everything else here.
+ */
+const atCheckpoint = new Map<string, { checkpoint: string; promise: Promise<unknown> }>();
+
+export function computeAtCheckpoint<T>(key: string, checkpoint: string, run: () => Promise<T>): Promise<T> {
+  const hit = atCheckpoint.get(key);
+  if (hit !== undefined && hit.checkpoint === checkpoint) return hit.promise as Promise<T>;
+  const entry = { checkpoint, promise: Promise.resolve().then(run) as Promise<unknown> };
+  atCheckpoint.set(key, entry);
+  entry.promise.catch(() => { if (atCheckpoint.get(key) === entry) atCheckpoint.delete(key); });
+  return entry.promise as Promise<T>;
 }
 
 /** Keep only the query keys each public v2 route actually reads. */
@@ -157,4 +179,4 @@ function respond(c: Context, body: string, status: number, marker: string, expir
 }
 
 /** Drop everything. Exposed so a test or an admin path can force a re-read. */
-export const clearCache = () => { store.clear(); inflight.clear(); computations.clear(); };
+export const clearCache = () => { store.clear(); inflight.clear(); computations.clear(); atCheckpoint.clear(); };

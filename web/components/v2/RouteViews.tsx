@@ -4,6 +4,7 @@ import Link from "next/link";
 import type { ReactNode } from "react";
 import { useAccount } from "wagmi";
 
+import { ConnectButton } from "@/components/ConnectButton";
 import { Button, Notice, PageHead, Panel } from "@/components/ui";
 import { v2ConfigWarnings } from "@/lib/v2/config";
 import {
@@ -73,7 +74,7 @@ export function PortfolioShell() {
   const positions = usePositions(address);
   return <>
     <PageHead eyebrow="Your account" title="Portfolio" lede="Positions, open orders, and balances in one place." />
-    {!address ? <Panel><p className="text-ink-2">Connect a wallet to see your positions.</p></Panel> :
+    {!address ? <Panel><p className="text-ink-2">Connect a wallet to see your positions.</p><div className="mt-4"><ConnectButton /></div></Panel> :
       <StatePanel query={positions} empty="No positions or open orders for this wallet yet." isEmpty={(data) => data.longs.length + data.shorts.length + data.orders.length === 0}>
         {(data) => <div className="grid gap-4 sm:grid-cols-3">
           <Panel><h2 className="font-bold">Long positions</h2><p className="num mt-2 text-2xl">{data.longs.length}</p></Panel>
@@ -169,7 +170,7 @@ export function NotificationsShell() {
   const config = useConfig();
   return <>
     <PageHead eyebrow="Settings" title="Notifications" lede="Choose where you want fill, price, and settlement updates." />
-    {!address ? <Panel><p className="text-ink-2">Connect a wallet to manage notifications.</p></Panel> :
+    {!address ? <Panel><p className="text-ink-2">Connect a wallet to manage notifications.</p><div className="mt-4"><ConnectButton /></div></Panel> :
       <StatePanel query={config} empty="Notification settings are not configured yet." isEmpty={() => false}>
         {() => <Panel><p className="text-ink-2">Notification controls will appear when the notifier is connected.</p></Panel>}
       </StatePanel>}

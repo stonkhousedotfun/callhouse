@@ -1020,6 +1020,9 @@ export const v2LotSource = onchainEnum("v2_lot_source", ["fill", "transfer", "mi
 export const v2SettlementStatus = onchainEnum("v2_settlement_status", [
   "None", "Pending", "Finalized", "Held",
 ]);
+export const v2AccessOperationStatus = onchainEnum("v2_access_operation_status", [
+  "pending", "executed", "canceled",
+]);
 
 /** One row per registered underlying. Raw money is in asset or USDG base units. */
 export const v2Market = onchainTable(
@@ -1054,10 +1057,22 @@ export const v2Market = onchainTable(
 export const v2ProtocolState = onchainTable("v2_protocol_state", (t) => ({
   id: t.text().primaryKey(),
   createPaused: t.boolean().notNull().default(false),
+  defaultExerciseFeeBps: t.integer().notNull().default(0),
+  defaultMintFeePpm: t.integer().notNull().default(0),
+  defaultOracle: t.hex(),
   feeRecipient: t.hex(),
   payoutAdapter: t.hex(),
   maxSlippageBps: t.integer(),
   updatedAt: t.bigint().notNull(),
+}));
+
+/** Current Clearinghouse minter allow-list, derived only from MinterSet. */
+export const v2Minter = onchainTable("v2_minter", (t) => ({
+  minter: t.hex().primaryKey(),
+  allowed: t.boolean().notNull(),
+  changedAt: t.bigint().notNull(),
+  changedBlock: t.bigint().notNull(),
+  changedTx: t.hex().notNull(),
 }));
 
 /** Latest ERC-1155 metadata URI per token, when the Clearinghouse emits URI. */
@@ -1171,8 +1186,221 @@ export const v2OrderBookState = onchainTable("v2_order_book_state", (t) => ({
   pendingTakerFeeCapBps: t.integer(),
   pendingMakerRebateBps: t.integer(),
   pendingEffectiveAt: t.bigint(),
+  discountModule: t.hex(),
   updatedAt: t.bigint().notNull(),
 }));
+
+/** Current maker-controlled funding policy. Revoking allowance also forces funding off on chain. */
+export const v2FundingSource = onchainTable("v2_funding_source", (t) => ({
+  maker: t.hex().primaryKey(),
+  allowed: t.boolean().notNull().default(false),
+  fundingOn: t.boolean().notNull().default(false),
+  changedAt: t.bigint().notNull(),
+  changedBlock: t.bigint().notNull(),
+  changedTx: t.hex().notNull(),
+}));
+
+/** One attempted OrderBook funding pull. A null delivered amount means FundingFailed, not zero delivery. */
+export const v2FundingAttempt = onchainTable("v2_funding_attempt", (t) => ({
+  id: t.text().primaryKey(),
+  maker: t.hex().notNull(),
+  asset: t.hex().notNull(),
+  requested: t.bigint().notNull(),
+  delivered: t.bigint(),
+  succeeded: t.boolean().notNull(),
+  ts: t.bigint().notNull(),
+  block: t.bigint().notNull(),
+  logIndex: t.integer().notNull(),
+  tx: t.hex().notNull(),
+}), (t) => ({ byMakerTime: index().on(t.maker, t.ts), byAssetTime: index().on(t.asset, t.ts) }));
+
+/** One AccessManager operation nonce. The terminal events carry no payload, so schedule fields are nullable. */
+export const v2AccessOperation = onchainTable("v2_access_operation", (t) => ({
+  id: t.text().primaryKey(),
+  // AccessManager's operation id (the `operationId` event argument). NAMED `opId`, NOT `operationId`, because
+  // ponder 0.17 reserves the snake-cased columns `operation_id`, `operation` and `checkpoint` for its own reorg
+  // tables and refuses the schema at build time ("'v2AccessOperation.operationId' is a reserved column name",
+  // node_modules/ponder/dist/esm/build/schema.js) -- the indexer could not boot (T-OP-197). The wire field
+  // stays `id` (src/api/v2/admin.ts operationWire); only the DB column is renamed. `opId` is the name the
+  // day-zero batch uses for the same value (callhouse-contracts docs/V8-DAY-ZERO-ADMIN-BATCH.md).
+  opId: t.hex().notNull(),
+  nonce: t.bigint().notNull(),
+  status: v2AccessOperationStatus("status").notNull(),
+  caller: t.hex(),
+  target: t.hex(),
+  data: t.hex(),
+  selector: t.hex(),
+  targetName: t.text(),
+  functionSignature: t.text(),
+  label: t.text(),
+  expectedRoleId: t.bigint(),
+  roleId: t.bigint(),
+  roleName: t.text(),
+  scheduledAt: t.bigint(),
+  readyAt: t.bigint(),
+  expiresAt: t.bigint(),
+  scheduledBlock: t.bigint(),
+  scheduledLogIndex: t.integer(),
+  scheduledTx: t.hex(),
+  finishedAt: t.bigint(),
+  finishedBlock: t.bigint(),
+  finishedLogIndex: t.integer(),
+  finishedTx: t.hex(),
+}), (t) => ({
+  byStatusReady: index().on(t.status, t.readyAt),
+  byTarget: index().on(t.target),
+  byCaller: index().on(t.caller),
+}));
+
+/** Current AccessManager role settings; delayed grant-delay changes retain both sides of the transition. */
+export const v2AccessRole = onchainTable("v2_access_role", (t) => ({
+  roleId: t.bigint().primaryKey(),
+  name: t.text().notNull(),
+  chainLabel: t.text(),
+  expectedExecutionDelayS: t.bigint(),
+  adminRoleId: t.bigint().notNull().default(0n),
+  guardianRoleId: t.bigint().notNull().default(0n),
+  grantDelayS: t.bigint().notNull().default(0n),
+  pendingGrantDelayS: t.bigint(),
+  pendingGrantDelayAt: t.bigint(),
+  updatedAt: t.bigint().notNull(),
+  updatedBlock: t.bigint().notNull(),
+  updatedLogIndex: t.integer().notNull(),
+  updatedTx: t.hex().notNull(),
+}));
+
+/** Current membership plus any delayed execution-delay replacement. */
+export const v2AccessRoleMember = onchainTable("v2_access_role_member", (t) => ({
+  id: t.text().primaryKey(),
+  roleId: t.bigint().notNull(),
+  roleName: t.text().notNull(),
+  account: t.hex().notNull(),
+  granted: t.boolean().notNull(),
+  memberSince: t.bigint(),
+  executionDelayS: t.bigint(),
+  pendingExecutionDelayS: t.bigint(),
+  pendingExecutionDelayAt: t.bigint(),
+  lastGrantNewMember: t.boolean(),
+  grantedAt: t.bigint(),
+  grantedBlock: t.bigint(),
+  grantedTx: t.hex(),
+  revokedAt: t.bigint(),
+  revokedBlock: t.bigint(),
+  revokedTx: t.hex(),
+}), (t) => ({ byRoleGranted: index().on(t.roleId, t.granted), byAccountGranted: index().on(t.account, t.granted) }));
+
+/** Current AccessManager target-level settings, including a delayed admin-delay replacement. */
+export const v2AccessTarget = onchainTable("v2_access_target", (t) => ({
+  target: t.hex().primaryKey(),
+  targetName: t.text(),
+  closed: t.boolean().notNull().default(false),
+  adminDelayS: t.bigint().notNull().default(0n),
+  pendingAdminDelayS: t.bigint(),
+  pendingAdminDelayAt: t.bigint(),
+  updatedAt: t.bigint().notNull(),
+  updatedBlock: t.bigint().notNull(),
+  updatedLogIndex: t.integer().notNull(),
+  updatedTx: t.hex().notNull(),
+}));
+
+/** Current `(target, selector) -> role` mapping. Manifest expectations are annotations, not chain state. */
+export const v2AccessTargetFunction = onchainTable("v2_access_target_function", (t) => ({
+  id: t.text().primaryKey(),
+  target: t.hex().notNull(),
+  targetName: t.text(),
+  selector: t.hex().notNull(),
+  functionSignature: t.text(),
+  label: t.text(),
+  roleId: t.bigint().notNull(),
+  roleName: t.text().notNull(),
+  expectedRoleId: t.bigint(),
+  changedAt: t.bigint().notNull(),
+  changedBlock: t.bigint().notNull(),
+  changedLogIndex: t.integer().notNull(),
+  changedTx: t.hex().notNull(),
+}), (t) => ({ byTarget: index().on(t.target), byRole: index().on(t.roleId) }));
+
+/** Latest payout route. `routes()` supplies the v8-only tickSpacing and v3Pool tuple fields. */
+export const v2PayoutRoute = onchainTable("v2_payout_route", (t) => ({
+  asset: t.hex().primaryKey(),
+  active: t.boolean().notNull(),
+  venue: t.integer().notNull(),
+  poolId: t.hex().notNull(),
+  fee: t.integer().notNull(),
+  tickSpacing: t.integer().notNull(),
+  v3Pool: t.hex().notNull(),
+  feeBps: t.integer().notNull(),
+  changedAt: t.bigint().notNull(),
+  changedBlock: t.bigint().notNull(),
+  changedTx: t.hex().notNull(),
+}));
+
+/** FeeSplitter distribution, including the USDG amount that actually exited to treasury. */
+export const v2FlywheelDistribution = onchainTable("v2_flywheel_distribution", (t) => ({
+  id: t.text().primaryKey(),
+  asset: t.hex().notNull(),
+  assetIn: t.bigint().notNull(),
+  usdgIn: t.bigint().notNull(),
+  treasuryOut: t.bigint().notNull(),
+  buybackAdded: t.bigint().notNull(),
+  ts: t.bigint().notNull(), block: t.bigint().notNull(), logIndex: t.integer().notNull(), tx: t.hex().notNull(),
+}), (t) => ({ byTime: index().on(t.ts), byAssetTime: index().on(t.asset, t.ts) }));
+
+export const v2FlywheelDistributionSkip = onchainTable("v2_flywheel_distribution_skip", (t) => ({
+  id: t.text().primaryKey(), asset: t.hex().notNull(), reason: t.hex().notNull(),
+  ts: t.bigint().notNull(), block: t.bigint().notNull(), logIndex: t.integer().notNull(), tx: t.hex().notNull(),
+}), (t) => ({ byTime: index().on(t.ts) }));
+
+export const v2FlywheelBuyback = onchainTable("v2_flywheel_buyback", (t) => ({
+  id: t.text().primaryKey(), usdgIn: t.bigint().notNull(), tokenOut: t.bigint().notNull(),
+  ts: t.bigint().notNull(), block: t.bigint().notNull(), logIndex: t.integer().notNull(), tx: t.hex().notNull(),
+}), (t) => ({ byTime: index().on(t.ts) }));
+
+/** Burn rows carry event-block supply; totals are derived from rows and supply, never a mutable counter. */
+export const v2FlywheelBurn = onchainTable("v2_flywheel_burn", (t) => ({
+  id: t.text().primaryKey(), token: t.hex().notNull(), amount: t.bigint().notNull(),
+  totalSupplyAtBlock: t.bigint().notNull(),
+  ts: t.bigint().notNull(), block: t.bigint().notNull(), logIndex: t.integer().notNull(), tx: t.hex().notNull(),
+}), (t) => ({ byTime: index().on(t.ts) }));
+
+export const v2FlywheelBuybackSkip = onchainTable("v2_flywheel_buyback_skip", (t) => ({
+  id: t.text().primaryKey(), reason: t.hex().notNull(),
+  ts: t.bigint().notNull(), block: t.bigint().notNull(), logIndex: t.integer().notNull(), tx: t.hex().notNull(),
+}), (t) => ({ byTime: index().on(t.ts) }));
+
+/** Concrete V4BuybackExecutor execution detail; FeeSplitter:BoughtBack remains the canonical buy receipt. */
+export const v2FlywheelExecution = onchainTable("v2_flywheel_execution", (t) => ({
+  id: t.text().primaryKey(), usdgIn: t.bigint().notNull(), usdgSpent: t.bigint().notNull(),
+  wethOut: t.bigint().notNull(), tokenOut: t.bigint().notNull(), minWethOut: t.bigint().notNull(),
+  declaredFeeBps: t.bigint().notNull(), measuredFeeBps: t.bigint().notNull(),
+  ts: t.bigint().notNull(), block: t.bigint().notNull(), logIndex: t.integer().notNull(), tx: t.hex().notNull(),
+}), (t) => ({ byTime: index().on(t.ts) }));
+
+/** Executor audit event only. Public burn totals use FeeSplitter:Burned, never this duplicate signal. */
+export const v2FlywheelExecutorBurn = onchainTable("v2_flywheel_executor_burn", (t) => ({
+  id: t.text().primaryKey(), amount: t.bigint().notNull(),
+  ts: t.bigint().notNull(), block: t.bigint().notNull(), logIndex: t.integer().notNull(), tx: t.hex().notNull(),
+}), (t) => ({ byTime: index().on(t.ts), byTx: index().on(t.tx) }));
+
+/** A fee sweep that could not collect what an order book owed. The event payload (orderBook,
+ *  amount) cannot tell its three cases apart, so `kind` records WHICH emit fired rather than being
+ *  derived from the amount — see the handler in src/v2/flywheel.ts. */
+export const v2FlywheelStrandedFees = onchainTable("v2_flywheel_stranded_fees", (t) => ({
+  id: t.text().primaryKey(), orderBook: t.hex().notNull(),
+  /** OWED_UNREADABLE | CLAIM_SHORT | CLAIM_REVERTED */
+  kind: t.text().notNull(),
+  /** 0 ONLY when kind is OWED_UNREADABLE, where it means UNKNOWN — never "nothing stranded". */
+  amount: t.bigint().notNull(),
+  ts: t.bigint().notNull(), block: t.bigint().notNull(), logIndex: t.integer().notNull(), tx: t.hex().notNull(),
+}), (t) => ({ byTime: index().on(t.ts), byBook: index().on(t.orderBook) }));
+
+/** Money or positions leaving treasury-controlled protocol holders. */
+export const v2TreasuryExit = onchainTable("v2_treasury_exit", (t) => ({
+  id: t.text().primaryKey(), source: t.text().notNull(), sourceAddress: t.hex().notNull(),
+  eventKind: t.text().notNull(), assetKind: t.text().notNull(),
+  asset: t.hex(), tokenId: t.bigint(), recipient: t.hex().notNull(), amount: t.bigint().notNull(),
+  ts: t.bigint().notNull(), block: t.bigint().notNull(), logIndex: t.integer().notNull(), tx: t.hex().notNull(),
+}), (t) => ({ bySourceTime: index().on(t.source, t.ts), byRecipientTime: index().on(t.recipient, t.ts) }));
 
 /** Current admin-maintained holiday calendar, keyed by UTC day index from ExpiryCalendar. */
 export const v2CalendarHoliday = onchainTable("v2_calendar_holiday", (t) => ({
@@ -1318,6 +1546,71 @@ export const v2Transfer = onchainTable(
 export const v2PnlCursor = onchainTable("v2_pnl_cursor", (t) => ({
   id: t.text().primaryKey(),
   block: t.bigint().notNull(),
+}));
+
+/** Durable evidence that two non-protocol wallets have interacted. Links are append-only. */
+export const v2SelfTradeLink = onchainTable(
+  "v2_self_trade_link",
+  (t) => ({
+    /** The two lower-case addresses, sorted and joined with `:`. */
+    id: t.text().primaryKey(),
+    left: t.hex().notNull(),
+    right: t.hex().notNull(),
+  }),
+  (t) => ({ byLeft: index().on(t.left), byRight: index().on(t.right) }),
+);
+
+/** FIFO ownership lots used to distinguish linked minimum-price units from ordinary inventory. */
+export const v2SelfTradeLot = onchainTable(
+  "v2_self_trade_lot",
+  (t) => ({
+    /** Deterministic source-event path; retained at zero so replay cannot recreate consumed taint. */
+    id: t.text().primaryKey(),
+    longId: t.bigint().notNull(),
+    holder: t.hex().notNull(),
+    /** The primary writer for measured units; null means ordinary, unmeasured inventory. */
+    writer: t.hex(),
+    primaryFillId: t.text(),
+    sourceId: t.text().notNull(),
+    units: t.bigint().notNull(),
+    unitsRemaining: t.bigint().notNull(),
+    createdBlock: t.bigint().notNull(),
+    createdLogIndex: t.integer().notNull(),
+  }),
+  (t) => ({
+    byHolderSeries: index().on(t.holder, t.longId),
+    byWriter: index().on(t.writer),
+  }),
+);
+
+/** Lifetime units attributed to a writer, independent of maker-program enrollment. */
+export const v2SelfTradeMaker = onchainTable("v2_self_trade_maker", (t) => ({
+  maker: t.hex().primaryKey(),
+  units: t.bigint().notNull().default(0n),
+  updatedAt: t.bigint().notNull(),
+  updatedBlock: t.bigint().notNull(),
+}));
+
+/**
+ * WHAT THE DETECTOR REFUSED TO COUNT, AND WHY. One row per reason, not per fill.
+ *
+ * v2SelfTradeMaker alone cannot answer the question D18 actually attached to leaving the
+ * self-trade loophole open ("the indexer flags the pattern"), because the attribution fires only
+ * on `takerIsBuyer && minimumPrice && linked` (indexer/lib/v2/selfTrade.ts). Both cheap evasions
+ * - pricing the primary leg one tick higher, or funding the second wallet off chain so no edge
+ * exists - drive the counted total to exactly 0, which is indistinguishable from an honest
+ * market. This table is what makes that 0 readable: if it is empty the zero is real, and if it is
+ * not the zero is an artefact of the detector.
+ *
+ * `reason` is the primary key and comes from SelfTradeUnseenReason, so this table has one row per
+ * distinct blind spot and is rewritten in place rather than appended per block.
+ */
+export const v2SelfTradeUnseen = onchainTable("v2_self_trade_unseen", (t) => ({
+  reason: t.text().primaryKey(),
+  units: t.bigint().notNull().default(0n),
+  fills: t.integer().notNull().default(0),
+  updatedAt: t.bigint().notNull(),
+  updatedBlock: t.bigint().notNull(),
 }));
 
 /** FIFO long cost basis. Transfer-in lots carry zero cost and cannot produce feed wins. */
@@ -1603,6 +1896,10 @@ export const v2Strategy = onchainTable(
     orderId: t.bigint(),
     expiry: t.bigint(),
     lastRolledAt: t.bigint(),
+    /** Reprice history belongs to the current rolled position and resets on the next roll. */
+    lastRepricedAt: t.bigint(),
+    lastRepricedPrice: t.bigint(),
+    repriceCount: t.integer().notNull().default(0),
     lastStaleCancelAt: t.bigint(),
     staleSpot: t.bigint(),
     updatedAt: t.bigint().notNull(),
@@ -1640,11 +1937,32 @@ export const v2MakerEpoch = onchainTable(
     maker: t.hex().notNull(),
     epoch: t.bigint().notNull(),
     tierBps: t.integer().notNull().default(0),
+    /**
+     * lib/v2/makerScoring.ts MAKER_BENCHMARK_POLICY when scored. Figures compare only within one policy;
+     * no default, so a writer that forgets it fails instead of labelling a row it did not score.
+     */
+    benchmarkPolicy: t.integer().notNull(),
+    /** absentSamples + validSamples: what uptime and depth are averaged over. */
     samples: t.integer().notNull().default(0),
+    /** Series-ticks with no quote on either side: definite downtime. */
+    absentSamples: t.integer().notNull().default(0),
+    /** Series-ticks quoted and measured against a chain reference; may measure zero. */
+    validSamples: t.integer().notNull().default(0),
+    /** Series-ticks quoted with no chain reference to measure against; outside uptime and depth. */
+    missingReferenceSamples: t.integer().notNull().default(0),
     twoSidedSamples: t.integer().notNull().default(0),
     uptimePpm: t.bigint().notNull().default(0n),
     avgSpreadBps: t.bigint().notNull().default(0n),
+    /**
+     * The mean resting units inside 100 bps of fair. Its NAME pins its band, so it keeps that meaning and
+     * never takes the epoch band (02-interfaces.md:870-873).
+     */
     depthWithin100bps: t.bigint().notNull().default(0n),
+    /**
+     * The same mean inside the epoch's scoring band (lib/v2/makerScoring.ts MAKER_SCORING_POLICY). This is
+     * the one the score ranks on; the 100 bps column is published beside it and is not scored.
+     */
+    depthInBand: t.bigint().notNull().default(0n),
     fills: t.integer().notNull().default(0),
     volumeUsdg: t.bigint().notNull().default(0n),
     rebatesUsdg: t.bigint().notNull().default(0n),
@@ -1684,3 +2002,842 @@ export const v2StaleCancel = onchainTable("v2_stale_cancel", (t) => ({
   longId: t.bigint().notNull(), orderId: t.bigint().notNull(), spot: t.bigint().notNull(), spotUpdatedAt: t.bigint().notNull(),
   ts: t.bigint().notNull(), block: t.bigint().notNull(), logIndex: t.integer().notNull(), tx: t.hex().notNull(),
 }), (t) => ({ byWriter: index().on(t.writer), byActivity: index().on(t.block, t.logIndex, t.id) }));
+
+/*//////////////////////////////////////////////////////////////
+                  P8 LENDING PERIPHERY — EARN VAULT
+//////////////////////////////////////////////////////////////*/
+
+/**
+ * The Earn VAULT is the lending surface: depositors supply a Stock Token or USDG, receive shares,
+ * and the vault keeps what it does not need right now in a venue adapter (v8-plan/tasks/
+ * P-periphery.md:19-30, P8-02). It is NOT `/earn` in the web app, which is the covered-call
+ * WRITING surface (web/app/earn/page.tsx). Every table here is prefixed `v2EarnVault` for that
+ * reason; the bare word means the writing surface everywhere else in this product.
+ *
+ * TWO RULES THIS BLOCK IS BUILT ON.
+ *
+ * 1. Yield is recorded only from observed flows. No column holds a rate, a projection, or any
+ *    figure scaled to a period the chain did not report: a skim row is base units and a
+ *    timestamp, and whoever wants a period return divides two observations at the edge. The
+ *    vault's venue exposes a rate as a view; it is deliberately not read and not stored.
+ * 2. Unavailable is not zero. A column whose "not observed yet" state differs from "observed and
+ *    it was zero" is nullable and says so, on the precedent of v2FundingAttempt.delivered above
+ *    ("A null delivered amount means FundingFailed, not zero delivery"). A .notNull().default(0)
+ *    on such a column would publish a guess as a measurement.
+ *
+ * The OrderBook's side of just-in-time funding is already indexed into v2FundingSource and
+ * v2FundingAttempt by src/v2/orderBook.ts and is not duplicated here. v2EarnVaultAdapterMove is
+ * the VAULT's own view — what it pulled from or pushed to its venue adapter — and the two are
+ * meant to be cross-checked against each other, not merged.
+ */
+
+/**
+ * One configured Earn vault, keyed by its address so a second instance never overwrites the first.
+ * Every configuration column is nullable: the row is created by whichever event is observed first,
+ * and a skim of 0 bps or an unpaused vault are real observations that must not be confused with a
+ * field nothing has reported yet.
+ */
+export const v2EarnVaultState = onchainTable("v2_earn_vault_state", (t) => ({
+  vault: t.hex().primaryKey(),
+  /** The supplied asset (a Stock Token or USDG). Null until an asset-naming event is observed. */
+  asset: t.hex(),
+  /** Current venue adapter. Null until observed; the zero address would be a real "detached" value. */
+  adapter: t.hex(),
+  /** Yield skim to the FeeSplitter. Null means not observed; 0 means observed and skimming nothing. */
+  skimBps: t.integer(),
+  /** Null means not observed; false means observed and running. */
+  paused: t.boolean(),
+  /** Running share supply from observed mint/burn events. Null until the first is observed. */
+  sharesSupply: t.bigint(),
+  updatedAt: t.bigint().notNull(),
+  updatedBlock: t.bigint().notNull(),
+  updatedLogIndex: t.integer().notNull(),
+  updatedTx: t.hex().notNull(),
+}));
+
+/** One completed deposit. Both amounts come from the log that created the row, so neither is nullable. */
+export const v2EarnVaultDeposit = onchainTable("v2_earn_vault_deposit", (t) => ({
+  id: t.text().primaryKey(),
+  vault: t.hex().notNull(),
+  /** Asset owner that initiated the deposit. */
+  account: t.hex().notNull(),
+  /** Account that received the minted shares; it may differ from the owner. */
+  receiver: t.hex().notNull(),
+  asset: t.hex().notNull(),
+  /** Supplied amount in the asset's base units. */
+  assets: t.bigint().notNull(),
+  /** Shares minted for it, in share base units. */
+  shares: t.bigint().notNull(),
+  /** Null for an immediate deposit; otherwise the v2EarnVaultDepositQueue row it fulfilled. */
+  queueId: t.text(),
+  ts: t.bigint().notNull(),
+  block: t.bigint().notNull(),
+  logIndex: t.integer().notNull(),
+  tx: t.hex().notNull(),
+}), (t) => ({
+  byAccountTime: index().on(t.account, t.ts),
+  byReceiverTime: index().on(t.receiver, t.ts),
+  byVaultTime: index().on(t.vault, t.ts),
+  byAssetTime: index().on(t.asset, t.ts),
+  byQueue: index().on(t.queueId),
+}));
+
+/**
+ * One deposit request held until the vault returns to a flat boundary. A queued row is not a
+ * completed deposit: no shares exist until DepositServed. `status` is one of `queued` |
+ * `fulfilled` | `cancelled`.
+ */
+export const v2EarnVaultDepositQueue = onchainTable("v2_earn_vault_deposit_queue", (t) => ({
+  id: t.text().primaryKey(),
+  vault: t.hex().notNull(),
+  /** Asset owner from DepositQueued; DepositServed does not repeat it. */
+  account: t.hex().notNull(),
+  receiver: t.hex().notNull(),
+  asset: t.hex().notNull(),
+  status: t.text().notNull(),
+  /** Assets escrowed while the request waits. */
+  assetsQueued: t.bigint().notNull(),
+  requestedAt: t.bigint().notNull(),
+  requestedBlock: t.bigint().notNull(),
+  requestedLogIndex: t.integer().notNull(),
+  requestedTx: t.hex().notNull(),
+  /** Null while queued or cancelled; DepositServed always mints a positive amount. */
+  mintedShares: t.bigint(),
+  /** All null while open; set together when the request is fulfilled or cancelled. */
+  fulfilledAt: t.bigint(),
+  fulfilledBlock: t.bigint(),
+  fulfilledLogIndex: t.integer(),
+  fulfilledTx: t.hex(),
+}), (t) => ({
+  byAccountRequested: index().on(t.account, t.requestedAt),
+  byReceiverRequested: index().on(t.receiver, t.requestedAt),
+  byVaultStatus: index().on(t.vault, t.status, t.requestedAt),
+  byStatusRequested: index().on(t.status, t.requestedAt),
+}));
+
+/** One completed withdrawal: shares burned, assets paid out. */
+export const v2EarnVaultWithdrawal = onchainTable("v2_earn_vault_withdrawal", (t) => ({
+  id: t.text().primaryKey(),
+  vault: t.hex().notNull(),
+  account: t.hex().notNull(),
+  asset: t.hex().notNull(),
+  assets: t.bigint().notNull(),
+  shares: t.bigint().notNull(),
+  /**
+   * The v2EarnVaultWithdrawalQueue row this settles. NULL MEANS SERVED IMMEDIATELY AND NEVER
+   * QUEUED — it does not mean queue entry zero, and it is not an unknown.
+   */
+  queueId: t.text(),
+  ts: t.bigint().notNull(),
+  block: t.bigint().notNull(),
+  logIndex: t.integer().notNull(),
+  tx: t.hex().notNull(),
+}), (t) => ({
+  byAccountTime: index().on(t.account, t.ts),
+  byVaultTime: index().on(t.vault, t.ts),
+  byQueue: index().on(t.queueId),
+}));
+
+/**
+ * One queued withdrawal request, from the moment the venue was too illiquid to serve it. P8-02's
+ * rule is "disclose, do not hide": the request exists as a row the instant it queues, and its
+ * fulfilment is a separate, later observation.
+ *
+ * `status` is one of `queued` | `fulfilled` | `cancelled`, as plain text on the precedent of
+ * v2TreasuryExit.eventKind above.
+ */
+export const v2EarnVaultWithdrawalQueue = onchainTable("v2_earn_vault_withdrawal_queue", (t) => ({
+  id: t.text().primaryKey(),
+  vault: t.hex().notNull(),
+  account: t.hex().notNull(),
+  asset: t.hex().notNull(),
+  status: t.text().notNull(),
+  /** Shares escrowed by the request. */
+  sharesQueued: t.bigint().notNull(),
+  /**
+   * Assets the request asked for, when the request names an amount rather than only shares.
+   * Null means the request did not quote one, not that it asked for nothing.
+   */
+  assetsRequested: t.bigint(),
+  requestedAt: t.bigint().notNull(),
+  requestedBlock: t.bigint().notNull(),
+  requestedLogIndex: t.integer().notNull(),
+  requestedTx: t.hex().notNull(),
+  /**
+   * What the request actually paid out. NULL MEANS STILL QUEUED OR CANCELLED — NOT A ZERO PAYOUT.
+   * A fulfilment that legitimately delivered nothing is 0. This is the same distinction
+   * v2FundingAttempt.delivered draws, and the reason this column has no default.
+   */
+  fulfilledAssets: t.bigint(),
+  /** All null while the request is open; set together when it is fulfilled or cancelled. */
+  fulfilledAt: t.bigint(),
+  fulfilledBlock: t.bigint(),
+  fulfilledLogIndex: t.integer(),
+  fulfilledTx: t.hex(),
+}), (t) => ({
+  byAccountRequested: index().on(t.account, t.requestedAt),
+  byVaultStatus: index().on(t.vault, t.status, t.requestedAt),
+  byStatusRequested: index().on(t.status, t.requestedAt),
+}));
+
+/**
+ * One observed yield skim out of the vault. THIS IS THE WHOLE OF WHAT THIS TASK STORES ABOUT
+ * YIELD: an amount in base units and the block it happened in. No rate is derived here, and none
+ * may be derived into a stored column later — a consumer that wants a period figure sums these
+ * rows between two timestamps it chose itself.
+ */
+export const v2EarnVaultSkim = onchainTable("v2_earn_vault_skim", (t) => ({
+  id: t.text().primaryKey(),
+  vault: t.hex().notNull(),
+  asset: t.hex().notNull(),
+  /** Skimmed amount in the asset's base units. */
+  amount: t.bigint().notNull(),
+  /**
+   * Where the skim went. Null means the log did not name a destination — it is NOT an assertion
+   * that the FeeSplitter received it. The splitter's own receipt is indexed on its side.
+   */
+  recipient: t.hex(),
+  ts: t.bigint().notNull(),
+  block: t.bigint().notNull(),
+  logIndex: t.integer().notNull(),
+  tx: t.hex().notNull(),
+}), (t) => ({
+  byVaultTime: index().on(t.vault, t.ts),
+  byAssetTime: index().on(t.asset, t.ts),
+}));
+
+/**
+ * One move between the vault and its venue adapter. `direction` is `pull` (adapter -> vault, what
+ * `fund` does under the OrderBook's FUNDING_GAS) or `push` (vault -> adapter, idle funds going to
+ * work), as plain text.
+ *
+ * This is the vault's own view. The OrderBook's view of the same funding call is already in
+ * v2FundingAttempt and is neither duplicated nor modified by this table.
+ */
+export const v2EarnVaultAdapterMove = onchainTable("v2_earn_vault_adapter_move", (t) => ({
+  id: t.text().primaryKey(),
+  vault: t.hex().notNull(),
+  /** The adapter at the time of the move. Null if the log does not carry it. */
+  adapter: t.hex(),
+  asset: t.hex().notNull(),
+  direction: t.text().notNull(),
+  requested: t.bigint().notNull(),
+  /**
+   * What the venue actually moved. NULL MEANS THE MOVE FAILED OR WAS NOT REPORTED, NOT THAT ZERO
+   * MOVED. A partial fill against a ~90%-utilised venue is a real number and belongs here; a
+   * reverted pull is null. Exactly v2FundingAttempt.delivered's distinction.
+   */
+  delivered: t.bigint(),
+  succeeded: t.boolean().notNull(),
+  ts: t.bigint().notNull(),
+  block: t.bigint().notNull(),
+  logIndex: t.integer().notNull(),
+  tx: t.hex().notNull(),
+}), (t) => ({
+  byVaultTime: index().on(t.vault, t.ts),
+  byAssetTime: index().on(t.asset, t.ts),
+  byAdapterTime: index().on(t.adapter, t.ts),
+}));
+
+/**
+ * One StockZap action. `kind` is `write` (USDG -> Stock Token credited to the Clearinghouse
+ * ledger) or `exit` (wallet Stock Token -> USDG), as plain text.
+ *
+ * Column set mirrored from callhouse-contracts src/v2/interfaces/IStockZap.sol (worktree
+ * wt/v8-contracts at b2bf1dbc), whose two events are
+ *   WriteZapped(address indexed account, address indexed asset, address caller, uint256 usdgIn,
+ *               uint256 assetOut, uint8 venue)
+ *   ExitZapped (address indexed account, address indexed asset, address caller, uint256 assetIn,
+ *               uint256 usdgOut, uint8 venue)
+ * and whose topic0s are pinned in v8-plan/status/INTERFACE-CHANGES-V8.md Entry 4. `amountIn` and
+ * `amountOut` hold the pair in whichever direction the kind names; `caller` is kept separate from
+ * `account` because a zap may be executed for someone else.
+ */
+export const v2ZapAction = onchainTable("v2_zap_action", (t) => ({
+  id: t.text().primaryKey(),
+  zap: t.hex().notNull(),
+  kind: t.text().notNull(),
+  account: t.hex().notNull(),
+  asset: t.hex().notNull(),
+  caller: t.hex().notNull(),
+  amountIn: t.bigint().notNull(),
+  amountOut: t.bigint().notNull(),
+  /** The routed venue as the contract reports it (uint8). Stored as observed, never relabelled. */
+  venue: t.integer().notNull(),
+  ts: t.bigint().notNull(),
+  block: t.bigint().notNull(),
+  logIndex: t.integer().notNull(),
+  tx: t.hex().notNull(),
+}), (t) => ({
+  byAccountTime: index().on(t.account, t.ts),
+  byAssetTime: index().on(t.asset, t.ts),
+  byKindTime: index().on(t.kind, t.ts),
+}));
+
+/*//////////////////////////////////////////////////////////////
+                  P8-06 HOUSE VAULT — USER-FUNDED MM
+//////////////////////////////////////////////////////////////*/
+
+/**
+ * House vault tape (P8-06 / X8-07 ingest). Separate source from MakerVault: HouseVault
+ * composes the same quoting surface but depositor withdrawals must NEVER land in
+ * v2TreasuryExit (src/v2/treasury.ts files MakerVault:Withdrawn as source "makerVault").
+ *
+ * NAV IS A BOUNDARY FACT. Only HouseVault:EpochRolled writes v2HouseNav. A Transfer, a
+ * queued deposit, or a clock block does not. Intra-epoch NAV is null on this table because
+ * there is no row — the API's running-epoch `nav: null` (indexer/src/api/v2/schema.ts
+ * houseNavSchema) is that absence, not a stored 0.
+ *
+ * Unavailable is not zero: usdg / stockUnits on a NAV row are null when EpochRolled does
+ * not name them (the event is price, nav, supply, sharesMinted, sharesBurned,
+ * performanceFee — HouseVault.sol:231-240). 0 would mean an observed empty book.
+ *
+ * Event signatures are mirrored from callhouse-contracts src/v2/periphery/house/HouseVault.sol
+ * and HouseVaultFactory.sol (wt/v8-contracts). Topic strings are pinned in
+ * test/v2/unit/HouseVaultInterface.t.sol. PERFORMANCE_FEE_CEIL_BPS and MIN_SHARES live on
+ * the contract as constants (HouseVault.sol:147-150); they are not retyped into a column.
+ */
+export const v2HouseVault = onchainTable("v2_house_vault", (t) => ({
+  vault: t.hex().primaryKey(),
+  /** Stock Token this instance makes a market in. From VaultCreated.underlying. */
+  underlying: t.hex().notNull(),
+  /** The vault IS the ERC-20 share token. */
+  sharesToken: t.hex().notNull(),
+  factory: t.hex().notNull(),
+  name: t.text().notNull(),
+  symbol: t.text().notNull(),
+  createdAt: t.bigint().notNull(),
+  createdBlock: t.bigint().notNull(),
+  createdLogIndex: t.integer().notNull(),
+  createdTx: t.hex().notNull(),
+  /** Null until a Transfer is observed; 0 is an observed empty supply. */
+  sharesSupply: t.bigint(),
+  /** Null until QuotingPausedSet; false is observed running. */
+  quotingPaused: t.boolean(),
+  /** Null until PerformanceFeeBpsSet; 0 is observed zero fee. */
+  performanceFeeBps: t.integer(),
+  currentEpochId: t.bigint(),
+  currentEpochEnd: t.bigint(),
+}), (t) => ({
+  byUnderlying: index().on(t.underlying),
+  byFactory: index().on(t.factory),
+}));
+
+/** One weekly epoch of one vault. `${vault}-${epochId}`. */
+export const v2HouseEpoch = onchainTable("v2_house_epoch", (t) => ({
+  id: t.text().primaryKey(),
+  vault: t.hex().notNull(),
+  epochId: t.bigint().notNull(),
+  /** Unix seconds. Null until observed (first epoch start is VaultCreated.ts). */
+  start: t.bigint(),
+  /** Unix seconds. Null until epochEnd is observed (VaultCreated eth_call or EpochRolled). */
+  end: t.bigint(),
+  /** `running` | `rolled`. */
+  status: t.text().notNull(),
+  rolledAt: t.bigint(),
+  rolledBlock: t.bigint(),
+  rolledLogIndex: t.integer(),
+  rolledTx: t.hex(),
+  /**
+   * Signed NAV-delta for a closed epoch. NULL WHILE RUNNING AND NULL AFTER ROLL unless a
+   * future event names it — EpochRolled does not. Never stored as 0 to mean "unknown".
+   */
+  resultUsdg: t.bigint(),
+}), (t) => ({
+  byVaultEpoch: index().on(t.vault, t.epochId),
+  byVaultStatus: index().on(t.vault, t.status),
+}));
+
+/**
+ * One boundary NAV. ONE ROW PER EPOCH ROLLED, never per block. Source event is always
+ * EpochRolled. usdg and stockUnits are null: the log does not name the legs.
+ */
+export const v2HouseNav = onchainTable("v2_house_nav", (t) => ({
+  id: t.text().primaryKey(),
+  vault: t.hex().notNull(),
+  epochId: t.bigint().notNull(),
+  at: t.bigint().notNull(),
+  /** Null: EpochRolled does not name the USDG leg. Not zero. */
+  usdg: t.bigint(),
+  /** Null: EpochRolled does not name the Stock-Token leg. Not zero. */
+  stockUnits: t.bigint(),
+  /** Settlement price from EpochRolled.price, USDG 6 dp per whole share. */
+  settlementPrice: t.bigint().notNull(),
+  /** EpochRolled.nav, USDG base units. */
+  navUsdg: t.bigint().notNull(),
+  sourceEvent: t.text().notNull(),
+  supply: t.bigint().notNull(),
+  sharesMinted: t.bigint().notNull(),
+  sharesBurned: t.bigint().notNull(),
+  performanceFee: t.bigint().notNull(),
+  ts: t.bigint().notNull(),
+  block: t.bigint().notNull(),
+  logIndex: t.integer().notNull(),
+  tx: t.hex().notNull(),
+}), (t) => ({
+  byVaultEpoch: index().on(t.vault, t.epochId),
+  byVaultTime: index().on(t.vault, t.ts),
+}));
+
+/** Current share holding. `${vault}-${account}`. Null supply on the vault is "never observed". */
+export const v2HouseShareBalance = onchainTable("v2_house_share_balance", (t) => ({
+  id: t.text().primaryKey(),
+  vault: t.hex().notNull(),
+  account: t.hex().notNull(),
+  shares: t.bigint().notNull(),
+  updatedAt: t.bigint().notNull(),
+  updatedBlock: t.bigint().notNull(),
+  updatedLogIndex: t.integer().notNull(),
+  updatedTx: t.hex().notNull(),
+}), (t) => ({
+  byVault: index().on(t.vault),
+  byAccount: index().on(t.account),
+}));
+
+/**
+ * Current deposit request per (vault, account). Status `queued` | `cancelled` | `settled` | `claimed`.
+ * Amounts are from DepositRequested; a cancel writes the cancelled amounts from that log.
+ */
+export const v2HouseDepositQueue = onchainTable("v2_house_deposit_queue", (t) => ({
+  id: t.text().primaryKey(),
+  vault: t.hex().notNull(),
+  account: t.hex().notNull(),
+  epochId: t.bigint().notNull(),
+  usdgAmount: t.bigint().notNull(),
+  stockAmount: t.bigint().notNull(),
+  status: t.text().notNull(),
+  requestedAt: t.bigint().notNull(),
+  requestedBlock: t.bigint().notNull(),
+  requestedLogIndex: t.integer().notNull(),
+  requestedTx: t.hex().notNull(),
+  closedAt: t.bigint(),
+  closedBlock: t.bigint(),
+  closedLogIndex: t.integer(),
+  closedTx: t.hex(),
+}), (t) => ({
+  byVaultStatus: index().on(t.vault, t.status, t.requestedAt),
+  byAccount: index().on(t.account, t.requestedAt),
+  byVaultEpoch: index().on(t.vault, t.epochId),
+}));
+
+/** Current withdraw request per (vault, account). Same status vocabulary as deposits. */
+export const v2HouseWithdrawQueue = onchainTable("v2_house_withdraw_queue", (t) => ({
+  id: t.text().primaryKey(),
+  vault: t.hex().notNull(),
+  account: t.hex().notNull(),
+  epochId: t.bigint().notNull(),
+  shares: t.bigint().notNull(),
+  status: t.text().notNull(),
+  requestedAt: t.bigint().notNull(),
+  requestedBlock: t.bigint().notNull(),
+  requestedLogIndex: t.integer().notNull(),
+  requestedTx: t.hex().notNull(),
+  closedAt: t.bigint(),
+  closedBlock: t.bigint(),
+  closedLogIndex: t.integer(),
+  closedTx: t.hex(),
+}), (t) => ({
+  byVaultStatus: index().on(t.vault, t.status, t.requestedAt),
+  byAccount: index().on(t.account, t.requestedAt),
+  byVaultEpoch: index().on(t.vault, t.epochId),
+}));
+
+/** Batch queue processing at the boundary. One row per EpochRolled. */
+export const v2HouseQueueSettlement = onchainTable("v2_house_queue_settlement", (t) => ({
+  id: t.text().primaryKey(),
+  vault: t.hex().notNull(),
+  epochId: t.bigint().notNull(),
+  sharesMinted: t.bigint().notNull(),
+  sharesBurned: t.bigint().notNull(),
+  performanceFee: t.bigint().notNull(),
+  ts: t.bigint().notNull(),
+  block: t.bigint().notNull(),
+  logIndex: t.integer().notNull(),
+  tx: t.hex().notNull(),
+}), (t) => ({
+  byVaultEpoch: index().on(t.vault, t.epochId),
+}));
+
+/** In-kind payout (and/or shares from a priced deposit) from Claimed. */
+export const v2HouseClaim = onchainTable("v2_house_claim", (t) => ({
+  id: t.text().primaryKey(),
+  vault: t.hex().notNull(),
+  account: t.hex().notNull(),
+  shares: t.bigint().notNull(),
+  usdgAmount: t.bigint().notNull(),
+  stockAmount: t.bigint().notNull(),
+  ts: t.bigint().notNull(),
+  block: t.bigint().notNull(),
+  logIndex: t.integer().notNull(),
+  tx: t.hex().notNull(),
+}), (t) => ({
+  byVaultTime: index().on(t.vault, t.ts),
+  byAccountTime: index().on(t.account, t.ts),
+}));
+
+/** Performance fee paid to the immutable splitter at the boundary. 0 is a real observation. */
+export const v2HousePerformanceFee = onchainTable("v2_house_performance_fee", (t) => ({
+  id: t.text().primaryKey(),
+  vault: t.hex().notNull(),
+  epochId: t.bigint().notNull(),
+  amount: t.bigint().notNull(),
+  ts: t.bigint().notNull(),
+  block: t.bigint().notNull(),
+  logIndex: t.integer().notNull(),
+  tx: t.hex().notNull(),
+}), (t) => ({
+  byVaultEpoch: index().on(t.vault, t.epochId),
+}));
+
+/**
+ * House-vault fills and rebates. OrderBook:OrderFilled already writes v2Fill; this table is
+ * the vault-shaped projection (maker or taker is a v2HouseVault row). Populated by the
+ * reducer tests and, when a fill is observed against a registered vault, by the ingest
+ * helper — not by a second ponder.on("OrderBook:OrderFilled"), which would steal the
+ * existing handler.
+ */
+export const v2HouseFill = onchainTable("v2_house_fill", (t) => ({
+  id: t.text().primaryKey(),
+  vault: t.hex().notNull(),
+  side: t.text().notNull(),
+  orderId: t.bigint().notNull(),
+  longId: t.bigint().notNull(),
+  maker: t.hex().notNull(),
+  taker: t.hex().notNull(),
+  units: t.bigint().notNull(),
+  price: t.bigint().notNull(),
+  premium: t.bigint().notNull(),
+  sellerFee: t.bigint().notNull(),
+  makerRebate: t.bigint().notNull(),
+  ts: t.bigint().notNull(),
+  block: t.bigint().notNull(),
+  logIndex: t.integer().notNull(),
+  tx: t.hex().notNull(),
+}), (t) => ({
+  byVaultTime: index().on(t.vault, t.ts),
+  byLongId: index().on(t.longId),
+}));
+
+/**
+ * Self-dealing refusal. HouseVault.take reverts V2Errors.NotAuthorized with NO LOG
+ * (HouseVault.sol:794-799). This table exists so the name is landed for T-X8-07-API; ingest
+ * never invents a row from Transfer or ProtocolAccountSet. Protocol counterparties are
+ * v2HouseProtocolAccount.
+ */
+export const v2HouseSelfDealRefusal = onchainTable("v2_house_self_deal_refusal", (t) => ({
+  id: t.text().primaryKey(),
+  vault: t.hex().notNull(),
+  counterparty: t.hex().notNull(),
+  reason: t.text(),
+  ts: t.bigint().notNull(),
+  block: t.bigint().notNull(),
+  logIndex: t.integer().notNull(),
+  tx: t.hex().notNull(),
+}), (t) => ({
+  byVaultTime: index().on(t.vault, t.ts),
+}));
+
+export const v2HouseProtocolAccount = onchainTable("v2_house_protocol_account", (t) => ({
+  id: t.text().primaryKey(),
+  vault: t.hex().notNull(),
+  account: t.hex().notNull(),
+  blocked: t.boolean().notNull(),
+  ts: t.bigint().notNull(),
+  block: t.bigint().notNull(),
+  logIndex: t.integer().notNull(),
+  tx: t.hex().notNull(),
+}), (t) => ({
+  byVaultAccount: index().on(t.vault, t.account),
+}));
+
+export const v2HouseLimits = onchainTable("v2_house_limits", (t) => ({
+  id: t.text().primaryKey(),
+  vault: t.hex().notNull(),
+  maxSeriesUnits: t.bigint().notNull(),
+  maxTotalNotional: t.bigint().notNull(),
+  askToleranceBps: t.integer().notNull(),
+  maxBidBpsOfSpot: t.integer().notNull(),
+  maxOrderLifetime: t.bigint().notNull(),
+  maxDailyOutflow: t.bigint().notNull(),
+  ts: t.bigint().notNull(),
+  block: t.bigint().notNull(),
+  logIndex: t.integer().notNull(),
+  tx: t.hex().notNull(),
+}), (t) => ({
+  byVaultTime: index().on(t.vault, t.ts),
+}));
+
+export const v2HouseExposure = onchainTable("v2_house_exposure", (t) => ({
+  id: t.text().primaryKey(),
+  vault: t.hex().notNull(),
+  longId: t.bigint().notNull(),
+  units: t.bigint().notNull(),
+  notional: t.bigint().notNull(),
+  totalNotional: t.bigint().notNull(),
+  ts: t.bigint().notNull(),
+  block: t.bigint().notNull(),
+  logIndex: t.integer().notNull(),
+  tx: t.hex().notNull(),
+}), (t) => ({
+  byVaultLong: index().on(t.vault, t.longId),
+  byVaultTime: index().on(t.vault, t.ts),
+}));
+
+/*//////////////////////////////////////////////////////////////
+       T-295: STATE FACTS THAT HAD NOWHERE TO PERSIST
+//////////////////////////////////////////////////////////////*/
+
+/**
+ * Which AccessManager actually governs each v8 contract, from `AuthorityUpdated`.
+ *
+ * Every restricted contract emits this on deployment and on any later re-pointing. Until now the
+ * indexer read none of them, so the only statement anywhere about who governs a contract was the
+ * deploy manifest — a document, not chain state. Read by the /trust page (W8-02a) and by
+ * /v2/config's `accessManager`: a contract whose authority is NOT the deployed AccessManager is
+ * the launch check this table exists to make answerable.
+ */
+export const v2ContractAuthority = onchainTable("v2_contract_authority", (t) => ({
+  /** Lower-cased Ponder source name, e.g. "orderbook". One row per contract, not per address. */
+  id: t.text().primaryKey(),
+  source: t.text().notNull(),
+  contract: t.hex().notNull(),
+  authority: t.hex().notNull(),
+  updatedAt: t.bigint().notNull(),
+  updatedBlock: t.bigint().notNull(),
+  updatedLogIndex: t.integer().notNull(),
+  updatedTx: t.hex().notNull(),
+}), (t) => ({ byAuthority: index().on(t.authority) }));
+
+/**
+ * Current value of one named pointer or parameter, from the `*Set` admin events.
+ *
+ * A setting is (source, key) — "FeeSplitter:burnBps", "Clearinghouse:calendar". The value lands in
+ * exactly one of the four typed columns by its ABI type, so a consumer reads a typed value rather
+ * than parsing text; `valueKind` says which column is live. Read by /v2/config (the fee and pointer
+ * block the notifier's fee_notice compares against) and by the /trust page's parameter list.
+ *
+ * Current state only. The history is {@link v2ContractSettingChange}, and the two are written in
+ * the same handler so a row here always has the change that produced it.
+ */
+export const v2ContractSetting = onchainTable("v2_contract_setting", (t) => ({
+  /** `${source}:${key}`, e.g. "FeeSplitter:treasury". */
+  id: t.text().primaryKey(),
+  source: t.text().notNull(),
+  key: t.text().notNull(),
+  /** Which of the value columns carries this setting: "address" | "uint" | "bool" | "text". */
+  valueKind: t.text().notNull(),
+  valueAddress: t.hex(),
+  valueUint: t.bigint(),
+  valueBool: t.boolean(),
+  valueText: t.text(),
+  updatedAt: t.bigint().notNull(),
+  updatedBlock: t.bigint().notNull(),
+  updatedLogIndex: t.integer().notNull(),
+  updatedTx: t.hex().notNull(),
+}), (t) => ({ bySource: index().on(t.source) }));
+
+/** Append-only history of {@link v2ContractSetting}. Read by the /trust page's change log. */
+export const v2ContractSettingChange = onchainTable("v2_contract_setting_change", (t) => ({
+  /** `${tx}-${logIndex}`. */
+  id: t.text().primaryKey(),
+  source: t.text().notNull(),
+  key: t.text().notNull(),
+  valueKind: t.text().notNull(),
+  valueAddress: t.hex(),
+  valueUint: t.bigint(),
+  valueBool: t.boolean(),
+  valueText: t.text(),
+  ts: t.bigint().notNull(),
+  block: t.bigint().notNull(),
+  logIndex: t.integer().notNull(),
+  tx: t.hex().notNull(),
+}), (t) => ({ bySourceKeyTime: index().on(t.source, t.key, t.ts) }));
+
+/**
+ * USDG paid INTO a contract that pays keepers or lenders, from `Funded` on KeeperRewards and
+ * RewardsDistributor. Distinct from EarnVault's `Funded`, which is a just-in-time draw against an
+ * OrderBook fill and is already carried by the funding attempt tape.
+ *
+ * Read by the keeper-budget panel (how much has been put in, against v2_keeper_reward paid out) and
+ * by the lender rewards page (an epoch root with nothing funded behind it is not claimable).
+ */
+export const v2ContractFunding = onchainTable("v2_contract_funding", (t) => ({
+  /** `${tx}-${logIndex}`. */
+  id: t.text().primaryKey(),
+  source: t.text().notNull(),
+  contract: t.hex().notNull(),
+  from: t.hex().notNull(),
+  amount: t.bigint().notNull(),
+  ts: t.bigint().notNull(),
+  block: t.bigint().notNull(),
+  logIndex: t.integer().notNull(),
+  tx: t.hex().notNull(),
+}), (t) => ({ bySourceTime: index().on(t.source, t.ts) }));
+
+/**
+ * One rewards epoch as published on chain, from `RootSet`.
+ *
+ * The Merkle root and the epoch total are what a claim is checked against, so the claim UI cannot
+ * show a claimable amount without them (P8-05 / T-113). Off-chain epoch generation produces the
+ * same numbers; this row is the chain's copy, and a disagreement between them is the thing worth
+ * seeing.
+ */
+export const v2RewardsEpoch = onchainTable("v2_rewards_epoch", (t) => ({
+  /** `${distributor}-${epoch}`: epoch ids are local to one distributor instance. */
+  id: t.text().primaryKey(),
+  distributor: t.hex().notNull(),
+  epoch: t.bigint().notNull(),
+  root: t.hex().notNull(),
+  total: t.bigint().notNull(),
+  setAt: t.bigint().notNull(),
+  setBlock: t.bigint().notNull(),
+  setLogIndex: t.integer().notNull(),
+  setTx: t.hex().notNull(),
+}), (t) => ({ byDistributorEpoch: index().on(t.distributor, t.epoch), byEpoch: index().on(t.epoch) }));
+
+/** One rewards claim, from `Claimed`. Read by the claim API to mark a leaf already spent. */
+export const v2RewardsClaim = onchainTable("v2_rewards_claim", (t) => ({
+  /** `${distributor}-${epoch}-${index}`: a leaf is claim-once inside one distributor instance. */
+  id: t.text().primaryKey(),
+  distributor: t.hex().notNull(),
+  epoch: t.bigint().notNull(),
+  leafIndex: t.bigint().notNull(),
+  account: t.hex().notNull(),
+  amount: t.bigint().notNull(),
+  ts: t.bigint().notNull(),
+  block: t.bigint().notNull(),
+  logIndex: t.integer().notNull(),
+  tx: t.hex().notNull(),
+}), (t) => ({
+  byAccount: index().on(t.account),
+  byDistributorEpoch: index().on(t.distributor, t.epoch),
+  byEpoch: index().on(t.epoch),
+}));
+
+/**
+ * Capital paid into the treasury MakerVault, from `Deposited`. The withdrawal side already exists as
+ * v2TreasuryExit (source "makerVault"); without this row the vault's balance could only ever be seen
+ * going down. Read by the treasury panel's funded-versus-withdrawn line.
+ */
+export const v2MakerVaultDeposit = onchainTable("v2_maker_vault_deposit", (t) => ({
+  /** `${tx}-${logIndex}`. */
+  id: t.text().primaryKey(),
+  asset: t.hex().notNull(),
+  from: t.hex().notNull(),
+  amount: t.bigint().notNull(),
+  ts: t.bigint().notNull(),
+  block: t.bigint().notNull(),
+  logIndex: t.integer().notNull(),
+  tx: t.hex().notNull(),
+}), (t) => ({ byAssetTime: index().on(t.asset, t.ts) }));
+
+/**
+ * The treasury MakerVault's exposure to one series, from `ExposureSet` — the same fact the House
+ * vault carries in v2HouseExposure, which the MakerVault had no table for. `totalNotional` is the
+ * vault-wide figure the limits are judged against, so it is stored beside the per-series number
+ * rather than recomputed. Read by the treasury risk panel and by the limits check below it.
+ */
+export const v2MakerVaultExposure = onchainTable("v2_maker_vault_exposure", (t) => ({
+  /** The series long ID. Current exposure, one row per series. */
+  longId: t.bigint().primaryKey(),
+  units: t.bigint().notNull(),
+  notional: t.bigint().notNull(),
+  totalNotional: t.bigint().notNull(),
+  updatedAt: t.bigint().notNull(),
+  updatedBlock: t.bigint().notNull(),
+  updatedLogIndex: t.integer().notNull(),
+  updatedTx: t.hex().notNull(),
+}));
+
+/**
+ * The treasury MakerVault's current limits, from `LimitsSet`. A tuple, so it gets columns rather
+ * than a setting row: the risk panel reads the fields individually and the MM bot's own limits are
+ * only meaningful next to these. Mirrors v2HouseLimits for the House vault.
+ */
+export const v2MakerVaultLimits = onchainTable("v2_maker_vault_limits", (t) => ({
+  /** Single row, keyed by the vault address. */
+  vault: t.hex().primaryKey(),
+  maxSeriesUnits: t.bigint().notNull(),
+  maxTotalNotional: t.bigint().notNull(),
+  askToleranceBps: t.integer().notNull(),
+  maxBidBpsOfSpot: t.integer().notNull(),
+  maxOrderLifetime: t.bigint().notNull(),
+  maxDailyOutflow: t.bigint().notNull(),
+  updatedAt: t.bigint().notNull(),
+  updatedBlock: t.bigint().notNull(),
+  updatedLogIndex: t.integer().notNull(),
+  updatedTx: t.hex().notNull(),
+}));
+
+/**
+ * A withdrawal of an owed balance from the OrderBook, from `OwedClaimed`.
+ *
+ * The book credits `owed` when a transfer to a maker fails, and the maker claims it later. The
+ * credit side is already indexed; the claim was not, so an owed balance appeared permanent. Read by
+ * the account page's owed line, which must go to zero after a claim.
+ */
+export const v2OwedClaim = onchainTable("v2_owed_claim", (t) => ({
+  /** `${tx}-${logIndex}`. */
+  id: t.text().primaryKey(),
+  account: t.hex().notNull(),
+  amount: t.bigint().notNull(),
+  ts: t.bigint().notNull(),
+  block: t.bigint().notNull(),
+  logIndex: t.integer().notNull(),
+  tx: t.hex().notNull(),
+}), (t) => ({ byAccountTime: index().on(t.account, t.ts) }));
+
+/**
+ * A market's settlement-oracle configuration, from `MarketConfigured`: the source list in priority
+ * order and the three parameters the fallback chain is judged by. Read by /v2/markets' settlement
+ * metadata (X3-101) and by the /trust page; a market whose sources changed between two expiries is
+ * only visible here.
+ */
+export const v2OracleMarketConfig = onchainTable("v2_oracle_market_config", (t) => ({
+  /** The 18-dp Stock Token. */
+  underlying: t.hex().primaryKey(),
+  /** Priority order, as emitted. Lower-cased addresses. */
+  sources: t.text().array().notNull(),
+  maxDeviationBps: t.integer().notNull(),
+  uncorroboratedDelayS: t.bigint().notNull(),
+  spotMaxAgeS: t.bigint().notNull(),
+  updatedAt: t.bigint().notNull(),
+  updatedBlock: t.bigint().notNull(),
+  updatedLogIndex: t.integer().notNull(),
+  updatedTx: t.hex().notNull(),
+}));
+
+/**
+ * The configuration PINNED to one expiry, from `SettlementConfigPinned`. This is the copy a
+ * settlement is actually judged by — a later `MarketConfigured` never moves it — so a settlement
+ * dispute is answered by this row and not by the market's current configuration. `spotMaxAge` is
+ * absent from the event on purpose: the pin does not carry it.
+ */
+export const v2OracleExpiryConfig = onchainTable("v2_oracle_expiry_config", (t) => ({
+  /** `${underlying}-${expiry}`. */
+  id: t.text().primaryKey(),
+  underlying: t.hex().notNull(),
+  expiry: t.bigint().notNull(),
+  sources: t.text().array().notNull(),
+  maxDeviationBps: t.integer().notNull(),
+  uncorroboratedDelayS: t.bigint().notNull(),
+  pinnedAt: t.bigint().notNull(),
+  pinnedBlock: t.bigint().notNull(),
+  pinnedLogIndex: t.integer().notNull(),
+  pinnedTx: t.hex().notNull(),
+}), (t) => ({ byUnderlying: index().on(t.underlying) }));
+
+/**
+ * Which contracts KeeperRewards will pay a bounty on behalf of, from `CallerSet`. Not a scalar
+ * setting: it is an allow-list, and the fact worth seeing is the SET of contracts that can spend the
+ * keeper budget. Read by the /trust page and by the keeper-budget panel, where a caller nobody
+ * expects is the finding.
+ */
+export const v2KeeperCaller = onchainTable("v2_keeper_caller", (t) => ({
+  caller: t.hex().primaryKey(),
+  registered: t.boolean().notNull(),
+  changedAt: t.bigint().notNull(),
+  changedBlock: t.bigint().notNull(),
+  changedLogIndex: t.integer().notNull(),
+  changedTx: t.hex().notNull(),
+}));

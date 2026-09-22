@@ -1,6 +1,7 @@
 import { parseV2Series, parseV2Ticker } from "@/app/v2-route-params";
 import { renderBrandImage, neutralPnlLines } from "@/components/v2/PnlImage";
 import { expiryLabel, seriesTitle } from "@/components/v2/PnlText";
+import { isV2Live } from "@/lib/markets";
 import { v2Api } from "@/lib/v2/api";
 
 export const alt = "StonkHouse option series and payoff";
@@ -12,7 +13,7 @@ export default async function OpengraphImage({ params }: { params: Promise<{ tic
   const { ticker, series: segment } = await params;
   const market = parseV2Ticker(ticker);
   const id = market ? parseV2Series(market, segment) : undefined;
-  if (!id) return renderBrandImage(neutralPnlLines());
+  if (!market || !id || !isV2Live(market.ticker)) return renderBrandImage(neutralPnlLines());
   try {
     const { series } = await v2Api.getSeries(id);
     return renderBrandImage({ eyebrow: "Option payoff", metric: series.ticker,

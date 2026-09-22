@@ -13,11 +13,11 @@
     "expiry": 1789502400,
     "tenor": "daily",
     "mintCutoff": 1789500600,
-    "mintFeePpm": 300,
+    "mintFeePpm": 0,
     "mintFeesHeld": {
-      "raw": "41190476190477",
+      "raw": "0",
       "decimals": 18,
-      "formatted": "0.000041190476190477"
+      "formatted": "0"
     },
     "mintFeesAccrued": {
       "raw": "0",

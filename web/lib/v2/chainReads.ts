@@ -10,6 +10,15 @@ import { requireV2Address } from "./config";
 import { shortIdOf } from "./seriesId";
 import type { SeriesRef } from "./api-types";
 
+/** Read the authoritative enabled bit when the indexer's market snapshot is unavailable. */
+export async function readMarketEnabledOnChain(ticker: string, client: PublicClient = publicClient): Promise<boolean> {
+  const market = v2Markets().find((row) => row.ticker === ticker.toUpperCase());
+  if (!market) throw new Error("Market is not in this app's registry");
+  const config = await client.readContract({ address: requireV2Address("clearinghouse"),
+    abi: clearinghouseAbi, functionName: "market", args: [market.asset] });
+  return config.enabled;
+}
+
 /** Read the compiled market's oracle directly when the indexer cannot serve /markets. */
 export async function readMarketSpotOnChain(ticker: string, client: PublicClient = publicClient): Promise<bigint> {
   const market = v2Markets().find((row) => row.ticker === ticker.toUpperCase());

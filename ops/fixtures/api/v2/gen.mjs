@@ -67,16 +67,17 @@ const RESOLVE_DELAY = 48 * 3600;
 const MAX_TENOR = 45 * DAY;
 const MIN_SERIES_LEAD = 3600;
 const EXERCISE_FEE_MAX_PAYOUT_SHARE_BPS = 1000n;
-const INTERFACE_VERSION = 7;
+const INTERFACE_VERSION = 8;
 const MINT_FEE_PERIOD = 604800;
 const MINT_FEE_CEIL_PPM = 5000;
 const CHAIN_ID = 4663;
 
-// The registry's v2 `fees` and `defaults` blocks. Copied, not read from
-// ops/markets/tier1.json, so a registry edit cannot silently rewrite the fixtures.
+// The registry's v2 `fees` block, copied exactly from ops/markets/tier1.json:133-140 rather than
+// read at generation time so a registry edit cannot silently rewrite the fixture wire contract:
+// premium 500 bps, rent 0 ppm, resale 0 bps, taker 100000 / 1000 bps, rebate 5000 bps, exercise 25 bps.
 const FEES = {
-  premiumFeeBps: 0n,
-  mintFeePpm: 80n,
+  premiumFeeBps: 500n,
+  mintFeePpm: 0n,
   resaleFeeBps: 0n,
   takerFeeFlat: 100_000n,
   takerFeeCapBps: 1000n,
@@ -156,9 +157,15 @@ const MARKETS = {
     ticker: "NVDA",
     name: "NVIDIA • Robinhood Token",
     underlying: "0xd0601CE157Db5bdC3162BbaC2a2C8aF5320D9EEC",
+    // T-OP-099. In the owner's launch set (tier1.json launchSet: NVDA, SPCX).
+    launch: true,
     strikeTick: usd("1"),
     spot: usd("215.50"),
     spotUpdatedAt: at("2026-09-16T20:05:12Z"),
+    // Routed pooled market: Chainlink + Uniswap v3 sources, the default uncorroborated delay and an
+    // illustrative v3 USDG conversion route. A v3 payoutRoute has only venue + fee; it does not expose
+    // the settlement TWAP pool or invent a payout-pool address (build-markets.mjs:324-327).
+    settlement: { sourceCount: 2, uncorroboratedDelayS: UNCORROBORATED_DELAY, route: { venue: "v3", fee: 100 } },
     baseIv: 0.42,
     // Cboe expiries listed for the root on 09-16 (tier1.json cboe.expiries): Thu 09-17 is not
     // one, so the pricing service interpolates it ("model"); 09-18 and 09-25 are "cboe".
@@ -170,9 +177,15 @@ const MARKETS = {
     ticker: "TSLA",
     name: "Tesla • Robinhood Token",
     underlying: "0x322F0929c4625eD5bAd873c95208D54E1c003b2d",
+    // T-OP-099. Registered and live on chain in this fixture, yet NOT in the launch set: the shape a
+    // `--wave wave1` broadcast would produce, and the case the app must render as deferred.
+    launch: false,
     strikeTick: usd("5"),
     spot: usd("355.85"),
     spotUpdatedAt: at("2026-09-16T20:04:40Z"),
+    // Single-source market: Chainlink only, the one-hour uncorroborated delay and no conversion route, so
+    // winning calls pay Stock Tokens in kind.
+    settlement: { sourceCount: 1, uncorroboratedDelayS: 3_600, route: null },
     baseIv: 0.55,
     cboeExpiries: [EXPIRY["09-16"], EXPIRY["09-18"], EXPIRY["09-25"]],
     mvSeriesCapUnits: 120n,
@@ -192,8 +205,61 @@ const CONTRACTS = {
   makerVault: derive("contract:MakerVault"),
   makerRegistry: derive("contract:MakerRegistry"),
   rewardsDistributor: derive("contract:RewardsDistributor"),
+  accessManager: derive("contract:AccessManager"),
   sources: { chainlink: derive("contract:ChainlinkFeedSource"), univ3: derive("contract:UniV3TwapSource"), dataStreams: null },
 };
+
+const FLYWHEEL = {
+  feeSplitter: derive("contract:FeeSplitter"),
+  buybackExecutor: derive("contract:V4BuybackExecutor"),
+};
+const SAFES = {
+  admin: derive("account:safe.admin"),
+  treasury: derive("account:safe.treasury"),
+};
+const KEYS = {
+  guardian: derive("account:key.guardian"),
+  pricer: derive("account:key.pricer"),
+  quoter: derive("account:key.quoter"),
+  cranker: derive("account:key.cranker"),
+};
+
+// Role ids, names and intended holders mirror ops/abis/v2/roles.json. `delayS` on a role is the
+// chain's AccessManager grant delay (0 in this scenario); each holder's `delayS` is its chain
+// execution delay. They are deliberately distinct fields even when the manifest happens to
+// prescribe the same number for another purpose.
+const ACCESS_ROLES = [
+  { id: 0, name: "ADMIN", delayS: 0, holders: [{ address: SAFES.admin, delayS: 172_800 }] },
+  { id: 1, name: "FEE_MANAGER", delayS: 0, holders: [{ address: SAFES.admin, delayS: 172_800 }] },
+  { id: 2, name: "MARKET_FEE_MANAGER", delayS: 0, holders: [{ address: SAFES.admin, delayS: 259_200 }] },
+  { id: 3, name: "CONFIG_ADMIN", delayS: 0, holders: [{ address: SAFES.admin, delayS: 86_400 }] },
+  { id: 4, name: "TREASURY_ADMIN", delayS: 0, holders: [{ address: SAFES.admin, delayS: 86_400 }] },
+  { id: 5, name: "LISTING", delayS: 0, holders: [{ address: SAFES.admin, delayS: 3_600 }] },
+  { id: 6, name: "OPS_ADMIN", delayS: 0, holders: [{ address: SAFES.admin, delayS: 0 }] },
+  { id: 7, name: "GUARDIAN", delayS: 0, holders: [{ address: SAFES.admin, delayS: 0 }, { address: KEYS.guardian, delayS: 0 }] },
+  { id: 8, name: "PRICER", delayS: 0, holders: [{ address: KEYS.pricer, delayS: 0 }] },
+  { id: 9, name: "QUOTER", delayS: 0, holders: [{ address: SAFES.admin, delayS: 0 }, { address: KEYS.quoter, delayS: 0 }] },
+  { id: 10, name: "BUYBACK", delayS: 0, holders: [{ address: KEYS.cranker, delayS: 0 }] },
+];
+
+// The nonce is part of the row's identity, not decoration: AccessManager REUSES an operation id
+// when the same call is rescheduled, so `id` alone repeats and `operationId:nonce` does not. The
+// indexer keys its row the same way (indexer/src/v2/accessManager.ts:135-137).
+const SET_DEFAULT_ORACLE_OPERATION = txHash("operation:setDefaultOracle");
+
+const PENDING_OPERATIONS = [
+  {
+    key: `${SET_DEFAULT_ORACLE_OPERATION}:1`,
+    id: SET_DEFAULT_ORACLE_OPERATION,
+    role: "CONFIG_ADMIN",
+    target: CONTRACTS.clearinghouse,
+    selector: keccak256(toHex("setDefaultOracle(address)")).slice(0, 10),
+    label: "Clearinghouse.setDefaultOracle(address)",
+    caller: SAFES.admin,
+    scheduledAt: NOW - 3_600,
+    readyAt: NOW - 3_600 + 86_400,
+  },
+];
 
 const A = {
   makerVault: CONTRACTS.makerVault,
@@ -320,7 +386,7 @@ function addSeries(ticker, date, tenor, strike, extra = {}) {
     expiry,
     tenor,
     mintCutoff: expiry - SETTLEMENT_WINDOW,
-    mintFeePpm: ticker === "TSLA" ? 300 : 80,
+    mintFeePpm: 0,
     mintFeesHeld: 0n,
     mintFeesAccrued: 0n,
     longId,
@@ -461,10 +527,6 @@ deposit("2026-09-04T19:00:00Z", A.manual, "TSLA", tokens("2"));
 deposit("2026-09-07T16:00:00Z", A.roller, "NVDA", tokens("3.5"));
 
 // --- the settled NVDA weekly (Fri 09-11), settlement price 219.40 --------------------------------
-// The AutoRoller writer mints a pair to itself on Labor Day and closes it two days later: the
-// only direct mint/close in the scenario, so /history shows both kinds.
-push({ ts: at("2026-09-07T16:05:00Z"), kind: "mint", account: A.roller, series: S("NVDA", "09-11", "214"), units: 50n, longTo: A.roller });
-push({ ts: at("2026-09-09T15:00:00Z"), kind: "close", account: A.roller, series: S("NVDA", "09-11", "214"), units: 50n });
 push({ ts: at("2026-09-10T17:00:00Z"), kind: "withdrawal", account: A.roller, asset: MARKETS.NVDA.underlying, amount: tokens("0.5") });
 
 // AutoRoller: first roll of the week. Its strike (spot × 1.045 rounded up) is off the cranker's
@@ -475,6 +537,15 @@ mvFill({ time: "2026-09-08T14:05:00Z", series: S("NVDA", "09-11", "210"), taker:
 const manual0911 = order({ maker: A.manual, series: S("NVDA", "09-11", "210"), kind: "AskWrite", price: usd("2.10"), units: 20n, placedAt: at("2026-09-08T15:00:00Z") });
 fill({ time: "2026-09-08T15:20:00Z", order: manual0911, taker: A.lucy, units: 20n, spot: usd("206.60") });
 fill({ time: "2026-09-08T17:30:00Z", order: "roller-0911", taker: A.degen, units: 200n, spot: usd("206.35") });
+// In v8 only an authorised minter (the OrderBook here) may call Clearinghouse.mint. The roller
+// therefore writes through its book ask, buys 50 of those longs back from degen, then calls the
+// still-permissionless close. The Minted event from the first fill supplies the `mint` history row.
+// Pre-declare the series that the replayed roll also derives; addSeries de-duplicates it by key.
+const roller0911Series = addSeries("NVDA", "09-11", "weekly", usd("216"));
+const rollerBuyback0911 = order({ maker: A.degen, series: roller0911Series, kind: "AskResale", price: usd("0.30"), units: 50n, placedAt: at("2026-09-09T14:30:00Z") });
+push({ ts: rollerBuyback0911.placedAt, kind: "place", order: rollerBuyback0911 });
+fill({ time: "2026-09-09T14:50:00Z", order: rollerBuyback0911, taker: A.roller, units: 50n, spot: usd("207.10") });
+push({ ts: at("2026-09-09T15:00:00Z"), kind: "close", account: A.roller, series: S("NVDA", "09-11", "216"), units: 50n });
 mvFill({ time: "2026-09-09T14:40:00Z", series: S("NVDA", "09-11", "214"), taker: A.degen, units: 100n, spot: usd("207.20") });
 mvFill({ time: "2026-09-09T16:10:00Z", series: S("NVDA", "09-11", "218"), taker: A.sam, units: 100n, spot: usd("207.05") });
 // 30 units at the 0.25 minimum ask: 0.0825 USDG all in, under the 0.10 integrity floor.
@@ -637,7 +708,7 @@ for (const e of EVENTS) {
       bump(s.short, e.account, e.units);
       s.supply += e.units;
       addLot(s, e.longTo, e.units, 0n);
-      LEDGER_HISTORY.push({ ...e, fee, tx: txHash(`mint:${e.seq}`) });
+      LEDGER_HISTORY.push({ ...e, writer: e.account, fee, tx: txHash(`mint:${e.seq}`), logIndex: 2 });
       break;
     }
     case "close": {
@@ -649,7 +720,7 @@ for (const e of EVENTS) {
       const feeRefund = min(s.mintFeesHeld, rentNumerator(s, e.units, e.ts) / (1_000_000n * BigInt(MINT_FEE_PERIOD)));
       s.mintFeesHeld -= feeRefund;
       credit(e.account, s.market.underlying, e.units * UNIT + feeRefund);
-      LEDGER_HISTORY.push({ ...e, feeRefund, tx: txHash(`close:${e.seq}`) });
+      LEDGER_HISTORY.push({ ...e, feeRefund, tx: txHash(`close:${e.seq}`), logIndex: 2 });
       break;
     }
     case "place": {
@@ -729,9 +800,28 @@ for (const e of EVENTS) {
       o.filled += e.units;
       fillNo += 1;
       const tx = txHash(`fill:${fillNo}`);
-      const f = { no: fillNo, series: s, order: o, maker: o.maker, taker: e.taker, recipient: e.recipient, units: e.units, price: o.price, premium, takerFee, sellerFee, makerRebate, primary, takerIsBuyer, writer, realisedPnl, ts: e.ts, spot: e.spot, tx, logIndex: 2 };
+      const logIndex = primary ? 3 : 1;
+      const f = { no: fillNo, series: s, order: o, maker: o.maker, taker: e.taker, recipient: e.recipient, units: e.units, price: o.price, premium, takerFee, sellerFee, makerRebate, primary, takerIsBuyer, writer, realisedPnl, ts: e.ts, spot: e.spot, tx, logIndex };
       s.fills.push(f);
       FILLS.push(f);
+      // Clearinghouse emits Minted after its two TransferSingle logs and before OrderFilled for
+      // every AskWrite/writeToSell delivery. clearinghouse.ts indexes that event unconditionally,
+      // and accounts.ts returns it to both the writer and longTo; a primary fill therefore yields
+      // both a `fill` and a `mint` history item even though an EOA cannot mint directly in v8.
+      if (primary) {
+        const longTo = takerIsBuyer ? e.recipient : o.maker;
+        LEDGER_HISTORY.push({
+          ts: e.ts,
+          kind: "mint",
+          series: s,
+          units: e.units,
+          writer,
+          longTo,
+          fee: mintRent(s, e.units, e.ts),
+          tx,
+          logIndex: 2,
+        });
+      }
       break;
     }
     case "settleExpiry": {
@@ -867,6 +957,18 @@ function quoteOf(s) {
 const openInterest = (s) => s.supply;
 const volumeOf = (fills) => sumBy(fills, (f) => f.premium);
 const within = (fills, seconds) => fills.filter((f) => f.ts > NOW - seconds);
+/**
+ * T-425. The instant every trailing window in these fixtures ends at, published as `asOf` beside the
+ * figures it qualifies. It is NOW because this generator has no host clock at all -- NOW is the
+ * scenario's indexed state, which is exactly what the routes anchor to via indexedHead(). It is NOT
+ * a wall clock, which is the thing T-188 removed from those routes.
+ *
+ * KNOWN FIDELITY GAP: health.json models a 2-second indexer lag (block at NOW - 2, lagSeconds 2)
+ * while `within` anchors at NOW, so these fixtures never exercise a head BEHIND the scenario clock --
+ * the one case the asOf field exists to describe. Moving the anchor to NOW - 2 would re-cut every
+ * window boundary in the scenario, so it is recorded rather than done here.
+ */
+const ASOF = NOW;
 
 function settlementOf(s) {
   if (NOW < s.expiry) return null;
@@ -1024,12 +1126,34 @@ const put = (path, body) => {
 
 put("health.json", { status: "ok", block: blockAt(NOW - 2).toString(), lagSeconds: 2, interfaceVersion: INTERFACE_VERSION });
 
+/**
+ * /v2/services — the readiness of a service the indexer does NOT run (T-424; the route existed with no
+ * fixture, which is why the coverage test was red). The scenario's pricer is up: `healthy` is true only
+ * when `reason` is "ready", and `reasons` is the pricer's own closed set, empty while it is ready.
+ * `lastEvaluationAt` is its last completed tick, deliberately EARLIER than `checkedAt` -- the indexer
+ * asked at NOW and the pricer answered about a tick it finished 30 seconds ago. A fixture with the two
+ * equal would teach a consumer that they are one timestamp.
+ */
+put("services.json", {
+  pricer: {
+    healthy: true,
+    reason: "ready",
+    reasons: [],
+    checkedAt: NOW,
+    lastEvaluationAt: NOW - 30,
+  },
+});
+
 put("config.json", {
   chainId: CHAIN_ID,
   interfaceVersion: INTERFACE_VERSION,
   deployBlock: blockAt(at("2026-09-04T17:00:00Z")).toString(),
   usdg: USDG,
   contracts: CONTRACTS,
+  flywheel: FLYWHEEL,
+  safes: SAFES,
+  access: { manager: CONTRACTS.accessManager, roles: ACCESS_ROLES },
+  pendingOperations: PENDING_OPERATIONS,
   fees: {
     premiumFeeBps: Number(FEES.premiumFeeBps),
     resaleFeeBps: Number(FEES.resaleFeeBps),
@@ -1038,6 +1162,9 @@ put("config.json", {
     makerRebateBps: Number(FEES.makerRebateBps),
     exerciseFeeBps: Number(FEES.exerciseFeeBps),
     mintFeePpm: Number(FEES.mintFeePpm),
+    // T-OP-120 (G7): the registry's payoutAdapter is null (ops/markets/tier1.json), so no PayoutAdapterSet has
+    // been indexed and the Clearinghouse slippage bound is unknown to the wire; the app uses the 300 bps ceiling.
+    maxPayoutSlippageBps: null,
   },
   pendingFees: null,
   constants: {
@@ -1052,6 +1179,9 @@ put("config.json", {
     minSeriesLead: MIN_SERIES_LEAD,
     mintFeePeriod: MINT_FEE_PERIOD,
     mintFeeCeilPpm: MINT_FEE_CEIL_PPM,
+    // callhouse-contracts v8, src/v2/interfaces/V2Constants.sol:60: FEE_CHANGE_DELAY = 48 hours.
+    // This is the OrderBook's fee-schedule delay, not the AccessManager FEE_MANAGER execution delay.
+    feeChangeDelay: 172_800,
   },
   ladder: LADDER,
 });
@@ -1068,15 +1198,18 @@ put(
       name: m.name,
       underlying: m.underlying,
       status: "live",
+      launch: m.launch,
       spot: usdg(m.spot),
       spotUpdatedAt: m.spotUpdatedAt,
       strikeTick: usdg(m.strikeTick),
       puts: false,
-      mintFeePpm: m.ticker === "TSLA" ? 300 : 80,
+      mintFeePpm: 0,
+      settlement: m.settlement,
       expiries: [...new Set(ss.filter((s) => ["open", "cutoff"].includes(statusOf(s))).map((s) => s.expiry))].sort((a, b) => a - b),
       stats: {
         volume24h: usdg(volumeOf(within(fills, DAY))),
         premium7d: usdg(volumeOf(within(fills, 7 * DAY).filter((f) => f.primary))),
+        asOf: ASOF,
         openInterestUnits: sumBy(ss.filter((s) => s.settledAt === null), openInterest).toString(),
         seriesOpen: ss.filter((s) => statusOf(s) === "open").length,
       },
@@ -1089,6 +1222,7 @@ for (const m of Object.values(MARKETS)) {
     items: SERIES.filter((s) => s.market === m)
       .sort(bySeriesOrder)
       .map((s) => ({ series: seriesRef(s), quote: quoteOf(s), openInterestUnits: openInterest(s).toString(), volume24h: usdg(volumeOf(within(s.fills, DAY))) })),
+    asOf: ASOF,
     nextCursor: null,
   });
 }
@@ -1238,8 +1372,10 @@ function historyOf(account) {
     });
   }
   for (const e of LEDGER_HISTORY) {
-    if (e.account !== account) continue;
-    const id = `${e.tx}-1`;
+    if (e.kind === "mint") {
+      if (e.writer !== account && e.longTo !== account) continue;
+    } else if (e.account !== account) continue;
+    const id = `${e.tx}-${e.logIndex ?? 1}`;
     if (e.kind === "deposit" || e.kind === "withdrawal") {
       const data = { asset: e.asset, symbol: SYMBOL.get(e.asset), amount: tokenMoney(e.asset, e.amount) };
       items.push({ id, kind: e.kind, ts: e.ts, longId: null, series: null, data: e.kind === "deposit" ? { ...data, from: account, tx: e.tx } : { ...data, to: account, tx: e.tx } });
@@ -1272,7 +1408,10 @@ function historyOf(account) {
       },
     });
   }
-  items.sort((a, b) => b.ts - a.ts || (a.id < b.id ? -1 : 1));
+  // The live query sorts block DESC, logIndex DESC, id DESC. A minting fill emits Minted at log
+  // index 2 and OrderFilled at 3 in the same transaction, so the fill must precede its mint row.
+  const logIndexOf = (item) => Number(item.id.slice(item.id.lastIndexOf("-") + 1));
+  items.sort((a, b) => b.ts - a.ts || logIndexOf(b) - logIndexOf(a) || (a.id < b.id ? 1 : -1));
   return { items, nextCursor: null };
 }
 
@@ -1428,6 +1567,7 @@ for (const p of WINS) {
   const winsWeek = WINS.filter((p) => p.series.settledAt > NOW - 7 * DAY);
   const receivers = new Set(FILLS.map((f) => (f.takerIsBuyer ? f.taker : f.maker)));
   put("stats.json", {
+    asOf: ASOF,
     volume24h: usdg(volumeOf(within(FILLS, DAY))),
     volumeAll: usdg(volumeOf(FILLS)),
     premiumAll: usdg(volumeOf(FILLS.filter((f) => f.primary))),
@@ -1439,6 +1579,141 @@ for (const p of WINS) {
   });
 }
 
+// --- v8 administration + flywheel --------------------------------------------------------------
+const FLYWHEEL_DISTRIBUTIONS = [
+  {
+    id: `${txHash("flywheel:distribution:usdg")}-0`,
+    asset: USDG.address,
+    symbol: USDG.symbol,
+    decimals: USDG.decimals,
+    assetInRaw: usd("12.5").toString(),
+    usdgInRaw: usd("12.5").toString(),
+    treasuryOutRaw: usd("6.25").toString(),
+    buybackAddedRaw: usd("6.25").toString(),
+    ts: NOW - 7_200,
+    tx: txHash("flywheel:distribution:usdg"),
+  },
+  {
+    id: `${txHash("flywheel:distribution:nvda")}-0`,
+    asset: MARKETS.NVDA.underlying,
+    symbol: MARKETS.NVDA.ticker,
+    decimals: 18,
+    assetInRaw: tokens("0.08").toString(),
+    usdgInRaw: usd("17").toString(),
+    treasuryOutRaw: usd("8.5").toString(),
+    buybackAddedRaw: usd("8.5").toString(),
+    ts: NOW - 10_800,
+    tx: txHash("flywheel:distribution:nvda"),
+  },
+];
+put("flywheel.json", {
+  configured: true,
+  splitter: FLYWHEEL.feeSplitter,
+  tokenAddress: derive("token:STONKHOUSE"),
+  tokenDecimals: 18,
+  burnedTotal: tokens("1250").toString(),
+  burned7d: tokens("250").toString(),
+  // Revenue is grouped in the native asset actually received; unsold Stock Tokens are not
+  // silently valued as USDG. `held` separately exposes what the splitter has not converted.
+  revenue7d: [
+    { asset: USDG.address, symbol: USDG.symbol, decimals: USDG.decimals, amountRaw: usd("12.5").toString() },
+    { asset: MARKETS.NVDA.underlying, symbol: MARKETS.NVDA.ticker, decimals: 18, amountRaw: tokens("0.08").toString() },
+  ],
+  held: [
+    { asset: MARKETS.NVDA.underlying, symbol: MARKETS.NVDA.ticker, decimals: 18, amountRaw: tokens("0.03").toString() },
+  ],
+  lastDistribution: FLYWHEEL_DISTRIBUTIONS[0],
+  distributions: FLYWHEEL_DISTRIBUTIONS,
+});
+
+// Lending vault at /v2/earn. skimmed is null (no skim observed) vs deposited "0" would be a
+// measured empty book; lastAdapterMove.delivered is null (move not reported), not zero.
+put("earn.json", {
+  configured: true,
+  vaults: [
+    {
+      vault: derive("contract:EarnVault"),
+      asset: USDG.address,
+      adapter: null,
+      paused: false,
+      sharesSupply: tokens("100").toString(),
+      deposited: usd("1000").toString(),
+      skimmed: null,
+      queue: { depth: 1, oldestRequestedAt: NOW - 3_600 },
+      lastAdapterMove: {
+        adapter: null,
+        direction: "pull",
+        requested: usd("50").toString(),
+        delivered: null,
+        ts: NOW - 1_800,
+        tx: txHash("earn:adapter:pull"),
+      },
+    },
+  ],
+});
+
+// House vault tape. Epochs are Friday 20:00Z settlement to the next Friday (P8-06).
+// The running epoch (09-11 → 09-18, NOW is Wed 09-16) has nav: null — never 0, never omitted.
+// 09-04 → 09-11 is a published LOSING epoch (resultUsdg negative).
+{
+  const week = 7 * DAY;
+  const runningStart = EXPIRY["09-11"];
+  const runningEnd = EXPIRY["09-18"];
+  const lostStart = runningStart - week;
+  const lostEnd = runningStart;
+  const running = {
+    id: String(runningStart),
+    start: runningStart,
+    end: runningEnd,
+    nav: null,
+    resultUsdg: null,
+  };
+  const lost = {
+    id: String(lostStart),
+    start: lostStart,
+    end: lostEnd,
+    nav: {
+      epoch: String(lostStart),
+      at: lostEnd,
+      usdg: usdg(usd("800")),
+      stockUnits: tokens("40").toString(),
+      settlementPrice: usdg(usd("215.50")),
+      navUsdg: usdg(usd("9420")),
+    },
+    resultUsdg: money(-usd("180"), 6),
+  };
+  const nvdaVault = derive("contract:HouseVault.NVDA");
+  const tslaVault = derive("contract:HouseVault.TSLA");
+  put("house.json", {
+    items: [
+      { market: "NVDA", vault: nvdaVault, currentEpoch: running, sharesSupply: tokens("1000").toString() },
+      { market: "TSLA", vault: tslaVault, currentEpoch: running, sharesSupply: tokens("250").toString() },
+    ],
+    nextCursor: null,
+  });
+  put("house/NVDA.json", {
+    market: "NVDA",
+    vault: nvdaVault,
+    currentEpoch: running,
+    epochs: [lost, running],
+    shares: null,
+    queue: [
+      {
+        kind: "withdraw",
+        account: A.sam,
+        assets: null,
+        shares: tokens("10").toString(),
+        requestedAt: NOW - 7_200,
+      },
+    ],
+  });
+}
+
+put("admin/operations.json", {
+  items: PENDING_OPERATIONS.map((operation) => ({ ...operation, status: "pending" })),
+  nextCursor: null,
+});
+
 // --- makers: weekly epochs from Monday 00:00Z; quoting-quality figures are fixture constants -------
 // Epoch id (02-interfaces §1.9): whole weeks since Monday 1970-01-05 00:00Z, i.e. floor((t - 345600) / 604800).
 // Unix time 0 was a Thursday, so floor(t / 604800) would roll over on Thursdays; for a Monday start the two agree.
@@ -1446,28 +1721,110 @@ const MONDAY_EPOCH_OFFSET = 345_600;
 const WEEK = 604_800;
 const epochIdOf = (t) => Math.floor((t - MONDAY_EPOCH_OFFSET) / WEEK);
 {
-  const epochAt = (iso) => ({ id: epochIdOf(at(iso)), start: at(iso), end: at(iso) + WEEK });
+  // The epoch publishes the scoring policy its figures were produced under (X3-201). The values are the
+  // OQ-14 placeholders from indexer/lib/v2/makerScoring.ts MAKER_SCORING_POLICY, mirrored here rather than
+  // chosen: 1000 bps with a 0.02 USDG floor. They are NOT approved for funded use.
+  const MAKER_BAND = { bps: 1000, minUsdg: usdg(20_000n) };
+  const epochAt = (iso) => ({ id: epochIdOf(at(iso)), start: at(iso), end: at(iso) + WEEK, band: MAKER_BAND });
   const EPOCHS = [epochAt("2026-09-07T00:00:00Z"), epochAt("2026-09-14T00:00:00Z")];
   const [E1, E2] = EPOCHS.map((e) => e.id);
+  // X8-312. WHICH BENCHMARK THESE FIGURES CAME FROM, MIRRORED FROM THE PRODUCER, NOT RETYPED.
+  // A fixture that states a policy number of its own would agree with itself forever while the
+  // indexer moved underneath it, which is the exact failure this field exists to make impossible.
+  // So read the constant out of the source that defines it and fail generation if it is not there.
+  const POLICY_SOURCE = "indexer/lib/v2/makerScoring.ts";
+  const BENCHMARK_POLICY = (() => {
+    const text = readFileSync(join(REPO, POLICY_SOURCE), "utf8");
+    const match = /export const MAKER_BENCHMARK_POLICY = (\d+);/.exec(text);
+    if (match === null) throw new Error(`cannot read MAKER_BENCHMARK_POLICY from ${POLICY_SOURCE}`);
+    return Number(match[1]);
+  })();
   // Not derivable from events (they come from the indexer's book sampling): stated here.
+  //
+  // `samples` is stated for the same reason, and it is the point of X8-312: absent (no quote on
+  // either side) and valid (quoted and measured, possibly at zero) are DIFFERENT FACTS about a
+  // maker, and a score alone cannot tell them apart. `manual` in E1 is the mostly-absent maker;
+  // `roller` in E1 quoted four times as often for a score only 4.2 points higher, and the counts
+  // are the only place that difference is visible. missingReference (quoted, but no chain
+  // reference existed to measure against) is deliberately non-zero for some maker-epochs and zero
+  // for others, because a consumer that treats it as always-zero is the bug.
   const QUALITY = new Map([
-    [A.makerVault, { [E1]: { uptimePct: 98.7, avgSpreadBps: 1510, depthWithin100bps: "1850", score: 88.1 }, [E2]: { uptimePct: 99.4, avgSpreadBps: 1480, depthWithin100bps: "2240", score: 91.6 } }],
-    [A.manual, { [E1]: { uptimePct: 12.5, avgSpreadBps: null, depthWithin100bps: "0", score: 9.8 }, [E2]: { uptimePct: 31.0, avgSpreadBps: null, depthWithin100bps: "50", score: 24.3 } }],
-    [A.roller, { [E1]: { uptimePct: 71.2, avgSpreadBps: null, depthWithin100bps: "0", score: 14.0 }, [E2]: { uptimePct: 96.5, avgSpreadBps: null, depthWithin100bps: "0", score: 17.2 } }],
+    [A.makerVault, {
+      [E1]: { uptimePct: 98.7, avgSpreadBps: 1510, depthWithin100bps: "1850", depthInBand: "2600", score: 88.1, samples: { absent: 12, valid: 988, missingReference: 8 } },
+      [E2]: { uptimePct: 99.4, avgSpreadBps: 1480, depthWithin100bps: "2240", depthInBand: "3100", score: 91.6, samples: { absent: 6, valid: 994, missingReference: 0 } },
+    }],
+    [A.manual, {
+      [E1]: { uptimePct: 12.5, avgSpreadBps: null, depthWithin100bps: "0", depthInBand: "0", score: 9.8, samples: { absent: 850, valid: 150, missingReference: 0 } },
+      [E2]: { uptimePct: 31.0, avgSpreadBps: null, depthWithin100bps: "50", depthInBand: "420", score: 24.3, samples: { absent: 650, valid: 350, missingReference: 24 } },
+    }],
+    [A.roller, {
+      [E1]: { uptimePct: 71.2, avgSpreadBps: null, depthWithin100bps: "0", depthInBand: "180", score: 14.0, samples: { absent: 250, valid: 750, missingReference: 40 } },
+      [E2]: { uptimePct: 96.5, avgSpreadBps: null, depthWithin100bps: "0", depthInBand: "240", score: 17.2, samples: { absent: 25, valid: 975, missingReference: 5 } },
+    }],
   ]);
   const statsFor = (maker, epoch) => {
     const fills = FILLS.filter((f) => f.maker === maker && f.ts >= epoch.start && f.ts < epoch.end);
     const q = QUALITY.get(maker)[epoch.id];
     return {
+      benchmarkPolicy: BENCHMARK_POLICY,
+      samples: q.samples,
       uptimePct: q.uptimePct,
       avgSpreadBps: q.avgSpreadBps,
       depthWithin100bps: q.depthWithin100bps,
+      depthInBand: q.depthInBand,
       fills: fills.length,
       volume: usdg(volumeOf(fills)),
       rebates: usdg(sumBy(fills, (f) => f.makerRebate)),
       score: q.score,
     };
   };
+  // Pins on the stated counts, so they cannot be arbitrary. uptime is the two-sided share of
+  // absent + valid (indexer/lib/v2/makerScoring.ts advanceMakerEpoch), and a maker cannot be
+  // two-sided on a tick it did not quote, so uptimePct can never exceed the valid share.
+  // missingReference is outside that denominator on purpose: a missing benchmark is not downtime.
+  for (const [maker, byEpoch] of QUALITY) {
+    for (const [id, q] of Object.entries(byEpoch)) {
+      const scored = q.samples.absent + q.samples.valid;
+      if (scored === 0) throw new Error(`scenario pin failed: maker ${maker} epoch ${id} has no scored sample`);
+      if (q.uptimePct > (100 * q.samples.valid) / scored) {
+        throw new Error(`scenario pin failed: maker ${maker} epoch ${id} uptime ${q.uptimePct}% exceeds its valid share`);
+      }
+    }
+  }
+  // The 1000 bps band strictly CONTAINS the 100 bps one, so every order counted in depthWithin100bps is
+  // also counted in depthInBand. A fixture where the band figure is the smaller one would teach a consumer
+  // that the two are interchangeable, which is exactly what D10 forbids.
+  for (const [maker, byEpoch] of QUALITY) {
+    for (const [id, q] of Object.entries(byEpoch)) {
+      if (BigInt(q.depthInBand) < BigInt(q.depthWithin100bps)) {
+        throw new Error(`scenario pin failed: maker ${maker} epoch ${id} has depthInBand below depthWithin100bps`);
+      }
+    }
+  }
+  {
+    // /v2/services: `healthy` is true ONLY for reason "ready" (schema.ts pricerServiceSchema), and the
+    // reasons list is empty while ready. A fixture that broke either would teach a consumer to read
+    // `reason` when `healthy` alone is meant to be fail-closed.
+    const services = JSON.parse(FILES.get("services.json"));
+    if (services.pricer.healthy !== (services.pricer.reason === "ready")) {
+      throw new Error("scenario pin failed: /v2/services healthy disagrees with its reason");
+    }
+    if (services.pricer.reason === "ready" && services.pricer.reasons.length !== 0) {
+      throw new Error("scenario pin failed: a ready pricer carries failure reasons");
+    }
+    if (!(services.pricer.lastEvaluationAt < services.pricer.checkedAt)) {
+      throw new Error("scenario pin failed: /v2/services lastEvaluationAt is not earlier than checkedAt");
+    }
+  }
+  {
+    const all = [...QUALITY.values()].flatMap((byEpoch) => Object.values(byEpoch));
+    if (!all.some((q) => q.samples.missingReference > 0)) throw new Error("scenario pin failed: no maker-epoch has a missing reference");
+    if (!all.some((q) => q.samples.missingReference === 0)) throw new Error("scenario pin failed: every maker-epoch has a missing reference");
+    // The X8-312 contrast itself: two makers whose scores are close while their absence is not.
+    const absent = QUALITY.get(A.manual)[E1].samples.absent;
+    const quoted = QUALITY.get(A.roller)[E1].samples.absent;
+    if (!(absent > quoted * 3)) throw new Error("scenario pin failed: no absent-vs-quoted contrast in E1");
+  }
   const current = EPOCHS.find((e) => e.start <= NOW && NOW < e.end);
   const makers = [...QUALITY.keys()];
   put("makers.json", {
@@ -1484,6 +1841,78 @@ const epochIdOf = (t) => Math.floor((t - MONDAY_EPOCH_OFFSET) / WEEK);
       epochs: [...EPOCHS].reverse().map((epoch) => ({ epoch, ...statsFor(maker, epoch) })),
     });
   }
+}
+
+// --- rewards: funding is per distributor; entitlement and claims are per posted epoch ---------
+{
+  const epochId = epochIdOf(at("2026-09-14T00:00:00Z"));
+  const root = txHash("reward-root:maker:2958");
+  put("rewards/epochs.json", {
+    program: "maker",
+    distributors: [{
+      distributor: CONTRACTS.rewardsDistributor,
+      funded: usdg(100_000_000n),
+      defunded: usdg(5_000_000n),
+      balance: usdg(75_000_000n),
+    }],
+    items: [{
+      distributor: CONTRACTS.rewardsDistributor,
+      epochId,
+      root,
+      total: usdg(25_000_000n),
+      claimed: usdg(20_000_000n),
+    }],
+    nextCursor: null,
+  });
+  put(`rewards/${A.sam}/claims.json`, {
+    address: A.sam,
+    items: [{
+      program: "maker",
+      distributor: CONTRACTS.rewardsDistributor,
+      epochId,
+      index: 0,
+      amount: usdg(20_000_000n),
+      claimed: true,
+      tx: txHash("reward-claim:maker:2958:0"),
+    }],
+    nextCursor: null,
+  });
+}
+
+// --- protocol MakerVault: live wallet/ledger state and risk controls ---------------------------
+{
+  const liveOrders = ORDERS.filter((order) => order.maker === A.makerVault && isLive(order));
+  const tracked = [...new Map(liveOrders.map((order) => [order.series.longId, order.series])).values()];
+  const assets = [USDG, ...[...new Map(tracked.map((series) => [
+    series.market.underlying,
+    { address: series.market.underlying, symbol: series.market.ticker, decimals: 18 },
+  ])).values()]];
+  const walletOf = (asset) => asset.address === USDG.address ? usd("12")
+    : asset.symbol === "NVDA" ? tokens("2") : 0n;
+  put("vault.json", {
+    vault: A.makerVault,
+    protocol: true,
+    balances: {
+      wallet: assets.map((asset) => ({
+        asset: asset.address, symbol: asset.symbol, free: money(walletOf(asset), asset.decimals),
+      })).sort((left, right) => left.symbol.localeCompare(right.symbol)),
+      ledger: assets.map((asset) => ({
+        asset: asset.address, symbol: asset.symbol,
+        free: money(freeOf(A.makerVault, asset.address), asset.decimals),
+      })).sort((left, right) => left.symbol.localeCompare(right.symbol)),
+    },
+    limits: {
+      maxSeriesUnits: "10000",
+      maxTotalNotional: usd("250000").toString(),
+      askToleranceBps: 100,
+      maxBidBpsOfSpot: 1000,
+      maxOrderLifetime: 3600,
+      maxDailyOutflow: usd("2500").toString(),
+    },
+    outflow: { used: usdg(usd("500")), cap: usdg(usd("2500")) },
+    liveOrderCount: liveOrders.length,
+    trackedSeries: tracked.map((series) => series.longId.toString()),
+  });
 }
 
 // =============================================================================================

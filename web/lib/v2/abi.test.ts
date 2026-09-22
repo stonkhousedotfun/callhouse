@@ -23,7 +23,10 @@ import { fileURLToPath } from "node:url";
 import type { Address, ContractErrorName, ContractEventName, ContractFunctionName } from "viem";
 import { describe, expect, it } from "vitest";
 
+import { accessManagerAbi } from "@/lib/abi/v2/accessManager";
 import { clearinghouseAbi } from "@/lib/abi/v2/clearinghouse";
+import { orderBookAbi } from "@/lib/abi/v2/orderBook";
+import { payoutAdapterAbi } from "@/lib/abi/v2/payoutAdapter";
 
 import { isShortId, longIdOf, shortIdOf } from "./seriesId";
 
@@ -104,5 +107,53 @@ describe("lib/abi/v2/clearinghouse.ts", () => {
     for (const name of errors) expect(names("error")).toContain(name);
     expect(names("function")).not.toContain(notAFunction);
     expect(names("error")).not.toContain(notAnError);
+  });
+});
+
+describe("v8 take, authority and payout router ABI pins", () => {
+  it("pins the appended maxTotalFee field and four-field quote", async () => {
+    const { toFunctionSelector } = await import("viem");
+    const take = orderBookAbi.find((item) => item.type === "function" && item.name === "take")!;
+    const quoteTake = orderBookAbi.find((item) => item.type === "function" && item.name === "quoteTake")!;
+    const fields = [
+      ["longId", "uint256"], ["buying", "bool"], ["orderIds", "uint256[]"], ["units", "uint64"],
+      ["minUnits", "uint64"], ["limitPrice", "uint128"], ["writeToSell", "bool"],
+      ["recipient", "address"], ["deadline", "uint40"], ["maxTotalFee", "uint128"],
+    ];
+    expect(take.inputs[0]!.components.map((field) => [field.name, field.type])).toEqual(fields);
+    expect(quoteTake.inputs[0]!.components.map((field) => [field.name, field.type])).toEqual(fields);
+    expect(quoteTake.outputs.map((field) => [field.name, field.type])).toEqual([
+      ["unitsFilled", "uint64"], ["premium", "uint256"], ["takerFee", "uint256"], ["sellerFees", "uint256"],
+    ]);
+    expect(take.outputs.map((field) => [field.name, field.type])).toEqual([
+      ["unitsFilled", "uint64"], ["premium", "uint256"], ["takerFee", "uint256"],
+    ]);
+    expect(toFunctionSelector(take)).toBe("0xcf96851b");
+    expect(toFunctionSelector(quoteTake)).toBe("0xe2e13f01");
+  });
+
+  it("decodes AccessManager's uint64 role and complete scheduled operation", () => {
+    const roleGranted = accessManagerAbi.find((item) => item.type === "event" && item.name === "RoleGranted")!;
+    expect(roleGranted.inputs.map((input) => [input.name, input.type, input.indexed])).toEqual([
+      ["roleId", "uint64", true], ["account", "address", true], ["delay", "uint32", false],
+      ["since", "uint48", false], ["newMember", "bool", false],
+    ]);
+    const scheduled = accessManagerAbi.find((item) => item.type === "event" && item.name === "OperationScheduled")!;
+    expect(scheduled.inputs.map((input) => [input.name, input.type])).toEqual([
+      ["operationId", "bytes32"], ["nonce", "uint32"], ["schedule", "uint48"],
+      ["caller", "address"], ["target", "address"], ["data", "bytes"],
+    ]);
+  });
+
+  it("pins the unchanged routes selector and the v8 router return tuple", async () => {
+    const { toFunctionSelector } = await import("viem");
+    const routes = payoutAdapterAbi.find((item) => item.type === "function" && item.name === "routes")!;
+    expect(toFunctionSelector(routes)).toBe("0xd7409659");
+    expect(routes.outputs).toHaveLength(1);
+    expect(routes.outputs[0]).toMatchObject({ type: "tuple" });
+    expect(routes.outputs[0]!.components.map((field) => [field.name, field.type])).toEqual([
+      ["venue", "uint8"], ["fee", "uint24"], ["tickSpacing", "int24"],
+      ["v3Pool", "address"], ["feeBps", "uint16"],
+    ]);
   });
 });

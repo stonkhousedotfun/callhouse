@@ -10,7 +10,7 @@
  */
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, readFileSync, writeFileSync, cpSync } from "node:fs";
+import { cpSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { test } from "node:test";
@@ -20,7 +20,7 @@ const HERE = path.dirname(fileURLToPath(import.meta.url));
 const BAD = "0x000000000000000000000000000000000000bAd0";
 
 /** A scratch copy of ops/markets, so nothing here writes to the checkout. */
-function scratch(mutate) {
+function scratch(mutate, mutateLegacy = () => {}) {
   const dir = mkdtempSync(path.join(tmpdir(), "render-docs-"));
   const out = path.join(dir, "markets");
   cpSync(HERE, out, { recursive: true });
@@ -28,7 +28,11 @@ function scratch(mutate) {
   const reg = JSON.parse(readFileSync(file, "utf8"));
   mutate(reg);
   writeFileSync(file, `${JSON.stringify(reg, null, 2)}\n`);
-  return { dir, script: path.join(out, "render-docs.mjs"), page: path.join(dir, "markets.md") };
+  const legacyFile = path.join(out, "v7-legacy.json");
+  const legacy = JSON.parse(readFileSync(legacyFile, "utf8"));
+  mutateLegacy(legacy);
+  writeFileSync(legacyFile, `${JSON.stringify(legacy, null, 2)}\n`);
+  return { dir, legacyFile, script: path.join(out, "render-docs.mjs"), page: path.join(dir, "markets.md") };
 }
 
 function render({ script, page }) {
@@ -46,6 +50,13 @@ test("the registry as committed renders", () => {
   assert.ok(r.ok, `the committed registry must render: ${r.stderr}`);
   const page = readFileSync(s.page, "utf8");
   assert.match(page, /Trust only the production addresses on this page/);
+  assert.match(page, /Stonkhouse v2 is unaudited/);
+  assert.match(page, /`AccessManager`/);
+  assert.match(page, /`FeeSplitter`/);
+  assert.match(page, /`V4BuybackExecutor`/);
+  assert.match(page, /`Admin Safe`/);
+  assert.match(page, /`Treasury Safe`/);
+  assert.match(page, /Legacy interface-7 contract set/);
 });
 
 test("an empty production registry does not claim nothing deployed on chain", () => {
@@ -61,6 +72,11 @@ test("an empty production registry does not claim nothing deployed on chain", ()
         for (const source of Object.keys(reg.v2.contracts.sources)) reg.v2.contracts.sources[source] = null;
       } else reg.v2.contracts[key] = null;
     }
+    reg.v2.flywheel.deployBlock = null;
+    reg.v2.flywheel.feeSplitter = null;
+    reg.v2.flywheel.buybackExecutor = null;
+    reg.shared.safes.admin = null;
+    reg.shared.safes.treasury = null;
   });
   assert.ok(render(s).ok);
   const page = readFileSync(s.page, "utf8");
@@ -141,4 +157,177 @@ test("the page does not claim USDG's address was read on chain", () => {
   // check on chain is that each configured pool holds exactly {asset, USDG}.
   assert.doesNotMatch(page, /USDG was read on chain/);
   assert.match(page, /USDG's address is a constant of the registry, not a read/);
+});
+
+test("an unknown flywheel key does not disappear from the page", () => {
+  const s = scratch((reg) => {
+    reg.v2.flywheel.discountModule = null;
+  });
+  const r = render(s);
+  assert.equal(r.ok, false);
+  assert.match(r.stderr, /v2\.flywheel\.discountModule is not a key this page renders/);
+});
+
+test("an unknown Safe key does not disappear from the page", () => {
+  const s = scratch((reg) => {
+    reg.shared.safes.recovery = null;
+  });
+  const r = render(s);
+  assert.equal(r.ok, false);
+  assert.match(r.stderr, /shared\.safes\.recovery is not a key this page renders/);
+});
+
+/* ------------------------------------------------------------------ T-OP-138: the six external contracts */
+
+// The six external `v2.contracts` keys (T-OP-114: houseVault, houseVaultFactory, hedger, rewardsDistributorLender,
+// earnVault, stockVenueAdapter) are written back by their own deploy step. Before this row `checkKeys` threw on
+// them ("not a key this page renders"), so the first write-back would have turned the docs gate red. Now they
+// are accepted when present and rendered in their own section; the key list is IMPORTED from
+// build-markets.mjs, and any other name is still refused.
+const EXTERNAL = ["houseVault", "houseVaultFactory", "hedger", "rewardsDistributorLender", "earnVault", "stockVenueAdapter"];
+const EXTERNAL_NAMES = ["HouseVault", "HouseVaultFactory", "Hedger", "RewardsDistributor (lender)", "EarnVault", "StockVenueAdapter"];
+
+test("T-OP-138: the committed registry (no externals yet) renders the externals section with every row not deployed", () => {
+  const s = scratch(() => {});
+  const r = render(s);
+  assert.ok(r.ok, r.stderr);
+  const page = readFileSync(s.page, "utf8");
+  assert.match(page, /### External v2 contracts/);
+  for (const name of EXTERNAL_NAMES) {
+    assert.match(page, new RegExp(`\\| \`${name.replace(/[()]/g, "\\$&")}\` \\| [^|]+ \\| not deployed \\| — \\|`), `${name} row`);
+  }
+});
+
+test("T-OP-138: the six present as null render exactly like absent ones", () => {
+  const absent = scratch(() => {});
+  const present = scratch((reg) => {
+    for (const k of EXTERNAL) reg.v2.contracts[k] = null;
+  });
+  assert.ok(render(absent).ok);
+  const r = render(present);
+  assert.ok(r.ok, r.stderr);
+  assert.equal(readFileSync(present.page, "utf8"), readFileSync(absent.page, "utf8"));
+});
+
+test("T-OP-138: the written-back shape renders — six addresses with their start blocks, in their own section", () => {
+  const s = scratch((reg) => {
+    EXTERNAL.forEach((k, i) => {
+      reg.v2.contracts[k] = `0x${String(501 + i).padStart(40, "0")}`;
+      reg.v2.externalDeployBlocks[k] = 69324900 + i;
+    });
+  });
+  const r = render(s);
+  assert.ok(r.ok, r.stderr);
+  const page = readFileSync(s.page, "utf8");
+  const section = page.slice(page.indexOf("### External v2 contracts"), page.indexOf("v2 also relies on these third-party contracts"));
+  EXTERNAL.forEach((k, i) => {
+    const a = `0x${String(501 + i).padStart(40, "0")}`;
+    assert.match(section, new RegExp(`\\| \`${EXTERNAL_NAMES[i].replace(/[()]/g, "\\$&")}\` \\| [^|]+ \\| \\[\`${a}\`\\]\\([^)]+/address/${a}\\) \\| ${(69324900 + i).toLocaleString("en-US")} \\|`), `${k} row`);
+  });
+  assert.doesNotMatch(section, /not deployed \|/);
+  // An external address is never listed as a CORE contract: the core table is above the section and unchanged.
+  const core = page.slice(page.indexOf("## v2 contracts"), page.indexOf("### External v2 contracts"));
+  assert.doesNotMatch(core, /0x0000000000000000000000000000000000000501/);
+});
+
+test("T-OP-138: a seventh v2.contracts key is still refused by name — the block stays closed", () => {
+  const s = scratch((reg) => {
+    for (const k of EXTERNAL) reg.v2.contracts[k] = null;
+    reg.v2.contracts.stockZap = null;
+  });
+  const r = render(s);
+  assert.equal(r.ok, false);
+  assert.match(r.stderr, /v2\.contracts\.stockZap is not a key this page renders/);
+  // And a misspelt external is unknown, not silently taken for the real one.
+  const typo = scratch((reg) => { reg.v2.contracts.earnvault = null; });
+  const t = render(typo);
+  assert.equal(t.ok, false);
+  assert.match(t.stderr, /v2\.contracts\.earnvault is not a key this page renders/);
+});
+
+test("T-OP-138: an external slot holding a non-address is refused by name", () => {
+  const s = scratch((reg) => { reg.v2.contracts.earnVault = "0xnot-an-address"; });
+  const r = render(s);
+  assert.equal(r.ok, false);
+  assert.match(r.stderr, /v2\.contracts\.earnVault is neither null nor an address/);
+});
+
+test("a v8 contracts block without accessManager is refused", () => {
+  const s = scratch((reg) => {
+    delete reg.v2.contracts.accessManager;
+  });
+  const r = render(s);
+  assert.equal(r.ok, false);
+  assert.match(r.stderr, /v2\.contracts\.accessManager is missing/);
+});
+
+test("null, v3 and v4 payout routes render separately from settlement sources", () => {
+  const poolId = `0x${"ab".repeat(32)}`;
+  const s = scratch((reg) => {
+    reg.markets.find((m) => m.ticker === "AAPL").v2.payoutRoute = { venue: "v3", fee: 3000 };
+    reg.markets.find((m) => m.ticker === "NVDA").v2.payoutRoute = {
+      venue: "v4",
+      fee: 500,
+      tickSpacing: 10,
+      poolId,
+    };
+  });
+  const r = render(s);
+  assert.ok(r.ok, r.stderr);
+  const page = readFileSync(s.page, "utf8");
+  const marketTable = page.slice(page.indexOf("## Tokens, feeds and settlement sources"), page.indexOf("## Strikes, ladders and puts"));
+  assert.match(marketTable, /\| \*\*AAPL\*\* .* Uniswap v3 — 0\.3% fee tier \|/);
+  assert.match(marketTable, /\| \*\*NVDA\*\* .*Uniswap v3 TWAP .* Uniswap v4 — 0\.05% fee tier, tick spacing 10, pool id/);
+  assert.ok(marketTable.includes(`pool id \`${poolId}\``));
+  assert.match(marketTable, /\| \*\*AMD\*\* .* No route — winning calls pay in Stock Tokens in kind \|/);
+  assert.doesNotMatch(page, new RegExp(`/address/${poolId}`));
+});
+
+test("an interface-8 file cannot be relabelled as the legacy interface-7 set", () => {
+  const s = scratch(() => {}, (legacy) => {
+    legacy.v2.interfaceVersion = 8;
+  });
+  const r = render(s);
+  assert.equal(r.ok, false);
+  assert.match(r.stderr, /must record v2\.interfaceVersion 7/);
+});
+
+test("a file without the legacy marker cannot become the interface-7 set", () => {
+  const s = scratch(() => {}, (legacy) => {
+    delete legacy._legacy;
+  });
+  const r = render(s);
+  assert.equal(r.ok, false);
+  assert.match(r.stderr, /has no _legacy marker/);
+});
+
+test("a missing legacy registry refuses instead of dropping the section", () => {
+  const s = scratch(() => {});
+  rmSync(s.legacyFile);
+  const r = render(s);
+  assert.equal(r.ok, false);
+  assert.match(r.stderr, /v7-legacy\.json is missing/);
+});
+
+test("the legacy NVDA registration never becomes a live interface-8 market", () => {
+  const s = scratch(() => {});
+  const r = render(s);
+  assert.ok(r.ok, r.stderr);
+  const page = readFileSync(s.page, "utf8");
+  const current = page.slice(page.indexOf("## Tokens, feeds and settlement sources"), page.indexOf("## Strikes, ladders and puts"));
+  const legacy = page.slice(page.indexOf("## Legacy interface-7 contract set"), page.indexOf("## Legacy v1 factories"));
+  assert.match(current, /\| \*\*NVDA\*\* \| `planned` \|/);
+  assert.doesNotMatch(current, /\| \*\*NVDA\*\* \| `live`/);
+  assert.match(legacy, /\| \*\*NVDA\*\* \| `live` since/);
+});
+
+test("the interface-7 section describes policy without claiming the freeze happened", () => {
+  const s = scratch(() => {});
+  const r = render(s);
+  assert.ok(r.ok, r.stderr);
+  const page = readFileSync(s.page, "utf8");
+  const legacy = page.slice(page.indexOf("## Legacy interface-7 contract set"), page.indexOf("## Legacy v1 factories"));
+  assert.match(legacy, /run-off procedure, if applied/);
+  assert.match(legacy, /does not record whether that procedure has been applied/);
+  assert.doesNotMatch(legacy, /interface[- ]7 (?:is|was|has been) (?:frozen|stopped|paused)/i);
 });

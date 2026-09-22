@@ -28,6 +28,8 @@ export const EVENT_KINDS = [
   'writer_itm_warning',
   'auto_roll',
   'payout_failed_to_ledger',
+  'fee_notice',
+  'admin_operation',
 ] as const;
 
 export type EventKind = (typeof EVENT_KINDS)[number];
@@ -69,9 +71,40 @@ export type SeriesLite = z.infer<typeof seriesSchema>;
 const position = z.enum(['long', 'short']);
 const direction = z.enum(['above', 'below']);
 
+/**
+ * When the oracle last updated the spot in the same payload (`/v2/markets[].spotUpdatedAt`), so a
+ * price-driven message can say "as of <New York time>" (F4 D8). OPTIONAL, and a template must omit
+ * the phrase when it is absent rather than fall back to a clock: the on-chain spot is stale from
+ * about 17:00 New York on Friday until Monday's first print, which is the very case where an
+ * invented observation time would mislead. A payload queued before this field existed has none.
+ */
+const spotUpdatedAtSchema = z.number().int().positive().optional();
+
 const longNeedsCost = <T extends { position: 'long' | 'short'; cost?: unknown }>(p: T) =>
   p.position === 'short' || p.cost !== undefined;
 const COST_MESSAGE = { message: 'cost is required for a long position (every payoff message states cost and max loss)', path: ['cost'] };
+
+const expiryLineSchema = z
+  .object({ series: seriesSchema, position, units: unitsSchema, cost: usdgSchema.optional() })
+  .refine(longNeedsCost, COST_MESSAGE);
+
+const expiryPayloadSchema = z
+  .object({
+    series: seriesSchema,
+    position,
+    units: unitsSchema,
+    spot: usdgSchema.optional(),
+    cost: usdgSchema.optional(),
+    /** Digest only (N3-404): 4–10 of the positions that entered this window together. */
+    positions: z.array(expiryLineSchema).min(4).max(10).optional(),
+    /** Digest only: positions past the 10 listed. */
+    more: z.number().int().min(1).optional(),
+  })
+  .refine(longNeedsCost, COST_MESSAGE)
+  .refine((p) => p.more === undefined || p.positions !== undefined, {
+    message: 'more is only set on a digest',
+    path: ['more'],
+  });
 
 export const payloadSchemas = {
   /** A fill the subscriber was part of, from their side. */
@@ -125,6 +158,7 @@ export const payloadSchemas = {
       position,
       direction,
       spot: usdgSchema,
+      spotUpdatedAt: spotUpdatedAtSchema,
       units: unitsSchema,
       cost: usdgSchema.optional(),
     })
@@ -136,15 +170,16 @@ export const payloadSchemas = {
     direction,
     threshold: usdgSchema,
     spot: usdgSchema,
+    spotUpdatedAt: spotUpdatedAtSchema,
   }),
 
-  expiry_24h: z
-    .object({ series: seriesSchema, position, units: unitsSchema, spot: usdgSchema.optional(), cost: usdgSchema.optional() })
-    .refine(longNeedsCost, COST_MESSAGE),
-
-  expiry_1h: z
-    .object({ series: seriesSchema, position, units: unitsSchema, spot: usdgSchema.optional(), cost: usdgSchema.optional() })
-    .refine(longNeedsCost, COST_MESSAGE),
+  /**
+   * One position entering an expiry window, or an N3-404 digest of more than 3. `positions` is
+   * present only on a digest (4–10 lines); `more` is how many further positions the list omitted.
+   * Kinds stay `expiry_24h` / `expiry_1h` (F4 D7: no prefs or kind change).
+   */
+  expiry_24h: expiryPayloadSchema,
+  expiry_1h: expiryPayloadSchema,
 
   /**
    * The holder's side of a settled series. `payout` is what `Redeemed` delivered (null when
@@ -174,6 +209,7 @@ export const payloadSchemas = {
     series: seriesSchema,
     units: unitsSchema,
     spot: usdgSchema,
+    spotUpdatedAt: spotUpdatedAtSchema,
     /** In the collateral asset: Stock Tokens (18 dp) for calls, USDG for puts. */
     collateralLocked: moneySchema,
   }),
@@ -215,6 +251,28 @@ export const payloadSchemas = {
     asset: z.enum(['usdg', 'stock']),
     amount: moneySchema,
     tx: txSchema.optional(),
+  }),
+
+  /**
+   * Protocol fee schedule. `scheduled` is pendingFees going from null to set;
+   * `live` is the live fees block changing. effectiveAt is pendingFees.effectiveAt
+   * (web/lib/v2/api-schema.ts), never a hardcoded delay.
+   */
+  fee_notice: z.object({
+    phase: z.enum(['scheduled', 'live']),
+    effectiveAt: z.number().int().nonnegative().optional(),
+  }),
+
+  /**
+   * AccessManager operation. status mirrors /v2/admin/operations (pending, executed, canceled).
+   * `id` is the operation id and repeats across reschedules; `key` (`<operationId>:<nonce>`) is the
+   * one operation this notice is about. Optional only so rows queued before T-435 still parse.
+   */
+  admin_operation: z.object({
+    id: z.string().min(1),
+    key: z.string().min(1).optional(),
+    status: z.enum(['pending', 'executed', 'canceled']),
+    label: z.string().min(1),
   }),
 } satisfies Record<EventKind, z.ZodTypeAny>;
 

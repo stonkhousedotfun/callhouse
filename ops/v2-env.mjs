@@ -41,12 +41,13 @@ const REGISTRY = path.join(HERE, "markets", "tier1.json");
 const OUT_DIR = path.join(HERE, "v2", "env");
 
 /** Chain-wide public values, the same the v1 keeper files carry (ops/keeper-env.sh). */
-const RPC_PRIMARY = "https://rpc.mainnet.chain.robinhood.com";
-const RPC_BACKUP = "https://robinhood-rpc.publicnode.com";
+const MAINNET_RPC_PRIMARY = "https://rpc.mainnet.chain.robinhood.com";
+const MAINNET_RPC_BACKUP = "https://robinhood-rpc.publicnode.com";
+const LOCAL_DEVNET_RPC = "http://127.0.0.1:8546";
 const RELAY_ALERT_URL = "http://relay.railway.internal:8080/alert";
-const APP_URL = "https://app.stonkhouse.fun";
-/** The notifier's public domain (ops/deploy.md §15): the web app's NEXT_PUBLIC_NOTIFIER_URL. */
-const NOTIFIER_PUBLIC_URL = "https://notify.stonkhouse.fun";
+let APP_URL = "https://app.stonkhouse.fun";
+/** Comment-only hostname interpolated into notifier.env. Never a live assignment (O3-401 / O8-05). */
+let NOTIFIER_PUBLIC_URL = "https://notify.stonkhouse.fun";
 
 /**
  * Ports: 8787 is the v1 keeper, 8790 pricing and 8791 the notifier,
@@ -90,6 +91,10 @@ const CRANKER_TUNING = [
   ["CRANKER_PENDING_STUCK_S", "1800", "v2_settle_stuck when a candidate is this long past finalizableAt"],
   ["CRANKER_SWEEP_INTERVAL_S", "604800", "sweepFees per asset at most this often"],
   ["CRANKER_INDEXER_TIMEOUT_MS", "5000", "one indexer request"],
+  ["CRANKER_FLYWHEEL_ENABLED", "0", "the flywheel step (claim, distribute, buyback); off until the flywheel is deployed"],
+  ["CRANKER_FLYWHEEL_INTERVAL_S", "3600", "one flywheel pass at most this often; floor 300 s, the compiled BUYBACK_COOLDOWN"],
+  ["CRANKER_BUYBACK_TOLERANCE_BPS", "50", "how far below the fresh quote minTokenOut is set; never 0"],
+  ["CRANKER_BUYBACK_DRY_RUN", "0", "probe the buyback and report it, never send it, while the rest of the cranker runs live"],
   ["KEEPER_BOOT_RETRY_MS", "300000", "retry an unreadable chain this long at boot before exiting 1 (the health server is up meanwhile)"],
 ];
 
@@ -139,6 +144,7 @@ const PRICER_TUNING = [
   ["PRICER_EDGE_BPS", "500", "target = fair x (1 + edge), then clamped to the strategy band; -5000..10000"],
   ["PRICER_REPRICE_THRESHOLD_BPS", "1000", "reprice only when the target differs from the live ask by more than this"],
   ["PRICER_MIN_INTERVAL_S", "1800", "evaluate a position right after its roll, then at most this often"],
+  ["PRICER_REPRICE_OFF_HOURS", "0", "1 = allow repricing outside the regular session"],
   ["PRICER_MAX_TX_PER_TICK", "50", "reprice transactions per tick"],
   ["PRICER_HTTP_TIMEOUT_MS", "5000", "one pricing-service or indexer request"],
   ["PRICER_FAIR_ALERT_S", "7200", "v2_pricer_fair_unavailable after a live ask has had no fair value this long"],
@@ -162,16 +168,24 @@ let check = false;
 let only = null;
 let outDir = OUT_DIR;
 let registryFile = REGISTRY;
+let rpcOverride = null;
+let rpcBackupOverride = null;
 for (let i = 0; i < argv.length; i += 1) {
   const a = argv[i];
   if (a === "--check") check = true;
   else if (a === "--services") only = new Set((argv[++i] || die("--services needs a comma-separated list")).split(",").filter(Boolean));
   else if (a === "--out") outDir = path.resolve(argv[++i] || die("--out needs a directory"));
   else if (a === "--registry") registryFile = path.resolve(argv[++i] || die("--registry needs a file"));
+  else if (a === "--rpc") rpcOverride = argv[++i] || die("--rpc needs a URL");
+  else if (a === "--rpc-backup") rpcBackupOverride = argv[++i] || die("--rpc-backup needs a URL");
   else if (a === "-h" || a === "--help") {
-    process.stdout.write("usage: node ops/v2-env.mjs [--check] [--services a,b] [--out DIR] [--registry FILE]\n");
+    process.stdout.write("usage: node ops/v2-env.mjs [--check] [--services a,b] [--out DIR] [--registry FILE] [--rpc URL] [--rpc-backup URL]\n");
     process.exit(0);
   } else die(`unknown argument: ${a}`);
+}
+if (path.basename(registryFile) === "dev.json") {
+  APP_URL = "https://dev.app.stonkhouse.fun";
+  NOTIFIER_PUBLIC_URL = "https://<approved-dev-notifier-domain>";
 }
 
 function die(message) {
@@ -185,6 +199,28 @@ function die(message) {
 
 const registry = JSON.parse(readFileSync(registryFile, "utf8"));
 const v2 = registry.v2;
+const localDevRegistry = Object.hasOwn(registry, "_dev");
+const rpcPrimary = rpcOverride ?? (localDevRegistry ? LOCAL_DEVNET_RPC : MAINNET_RPC_PRIMARY);
+const rpcBackup = rpcOverride === null
+  ? (localDevRegistry ? null : MAINNET_RPC_BACKUP)
+  : rpcBackupOverride;
+if (rpcBackupOverride !== null && rpcOverride === null) die("--rpc-backup requires --rpc");
+const isLoopbackRpc = (value) => {
+  try {
+    const url = new URL(value);
+    return (url.protocol === "http:" || url.protocol === "https:")
+      && (url.hostname === "127.0.0.1" || url.hostname === "localhost" || url.hostname === "::1");
+  } catch {
+    return false;
+  }
+};
+if (localDevRegistry) {
+  for (const [label, value] of [["RPC", rpcPrimary], ["backup RPC", rpcBackup]]) {
+    if (value !== null && !isLoopbackRpc(value)) {
+      die(`refusing local-only registry ${registryFile} with non-local ${label} ${value}`);
+    }
+  }
+}
 // ops/markets/build-markets.mjs --check validates the block in full; this refuses only what would
 // render a wrong file.
 if (!v2 || typeof v2 !== "object") die(`${registryFile} has no top-level v2 block`);
@@ -213,7 +249,82 @@ function contract(name, key) {
   return [`# v2.contracts.${key} is null in the registry: no production address configured. Populate only after owner publication and verification; re-run ops/v2-env.mjs.`, set(name, "")];
 }
 
-const rpc = () => [set("RH_RPC", RPC_PRIMARY), set("RH_RPC_2", RPC_BACKUP)];
+/**
+ * INTERFACE_VERSION 8 blocks, rendered ONLY for a registry that has them.
+ *
+ * `ops/markets/v7-legacy.json` is the frozen v7 production registry the run-off services read
+ * (ops/markets/README.md). It has no `v2.flywheel`, no `shared.safes` and no `shared.token`, so
+ * every v8 line below is omitted for it and the v7 service env renders exactly as it did before
+ * this file learned about v8 — which is the acceptance for O8-01 and the reason these are guarded
+ * on the block being present rather than on a flag somebody has to remember to pass.
+ */
+const isV8 = Number(v2.interfaceVersion) >= 8;
+const flywheel = registry.v2?.flywheel ?? {};
+const safes = registry.shared?.safes ?? {};
+const token = registry.shared?.token ?? {};
+
+/** One `registry <path>` address line, or an empty value naming the path that is still null. */
+function fromRegistry(name, dotted, value) {
+  if (value) return [`# registry ${dotted}`, set(name, value)];
+  return [`# ${dotted} is null in the registry: no production address configured. Populate only after owner publication and verification; re-run ops/v2-env.mjs.`, set(name, "")];
+}
+
+/** The AccessManager: every privileged call on every v8 target resolves through it. */
+const accessManager = () => (isV8 ? [
+  "# ---- access control (v8: one AccessManager, V8-DESIGN §2) ----",
+  "# Roles, delays and the selector map are ops/abis/v2/roles.json, exported with the ABIs.",
+  ...contract("V2_ACCESS_MANAGER", "accessManager"),
+] : []);
+
+/** The flywheel: splitter, buyback executor and the block the splitter was deployed at. */
+const flywheelEnv = () => (isV8 ? [
+  "# ---- flywheel (v8: 50 % buyback and burn, 50 % Treasury Safe; V8-DESIGN §6) ----",
+  ...fromRegistry("V2_FEE_SPLITTER", "v2.flywheel.feeSplitter", flywheel.feeSplitter),
+  ...fromRegistry("V2_BUYBACK_EXECUTOR", "v2.flywheel.buybackExecutor", flywheel.buybackExecutor),
+] : []);
+
+/** STONKHOUSE, for anything that reports burned supply or the buyback's own pool. */
+const tokenEnv = () => (isV8 ? [
+  "# ---- token (v8: the only thing ever burned; Stock Token fees are sold for USDG first) ----",
+  ...fromRegistry("V2_TOKEN", "shared.token.address", token.address),
+  token.decimals === null || token.decimals === undefined
+    ? "# shared.token.decimals is null in the registry: no production value configured."
+    : "# registry shared.token.decimals",
+  set("V2_TOKEN_DECIMALS", token.decimals === null || token.decimals === undefined ? "" : String(token.decimals)),
+] : []);
+
+/**
+ * The five indexer inputs for the v8 lending and House periphery (indexer/lib/env.ts V2_EARN_VAULT,
+ * V2_ZAP_HELPER, V2_HOUSE_VAULT_FACTORY, V2_EARN_START_BLOCK, V2_HOUSE_START_BLOCK).
+ *
+ * THE REGISTRY HAS NO SLOT FOR ANY OF THEM, deliberately: EarnVault and StockZap are override-only
+ * (T-401 design B, web/lib/v2/config.ts), and build-markets.mjs records why EarnVault and the
+ * per-market House vaults are not protocol keys (T-232). So there is nothing to render a value from.
+ *
+ * They are named, never omitted: a file that simply lacked them is how a go-live indexer came to
+ * index no Earn, Zap or House contract with nothing anywhere saying so. They are COMMENTS rather than
+ * empty assignments because go-live-v2.sh refuses a service whose env renders any empty value, and
+ * with no registry slot an empty value could never be filled, so indexer-v2 could never go live.
+ */
+const PERIPHERY_UNREGISTERED = [
+  ["V2_EARN_VAULT", "the EarnVault (lending vault) address; unset = the indexer does not index EarnVault"],
+  ["V2_ZAP_HELPER", "the StockZap address; unset = the indexer does not index StockZap"],
+  ["V2_EARN_START_BLOCK", "EarnVault's deploy block; required with V2_EARN_VAULT or V2_ZAP_HELPER and refused without them"],
+  ["V2_HOUSE_VAULT_FACTORY", "the HouseVaultFactory address; unset = the indexer does not index House vaults"],
+  ["V2_HOUSE_START_BLOCK", "the factory's deploy block; required with V2_HOUSE_VAULT_FACTORY and refused without it"],
+];
+const peripheryEnv = () => [
+  "# ---- Earn, Zap and House (v8 periphery; NOT in the registry) ----",
+  "# The registry has no slot for these (T-401 design B), so nothing here can render a value. Until they are",
+  "# set on Railway from the verified deploy output, this indexer does NOT index Earn, Zap or House.",
+  ...PERIPHERY_UNREGISTERED.map(([name, what]) =>
+    `# ${name}=<not in the registry: ${what}; set on Railway from the verified deploy output>`),
+];
+
+const rpc = () => [
+  set("RH_RPC", rpcPrimary),
+  ...(rpcBackup === null ? [] : [set("RH_RPC_2", rpcBackup)]),
+];
 const registryPath = () => [
   "# The market registry baked into the image (ops/deploy.md §15.2); markets and contract addresses come from it.",
   "# Absolute: the keeper default ../ops/markets/tier1.json resolves against /app, the package root in the image.",
@@ -223,8 +334,21 @@ const journal = (service) => [
   "# SQLite journal of sent transactions and alert cooldowns, on the service's volume mounted at /data.",
   set("KEEPER_DB_PATH", dbPath(service)),
 ];
-const botKey = (name, bot, index, what) =>
-  secret(name, `~/.callhouse-keys/v2/${bot}.env from ops/v2/derive-bot-keys.sh (ops mnemonic index ${index}; address in registry v2.bots.${bot}); ${what}`);
+/**
+ * Where a signing bot's key comes from, as a comment: never a value.
+ *
+ * v8 keys live in ~/.callhouse-keys/v8/, NOT ~/.callhouse-keys/v2/. v7 derived indices 50-52 into
+ * v2/cranker.env and v2/pricer.env, and derive-bot-keys.sh refuses to overwrite a key file, so on any
+ * machine that ran v7 a v8 line naming that directory points at a v7 key and the v8 derivation dies.
+ * A v7 registry (ops/markets/v7-legacy.json) keeps the directory it always had.
+ *
+ * A local dev registry (`_dev`, ops/markets/dev.json) names no production mnemonic index at all
+ * (06-QUIRKS §G and its own `_dev` note): its bots are anvil's public dev accounts, the addresses in
+ * its v2.bots, whose keys `node ops/devnet/devnet.mjs env` prints.
+ */
+const botKey = (name, bot, index, what) => localDevRegistry
+  ? secret(name, `anvil dev account ops/devnet/lib.mjs ROLE_INDEX.${bot} (address in registry v2.bots.${bot}), a public key from anvil's "test test ... junk" mnemonic that \`node ops/devnet/devnet.mjs env\` prints; never a production mnemonic index; ${what}`)
+  : secret(name, `~/.callhouse-keys/${isV8 ? "v8" : "v2"}/${bot}.env from ops/v2/derive-bot-keys.sh (ops mnemonic index ${index}; address in registry v2.bots.${bot}); ${what}`);
 const alerts = () => [
   "# Alerts to the relay over Railway's private network (the v1 keeper's names).",
   set("ALERT_WEBHOOK", RELAY_ALERT_URL),
@@ -254,11 +378,46 @@ const SERVICES = [
       "# Optional sources the indexer also reads (calendar holidays, bounty payments); not in §7's list.",
       ...contract("V2_EXPIRY_CALENDAR", "expiryCalendar"),
       ...contract("V2_KEEPER_REWARDS", "keeperRewards"),
+      ...contract("V2_MAKER_VAULT", "makerVault"),
+      ...contract("V2_REWARDS_DISTRIBUTOR", "rewardsDistributor"),
+      ...(isV8 ? [
+        "# v8: RouteSet / RouteCleared, so /v2/markets[].settlement.route follows the chain, not the registry.",
+        ...contract("V2_PAYOUT_ROUTER", "payoutAdapter"),
+      ] : []),
       v2.deployBlock === null
         ? "# v2.deployBlock is null in the registry: no production block configured. Populate only after owner publication and verification; re-run ops/v2-env.mjs."
         : "# registry v2.deployBlock",
       set("V2_START_BLOCK", v2.deployBlock === null ? "" : String(v2.deployBlock)),
       "",
+      ...accessManager(),
+      ...(isV8 ? [
+        "# /v2/config access block and /v2/admin/operations: role grants, delays and every scheduled,",
+        "# executed or cancelled operation come from this contract's events.",
+        "",
+        ...flywheelEnv(),
+        // lib/env.ts treats these as a pair. A token deployed before the splitter must not
+        // accidentally activate the flywheel source; once the splitter exists, a missing token
+        // address is intentionally an empty value that makes the indexer refuse to boot.
+        ...(flywheel.feeSplitter
+          ? fromRegistry("V2_FLYWHEEL_TOKEN_ADDRESS", "shared.token.address", token.address)
+          : ["# V2_FLYWHEEL_TOKEN_ADDRESS is inactive until v2.flywheel.feeSplitter is populated.",
+            set("V2_FLYWHEEL_TOKEN_ADDRESS", "")]),
+        "# The splitter is constructed BEFORE the core (it is the core's fee recipient), so its first",
+        "# event can precede V2_START_BLOCK: /v2/flywheel indexes from its own block.",
+        flywheel.deployBlock === null || flywheel.deployBlock === undefined
+          ? "# v2.flywheel.deployBlock is null in the registry: no production block configured."
+          : "# registry v2.flywheel.deployBlock",
+        set("V2_FLYWHEEL_START_BLOCK", flywheel.deployBlock === null || flywheel.deployBlock === undefined ? "" : String(flywheel.deployBlock)),
+        "",
+        ...tokenEnv(),
+        "",
+        "# ---- Safes (v8: reported by /v2/config, watched by the monitor) ----",
+        ...fromRegistry("V2_ADMIN_SAFE", "shared.safes.admin", safes.admin),
+        ...fromRegistry("V2_TREASURY_SAFE", "shared.safes.treasury", safes.treasury),
+        "",
+        ...peripheryEnv(),
+        "",
+      ] : []),
       "# ---- services ----",
       "# /v2/fair/:longId is proxied from the pricing service.",
       set("PRICING_URL", PRICING_URL),
@@ -283,7 +442,9 @@ const SERVICES = [
       "",
       "# ---- chain and key ----",
       ...rpc(),
-      botKey("CRANKER_PK", "cranker", 50, "holds no role, earns capped bounties"),
+      ...(isV8
+        ? [botKey("CRANKER_PK", "cranker", 60, "holds BUYBACK on the FeeSplitter (it cranks buyback(minTokenOut)); every lifecycle call it makes is permissionless, and it earns capped bounties")]
+        : [botKey("CRANKER_PK", "cranker", 50, "holds no role, earns capped bounties")]),
       "",
       "# ---- registry and services ----",
       ...registryPath(),
@@ -291,6 +452,12 @@ const SERVICES = [
       set("INDEXER_URL", INDEXER_URL),
       "# V2_AUTO_ROLLER comes from the registry and is optional here: without it the rolls step is skipped.",
       "",
+      ...(isV8 ? [
+        ...flywheelEnv(),
+        "# The distribute and buyback steps. With V2_FEE_SPLITTER empty the cranker runs every other",
+        "# step and skips these, which is what it does before the flywheel is deployed.",
+        "",
+      ] : []),
       "# ---- process ----",
       ...port("CRANKER_PORT", PORTS.cranker),
       ...journal("cranker"),
@@ -331,7 +498,9 @@ const SERVICES = [
       "",
       "# ---- chain and key ----",
       ...rpc(),
-      botKey("MM_QUOTER_PK", "mmQuoter", 52, "QUOTER_ROLE only, cannot withdraw"),
+      ...(isV8
+        ? [botKey("MM_QUOTER_PK", "quoter", 62, "QUOTER on the manager: the ten MakerVault quoter functions, cannot withdraw")]
+        : [botKey("MM_QUOTER_PK", "mmQuoter", 52, "QUOTER_ROLE only, cannot withdraw")]),
       "",
       "# ---- vault, registry and services ----",
       // MAKER_VAULT is deliberately NOT rendered. The vault is the one contract this bot moves
@@ -374,7 +543,9 @@ const SERVICES = [
       "",
       "# ---- chain and key ----",
       ...rpc(),
-      botKey("PRICER_PK", "pricer", 51, "PRICER_ROLE on AutoRoller"),
+      ...(isV8
+        ? [botKey("PRICER_PK", "pricer", 61, "PRICER on the manager: AutoRoller.reprice")]
+        : [botKey("PRICER_PK", "pricer", 51, "PRICER_ROLE on AutoRoller")]),
       "",
       "# ---- registry and services ----",
       ...registryPath(),
@@ -400,7 +571,7 @@ const SERVICES = [
       "# The rules engine polls /v2/feed/activity here.",
       set("INDEXER_URL", INDEXER_URL),
       "# Used only to verify smart-wallet signatures (ERC-1271 / ERC-6492).",
-      set("RH_RPC", RPC_PRIMARY),
+      set("RH_RPC", rpcPrimary),
       "# The dapp origin: every message links into it and it is the only origin CORS admits.",
       set("APP_URL", APP_URL),
       "",
@@ -434,7 +605,13 @@ function render(service) {
     "",
     ...service.lines(),
   ];
-  return `${lines.join("\n")}\n`;
+  const text = `${lines.join("\n")}\n`;
+  // O3-401 / O8-05: notifier/src/config.ts refuses EMAIL_FROM or NOTIFIER_PUBLIC_URL without
+  // SMTP_URL. These stay comments. A live assignment here would crash-loop every go-live.
+  if (/(?:^|\n)(?:NOTIFIER_PUBLIC_URL|EMAIL_FROM)=/m.test(text)) {
+    die("NOTIFIER_PUBLIC_URL and EMAIL_FROM must stay comments (O3-401/O8-05): the notifier refuses either without SMTP_URL");
+  }
+  return text;
 }
 
 /* ---------------------------------------------------------------------------------------------- */

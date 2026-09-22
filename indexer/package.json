@@ -13,14 +13,18 @@
     "check:card-registry": "node scripts/gen-card-registry.mjs --check",
     "gen:v2-registry": "node scripts/gen-v2-registry.mjs",
     "check:v2-registry": "node scripts/gen-v2-registry.mjs --check",
+    "gen:reward-epochs": "node scripts/gen-reward-epochs.mjs",
+    "check:reward-epochs": "node scripts/gen-reward-epochs.mjs --check",
     "build": "ponder codegen && tsc --noEmit",
     "typecheck": "tsc --noEmit",
     "lint": "tsc --noEmit",
     "test": "vitest run",
+    "scale:v2": "vitest run scripts/v2-scale.test.ts --reporter=verbose",
     "fork:sync": "node --experimental-strip-types scripts/fork-sync.ts",
     "v2:devnet-check": "node --experimental-strip-types scripts/v2-devnet-check.ts",
     "v2:dev-readonly-check": "node --experimental-strip-types scripts/v2-dev-readonly-check.ts",
-    "maker:epoch": "node scripts/maker-epoch.mjs"
+    "maker:epoch": "node scripts/maker-epoch.mjs",
+    "maker:post": "node scripts/post-maker-epoch.mjs"
   },
   "dependencies": {
     "hono": "^4.13.7",

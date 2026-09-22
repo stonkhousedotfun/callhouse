@@ -42,6 +42,8 @@ export const prefsSchema = z
     fills: z.boolean().default(true),
     writerItmWarning: z.boolean().default(true),
     autoRoll: z.boolean().default(true),
+    feeNotice: z.boolean().default(false),
+    adminOperation: z.boolean().default(false),
     priceAlerts: z.array(priceAlertSchema).max(20).default([]),
   })
   .strict();
@@ -61,6 +63,8 @@ export const KIND_TOGGLE: Record<Exclude<EventKind, 'price_alert'>, Toggle> = {
   fill_receipt: 'fills',
   writer_itm_warning: 'writerItmWarning',
   auto_roll: 'autoRoll',
+  fee_notice: 'feeNotice',
+  admin_operation: 'adminOperation',
 };
 
 /** Stored prefs back to Prefs. A row that no longer parses lets nothing through. */

@@ -6,11 +6,26 @@
       "epoch": {
         "id": 2958,
         "start": 1789344000,
-        "end": 1789948800
+        "end": 1789948800,
+        "band": {
+          "bps": 1000,
+          "minUsdg": {
+            "raw": "20000",
+            "decimals": 6,
+            "formatted": "0.02"
+          }
+        }
+      },
+      "benchmarkPolicy": 2,
+      "samples": {
+        "absent": 6,
+        "valid": 994,
+        "missingReference": 0
       },
       "uptimePct": 99.4,
       "avgSpreadBps": 1480,
       "depthWithin100bps": "2240",
+      "depthInBand": "3100",
       "fills": 10,
       "volume": {
         "raw": "8606980",
@@ -28,11 +43,26 @@
       "epoch": {
         "id": 2957,
         "start": 1788739200,
-        "end": 1789344000
+        "end": 1789344000,
+        "band": {
+          "bps": 1000,
+          "minUsdg": {
+            "raw": "20000",
+            "decimals": 6,
+            "formatted": "0.02"
+          }
+        }
+      },
+      "benchmarkPolicy": 2,
+      "samples": {
+        "absent": 12,
+        "valid": 988,
+        "missingReference": 8
       },
       "uptimePct": 98.7,
       "avgSpreadBps": 1510,
       "depthWithin100bps": "1850",
+      "depthInBand": "2600",
       "fills": 6,
       "volume": {
         "raw": "2559300",

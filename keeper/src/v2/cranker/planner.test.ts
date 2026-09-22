@@ -21,6 +21,7 @@ import {
   inStrikeBand,
   isDeadOrder,
   ladderSearchStart,
+  ladderSlots,
   ladderStrikes,
   planExpiry,
   planLadder,
@@ -39,6 +40,7 @@ import {
   selectRedeemable,
   splitChunk,
   sweepDue,
+  upcomingLadderExpiries,
   type ExpiryView,
   type OrderView,
   type SeriesView,
@@ -155,6 +157,31 @@ test('planLadder: an anchored rung outside today\'s createSeries band is never p
 
 test('ladderSearchStart: MIN_SERIES_LEAD plus a margin, so a create is not refused BadExpiry when mined', () => {
   assert.equal(ladderSearchStart(1_000), 1_000 + 3_600 + 300);
+});
+
+test('upcomingLadderExpiries: nextExpiry from ladderSearchStart, each after the previous; a rejected read ends the list there', async () => {
+  const asked: Array<[number, boolean]> = [];
+  const next = async (after: number, weekly: boolean) => {
+    asked.push([after, weekly]);
+    if (after >= 20_000) throw new Error('NoExpiry');
+    return after + 10_000;
+  };
+  assert.deepEqual(await upcomingLadderExpiries(1_000, false, 3, next), [14_900, 24_900]);
+  assert.deepEqual(asked, [[4_900, false], [14_900, false], [24_900, false]], 'from now + 3_600 + 300, then after each answer; the rejection stops it');
+  asked.length = 0;
+  assert.deepEqual(await upcomingLadderExpiries(1_000, true, 1, next), [14_900], 'count reached: no further read');
+  assert.deepEqual(asked, [[4_900, true]]);
+  assert.deepEqual(await upcomingLadderExpiries(1_000, true, 0, next), [], 'count 0 reads nothing');
+});
+
+test('ladderSlots: the first expiriesAhead expiries of each tenor, weekly then daily; puts only for a market with puts; 0 switches a tenor off', () => {
+  const expiries = { weekly: [700, 1_400, 2_100], daily: [100, 200, 300, 400] };
+  const slots = (weekly: number, daily: number, puts: boolean) =>
+    ladderSlots({ expiriesAhead: { weekly, daily } }, puts, expiries).map((s) => `${s.tenor}:${s.expiry}:${s.isPut ? 'P' : 'C'}`);
+  assert.deepEqual(slots(2, 3, false), ['weekly:700:C', 'weekly:1400:C', 'daily:100:C', 'daily:200:C', 'daily:300:C']);
+  assert.deepEqual(slots(1, 1, true), ['weekly:700:C', 'weekly:700:P', 'daily:100:C', 'daily:100:P']);
+  assert.deepEqual(slots(2, 0, false), ['weekly:700:C', 'weekly:1400:C'], 'no dailies when the registry turns them off');
+  assert.deepEqual(slots(5, 9, false).length, 7, 'never more than the calendar gave');
 });
 
 /*//////////////////////////////////////////////////////////////

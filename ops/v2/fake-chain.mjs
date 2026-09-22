@@ -34,6 +34,24 @@ export const C = {
 export const SRC = { chainlink: addr(0xd1), univ3: addr(0xd2) };
 export const USDG = addr(0xe1);
 
+/**
+ * One holder's USDG balance in every fixture, and the source of the supply below.
+ *
+ * `defaultRead` keys `balanceOf` on the TOKEN address, not on the holder, so every
+ * value-holding contract the registry names reads as holding exactly this much: a fixture's
+ * locked total is this times the number of holders. The v8 healthy registry names two
+ * (clearinghouse, makerVault), so it locks 2,000,000 USDG.
+ */
+export const USDG_BALANCE = 10n ** 12n;
+
+/**
+ * USDG's totalSupply. It is DERIVED from USDG_BALANCE rather than written beside it, so the
+ * two answers cannot drift apart: a supply below the sum of the balances this file hands out
+ * would be a fixture contradicting itself, and `tvlFaults` reads a supply of 0 as proof that
+ * shared.usdg is the wrong address. The headroom covers any holder count a fixture could name.
+ */
+export const USDG_TOTAL_SUPPLY = USDG_BALANCE * 1000n;
+
 export function tmp(prefix = "monitor-fake-") {
   return mkdtempSync(path.join(tmpdir(), prefix));
 }
@@ -127,7 +145,12 @@ export function defaultRead(chain, address, fn, args) {
     case "mintFee":
       return 0n;
     case "balanceOf":
-      return a === USDG.toLowerCase() ? 10n ** 12n : 0n;
+      return a === USDG.toLowerCase() ? USDG_BALANCE : 0n;
+    case "totalSupply":
+      // The monitor reads this beside the balances (monitor.mjs, the tvl check's readMany) and
+      // treats an unreadable answer as a fault, which returns before checkTvl's half and full
+      // arms. Without this case no end-to-end fixture could reach them at all.
+      return a === USDG.toLowerCase() ? USDG_TOTAL_SUPPLY : 0n;
     case "thirdPartyRedeemAllowed":
       return true;
     case "free":

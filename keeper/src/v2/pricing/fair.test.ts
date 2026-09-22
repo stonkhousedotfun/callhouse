@@ -23,6 +23,7 @@ import { PricingService, priceContract, type FairOutcome, type FairRequest } fro
 import type { PricingMarket } from './markets.js';
 import { tokenSpotFromRound, type FeedRound } from './spot.js';
 import { buildSurface } from './surface.js';
+import { cboeToNormalized } from './cboe.js';
 
 /*//////////////////////////////////////////////////////////////
                               FIXTURES
@@ -151,8 +152,8 @@ test('cboe: the exact listed NVDA contract prices from its own mid at the token 
 });
 
 test('cboe: at the expiry forward on the chain clock the price IS the mid, to the base unit; a bare mid × ratio is not the answer', () => {
-  const nvda = buildSurface(NVDA, NVDA_AS_OF);
-  const tsla = buildSurface(TSLA, TSLA_AS_OF);
+  const nvda = buildSurface(cboeToNormalized(NVDA, 0), NVDA_AS_OF);
+  const tsla = buildSurface(cboeToNormalized(TSLA, 0), TSLA_AS_OF);
   const at = (surface: typeof nvda, strike: number, day: number, type: 'call' | 'put') => {
     const e = surface.expiries.find((x) => x.expiry === closeOf(day))!;
     const p = priceContract({ surface, request: request('X', strike, closeOf(day), type), tokenSpot: e.forward!, nowSeconds: surface.asOf });

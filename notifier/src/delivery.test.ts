@@ -6,7 +6,10 @@
  *     that wants the kind; the same key twice is one message (dedupe), even after it was sent;
  *   - retries: 3, at 30 s / 2 min / 10 min (or a longer Retry-After), then `failed`;
  *   - permanent failures do not retry; `gone` also disables the subscription;
- *   - the per-subscription rate limit (20 per rolling hour) drops the excess;
+ *   - the per-subscription rate limit is per class (60 receipts, 20 alerts per rolling hour): the
+ *     excess is dropped with the class in its reason, and a class at its cap leaves the other
+ *     class's messages flowing;
+ *   - statsLastHour reports the outcomes of the deliveries created in the last hour (/health);
  *   - the per-channel circuit breaker postpones without spending attempts, and other channels
  *     keep flowing;
  *   - at-least-once: a lease that ran out is taken again;
@@ -18,7 +21,15 @@ import { after, before, beforeEach, test } from 'node:test';
 import { CircuitBreaker } from './breaker.js';
 import type { Channel, ChannelName, SendContext, SendOutcome } from './channels/types.js';
 import { createTargetCipher } from './crypto.js';
-import { dedupeKey, DeliveryService, EnqueueError, type DeliveryOptions } from './delivery.js';
+import {
+  CLASS_KINDS,
+  DEFAULT_DELIVERY_OPTIONS,
+  dedupeKey,
+  deliveryClass,
+  DeliveryService,
+  EnqueueError,
+  type DeliveryOptions,
+} from './delivery.js';
 import type { EventKind } from './events.js';
 import { DEFAULT_PREFS, prefsSchema, type Prefs } from './prefs.js';
 import { disableSubscription, linkTelegramChat, purge, upsertWebPush } from './store.js';
@@ -101,6 +112,10 @@ async function deliveries() {
 
 const fill = (bucket: string | number, address = ADDRESS) =>
   ['fill_receipt', address, SAMPLE_PAYLOADS.fill_receipt, dedupeKey('fill_receipt', address, SERIES_221.longId, bucket)] as const;
+
+/** A message of the other delivery class (F4 D7): a reminder, not a receipt. */
+const alert = (bucket: string | number, address = ADDRESS) =>
+  ['expiry_1h', address, SAMPLE_PAYLOADS.expiry_1h, dedupeKey('expiry_1h', address, SERIES_221.longId, bucket)] as const;
 
 before(async () => {
   db = await createTestDb();
@@ -280,25 +295,97 @@ test('gone: failed, the subscription is disabled, and nothing more is queued for
   assert.ok(log.lines.some((l) => l.includes('"msg":"subscription disabled"') && l.includes(sub.id)));
 });
 
-test('rate limit: 20 per subscription per rolling hour, the excess is dropped', async () => {
+test('rate limit: 20 alerts per subscription per rolling hour, the excess is dropped with its class', async () => {
   await telegramSub();
   const delivery = service({ batchSize: 50 });
   for (let i = 0; i < 25; i += 1) {
-    await delivery.enqueue(...fill(`f${i}`));
+    await delivery.enqueue(...alert(`a${i}`));
     clock.advance(60_000);
   }
   // 25 minutes of events, delivered in one pass.
   await delivery.runOnce();
   const rows = await deliveries();
   assert.equal(rows.filter((r) => r.status === 'sent').length, 20);
-  assert.deepEqual([...new Set(rows.filter((r) => r.status !== 'sent').map((r) => `${r.status}:${r.last_error_code}`))], ['dropped:rate_limited']);
+  assert.deepEqual([...new Set(rows.filter((r) => r.status !== 'sent').map((r) => `${r.status}:${r.last_error_code}`))], ['dropped:rate_limited:alerts']);
   assert.equal(telegram.sent.length, 20);
 
   // An hour after those sends the window has room again.
   clock.advance(3600_000);
-  await delivery.enqueue(...fill('later'));
+  await delivery.enqueue(...alert('later'));
   await delivery.runOnce();
   assert.equal(telegram.sent.length, 21);
+});
+
+test('the caps are per class: receipts have their own hourly budget, and its overflow names it', async () => {
+  assert.deepEqual(DEFAULT_DELIVERY_OPTIONS.ratePerHour, { receipts: 60, alerts: 20 }, 'F4 D7: receipts 60/h, everything else 20/h');
+  assert.deepEqual(
+    [...CLASS_KINDS.receipts].sort(),
+    ['auto_roll', 'fill_receipt', 'payout_failed_to_ledger', 'settlement_receipt'],
+    'what already happened to the wallet is a receipt',
+  );
+  assert.deepEqual([...CLASS_KINDS.alerts].sort(), ['expiry_1h', 'expiry_24h', 'price_alert', 'strike_cross', 'writer_itm_warning']);
+  assert.equal(deliveryClass('settlement_receipt'), 'receipts');
+  assert.equal(deliveryClass('expiry_1h'), 'alerts');
+
+  await telegramSub();
+  // Small caps so the behaviour, not the arithmetic of 60 rows, is what the test spends its time on.
+  const delivery = service({ batchSize: 50, ratePerHour: { receipts: 2, alerts: 20 } });
+  for (let i = 0; i < 4; i += 1) await delivery.enqueue(...fill(`r${i}`));
+  await delivery.runOnce();
+  const rows = await deliveries();
+  assert.equal(rows.filter((r) => r.status === 'sent').length, 2, 'the receipt budget, not the alert one');
+  assert.deepEqual([...new Set(rows.filter((r) => r.status !== 'sent').map((r) => `${r.status}:${r.last_error_code}`))], ['dropped:rate_limited:receipts']);
+
+  // The alert budget is untouched by the receipts that just ran out.
+  assert.equal((await delivery.enqueue(...alert('a1'))).queued, 1);
+  await delivery.runOnce();
+  assert.equal((await deliveries()).filter((r) => r.status === 'sent').length, 3);
+  assert.equal(telegram.sent.length, 3);
+});
+
+test('a class at its cap does not throttle the other: 25 reminders then 5 receipts in one hour', async () => {
+  await telegramSub();
+  const delivery = service({ batchSize: 50 });
+  for (let i = 0; i < 25; i += 1) await delivery.enqueue(...alert(`a${i}`));
+  await delivery.runOnce();
+  assert.equal((await deliveries()).filter((r) => r.status === 'sent').length, 20, 'the alert cap');
+
+  clock.advance(60_000);
+  for (let i = 0; i < 5; i += 1) await delivery.enqueue(...fill(`r${i}`));
+  await delivery.runOnce();
+  const rows = await deliveries();
+  const receipts = rows.filter((r) => r.dedupe_key.startsWith('fill_receipt:'));
+  assert.deepEqual(receipts.map((r) => r.status), ['sent', 'sent', 'sent', 'sent', 'sent'], 'every receipt goes out behind a full hour of reminders');
+  assert.equal(telegram.sent.length, 25);
+  assert.equal(rows.filter((r) => r.status === 'dropped').length, 5, 'only the five reminders over the alert cap');
+});
+
+test('statsLastHour: the outcomes of the last hour’s deliveries, with the capped ones named', async () => {
+  await telegramSub();
+  const delivery = service({ batchSize: 50, ratePerHour: { receipts: 2, alerts: 20 } });
+  assert.deepEqual(await delivery.statsLastHour(), { sent: 0, failed: 0, dropped: 0, rateLimited: 0 }, 'an idle notifier reports zeros');
+
+  // Two receipts sent, two refused by the receipt cap.
+  for (let i = 0; i < 4; i += 1) await delivery.enqueue(...fill(`r${i}`));
+  await delivery.runOnce();
+  assert.deepEqual(await delivery.statsLastHour(), { sent: 2, failed: 0, dropped: 2, rateLimited: 2 });
+
+  // A permanent channel failure is `failed`, not a drop.
+  telegram.script = [{ ok: false, kind: 'permanent', code: 'http_400' }];
+  await delivery.enqueue(...alert('a1'));
+  await delivery.runOnce();
+  assert.deepEqual(await delivery.statsLastHour(), { sent: 2, failed: 1, dropped: 2, rateLimited: 2 });
+
+  // A drop for another reason counts as a drop and NOT as rate limited: the two must stay
+  // distinguishable, or the monitor cannot tell a cap overflow from a switched-off preference.
+  await delivery.enqueue(...alert('a2'));
+  await db.query('UPDATE notifier.subscription SET prefs = $1::jsonb', [JSON.stringify(prefsSchema.parse({ expiry1h: false }))]);
+  await delivery.runOnce();
+  assert.deepEqual(await delivery.statsLastHour(), { sent: 2, failed: 1, dropped: 3, rateLimited: 2 });
+
+  // The window is the last hour of created deliveries: an hour on, none of this is reported.
+  clock.advance(3600_001);
+  assert.deepEqual(await delivery.statsLastHour(), { sent: 0, failed: 0, dropped: 0, rateLimited: 0 });
 });
 
 test('circuit breaker: opens on repeated transient failures, postpones without spending attempts, other channels flow', async () => {

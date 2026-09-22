@@ -7,6 +7,8 @@ import { getAddress } from "viem";
 import { useAccount } from "wagmi";
 
 import { TradeTicket } from "@/components/v2/TradeTicket";
+import { SettlementDisclosure } from "@/components/v2/SettlementDisclosure";
+import { PremiumChart } from "@/components/v2/PremiumChart";
 import { Button, Notice, PageHead, Panel, Table } from "@/components/ui";
 import { USDG } from "@/lib/contracts";
 import type { BookResponse, Level, SeriesDetailResponse } from "@/lib/v2/api-types";
@@ -18,11 +20,7 @@ import { v2Markets } from "@/lib/markets";
 import { selectTradeSpot } from "@/lib/v2/marketSpot";
 import { cardTarget } from "@/lib/v2/payoff";
 import { formatShares, formatUsdg } from "@/lib/v2/payoffCard";
-
-const ET = new Intl.DateTimeFormat("en-US", { timeZone: "America/New_York", month: "short", day: "numeric", year: "numeric",
-  hour: "numeric", minute: "2-digit", timeZoneName: "short" });
-
-function date(seconds: number) { return ET.format(new Date(seconds * 1_000)); }
+import { stamp } from "@/lib/v2/time";
 
 function BookSide({ levels, title, account }: { levels: Level[]; title: string; account?: string }) {
   return <div>
@@ -50,7 +48,7 @@ function OrderBook({ book, account, degraded, loading }: { book: BookResponse | 
   </Panel>;
 }
 
-function SeriesFacts({ detail }: { detail: SeriesDetailResponse }) {
+export function SeriesFacts({ detail }: { detail: SeriesDetailResponse }) {
   const s = detail.series;
   const settlement = detail.settlement;
   const [localExpiry, setLocalExpiry] = useState<string | null>(null);
@@ -60,9 +58,9 @@ function SeriesFacts({ detail }: { detail: SeriesDetailResponse }) {
   return <Panel as="section" aria-label="Series facts">
     <h2 className="font-display text-xl font-bold">Series facts</h2>
     <dl className="mt-4 grid grid-cols-2 gap-x-4 gap-y-4 text-sm">
-      <div><dt className="text-ink-3">Expires (New York)</dt><dd className="font-semibold">{date(s.expiry)}</dd></div>
+      <div><dt className="text-ink-3">Expires (New York)</dt><dd className="font-semibold">{stamp(s.expiry)}</dd></div>
       <div><dt className="text-ink-3">Your local time</dt><dd className="font-semibold">{localExpiry ?? "Loading…"}</dd></div>
-      <div><dt className="text-ink-3">New writing closes</dt><dd className="font-semibold">{date(s.mintCutoff)}</dd></div>
+      <div><dt className="text-ink-3">New writing closes</dt><dd className="font-semibold">{stamp(s.mintCutoff)}</dd></div>
       <div><dt className="text-ink-3">Exercise fee</dt><dd className="num font-semibold">{(detail.exerciseFeeBps / 100).toFixed(2)}%</dd></div>
       <div><dt className="text-ink-3">Status</dt><dd className="font-semibold capitalize">{s.status}</dd></div>
       <div><dt className="text-ink-3">Open interest</dt><dd className="num font-semibold">{formatShares(BigInt(detail.openInterestUnits))} shares</dd></div>
@@ -125,7 +123,11 @@ export function SeriesPage({ ticker, longId, initialShares, openTicket }: { tick
   useEffect(() => {
     if (!openTicket) { focusedTicketFor.current = null; return; }
     if (target === null || focusedTicketFor.current === ticketRoute) return;
-    const input = document.getElementById("ticket-shares");
+    // The ticket mounts exactly ONE size input, and which one depends on W1's prefill: budget mode
+    // renders `ticket-budget`, shares mode renders `ticket-shares`. Looking only for the shares
+    // input meant a ladder Buy arriving as `?buy=1` -- the dollar-first default, with no `shares`
+    // param -- focused nothing and never scrolled, because this effect returned early.
+    const input = document.getElementById("ticket-budget") ?? document.getElementById("ticket-shares");
     if (!input) return;
     focusedTicketFor.current = ticketRoute;
     input.focus({ preventScroll: true });
@@ -147,7 +149,7 @@ export function SeriesPage({ ticker, longId, initialShares, openTicket }: { tick
         <div className="flex flex-wrap items-start justify-between gap-4">
           <div><p className="text-sm font-semibold text-ink-2">{detail.series.isPut ? "Payout starts below the strike" : "Payout starts above the strike"}</p>
             <p className="num mt-2 text-2xl font-bold">Strike ${detail.series.strike.formatted}</p>
-            <p className="mt-1 text-sm text-ink-2">Expires {date(detail.series.expiry)} · {detail.series.status}</p></div>
+            <p className="mt-1 text-sm text-ink-2">Expires {stamp(detail.series.expiry)} · {detail.series.status}</p></div>
           <div className="text-right"><p className="text-sm text-ink-3">Best ask / share</p>
             <p className="num text-2xl font-bold">{bestAsk ? `${bestAsk.price.formatted} USDG` : shownBook ? "No ask" : bookLoading ? "Loading…" : "Unavailable"}</p>
             <p className="text-xs text-ink-3">{shownBook ? bestAsk
@@ -162,21 +164,25 @@ export function SeriesPage({ ticker, longId, initialShares, openTicket }: { tick
             ? "Choose a size below to see the current quoted cost and projected USDG payout."
             : "Choose a size below to see the current quoted cost and estimated settlement value."}</p>
         <p className="mt-2 text-xs text-ink-3">Resale stays open after new writing closes, until expiry.</p>
+        <SettlementDisclosure settlement={market?.settlement} isPut={detail.series.isPut} ticker={ticker}
+          className="mt-4 border-t border-line pt-4" />
       </Panel>
       <div className="grid grid-cols-[minmax(0,1fr)] items-start gap-5 lg:grid-cols-[minmax(0,1fr)_minmax(18rem,23rem)]">
         <div className="min-w-0 space-y-5">
+          <PremiumChart trades={trades.data?.items ?? []} loading={trades.isPending} error={trades.isError} />
           <OrderBook book={shownBook} account={address} degraded={degraded} loading={bookLoading} />
           {book.isError && !shownBook ? <Notice tone="warn" role="status">Indexer book is unavailable.{fallback.error
             ? ` ${fallback.error.message}` : canRebuildBook ? " Trying the chain." : " On-chain fallback is unavailable in this build."}</Notice> : null}
           <Panel as="section" aria-label="Recent trades"><h2 className="font-display text-xl font-bold">Recent trades</h2>
             {trades.data?.items.length ? <Table label="Recent option trades" minWidth={350} className="mt-3"><thead><tr><th scope="col">Time (New York)</th><th scope="col">Price / share</th><th scope="col">Size</th></tr></thead>
-              <tbody>{trades.data.items.map((trade) => <tr key={trade.id}><td>{date(trade.ts)}</td><td className="num">{trade.price.formatted} USDG</td>
+              <tbody>{trades.data.items.map((trade) => <tr key={trade.id}><td>{stamp(trade.ts)}</td><td className="num">{trade.price.formatted} USDG</td>
                 <td className="num">{formatShares(BigInt(trade.units))} shares</td></tr>)}</tbody></Table> :
               <p className="mt-3 text-sm text-ink-2">{trades.isPending ? "Loading trades…" : trades.isError ? "Recent trades are temporarily unavailable." : "No trades recorded yet."}</p>}
           </Panel>
           <SeriesFacts detail={detail} />
         </div>
-        {target !== null ? <TradeTicket key={ticketRoute} ticker={ticker} detail={detail} book={shownBook} target={target} spot={spot} initialShares={initialShares}
+        {target !== null ? <TradeTicket key={ticketRoute} ticker={ticker} detail={detail} book={shownBook} target={target} spot={spot}
+          marketSettlement={market?.settlement} initialShares={initialShares}
           bookDegraded={degraded} onRefresh={() => { void book.refetch(); void fallback.refetch(); void series.refetch(); void trades.refetch(); }} /> :
           <Panel id="ticket" role="status">Loading the strike target and fee settings for this option…</Panel>}
       </div>

@@ -1,7 +1,7 @@
 import { getAddress, type Address, type Hex } from "viem";
 
 import { ASSET, FACTORY } from "./contracts";
-import { GENERATED_MARKETS, GENERATED_REGISTRY } from "./markets.generated";
+import { GENERATED_MARKETS, GENERATED_REGISTRY, LAUNCH_SET as GENERATED_LAUNCH_SET } from "./markets.generated";
 
 /**
  * The markets, as the app sees them.
@@ -19,9 +19,11 @@ import { GENERATED_MARKETS, GENERATED_REGISTRY } from "./markets.generated";
  * the app changes.
  *
  * THE DEFAULT MARKET is NVDA, the first one, and it carries the app's pre-registry behaviour: the
- * bare /account and /book routes redirect to it, the nav points at it when no market is in the
- * URL, and the NEXT_PUBLIC_FACTORY / NEXT_PUBLIC_ASSET build-time overrides (lib/contracts.ts,
- * for a fork or a rehearsal deploy) apply to IT ALONE. Every other market is exactly what the
+ * bare /account and /book routes redirect to it, the V1 nav (its Account and Book links and its
+ * market switcher) points at it when no market is in the URL, and the NEXT_PUBLIC_FACTORY /
+ * NEXT_PUBLIC_ASSET build-time overrides (lib/contracts.ts, for a fork or a rehearsal deploy)
+ * apply to IT ALONE. The V2 nav has no per-market entry, and its market switcher preselects no
+ * market (components/MarketSwitcher.tsx). Every other market is exactly what the
  * registry says; a rehearsal of a second market edits a copy of the registry instead
  * (scripts/gen-markets.mjs --registry). `DEFAULT_TICKER` is the one ticker this directory is
  * allowed to spell, and only here: it names which registry row the overrides land on. What the
@@ -112,6 +114,7 @@ type GeneratedRow = {
     univ3Pool: string | null;
     univ3MinLiquidity: string | null;
     dataStreamsFeedId: string | null;
+    payoutRoute: V2PayoutRoute | null;
     overrides: Readonly<Record<string, unknown>>;
     registeredAt: number | null;
     registerTx: string | null;
@@ -174,6 +177,9 @@ export function plannedByWave(): ReadonlyArray<{ wave: MarketWave; markets: read
 export type V2MarketStatus = "planned" | "live" | "paused";
 export type V2Wave = "canary" | "wave1" | "wave2";
 export const V2_WAVE_ORDER: readonly V2Wave[] = ["canary", "wave1", "wave2"];
+export type V2PayoutRoute =
+  | Readonly<{ venue: "v3"; fee: number }>
+  | Readonly<{ venue: "v4"; fee: number; tickSpacing: number; poolId: Hex }>;
 
 /** A market's `v2` block from the registry, typed. Big integers are bigint (USDG base units, ADR-04). */
 export type V2MarketConfig = {
@@ -186,12 +192,14 @@ export type V2MarketConfig = {
   puts: boolean;
   /** Collateral rent per seven days remaining, in parts per million; series pin it at creation. */
   mintFeePpm: number;
-  /** The Uniswap v3 {Stock Token, USDG} pool used as a settlement source and for USDG payout, or null. */
+  /** The Uniswap v3 {Stock Token, USDG} pool used only as a settlement source, or null. */
   univ3Pool: Address | null;
   /** The pool's harmonic-mean liquidity floor (raw pool liquidity units), null with the pool. */
   univ3MinLiquidity: bigint | null;
   /** Chainlink Data Streams feed id, lowercase hex, or null. */
   dataStreamsFeedId: Hex | null;
+  /** The independent v3 or v4 payout-conversion route, or null for in-kind fallback. */
+  payoutRoute: V2PayoutRoute | null;
   /** Keys of V2_DEFAULTS this market replaces. */
   overrides: Readonly<Record<string, unknown>>;
   /** Unix seconds of the market's registration, null while planned. */
@@ -203,19 +211,47 @@ export type V2MarketConfig = {
  * A market as v2 sees it. The addresses are the registry's, checksummed; the v1 build-time
  * NEXT_PUBLIC_ASSET / NEXT_PUBLIC_FACTORY overrides of the default market do not apply here.
  */
+/**
+ * T-OP-099. The owner's launch set (registry `launchSet`, owner ruling 2026-09-21: NVDA and SPCX), widened from the
+ * generated literal exactly as the market rows are. It is the ONLY thing that may decide whether the app presents
+ * a market as part of the launch: `wave` is rollout order and `status` is what the chain says, and neither answers
+ * the question (the registry's note says why). No ticker is written here; the generator copies the registry.
+ */
+export const LAUNCH_SET: { readonly note: string; readonly markets: readonly string[] } = GENERATED_LAUNCH_SET;
+/** Upper-case tickers of the launch set, for membership tests. */
+export const LAUNCH_SET_TICKERS: ReadonlySet<string> = new Set(LAUNCH_SET.markets.map((ticker) => ticker.trim().toUpperCase()));
+
+/** Whether the ticker (any case) is in the owner's launch set. False for an unknown, empty or non-launch ticker. */
+export function isLaunch(ticker: string | undefined | null): boolean {
+  if (!ticker) return false;
+  return LAUNCH_SET_TICKERS.has(ticker.trim().toUpperCase());
+}
+
 export type V2Market = {
   ticker: string;
   name: string;
   asset: Address;
   feed: Address;
+  /** T-OP-099. In the owner's launch set (LAUNCH_SET). Data on the row, so a consumer never re-derives it. */
+  launch: boolean;
   v2: V2MarketConfig;
 };
 
-const V2_MARKETS: readonly V2Market[] = ROWS.map((m) => ({
+/**
+ * Owner 2026-09-22 (launch night): the app presents the LAUNCH SET only -- NVDA and SPCX -- everywhere
+ * (market lists, the switcher, /trust/markets, static params). The other 33 registry rows stay in the
+ * registry (owner ruling 2026-09-21: the launch scopes the launch, not the registry) and come back here
+ * by widening `launchSet.markets`, never by editing this file. An empty launch set falls back to every
+ * row so a registry without one cannot blank the app.
+ */
+const V2_ROWS = LAUNCH_SET_TICKERS.size > 0 ? ROWS.filter((m) => isLaunch(m.ticker)) : ROWS;
+
+const V2_MARKETS: readonly V2Market[] = V2_ROWS.map((m) => ({
   ticker: m.ticker,
   name: m.name,
   asset: getAddress(m.asset),
   feed: getAddress(m.feed),
+  launch: isLaunch(m.ticker),
   v2: {
     status: m.v2.status,
     wave: m.v2.wave,
@@ -225,23 +261,43 @@ const V2_MARKETS: readonly V2Market[] = ROWS.map((m) => ({
     univ3Pool: m.v2.univ3Pool === null ? null : getAddress(m.v2.univ3Pool),
     univ3MinLiquidity: m.v2.univ3MinLiquidity === null ? null : BigInt(m.v2.univ3MinLiquidity),
     dataStreamsFeedId: m.v2.dataStreamsFeedId === null ? null : (m.v2.dataStreamsFeedId.toLowerCase() as Hex),
+    payoutRoute: m.v2.payoutRoute,
     overrides: m.v2.overrides,
     registeredAt: m.v2.registeredAt,
     registerTx: m.v2.registerTx === null ? null : (m.v2.registerTx.toLowerCase() as Hex),
   },
 }));
 
-/** Every registry market with its v2 block, whatever its v2 status, in registry order. */
+/** A v2 market published for trading: registration is recorded and its release status is live. */
+function isLiveV2Market(market: V2Market): boolean {
+  return market.v2.status === "live" && market.v2.registeredAt !== null;
+}
+
+const LIVE_V2_MARKETS: readonly V2Market[] = V2_MARKETS.filter(isLiveV2Market);
+
+/** Every LAUNCH-SET market with its v2 block, whatever its v2 status, in registry order (see V2_ROWS). */
 export function v2Markets(): readonly V2Market[] {
   return V2_MARKETS;
 }
 
-/** Whether the ticker (any case) is a v2 market with status live. False for an unknown ticker. */
-export function isV2Live(ticker: string | undefined | null): boolean {
-  if (!ticker) return false;
-  const key = ticker.trim().toUpperCase();
-  return V2_MARKETS.some((m) => m.ticker === key && m.v2.status === "live");
+/** Every registered, released v2 market in registry order. Planned and paused rows are excluded. */
+export function liveV2Markets(): readonly V2Market[] {
+  return LIVE_V2_MARKETS;
 }
+
+/** A compiled v2 market for a ticker in any case, whatever its lifecycle status. */
+export function getV2Market(ticker: string | undefined | null): V2Market | undefined {
+  if (!ticker) return undefined;
+  const key = ticker.trim().toUpperCase();
+  return V2_MARKETS.find((market) => market.ticker === key);
+}
+
+/** Whether the ticker is registered and released live in v2. False for non-live or unknown rows. */
+export function isV2Live(ticker: string | undefined | null): boolean {
+  const market = getV2Market(ticker);
+  return market !== undefined && isLiveV2Market(market);
+}
+
 
 /**
  * When the ticker's (any case) v1 factory was frozen, in unix seconds, or null: not frozen yet, no v1
@@ -267,8 +323,9 @@ export function getMarket(ticker: string | undefined | null): LiveMarket | undef
  * otherwise the first live market in registry order. The fallback exists for one registry state,
  * the default market marked "paused" (the registry's only pause state): without it every page's
  * build would fail on a status flip that the runbook is allowed to make, and the pause could not
- * ship without editing this file. With it the bare /account and /book redirects, the nav, the 404
- * page and the footer follow the fallback, and the paused market's own pages are 404s like any
+ * ship without editing this file. With it the bare /account and /book redirects, the V1 nav's
+ * Account and Book links and market switcher, the 404 page and the footer follow the fallback,
+ * and the paused market's own pages are 404s like any
  * other non-live row. The NEXT_PUBLIC_FACTORY / NEXT_PUBLIC_ASSET overrides do NOT follow: they
  * stay keyed to DEFAULT_TICKER's row (lib/contracts.ts reads that row by name), because an
  * override that silently moved to another market's factory would be worse than one that does

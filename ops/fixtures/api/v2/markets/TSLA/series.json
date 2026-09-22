@@ -15,7 +15,7 @@
         "expiry": 1789502400,
         "tenor": "daily",
         "mintCutoff": 1789500600,
-        "mintFeePpm": 300,
+        "mintFeePpm": 0,
         "mintFeesHeld": {
           "raw": "0",
           "decimals": 18,
@@ -60,11 +60,11 @@
         "expiry": 1789502400,
         "tenor": "daily",
         "mintCutoff": 1789500600,
-        "mintFeePpm": 300,
+        "mintFeePpm": 0,
         "mintFeesHeld": {
-          "raw": "41190476190477",
+          "raw": "0",
           "decimals": 18,
-          "formatted": "0.000041190476190477"
+          "formatted": "0"
         },
         "mintFeesAccrued": {
           "raw": "0",
@@ -109,7 +109,7 @@
         "expiry": 1789502400,
         "tenor": "daily",
         "mintCutoff": 1789500600,
-        "mintFeePpm": 300,
+        "mintFeePpm": 0,
         "mintFeesHeld": {
           "raw": "0",
           "decimals": 18,
@@ -154,7 +154,7 @@
         "expiry": 1789502400,
         "tenor": "daily",
         "mintCutoff": 1789500600,
-        "mintFeePpm": 300,
+        "mintFeePpm": 0,
         "mintFeesHeld": {
           "raw": "0",
           "decimals": 18,
@@ -199,7 +199,7 @@
         "expiry": 1789761600,
         "tenor": "weekly",
         "mintCutoff": 1789759800,
-        "mintFeePpm": 300,
+        "mintFeePpm": 0,
         "mintFeesHeld": {
           "raw": "0",
           "decimals": 18,
@@ -256,7 +256,7 @@
         "expiry": 1789761600,
         "tenor": "weekly",
         "mintCutoff": 1789759800,
-        "mintFeePpm": 300,
+        "mintFeePpm": 0,
         "mintFeesHeld": {
           "raw": "0",
           "decimals": 18,
@@ -313,11 +313,11 @@
         "expiry": 1789761600,
         "tenor": "weekly",
         "mintCutoff": 1789759800,
-        "mintFeePpm": 300,
+        "mintFeePpm": 0,
         "mintFeesHeld": {
-          "raw": "27321428571429",
+          "raw": "0",
           "decimals": 18,
-          "formatted": "0.000027321428571429"
+          "formatted": "0"
         },
         "mintFeesAccrued": {
           "raw": "0",
@@ -374,7 +374,7 @@
         "expiry": 1789761600,
         "tenor": "weekly",
         "mintCutoff": 1789759800,
-        "mintFeePpm": 300,
+        "mintFeePpm": 0,
         "mintFeesHeld": {
           "raw": "0",
           "decimals": 18,
@@ -431,11 +431,11 @@
         "expiry": 1789761600,
         "tenor": "weekly",
         "mintCutoff": 1789759800,
-        "mintFeePpm": 300,
+        "mintFeePpm": 0,
         "mintFeesHeld": {
-          "raw": "84910714285715",
+          "raw": "0",
           "decimals": 18,
-          "formatted": "0.000084910714285715"
+          "formatted": "0"
         },
         "mintFeesAccrued": {
           "raw": "0",
@@ -492,7 +492,7 @@
         "expiry": 1790366400,
         "tenor": "weekly",
         "mintCutoff": 1790364600,
-        "mintFeePpm": 300,
+        "mintFeePpm": 0,
         "mintFeesHeld": {
           "raw": "0",
           "decimals": 18,
@@ -541,7 +541,7 @@
         "expiry": 1790366400,
         "tenor": "weekly",
         "mintCutoff": 1790364600,
-        "mintFeePpm": 300,
+        "mintFeePpm": 0,
         "mintFeesHeld": {
           "raw": "0",
           "decimals": 18,
@@ -590,7 +590,7 @@
         "expiry": 1790366400,
         "tenor": "weekly",
         "mintCutoff": 1790364600,
-        "mintFeePpm": 300,
+        "mintFeePpm": 0,
         "mintFeesHeld": {
           "raw": "0",
           "decimals": 18,
@@ -639,7 +639,7 @@
         "expiry": 1790366400,
         "tenor": "weekly",
         "mintCutoff": 1790364600,
-        "mintFeePpm": 300,
+        "mintFeePpm": 0,
         "mintFeesHeld": {
           "raw": "0",
           "decimals": 18,
@@ -688,7 +688,7 @@
         "expiry": 1790366400,
         "tenor": "weekly",
         "mintCutoff": 1790364600,
-        "mintFeePpm": 300,
+        "mintFeePpm": 0,
         "mintFeesHeld": {
           "raw": "0",
           "decimals": 18,
@@ -723,5 +723,6 @@
       }
     }
   ],
+  "asOf": 1789592400,
   "nextCursor": null
 }

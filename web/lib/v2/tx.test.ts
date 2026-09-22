@@ -78,82 +78,118 @@ describe("v2 exact approval", () => {
   });
 });
 
-describe("v2 take fee deadline", () => {
+describe("v2 take fee cap", () => {
   const blockNumber = 42n;
   const chainTime = 1_789_620_000n;
+  const maxUint128 = (1n << 128n) - 1n;
   const request = { longId: 7n, buying: true, orderIds: [3n], units: 100n, minUnits: 100n,
     limitPrice: 250_000n, writeToSell: false, recipient: account as `0x${string}` };
-  const expected = { filled: 100n, premium: 250_000n, fee: 1_000n };
+  const expected = { filled: 100n, premium: 250_000n, takerFee: 1_000n, sellerFees: 0n };
 
-  function context(effectiveAt: number, feeBps = 40) {
-    const reads: { functionName: string; blockNumber: bigint; deadline?: number }[] = [];
+  function context(quote: readonly [bigint, bigint, bigint, bigint] =
+    [expected.filled, expected.premium, expected.takerFee, expected.sellerFees]) {
+    const reads: { functionName: string; blockNumber: bigint; params?: { deadline: number; maxTotalFee: bigint } }[] = [];
     const client = { getBlock: vi.fn(async () => ({ number: blockNumber, timestamp: chainTime })),
-      readContract: vi.fn(async (args: { functionName: string; blockNumber: bigint; args?: [{ deadline: number }] }) => {
-        reads.push({ functionName: args.functionName, blockNumber: args.blockNumber, deadline: args.args?.[0].deadline });
-        if (args.functionName === "pendingFeeParams") return [{}, effectiveAt];
-        if (args.functionName === "feeParams") return { resaleFeeBps: feeBps };
-        if (args.functionName === "quoteTake") return [expected.filled, expected.premium, expected.fee];
+      readContract: vi.fn(async (args: { functionName: string; blockNumber: bigint;
+        args?: [{ deadline: number; maxTotalFee: bigint }] }) => {
+        reads.push({ functionName: args.functionName, blockNumber: args.blockNumber, params: args.args?.[0] });
+        if (args.functionName === "quoteTake") return quote;
         throw new Error("Unexpected contract read");
       }),
     } as unknown as PublicClient;
     return { reads, client, writeContext: { account, client, wallet: {} as WalletClient } as WriteContext };
   }
 
-  it("caps the deadline at the second before activation using the quote block timestamp", async () => {
-    const { reads, writeContext } = context(Number(chainTime) + 120);
-    const params = await recheckTakeQuote(writeContext, request, { ...expected, resaleFeeBps: 40 });
-    expect(params.deadline).toBe(Number(chainTime) + 119);
-    expect(reads).toEqual([
-      { functionName: "pendingFeeParams", blockNumber },
-      { functionName: "feeParams", blockNumber },
-      { functionName: "quoteTake", blockNumber, deadline: Number(chainTime) + 119 },
-    ]);
-  });
-
-  it("stops when activation is the next second, before any quote or wallet write", async () => {
-    const { client, writeContext } = context(Number(chainTime) + 1);
-    await expect(recheckTakeQuote(writeContext, request, expected)).rejects.toThrow("fee change is too close");
-    expect(client.readContract).toHaveBeenCalledTimes(1);
-  });
-
-  it("uses current effective fees when the pending schedule already activated", async () => {
-    const { writeContext } = context(Number(chainTime), 60);
-    const params = await recheckTakeQuote(writeContext, request, { ...expected, resaleFeeBps: 60 });
+  it("quotes without a cap, then returns the exact buyer fee cap at one block", async () => {
+    const { reads, writeContext } = context();
+    const params = await recheckTakeQuote(writeContext, request, expected);
     expect(params.deadline).toBe(Number(chainTime) + 300);
+    expect(params.maxTotalFee).toBe(expected.takerFee);
+    expect(reads).toHaveLength(1);
+    expect(reads[0]).toMatchObject({ functionName: "quoteTake", blockNumber,
+      params: { deadline: Number(chainTime) + 300, maxTotalFee: maxUint128 } });
   });
 
-  it("recomputes the deadline if a schedule changes between approval checks", async () => {
-    const { client, writeContext } = context(0);
-    expect((await recheckTakeQuote(writeContext, request, expected)).deadline).toBe(Number(chainTime) + 300);
-    vi.mocked(client.readContract).mockImplementation(async (args) => {
-      if (args.functionName === "pendingFeeParams") return [{}, Number(chainTime) + 90] as never;
-      if (args.functionName === "quoteTake") return [expected.filled, expected.premium, expected.fee] as never;
-      throw new Error("Unexpected contract read");
+  it("sets a seller's cap to the quoted taker fee plus seller fees", async () => {
+    const seller = { ...expected, sellerFees: 5_000n };
+    const { writeContext } = context([seller.filled, seller.premium, seller.takerFee, seller.sellerFees]);
+    const params = await recheckTakeQuote(writeContext, { ...request, buying: false }, seller);
+    expect(params.maxTotalFee).toBe(6_000n);
+  });
+
+  it("allows a zero cap when the authoritative quote has no fees", async () => {
+    const free = { ...expected, takerFee: 0n, sellerFees: 0n };
+    const { writeContext } = context([free.filled, free.premium, free.takerFee, free.sellerFees]);
+    expect((await recheckTakeQuote(writeContext, request, free)).maxTotalFee).toBe(0n);
+  });
+
+  /**
+   * F-APP-01. A taker with a non-zero on-chain discount must be able to trade.
+   *
+   * The protected fact is "a discounted taker can buy, sell and buy-back-and-close". The old exact
+   * equality broke that fact the moment FEE_MANAGER set a discount module, because `quoteTake`
+   * applies the discount (OrderBook.sol:492) while the client estimate in payoff.ts has no discount
+   * term. These fixtures are the chain answering with a DISCOUNTED taker fee against an undiscounted
+   * estimate — which is exactly what a wired deployment with a discount module returns.
+   */
+  const DISCOUNT_BPS = 2_500n; // well inside MAX_DISCOUNT_BPS (5,000)
+  const discounted = (fee: bigint) => fee - fee * DISCOUNT_BPS / 10_000n;
+
+  it("lets a DISCOUNTED taker buy: the chain fee is lower than the estimate", async () => {
+    const { writeContext } = context([expected.filled, expected.premium, discounted(expected.takerFee), 0n]);
+    const params = await recheckTakeQuote(writeContext, request, expected);
+    expect(params.maxTotalFee).toBe(discounted(expected.takerFee));
+    expect(params.maxTotalFee).toBeLessThan(expected.takerFee);
+  });
+
+  it("lets a DISCOUNTED taker sell: seller fees stay exact while the taker fee is discounted", async () => {
+    const seller = { ...expected, sellerFees: 5_000n };
+    const { writeContext } = context([seller.filled, seller.premium, discounted(seller.takerFee), seller.sellerFees]);
+    const params = await recheckTakeQuote(writeContext, { ...request, buying: false }, seller);
+    expect(params.maxTotalFee).toBe(discounted(seller.takerFee) + seller.sellerFees);
+  });
+
+  it("lets a DISCOUNTED taker buy back and close", async () => {
+    const buyBack = { ...request, buying: true, writeToSell: true };
+    const { writeContext } = context([expected.filled, expected.premium, discounted(expected.takerFee), 0n]);
+    await expect(recheckTakeQuote(writeContext, buyBack, expected)).resolves.toMatchObject({
+      maxTotalFee: discounted(expected.takerFee),
     });
-    expect((await recheckTakeQuote(writeContext, request, expected)).deadline).toBe(Number(chainTime) + 89);
   });
 
-  it("rejects a changed resale fee even if the taker quote is unchanged", async () => {
-    const { writeContext } = context(0, 60);
-    await expect(recheckTakeQuote(writeContext, { ...request, buying: false },
-      { ...expected, resaleFeeBps: 40 })).rejects.toThrow("resale fee changed");
+  it("accepts a FULL discount to zero, the boundary of the bound", async () => {
+    const { writeContext } = context([expected.filled, expected.premium, 0n, 0n]);
+    expect((await recheckTakeQuote(writeContext, request, expected)).maxTotalFee).toBe(0n);
   });
 
-  it("rechecks after an approval and rejects a changed taker quote", async () => {
-    const { client, writeContext } = context(0);
+  it("still REFUSES a taker fee HIGHER than quoted — the bound is one-directional", async () => {
+    // The discount can only reduce (`base - base * discountBps / BPS`), so a higher fee is never a
+    // discount and must still stop the trade. Relaxing this to `<=` on everything is the forbidden fix.
+    const { writeContext } = context([expected.filled, expected.premium, expected.takerFee + 1n, 0n]);
+    await expect(recheckTakeQuote(writeContext, request, expected)).rejects.toThrow("higher than quoted");
+  });
+
+  it("still REFUSES a changed filled or premium, discount or no discount", async () => {
+    const { writeContext: a } = context([expected.filled + 1n, expected.premium, discounted(expected.takerFee), 0n]);
+    await expect(recheckTakeQuote(a, request, expected)).rejects.toThrow("on-chain quote changed");
+    const { writeContext: b } = context([expected.filled, expected.premium + 1n, discounted(expected.takerFee), 0n]);
+    await expect(recheckTakeQuote(b, request, expected)).rejects.toThrow("on-chain quote changed");
+  });
+
+  it("rechecks after approval and rejects a changed taker or seller fee", async () => {
+    const { client, writeContext } = context();
     await recheckTakeQuote(writeContext, request, expected);
-    vi.mocked(client.readContract).mockImplementation(async (args) => {
-      if (args.functionName === "pendingFeeParams") return [{}, 0] as never;
-      if (args.functionName === "quoteTake") return [100n, 250_000n, 2_000n] as never;
-      throw new Error("Unexpected contract read");
-    });
+    vi.mocked(client.readContract).mockResolvedValueOnce(
+      [expected.filled, expected.premium, expected.takerFee, 1n] as never,
+    );
     await expect(recheckTakeQuote(writeContext, request, expected)).rejects.toThrow("on-chain quote changed");
   });
 });
 
 describe("v2 confirmed take amount", () => {
   const params = { longId: 7n, buying: true, orderIds: [3n], units: 100n, minUnits: 1n,
-    limitPrice: 250_000n, writeToSell: false, recipient: account as `0x${string}`, deadline: 1_789_620_300 };
+    limitPrice: 250_000n, writeToSell: false, recipient: account as `0x${string}`, deadline: 1_789_620_300,
+    maxTotalFee: 1_000n };
 
   function context(logs: unknown[]) {
     const client = { simulateContract: vi.fn(async (request: unknown) => ({ request })),

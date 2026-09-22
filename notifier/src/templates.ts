@@ -5,7 +5,7 @@
  *                          webpush.ts, email.ts): the title as a first line, a push title or a
  *                          subject; the url as a link; a settings footer.
  *
- * COPY RULES (plan README "Copy rules", scripts/copy-lint.mjs), pinned by templates.test.ts:
+ * COPY RULES (plan README "Copy rules"; copy-lint held these until it was removed on 2026-09-21), pinned by templates.test.ts:
  *   - "Stock Tokens", never any other name for them.
  *   - Every message about a long position (a payoff the holder paid for) states its cost and its
  *     max loss, which for a long is the cost. Costs and max losses round UP to the cent.
@@ -13,6 +13,9 @@
  *     claims, nothing about what a position "could" make. A payout that happened is reported with
  *     its multiple of the cost, because that is a fact about the past.
  *   - Numbers are formatted as the dapp formats them (format.ts). Prices are USDG per whole share.
+ *   - A price-driven message states when its spot was observed ("as of <New York time>") when the
+ *     payload carries `spotUpdatedAt`, and says nothing about the time when it does not. No
+ *     template ever substitutes a clock for a missing observation time.
  *   - Every message links to the app page where the thing it describes can be seen or acted on:
  *     a series page, Portfolio, Earn for a writer, or the market page for a price alert.
  *
@@ -53,6 +56,19 @@ function assetAmount(amount: Money, ticker: string): string {
 
 function costAndMaxLoss(cost: Money): string {
   return `Cost: ${usdgCost(cost)}. Max loss: ${usdgCost(cost)}.`;
+}
+
+/**
+ * " as of <New York time>" for a spot the payload dated, and NOTHING for one it did not.
+ *
+ * The spot in these messages is the on-chain one settlement uses, which stops updating from about
+ * 17:00 New York on Friday until Monday's first print. Stating when it was observed is the point
+ * of the phrase, so a payload without a time (an older queued message, a market that returned no
+ * `spotUpdatedAt`) says nothing at all rather than the send time or the render time, either of
+ * which would read as a price observed now.
+ */
+function asOf(spotUpdatedAt: number | undefined): string {
+  return spotUpdatedAt === undefined ? '' : ` as of ${fmtEastern(spotUpdatedAt)}`;
 }
 
 export interface Links {
@@ -148,7 +164,7 @@ function strikeCross(p: EventPayloads['strike_cross'], links: Links): Rendered {
   const name = optionName(p.series);
   const when = fmtEastern(p.series.expiry);
   const strike = usdg(p.series.strike);
-  const where = `${p.series.ticker} is at ${usdg(p.spot)}, ${p.direction} the ${strike} strike`;
+  const where = `${p.series.ticker} is at ${usdg(p.spot)}${asOf(p.spotUpdatedAt)}, ${p.direction} the ${strike} strike`;
   if (p.position === 'long') {
     return {
       title: `${p.series.ticker} is ${p.direction} the strike of your ${name}`,
@@ -174,12 +190,30 @@ function strikeCross(p: EventPayloads['strike_cross'], links: Links): Rendered {
 function priceAlert(p: EventPayloads['price_alert'], links: Links): Rendered {
   return {
     title: `${p.ticker} is ${p.direction} ${usdg(p.threshold)}`,
-    body: `${p.ticker} is at ${usdg(p.spot)}, ${p.direction} your alert at ${usdg(p.threshold)}.`,
+    body: `${p.ticker} is at ${usdg(p.spot)}${asOf(p.spotUpdatedAt)}, ${p.direction} your alert at ${usdg(p.threshold)}.`,
     url: links.market(p.ticker),
   };
 }
 
+function expiryLine(p: { series: SeriesLite; position: 'long' | 'short'; units: string; cost?: Money }): string {
+  const name = optionName(p.series);
+  const side = p.position === 'long' ? 'long' : 'written';
+  const cost = p.position === 'long' && p.cost !== undefined ? ` ${costAndMaxLoss(p.cost)}` : '';
+  return `${name} (${shares(p.units)}, ${side}).${cost}`;
+}
+
 function expiry(p: EventPayloads['expiry_24h'], hoursLabel: string, links: Links): Rendered {
+  if (p.positions !== undefined && p.positions.length > 3) {
+    const n = p.positions.length + (p.more ?? 0);
+    const when = fmtEastern(p.series.expiry);
+    const lines = p.positions.map(expiryLine);
+    if (p.more !== undefined) lines.push(`And ${p.more} more.`);
+    return {
+      title: `${n} of your positions expire in ${hoursLabel}`,
+      body: [`${n} of your positions expire ${when}.`, ...lines, 'See them in Portfolio.'].join('\n'),
+      url: links.portfolio(),
+    };
+  }
   const name = optionName(p.series);
   const when = fmtEastern(p.series.expiry);
   const spot = p.spot === undefined ? '' : ` ${p.series.ticker} is at ${usdg(p.spot)}.`;
@@ -259,7 +293,7 @@ function writerItmWarning(p: EventPayloads['writer_itm_warning'], links: Links):
   return {
     title: `${p.series.ticker} is ${side} the strike of the ${name} you wrote`,
     body: [
-      `${p.series.ticker} is at ${usdg(p.spot)}, ${side} the ${usdg(p.series.strike)} strike of the ${name} you wrote (${shares(p.units)}), which expires ${fmtEastern(p.series.expiry)}.`,
+      `${p.series.ticker} is at ${usdg(p.spot)}${asOf(p.spotUpdatedAt)}, ${side} the ${usdg(p.series.strike)} strike of the ${name} you wrote (${shares(p.units)}), which expires ${fmtEastern(p.series.expiry)}.`,
       `If ${paysIf(p.series)}, holders are paid from your ${assetAmount(p.collateralLocked, p.series.ticker)} of collateral and you get back the rest. You keep the premium either way.`,
       'You can buy back and close the position before expiry from Earn.',
     ].join('\n'),
@@ -319,6 +353,33 @@ function payoutFailedToLedger(p: EventPayloads['payout_failed_to_ledger'], links
   };
 }
 
+function feeNotice(p: EventPayloads['fee_notice'], links: Links): Rendered {
+  // effectiveAt is pendingFees.effectiveAt from web/lib/v2/api-schema.ts (configResponseSchema).
+  // Do not write a delay length; the contract publishes the instant.
+  if (p.phase === 'scheduled' && p.effectiveAt !== undefined) {
+    return {
+      title: 'Fee change scheduled',
+      body: `A protocol fee change is scheduled to take effect ${fmtEastern(p.effectiveAt)}.`,
+      url: links.settings(),
+    };
+  }
+  return {
+    title: 'Protocol fees changed',
+    body: 'Live protocol fees have changed.',
+    url: links.settings(),
+  };
+}
+
+function adminOperation(p: EventPayloads['admin_operation'], links: Links): Rendered {
+  const status =
+    p.status === 'pending' ? 'scheduled' : p.status === 'executed' ? 'executed' : 'canceled';
+  return {
+    title: 'Admin operation',
+    body: `Admin operation ${p.label} is ${status}.`,
+    url: links.settings(),
+  };
+}
+
 /** Render a validated event (events.ts parsePayload). Pure. */
 export function render(event: ParsedEvent, links: Links): Rendered {
   switch (event.kind) {
@@ -340,5 +401,9 @@ export function render(event: ParsedEvent, links: Links): Rendered {
       return autoRoll(event.payload, links);
     case 'payout_failed_to_ledger':
       return payoutFailedToLedger(event.payload, links);
+    case 'fee_notice':
+      return feeNotice(event.payload, links);
+    case 'admin_operation':
+      return adminOperation(event.payload, links);
   }
 }

@@ -1,17 +1,17 @@
-import { ALL_MARKETS, type Market } from "@/lib/markets";
+import { getV2Market, type V2Market } from "@/lib/markets";
 import { longIdOf } from "@/lib/v2/seriesId";
 
 const UINT = /^(0|[1-9]\d*)$/;
 const ALIAS = /^([cp])-([1-9]\d*(?:\.\d{1,6})?)-(\d{4}-\d{2}-\d{2})$/;
 
 /** A canonical lowercase ticker in the compiled registry, including not-yet-live v2 markets. */
-export function parseV2Ticker(param: string): Market | undefined {
+export function parseV2Ticker(param: string): V2Market | undefined {
   if (!/^[a-z0-9.]{1,10}$/.test(param)) return undefined;
-  return ALL_MARKETS.find((market) => market.ticker.toLowerCase() === param);
+  return getV2Market(param);
 }
 
 /** Numeric long id or a readable call/put alias. Returns the canonical decimal id. */
-export function parseV2Series(ticker: Market, param: string): string | undefined {
+export function parseV2Series(ticker: V2Market, param: string): string | undefined {
   if (UINT.test(param)) {
     try {
       const id = BigInt(param);

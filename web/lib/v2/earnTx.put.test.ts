@@ -58,9 +58,9 @@ describe("cash-secured put ask preflight", () => {
     expect(client.readContract).toHaveBeenCalledWith(expect.objectContaining({ functionName: "longIdOf", args: [underlying, false, strike, expiry] }));
   });
 
-  it("rejects collateral-only balances with nonzero rent for calls and puts", async () => {
-    await expect(preflightAsk(account, underlying, true, strike, expiry, 100n, 0, chain(strike, { ppm: 1200, premiumFeeBps: 0 }))).rejects.toThrow(/writer rent/);
-    await expect(preflightAsk(account, underlying, false, strike, expiry, 100n, 0, chain(10n ** 18n, { ppm: 1200, premiumFeeBps: 0 }))).rejects.toThrow(/writer rent/);
+  it("rejects balances below the complete on-chain collateral requirement for calls and puts", async () => {
+    await expect(preflightAsk(account, underlying, true, strike, expiry, 100n, 0, chain(strike, { ppm: 1200, premiumFeeBps: 0 }))).rejects.toThrow(/enough free USDG/);
+    await expect(preflightAsk(account, underlying, false, strike, expiry, 100n, 0, chain(10n ** 18n, { ppm: 1200, premiumFeeBps: 0 }))).rejects.toThrow(/enough free Stock Tokens/);
   });
 
   it("uses the existing series mintFee view, even when the market rate differs", async () => {

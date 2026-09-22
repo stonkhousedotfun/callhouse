@@ -27,11 +27,23 @@ export async function readMany(client: MulticallClient, calls: readonly AnyRead[
   return multicallMany(client, calls as never, { blockNumber }) as Promise<ReadOutcome<unknown>[]>;
 }
 
-const okOr = <T>(o: ReadOutcome<unknown> | undefined, fallback: T): T => (o !== undefined && o.ok ? (o.result as T) : fallback);
-
 /** The result of a successful read, else undefined. */
 export function okResult<T>(o: ReadOutcome<unknown> | undefined): T | undefined {
   return o !== undefined && o.ok ? (o.result as T) : undefined;
+}
+
+/**
+ * A market's own oracle from its `Clearinghouse.market(underlying)` read: null when that read failed, or answered the
+ * zero address. Every step that prices a market resolves its oracle here.
+ *
+ * NULL, NOT A DEFAULT. Oracles are per market; the registry's settlementOracle is only one of them. A failed read
+ * substituted with it becomes a plausible spot from a source this market may not use, and a stale, roll or ladder
+ * decision taken on it looks exactly like one taken on the right price. A caller holding null reads no spot for that
+ * market and takes no spot-dependent decision for it this tick; the tick itself goes on.
+ */
+export function marketOracleOf(o: ReadOutcome<unknown> | undefined): Address | null {
+  const oracle = okResult<{ oracle: Address }>(o)?.oracle;
+  return oracle === undefined || /^0x0{40}$/i.test(oracle) ? null : oracle;
 }
 
 function must<T>(o: ReadOutcome<unknown> | undefined, what: string): T {
@@ -239,7 +251,11 @@ export async function surveyExpiries(
   const perKey = keys.map((k, i) => {
     const o = i * 6;
     const price = must<readonly [number, bigint]>(base[o + 1], `settlementPrice(${k.underlying}, ${k.expiry})`);
-    const cand = okOr<readonly [bigint, number, boolean, number]>(base[o + 2], [0n, 0, false, 0]);
+    // `must`, like settlementPrice beside it: candidate() is on ISettlementOracle, so a failed read is a fault, never
+    // "no candidate" (T-476). A default here read as finalizableAt 0, exactly the no-candidate value, so a Pending
+    // expiry was finalized every tick and its sources-disagree and pending-stuck alerts were skipped inside the veto
+    // window. The tick fails and the next one reads again.
+    const cand = must<readonly [bigint, number, boolean, number]>(base[o + 2], `candidate(${k.underlying}, ${k.expiry})`);
     const info = okResult<readonly [number, bigint, number, boolean, boolean, boolean]>(base[o + 3]);
     const recorded = okResult<readonly [readonly Address[], readonly boolean[], readonly bigint[], number]>(base[o + 4]);
     const settlementConfig = okResult<readonly [boolean, readonly Address[], number, number, number]>(base[o + 5]);

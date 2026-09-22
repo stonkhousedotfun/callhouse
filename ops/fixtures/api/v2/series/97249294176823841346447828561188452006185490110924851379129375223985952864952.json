@@ -13,16 +13,16 @@
     "expiry": 1789156800,
     "tenor": "weekly",
     "mintCutoff": 1789155000,
-    "mintFeePpm": 80,
+    "mintFeePpm": 0,
     "mintFeesHeld": {
       "raw": "0",
       "decimals": 18,
       "formatted": "0"
     },
     "mintFeesAccrued": {
-      "raw": "70952380952381",
+      "raw": "0",
       "decimals": 18,
-      "formatted": "0.000070952380952381"
+      "formatted": "0"
     },
     "status": "settled"
   },
@@ -35,16 +35,16 @@
     "iv": null,
     "delta": null,
     "last": {
-      "raw": "247000",
+      "raw": "300000",
       "decimals": 6,
-      "formatted": "0.247"
+      "formatted": "0.3"
     }
   },
   "openInterestUnits": "0",
   "volume": {
-    "raw": "494000",
+    "raw": "644000",
     "decimals": 6,
-    "formatted": "0.494"
+    "formatted": "0.644"
   },
   "settlement": {
     "status": "Finalized",

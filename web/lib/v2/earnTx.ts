@@ -125,7 +125,7 @@ export async function preflightAsk(
     ? await client.readContract({ address: clearinghouse, abi: clearinghouseAbi, functionName: "mintFee", args: [longId, units], blockNumber })
     : mintRent(units, { collateralPerUnit: collateralPerUnit(isPut, strike), mintFeePpm: market.mintFeePpm, expiry, snapshotTimestamp: now });
   const collateralRequired = units * collateralPerUnit(isPut, strike) + rent;
-  if (free < collateralRequired) throw new Error(`Deposit enough free ${isPut ? "USDG" : "Stock Tokens"} for this ask and its writer rent first.`);
+  if (free < collateralRequired) throw new Error(`Deposit enough free ${isPut ? "USDG" : "Stock Tokens"} for this ask first.`);
   return { longId, exists, operator, free, mintCutoff, rent, collateralRequired };
 }
 

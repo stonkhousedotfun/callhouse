@@ -1,25 +1,178 @@
 # web
 
-`app.stonkhouse.fun` — the Stonkhouse dapp. Next.js App Router, React 19, wagmi 3, viem. No custody,
-no private keys, no server-side signing. Unaudited, and it says so on every page.
+`app.stonkhouse.fun` is the Stonkhouse dapp: Next.js App Router, React, wagmi and viem. The
+browser prepares transactions for the user's wallet; this package holds no signer key. The
+marketing site is a separate repository, `callhouse-site`, at `stonkhouse.fun`.
 
-The marketing landing is a separate repository, `stonkhousedotfun/callhouse-site`, served at
-`stonkhouse.fun`. It carries no wallet code at all and it is not a copy of anything here; the two
-domains share a palette, nothing else at runtime.
+## V2 app entrypoint
 
-**This package is `noindex`.** That is deliberate: the disclosures should have one canonical
-address and it is the other domain. The full reasoning is in the comment above `metadata` in
-`app/layout.tsx`. `app/robots.ts` states the same thing as a served `robots.txt`, so the two must
-be changed together.
+`NEXT_PUBLIC_V2=1` selects the v2 buyer-first shell. Without it, the v1 app remains the
+default. V2 public buyer pages are eligible for indexing; wallet, writer, settings and legacy
+pages stay noindex. Keep `app/layout.tsx`, route metadata, `app/robots.ts` and `app/sitemap.ts`
+consistent when changing crawl policy.
+
+The separate dev app build sets `NEXT_PUBLIC_DEV_PREVIEW=1` alongside `NEXT_PUBLIC_V2=1` and
+`NEXT_PUBLIC_APP_URL=https://dev.app.stonkhouse.fun`. It shows a persistent DEV PREVIEW banner and
+a trade-ticket reminder, emits noindex metadata on every page and a noindex/nofollow
+`X-Robots-Tag` response header, disallows all crawlers in `robots.txt`, and returns 404 for
+`sitemap.xml`. The Dockerfile passes
+this build-time flag; changing it requires a rebuild. Leave it `0` for the production app build.
+
+| V2 route | Purpose |
+|---|---|
+| `/` | market and series discovery |
+| `/<ticker>` | market details and series discovery |
+| `/<ticker>/<series>` | series details and buyer trade ticket |
+| `/<ticker>/account` | v1 market account page; see the historical Routes table below |
+| `/<ticker>/book` | v1 market book page; see the historical Routes table below |
+| `/account` | redirects to `/legacy/<ticker>/account` in the v2 app |
+| `/activity` | v1 activity page; see the historical Routes table below |
+| `/book` | redirects to `/legacy/<ticker>/book` in the v2 app |
+| `/collect` | redirects to `/legacy/collect` in the v2 app |
+| `/docs` | v1 protocol summary; see the historical Routes table below |
+| `/earn` | writer market discovery |
+| `/earn/<ticker>` | writer inventory and offer flow for one market |
+| `/house` | house-vault market overview |
+| `/house/<ticker>` | house-vault detail for one market |
+| `/leaderboard` | ranked maker activity |
+| `/legal` | v1 legal page; see the historical Routes table below |
+| `/lend` | lending vault overview |
+| `/lend/rewards` | lender rewards history and claims |
+| `/makers` | maker directory and performance |
+| `/markets` | redirects to the market-status reference at `/trust/markets` |
+| `/pnl/<id>` | verifiable shareable P&L receipt |
+| `/portfolio` | wallet positions and history |
+| `/settings/notifications` | notification preferences |
+| `/trust` | protocol controls, delayed roles and audit status |
+| `/trust/burns` | Stock Token burn history |
+| `/trust/markets` | live, upcoming, paused and deferred market status |
+| `/v7` | v7 run-off portfolio |
+| `/vault/nvda` | redirects to `/legacy/vault/nvda` in the v2 app |
+| `/vault/nvda/cycle` | redirects to `/legacy/vault/nvda/cycle` in the v2 app |
+| `/vaults` | vault directory and availability |
+| `/wins` | recent maker outcomes |
+| `/legacy/*` | v1 solo and vault run-off pages |
+
+The v2 source is in `app/`, `components/v2/` and `lib/v2/`. The registry at
+`../ops/markets/tier1.json` has separate v1 `status` and v2 `v2.status` fields. `gen:markets`
+commits its snapshot to `lib/markets.generated.ts`, including `V2_CONTRACTS`, `V2_FEES` and
+`V2_DEFAULTS`. Null v2 addresses mean the mainnet contract is not deployed. Devnet-generated
+addresses are for rehearsal only; see `../ops/devnet/README.md`.
+
+The indexer's `/v2/config` must match the compiled chain, interface, constants and contract
+addresses before a trade. `lib/v2/config.ts` checks this and `components/v2/TradeTicket.tsx`
+guards writes. The effective OrderBook fees are mutable on-chain, so the registry's `V2_FEES`
+are launch examples, not a live fee quote. Check the current API and on-chain fee parameters
+for buyer and seller amounts. V2 trades use Clearinghouse and OrderBook calls; the keeper's
+Seaport order payload below applies only to v1.
+
+### Interface version 8: fee caps and execution
+
+V8 charges the writer from premium on a first sale and launches true resales with no seller fee.
+Read effective OrderBook fees for every trade; registry values are launch defaults only. Buyer
+maximum loss remains premium plus taker fee, with gas disclosed separately.
+
+Every take quotes at one pinned block with `maxTotalFee` temporarily set to `uint128.max`, checks
+all four `quoteTake` results, and submits with an exact zero-tolerance cap equal to the quoted taker
+fee plus any seller fee. A fee change between quote and fill therefore reverts `FeeAboveMax` instead
+of silently changing proceeds. The five-minute transaction deadline remains a separate freshness
+guard.
+
+The API book includes raw maker collateral and its snapshot timestamp. `ticket.ts` reserves the
+complete collateral requirement across asks from the same maker, accepting or skipping the whole
+proposed fill as OrderBook does. A writer budget does not cause an order to be partially resized.
+`bookFromChain.ts` reads orders, balances and series at one block when the API book is unavailable.
+Immediately before signing, chain preflights repeat the budget check at one block and the
+transaction is simulated. API depth and an earlier quote are not execution guarantees.
+
+Earn shows seller fees and total collateral required. An auto-roll stale cancellation withdraws
+the ask while retaining the current period and any filled positions; the UI displays **Ask withdrawn**.
+The conversion-floor component decodes the PayoutRouter's v3/v4 route tuple and reads its cached
+route fee. `FeeAboveMax`, `InTheMoney` and `OutflowCapExceeded` have dedicated explanations in
+`lib/v2/errors.ts`.
+
+Portfolio order edits and redemptions re-read the displayed series from Clearinghouse before
+signing; an API order ID or position row does not prove its underlying, strike, type or expiry.
+The payout controls read `Clearinghouse.payoutPrefs(account)` directly. Long and short collection
+rechecks those preferences immediately before redeeming and stops if they changed since display,
+because `inKind` and `toLedger` determine the asset and destination of a payout. The writer
+auto-roll setup also reads `payoutPrefs` on chain before deciding whether it must enable ledger
+payouts. If this getter changes in the contracts, regenerate the ABI and update these preflights.
+Notification settings validate the notifier's Telegram link against the expected `https://t.me`
+bot path and one-time token shape before rendering it as an external link.
+The notifier URL must use HTTPS outside loopback, because settings requests carry wallet
+signatures and bearer sessions. The generated devnet URL uses local HTTP and remains valid.
 
 ```bash
-pnpm --filter @callhouse/web dev     # http://localhost:3000  (the landing owns 3001)
+pnpm --filter @callhouse/web dev        # http://localhost:3000 (the landing owns 3001)
 pnpm --filter @callhouse/web lint
-pnpm --filter @callhouse/web typecheck   # the app, then tests/acceptance under its own tsconfig
-pnpm --filter @callhouse/web test        # vitest, node environment, no jsdom
-pnpm --filter @callhouse/web copy-lint   # compliance gate, also runs in CI
-pnpm --filter @callhouse/web build       # next build; NEXT_PUBLIC_VAULT unset builds the "not configured" pages
+pnpm --filter @callhouse/web typecheck
+pnpm --filter @callhouse/web test
+pnpm --filter @callhouse/web build
+pnpm --filter @callhouse/web gen:markets  # after an intentional registry change; commit the output
+node web/scripts/gen-abis.mjs --check     # from repo root; generated v1 and v2 ABI drift
 ```
+
+The v2 ABI source flows from `callhouse-contracts/script/v2/export-abis.sh` to
+`../ops/abis/v2/*.json`, then to `lib/abi/v2/*.ts` via `scripts/gen-abis.mjs`. The generated
+modules include shared v2 error fragments; never edit them by hand. After a contract ABI
+change, regenerate the indexer and keeper ABIs as well as the web's.
+
+V2 fork acceptance uses `../ops/devnet/up.sh` followed by
+`pnpm --filter @callhouse/web acceptance:v2`; it starts local services and modifies the local
+`.next` build. Consult `stonkhouse-plan/status/W2-14.json` for the latest gate result. The
+presence of a harness does not establish that the full interface has passed its final run.
+The historical v7 extension checks its collateral-fee lifecycle on multi-order fills, an API-book
+outage with chain fallback, one-unit call/put mint and browser close/refund, and permissionless stale-ask cancellation.
+The adjacent plan's `status/V7-DEV-ACCEPTANCE.md` records the current v7 run status separately
+from the historical v6 board result. Deployed-dev probes are read-only and never use this harness.
+
+## Legacy v1 reference (historical)
+
+The sections through "Fork acceptance (W-13)" document the old solo factory, pooled vault
+and Seaport fill route for run-off. Their `NEXT_PUBLIC_VAULT` environment, `/v1/*` API,
+factory rollout and keeper order flow do not configure v2. Some historical gate counts and
+rollout wording predate the private `v2` branch; use the current task board for progress.
+
+## Markets are compiled in from the registry
+
+`../ops/markets/tier1.json` is the one list of markets (read `../ops/markets/README.md`). This
+package never reads it at build or run time: the Docker build context is the repo root (the
+workspace install needs the lockfile), `ops/` is excluded from it by the root `.dockerignore`, and
+`web/Dockerfile` copies only `scripts/` and `web/` into the builder, so `scripts/gen-markets.mjs`
+copies what the app needs (per market: `ticker`, `name`,
+`asset`, `feed`, `factory`, `deployBlock`, `status`, `wave`, `mode`, `cboeRoot`, `depositCapUsd`,
+plus the registry's `verifiedAtBlock` and `generatedAt`) into **`lib/markets.generated.ts`, which
+is committed**. `lib/markets.test.ts` reads the real registry from the workspace and fails the
+test gate when the committed file drifts from it, or when a `live` row lacks a factory.
+
+`lib/markets.ts` is the typed view every page reads: `ALL_MARKETS` (the registry, in order),
+`MARKETS` (live only: `status == "live"` with a factory), `DEFAULT_TICKER` (`NVDA`),
+`getMarket(ticker)` (case-insensitive, live only), `marketHref(ticker, "account" | "book")`
+(`/tsla/account`), `parseTickerParam(segment)` and `marketFromPathname(pathname)`. **A planned
+market has no page**: `/tsla/account` is a 404 until TSLA's row is `live`, and it becomes a page
+by re-running `gen:markets` and rebuilding, with no code change. Nothing under `app/`,
+`components/` or `lib/` may name a ticker, a token or a factory of its own, with two carve-outs:
+`DEFAULT_TICKER` in `lib/markets.ts` (the one place that says which registry row the env overrides
+below land on; the pages use `DEFAULT_MARKET`, which is that row while it is live and the first live
+row if it is paused in the registry), and the closed pooled vault under `app/vault/nvda`,
+`app/collect` and `app/activity`, which keeps reading `MARKET` / `SHARE_TICKER` from
+`lib/contracts.ts` because it is one vault over one token and is not being redeployed.
+
+The test gate needs the registry in the checkout: `lib/markets.test.ts` fails with the path in the
+message when `../ops/markets/tier1.json` is absent (commit the registry and the generated file
+together). Because the registry builder re-stamps `verifiedAtBlock` and `generatedAt` on every run,
+every registry rebuild needs a `gen:markets` and a commit of the generated file with it, even when
+no market field changed; that coupling is deliberate (the docs page prints the verification block).
+`MARKETS_REGISTRY_OPTIONAL=1` skips the registry-backed cases explicitly for a run that has no
+`ops/` on purpose; CI never sets it.
+
+`NEXT_PUBLIC_FACTORY` and `NEXT_PUBLIC_ASSET` (build-time overrides for a fork or a rehearsal
+deploy, `lib/contracts.ts`) apply to the **default market only**; their compiled-in fallbacks are
+the registry's own NVDA row, so there is one copy of each address. To rehearse a second market's
+go-live, edit a *copy* of the registry and point the generator at it
+(`node scripts/gen-markets.mjs --registry /path/to/copy.json`, or `MARKETS_REGISTRY=`), then
+regenerate from the real one before committing.
 
 ## What the app is, under write on fill
 
@@ -47,7 +200,10 @@ only in notes that say they are history.
 
 | Route | Content |
 |---|---|
-| `/` | one vault card: collateral (idle / sold / assigned), this week's strike, calls sold and capacity, the order hash, last week's realized net premium per share (and its strike proceeds on their own line if assigned); the stranded banner when a claim is stranded |
+| `/` | one card per live market (account and book links, the factory), and a "Next" card listing the planned markets by wave, all from `lib/markets.ts` |
+| `/<ticker>/account` | one market's account page (`components/AccountView.tsx`): open an account on the market's factory, deposit its Stock Token, choose how much is for sale, list, close the week, collect USDG. `app/[ticker]/account/page.tsx` resolves the segment against the live markets and 404s anything else |
+| `/<ticker>/book` | one market's book (`components/BookView.tsx`): this week's 1-lot offers, the buyer's fill, and the calls this wallet holds with their exercise |
+| `/account`, `/book` | temporary redirects to the default market's pages (`/nvda/account`, `/nvda/book`) |
 | `/vault/nvda` | deposit (closed whenever `maxDeposit == 0`, with the reason and the Listed-phase risk on screen), queue or instant withdraw, `settleQueue` while flat, complete redeem, claim USDG, the stranded banner with the queuer's pending claim share and a Retry button |
 | `/vault/nvda/cycle` | **the fill page**: this week's option type (from the vault's snapshot and `clear.option(optionId)`), the vault's order on chain (`listingHash`, size, gross, Seaport's status), capacity remaining, the live in-fill floor, and the fill card that checks the keeper's order against the chain, simulates the exact fill, then fills it |
 | `/activity` | every week, one row per cycle, from the indexer or rebuilt from the vault's own logs: `CallsWritten` per fill, `RollClose`, `Harvest`, `ClaimStranded`, `StrandedClaimRecovered` |
@@ -185,8 +341,8 @@ If a forbidden phrase genuinely belongs inside an explicit negation on the docs 
 
 ## Display rules
 
-- Raw balances and the `uiMultiplier`-adjusted "NVDA-eq" figure are both shown, with the adjusted
-  one labelled display-only. No internal maths reads the multiplier.
+- Raw balances and the `uiMultiplier`-adjusted "<ticker>-eq" figure (`toStockEq`) are both shown,
+  with the adjusted one labelled display-only. No internal maths reads the multiplier.
 - USDG is 6 decimals, the asset and the shares are 18. Never format one with the other's scale.
 - The headline weekly figure is net premium over TVL at harvest. **Never annualize it.**
 - **Strike proceeds are not premium.** On an assigned week the harvest also sweeps the USDG the
@@ -238,12 +394,20 @@ production configuration and check it against `../ops/addresses.json`.
 | Variable | Kind | Meaning |
 |---|---|---|
 | `NEXT_PUBLIC_VAULT` | build, required | the deployed vault; unset builds the "not configured" pages |
+| `NEXT_PUBLIC_FACTORY` | build, default compiled in | the **default market's** (NVDA) account factory only; blank falls back to the registry row in `lib/markets.generated.ts`. The other markets' factories are the registry's and have no override |
 | `KEEPER_ORDERS_URL` | **runtime, server side, required for the fill page** | the keeper's `GET /orders`; read per request by `app/api/keeper/orders`, never `NEXT_PUBLIC_`, never a Docker build ARG. Unset, nothing can be bought through the app |
 | `NEXT_PUBLIC_CLEARINGHOUSE` | build, default compiled in | the clearinghouse the vault was constructed with; a deploy on our own Clear (`contracts/script/DeployClear.s.sol`) needs its address here. The app reads `vault.clear()` and follows it for every check; the cycle page reports a build whose value disagrees |
-| `NEXT_PUBLIC_ASSET`, `NEXT_PUBLIC_USDG`, `NEXT_PUBLIC_SEAPORT` | build, defaults compiled in | explorer-confirmed third-party addresses; overrides for a fork only |
+| `NEXT_PUBLIC_ASSET`, `NEXT_PUBLIC_USDG`, `NEXT_PUBLIC_SEAPORT` | build, defaults compiled in | explorer-confirmed third-party addresses; overrides for a fork only. `NEXT_PUBLIC_ASSET` is the default market's Stock Token (and the closed vault's asset) and moves that market only |
 | `NEXT_PUBLIC_CHAIN_ID`, `NEXT_PUBLIC_RPC_URL`, `NEXT_PUBLIC_RPC_URL_2`, `NEXT_PUBLIC_EXPLORER_URL` | build | the chain; blank is unsafe for these (see the Dockerfile) |
 | `NEXT_PUBLIC_API_URL` | build | the indexer; unreachable degrades history to the log fallback |
+| `NEXT_PUBLIC_V1_API_URL` | build, optional | v1 indexer for `/legacy` history when the main API URL points at v2; blank follows `NEXT_PUBLIC_API_URL` |
+| `NEXT_PUBLIC_V7_API_URL` | build, optional | dedicated frozen-v7 indexer for `/v7`; blank disables the route and never falls back to the v8 indexer |
+| `NEXT_PUBLIC_V2` | build | set to `1` for the v2 buyer routes; `0` keeps the v1 site active |
+| `NEXT_PUBLIC_DEV_PREVIEW` | build | set to `1` only for the separate dev app; marks it as a preview and disables indexing and the sitemap |
+| `NEXT_PUBLIC_NOTIFIER_URL` | build, optional | v2 notifier; HTTPS required except `http://localhost`, `http://127.0.0.1`, or `http://[::1]` for local devnet |
+| `NEXT_PUBLIC_WC_PROJECT_ID` | build, optional | WalletConnect project ID |
 | `NEXT_PUBLIC_VAULT_FROM_BLOCK` | build | the deploy block, so the log fallback is one query |
+| `NEXT_PUBLIC_V2_EARN_VAULT`, `NEXT_PUBLIC_V2_LENDER_REWARDS_DISTRIBUTOR`, `NEXT_PUBLIC_V2_STOCK_ZAP` | build, optional | the three v8 contracts with no registry key. Blank is safe and means the feature renders as unconfigured. A registry value always wins over one of these; a malformed value resolves to `null` rather than being cast; and an address served from one of them is named in the UI by `v2ConfigWarnings`' companion `v2AddressProvenanceNotices()`, so an override is never silent. Like every `NEXT_PUBLIC_*` they are inlined at build time, so changing one is a rebuild, not a restart, and each needs its `ARG`/`ENV` pair in `web/Dockerfile` |
 | `NEXT_PUBLIC_SITE_URL`, `NEXT_PUBLIC_APP_URL`, `NEXT_PUBLIC_DOCS_URL` | build, defaults compiled in | the domains, read only by `lib/site.ts`; never used to reach a node |
 
 `NEXT_PUBLIC_REGISTRY` and `OVERCALL_API_BASE` are gone with the redesign (no registry, no
@@ -350,3 +514,32 @@ browsers or the 400px layout; that the deployed app can reach the deployed keepe
 private network (a post-deploy check, `ops/deploy.md` §9); the route under a hostile network (its
 timeout, byte cap and redirect refusal are `lib/keeperOrders.test.ts`, over local HTTP); the
 indexer path (`NEXT_PUBLIC_API_URL` live); the production Docker image; real RPC latency or reorgs.
+
+## V2 fork acceptance harness (W2-14)
+
+The commands and intended coverage below describe the harness. Check
+`stonkhouse-plan/status/W2-14.json` for the latest completed gate and interface version
+before treating it as release evidence.
+
+Run this from the `callhouse` checkout with a `callhouse-contracts` v2 checkout available. The
+first command creates a local anvil fork, deploys and seeds v2 contracts, then writes gitignored
+`ops/devnet/addresses.json`, `ops/devnet/tier1.devnet.json`, and `ops/devnet/env/*.env`.
+
+```bash
+ops/devnet/up.sh
+pnpm --filter @callhouse/web acceptance:v2
+ops/devnet/down.sh
+```
+
+The browser suite refuses a non-loopback RPC, another chain, or a non-anvil node. It starts a fresh
+Ponder PGlite database, builds Next with the generated devnet registry, and restores the committed
+`web/lib/markets.generated.ts` immediately after the build. It uses anvil's local dev accounts for
+wallet confirmations. Check its printed temporary evidence directory for Ponder/Next logs and
+screenshots on failure. The harness is designed to cover card buy, bid, resale listing, writer deposit and manual
+ask, a one-share fill across ask levels, auto-roll when deployed, settled payout history, share page,
+keyboard focus, mobile overflow, Daylight contrast, and a bounded local page response. The devnet
+seed performs the expiry warp and settlement before the browser run.
+
+`acceptance:v2` overwrites `.next` with a local devnet build. Run a regular `pnpm build` before
+serving this checkout against another network. The suite needs Playwright Chromium and is not part
+of the unit-test gate because it creates a live fork and services.

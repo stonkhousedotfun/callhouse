@@ -6,12 +6,16 @@
  * crash loop that also kills in-flight transactions. The loop must never overlap two ticks, survive
  * a tick that throws, and let the in-flight tick finish on stop.
  *
+ * GET /ready (T-423) is readiness, not liveness, and public-safe: five keys, a closed set of reasons, and
+ * no path from "unknown" to ready. The pricer's own rule is pinned in pricer/pricer.test.ts.
+ *
  * DELIBERATELY ABSENT: sockets. The app is driven with `app.request`; runtime.test.ts binds a port.
  */
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { ModeHealth, createModeHealthApp, evaluateHealth, type HealthLimits } from './health.js';
+import { ModeHealth, READY_REASONS, createModeHealthApp, evaluateHealth, readyBody, readyRoute, type HealthLimits, type Readiness, type ReadyReason } from './health.js';
 import { startLoop } from './loop.js';
+import { INTERFACE_VERSION } from './registry.js';
 import { V2Store } from './store.js';
 
 const LIMITS: HealthLimits = { pollIntervalMs: 60_000, txTimeoutMs: 180_000, rpcLagAlertMs: 300_000, minGasWei: 10n ** 16n };
@@ -217,4 +221,90 @@ test('evaluateHealth: a long tick that keeps making progress (a beat per send) s
   assert.equal(evaluateHealth(h, LIMITS, T0 + 600_000).alive, true);
   assert.equal(evaluateHealth(h, LIMITS, T0 + 430_000 + 239_999).alive, true, 'KEEPER_TX_TIMEOUT_MS + 60 s from the last progress');
   assert.equal(evaluateHealth(h, LIMITS, T0 + 430_000 + 240_000).alive, false, 'no progress for that long: wedged');
+});
+
+/*//////////////////////////////////////////////////////////////
+                          GET /ready
+//////////////////////////////////////////////////////////////*/
+
+const READY_KEYS = ['checkedAt', 'interfaceVersion', 'lastEvaluationAt', 'ready', 'reasons'];
+
+test('readyBody: exactly five keys; ready only on an explicit true with no reason against it', () => {
+  const at = T0 + 5_000;
+  const ready = readyBody(() => ({ ready: true, reasons: [], lastEvaluationAt: T0 }), at);
+  assert.deepEqual(ready, { ready: true, reasons: [], checkedAt: new Date(at).toISOString(), lastEvaluationAt: new Date(T0).toISOString(), interfaceVersion: INTERFACE_VERSION });
+  assert.deepEqual(Object.keys(ready).sort(), READY_KEYS);
+
+  // A rule that says ready but names a reason is not ready.
+  assert.deepEqual(readyBody(() => ({ ready: true, reasons: ['fair-stale'], lastEvaluationAt: null }), at), {
+    ready: false,
+    reasons: ['fair-stale'],
+    checkedAt: new Date(at).toISOString(),
+    lastEvaluationAt: null,
+    interfaceVersion: INTERFACE_VERSION,
+  });
+  // Repeated reasons are named once.
+  assert.deepEqual(readyBody(() => ({ ready: false, reasons: ['role-unread', 'role-unread'], lastEvaluationAt: null }), at).reasons, ['role-unread']);
+});
+
+test('readyBody FAILS CLOSED: a throw, a non-boolean ready, a missing reasons list, an unknown code or a bare false are all state-unknown, never ready', () => {
+  const at = T0 + 5_000;
+  const unknown = { ready: false, reasons: ['state-unknown'], checkedAt: new Date(at).toISOString(), lastEvaluationAt: null, interfaceVersion: INTERFACE_VERSION };
+  assert.deepEqual(
+    readyBody(() => {
+      throw new Error('the rule threw');
+    }, at),
+    unknown,
+  );
+  assert.deepEqual(readyBody(() => ({ ready: 'yes', reasons: [], lastEvaluationAt: null }) as unknown as Readiness, at), unknown, 'truthy is not true');
+  assert.deepEqual(readyBody(() => ({ ready: true, lastEvaluationAt: null }) as unknown as Readiness, at), unknown, 'no reasons list is not "no reasons"');
+  assert.deepEqual(readyBody(() => undefined as unknown as Readiness, at), unknown);
+  assert.deepEqual(readyBody(() => ({ ready: false, reasons: [], lastEvaluationAt: null }), at), unknown, 'not ready never arrives without a reason');
+  // An unknown code poisons a ready:true, and the known codes beside it survive.
+  const mixed = readyBody(() => ({ ready: true, reasons: ['made-up' as ReadyReason], lastEvaluationAt: null }), at);
+  assert.deepEqual([mixed.ready, mixed.reasons], [false, ['state-unknown']]);
+  assert.deepEqual(readyBody(() => ({ ready: false, reasons: ['role-unread', 'made-up' as ReadyReason], lastEvaluationAt: null }), at).reasons, ['role-unread', 'state-unknown']);
+  // A lastEvaluationAt that is not a finite number is null, not a thrown RangeError.
+  assert.equal(readyBody(() => ({ ready: true, reasons: [], lastEvaluationAt: Number.NaN }), at).lastEvaluationAt, null);
+  // The closed set is what the tests above assume.
+  assert.deepEqual([...READY_REASONS].sort(), ['fair-stale', 'loop-wedged', 'no-completed-tick', 'role-delayed', 'role-refused', 'role-unread', 'state-unknown', 'tick-failed']);
+});
+
+test('GET /ready on the mode app: 200 ready / 503 not, no private field, /health and /state untouched, / lists it', async () => {
+  const now = T0 + 1_000;
+  let verdict: Readiness = { ready: false, reasons: ['no-completed-tick'], lastEvaluationAt: null };
+  const options = {
+    mode: 'pricer' as const,
+    limits: LIMITS,
+    chainId: 4663,
+    rpcUrls: ['https://rpc.example/v2/SECRET-KEY'],
+    signer: '0x000000000000000000000000000000000000bEEF' as const,
+    contracts: { autoRoller: '0x00000000000000000000000000000000000000A1' as const, accessManager: '0x00000000000000000000000000000000000000A2' as const },
+    now: () => now,
+  };
+  const store = new V2Store(':memory:');
+  const withReady = createModeHealthApp({ ...options, health: new ModeHealth(T0), store, routes: readyRoute(() => verdict, () => now) });
+  const without = createModeHealthApp({ ...options, health: new ModeHealth(T0), store });
+
+  const notReady = await withReady.request('/ready');
+  assert.equal(notReady.status, 503);
+  const body = (await notReady.json()) as Record<string, unknown>;
+  assert.deepEqual(Object.keys(body).sort(), READY_KEYS);
+  assert.deepEqual(body.reasons, ['no-completed-tick']);
+  const raw = JSON.stringify(body).toLowerCase();
+  for (const secret of ['secret', 'rpc.example', 'beef', '00a1', '00a2', 'memory']) assert.equal(raw.includes(secret), false, `/ready must not carry ${secret}`);
+
+  verdict = { ready: true, reasons: [], lastEvaluationAt: T0 };
+  const ok = await withReady.request('/ready');
+  assert.equal(ok.status, 200);
+  assert.equal(((await ok.json()) as { ready: boolean }).ready, true);
+
+  // Mounting /ready changes nothing about /health or /state: same status, same body, key for key.
+  for (const path of ['/health', '/state']) {
+    const [a, b] = [await withReady.request(path), await without.request(path)];
+    assert.equal(a.status, b.status, path);
+    assert.deepEqual(await a.json(), await b.json(), path);
+  }
+  assert.deepEqual(await (await withReady.request('/')).json(), { service: 'callhouse-pricer', mode: 'pricer', endpoints: ['/health', '/state', '/ready'] });
+  store.close();
 });

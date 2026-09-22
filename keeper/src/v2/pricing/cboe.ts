@@ -18,6 +18,14 @@
  * the strike rises; both prices are convex in strike). For calls the two functions below answer
  * exactly what vol.ts's do; a test pins that on every row of the real chain.
  *
+ * THE PROVIDER SEAM (K3-311). The Cboe file is one provider: cboeToNormalized turns it into the
+ * provider-neutral NormalizedChain (chain.ts) the moment it is parsed, and everything after this file
+ * (the gates below, the cache, surface.ts, fair.ts) reads only that. The gates take chain.ts
+ * ListedOption, which a row becomes only from a supplied quote plus the provider's greeks; a provider
+ * theoretical value never does. Cboe states no quote time, sizes, multiplier or exercise and
+ * settlement convention, so those stay null; its file time and the underlying's last trade keep their
+ * own fields.
+ *
  * THE CACHE. One entry per ticker. A download is reused for PRICING_MIN_REFETCH_MS, the floor v1 set
  * for the same reason (roll.ts VOL_MIN_REFETCH_MS): a service asked for 35 markets' fair values every
  * few seconds would otherwise pull megabytes from a free feed on every request, which is how an IP gets
@@ -27,7 +35,7 @@
  * fresher, because every decision judges the chain's own clocks. Concurrent asks for the same ticker
  * share one download.
  *
- * Pure except ChainCache, which takes its fetch and its clock as seams.
+ * Pure except ChainCache, which takes its provider (or the Cboe fetch) and its clock as seams.
  */
 import { NYSE_HOLIDAYS_2026_2028 } from '../../calendar.js';
 import {
@@ -36,19 +44,30 @@ import {
   MAX_SKIPPED_ROW_FRACTION,
   MAX_SPREAD_FRACTION_OF_MID,
   MAX_SPREAD_USD,
-  chainFreshness,
+  VOL_SOURCE,
   fetchCboeChain,
   maxBracketGap,
+  parseCboeTimestamp,
+  parseNewYorkLocalTime,
   type CboeChain,
-  type CboeOption,
   type FetchChainOptions,
 } from '../../vol.js';
+import {
+  CHAIN_CONTRACT,
+  pricingClock,
+  type ChainSource,
+  type ListedOption,
+  type NormalizedChain,
+  type OptionChainProvider,
+  type OptionSide,
+  type ProviderDescriptor,
+} from './chain.js';
 
 /*//////////////////////////////////////////////////////////////
                          REASONS AND LIMITS
 //////////////////////////////////////////////////////////////*/
 
-export type OptionSide = 'C' | 'P';
+export type { OptionSide };
 
 /**
  * Why a price is not given. Every refusal anywhere in the service is one of these plus a detail
@@ -62,7 +81,10 @@ export type OptionSide = 'C' | 'P';
  *   spot-divergence      token spot / Cboe spot is further from 1 than allowed
  *   no-quotes            nothing usable to price from at this expiry or strike
  *   quotes-inconsistent  the quotes the price would come from fail a window check or a gap
- *   expired              the expiry is not in the future
+ *   expired              the expiry is not in the future, or no regular session remains before it
+ *                        (expiry-clock.ts)
+ *   model-uncertainty    the estimate's uncertainty exceeds the short-maturity policy and that policy
+ *                        refuses (short-maturity.ts; not the proposal default, which bounds)
  *   unknown-ticker       the registry has no such market
  */
 export type PricingReason =
@@ -75,7 +97,8 @@ export type PricingReason =
   | 'spot-divergence'
   | 'no-quotes'
   | 'quotes-inconsistent'
-  | 'expired';
+  | 'expired'
+  | 'model-uncertainty';
 
 export interface PricingFailure {
   ok: false;
@@ -113,7 +136,7 @@ const EPSILON = 1e-9;
  * non-negative iv, a spread no wider than max(MAX_SPREAD_USD, MAX_SPREAD_FRACTION_OF_MID × mid),
  * and a delta strictly inside (0, 1) for a call or (-1, 0) for a put.
  */
-export function isUsableQuote(o: Pick<CboeOption, 'type' | 'bid' | 'ask' | 'delta' | 'iv' | 'strike'>): boolean {
+export function isUsableQuote(o: Pick<ListedOption, 'type' | 'bid' | 'ask' | 'delta' | 'iv' | 'strike'>): boolean {
   if (![o.bid, o.ask, o.delta, o.iv, o.strike].every(Number.isFinite)) return false;
   const deltaOk = o.type === 'C' ? o.delta > 0 && o.delta < 1 : o.type === 'P' ? o.delta > -1 && o.delta < 0 : false;
   if (!(o.bid > 0) || !(o.ask >= o.bid) || !deltaOk || o.iv < 0 || !(o.strike > 0)) return false;
@@ -124,14 +147,14 @@ export function isUsableQuote(o: Pick<CboeOption, 'type' | 'bid' | 'ask' | 'delt
 }
 
 /** One side's usable quotes, sorted by strike. A strike listed twice is dropped entirely. */
-export function filterQuotes(options: readonly CboeOption[], side: OptionSide): CboeOption[] {
+export function filterQuotes(options: readonly ListedOption[], side: OptionSide): ListedOption[] {
   const usable = options.filter((o) => o.type === side && isUsableQuote(o));
   const counts = new Map<number, number>();
   for (const q of usable) counts.set(q.strike, (counts.get(q.strike) ?? 0) + 1);
   return usable.filter((q) => counts.get(q.strike) === 1).sort((a, b) => a.strike - b.strike);
 }
 
-export function mid(q: Pick<CboeOption, 'bid' | 'ask'>): number {
+export function mid(q: Pick<ListedOption, 'bid' | 'ask'>): number {
   return (q.bid + q.ask) / 2;
 }
 
@@ -146,7 +169,7 @@ export function mid(q: Pick<CboeOption, 'bid' | 'ask'>): number {
  *             puts:  a lower strike bid above a higher strike's ask
  *   butterfly a middle strike bid above the strike-weighted asks of its neighbours (both sides)
  */
-export function checkQuoteWindow(quotes: readonly CboeOption[], side: OptionSide, bracket: readonly [number, number]): PricingFailure | null {
+export function checkQuoteWindow(quotes: readonly ListedOption[], side: OptionSide, bracket: readonly [number, number]): PricingFailure | null {
   const fail = (why: string, extra: Record<string, string> = {}) =>
     failure('quotes-inconsistent', { why, side, bracket: `${bracket[0]}-${bracket[1]}`, ...extra });
   const loIdx = quotes.findIndex((q) => q.strike === bracket[0]);
@@ -195,20 +218,30 @@ export interface ChainSettings {
   holidays?: readonly string[];
 }
 
-export type ChainCheck = { ok: true; lastTradeUnix: number; timestampUnix: number; ageSeconds: number } | PricingFailure;
+/**
+ * `lastTradeUnix` is the clock the chain is priced on (chain.ts pricingClock): Cboe's underlying last
+ * trade, or a provider's quote time when it gives one (`clockBasis`). `timestampUnix` is the file's
+ * publication time, null for a provider that gives none.
+ */
+export type ChainCheck = { ok: true; lastTradeUnix: number; timestampUnix: number | null; ageSeconds: number; clockBasis: 'quote' | 'underlying' } | PricingFailure;
 
 /**
  * Every check on a chain that does not depend on a strike, an expiry or the token: is it for the
- * market's root, are its clocks fresh and consistent (vol.ts chainFreshness, with the session
- * calendar), and did its rows parse.
+ * market's root, does it carry an underlying price, are its clocks fresh and consistent (chain.ts
+ * pricingClock: vol.ts chainFreshness's rule on the neutral clocks, with the session calendar), and
+ * did its rows parse.
  */
-export function checkChain(chain: CboeChain, expectedRoot: string, nowSeconds: number, settings: ChainSettings): ChainCheck {
-  if (chain.root !== expectedRoot) {
-    return failure('chain-inconsistent', { why: 'the chain is for another symbol', symbol: chain.root, expectedRoot });
+export function checkChain(chain: NormalizedChain, expectedRoot: string, nowSeconds: number, settings: ChainSettings): ChainCheck {
+  if (chain.underlying.providerSymbol !== expectedRoot) {
+    return failure('chain-inconsistent', { why: 'the chain is for another symbol', symbol: chain.underlying.providerSymbol, expectedRoot });
   }
-  const fresh = chainFreshness(chain, nowSeconds, settings.maxAgeS, settings.holidays ?? NYSE_HOLIDAYS_2026_2028);
-  if (!fresh.ok) return failure(fresh.reason === 'vol-stale' ? 'chain-stale' : 'chain-inconsistent', fresh.detail);
-  const rows = chain.options.length + chain.skippedRows;
+  const price = chain.underlying.price;
+  if (price === null || !Number.isFinite(price) || !(price > 0)) {
+    return failure('chain-inconsistent', { why: 'the source gives no usable underlying price', price: String(price) });
+  }
+  const fresh = pricingClock(chain, nowSeconds, settings.maxAgeS, settings.holidays ?? NYSE_HOLIDAYS_2026_2028);
+  if (!fresh.ok) return failure(fresh.reason === 'stale' ? 'chain-stale' : 'chain-inconsistent', fresh.detail);
+  const rows = chain.rows.length + chain.skippedRows;
   if (chain.skippedRows > 0 && chain.skippedRows > MAX_SKIPPED_ROW_FRACTION * rows) {
     return failure('chain-inconsistent', {
       why: 'most option rows do not parse: the feed format changed',
@@ -217,7 +250,66 @@ export function checkChain(chain: CboeChain, expectedRoot: string, nowSeconds: n
       firstSkip: chain.firstSkip ?? 'none',
     });
   }
-  return { ok: true, lastTradeUnix: fresh.lastTradeUnix, timestampUnix: fresh.timestampUnix, ageSeconds: fresh.ageSeconds };
+  return { ok: true, lastTradeUnix: fresh.clock, timestampUnix: fresh.publishedAt, ageSeconds: fresh.ageSeconds, clockBasis: fresh.basis };
+}
+
+/*//////////////////////////////////////////////////////////////
+                        THE CBOE PROVIDER
+//////////////////////////////////////////////////////////////*/
+
+/** Cboe's free delayed file. Its delay is not stated in the file, so `declaredDelayS` is null. */
+export const CBOE_PROVIDER: ProviderDescriptor = {
+  id: VOL_SOURCE,
+  product: 'delayed_quotes/options',
+  entitlement: { class: 'delayed', declaredDelayS: null, rightsRef: null },
+};
+
+/**
+ * One parsed Cboe file as a NormalizedChain. What Cboe states is kept; what it does not state stays
+ * null: no per-quote or file-wide quote time, no sizes, no contract multiplier, exercise or
+ * settlement convention, no theoretical value (vol.ts's parser keeps bid, ask, iv and delta). The
+ * file time and the underlying's last trade keep their verbatim text beside the parsed value, and an
+ * unparseable one parses to null (chain.ts pricingClock refuses it).
+ */
+export function cboeToNormalized(chain: CboeChain, receivedAt: number): NormalizedChain {
+  return {
+    contract: CHAIN_CONTRACT,
+    provider: CBOE_PROVIDER,
+    underlying: {
+      providerSymbol: chain.root,
+      issuer: null,
+      price: chain.shareSpot,
+      observedAt: parseNewYorkLocalTime(chain.lastTradeTime),
+      observedAtText: chain.lastTradeTime,
+    },
+    clocks: {
+      quoteObservedAt: null,
+      tradeObservedAt: null,
+      volatilityObservedAt: null,
+      publishedAt: parseCboeTimestamp(chain.timestamp),
+      publishedAtText: chain.timestamp,
+      receivedAt,
+    },
+    rows: chain.options.map((o) => ({
+      instrument: { providerInstrumentId: o.symbol, root: chain.root, side: o.type, strike: o.strike, expiryDay: o.expiry, expiry: null, multiplier: null, exercise: null, settlement: null },
+      quote: { bid: o.bid, ask: o.ask, bidSize: null, askSize: null, currency: 'USD', observedAt: null },
+      analytics: { iv: o.iv, delta: o.delta, observedAt: null },
+      theoretical: null,
+    })),
+    skippedRows: chain.skippedRows,
+    firstSkip: chain.firstSkip ?? null,
+  };
+}
+
+/** The Cboe provider over a raw download (default vol.ts fetchCboeChain with every v1 gate). */
+export function createCboeProvider(fetchChain: FetchChain = fetchCboeChain): OptionChainProvider {
+  return {
+    descriptor: CBOE_PROVIDER,
+    async fetch(source: ChainSource, options) {
+      const chain = await fetchChain(source.url, { timeoutMs: options.timeoutMs, maxBytes: options.maxBytes });
+      return cboeToNormalized(chain, Math.floor(options.nowMs() / 1000));
+    },
+  };
 }
 
 /*//////////////////////////////////////////////////////////////
@@ -226,8 +318,9 @@ export function checkChain(chain: CboeChain, expectedRoot: string, nowSeconds: n
 
 export interface ChainEntry {
   url: string;
-  /** The last chain downloaded from `url`, or null when none ever was. */
-  chain: CboeChain | null;
+  /** The last chain downloaded from `url`, normalized, or null when none ever was. A failed refetch
+   *  keeps it with its own clocks, `receivedAt` included: serving it again refreshes nothing. */
+  chain: NormalizedChain | null;
   /** Why the LATEST attempt failed (VolFetchError's `code: message`), or null when it succeeded. */
   error: string | null;
   /** Wall clock of the latest attempt, ms. */
@@ -236,10 +329,13 @@ export interface ChainEntry {
   failures: number;
 }
 
+/** The raw Cboe download: the Cboe provider's own seam, not the pricing service's. */
 export type FetchChain = (url: string, options: FetchChainOptions) => Promise<CboeChain>;
 
 export interface ChainCacheOptions {
-  /** SEAM for tests. Defaults to vol.ts fetchCboeChain with every gate. */
+  /** SEAM: the data provider. Defaults to the Cboe provider over `fetchChain`. */
+  provider?: OptionChainProvider;
+  /** SEAM for tests: the Cboe provider's raw download. Defaults to vol.ts fetchCboeChain with every gate. */
   fetchChain?: FetchChain;
   timeoutMs?: number;
   maxBytes?: number;
@@ -251,14 +347,14 @@ export interface ChainCacheOptions {
 export class ChainCache {
   private readonly entries = new Map<string, ChainEntry>();
   private readonly inflight = new Map<string, Promise<ChainEntry>>();
-  private readonly fetchChain: FetchChain;
+  private readonly provider: OptionChainProvider;
   private readonly timeoutMs: number;
   private readonly maxBytes: number;
   private readonly minRefetchMs: number;
   private readonly nowMs: () => number;
 
   constructor(options: ChainCacheOptions = {}) {
-    this.fetchChain = options.fetchChain ?? fetchCboeChain;
+    this.provider = options.provider ?? createCboeProvider(options.fetchChain ?? fetchCboeChain);
     this.timeoutMs = options.timeoutMs ?? DEFAULT_CHAIN_TIMEOUT_MS;
     this.maxBytes = options.maxBytes ?? DEFAULT_CHAIN_MAX_BYTES;
     this.minRefetchMs = options.minRefetchMs ?? PRICING_MIN_REFETCH_MS;
@@ -269,8 +365,9 @@ export class ChainCache {
    * `ticker`'s chain from `url`: the cached attempt while it is younger than the refetch floor (a
    * failed one: the failure retry) and for the same URL, else one download shared by every concurrent
    * caller. Never rejects: a failed download is an entry with the error and the last good chain.
+   * `root` is the registry's option root for the provider (default: the ticker).
    */
-  async get(ticker: string, url: string): Promise<ChainEntry> {
+  async get(ticker: string, url: string, root: string = ticker): Promise<ChainEntry> {
     const cached = this.entries.get(ticker);
     if (cached !== undefined && cached.url === url) {
       const reuseMs = cached.failures === 0 ? this.minRefetchMs : Math.min(this.minRefetchMs, PRICING_FAILURE_RETRY_MS * 2 ** (cached.failures - 1));
@@ -278,7 +375,7 @@ export class ChainCache {
     }
     const pending = this.inflight.get(ticker);
     if (pending !== undefined) return pending;
-    const attempt = this.download(ticker, url).finally(() => this.inflight.delete(ticker));
+    const attempt = this.download({ ticker, url, root }).finally(() => this.inflight.delete(ticker));
     this.inflight.set(ticker, attempt);
     return attempt;
   }
@@ -288,11 +385,17 @@ export class ChainCache {
     return this.entries;
   }
 
-  private async download(ticker: string, url: string): Promise<ChainEntry> {
+  /** The provider serving this cache. */
+  get descriptor(): ProviderDescriptor {
+    return this.provider.descriptor;
+  }
+
+  private async download(source: ChainSource): Promise<ChainEntry> {
+    const { ticker, url } = source;
     let entry: ChainEntry;
     const previous = this.entries.get(ticker);
     try {
-      const chain = await this.fetchChain(url, { timeoutMs: this.timeoutMs, maxBytes: this.maxBytes });
+      const chain = await this.provider.fetch(source, { timeoutMs: this.timeoutMs, maxBytes: this.maxBytes, nowMs: this.nowMs });
       entry = { url, chain, error: null, fetchedAtMs: this.nowMs(), failures: 0 };
     } catch (error) {
       const same = previous !== undefined && previous.url === url;

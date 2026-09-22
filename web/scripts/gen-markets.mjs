@@ -25,7 +25,7 @@
 //
 // V2. The registry's v2 blocks come along whole, because the v2 app reads its contract addresses
 // from this file, never from env (the indexer's /v2/config is only a cross-check): each market's
-// `v2` block (status, wave, strikeTick, mintFeePpm, pool, Data Streams id, overrides, registration) and the
+// `v2` block (status, wave, strikeTick, mintFeePpm, pool, Data Streams id, overrides, house vault, registration) and the
 // top-level block as V2_REGISTRY (interface version, deploy block), V2_CONTRACTS (null until the
 // v2 deploy writes addresses back), V2_UNISWAP_V3, V2_FEES and V2_DEFAULTS. v1 `status` gains
 // `superseded-by-v2`: the per-market factory rollout that 34 rows were planned for was cancelled.
@@ -50,10 +50,30 @@ import { existsSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
+// T-OP-138. The six EXTERNAL v2 contracts' key list (houseVault, houseVaultFactory, hedger,
+// rewardsDistributorLender, earnVault, stockVenueAdapter) is imported from the builder that defined it
+// (T-OP-114), never re-typed here: a second copy agrees with the first right up to the day one of them
+// changes. This script already reads ops/markets/tier1.json from the same checkout, so ops/ is present
+// wherever this runs (it is the Docker build that lacks ops/, and the Docker build never runs this
+// script). Importing the module runs no build: its `main()` is guarded by `isMain`.
+// T-OP-156. The per-market `v2` key set is imported the same way: this file's own copy (V2_MARKET_NAMES, twelve
+// names) threw on `markets[].v2.houseVault` the day the builder gained it, exactly the shape T-OP-138 removed for
+// the top-level block. One list, owned by the builder that closes the block.
+import { V2_EXTERNAL_CONTRACT_NAMES, V2_MARKET_KEYS } from "../../ops/markets/build-markets.mjs";
+
 const here = path.dirname(fileURLToPath(import.meta.url));
 const pkgRoot = path.resolve(here, "..");
 const defaultRegistry = path.resolve(pkgRoot, "..", "ops", "markets", "tier1.json");
-const out = path.resolve(pkgRoot, "lib", "markets.generated.ts");
+// `--out <path>` (T-OP-138) writes the rendered file somewhere other than lib/markets.generated.ts: for a
+// rehearsal against a scratch registry, and for web/scripts/gen-markets.test.mjs, which must never write
+// into the checkout. The committed file always comes from a run without it.
+const out = (() => {
+  const i = process.argv.indexOf("--out");
+  if (i === -1) return path.resolve(pkgRoot, "lib", "markets.generated.ts");
+  const p = process.argv[i + 1];
+  if (!p) throw new Error("--out needs a path");
+  return path.resolve(process.cwd(), p);
+})();
 const check = process.argv.includes("--check");
 
 function registryPathFromArgs(argv) {
@@ -74,9 +94,17 @@ const V2_STATUSES = new Set(["planned", "live", "paused"]);
 const V2_WAVES = new Set(["canary", "wave1", "wave2"]);
 const V2_CONTRACT_NAMES = [
   "clearinghouse", "orderBook", "settlementOracle", "expiryCalendar", "keeperRewards",
-  "autoRoller", "payoutAdapter", "makerVault", "makerRegistry", "rewardsDistributor",
+  "autoRoller", "payoutAdapter", "makerVault", "makerRegistry", "rewardsDistributor", "accessManager",
 ];
 const V2_SOURCE_NAMES = ["chainlink", "univ3", "dataStreams"];
+const V2_FEE_NAMES = [
+  "premiumFeeBps", "mintFeePpm", "allowRent", "resaleFeeBps", "takerFeeFlat",
+  "takerFeeCapBps", "makerRebateBps", "exerciseFeeBps",
+];
+const PAYOUT_ROUTE_NAMES = {
+  v3: ["venue", "fee"],
+  v4: ["venue", "fee", "tickSpacing", "poolId"],
+};
 const ADDRESS = /^0x[0-9a-fA-F]{40}$/;
 const BYTES32 = /^0x[0-9a-fA-F]{64}$/;
 const DECIMAL = /^(0|[1-9][0-9]*)$/;
@@ -84,6 +112,20 @@ const TICKER = /^[A-Z0-9.]{1,10}$/;
 const isObject = (v) => v !== null && typeof v === "object" && !Array.isArray(v);
 const nullOrAddress = (v) => v === null || (typeof v === "string" && ADDRESS.test(v));
 const isUint = (v) => Number.isSafeInteger(v) && v >= 0;
+// Mirrors V2Constants.MINT_FEE_CEIL_PPM, MAX_ROUTE_FEE_TIER and Uniswap v4 TickMath.MAX_TICK_SPACING.
+const MINT_FEE_CEIL_PPM = 5_000;
+const MAX_ROUTE_FEE_TIER = 10_000;
+const MAX_TICK_SPACING = 32_767;
+
+function assertExactKeys(value, expected, where) {
+  const missing = expected.filter((key) => !(key in value));
+  const unknown = Object.keys(value).filter((key) => !expected.includes(key));
+  if (missing.length || unknown.length) {
+    throw new Error(`${where} keys differ from the v8 registry schema` +
+      `${missing.length ? `; missing ${missing.join(", ")}` : ""}` +
+      `${unknown.length ? `; unknown ${unknown.join(", ")}` : ""}`);
+  }
+}
 
 /**
  * The top-level v2 block. ops/markets/build-markets.mjs --check validates it in full (interface
@@ -101,15 +143,33 @@ function assertV2Top(v2) {
     throw new Error(`${where}.deployBlock is neither null nor a block number`);
   }
   if (!isObject(v2.contracts) || !isObject(v2.contracts.sources)) throw new Error(`${where}.contracts / .contracts.sources missing`);
-  for (const k of V2_CONTRACT_NAMES) if (!(k in v2.contracts) || !nullOrAddress(v2.contracts[k])) throw new Error(`${where}.contracts.${k} is neither null nor an address`);
+  // T-OP-138: the core eleven and `sources` are exact; an external key is known only when present (the
+  // builder's rule), and is then held to null-or-address like the rest. Any other name still throws, and
+  // V2_CONTRACT_NAMES stays eleven: this file's V2_CONTRACTS literal is `v2.contracts` verbatim, so an
+  // external the registry carries is copied through, and one it does not carry is simply absent.
+  const externalsPresent = V2_EXTERNAL_CONTRACT_NAMES.filter((k) => k in v2.contracts);
+  assertExactKeys(v2.contracts, [...V2_CONTRACT_NAMES, ...externalsPresent, "sources"], `${where}.contracts`);
+  assertExactKeys(v2.contracts.sources, V2_SOURCE_NAMES, `${where}.contracts.sources`);
+  for (const k of [...V2_CONTRACT_NAMES, ...externalsPresent]) if (!(k in v2.contracts) || !nullOrAddress(v2.contracts[k])) throw new Error(`${where}.contracts.${k} is neither null nor an address`);
   for (const k of V2_SOURCE_NAMES) if (!(k in v2.contracts.sources) || !nullOrAddress(v2.contracts.sources[k])) throw new Error(`${where}.contracts.sources.${k} is neither null nor an address`);
   for (const k of ["factory", "swapRouter02", "quoterV2"]) {
     if (typeof v2.uniswapV3?.[k] !== "string" || !ADDRESS.test(v2.uniswapV3[k])) throw new Error(`${where}.uniswapV3.${k} is not an address`);
   }
   const f = v2.fees;
   if (!isObject(f)) throw new Error(`${where}.fees missing`);
+  assertExactKeys(f, V2_FEE_NAMES, `${where}.fees`);
   for (const k of ["premiumFeeBps", "resaleFeeBps", "takerFeeCapBps", "makerRebateBps", "exerciseFeeBps"]) {
     if (!isUint(f[k])) throw new Error(`${where}.fees.${k} is not a non-negative integer`);
+  }
+  if (f.premiumFeeBps <= f.resaleFeeBps) {
+    throw new Error(`${where}.fees.premiumFeeBps must be above resaleFeeBps in interface version 8`);
+  }
+  if (typeof f.allowRent !== "boolean") throw new Error(`${where}.fees.allowRent is not a boolean`);
+  if (!isUint(f.mintFeePpm) || f.mintFeePpm > MINT_FEE_CEIL_PPM) {
+    throw new Error(`${where}.fees.mintFeePpm is not an integer in [0, ${MINT_FEE_CEIL_PPM}]`);
+  }
+  if (!f.allowRent && f.mintFeePpm !== 0) {
+    throw new Error(`${where}.fees.mintFeePpm must be 0 unless v2.fees.allowRent is true`);
   }
   if (typeof f.takerFeeFlat !== "string" || !DECIMAL.test(f.takerFeeFlat)) throw new Error(`${where}.fees.takerFeeFlat is not a decimal string of USDG base units`);
   const d = v2.defaults;
@@ -124,19 +184,42 @@ function assertV2Top(v2) {
   return v2;
 }
 
+function assertPayoutRoute(route, where) {
+  if (route === null) return null;
+  if (!isObject(route) || !(route.venue in PAYOUT_ROUTE_NAMES)) {
+    throw new Error(`${where} is neither null nor a v3 or v4 payout route`);
+  }
+  assertExactKeys(route, PAYOUT_ROUTE_NAMES[route.venue], where);
+  if (!Number.isSafeInteger(route.fee) || route.fee < 1 || route.fee > MAX_ROUTE_FEE_TIER) {
+    throw new Error(`${where}.fee is not an integer in [1, ${MAX_ROUTE_FEE_TIER}]`);
+  }
+  if (route.venue === "v3") return { venue: route.venue, fee: route.fee };
+  if (!Number.isSafeInteger(route.tickSpacing) || route.tickSpacing < 1 || route.tickSpacing > MAX_TICK_SPACING) {
+    throw new Error(`${where}.tickSpacing is not an integer in [1, ${MAX_TICK_SPACING}]`);
+  }
+  if (typeof route.poolId !== "string" || !BYTES32.test(route.poolId)) {
+    throw new Error(`${where}.poolId is not a 32-byte hex pool id`);
+  }
+  return { venue: route.venue, fee: route.fee, tickSpacing: route.tickSpacing, poolId: route.poolId };
+}
+
 /** One market's v2 block; `v2` is the validated top-level block (a live market needs its contracts). */
 function assertV2Market(m, v2) {
   const where = `market ${JSON.stringify(m?.ticker)} v2`;
   const b = m.v2;
   if (!isObject(b)) throw new Error(`${where}: missing`);
+  assertExactKeys(b, V2_MARKET_KEYS, where);
   if (!V2_STATUSES.has(b.status)) throw new Error(`${where}.status ${JSON.stringify(b.status)} is not planned|live|paused`);
   if (!V2_WAVES.has(b.wave)) throw new Error(`${where}.wave ${JSON.stringify(b.wave)} is not canary|wave1|wave2`);
   if (typeof b.strikeTick !== "string" || !DECIMAL.test(b.strikeTick) || BigInt(b.strikeTick) === 0n || BigInt(b.strikeTick) % 100n !== 0n) {
     throw new Error(`${where}.strikeTick ${JSON.stringify(b.strikeTick)} is not a positive multiple of 100 USDG base units`);
   }
   if (typeof b.puts !== "boolean") throw new Error(`${where}.puts is not a boolean`);
-  if (!isUint(b.mintFeePpm) || b.mintFeePpm === 0 || b.mintFeePpm > 5_000) {
-    throw new Error(`${where}.mintFeePpm is not an integer in [1, 5000]`);
+  if (!isUint(b.mintFeePpm) || b.mintFeePpm > MINT_FEE_CEIL_PPM) {
+    throw new Error(`${where}.mintFeePpm is not an integer in [0, ${MINT_FEE_CEIL_PPM}]`);
+  }
+  if (!v2.fees.allowRent && b.mintFeePpm !== 0) {
+    throw new Error(`${where}.mintFeePpm must be 0 unless v2.fees.allowRent is true`);
   }
   if (!nullOrAddress(b.univ3Pool)) throw new Error(`${where}.univ3Pool is neither null nor an address`);
   if (!(b.univ3MinLiquidity === null || (typeof b.univ3MinLiquidity === "string" && DECIMAL.test(b.univ3MinLiquidity)))) {
@@ -145,7 +228,13 @@ function assertV2Market(m, v2) {
   if (!(b.dataStreamsFeedId === null || (typeof b.dataStreamsFeedId === "string" && BYTES32.test(b.dataStreamsFeedId)))) {
     throw new Error(`${where}.dataStreamsFeedId is neither null nor a 32-byte hex id`);
   }
+  const payoutRoute = assertPayoutRoute(b.payoutRoute, `${where}.payoutRoute`);
   if (!isObject(b.overrides)) throw new Error(`${where}.overrides is not an object`);
+  // T-OP-156: this market's HouseVault (owner ruling 2026-09-22, two vaults at launch), written back per ticker by
+  // the broadcast's externals stage; null until then and for ever on a market outside the launch set. Shape only
+  // here -- the launch-set rule, the zero-address refusal and the EIP-55 case are build-markets.mjs's (its --check
+  // is the registry gate); this file copies what that gate accepted.
+  if (!nullOrAddress(b.houseVault)) throw new Error(`${where}.houseVault is neither null nor an address`);
   if (!(b.registeredAt === null || (Number.isSafeInteger(b.registeredAt) && b.registeredAt > 0))) throw new Error(`${where}.registeredAt is neither null nor unix seconds`);
   if (!(b.registerTx === null || (typeof b.registerTx === "string" && BYTES32.test(b.registerTx)))) throw new Error(`${where}.registerTx is neither null nor a transaction hash`);
   // A live v2 market with no clearinghouse would render a ticket that writes to address null.
@@ -154,8 +243,8 @@ function assertV2Market(m, v2) {
   }
   return {
     status: b.status, wave: b.wave, strikeTick: b.strikeTick, puts: b.puts, mintFeePpm: b.mintFeePpm, univ3Pool: b.univ3Pool,
-    univ3MinLiquidity: b.univ3MinLiquidity, dataStreamsFeedId: b.dataStreamsFeedId, overrides: b.overrides,
-    registeredAt: b.registeredAt, registerTx: b.registerTx,
+    univ3MinLiquidity: b.univ3MinLiquidity, dataStreamsFeedId: b.dataStreamsFeedId, payoutRoute, overrides: b.overrides,
+    houseVault: b.houseVault, registeredAt: b.registeredAt, registerTx: b.registerTx,
   };
 }
 
@@ -223,6 +312,32 @@ for (const m of markets) {
   if (seen.has(key)) throw new Error(`duplicate ticker ${m.ticker} (case-insensitive)`);
   seen.add(key);
 }
+
+/**
+ * T-OP-099. The registry's `launchSet` block: the owner's launch set (2026-09-21: NVDA and SPCX), AUTHORITATIVE and
+ * deliberately not derived from `wave` or `status` (the block's own note says why). Rendered so lib/markets.ts can
+ * answer "is this market in the launch?" without tier1.json, which the Docker build context does not carry, and so
+ * the directory can never promise a market the owner scoped out. Same validation as ops/markets/build-markets.mjs:
+ * { note, markets }, a non-empty note, a non-empty array of tickers each naming a market here, no duplicates. Missing
+ * is an error: a projection without a launch set would either hide every market or promise every market.
+ */
+function assertLaunchSet(block, tickers) {
+  const where = "launchSet";
+  if (!isObject(block)) throw new Error(`${where}: missing or not an object of { note, markets }; the registry must name its launch set explicitly`);
+  assertExactKeys(block, ["note", "markets"], where);
+  if (typeof block.note !== "string" || block.note.trim() === "") throw new Error(`${where}.note must be a non-empty string`);
+  if (!Array.isArray(block.markets) || block.markets.length === 0) throw new Error(`${where}.markets must be a non-empty array of tickers`);
+  const known = new Set(tickers);
+  const named = new Set();
+  for (const ticker of block.markets) {
+    if (typeof ticker !== "string" || !/^[A-Z0-9.]+$/.test(ticker)) throw new Error(`${where}.markets contains ${JSON.stringify(ticker)}, which is not a ticker`);
+    if (named.has(ticker)) throw new Error(`${where}.markets names ${ticker} twice`);
+    named.add(ticker);
+    if (!known.has(ticker)) throw new Error(`${where}.markets names ${ticker}, which is not a market in this registry`);
+  }
+  return { note: block.note, markets: [...block.markets] };
+}
+const launchSet = assertLaunchSet(registry.launchSet, markets.map((m) => m.ticker));
 
 const isRehearsal = registryPath !== defaultRegistry;
 // Repo-relative when the source is inside the repo (the real registry reads "../ops/markets/…"),
@@ -292,6 +407,9 @@ lines.push(
   "",
   "/** Market defaults: oracle bounds, strike ladders per tenor, expiries listed ahead. A market's v2.overrides replaces keys of these. */",
   `export const V2_DEFAULTS = ${lit(v2.defaults, "")} as const;`,
+  "",
+  "/** The owner's launch set (T-OP-099): the ONLY markets the app may present as launching. Not derived from wave or status; see the note. */",
+  `export const LAUNCH_SET = ${lit(launchSet, "")} as const;`,
   "",
 );
 

@@ -59,8 +59,9 @@ vi.mock("ponder", async (importOriginal) => {
 import { ZERO_HARVEST_TOTALS, addHarvest, splitHarvest, type HarvestEvent } from "../../lib/harvest";
 import { closeStatus, endedListingStatus, recoveredStatus, type HarvestOrigin } from "../../lib/lifecycle";
 import { cycleStatus, epochStatus, harvestOrigin, listingStatus } from "../../ponder.schema";
-import { CYCLE_STATUSES, LISTING_STATUSES, accountStrand, clampOffset, cycleJson, harvestJson, listingJson, strandJson, weekOptionIds } from "./index";
+import app, { CYCLE_STATUSES, LISTING_STATUSES, accountStrand, clampOffset, cycleJson, harvestJson, listingJson, strandJson, weekOptionIds } from "./index";
 import { toJson } from "./serialize";
+import { ROUTES } from "./v2/schema";
 
 type CycleRow = typeof schema.cycle.$inferSelect;
 type ListingRow = typeof schema.listing.$inferSelect;
@@ -68,6 +69,34 @@ type HarvestRow = typeof schema.harvest.$inferSelect;
 type StrandRow = typeof schema.strand.$inferSelect;
 
 const FIXTURE_DIR = join(import.meta.dirname, "..", "..", "..", "ops", "fixtures", "api");
+
+describe("root route catalogue", () => {
+  it("derives every v2 route without dropping legacy routes or GraphQL", async () => {
+    const response = await app.request("http://localhost/");
+    expect(response.status).toBe(200);
+    const { routes } = await response.json() as { routes: string[] };
+
+    expect(routes.filter((route) => route.startsWith("GET  /v2/")))
+      .toEqual(ROUTES.map(({ route }) => `GET  ${route}`));
+    expect(routes.filter((route) => route.startsWith("GET  /v1/"))).toEqual([
+      "GET  /v1/vault",
+      "GET  /v1/cycles",
+      "GET  /v1/cycles/:cycle",
+      "GET  /v1/activity",
+      "GET  /v1/account/:addr",
+      "GET  /v1/listings",
+      "GET  /v1/listings/:hash",
+      "GET  /v1/strands",
+      "GET  /v1/snapshots",
+      "GET  /v1/market",
+      "GET  /v1/market/weeks",
+      "GET  /v1/market/fills",
+      "GET  /v1/market/accounts/:address",
+      "GET  /v1/health",
+    ]);
+    expect(routes.filter((route) => route === "POST /graphql")).toEqual(["POST /graphql"]);
+  });
+});
 
 describe("legacy list pagination", () => {
   it("caps a valid offset at the largest supported page start", () => {

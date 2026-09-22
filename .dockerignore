@@ -69,10 +69,14 @@ broadcast
 #      `pnpm gen:abis`, never part of `next build`. ----
 ops
 # … except the market registry: the v2 bots read it at boot (keeper/Dockerfile runner stage,
-# ops/deploy.md §15.2).
+# ops/deploy.md §15.2). Production bakes tier1.json; the stonkhouse-dev project bakes
+# dev.json (go-live-v2.sh refuses a missing exception). Both files must be exact lines.
 !ops/markets/tier1.json
+!ops/markets/dev.json
 # … and the v2 external monitor, which the keeper image runs as the `monitor` service (ops/deploy.md §15.12).
 !ops/v2/monitor.mjs
+# … and maker epoch claim files the web image copies into public/maker-epochs (O3-205 / W3-202).
+!ops/maker-epochs/*.json
 # Next type-checks web/lib/v2/config.test.ts during `next build`, and that file statically imports
 # this JSON fixture. Keep the single fixture in the web build context; the runner copies only
 # standalone output, so it is not shipped in the runtime image.

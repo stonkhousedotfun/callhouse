@@ -28,9 +28,11 @@
  *     the lease to expire and the row is sent again: a duplicate is possible, a loss is not.
  *   - Retries: 3, after 30 s, 2 min and 10 min (or the channel's Retry-After, if longer), then
  *     `failed`. Only transient outcomes retry (channels/types.ts).
- *   - Rate limit: at most 20 messages per subscription per rolling hour. The excess is DROPPED,
- *     not delayed: a storm that produces more than that is noise, and holding it back would only
- *     deliver stale alerts later.
+ *   - Rate limit, per subscription per rolling hour and PER CLASS (F4 D7): 60 receipts and 20
+ *     alerts, each counted only against its own class's sends. The excess is DROPPED, not delayed:
+ *     a storm that produces more than that is noise, and holding it back would only deliver stale
+ *     alerts later. The drop reason is `rate_limited:<class>`, so an overflow says which budget ran
+ *     out. One class at its cap never delays or drops the other's messages.
  *   - Circuit breaker per shared destination (breaker.ts): Telegram and email use their channel;
  *     Web Push uses the endpoint host. A failing user-controlled push host cannot postpone another
  *     push service's rows. A 429 uses its Retry-After without counting as a channel outage.
@@ -45,7 +47,7 @@ import { CircuitBreaker, DEFAULT_BREAKER, type BreakerState } from './breaker.js
 import { CHANNELS, type Channel, type ChannelName, type SendOutcome } from './channels/types.js';
 import type { TargetCipher } from './crypto.js';
 import type { Db } from './db.js';
-import { isEventKind, parsePayload, type EventKind } from './events.js';
+import { EVENT_KINDS, isEventKind, parsePayload, type EventKind } from './events.js';
 import { errorCode, type Logger } from './log.js';
 import { prefsAllow, readPrefs } from './prefs.js';
 import { activeForAddress, disableSubscription, purge } from './store.js';
@@ -58,7 +60,8 @@ export interface DeliveryOptions {
   pollMs: number;
   /** Wait before retry n (1-based index n-1). Its length is the number of retries. */
   retryBackoffMs: number[];
-  ratePerHour: number;
+  /** Messages per subscription per rolling hour, counted and spent per class (F4 D7). */
+  ratePerHour: Record<DeliveryClass, number>;
   maxAgeMs: number;
   purgeEveryMs: number;
 }
@@ -68,10 +71,55 @@ export const DEFAULT_DELIVERY_OPTIONS: DeliveryOptions = {
   leaseMs: 5 * 60_000,
   pollMs: 2_000,
   retryBackoffMs: [30_000, 120_000, 600_000],
-  ratePerHour: 20,
+  ratePerHour: { receipts: 60, alerts: 20 },
   maxAgeMs: 6 * 3600_000,
   purgeEveryMs: 10 * 60_000,
 };
+
+/**
+ * The two delivery classes and their separate hourly budgets (F4 D7).
+ *
+ *   receipts  what already happened to the wallet's money or positions: a fill, a settlement, a
+ *             payout that went to the ledger, an auto-roll. Losing one loses a record.
+ *   alerts    reminders and price-driven notices: expiry countdowns, strike crossings, price
+ *             alerts, the writer ITM warning. They describe a condition, so a dropped one is
+ *             replaced by the next tick's.
+ *
+ * WHY SEPARATE BUDGETS: every rule fires once per series and all markets share one expiry instant,
+ * so with 20 markets a holder's reminders alone can exceed a single cap and eat the receipts behind
+ * them. The budgets are counted and spent per class, so a storm in one cannot throttle the other.
+ * Both remain capped: a class over its cap is still DROPPED, never queued for later, and the drop
+ * reason names the class so the overflow stays visible in /health and the logs.
+ */
+export type DeliveryClass = 'receipts' | 'alerts';
+
+export const RECEIPT_KINDS = [
+  'fill_receipt',
+  'settlement_receipt',
+  'payout_failed_to_ledger',
+  'auto_roll',
+] as const satisfies readonly EventKind[];
+
+const RECEIPT_KIND_SET: ReadonlySet<string> = new Set<string>(RECEIPT_KINDS);
+
+export function deliveryClass(kind: string): DeliveryClass {
+  return RECEIPT_KIND_SET.has(kind) ? 'receipts' : 'alerts';
+}
+
+/** The kinds counted against each class's budget. Together they are exactly EVENT_KINDS. */
+export const CLASS_KINDS: Record<DeliveryClass, EventKind[]> = {
+  receipts: EVENT_KINDS.filter((kind) => deliveryClass(kind) === 'receipts'),
+  alerts: EVENT_KINDS.filter((kind) => deliveryClass(kind) === 'alerts'),
+};
+
+/** Deliveries created in the last hour, by what became of them. */
+export interface DeliveryStats {
+  sent: number;
+  failed: number;
+  dropped: number;
+  /** The `dropped` rows a class budget refused; also counted in `dropped`. */
+  rateLimited: number;
+}
 
 export class EnqueueError extends Error {
   constructor(readonly issues: string[]) {
@@ -177,6 +225,34 @@ export class DeliveryService {
     return result;
   }
 
+  /**
+   * What became of the deliveries CREATED in the last hour: the window is `created_at`, not
+   * `sent_at`, so one message is counted once and under the hour it belongs to. Rows still pending
+   * or retrying are in none of the four counters; they are still in flight, not an outcome yet.
+   * `rateLimited` is the subset of `dropped` a class budget refused (reason `rate_limited:<class>`).
+   */
+  async statsLastHour(): Promise<DeliveryStats> {
+    const since = new Date(this.deps.now().getTime() - 3600_000);
+    const { rows } = await this.deps.db.query<{ status: string; n: number; rate_limited: number }>(
+      `SELECT status, count(*)::int AS n,
+              count(*) FILTER (WHERE last_error_code LIKE 'rate_limited%')::int AS rate_limited
+         FROM notifier.delivery
+        WHERE created_at > $1::timestamptz
+        GROUP BY status`,
+      [since],
+    );
+    const stats: DeliveryStats = { sent: 0, failed: 0, dropped: 0, rateLimited: 0 };
+    for (const row of rows) {
+      if (row.status === 'sent') stats.sent = row.n;
+      else if (row.status === 'failed') stats.failed = row.n;
+      else if (row.status === 'dropped') {
+        stats.dropped = row.n;
+        stats.rateLimited = row.rate_limited;
+      }
+    }
+    return stats;
+  }
+
   breakerStates(): Record<ChannelName, BreakerState | 'off'> {
     const nowMs = this.deps.now().getTime();
     const out = {} as Record<ChannelName, BreakerState | 'off'>;
@@ -275,12 +351,15 @@ export class DeliveryService {
     const prefs = readPrefs(row.prefs);
     if (prefs === null || !prefsAllow(prefs, parsed.event)) return drop('pref_off');
 
+    // The hourly budget of this message's class only: a storm of reminders must not consume the
+    // budget a receipt needs (F4 D7). The reason names the class the message was refused by.
+    const messageClass = deliveryClass(row.kind);
     const { rows: sent } = await db.query<{ n: number }>(
       `SELECT count(*)::int AS n FROM notifier.delivery
-        WHERE subscription_id = $1 AND status = 'sent' AND sent_at > $2::timestamptz`,
-      [row.subscription_id, new Date(at.getTime() - 3600_000)],
+        WHERE subscription_id = $1 AND status = 'sent' AND sent_at > $2::timestamptz AND kind = ANY($3::text[])`,
+      [row.subscription_id, new Date(at.getTime() - 3600_000), CLASS_KINDS[messageClass]],
     );
-    if ((sent[0]?.n ?? 0) >= this.options.ratePerHour) return drop('rate_limited');
+    if ((sent[0]?.n ?? 0) >= this.options.ratePerHour[messageClass]) return drop(`rate_limited:${messageClass}`);
 
     let target: string;
     try {

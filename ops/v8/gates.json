@@ -1,0 +1,1256 @@
+{
+  "_readme": "The launch-verification gate catalog (O8-13A). One entry per command in v8-plan/01-CONTEXT.md section 4, plus the three owner-gate artifacts of OWN8-10/11/12 (T-198). Every command is an argv ARRAY, never a shell string, so 06-QUIRKS A6's pipefail hazard cannot exist. `inCi` is READ from .github/workflows/ci.yml at the app SHA and must be re-read whenever that file changes. CORRECTION (T-198, 2026-09-20): this sentence previously claimed ops/v8/verify-gates.test.mjs re-derives inCi and fails on drift. It does not - neither `inCi` nor `ci.yml` appears anywhere in that file. Nothing currently detects inCi drift; the claim was itself a check that could not see its subject. verify-gates.test.mjs is outside T-198's scope so the missing test is filed in the deferred-verification ledger rather than written here. No count in this file is an expectation: 01-CONTEXT's quoted numbers are already stale and the runner RECORDS what it measures.",
+  "source": "v8-plan/01-CONTEXT.md section 4",
+  "repos": {
+    "contracts": "callhouse-contracts",
+    "app": "callhouse",
+    "site": "callhouse-site",
+    "docs": "callhouse-docs"
+  },
+  "gates": [
+    {
+      "id": "contracts.build",
+      "repo": "contracts",
+      "argv": [
+        "forge",
+        "build"
+      ],
+      "env": {},
+      "preconditions": [],
+      "inCi": false,
+      "count": null,
+      "exit": {
+        "pass": [
+          0
+        ]
+      },
+      "note": ""
+    },
+    {
+      "id": "contracts.test",
+      "repo": "contracts",
+      "argv": [
+        "forge",
+        "test"
+      ],
+      "env": {},
+      "preconditions": [],
+      "inCi": false,
+      "count": {
+        "parse": "forge-summary",
+        "record": "tests and suites, verbatim"
+      },
+      "exit": {
+        "pass": [
+          0
+        ]
+      },
+      "note": "01-CONTEXT quotes 1,608 tests / 97 suites. That is a note, not an expectation: record what you measure."
+    },
+    {
+      "id": "contracts.sizes",
+      "repo": "contracts",
+      "argv": [
+        "forge",
+        "build",
+        "--sizes"
+      ],
+      "env": {},
+      "preconditions": [],
+      "inCi": false,
+      "count": {
+        "parse": "sizes-table",
+        "record": "the table verbatim"
+      },
+      "exit": {
+        "pass": [
+          0,
+          1
+        ],
+        "why": "v1 Vault is over EIP-170 so this exits 1 regardless; the table is the artifact, not the code"
+      },
+      "note": ""
+    },
+    {
+      "id": "contracts.fmt",
+      "repo": "contracts",
+      "argv": [
+        "forge",
+        "fmt",
+        "--check",
+        "src/v2",
+        "script/v2",
+        "test/v2"
+      ],
+      "env": {},
+      "preconditions": [],
+      "inCi": false,
+      "count": null,
+      "exit": {
+        "pass": [
+          0
+        ]
+      },
+      "note": ""
+    },
+    {
+      "id": "contracts.fork",
+      "repo": "contracts",
+      "argv": [
+        "forge",
+        "test",
+        "-j",
+        "1"
+      ],
+      "env": {
+        "FOUNDRY_PROFILE": "fork"
+      },
+      "preconditions": [
+        "fork-url",
+        "fork-block-number"
+      ],
+      "inCi": false,
+      "count": {
+        "parse": "forge-summary",
+        "record": "tests and suites, verbatim"
+      },
+      "exit": {
+        "pass": [
+          0
+        ]
+      },
+      "note": "foundry.toml [profile.fork] match_path = test/{fork,v2/fork}/* selects the suites; each self-returns at `if (block.chainid != 4663) return;` (test/v2/fork/DataStreamsFork.t.sol:52, FreezeV1Fork.t.sol:55), so without a fork they PASS having asserted nothing."
+    },
+    {
+      "id": "contracts.export-abis",
+      "repo": "contracts",
+      "argv": [
+        "script/v2/export-abis.sh",
+        "--callhouse",
+        "<app>",
+        "--check"
+      ],
+      "env": {},
+      "preconditions": [
+        "app-binding"
+      ],
+      "inCi": false,
+      "count": null,
+      "exit": {
+        "pass": [
+          0
+        ]
+      },
+      "note": ""
+    },
+    {
+      "id": "contracts.batch-refusals",
+      "repo": "contracts",
+      "argv": [
+        "script/v2/batch-refusals.sh",
+        "--registry",
+        "<registry-copy>"
+      ],
+      "env": {},
+      "preconditions": [
+        "registry-copy",
+        "out-built"
+      ],
+      "inCi": false,
+      "count": {
+        "parse": "case-count",
+        "record": "cases, verbatim"
+      },
+      "exit": {
+        "pass": [
+          0
+        ]
+      },
+      "note": ""
+    },
+    {
+      "id": "contracts.rehearse",
+      "repo": "contracts",
+      "argv": [
+        "script/v2/rehearse-v2.sh"
+      ],
+      "env": {
+        "PORT": "8582",
+        "REGISTRY": "<registry-copy>"
+      },
+      "preconditions": [
+        "registry-copy",
+        "fork-url"
+      ],
+      "inCi": false,
+      "count": null,
+      "exit": {
+        "pass": [
+          0
+        ]
+      },
+      "note": "deploy + register + verify on a 4663 fork"
+    },
+    {
+      "id": "app.install",
+      "repo": "app",
+      "argv": [
+        "pnpm",
+        "install",
+        "--frozen-lockfile"
+      ],
+      "env": {},
+      "preconditions": [],
+      "inCi": true,
+      "count": null,
+      "exit": {
+        "pass": [
+          0
+        ]
+      },
+      "note": ""
+    },
+    {
+      "id": "app.web.typecheck",
+      "repo": "app",
+      "argv": [
+        "pnpm",
+        "--filter",
+        "@callhouse/web",
+        "typecheck"
+      ],
+      "env": {},
+      "preconditions": [],
+      "inCi": false,
+      "count": null,
+      "exit": {
+        "pass": [
+          0
+        ]
+      },
+      "note": ""
+    },
+    {
+      "id": "app.web.test",
+      "repo": "app",
+      "argv": [
+        "pnpm",
+        "--filter",
+        "@callhouse/web",
+        "test"
+      ],
+      "env": {},
+      "preconditions": [],
+      "inCi": true,
+      "count": null,
+      "exit": {
+        "pass": [
+          0
+        ]
+      },
+      "note": ""
+    },
+    {
+      "id": "app.web.lint",
+      "repo": "app",
+      "argv": [
+        "pnpm",
+        "--filter",
+        "@callhouse/web",
+        "lint"
+      ],
+      "env": {},
+      "preconditions": [],
+      "inCi": true,
+      "count": null,
+      "exit": {
+        "pass": [
+          0
+        ]
+      },
+      "note": ""
+    },
+    {
+      "id": "app.web.build",
+      "repo": "app",
+      "argv": [
+        "pnpm",
+        "--filter",
+        "@callhouse/web",
+        "build"
+      ],
+      "env": {},
+      "preconditions": [],
+      "inCi": true,
+      "count": null,
+      "exit": {
+        "pass": [
+          0
+        ]
+      },
+      "note": ""
+    },
+    {
+      "id": "app.indexer.typecheck",
+      "repo": "app",
+      "argv": [
+        "pnpm",
+        "--filter",
+        "@callhouse/indexer",
+        "typecheck"
+      ],
+      "env": {},
+      "preconditions": [],
+      "inCi": true,
+      "count": null,
+      "exit": {
+        "pass": [
+          0
+        ]
+      },
+      "note": ""
+    },
+    {
+      "id": "app.indexer.test",
+      "repo": "app",
+      "argv": [
+        "pnpm",
+        "--filter",
+        "@callhouse/indexer",
+        "test"
+      ],
+      "env": {},
+      "preconditions": [],
+      "inCi": true,
+      "count": null,
+      "exit": {
+        "pass": [
+          0
+        ]
+      },
+      "note": ""
+    },
+    {
+      "id": "app.keeper.typecheck",
+      "repo": "app",
+      "argv": [
+        "pnpm",
+        "--filter",
+        "@callhouse/keeper",
+        "typecheck"
+      ],
+      "env": {},
+      "preconditions": [],
+      "inCi": true,
+      "count": null,
+      "exit": {
+        "pass": [
+          0
+        ]
+      },
+      "note": ""
+    },
+    {
+      "id": "app.keeper.test",
+      "repo": "app",
+      "argv": [
+        "pnpm",
+        "--filter",
+        "@callhouse/keeper",
+        "test"
+      ],
+      "env": {},
+      "preconditions": [],
+      "inCi": true,
+      "count": null,
+      "exit": {
+        "pass": [
+          0
+        ]
+      },
+      "note": ""
+    },
+    {
+      "id": "app.notifier.typecheck",
+      "repo": "app",
+      "argv": [
+        "pnpm",
+        "--filter",
+        "@callhouse/notifier",
+        "typecheck"
+      ],
+      "env": {},
+      "preconditions": [],
+      "inCi": true,
+      "count": null,
+      "exit": {
+        "pass": [
+          0
+        ]
+      },
+      "note": ""
+    },
+    {
+      "id": "app.notifier.build",
+      "repo": "app",
+      "argv": [
+        "pnpm",
+        "--filter",
+        "@callhouse/notifier",
+        "build"
+      ],
+      "env": {},
+      "preconditions": [],
+      "inCi": true,
+      "count": null,
+      "exit": {
+        "pass": [
+          0
+        ]
+      },
+      "note": ""
+    },
+    {
+      "id": "app.notifier.test",
+      "repo": "app",
+      "argv": [
+        "pnpm",
+        "--filter",
+        "@callhouse/notifier",
+        "test"
+      ],
+      "env": {},
+      "preconditions": [],
+      "inCi": true,
+      "count": null,
+      "exit": {
+        "pass": [
+          0
+        ]
+      },
+      "note": ""
+    },
+    {
+      "id": "app.relay.typecheck",
+      "repo": "app",
+      "argv": [
+        "pnpm",
+        "--filter",
+        "@callhouse/relay",
+        "typecheck"
+      ],
+      "env": {},
+      "preconditions": [],
+      "inCi": true,
+      "count": null,
+      "exit": {
+        "pass": [
+          0
+        ]
+      },
+      "note": ""
+    },
+    {
+      "id": "app.relay.test",
+      "repo": "app",
+      "argv": [
+        "pnpm",
+        "--filter",
+        "@callhouse/relay",
+        "test"
+      ],
+      "env": {},
+      "preconditions": [],
+      "inCi": true,
+      "count": null,
+      "exit": {
+        "pass": [
+          0
+        ]
+      },
+      "note": ""
+    },
+    {
+      "id": "app.gen-abis.web",
+      "repo": "app",
+      "argv": [
+        "node",
+        "web/scripts/gen-abis.mjs",
+        "--check"
+      ],
+      "env": {},
+      "preconditions": [],
+      "inCi": false,
+      "count": null,
+      "exit": {
+        "pass": [
+          0
+        ]
+      },
+      "note": ""
+    },
+    {
+      "id": "app.gen-abis.indexer",
+      "repo": "app",
+      "argv": [
+        "node",
+        "indexer/scripts/gen-abis.mjs",
+        "--check"
+      ],
+      "env": {},
+      "preconditions": [],
+      "inCi": false,
+      "count": null,
+      "exit": {
+        "pass": [
+          0
+        ]
+      },
+      "note": ""
+    },
+    {
+      "id": "app.gen-abis.keeper",
+      "repo": "app",
+      "argv": [
+        "node",
+        "keeper/scripts/gen-abis.mjs",
+        "--check"
+      ],
+      "env": {},
+      "preconditions": [],
+      "inCi": false,
+      "count": null,
+      "exit": {
+        "pass": [
+          0
+        ]
+      },
+      "note": ""
+    },
+    {
+      "id": "app.build-markets",
+      "repo": "app",
+      "argv": [
+        "node",
+        "ops/markets/build-markets.mjs",
+        "--check"
+      ],
+      "env": {},
+      "preconditions": [
+        "cast",
+        "rpc"
+      ],
+      "inCi": true,
+      "count": null,
+      "exit": {
+        "pass": [
+          0
+        ]
+      },
+      "note": ""
+    },
+    {
+      "id": "app.build-markets.dev",
+      "repo": "app",
+      "argv": [
+        "node",
+        "ops/markets/build-markets.mjs",
+        "--registry",
+        "ops/markets/dev.json",
+        "--check"
+      ],
+      "env": {},
+      "preconditions": [
+        "cast",
+        "rpc"
+      ],
+      "inCi": false,
+      "count": null,
+      "exit": {
+        "pass": [
+          0
+        ]
+      },
+      "note": ""
+    },
+    {
+      "id": "app.gen-markets",
+      "repo": "app",
+      "argv": [
+        "node",
+        "web/scripts/gen-markets.mjs",
+        "--check"
+      ],
+      "env": {},
+      "preconditions": [],
+      "inCi": false,
+      "count": null,
+      "exit": {
+        "pass": [
+          0
+        ]
+      },
+      "note": ""
+    },
+    {
+      "id": "app.gen-v2-registry",
+      "repo": "app",
+      "argv": [
+        "node",
+        "indexer/scripts/gen-v2-registry.mjs",
+        "--check"
+      ],
+      "env": {},
+      "preconditions": [],
+      "inCi": false,
+      "count": null,
+      "exit": {
+        "pass": [
+          0
+        ]
+      },
+      "note": ""
+    },
+    {
+      "id": "app.gen-card-registry",
+      "repo": "app",
+      "argv": [
+        "node",
+        "indexer/scripts/gen-card-registry.mjs",
+        "--check"
+      ],
+      "env": {},
+      "preconditions": [],
+      "inCi": false,
+      "count": null,
+      "exit": {
+        "pass": [
+          0
+        ]
+      },
+      "note": ""
+    },
+    {
+      "id": "app.v2-env",
+      "repo": "app",
+      "argv": [
+        "node",
+        "ops/v2-env.mjs",
+        "--check"
+      ],
+      "env": {},
+      "preconditions": [],
+      "inCi": true,
+      "count": null,
+      "exit": {
+        "pass": [
+          0
+        ]
+      },
+      "note": ""
+    },
+    {
+      "id": "app.v2-env.dev",
+      "repo": "app",
+      "argv": [
+        "node",
+        "ops/v2-env.mjs",
+        "--registry",
+        "ops/markets/dev.json",
+        "--out",
+        "ops/v2/env-dev",
+        "--check"
+      ],
+      "env": {},
+      "preconditions": [],
+      "inCi": false,
+      "count": null,
+      "exit": {
+        "pass": [
+          0
+        ]
+      },
+      "note": ""
+    },
+    {
+      "id": "app.fixtures",
+      "repo": "app",
+      "argv": [
+        "node",
+        "ops/fixtures/api/v2/gen.mjs",
+        "--check"
+      ],
+      "env": {},
+      "preconditions": [],
+      "inCi": false,
+      "count": null,
+      "exit": {
+        "pass": [
+          0
+        ]
+      },
+      "note": ""
+    },
+    {
+      "id": "app.monitor-tests",
+      "repo": "app",
+      "argv": [
+        "node",
+        "--test",
+        "ops/v2/monitor.test.mjs"
+      ],
+      "env": {},
+      "preconditions": [],
+      "inCi": true,
+      "count": {
+        "parse": "node-test",
+        "record": "pass/fail"
+      },
+      "exit": {
+        "pass": [
+          0
+        ]
+      },
+      "note": ""
+    },
+    {
+      "id": "app.runbook-tests",
+      "repo": "app",
+      "argv": [
+        "node",
+        "--test",
+        "ops/runbooks.test.mjs"
+      ],
+      "env": {},
+      "preconditions": [],
+      "inCi": true,
+      "count": {
+        "parse": "node-test",
+        "record": "pass/fail"
+      },
+      "exit": {
+        "pass": [
+          0
+        ]
+      },
+      "note": ""
+    },
+    {
+      "id": "app.render-docs",
+      "repo": "app",
+      "argv": [
+        "node",
+        "ops/markets/render-docs.mjs",
+        "--check",
+        "--docs-dir",
+        "<docs>"
+      ],
+      "env": {},
+      "preconditions": [
+        "docs-binding"
+      ],
+      "inCi": false,
+      "count": null,
+      "exit": {
+        "pass": [
+          0
+        ]
+      },
+      "note": "without --docs-dir equal to the bound docs worktree this checks nothing"
+    },
+    {
+      "id": "app.acceptance",
+      "repo": "app",
+      "argv": [
+        "pnpm",
+        "--filter",
+        "@callhouse/web",
+        "acceptance:v2"
+      ],
+      "env": {},
+      "preconditions": [
+        "devnet-up"
+      ],
+      "inCi": false,
+      "count": null,
+      "exit": {
+        "pass": [
+          0
+        ]
+      },
+      "note": "ops/devnet/up.sh must be running; full browser + fork gate"
+    },
+    {
+      "id": "app.rehearse.v8",
+      "repo": "app",
+      "argv": [
+        "node",
+        "ops/v2/rehearse/6-v8-drills.mjs",
+        "--fork-allowed"
+      ],
+      "env": {
+        "CONTRACTS_DIR": "<contracts-worktree>"
+      },
+      "preconditions": [
+        "fork-url",
+        "fork-block-number"
+      ],
+      "inCi": false,
+      "count": null,
+      "exit": {
+        "pass": [
+          0
+        ]
+      },
+      "note": "O8-06, the full-stack v8 fork rehearsal. DISTINCT FROM contracts.rehearse, which is the v7 script/v2/rehearse-v2.sh: this one runs the v8 required-step set (ops/v2/rehearse/v8-plan.mjs) and exits non-zero if any required step has no outcome. Without --fork-allowed every on-chain step reports blocked and the gate exits 1 having proven nothing, which is the honest result, not a pass. The fork gate itself is an owner decision per task."
+    },
+    {
+      "id": "site.install",
+      "repo": "site",
+      "argv": [
+        "pnpm",
+        "install",
+        "--frozen-lockfile"
+      ],
+      "env": {},
+      "preconditions": [],
+      "inCi": false,
+      "count": null,
+      "exit": {
+        "pass": [
+          0
+        ]
+      },
+      "note": ""
+    },
+    {
+      "id": "site.typecheck",
+      "repo": "site",
+      "argv": [
+        "pnpm",
+        "typecheck"
+      ],
+      "env": {},
+      "preconditions": [],
+      "inCi": false,
+      "count": null,
+      "exit": {
+        "pass": [
+          0
+        ]
+      },
+      "note": ""
+    },
+    {
+      "id": "site.lint",
+      "repo": "site",
+      "argv": [
+        "pnpm",
+        "lint"
+      ],
+      "env": {},
+      "preconditions": [],
+      "inCi": false,
+      "count": null,
+      "exit": {
+        "pass": [
+          0
+        ]
+      },
+      "note": ""
+    },
+    {
+      "id": "site.test",
+      "repo": "site",
+      "argv": [
+        "pnpm",
+        "test"
+      ],
+      "env": {},
+      "preconditions": [],
+      "inCi": false,
+      "count": null,
+      "exit": {
+        "pass": [
+          0
+        ]
+      },
+      "note": ""
+    },
+    {
+      "id": "site.build",
+      "repo": "site",
+      "argv": [
+        "pnpm",
+        "build"
+      ],
+      "env": {},
+      "preconditions": [],
+      "inCi": false,
+      "count": null,
+      "exit": {
+        "pass": [
+          0
+        ]
+      },
+      "note": ""
+    },
+    {
+      "id": "site.check-twins",
+      "repo": "site",
+      "argv": [
+        "pnpm",
+        "check-twins"
+      ],
+      "env": {
+        "CALLHOUSE_WEB_DIR": "<app>/web"
+      },
+      "preconditions": [
+        "app-web-binding"
+      ],
+      "inCi": false,
+      "count": null,
+      "exit": {
+        "pass": [
+          0
+        ]
+      },
+      "note": "scripts/check-twins.mjs prints 'sibling web v2 source or registry is absent; skipped' and process.exit(0) when CALLHOUSE_WEB_DIR is unset"
+    },
+    {
+      "id": "docs.mirror-write",
+      "repo": "docs",
+      "argv": [
+        "node",
+        "scripts/mirror.mjs",
+        "--write"
+      ],
+      "env": {},
+      "preconditions": [],
+      "inCi": false,
+      "count": null,
+      "exit": {
+        "pass": [
+          0
+        ]
+      },
+      "note": ""
+    },
+    {
+      "id": "docs.mirror-check",
+      "repo": "docs",
+      "argv": [
+        "node",
+        "scripts/mirror.mjs",
+        "--check"
+      ],
+      "env": {},
+      "preconditions": [],
+      "inCi": false,
+      "count": null,
+      "exit": {
+        "pass": [
+          0
+        ]
+      },
+      "note": ""
+    },
+    {
+      "id": "docs.check-links",
+      "repo": "docs",
+      "argv": [
+        "node",
+        "scripts/check-links.mjs"
+      ],
+      "env": {},
+      "preconditions": [],
+      "inCi": false,
+      "count": null,
+      "exit": {
+        "pass": [
+          0
+        ]
+      },
+      "note": ""
+    },
+    {
+      "id": "app.prelaunch-gate",
+      "repo": "app",
+      "argv": [
+        "node",
+        "--test",
+        "ops/v8/prelaunch-gate.test.mjs"
+      ],
+      "env": {},
+      "preconditions": [],
+      "inCi": true,
+      "count": {
+        "parse": "node-test",
+        "record": "pass/fail"
+      },
+      "exit": {
+        "pass": [
+          0
+        ]
+      },
+      "note": "OWN8-02's own suite. DELIBERATELY the TEST, not the gate: ops/v8/prelaunch-gate.mjs observes live relay/monitor/pricing/notifier endpoints, which this catalog's runner has no bindings for and must never reach from a verification pass. NO preconditions on purpose -- prelaunch-gate.mjs reports an unconfigured or unreachable service as FAIL rather than REFUSED, so declaring one here would convert its loudest signal into a refusal."
+    },
+    {
+      "id": "own8-11.ledger-worklist",
+      "repo": "app",
+      "argv": [
+        "node",
+        "ops/v8/ledger.mjs",
+        "--ledger",
+        "<stonkhouse-plan/status/DEFERRED-VERIFICATION.md>",
+        "--board",
+        "<v8-plan/tasks.json>",
+        "--check"
+      ],
+      "env": {},
+      "preconditions": [
+        "ledger-path"
+      ],
+      "inCi": false,
+      "count": {
+        "parse": "ledger-worklist",
+        "record": "open/resolved/defects"
+      },
+      "exit": {
+        "pass": [
+          0
+        ]
+      },
+      "note": "OWN8-11's worklist. The ledger lives OUTSIDE every repo worktree, so it is bound with --ledger rather than resolved from a repo; without that binding this gate is REFUSED, never skipped. --check gates on missing required FIELDS only, which is its historical meaning; --check-sha is the opt-in gate on entries with no 40-hex Integrated SHA. Those entries stay in the worklist either way - dropping them would hide the work whose provenance is already lost."
+    },
+    {
+      "id": "own8-12.audit-packet",
+      "repo": "app",
+      "argv": [
+        "node",
+        "ops/v8/audit-packet.mjs",
+        "packet",
+        "--contracts",
+        "<contracts worktree>",
+        "--report",
+        "<status/VERIFICATION-REPORT.md>"
+      ],
+      "env": {},
+      "preconditions": [
+        "contracts-binding",
+        "verification-report"
+      ],
+      "inCi": false,
+      "count": null,
+      "exit": {
+        "pass": [
+          0
+        ]
+      },
+      "note": "OWN8-12's packet. TODAY THIS GATE IS EXPECTED TO BE REFUSED: status/VERIFICATION-REPORT.md does not exist anywhere in the workspace yet - O8-13 writes it once OWN8-11 reopens verification. A REFUSED result here is the tool working. Exit 1 from the command itself means a gap was found with the report present: a contract with no source, or a contract no packet document names. It never emits a packet with a hole."
+    },
+    {
+      "id": "app.audit-packet",
+      "repo": "app",
+      "argv": [
+        "node",
+        "--test",
+        "ops/v8/audit-packet.test.mjs"
+      ],
+      "env": {},
+      "preconditions": [],
+      "inCi": true,
+      "count": {
+        "parse": "node-test",
+        "record": "pass/fail"
+      },
+      "exit": {
+        "pass": [
+          0
+        ]
+      },
+      "note": "The suite for the OWN8-10/11/12 kit. inCi is true because .github/workflows/ci.yml:86 runs `node --test ops/v8/*.test.mjs`, which this file matches - read at app 0fed1559fc11a0a52b03bb84541a113411f57a4d, not assumed. Like app.prelaunch-gate this is the TEST rather than the gate, because the gates themselves need worktree and ledger bindings a verification pass supplies at run time."
+    }
+  ],
+  "sha_reconciliation": {
+    "_readme": "T-236 reconciliation of the kimi-code full-ledger SHA audit of 2026-09-20 (that audit's own section lives in DEFERRED-VERIFICATION.md under 'Verification notes - full-ledger SHA audit'). The row said reconcile that list, do not re-run its ~200 checks, so this re-checks only the 7 F1 findings and the SHAs they name. RESULT: 3 of the 7 were already closed in the ledger before this row ran and one of those three, T-200, was a WRONG FINDING - the audit looked for an app-repo commit in the contracts repo. 4 remain open and all 4 verify as claimed. THE FALSE GREEN THIS BLOCK KILLS: ops/v8/ledger.mjs treats any 40-hex Integrated SHA as provenance. It never asks whether that commit exists or is reachable, so an entry pinned to a dangling object reads as fully provenanced while naming a tree nobody can check out. EVERY ROW CARRIES ITS REPO, because the one wrong finding in the whole audit was a wrong-repo lookup: a SHA is only absent RELATIVE TO A REPO, and these four repos share no object store.",
+    "audited_at": "2026-09-20, kimi-code review pass, ~200 SHAs across all four repos, read-only",
+    "integration_line": "v8 is the sole integration line in every repo. Nothing in the ledger is on main. A report that flags 'not on main' is misreading the workspace model, not finding a defect.",
+    "unverifiable": [
+      {
+        "entry": "T-200",
+        "repo": "callhouse",
+        "pinned": "128ca996",
+        "state": "RETRACTED",
+        "open": false,
+        "finding": "the audit reported this SHA as absent from the clone entirely. IT IS NOT. Re-checked at reconciliation time: 128ca996 exists in callhouse and IS contained in callhouse v8. It is absent from callhouse-contracts because it was never a contracts commit - the audit looked in the wrong repo. The ledger entry already carries this retraction.",
+        "landed_as": "128ca996 itself, via integration commit bc75fed"
+      },
+      {
+        "entry": "T-248",
+        "repo": "callhouse-contracts",
+        "pinned": "913eedf9",
+        "state": "RESOLVED",
+        "open": false,
+        "finding": "pinned SHA is genuinely dangling, but the entry was resolved in the ledger before this row: the work was recommitted as 9461127d, patch-id identical, contained in contracts v8.",
+        "landed_as": "9461127d"
+      },
+      {
+        "entry": "T-251",
+        "repo": "callhouse-contracts",
+        "pinned": null,
+        "state": "RESOLVED",
+        "open": false,
+        "finding": "recorded no SHA at all, and was resolved in the ledger before this row: fix commit 3cd79ff1, parent = the recorded base 05e20943, contained in contracts v8.",
+        "landed_as": "3cd79ff1"
+      },
+      {
+        "entry": "N3-408",
+        "repo": "callhouse",
+        "pinned": "a8585c57",
+        "state": "author-branch-only",
+        "open": true,
+        "finding": "VERIFIED at reconciliation: a8585c57 exists in callhouse and is NOT contained in v8. On no shared branch, only the author's task-N3-KINDS. The entry itself says the submission was pending, so the field is aspirational. Nothing landed.",
+        "landed_as": null
+      },
+      {
+        "entry": "O8-11",
+        "repo": "callhouse",
+        "pinned": "ef3143ab",
+        "state": "stale-superseded",
+        "open": true,
+        "finding": "VERIFIED: ef3143ab exists and is NOT on v8; the later cherry-pick 2712e340 IS on v8. The first entry's SHA field is stale; its own 'submission pending' text is the accurate part.",
+        "landed_as": "2712e340"
+      },
+      {
+        "entry": "X8-06A",
+        "repo": "callhouse",
+        "pinned": "79d2c53f",
+        "state": "never-landed",
+        "open": true,
+        "finding": "VERIFIED: 79d2c53f exists and is NOT on v8; the recommit 168b6dae IS on v8. Content landed, pinned SHA did not - the exact shape a freeze exists to prevent, and the reason a consumer should re-derive a constant from the artifact rather than trust a pinned SHA.",
+        "landed_as": "168b6dae"
+      },
+      {
+        "entry": "T-78",
+        "repo": "callhouse-contracts",
+        "pinned": "4373919a",
+        "state": "dangling",
+        "open": true,
+        "finding": "VERIFIED: 4373919a exists in callhouse-contracts and is NOT on v8; the cherry-pick e9883ae IS on v8. Resolution is real only through that cherry-pick, patch-id verified by the original audit.",
+        "landed_as": "e9883ae"
+      }
+    ],
+    "superseded_epochs": [
+      {
+        "entry": "T-124",
+        "pinned": "07892388",
+        "landed_as": "4059c115",
+        "repo": "callhouse-contracts",
+        "note": "self-declared in its own entry, so not a false claim; recorded because the pinned commit exists only as a dangling object"
+      },
+      {
+        "entry": "T-172",
+        "pinned": "383a1a91",
+        "landed_as": "58e07bd4",
+        "repo": "callhouse-contracts",
+        "note": "self-declared in its own entry, so not a false claim; recorded because the pinned commit exists only as a dangling object"
+      },
+      {
+        "entry": "T-173",
+        "pinned": "e63b4c35",
+        "landed_as": "174f18e8",
+        "repo": "callhouse-contracts",
+        "note": "self-declared in its own entry, so not a false claim; recorded because the pinned commit exists only as a dangling object"
+      },
+      {
+        "entry": "T-175",
+        "pinned": "1def39f0",
+        "landed_as": "7d6888fb",
+        "repo": "callhouse-contracts",
+        "note": "self-declared in its own entry, so not a false claim; recorded because the pinned commit exists only as a dangling object"
+      },
+      {
+        "entry": "T-119",
+        "pinned": "5c133e65",
+        "landed_as": null,
+        "repo": "callhouse-contracts",
+        "note": "self-declared in its own entry, so not a false claim; recorded because the pinned commit exists only as a dangling object"
+      },
+      {
+        "entry": "T-161",
+        "pinned": "cbd7eb42",
+        "landed_as": null,
+        "repo": "callhouse-contracts",
+        "note": "self-declared in its own entry, so not a false claim; recorded because the pinned commit exists only as a dangling object"
+      },
+      {
+        "entry": "T-126",
+        "pinned": "cadd0169",
+        "landed_as": "08e5f387",
+        "repo": "callhouse-contracts",
+        "note": "self-declared in its own entry, so not a false claim; recorded because the pinned commit exists only as a dangling object"
+      },
+      {
+        "entry": "T-135",
+        "pinned": "2a79867e",
+        "landed_as": "3bd1f2e6",
+        "repo": "callhouse-contracts",
+        "note": "self-declared in its own entry, so not a false claim; recorded because the pinned commit exists only as a dangling object"
+      }
+    ],
+    "reconciled_at": {
+      "by": "T-236 / claude-360023, 2026-09-20",
+      "app_base": "8d5b13b38b20c9ec31def13f70b4916ef29d1bf2",
+      "contracts_v8_tip": "68d61c324a55b1dc47b9e0e5cef0e02051111956",
+      "method": "git cat-file -e <sha>^{commit} and git merge-base --is-ancestor <sha> v8, per repo, read-only"
+    }
+  },
+  "measured_baseline": {
+    "_readme": "T-236 was to RECORD THE MEASURED test and suite count. It is NOT MEASURED and this block says so rather than leaving the field empty or filling it with the nearest available number, because every wrong figure in this build so far was produced by reusing a number measured somewhere else. Read `status` first. The counts under `derived_at_tip` are STATIC COUNTS OF THE TREE - grep and ls-tree - and are a CEILING, not a run: fuzz, invariant and parameterised cases do not map 1:1 to a declaration, and a declaration in a skipped file is not a test that ran.",
+    "status": "NOT MEASURED at the v8 tip",
+    "blocker": "No callhouse-contracts worktree exists at the v8 tip 68d61c324a55b1dc47b9e0e5cef0e02051111956. The main clone is on branch tier1-multimarket and the 19 existing contracts worktrees belong to other lanes at other SHAs; checking one out or creating a new worktree is an operator hydration action, not a worker's. REPORTED, NOT REPAIRED. To measure: operator attaches a contracts worktree at the v8 tip, then `forge test` is run ONCE there and passed/failed/skipped/total are recorded verbatim below with that SHA.",
+    "plan_figure_is_a_description_not_an_expectation": {
+      "claim": "1,608 tests / 97 suites + 44 fork tests / 7 fork suites",
+      "source": "v8-plan 01-CONTEXT section 4; echoed at callhouse-contracts docs/DEPLOY-V2.md:815",
+      "status": "VOID for v8. HANDOFF.md:66-69 says suite counts are pending and the v7 figures measured 2026-09-17 must not be carried.",
+      "provably_stale": "the plan says 7 fork suites; the tree at the v8 tip has 15 fork .t.sol files. Re-derived by this row, and it disagrees with the row's own description too, which said 16."
+    },
+    "last_published_measurement": {
+      "figures": "1921 passed, 140 failed, 76 skipped, 2137 total",
+      "measured_by": "claude-19",
+      "at_sha": "69cdf747",
+      "profile": "full default profile, with T-CT5-01's vm.skip fix applied",
+      "STALE": "69cdf747 is 66 commits behind the v8 tip 68d61c32, re-derived by this row with `git rev-list --count 69cdf747..68d61c32`. Do NOT republish this as the v8 baseline and do not adjust it by arithmetic - that is precisely the mistake the row records claude-19 having made once already, predicting a total by subtracting a known inflation from a baseline seven commits back.",
+      "note": "140 failures is a separate question from the baseline. Measuring the count is this row; triaging the failures is not, and no row currently owns it."
+    },
+    "derived_at_tip": {
+      "contracts_v8_tip": "68d61c324a55b1dc47b9e0e5cef0e02051111956",
+      "test_files": 142,
+      "fork_test_files": 15,
+      "fork_files_calling_vm_skip": 15,
+      "function_test_or_invariant_declarations": 2071,
+      "fork_declarations": 56,
+      "method": "git ls-tree -r --name-only <tip> -- test | grep -c '\\.t\\.sol$' and git grep -hE '^[[:space:]]*function[[:space:]]+(test|invariant)' <tip> -- test | wc -l, both read-only against the bare tip, no checkout",
+      "caveat": "A CEILING, NOT A RUN COUNT. All 15 fork files call vm.skip since T-CT5-01, so their 56 declarations report SKIPPED rather than PASS - which is the fix that stopped a fork body that never ran from recording a pass."
+    }
+  },
+  "removed_gates": {
+    "_readme": "Gates deleted on 2026-09-21 by owner instruction: remove all copy-lint, in all repos. This block exists so a launch-phase reader finds a RECORD rather than a silent absence - three gates vanishing from a manifest with no explanation reads as an editing accident. Copy-lint was the only automated check on published claims: a FORBIDDEN table rejecting promise-an-outcome copy, a REQUIRED table pinning the DraftMarker on /terms and /privacy, and rules binding fee prose to the constants. Nothing guards those now, by decision.",
+    "removed_at": "2026-09-21",
+    "reason": "owner instruction",
+    "ids": [
+      "app.web.copy-lint",
+      "site.copy-lint",
+      "docs.copy-lint"
+    ],
+    "preserved_finding": "docs.copy-lint carried a note that is worth more than the gate was: scripts/copy-lint-docs.mjs:53 builds appCandidates from ../callhouse and ../../callhouse, and WITH NO SIBLING CHECKOUT the parity block is skipped - it then prints 'docs copy OK' and EXITS 0. It reported success for a check it never performed. The script is gone; the defect class is not, and this is the clearest recorded example of it in this repo.",
+    "own8_10_legal_diff": {
+      "removed_at": "2026-09-22",
+      "reason": "owner instruction (2026-09-20: 'get rid of the legal.ts shit, I don't want us to stop us from saying anything'); retired by T-OP-115",
+      "id": "own8-10.legal-diff",
+      "site_sha": "0e88449a755d860791e13694624e986be0cfdb76",
+      "note": "The gate diffed LEGAL_DOCS_VERSION / LEGAL_DOCS_ARE_DRAFT across the site's legal pages. Site commit 0e88449a deleted both constants and the draft banner, so `audit-packet.mjs legal-diff` REFUSED at the site tip by construction and the row could never pass (T-OP-095 drift item 2). The command is kept as a name: it prints 'legal-diff: retired 2026-09-22 by owner instruction (site 0e88449a) ...' and exits 0, so a stale invocation gets a record rather than an argument error and never a silently green diff. NOT repointed at LEGAL_DOCS_REVIEWED: that would recreate the gate the owner removed. What is left of OWN8-10 is the owner reading the pages. The `legal-baseline` and `site-binding` preconditions in ops/v8/verify-gates.mjs:150-159 now have no catalog row that uses the former (out of T-OP-115's fence; harmless dead branch)."
+    }
+  }
+}

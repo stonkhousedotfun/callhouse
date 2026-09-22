@@ -65,8 +65,10 @@ export function fillLogStart(checkpointBlock: bigint | null, head: bigint, deplo
 /** Re-read every open vault order at `head`; record fills (each sale at its real seller fee) and closes; checkpoint. */
 export async function trackVaultOrders(deps: TrackDeps, fees: FeeRegime, head: Head): Promise<TrackResult> {
   const result: TrackResult = { chain: [], fills: [], sales: { exact: 0, conservative: 0, logError: null } };
-  const checkpoint = deps.mm.fillCheckpoint();
-  const open = deps.mm.openOrders();
+  // Per vault (F-DAPP-02): a shared checkpoint made every vault after the first resume from another
+  // vault's block and book its sales against whatever fee regime that window happened to carry.
+  const checkpoint = deps.mm.fillCheckpoint(deps.vault);
+  const open = deps.mm.openOrders(deps.vault);
   if (open.length > 0) {
     result.chain = await readOrders(deps.client, deps.orderBook, open.map((o) => o.orderId), head.blockNumber);
     const byId = new Map(result.chain.map((o) => [o.id.toString(), o]));
@@ -119,7 +121,7 @@ export async function trackVaultOrders(deps: TrackDeps, fees: FeeRegime, head: H
         }
         event = { type: 'fill', longId: t.longId.toString(), side: f.side, units: f.units, price: t.price, feeBps, ...(exact ?? {}), at: head.timestamp };
       }
-      deps.mm.recordOrderProgress(t.orderId, c.filled, f.closed, event);
+      deps.mm.recordOrderProgress(t.orderId, c.filled, f.closed, event, deps.vault);
       if (event !== null) {
         const record: FillRecord = { at: head.timestamp, orderId: t.orderId, longId: t.longId, kind: t.kind, side: f.side, units: f.units, price: t.price, ...(fee === undefined ? {} : { fee }) };
         result.fills.push(record);
@@ -127,6 +129,6 @@ export async function trackVaultOrders(deps: TrackDeps, fees: FeeRegime, head: H
       }
     }
   }
-  deps.mm.setFillCheckpoint({ block: head.blockNumber, at: head.timestamp, premiumFeeBps: fees.premiumFeeBps, resaleFeeBps: fees.resaleFeeBps });
+  deps.mm.setFillCheckpoint({ block: head.blockNumber, at: head.timestamp, premiumFeeBps: fees.premiumFeeBps, resaleFeeBps: fees.resaleFeeBps }, deps.vault);
   return result;
 }

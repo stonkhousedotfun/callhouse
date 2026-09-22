@@ -15,11 +15,11 @@ jobs:
     name: keeper / indexer / web
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       # No `version:` here: package.json's packageManager (pnpm@9.10.0) is the single source, and
       # action-setup fails with "Multiple versions of pnpm specified" when both are set.
-      - uses: pnpm/action-setup@v4
-      - uses: actions/setup-node@v4
+      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with: {node-version: 22, cache: pnpm}
       - run: pnpm install --frozen-lockfile
       - name: typecheck keeper
@@ -43,12 +43,62 @@ jobs:
       - name: web tests
         run: pnpm --filter @callhouse/web test
 
-  copy-lint:
-    name: copy-lint (compliance)
+  # User notifications (notifier/). Its own job so a notifier change does not wait on the web build.
+  # The storage tests run on PGlite in-process: no Postgres service is needed.
+  notifier:
+    name: notifier
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with: {node-version: 22}
-      - name: forbidden + required copy (web; the landing is linted in stonkhousedotfun/callhouse-site)
-        run: node scripts/copy-lint.mjs
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with: {node-version: 22, cache: pnpm}
+      - run: pnpm install --frozen-lockfile
+      - name: typecheck notifier
+        run: pnpm --filter @callhouse/notifier typecheck
+      - name: build notifier
+        run: pnpm --filter @callhouse/notifier build
+      - name: notifier tests
+        run: pnpm --filter @callhouse/notifier test
+
+  # ops/ had never been in CI (06-QUIRKS.md A5, now stale for three of the four checks it names), so a
+  # pull request could be green with a monitor whose
+  # hand-written ABIs no longer match ops/abis/v2, a runbook pointing at an alert section that does not
+  # exist, or a registry the generators disagree with. INTERFACE_VERSION 8 made that specific: the monitor
+  # and the PayoutRouter share the selector 0xd7409659 between two different return tuples, and the wrong
+  # decode does not revert. This job is what fails on the next drift.
+  ops:
+    name: ops (monitor, runbooks, registry)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with: {node-version: 22, cache: pnpm}
+      # The monitor has no dependencies of its own: it loads viem through the keeper package
+      # (ops/v2/monitor.mjs loadViem), so the workspace install is what makes it runnable.
+      - run: pnpm install --frozen-lockfile
+      - name: monitor tests (includes the hand-written ABI parity suite)
+        run: node --test ops/v2/monitor.test.mjs
+      - name: runbook and alert-document tests
+        run: node --test ops/runbooks.test.mjs
+      - name: v8 launch-verification harness tests
+        run: node --test ops/v8/*.test.mjs
+      # wave.mjs is the one command that regenerates every registry projection; its suite is offline
+      # (fake exec/git seams, temp roots) and includes the dev.json parity check against the committed
+      # registries, so it catches a dev registry that has fallen behind tier1.json. `wave --check`
+      # itself is NOT run here: it needs a callhouse-docs checkout this runner does not have.
+      - name: registry projection wave tests
+        run: node --test ops/v2/wave.test.mjs
+      - name: generated markets-page renderer tests
+        run: node --test ops/markets/render-docs.test.mjs
+      - name: registry service env matches the registry
+        run: node ops/v2-env.mjs --check
+      # build-markets --check verifies the registry ON CHAIN (feed decimals, token pairs, v4 pool ids), so
+      # it needs foundry's `cast` and a reachable RPC. It is a real gate and is deliberately not
+      # continue-on-error: a check that passes when it could not check anything is the failure mode this
+      # whole job exists to end. If the public RPC rate-limits a run, re-run the job — do not weaken it.
+      - uses: foundry-rs/foundry-toolchain@82dee4ba654bd2146511f85f0d013af94670c4de # v1
+        with: {version: stable}
+      - name: registry matches the chain
+        run: node ops/markets/build-markets.mjs --check

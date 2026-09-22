@@ -1,13 +1,14 @@
 {
+  "asOf": 1789592400,
   "volume24h": {
     "raw": "5130900",
     "decimals": 6,
     "formatted": "5.1309"
   },
   "volumeAll": {
-    "raw": "14526340",
+    "raw": "14676340",
     "decimals": 6,
-    "formatted": "14.52634"
+    "formatted": "14.67634"
   },
   "premiumAll": {
     "raw": "14076340",
@@ -15,56 +16,56 @@
     "formatted": "14.07634"
   },
   "feesAll": {
-    "raw": "2250014",
+    "raw": "2791331",
     "decimals": 6,
-    "formatted": "2.250014"
+    "formatted": "2.791331"
   },
-  "contractsFilled": "1845",
-  "holders": 6,
+  "contractsFilled": "1895",
+  "holders": 7,
   "biggestWinDay": null,
   "biggestWinWeek": {
-    "id": "97249294176823841346447828561188452006185490110924851379129375223985952864952-0x83daA58d0a8d82D7b971338a03AA2f99bfADf4F8",
+    "id": "109733135889116194008703981926101410916763203979514320802443652863493208496976-0x83daA58d0a8d82D7b971338a03AA2f99bfADf4F8",
     "holder": "0x83daA58d0a8d82D7b971338a03AA2f99bfADf4F8",
     "ticker": "NVDA",
     "series": {
-      "longId": "97249294176823841346447828561188452006185490110924851379129375223985952864952",
-      "shortId": "97249294176823841346447828561188452006185490110924851379129375223985952864953",
+      "longId": "109733135889116194008703981926101410916763203979514320802443652863493208496976",
+      "shortId": "109733135889116194008703981926101410916763203979514320802443652863493208496977",
       "ticker": "NVDA",
       "underlying": "0xd0601CE157Db5bdC3162BbaC2a2C8aF5320D9EEC",
       "isPut": false,
       "strike": {
-        "raw": "216000000",
+        "raw": "214000000",
         "decimals": 6,
-        "formatted": "216"
+        "formatted": "214"
       },
       "expiry": 1789156800,
       "tenor": "weekly",
       "mintCutoff": 1789155000,
-      "mintFeePpm": 80,
+      "mintFeePpm": 0,
       "mintFeesHeld": {
         "raw": "0",
         "decimals": 18,
         "formatted": "0"
       },
       "mintFeesAccrued": {
-        "raw": "70952380952381",
+        "raw": "0",
         "decimals": 18,
-        "formatted": "0.000070952380952381"
+        "formatted": "0"
       },
       "status": "settled"
     },
     "cost": {
-      "raw": "543400",
+      "raw": "741510",
       "decimals": 6,
-      "formatted": "0.5434"
+      "formatted": "0.74151"
     },
     "payout": {
-      "raw": "6113879",
+      "raw": "4855140",
       "decimals": 6,
-      "formatted": "6.113879"
+      "formatted": "4.85514"
     },
-    "multiple": 11.25,
-    "settledAt": 1789156958,
-    "tx": "0x7f4daf0b48fb870233bff31494c65609b82394dedd800f0781681333f181d216"
+    "multiple": 6.54,
+    "settledAt": 1789156954,
+    "tx": "0x8b4d5382bd0879e0af1ea33f326659b5bc4b6bdb9fa2afa5da178762c7067d2f"
   }
 }

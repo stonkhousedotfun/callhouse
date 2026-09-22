@@ -1,6 +1,12 @@
 # Wiring
 
-The runtime complement to [ARCHITECTURE.md](./ARCHITECTURE.md): which process talks to which,
+> **Legacy v1 reference.** The hops and invariants below apply to the vault and solo-factory
+> run-off. V2 adds Clearinghouse, OrderBook, indexer-v2, pricing, cranker, pricer, market maker
+> bot and notifier connections; the statement below that the keeper and indexer never talk is
+> v1-only. For current v2 integration use [HANDOFF.md](../HANDOFF.md),
+> [web/README.md](../web/README.md) and [ops/deploy.md](../ops/deploy.md) §15.
+
+The v1 runtime complement to [ARCHITECTURE.md](./ARCHITECTURE.md): which process talks to which,
 over which env var, on which port, and what has actually been proven end to end. Where a
 statement here disagrees with a package README, the README wins for that package and this file
 should be fixed.
@@ -263,3 +269,35 @@ pnpm --filter @callhouse/web dev                              # http://localhost
 `--code-size-limit 98304` is not optional: a default anvil refuses the 25 KB vault. Pass
 `--no-storage-caching` to every forked `forge script`/`forge test` run near anvil. X-11 and W-13
 turn this sketch into the scripted rehearsal; the package READMEs own the details.
+
+---
+
+## 10. The market registry, and who reads it
+
+Tier 1 (many factory markets) adds one file that every lane reads and no lane hard-codes around:
+
+```
+ops/markets/tier1.json  (built + verified by ops/markets/build-markets.mjs; --check is a gate)
+   │
+   ├──► contracts/script/DeploySoloBatch.sh   reads asset, feed, depositCap, ticker, deployment.keeper / guardian
+   │      └──► writes back deployment.factory, implementation, deployBlock, deployTx (at deploy), sourcify, configuredAt (after Verify)
+   ├──► ops/markets/derive-keeper-keys.sh     writes deployment.keeper / keeperKeyIndex; keys → ~/.callhouse-keys/markets/
+   ├──► ops/keeper-env.sh                      → ops/keeper/markets/<TICKER>.env  → ops/keeper-railway.sh → keeper-<ticker>
+   │      env: FACTORY, PRICE_FEED, ASSET, KEEPER_MARKET, KEEPER_PRICING_MODE, KEEPER_VOL_URL/ROOT,
+   │           KEEPER_MIN_ASK_USDG6, KEEPER_STRIKE_OTM_BPS, vol knobs; VAULT unset; KEEPER_PK sealed, from the key file
+   ├──► indexer-<ticker>                       env: FACTORY_ADDRESS, MARKET, START_BLOCK (= deployBlock); VAULT_ADDRESS unset
+   │      routes: /v1/market, /v1/market/weeks, /v1/market/fills, /v1/market/accounts/:address
+   ├──► web/scripts/gen-markets.mjs            → web/lib/markets.generated.ts (build time) → lib/markets.ts
+   │      routes: /<ticker>/account, /<ticker>/book; /account, /book → /nvda/*; nav switcher; /vault/nvda/* untouched
+   ├──► ops/markets/render-docs.mjs            → callhouse-docs/product/markets.md (+ docs/ mirror); --check is a gate
+   └──► ops/runbooks/*.md                      loop over status == "live"
+```
+
+Three facts to keep straight: the registry is read at **build or generate time** by every consumer
+(nothing imports it at runtime, the same rule as `ops/addresses.json` in §3); the per-market
+keeper and indexer still never talk to each other (§ top); and the only writer of the six
+`deployment.*` receipt fields is the contracts batch script, from the owner's broadcast receipts —
+`factory` / `implementation` / `deployBlock` / `deployTx` immediately after each deploy,
+`sourcify` / `configuredAt` after Configure + Verify (a row missing `configuredAt` is finished
+with `--resume`). Full design:
+[TECHSPEC-TIER1-MULTIMARKET.md](./TECHSPEC-TIER1-MULTIMARKET.md); Railway layout: `ops/deploy.md` §14.

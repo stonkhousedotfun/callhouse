@@ -4,6 +4,7 @@ import { useMemo, useState } from "react";
 import type { Abi } from "viem";
 import { useAccount, useWriteContract } from "wagmi";
 
+import { CHAIN_ID } from "@/lib/chain";
 import { MARKET, SHARE_DECIMALS, SHARE_TICKER, VAULT, vaultAbi } from "@/lib/contracts";
 import { canSettleQueue, fmtAsset, fmtShares, fmtUsdg, parseAmount, redeemQueueView } from "@/lib/format";
 import type { AccountPosition, VaultSnapshot } from "@/lib/hooks";
@@ -65,7 +66,7 @@ export function RedeemQueue({
   position: AccountPosition;
   onDone: () => void;
 }) {
-  const { address, isConnected } = useAccount();
+  const { address, isConnected, chainId } = useAccount();
   const { writeContractAsync } = useWriteContract();
   const run = useTxRunner();
   const [raw, setRaw] = useState("");
@@ -114,9 +115,14 @@ export function RedeemQueue({
   });
 
   const overBalance = shares !== null && shares > free;
-  const disabled = busy || !isConnected || !VAULT || shares === null || shares === 0n || overBalance;
+  // W8-450, the same pair AccountView.tsx reads: the wallet's chain from useAccount against the one
+  // CHAIN_ID in @/lib/chain. Nothing here switches the wallet's network.
+  const wrongNetwork = isConnected && chainId !== CHAIN_ID;
+  const disabled =
+    busy || !isConnected || !VAULT || shares === null || shares === 0n || overBalance || wrongNetwork;
 
   async function submit() {
+    if (wrongNetwork) return;
     if (!VAULT || !address || shares === null || shares === 0n) return;
     // Bind the narrowed vault address: the guard does not reach inside the run() callbacks.
     const vault = VAULT;
@@ -130,6 +136,8 @@ export function RedeemQueue({
                 abi: vaultAbi as unknown as Abi,
                 functionName: "redeem",
                 args: [shares, address, address],
+                // W8-450: without this @wagmi/core 3.6.5 disables its chain assertion entirely.
+                chainId: CHAIN_ID,
               }),
             { pending: "Redeeming", success: `Redeemed — ${MARKET} returned` },
           )
@@ -140,6 +148,8 @@ export function RedeemQueue({
                 abi: vaultAbi as unknown as Abi,
                 functionName: "queueRedeem",
                 args: [shares],
+                // W8-450: without this @wagmi/core 3.6.5 disables its chain assertion entirely.
+                chainId: CHAIN_ID,
               }),
             { pending: "Queuing redemption", success: "Queued for this week's close" },
           );
@@ -153,6 +163,7 @@ export function RedeemQueue({
   }
 
   async function complete() {
+    if (wrongNetwork) return;
     if (!VAULT || !address) return;
     const vault = VAULT;
     setBusy(true);
@@ -164,6 +175,8 @@ export function RedeemQueue({
             abi: vaultAbi as unknown as Abi,
             functionName: "completeRedeem",
             args: [address],
+            // W8-450: without this @wagmi/core 3.6.5 disables its chain assertion entirely.
+            chainId: CHAIN_ID,
           }),
         { pending: "Completing redemption", success: "Redemption collected" },
       );
@@ -174,6 +187,7 @@ export function RedeemQueue({
   }
 
   async function settle() {
+    if (wrongNetwork) return;
     if (!VAULT || !address) return;
     const vault = VAULT;
     setBusy(true);
@@ -185,6 +199,8 @@ export function RedeemQueue({
             abi: vaultAbi as unknown as Abi,
             functionName: "settleQueue",
             args: [],
+            // W8-450: without this @wagmi/core 3.6.5 disables its chain assertion entirely.
+            chainId: CHAIN_ID,
           }),
         { pending: "Settling the queue", success: "Queue settled — redemption ready to collect" },
       );
@@ -238,6 +254,8 @@ export function RedeemQueue({
       <div className="mt-5">
         {!isConnected ? (
           <ConnectButton block />
+        ) : wrongNetwork ? (
+          <p className="text-[13px] text-ink-2">Switch to Robinhood Chain to redeem.</p>
         ) : (
           <Button variant="primary" className="w-full" disabled={disabled} onClick={submit}>
             {busy ? "Working…" : instant ? "Redeem now" : "Queue redemption"}
@@ -279,11 +297,19 @@ export function RedeemQueue({
                 settles every entry in this epoch, not only yours, and anyone can send it. After it confirms, collect
                 with Complete redemption.
               </Notice>
-              <Button variant="primary" className="mt-4 w-full" disabled={busy || !isConnected} onClick={settle}>
+              <Button
+                variant="primary"
+                className="mt-4 w-full"
+                disabled={busy || !isConnected || wrongNetwork}
+                onClick={settle}
+              >
                 {busy ? "Working…" : "Settle queue"}
               </Button>
+              {wrongNetwork ? (
+                <p className="mt-2 text-[13px] text-ink-2">Switch to Robinhood Chain to redeem.</p>
+              ) : null}
               {hasPending ? (
-                <Button variant="ghost" className="mt-2 w-full" disabled={busy} onClick={complete}>
+                <Button variant="ghost" className="mt-2 w-full" disabled={busy || wrongNetwork} onClick={complete}>
                   {busy ? "Working…" : "Collect earlier settled redemption"}
                 </Button>
               ) : null}

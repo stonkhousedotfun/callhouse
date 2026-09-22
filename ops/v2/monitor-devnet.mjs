@@ -330,20 +330,14 @@ async function main() {
   const [, feeAt] = await read(C.orderBook, ABI.orderBook, "pendingFeeParams");
   expect(Number(feeAt) > 0, `OrderBook schedules seller fee ${fees.premiumFeeBps + 100} bps for ${feeAt}`);
 
-  const factory = await read(C.payoutAdapter, ABI.payoutAdapter, "factory");
-  const getPoolAbi = viem.parseAbi(["function getPool(address tokenA, address tokenB, uint24 fee) view returns (address)"]);
-  const standIn = "0x000000000000000000000000000000000000bEEF";
-  const getPool = () => read(factory, getPoolAbi, "getPool", [NVDA.underlying, A.usdg, 3000]);
-  const { accessList: poolAccess } = await rpc("eth_createAccessList", [{ to: factory, data: encodeFunctionData({ abi: getPoolAbi, functionName: "getPool", args: [NVDA.underlying, A.usdg, 3000] }) }, "latest"]);
-  for (const slot of poolAccess.filter((x) => same(x.address, factory)).flatMap((x) => x.storageKeys).reverse()) {
-    const original = (await rpc("eth_getStorageAt", [factory, slot, "latest"])) ?? "0x0";
-    await rpc("anvil_setStorageAt", [factory, slot, pad(standIn, { size: 32 })]);
-    if (same(await getPool(), standIn)) break;
-    await rpc("anvil_setStorageAt", [factory, slot, pad(toHex(BigInt(original)), { size: 32 })]);
-  }
-  if (!same(await getPool(), standIn)) fail("could not point the factory's (NVDA, USDG, 3000) pool at a stand-in");
-  await send(acct.admin, { address: C.payoutAdapter, abi: ABI.payoutAdapter, functionName: "setRoute", args: [NVDA.underlying, 3000], label: "setRoute NVDA 3000" });
-  expect(same((await read(C.payoutAdapter, ABI.payoutAdapter, "routes", [NVDA.underlying]))[0], standIn), "NVDA's payout route now sells through a pool the registry does not name (RouteSet)");
+  // v8: the PayoutRouter validates its own route against an initialised pool, so the v7 stand-in
+  // misdirection no longer applies. Prove the routes() tuple decodes the ROUTER shape: venue first,
+  // v3Pool fourth - and that the router names the registry's pool.
+  await send(acct.admin, { address: C.payoutAdapter, abi: ABI.payoutAdapter, functionName: "setRouteV3", args: [NVDA.underlying, 3000], label: "setRouteV3 NVDA 3000" });
+  const nvdaRoute = await read(C.payoutAdapter, ABI.payoutAdapter, "routes", [NVDA.underlying]);
+  expect(Number(nvdaRoute.venue) === 1, "NVDA's payout route is venue 1 (v3)");
+  expect(Number(nvdaRoute.fee) === 3000, "NVDA's payout route fee is 3000 (30 bps)");
+  expect(same(nvdaRoute.v3Pool, NVDA.pool), "the router names the registry's NVDA pool (RouteSet)");
 
   await send(acct.admin, { address: S.chainlink, abi: ABI.chainlink, functionName: "setOracle", args: [acct.spare, true], label: "chainlink.setOracle(spare, true)" });
   await send(acct.spare, { address: S.chainlink, abi: ABI.chainlink, functionName: "pin", args: [TSLA.underlying, E_SOURCE_PIN], label: "chainlink.pin(TSLA) by the spare account" });

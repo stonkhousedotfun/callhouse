@@ -6,6 +6,7 @@ import { describe, expect, it, vi } from "vitest";
 import {
   GENERATED_MARKETS,
   GENERATED_REGISTRY,
+  LAUNCH_SET as GENERATED_LAUNCH_SET,
   V2_CONTRACTS,
   V2_DEFAULTS,
   V2_FEES,
@@ -18,7 +19,12 @@ import {
   DEFAULT_TICKER,
   MARKETS,
   getMarket,
+  getV2Market,
+  isLaunch,
   isV2Live,
+  LAUNCH_SET,
+  LAUNCH_SET_TICKERS,
+  liveV2Markets,
   marketFromPathname,
   marketHref,
   parseTickerParam,
@@ -79,7 +85,11 @@ type RegistryMarket = {
     univ3Pool: string | null;
     univ3MinLiquidity: string | null;
     dataStreamsFeedId: string | null;
+    payoutRoute: null | { venue: "v3"; fee: number } |
+      { venue: "v4"; fee: number; tickSpacing: number; poolId: `0x${string}` };
     overrides: Record<string, unknown>;
+    /** T-OP-156: this market's HouseVault, null until the externals stage writes it back (launch set only). */
+    houseVault: string | null;
     registeredAt: number | null;
     registerTx: string | null;
   };
@@ -88,6 +98,7 @@ type RegistryMarket = {
 type Registry = {
   verifiedAtBlock: number;
   generatedAt: string;
+  launchSet: { note: string; markets: string[] };
   v2: {
     interfaceVersion: number;
     deployBlock: number | string | null;
@@ -144,6 +155,51 @@ withRegistry("lib/markets.generated.ts is in sync with ops/markets/tier1.json", 
     });
   });
 
+  it("carries the registry's launchSet verbatim, and every row's `launch` is membership in it (T-OP-099)", () => {
+    // The generated literal is the registry block, field for field: no ticker was typed anywhere in the app.
+    expect(GENERATED_LAUNCH_SET).toEqual(registry.launchSet);
+    expect(LAUNCH_SET).toEqual(registry.launchSet);
+    expect([...LAUNCH_SET_TICKERS].sort()).toEqual([...registry.launchSet.markets].sort());
+    // Every launch ticker is a market; every row says whether it is in the set; nothing else decides it.
+    for (const ticker of registry.launchSet.markets) expect(getV2Market(ticker)).toBeDefined();
+    for (const market of v2Markets()) expect(market.launch).toBe(registry.launchSet.markets.includes(market.ticker));
+    const inLaunch = v2Markets().filter((market) => market.launch).map((market) => market.ticker).sort();
+    expect(inLaunch).toEqual([...registry.launchSet.markets].sort());
+    // Membership is NOT wave and NOT status: a launch set derived from either would be a different set today.
+    const byWave = (wave: string) => v2Markets().filter((market) => market.v2.wave === wave).map((market) => market.ticker).sort();
+    const byStatus = (status: string) => v2Markets().filter((market) => market.v2.status === status).map((market) => market.ticker).sort();
+    for (const candidate of [byWave("canary"), byWave("wave1"), byWave("wave2"), byStatus("live"), byStatus("planned")]) {
+      expect(candidate).not.toEqual(inLaunch);
+    }
+    // isLaunch is case-insensitive and false for unknown, empty and null.
+    for (const ticker of registry.launchSet.markets) {
+      expect(isLaunch(ticker)).toBe(true);
+      expect(isLaunch(ticker.toLowerCase())).toBe(true);
+      expect(isLaunch(` ${ticker} `)).toBe(true);
+    }
+    expect(isLaunch("NOT-A-TICKER")).toBe(false);
+    expect(isLaunch("")).toBe(false);
+    expect(isLaunch(null)).toBe(false);
+    expect(isLaunch(undefined)).toBe(false);
+  });
+
+  it("carries markets[].v2.houseVault on every row: null or an address, and an address only on a launch-set market (T-OP-156)", () => {
+    // The field-for-field case above already holds the generated `v2` block equal to the registry's; this one
+    // pins the KEY by name so a generator that dropped it (the pre-T-OP-156 V2_MARKET_NAMES copy threw on it)
+    // fails here with the key's name, not as a deep-equal diff of a 13-key object. The rule is the builder's
+    // (build-markets.mjs validateMarket: null | address, refused by name outside launchSet.markets); the app
+    // copies what --check accepted and never decides membership itself (LAUNCH_SET, T-OP-099).
+    expect(GENERATED_MARKETS).toHaveLength(registry.markets.length);
+    for (const gen of GENERATED_MARKETS) {
+      expect(Object.hasOwn(gen.v2, "houseVault"), `${gen.ticker}: v2.houseVault is a required key`).toBe(true);
+      const vault = (gen.v2 as { houseVault: string | null }).houseVault;
+      if (vault === null) continue;
+      expect(vault, `${gen.ticker}: v2.houseVault is an address`).toMatch(/^0x[0-9a-fA-F]{40}$/);
+      expect(getAddress(vault), `${gen.ticker}: v2.houseVault is EIP-55`).toBe(vault);
+      expect(isLaunch(gen.ticker), `${gen.ticker}: only a launch-set market carries a HouseVault`).toBe(true);
+    }
+  });
+
   it("carries the registry's top-level v2 block: version, deploy block, contracts, Uniswap periphery, fees, defaults", () => {
     expect(V2_REGISTRY).toEqual({ interfaceVersion: registry.v2.interfaceVersion, deployBlock: registry.v2.deployBlock });
     expect(V2_CONTRACTS).toEqual(registry.v2.contracts);
@@ -152,13 +208,14 @@ withRegistry("lib/markets.generated.ts is in sync with ops/markets/tier1.json", 
     expect(V2_DEFAULTS).toEqual(registry.v2.defaults);
   });
 
-  it("projects every approved nonzero per-market writer rent rate exactly", () => {
+  it("projects the v8 rent decision and every per-market rate exactly", () => {
     const projected = v2Markets();
     expect(projected).toHaveLength(registry.markets.length);
     registry.markets.forEach((row, i) => {
       expect(GENERATED_MARKETS[i]?.v2.mintFeePpm, row.ticker).toBe(row.v2.mintFeePpm);
       expect(projected[i]?.v2.mintFeePpm, row.ticker).toBe(row.v2.mintFeePpm);
-      expect(projected[i]!.v2.mintFeePpm, row.ticker).toBeGreaterThan(0);
+      if (registry.v2.fees.allowRent !== true) expect(projected[i]!.v2.mintFeePpm, row.ticker).toBe(0);
+      else expect(projected[i]!.v2.mintFeePpm, row.ticker).toBeGreaterThanOrEqual(0);
       expect(projected[i]!.v2.mintFeePpm, row.ticker).toBeLessThanOrEqual(5_000);
     });
   });
@@ -288,6 +345,19 @@ describe("lib/markets.ts", () => {
     });
   });
 
+  it("liveV2Markets includes only registered live rows, for public route and sitemap generation", () => {
+    expect(liveV2Markets().map((market) => market.ticker)).toEqual(
+      v2Markets().filter((market) => market.v2.status === "live" && market.v2.registeredAt !== null)
+        .map((market) => market.ticker),
+    );
+    for (const market of liveV2Markets()) {
+      expect(market.v2.status).toBe("live");
+      expect(market.v2.registeredAt).not.toBeNull();
+      expect(getV2Market(market.ticker.toLowerCase())).toBe(market);
+    }
+    expect(getV2Market("XYZ")).toBeUndefined();
+  });
+
   it("v1FrozenAt follows the generated row in any case, and is null for a market with no v1 factory and for an unknown ticker", () => {
     GENERATED_MARKETS.forEach((gen, i) => {
       expect(ALL_MARKETS[i]!.v1FrozenAt, gen.ticker).toBe(gen.v1FrozenAt);
@@ -344,8 +414,9 @@ describe("lib/markets.ts", () => {
     expect(nvda.v2.wave).toBe("canary");
     expect(nvda.v2.univ3Pool).toBe("0xd4EB21209C4D6093f80B5b84f5C45cc093EA14a3");
     for (const m of v2Markets()) {
-      expect(isV2Live(m.ticker)).toBe(m.v2.status === "live");
-      expect(isV2Live(m.ticker.toLowerCase())).toBe(m.v2.status === "live");
+      const live = m.v2.status === "live" && m.v2.registeredAt !== null;
+      expect(isV2Live(m.ticker)).toBe(live);
+      expect(isV2Live(m.ticker.toLowerCase())).toBe(live);
     }
     expect(isV2Live("XYZ")).toBe(false);
     expect(isV2Live("")).toBe(false);

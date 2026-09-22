@@ -1,7 +1,7 @@
 /**
  * Compliance surface, not marketing. The disclosures this page is required to carry — the
  * US-person perimeter and the legal form of the Stock Token — are enforced verbatim by
- * scripts/copy-lint.mjs, which fails CI if the wording drifts. Treat every sentence here as
+ * disclosure policy (copy-lint enforced this until it was removed on 2026-09-21; nothing checks it now), which fails CI if the wording drifts. Treat every sentence here as
  * legal text: do not reword, soften, or tidy up phrasing without running that script first.
  */
 import type { Metadata } from "next";
@@ -32,7 +32,7 @@ export default function LegalPage() {
       <PageHead eyebrow="Legal" title="Who this is for, and what Stock Tokens actually are" />
 
       <DocShell toc={Object.values(SECTIONS)}>
-        {/* The two phrases below are required, verbatim, by scripts/copy-lint.mjs.
+        {/* The two phrases below are required, verbatim, by disclosure policy (copy-lint enforced this until it was removed on 2026-09-21; nothing checks it now).
             They come from README "Frontend copy" and are compliance text. Do not reword. */}
         <div className={MEASURE}>
           <Notice
@@ -115,7 +115,9 @@ export default function LegalPage() {
             </li>
             <li>
               A writer receives premium only when a buyer fills an order. An unfilled order earns
-              no premium; writing a new option charges collateral rent when it is minted. A call
+              no premium; a first sale currently pays a 5% seller fee from its premium, while a
+              true resale currently pays no seller fee. On-chain fee settings can change after a
+              scheduled notice. A call
               that finishes in the money transfers upside above the strike to the buyer. The
               buyer&apos;s payout may arrive in Stock Tokens if conversion to USDG fails.{" "}
               <ExternalLink href={`${SITE_URL}/risks`} arrow className={cn(DOC_LINK, ARROW_QUIET)}>

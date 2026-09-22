@@ -18,6 +18,13 @@ export const MIN_SERIES_LEAD = 3_600;
 export const MAX_TENOR = 45 * 86_400;
 export const PRICE_TICK = 100n;
 export const BPS = 10_000n;
+/**
+ * V2Constants.sol:63 `BUYBACK_COOLDOWN = 5 minutes`: the least time between two FeeSplitter buybacks. Compiled,
+ * not configurable — it exists so small buys cannot be stacked into one sandwichable block. The cranker reads
+ * `lastBuybackAt()` and does not even PROBE before `lastBuybackAt + BUYBACK_COOLDOWN`, because a probe inside
+ * the window only ever answers `CooldownActive`.
+ */
+export const BUYBACK_COOLDOWN = 300;
 /** 1 unit = 0.01 share = 1e16 underlying base units. */
 export const UNIT = 10n ** 16n;
 export const UNITS_PER_SHARE = 100n;
@@ -118,4 +125,37 @@ export const GAS = {
   cancelStale: 350_000n,
   /** Clearinghouse.sweepFees: one transfer. */
   sweepFees: 150_000n,
+  /**
+   * FeeSplitter.claimOrderBookFees: OrderBook.claimOwed into the splitter — one storage clear and one ERC-20
+   * transfer, plus the splitter's own accounting.
+   *
+   * ESTIMATE, NOT MEASURED. callhouse-contracts docs/V2-GAS.md has one flywheel-adjacent row (sweepFees
+   * 68,283) and nothing at all for the splitter or the executor, so every number in this block is sized by
+   * hand against the route named in its comment and carries the same kind of headroom the measured entries do.
+   * Sized against: `owed` clear + one USDG transfer + the splitter's pending-USDG read.
+   */
+  claimOrderBookFees: 200_000n,
+  /**
+   * FeeSplitter.distribute(asset). The heaviest path is a Stock Token asset: an oracle spot read, the floor
+   * arithmetic, `forceApprove` to the router and back to zero, PayoutRouter.swapToUsdg over a Uniswap v3 pool,
+   * then the USDG split (treasury transfer plus the buyback accrual).
+   *
+   * ESTIMATE, NOT MEASURED, and the number that matters most in this table. `distribute` wraps the conversion
+   * in `try IPayoutAdapter(router_).swapToUsdg(...) { } catch { emit DistributionSkipped(asset,
+   * SKIP_BELOW_FLOOR); return 0; }` (FeeSplitter.sol:131-139). eth_estimateGas binary-searches the smallest
+   * limit at which the OUTER call succeeds — which is the limit at which the swap runs out of gas, the catch
+   * fires, and the call "succeeds" having converted nothing. A distribute sent on an estimate would never
+   * revert and never work. That is the same failure this file's header was written for.
+   */
+  distribute: 900_000n,
+  /**
+   * FeeSplitter.buyback(minTokenOut) -> V4BuybackExecutor.execute: the splitter's two `forceApprove`s and its
+   * supply reads, then the executor's v3 USDG->WETH swap, the WETH withdraw, the Uniswap v4 unlock and swap
+   * through the pinned hook (which charges a fee and a creator tax), and the STONKHOUSE burn with its
+   * totalSupply delta check (V4BuybackExecutor.sol:396-447).
+   *
+   * ESTIMATE, NOT MEASURED. The v4 unlock/callback round trip is the largest unknown here; the budget is sized
+   * so a cold pool and a cold hook still fit.
+   */
+  buyback: 1_200_000n,
 } as const;

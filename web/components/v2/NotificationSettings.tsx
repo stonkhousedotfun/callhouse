@@ -1,17 +1,19 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, useSyncExternalStore } from "react";
 import { useAccount, useWalletClient } from "wagmi";
 
 import { ConnectButton } from "@/components/ConnectButton";
 import { Button, Notice, PageHead, Panel } from "@/components/ui";
-import { v2Markets } from "@/lib/markets";
+import { useMarkets } from "@/lib/v2/hooks";
 import {
   ALERT_TOGGLES, DEFAULT_ALERT_PREFS, baseUnitsToPrice, createNotifierSession,
   deleteSubscription, listSubscriptions, notifierBase, notifierHealth, priceToBaseUnits,
   saveSubscription, sessionIsCurrent, telegramLink, vapidKeyBytes, webPushKey,
   type AlertPrefs, type Channel, type NotifierHealth, type NotifierSession, type PriceAlert, type Subscription,
 } from "@/lib/v2/notifier";
+import { alertMarketOptionsForQueryState, enabledAlertTickers } from "@/lib/v2/notificationMarkets";
+import { ensurePushSubscription, pushGuidance, type PushGuidance } from "@/lib/v2/webPush";
 
 type AlertRow = { ticker: string; direction: "above" | "below"; price: string };
 const CHANNELS: readonly { key: Channel; name: string; detail: string }[] = [
@@ -19,8 +21,6 @@ const CHANNELS: readonly { key: Channel; name: string; detail: string }[] = [
   { key: "webpush", name: "Browser", detail: "Receive alerts on this browser after you allow notifications." },
   { key: "email", name: "Email", detail: "Receive alerts after confirming the email address." },
 ];
-const TICKERS = v2Markets().map((market) => market.ticker);
-
 function rowsFromPrefs(prefs: AlertPrefs): AlertRow[] {
   return prefs.priceAlerts.flatMap((alert) => [
     ...(alert.above ? [{ ticker: alert.ticker, direction: "above" as const, price: baseUnitsToPrice(alert.above) }] : []),
@@ -28,10 +28,10 @@ function rowsFromPrefs(prefs: AlertPrefs): AlertRow[] {
   ]);
 }
 
-function parsedAlerts(rows: AlertRow[]): PriceAlert[] {
+function parsedAlerts(rows: AlertRow[], enabledTickers: readonly string[]): PriceAlert[] {
   if (rows.length > 20) throw new Error("Keep at most 20 price alerts for each channel.");
   return rows.map((row) => {
-    if (!TICKERS.includes(row.ticker)) throw new Error("Choose a ticker from the market list.");
+    if (!enabledTickers.includes(row.ticker)) throw new Error("Choose a live ticker from the available market list.");
     const amount = priceToBaseUnits(row.price);
     if (amount === null) throw new Error("Use a positive USDG price with up to six decimal places.");
     return { ticker: row.ticker, [row.direction]: amount };
@@ -51,6 +51,28 @@ function preferredItem(items: Subscription[], channel: Channel): Subscription | 
     ?? items.find((item) => item.channel === channel);
 }
 
+function subscribeBrowserPush(): () => void {
+  return () => undefined;
+}
+
+function browserPushSnapshot(): PushGuidance | "checking" {
+  if (typeof window === "undefined" || typeof navigator === "undefined") return "checking";
+  const extendedNavigator = navigator as Navigator & {
+    standalone?: boolean;
+    userAgentData?: { mobile?: boolean };
+  };
+  return pushGuidance({
+    userAgent: navigator.userAgent,
+    maxTouchPoints: navigator.maxTouchPoints,
+    userAgentDataMobile: extendedNavigator.userAgentData?.mobile,
+    standalone: extendedNavigator.standalone === true,
+    displayModeStandalone: window.matchMedia?.("(display-mode: standalone)").matches === true,
+    hasServiceWorker: "serviceWorker" in navigator,
+    hasPushManager: "PushManager" in window,
+    hasNotification: "Notification" in window,
+  });
+}
+
 export function NotificationSettings() {
   const { address } = useAccount();
   return <WalletNotifications key={address ?? "disconnected"} address={address} />;
@@ -58,6 +80,7 @@ export function NotificationSettings() {
 
 function WalletNotifications({ address }: { address: `0x${string}` | undefined }) {
   const wallet = useWalletClient();
+  const markets = useMarkets();
   const base = notifierBase();
   const session = useRef<NotifierSession | null>(null);
   const [health, setHealth] = useState<NotifierHealth | null>(null);
@@ -70,6 +93,12 @@ function WalletNotifications({ address }: { address: `0x${string}` | undefined }
   const [link, setLink] = useState<{ deepLink: string; expiresAt: number } | null>(null);
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState<{ tone: "accent" | "warn"; text: string } | null>(null);
+  const browserPush = useSyncExternalStore(subscribeBrowserPush, browserPushSnapshot, () => "checking");
+  const marketOptions = alertMarketOptionsForQueryState(
+    markets.data?.map((market) => market.ticker),
+    markets.isError,
+  );
+  const enabledTickers = enabledAlertTickers(marketOptions);
 
   useEffect(() => {
     if (!base) return;
@@ -124,7 +153,8 @@ function WalletNotifications({ address }: { address: `0x${string}` | undefined }
     const registration = await navigator.serviceWorker.register("/sw.js", { scope: "/" });
     const existing = await registration.pushManager.getSubscription();
     if (!existing) throw new Error("Enable browser alerts first, then save their preferences.");
-    return existing.toJSON();
+    const key = await webPushKey(base);
+    return (await ensurePushSubscription(registration.pushManager, vapidKeyBytes(key.publicKey))).toJSON();
   }
 
   async function enablePush() {
@@ -137,10 +167,8 @@ function WalletNotifications({ address }: { address: `0x${string}` | undefined }
         throw new Error("This browser does not support push notifications.");
       const key = await webPushKey(base);
       const registration = await navigator.serviceWorker.register("/sw.js", { scope: "/" });
-      const subscription = await registration.pushManager.getSubscription() ?? await registration.pushManager.subscribe({
-        userVisibleOnly: true, applicationServerKey: vapidKeyBytes(key.publicKey),
-      });
-      const currentPrefs = { ...prefs, priceAlerts: parsedAlerts(alerts) };
+      const subscription = await ensurePushSubscription(registration.pushManager, vapidKeyBytes(key.publicKey));
+      const currentPrefs = { ...prefs, priceAlerts: parsedAlerts(alerts, enabledTickers) };
       const saved = await saveSubscription(base, await getSession(), "webpush", currentPrefs, subscription.toJSON());
       setItems((before) => [
         ...(before ?? []).filter((item) => item.id !== saved.id),
@@ -154,7 +182,7 @@ function WalletNotifications({ address }: { address: `0x${string}` | undefined }
   async function savePrefs() {
     await act(async () => {
       if (!base) throw new Error("Alert service is not configured.");
-      const nextPrefs = { ...prefs, priceAlerts: parsedAlerts(alerts) };
+      const nextPrefs = { ...prefs, priceAlerts: parsedAlerts(alerts, enabledTickers) };
       let target: unknown;
       if (selected === "webpush") target = await pushTarget();
       if (selected === "email") {
@@ -199,6 +227,7 @@ function WalletNotifications({ address }: { address: `0x${string}` | undefined }
   const channelItems = items?.filter((item) => item.channel === selected) ?? [];
   const configured = base !== null;
   const serviceReady = health?.database === "ok";
+  const telegramUnavailable = health?.channels.telegram === "off";
 
   return <>
     <PageHead eyebrow="Settings" title="Notifications" lede="Choose where to receive fills, price alerts, and settlement updates." />
@@ -242,8 +271,14 @@ function WalletNotifications({ address }: { address: `0x${string}` | undefined }
           {link ? <div className="mt-3"><Button href={link.deepLink} size="sm">Open Telegram</Button><p className="mt-2 text-xs text-ink-3">After you start the bot, return and refresh status.</p></div> : null}
         </div> : null}
         {selected === "webpush" ? <div className="mt-5 rounded-md bg-surface-2 p-4">
-          <p className="text-sm text-ink-2">Browser alerts work on this device. Your browser asks permission only when you press Enable.</p>
-          <Button variant="ghost" size="sm" className="mt-3" disabled={busy || !serviceReady || !wallet.data} onClick={() => void enablePush()}>Enable on this browser</Button>
+          {browserPush === "ios-install" ? <p className="text-sm text-ink-2">On iPhone and iPad, browser push works only from an installed Home Screen app. In Safari, tap Share, choose Add to Home Screen, open Stonkhouse from the new icon, then enable browser alerts here.</p>
+            : browserPush === "mobile-unsupported" ? <p className="text-sm text-ink-2">Browser push is not available in this mobile browser. Telegram is another option when that channel is available; switch to Telegram to link a chat.</p>
+              : browserPush === "unsupported" ? <p className="text-sm text-ink-2">Browser push is not available in this browser. Try a browser with push support or choose another available channel.</p>
+                : <p className="text-sm text-ink-2">Browser alerts work on this device. Your browser asks permission only when you press Enable.</p>}
+          {browserPush === "ios-install" || browserPush === "mobile-unsupported" ? <Button variant="ghost" size="sm" className="mt-3"
+            disabled={busy || telegramUnavailable} onClick={() => selectChannel("telegram")}>{telegramUnavailable ? "Telegram unavailable" : "Set up Telegram instead"}</Button>
+            : <Button variant="ghost" size="sm" className="mt-3" disabled={browserPush !== "supported" || busy || !serviceReady || !wallet.data}
+              onClick={() => void enablePush()}>Enable on this browser</Button>}
         </div> : null}
         {selected === "email" ? <div className="mt-5">
           <label htmlFor="alert-email" className="block text-sm font-semibold">Email address</label>
@@ -258,12 +293,16 @@ function WalletNotifications({ address }: { address: `0x${string}` | undefined }
           </label>)}</div>
         </div>
         <div className="mt-6 border-t border-line pt-5">
-          <div className="flex flex-wrap items-center justify-between gap-3"><div><h3 className="font-display text-lg font-bold">Price alerts</h3><p className="mt-1 text-sm text-ink-2">Notify when a Stock Token price crosses your USDG threshold.</p></div>
-            <Button size="sm" variant="ghost" disabled={alerts.length >= 20} onClick={() => setAlerts((before) => [...before, { ticker: TICKERS[0] ?? "NVDA", direction: "above", price: "" }])}>Add alert</Button></div>
+          <div className="flex flex-wrap items-center justify-between gap-3"><div><h3 className="font-display text-lg font-bold">Price alerts</h3>
+            <p className="mt-1 text-sm text-ink-2">Alerts use the on-chain price. That price updates during US market sessions; alerts pause when it is older than 25 h.</p></div>
+            <Button size="sm" variant="ghost" disabled={alerts.length >= 20 || enabledTickers.length === 0}
+              onClick={() => setAlerts((before) => [...before, { ticker: enabledTickers[0]!, direction: "above", price: "" }])}>Add alert</Button></div>
+          {markets.isError ? <p className="mt-2 text-xs text-ink-3">Market availability could not be refreshed. Showing markets marked live in the app registry.</p> : null}
+          {enabledTickers.length === 0 ? <p className="mt-2 text-xs text-ink-3">No live markets are available for new price alerts.</p> : null}
           {alerts.length === 0 ? <p className="mt-3 text-sm text-ink-3">No price thresholds for this channel.</p> :
             <div className="mt-4 space-y-3">{alerts.map((row, index) => <div key={index} className="grid min-w-0 gap-2 rounded-sm border border-line p-3 sm:grid-cols-[1fr_1fr_1.25fr_auto]">
               <label className="text-xs font-semibold text-ink-2">Ticker<select aria-label={`Ticker for alert ${index + 1}`} value={row.ticker} onChange={(event) => setAlerts((before) => before.map((entry, i) => i === index ? { ...entry, ticker: event.target.value } : entry))}
-                className="mt-1 block min-h-10 w-full rounded-sm border border-line-2 bg-surface px-2 text-sm text-ink">{TICKERS.map((ticker) => <option key={ticker}>{ticker}</option>)}</select></label>
+                className="mt-1 block min-h-10 w-full rounded-sm border border-line-2 bg-surface px-2 text-sm text-ink">{marketOptions.map((option) => <option key={option.ticker} value={option.ticker} disabled={option.disabled}>{option.ticker}{option.note ? ` — ${option.note}` : ""}</option>)}</select></label>
               <label className="text-xs font-semibold text-ink-2">Crosses<select aria-label={`Direction for alert ${index + 1}`} value={row.direction} onChange={(event) => setAlerts((before) => before.map((entry, i) => i === index ? { ...entry, direction: event.target.value as AlertRow["direction"] } : entry))}
                 className="mt-1 block min-h-10 w-full rounded-sm border border-line-2 bg-surface px-2 text-sm text-ink"><option value="above">Above</option><option value="below">Below</option></select></label>
               <label className="text-xs font-semibold text-ink-2">Price in USDG<input aria-label={`Price for alert ${index + 1}`} inputMode="decimal" value={row.price} onChange={(event) => setAlerts((before) => before.map((entry, i) => i === index ? { ...entry, price: event.target.value } : entry))}

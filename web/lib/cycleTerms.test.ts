@@ -658,27 +658,35 @@ describe("keeperPricingFigures on records the keeper produces", () => {
 /* ---------------------------------------------------------------------------------- copy --- */
 
 /**
- * copy-lint's FORBIDDEN table, read out of scripts/copy-lint.mjs rather than copied, so a rule
- * added there is applied here too. The script runs its self-test and exits when imported, so it
- * is parsed as text.
+ * These were copy-lint's FORBIDDEN rules. copy-lint was removed on 2026-09-21 by owner
+ * instruction, so they are INLINED here rather than read out of the script. They are no longer a
+ * live mirror of anything: this is now the only copy, and nothing scans web/ copy any more.
  */
-function forbiddenFromCopyLint(): RegExp[] {
-  const source = readFileSync(fileURLToPath(new URL("../../scripts/copy-lint.mjs", import.meta.url)), "utf8");
-  const start = source.indexOf("const FORBIDDEN = [");
-  const end = source.indexOf("];", start);
-  expect(start).toBeGreaterThan(-1);
-  const table = source.slice(start, end);
-  return [...table.matchAll(/re:\s*\/((?:\\.|[^/\\\n])+)\/([a-z]*)/g)].map((m) => new RegExp(m[1]!, m[2]));
+function forbiddenRules(): RegExp[] {
+  return [
+    /\bAPY\b/i,
+    /\bAPR\b/i,
+    /10\s*%\s*weekly/i,
+    /projected\s+(yield|return|apy|income)/i,
+    /annuali[sz]ed/i,
+    /backed\s+by\s+nvidia/i,
+    /dividend\s+paid\s+(in\s+cash\s+)?by\s+nvidia/i,
+    /guaranteed\s+(yield|return|premium)/i,
+    /\bguaranteed\b/i,
+    /risk[-\s]?free/i,
+    /\bcan['\u2019]?t\s+lose\b/i,
+    /\bfree\s+money\b/i,
+  ];
 }
 
 describe("CYCLE_TERMS_LABELS", () => {
   const labels = Object.values(CYCLE_TERMS_LABELS);
 
-  it("pass every copy-lint FORBIDDEN rule", () => {
-    const rules = forbiddenFromCopyLint();
+  it("pass every forbidden-copy rule", () => {
+    const rules = forbiddenRules();
     expect(rules.length).toBeGreaterThanOrEqual(9);
-    // The extraction is live: a known-bad phrase trips at least one rule. Assembled at runtime,
-    // because this file is itself scanned by copy-lint.
+    // A known-bad phrase must still trip at least one rule, so the table cannot quietly empty.
+    // Assembled at runtime, a habit from when this file was itself scanned.
     const knownBad = ["projected", "yield"].join(" ");
     expect(rules.some((re) => re.test(knownBad))).toBe(true);
     for (const label of labels) {

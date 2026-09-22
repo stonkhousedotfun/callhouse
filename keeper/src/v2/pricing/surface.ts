@@ -2,9 +2,14 @@
  * The implied-vol surface of one chain: what vol the listed market is paying, per expiry and
  * strike, and how to read it at a strike or an expiry nobody lists.
  *
- * SPACE. Everything here is in the listed market's terms: share USD, Cboe's strikes, Cboe's
- * expiry days, and time on the trading clock measured from the chain's own last trade (bs.ts). The
- * token only enters in fair.ts, which carries VOL, not price, across (see its header).
+ * SPACE. Everything here is in the listed market's terms: share USD, the provider's listed strikes and
+ * expiry days, and time on the trading clock measured from the chain's pricing clock (bs.ts; Cboe's
+ * last trade, cboe.ts checkChain). The token only enters in fair.ts, which carries VOL, not price,
+ * across (see its header).
+ *
+ * INPUT. A provider-neutral chain (chain.ts NormalizedChain). Only its listed quotes with the
+ * provider's greeks feed the surface (chain.ts listedOptions); a provider theoretical value never
+ * does, and a row stating a non-standard contract multiplier or another root is left out.
  *
  * PER EXPIRY
  *   forward   put-call parity at r = 0: F = K + C - P, from the (up to) PARITY_PAIRS strikes
@@ -39,9 +44,10 @@
  * Pure.
  */
 import { CLOSE_HOUR_ET, NYSE_HOLIDAYS_2026_2028, newYorkTimeToUnix } from '../../calendar.js';
-import { maxBracketGap, type CboeChain, type CboeOption } from '../../vol.js';
+import { maxBracketGap } from '../../vol.js';
 import { bsDelta, impliedVol, sessionSecondsBetween, tradingYears } from './bs.js';
 import { checkQuoteWindow, failure, filterQuotes, mid, type OptionSide, type PricingFailure } from './cboe.js';
+import { listedOptions, type ListedOption, type NormalizedChain } from './chain.js';
 
 /*//////////////////////////////////////////////////////////////
                             CONSTANTS
@@ -96,8 +102,8 @@ export interface SurfaceExpiry {
   /** Trading years from the chain's last trade to `expiry`. */
   t: number;
   /** Usable quotes per side, sorted by strike. */
-  calls: CboeOption[];
-  puts: CboeOption[];
+  calls: ListedOption[];
+  puts: ListedOption[];
   forward: number | null;
   forwardSource: 'parity' | 'spot' | null;
   /** Sorted by strike. Empty when `failure` is set. */
@@ -107,6 +113,8 @@ export interface SurfaceExpiry {
 
 export interface Surface {
   root: string;
+  /** The chain's provider id (chain.ts ProviderDescriptor.id). */
+  provider: string;
   /** The chain's last trade, unix seconds: the clock every `t` is measured from. */
   asOf: number;
   shareSpot: number;
@@ -137,7 +145,7 @@ function clampIv(iv: number): number {
 export type ForwardEstimate = { ok: true; forward: number; source: 'parity' | 'spot'; estimates: number[] } | PricingFailure;
 
 /** The put-call parity forward of one expiry. See the header. */
-export function parityForward(calls: readonly CboeOption[], puts: readonly CboeOption[], spot: number): ForwardEstimate {
+export function parityForward(calls: readonly ListedOption[], puts: readonly ListedOption[], spot: number): ForwardEstimate {
   const putByStrike = new Map(puts.map((p) => [p.strike, p]));
   const pairs = calls
     .filter((c) => putByStrike.has(c.strike) && Math.abs(c.strike / spot - 1) <= PARITY_STRIKE_BAND + EPSILON)
@@ -169,7 +177,7 @@ export function parityForward(calls: readonly CboeOption[], puts: readonly CboeO
 }
 
 /** The listed strikes' vol points of one expiry, out-of-the-money side first. */
-export function surfacePoints(calls: readonly CboeOption[], puts: readonly CboeOption[], forward: number, t: number): SurfacePoint[] {
+export function surfacePoints(calls: readonly ListedOption[], puts: readonly ListedOption[], forward: number, t: number): SurfacePoint[] {
   const callByStrike = new Map(calls.map((c) => [c.strike, c]));
   const putByStrike = new Map(puts.map((p) => [p.strike, p]));
   const strikes = [...new Set([...callByStrike.keys(), ...putByStrike.keys()])].sort((a, b) => a - b);
@@ -177,7 +185,7 @@ export function surfacePoints(calls: readonly CboeOption[], puts: readonly CboeO
   for (const strike of strikes) {
     const call = callByStrike.get(strike);
     const put = putByStrike.get(strike);
-    const order: Array<[OptionSide, CboeOption | undefined]> = strike >= forward ? [['C', call], ['P', put]] : [['P', put], ['C', call]];
+    const order: Array<[OptionSide, ListedOption | undefined]> = strike >= forward ? [['C', call], ['P', put]] : [['P', put], ['C', call]];
     for (const [side, quote] of order) {
       if (quote === undefined) continue;
       const iv = impliedVol(mid(quote), { type: side === 'C' ? 'call' : 'put', spot: forward, strike, t });
@@ -198,16 +206,18 @@ export function surfacePoints(calls: readonly CboeOption[], puts: readonly CboeO
 }
 
 /**
- * The surface of `chain` as of `asOf` (its last trade, unix seconds, from cboe.ts checkChain).
- * Expiries are grouped from every parsed row; each keeps its own failure rather than failing the
+ * The surface of `chain` as of `asOf` (its pricing clock, unix seconds, from cboe.ts checkChain).
+ * Expiries are grouped from every listed input; each keeps its own failure rather than failing the
  * whole chain, so one broken expiry does not take the others down with it.
  */
-export function buildSurface(chain: CboeChain, asOf: number, settings: SurfaceSettings = {}): Surface {
+export function buildSurface(chain: NormalizedChain, asOf: number, settings: SurfaceSettings = {}): Surface {
   const holidays = settings.holidays ?? NYSE_HOLIDAYS_2026_2028;
   const horizonDays = settings.horizonDays ?? SURFACE_HORIZON_DAYS;
   const horizonS = horizonDays * 86_400;
-  const byDay = new Map<string, CboeOption[]>();
-  for (const o of chain.options) {
+  const root = chain.underlying.providerSymbol;
+  const shareSpot = chain.underlying.price ?? Number.NaN;
+  const byDay = new Map<string, ListedOption[]>();
+  for (const o of listedOptions(chain, root)) {
     const rows = byDay.get(o.expiry);
     if (rows === undefined) byDay.set(o.expiry, [o]);
     else rows.push(o);
@@ -222,11 +232,15 @@ export function buildSurface(chain: CboeChain, asOf: number, settings: SurfaceSe
     const calls = filterQuotes(rows, 'C');
     const puts = filterQuotes(rows, 'P');
     const base = { day, expiry, t, calls, puts };
+    if (!(shareSpot > 0)) {
+      expiries.push({ ...base, forward: null, forwardSource: null, points: [], failure: failure('chain-inconsistent', { why: 'the source gives no usable underlying price', day }) });
+      continue;
+    }
     if (calls.length + puts.length === 0) {
       expiries.push({ ...base, forward: null, forwardSource: null, points: [], failure: failure('no-quotes', { why: 'no usable quote at this expiry', day, listed: String(rows.length) }) });
       continue;
     }
-    const fwd = parityForward(calls, puts, chain.shareSpot);
+    const fwd = parityForward(calls, puts, shareSpot);
     if (!fwd.ok) {
       expiries.push({ ...base, forward: null, forwardSource: null, points: [], failure: { ...fwd, detail: { day, ...fwd.detail } } });
       continue;
@@ -241,7 +255,7 @@ export function buildSurface(chain: CboeChain, asOf: number, settings: SurfaceSe
     });
   }
   expiries.sort((a, b) => a.expiry - b.expiry);
-  return { root: chain.root, asOf, shareSpot: chain.shareSpot, expiries, holidays, horizonDays };
+  return { root, provider: chain.provider.id, asOf, shareSpot, expiries, holidays, horizonDays };
 }
 
 /*//////////////////////////////////////////////////////////////
@@ -285,7 +299,19 @@ export function volAtStrike(entry: SurfaceExpiry, strike: number): StrikeVol {
   return failure('no-quotes', { why: 'no bracket found', day: entry.day, strike: String(strike) });
 }
 
-export type SurfaceVol = { ok: true; iv: number; days: string[]; method: 'listed-expiry' | 'total-variance' | 'flat-before-first' | 'flat-after-last' } | PricingFailure;
+/** One listed expiry's contribution to a read: the strikes its vol came from and how. */
+export interface SurfaceInput {
+  day: string;
+  expiry: number;
+  bracket: [number, number];
+  strikeMethod: 'listed' | 'interpolated' | 'wing';
+}
+
+export type SurfaceVol =
+  | { ok: true; iv: number; days: string[]; method: 'listed-expiry' | 'total-variance' | 'flat-before-first' | 'flat-after-last'; inputs: SurfaceInput[] }
+  | PricingFailure;
+
+const inputOf = (e: SurfaceExpiry, v: Extract<StrikeVol, { ok: true }>): SurfaceInput => ({ day: e.day, expiry: e.expiry, bracket: v.bracket, strikeMethod: v.method });
 
 /** The vol at a share `strike` for an `expiry` (unix seconds), listed or not. See the header. */
 export function volAt(surface: Surface, strike: number, expiry: number): SurfaceVol {
@@ -297,14 +323,14 @@ export function volAt(surface: Surface, strike: number, expiry: number): Surface
   const exact = expiries.find((e) => e.expiry === expiry);
   if (exact !== undefined) {
     const v = volAtStrike(exact, strike);
-    return v.ok ? { ok: true, iv: clampIv(v.iv), days: [exact.day], method: 'listed-expiry' } : v;
+    return v.ok ? { ok: true, iv: clampIv(v.iv), days: [exact.day], method: 'listed-expiry', inputs: [inputOf(exact, v)] } : v;
   }
   const before = expiries.filter((e) => e.expiry < expiry).at(-1);
   const after = expiries.find((e) => e.expiry > expiry);
   if (before === undefined || after === undefined) {
     const only = (before ?? after)!;
     const v = volAtStrike(only, strike);
-    return v.ok ? { ok: true, iv: clampIv(v.iv), days: [only.day], method: before === undefined ? 'flat-before-first' : 'flat-after-last' } : v;
+    return v.ok ? { ok: true, iv: clampIv(v.iv), days: [only.day], method: before === undefined ? 'flat-before-first' : 'flat-after-last', inputs: [inputOf(only, v)] } : v;
   }
   const v1 = volAtStrike(before, strike);
   if (!v1.ok) return v1;
@@ -314,11 +340,11 @@ export function volAt(surface: Surface, strike: number, expiry: number): Surface
   // A target with no session between it and the earlier expiry (a special expiry on a closed
   // day) has that expiry's T: its vol is the earlier one's, not a division by a tiny number.
   if (!(target > before.t) || !(after.t > before.t)) {
-    return { ok: true, iv: clampIv(v1.iv), days: [before.day, after.day], method: 'total-variance' };
+    return { ok: true, iv: clampIv(v1.iv), days: [before.day, after.day], method: 'total-variance', inputs: [inputOf(before, v1), inputOf(after, v2)] };
   }
   const w1 = v1.iv * v1.iv * before.t;
   const w2 = v2.iv * v2.iv * after.t;
   const frac = Math.min(1, Math.max(0, (target - before.t) / (after.t - before.t)));
   const w = w1 + frac * (w2 - w1);
-  return { ok: true, iv: clampIv(Math.sqrt(w / target)), days: [before.day, after.day], method: 'total-variance' };
+  return { ok: true, iv: clampIv(Math.sqrt(w / target)), days: [before.day, after.day], method: 'total-variance', inputs: [inputOf(before, v1), inputOf(after, v2)] };
 }

@@ -1,6 +1,6 @@
 {
   "chainId": 4663,
-  "interfaceVersion": 7,
+  "interfaceVersion": 8,
   "deployBlock": "60213353",
   "usdg": {
     "address": "0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168",
@@ -18,14 +18,170 @@
     "makerVault": "0xd3b47D8a6B8e3fc6160Cd02634CF7Ae74aDeB66f",
     "makerRegistry": "0x29E6e4A14F7B6dC4A82ba03A198F1288Ee9018e8",
     "rewardsDistributor": "0xA35423709eb22ac7639fd415496018087f409deb",
+    "accessManager": "0xb9D17bb544483b8477Bfa9566874E9FE7c641ac8",
     "sources": {
       "chainlink": "0x5cBB51BA4dE2DCc6E2475453F6B479118DC42585",
       "univ3": "0xe6F51Cb2922Ac47B487b1f78063a99227ec7e285",
       "dataStreams": null
     }
   },
+  "flywheel": {
+    "feeSplitter": "0x05E1Ec84Bd7a942Ca2f45E5da2BF0DC6A9F46A68",
+    "buybackExecutor": "0x50e7e7d52CC1AD2F4dB0E9d838FB5513BE5BB11B"
+  },
+  "safes": {
+    "admin": "0x31D35771AaE6676aE6DFb4EdF2399D6115b3Af14",
+    "treasury": "0x1c0b1eE946D7eec27f886d5697c47fCD661f0458"
+  },
+  "access": {
+    "manager": "0xb9D17bb544483b8477Bfa9566874E9FE7c641ac8",
+    "roles": [
+      {
+        "id": 0,
+        "name": "ADMIN",
+        "delayS": 0,
+        "holders": [
+          {
+            "address": "0x31D35771AaE6676aE6DFb4EdF2399D6115b3Af14",
+            "delayS": 172800
+          }
+        ]
+      },
+      {
+        "id": 1,
+        "name": "FEE_MANAGER",
+        "delayS": 0,
+        "holders": [
+          {
+            "address": "0x31D35771AaE6676aE6DFb4EdF2399D6115b3Af14",
+            "delayS": 172800
+          }
+        ]
+      },
+      {
+        "id": 2,
+        "name": "MARKET_FEE_MANAGER",
+        "delayS": 0,
+        "holders": [
+          {
+            "address": "0x31D35771AaE6676aE6DFb4EdF2399D6115b3Af14",
+            "delayS": 259200
+          }
+        ]
+      },
+      {
+        "id": 3,
+        "name": "CONFIG_ADMIN",
+        "delayS": 0,
+        "holders": [
+          {
+            "address": "0x31D35771AaE6676aE6DFb4EdF2399D6115b3Af14",
+            "delayS": 86400
+          }
+        ]
+      },
+      {
+        "id": 4,
+        "name": "TREASURY_ADMIN",
+        "delayS": 0,
+        "holders": [
+          {
+            "address": "0x31D35771AaE6676aE6DFb4EdF2399D6115b3Af14",
+            "delayS": 86400
+          }
+        ]
+      },
+      {
+        "id": 5,
+        "name": "LISTING",
+        "delayS": 0,
+        "holders": [
+          {
+            "address": "0x31D35771AaE6676aE6DFb4EdF2399D6115b3Af14",
+            "delayS": 3600
+          }
+        ]
+      },
+      {
+        "id": 6,
+        "name": "OPS_ADMIN",
+        "delayS": 0,
+        "holders": [
+          {
+            "address": "0x31D35771AaE6676aE6DFb4EdF2399D6115b3Af14",
+            "delayS": 0
+          }
+        ]
+      },
+      {
+        "id": 7,
+        "name": "GUARDIAN",
+        "delayS": 0,
+        "holders": [
+          {
+            "address": "0x31D35771AaE6676aE6DFb4EdF2399D6115b3Af14",
+            "delayS": 0
+          },
+          {
+            "address": "0x40cAf8Ff5D83150456882aEFfbB8835294010aa6",
+            "delayS": 0
+          }
+        ]
+      },
+      {
+        "id": 8,
+        "name": "PRICER",
+        "delayS": 0,
+        "holders": [
+          {
+            "address": "0xf1Eb4AA7742413F4C9E202cb2d901b7736722A5c",
+            "delayS": 0
+          }
+        ]
+      },
+      {
+        "id": 9,
+        "name": "QUOTER",
+        "delayS": 0,
+        "holders": [
+          {
+            "address": "0x31D35771AaE6676aE6DFb4EdF2399D6115b3Af14",
+            "delayS": 0
+          },
+          {
+            "address": "0x894CED28a93c8383a04d1EA4cc5b6696Dc7c985D",
+            "delayS": 0
+          }
+        ]
+      },
+      {
+        "id": 10,
+        "name": "BUYBACK",
+        "delayS": 0,
+        "holders": [
+          {
+            "address": "0x85c379e9be175B682a86B52387036d335B4e8E2E",
+            "delayS": 0
+          }
+        ]
+      }
+    ]
+  },
+  "pendingOperations": [
+    {
+      "key": "0x67834fcc172f6a1d7d86ad24c576cabfe3650ba4cf79632aa6c7c1697bfb5fa7:1",
+      "id": "0x67834fcc172f6a1d7d86ad24c576cabfe3650ba4cf79632aa6c7c1697bfb5fa7",
+      "role": "CONFIG_ADMIN",
+      "target": "0x301b1e55217f139123D276B8298284EA2B704ca8",
+      "selector": "0xc44014d2",
+      "label": "Clearinghouse.setDefaultOracle(address)",
+      "caller": "0x31D35771AaE6676aE6DFb4EdF2399D6115b3Af14",
+      "scheduledAt": 1789588800,
+      "readyAt": 1789675200
+    }
+  ],
   "fees": {
-    "premiumFeeBps": 0,
+    "premiumFeeBps": 500,
     "resaleFeeBps": 0,
     "takerFeeFlat": {
       "raw": "100000",
@@ -35,7 +191,8 @@
     "takerFeeCapBps": 1000,
     "makerRebateBps": 5000,
     "exerciseFeeBps": 25,
-    "mintFeePpm": 80
+    "mintFeePpm": 0,
+    "maxPayoutSlippageBps": null
   },
   "pendingFees": null,
   "constants": {
@@ -49,7 +206,8 @@
     "maxTenor": 3888000,
     "minSeriesLead": 3600,
     "mintFeePeriod": 604800,
-    "mintFeeCeilPpm": 5000
+    "mintFeeCeilPpm": 5000,
+    "feeChangeDelay": 172800
   },
   "ladder": {
     "weekly": {

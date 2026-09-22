@@ -8,8 +8,8 @@ import type { VaultSnapshot } from "./hooks";
  * price, what the open order comes to if every remaining contract sells, and the protocol fee on
  * that). Deriving each figure once, here, means two pages cannot round the fee differently or
  * print the exercise time in a different zone. The words around the figures live in the page and
- * component files, which copy-lint scans; `CYCLE_TERMS_LABELS` below is the only wording pinned
- * here, and its test runs it through copy-lint's own FORBIDDEN table.
+ * component files, which copy-lint scanned until its removal on 2026-09-21; `CYCLE_TERMS_LABELS` below is the only wording pinned
+ * here, and its test runs it through the forbidden-copy table now inlined in that test.
  *
  * WHAT IS AND IS NOT A FIGURE HERE. Everything below is either a value the chain holds (strike,
  * deadlines, contracts written, the vault's listing slot, the fee in policy), an exact product of
@@ -48,8 +48,8 @@ function count(value: bigint | undefined): string {
 
 /**
  * Row labels for the figures below, for a page that wants the same words everywhere. Optional:
- * a page may write its own. Pinned by lib/cycleTerms.test.ts against copy-lint's FORBIDDEN table
- * (read from scripts/copy-lint.mjs, not copied) and against return, profit and per-year framing:
+ * a page may write its own. Pinned by lib/cycleTerms.test.ts against the forbidden-copy table
+ * (inlined there since copy-lint was removed on 2026-09-21) and against return, profit and per-year framing:
  * the order figures are the listing's own arithmetic, not an outcome for anyone. There is no
  * "after fee" figure: the fee is charged at harvest on the week's premium, not on an order, and a
  * total less the fee reads as what a depositor receives.

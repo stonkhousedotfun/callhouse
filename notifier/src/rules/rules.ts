@@ -7,7 +7,7 @@
  * | fill_receipt             | a `fill` item                                                    | taker, maker, recipient | `<item id>-<role>`, role = taker, maker, recipient   |
  * | strike_cross             | spot crosses a held series' strike past a 0.25 % band            | long and short holders  | `<position>-<above|below>-<NY date>`                 |
  * | price_alert              | spot at or beyond a subscriber's above/below level               | that subscriber         | seriesId = ticker, `<direction>-<level>-<NY date>`   |
- * | expiry_24h, expiry_1h    | a held series enters (23 h, 24 h] / (45 min, 60 min] to expiry   | holders                 | `<position>`                                         |
+ * | expiry_24h, expiry_1h    | a held series enters (23 h, 24 h] / (45 min, 60 min] to expiry   | holders                 | `<position>`; digest `kind:address:<expiry>:digest-<batch>` when >3 enter the same expiry's window, `<batch>` naming which positions are in it |
  * | writer_itm_warning       | a short is in the money on its expiry date after 09:30 New York  | short holders           | `itm`                                                |
  * | settlement_receipt       | a `redemption` item; or a held long whose series settled at 0    | holders                 | `<side>-<item id>`; worthless long `long-worthless`  |
  * | payout_failed_to_ledger  | a `redemption` item with toLedger for a holder whose pref is off | holder                  | `<item id>`                                          |
@@ -26,8 +26,16 @@
  *   - Price alerts are level-triggered with re-arm: an above alert fires when spot >= level and it
  *     did not hold at the previous tick (so an alert that is already true when first seen fires
  *     once), at most once per direction and level per New York day.
+ *   - Price-driven payloads (strike_cross, price_alert, writer_itm_warning) carry the snapshot's
+ *     `spotTimes` entry for their ticker as `spotUpdatedAt`, so the message can state when the
+ *     price was observed. A ticker with no time carries none: the spot the rules act on is the
+ *     on-chain one, which stops updating from about 17:00 New York on Friday, and a substituted
+ *     "now" would read as a fresh price that nobody observed.
  *   - Expiry windows are narrow so the "24 hours" / "1 hour" in the message stays true: a
- *     position first seen with 10 h left gets no 24 h notice, only the 1 h one.
+ *     position first seen with 10 h left gets no 24 h notice, only the 1 h one. More than 3
+ *     positions of one wallet entering the same `expiry_24h` or `expiry_1h` window for the same
+ *     expiry in one tick collapse to one digest (F4 D7 / N3-404): kinds unchanged, bucket `digest`,
+ *     seriesId the expiry unix seconds, list capped at 10. Exactly 3 stay per-position.
  *   - "Inside the last trading day" is from 09:30 New York on the expiry date until expiry, and
  *     in the money is strictly beyond the strike (call: spot > strike, put: spot < strike).
  *   - A long payload's `cost` is the indexer's FIFO average cost (fees included) × units, rounded
@@ -81,6 +89,10 @@ export const RULE_TIMING = {
   hysteresisBps: 25n,
   expiry24h: { leadS: 24 * 3600, windowS: 3600 },
   expiry1h: { leadS: 3600, windowS: 15 * 60 },
+  /** N3-404: more than this many entering one (wallet, kind, expiry) window become one digest. */
+  expiryDigestAfter: 3,
+  /** Digest body lists at most this many; the rest is `more`. */
+  expiryDigestList: 10,
   rollOverdueS: 24 * 3600,
 } as const;
 
@@ -132,6 +144,17 @@ function findPosition(snapshot: Snapshot, address: string, side: 'long' | 'short
 }
 
 const costOf = (p: Position) => (p.side === 'long' ? { cost: usdg(longCost(p.avgCost ?? '0', p.units)) } : {});
+
+/**
+ * When the oracle last updated `ticker`'s spot, for the message's "as of" (F4 D8). A ticker whose
+ * market gave no time (a snapshot from before the field existed, a spot read that failed) yields
+ * NOTHING, never a substitute: the template then omits the phrase instead of stating a time the
+ * notifier does not know.
+ */
+function spotSeenAt(snapshot: Snapshot, ticker: string): { spotUpdatedAt?: number } {
+  const at = snapshot.spotTimes[ticker];
+  return at === undefined || at <= 0 ? {} : { spotUpdatedAt: at };
+}
 
 /* ------------------------------------------------------------------ derived state */
 
@@ -349,7 +372,15 @@ export function strikeCross(before: Snapshot, after: Snapshot): EnqueueRequest[]
         request(
           'strike_cross',
           address,
-          { series: seriesPayload(p.series), position, direction: side, spot: usdg(spot), units: p.units, ...costOf(p) },
+          {
+            series: seriesPayload(p.series),
+            position,
+            direction: side,
+            spot: usdg(spot),
+            ...spotSeenAt(after, p.series.ticker),
+            units: p.units,
+            ...costOf(p),
+          },
           longId,
           `${position}-${side}-${day}`,
         ),
@@ -371,7 +402,13 @@ export function priceAlerts(before: Snapshot, after: Snapshot): EnqueueRequest[]
         request(
           'price_alert',
           address,
-          { ticker: alert.ticker, direction: alert.direction, threshold: usdg(alert.threshold), spot: usdg(spot) },
+          {
+            ticker: alert.ticker,
+            direction: alert.direction,
+            threshold: usdg(alert.threshold),
+            spot: usdg(spot),
+            ...spotSeenAt(after, alert.ticker),
+          },
           alert.ticker,
           `${alert.direction}-${alert.threshold}-${day}`,
         ),
@@ -386,27 +423,96 @@ function inExpiryWindow(at: number, series: SeriesInfo, window: { leadS: number;
   return isLive(series, at) && remaining <= window.leadS && remaining > window.leadS - window.windowS;
 }
 
+function expiryLine(p: Position) {
+  return { series: seriesPayload(p.series), position: p.side, units: p.units, ...costOf(p) };
+}
+
+function expirySingle(kind: 'expiry_24h' | 'expiry_1h', p: Position, after: Snapshot): EnqueueRequest {
+  const spot = after.spots[p.series.ticker];
+  return request(
+    kind,
+    p.address,
+    { ...expiryLine(p), ...(spot === undefined ? {} : { spot: usdg(spot) }) },
+    p.series.longId,
+    p.side,
+  );
+}
+
+/**
+ * X8-181, F-APP-OPS-06. Names WHICH positions a digest is about, so two digests for one
+ * (wallet, kind, expiry) are the same delivery only when they carry the same batch.
+ *
+ * The bucket used to be the constant `digest`, so the key was `kind:address:<expiry>:digest` for every
+ * batch of that expiry. `expiryCountdowns` only groups NEWLY-entering positions, so a later purchase
+ * into an expiry the wallet already holds more than three of forms a SECOND digest with an IDENTICAL
+ * key - and `delivery.enqueue`'s `ON CONFLICT (subscription_id, dedupe_key) DO NOTHING` drops it,
+ * counts it as a duplicate, and returns success. The wallet is never told about the later batch and
+ * nothing reports that it was not told.
+ *
+ * Derived from the batch's CONTENT and not from a clock, deliberately: the fact to protect is "a later
+ * batch is delivered once", not "the key differs". A timestamp in the bucket would make every
+ * re-evaluation of the SAME batch a fresh key and re-send the same digest, which is a worse bug than
+ * the one being fixed. With the content tag, re-evaluating an identical batch produces an identical key
+ * and is correctly suppressed.
+ *
+ * FNV-1a, 64-bit, inline: this file is documented as pure functions with no I/O, and a hash is the only
+ * thing needed here, so it does not earn an import.
+ */
+function batchTag(group: Position[]): string {
+  const ids = group.map((p) => `${p.side}:${p.series.longId}`).sort().join(',');
+  const mask = 0xffffffffffffffffn;
+  let h = 0xcbf29ce484222325n;
+  for (let i = 0; i < ids.length; i += 1) {
+    h = (h ^ BigInt(ids.charCodeAt(i))) & mask;
+    h = (h * 0x100000001b3n) & mask;
+  }
+  return h.toString(16).padStart(16, '0');
+}
+
+function expiryDigest(kind: 'expiry_24h' | 'expiry_1h', address: string, group: Position[], after: Snapshot): EnqueueRequest {
+  const listed = group.slice(0, RULE_TIMING.expiryDigestList);
+  const first = listed[0]!;
+  const spot = after.spots[first.series.ticker];
+  const more = group.length - listed.length;
+  return request(
+    kind,
+    address,
+    {
+      ...expiryLine(first),
+      ...(spot === undefined ? {} : { spot: usdg(spot) }),
+      positions: listed.map(expiryLine),
+      ...(more > 0 ? { more } : {}),
+    },
+    String(first.series.expiry),
+    `digest-${batchTag(group)}`,
+  );
+}
+
 export function expiryCountdowns(before: Snapshot, after: Snapshot): EnqueueRequest[] {
-  const out: EnqueueRequest[] = [];
   const windows = [
     ['expiry_24h', RULE_TIMING.expiry24h],
     ['expiry_1h', RULE_TIMING.expiry1h],
   ] as const;
+  type Key = `${string}:${(typeof windows)[number][0]}:${number}`;
+  const groups = new Map<Key, Position[]>();
   for (const p of positionsOf(after)) {
     for (const [kind, window] of windows) {
       if (!inExpiryWindow(after.at, p.series, window)) continue;
       const was = findPosition(before, p.address, p.side, p.series.longId);
       if (was !== undefined && inExpiryWindow(before.at, was.series, window)) continue;
-      const spot = after.spots[p.series.ticker];
-      out.push(
-        request(
-          kind,
-          p.address,
-          { series: seriesPayload(p.series), position: p.side, units: p.units, ...(spot === undefined ? {} : { spot: usdg(spot) }), ...costOf(p) },
-          p.series.longId,
-          p.side,
-        ),
-      );
+      const key = `${p.address}:${kind}:${p.series.expiry}` as Key;
+      const list = groups.get(key);
+      if (list) list.push(p);
+      else groups.set(key, [p]);
+    }
+  }
+  const out: EnqueueRequest[] = [];
+  for (const [key, group] of groups) {
+    const kind = key.split(':')[1] as 'expiry_24h' | 'expiry_1h';
+    if (group.length <= RULE_TIMING.expiryDigestAfter) {
+      for (const p of group) out.push(expirySingle(kind, p, after));
+    } else {
+      out.push(expiryDigest(kind, group[0]!.address, group, after));
     }
   }
   return out;
@@ -432,7 +538,13 @@ export function writerItmWarnings(before: Snapshot, after: Snapshot): EnqueueReq
       request(
         'writer_itm_warning',
         p.address,
-        { series: seriesPayload(p.series), units: p.units, spot: usdg(after.spots[p.series.ticker] ?? '0'), collateralLocked: short.collateralLocked },
+        {
+          series: seriesPayload(p.series),
+          units: p.units,
+          spot: usdg(after.spots[p.series.ticker] ?? '0'),
+          ...spotSeenAt(after, p.series.ticker),
+          collateralLocked: short.collateralLocked,
+        },
         p.series.longId,
         'itm',
       ),
@@ -522,7 +634,128 @@ export function autoRollSkipped(before: Snapshot, after: Snapshot): EnqueueReque
   return out;
 }
 
-export function stateRules(before: Snapshot, after: Snapshot): EnqueueRequest[] {
+/**
+ * Protocol-wide fee changes. Fan-out is one request per watched address because enqueue is
+ * per-wallet. An absent previous snapshot (at === 0) is not a change.
+ */
+export function feeNotices(before: Snapshot, after: Snapshot, watched: Iterable<string>): EnqueueRequest[] {
+  if (before.at === 0) return [];
+  const out: EnqueueRequest[] = [];
+  const addresses = [...watched];
+  if (
+    before.pendingFeesEffectiveAt === null &&
+    after.pendingFeesEffectiveAt !== null
+  ) {
+    const effectiveAt = after.pendingFeesEffectiveAt;
+    for (const address of addresses) {
+      out.push(request('fee_notice', address, { phase: 'scheduled', effectiveAt }, 'protocol', `scheduled-${effectiveAt}`));
+    }
+  }
+  if (
+    before.liveFeesKey !== null &&
+    after.liveFeesKey !== null &&
+    before.liveFeesKey !== after.liveFeesKey
+  ) {
+    for (const address of addresses) {
+      out.push(request('fee_notice', address, { phase: 'live' }, 'protocol', `live-${after.liveFeesKey}`));
+    }
+  }
+  return out;
+}
+
+type AdminOperationState = Snapshot['adminOperations'][string];
+
+const ownOperation = (map: Snapshot['adminOperations'], key: string): AdminOperationState | undefined =>
+  Object.hasOwn(map, key) ? map[key] : undefined;
+
+/**
+ * T-435. What a snapshot stored before T-435 remembered about the operation now seen as `current`.
+ *
+ * Those snapshots keyed an operation by its bare `id`, so the first tick after the upgrade finds every
+ * live operation under a key the previous tick never had. Read as new, every pending operation would
+ * be announced a second time to every subscriber, and one that went pending -> executed across the
+ * upgrade would say nothing at all (a first sighting that is not pending is recorded silently). The
+ * id-keyed entry IS that operation's previous state - but only while exactly one current key carries
+ * its id. With two, the entry cannot say which of them it described, and a repeated notice is the
+ * lesser failure: silencing the other one is the defect T-435 exists to close.
+ */
+function legacyPrevious(before: Snapshot, after: Snapshot, current: AdminOperationState): AdminOperationState | undefined {
+  if (current.id === undefined) return undefined;
+  const legacy = ownOperation(before.adminOperations, current.id);
+  if (legacy === undefined || legacy.id !== undefined) return undefined;
+  let sharing = 0;
+  for (const op of Object.values(after.adminOperations)) if (op.id === current.id) sharing += 1;
+  return sharing === 1 ? legacy : undefined;
+}
+
+/**
+ * AccessManager operations. Fires only when a previously seen operation changes status, or a
+ * previously seen snapshot (at > 0) observes a new pending one. First boot (at === 0) records without
+ * messaging.
+ *
+ * T-435. AN OPERATION IS ITS `key`, NEVER ITS `id`. Rescheduling reuses the id, so two pending
+ * operations can share it; keyed on id, the second one found the first one's `pending` already
+ * remembered and was never announced, and both collapsed into one dedupe key so a later status of
+ * either could be swallowed as a duplicate of the other. Both the state lookup and the dedupe key use
+ * `key`; `id` rides along in the payload for readers that name the operation.
+ */
+export function adminOperationNotices(before: Snapshot, after: Snapshot, watched: Iterable<string>): EnqueueRequest[] {
+  if (before.at === 0) return [];
+  const out: EnqueueRequest[] = [];
+  const addresses = [...watched];
+  for (const [key, current] of Object.entries(after.adminOperations)) {
+    const previous = ownOperation(before.adminOperations, key) ?? legacyPrevious(before, after, current);
+    if (previous !== undefined && previous.status === current.status) continue;
+    if (previous === undefined && current.status !== 'pending') continue;
+    const id = current.id ?? key;
+    for (const address of addresses) {
+      out.push(request('admin_operation', address, { id, key, status: current.status, label: current.label }, key, current.status));
+    }
+  }
+  return out;
+}
+
+/**
+ * X8-181, F-APP-OPS-02 and NOTE-1. Fold a read of `/v2/admin/operations` into the operations the
+ * previous tick remembered, keyed by `key` (T-435: never by `id`, which a reschedule reuses).
+ *
+ * WHY A MERGE AND NOT A REBUILD. This used to be `adminOperations = {}` followed by a loop, so an
+ * operation that was not on the page just read was ABSENT from the next snapshot rather than CHANGED -
+ * and `adminOperationNotices` only fires on a status that differs from a remembered one. Paired with a
+ * client that asked for the pending page alone, every operation vanished from the notifier at exactly
+ * the moment it became worth telling someone about: the subscriber heard "scheduled" and never heard
+ * executed or canceled, which is the half that moves protocol state.
+ *
+ * NOTHING HERE INFERS A STATUS FROM AN ABSENCE, and that is the point rather than an omission. An
+ * operation leaves the pending page three ways, not two: executed, canceled, or EXPIRED - the route
+ * filters pending on `expiresAt > indexedAt` (indexer/src/api/v2/admin.ts) while the stored status
+ * stays `pending`, so an expired operation is served on no page at all. It therefore keeps its
+ * remembered `pending` here and fires no notice, which is correct: there is no expired notice to send,
+ * and treating the disappearance as `executed` would report a governance action that never happened.
+ *
+ * An entry a pre-T-435 snapshot stored under the bare `id` is dropped once an operation carrying that
+ * id is read under its `key`: from then on the key entry is the state, and keeping both would leave
+ * one operation remembered twice. `adminOperationNotices` reads the old entry from the previous
+ * snapshot on that one tick (see legacyPrevious), so nothing it knew is lost by the drop.
+ *
+ * The container is null-prototype because `op.key` is server-supplied: `map[key] = x` on a plain `{}`
+ * runs the `__proto__` SETTER for a key of that name instead of storing it.
+ */
+export function mergeAdminOperations(
+  remembered: Snapshot['adminOperations'],
+  ops: readonly { key: string; id: string; status: 'pending' | 'executed' | 'canceled'; label: string }[],
+): Snapshot['adminOperations'] {
+  const merged = Object.create(null) as Snapshot['adminOperations'];
+  for (const [key, op] of Object.entries(remembered)) merged[key] = op;
+  for (const op of ops) {
+    const legacy = ownOperation(merged, op.id);
+    if (op.id !== op.key && legacy !== undefined && legacy.id === undefined) delete merged[op.id];
+    merged[op.key] = { id: op.id, status: op.status, label: op.label };
+  }
+  return merged;
+}
+
+export function stateRules(before: Snapshot, after: Snapshot, watched: Iterable<string> = []): EnqueueRequest[] {
   return [
     ...strikeCross(before, after),
     ...priceAlerts(before, after),
@@ -530,5 +763,7 @@ export function stateRules(before: Snapshot, after: Snapshot): EnqueueRequest[] 
     ...writerItmWarnings(before, after),
     ...settledWorthless(before, after),
     ...autoRollSkipped(before, after),
+    ...feeNotices(before, after, watched),
+    ...adminOperationNotices(before, after, watched),
   ];
 }

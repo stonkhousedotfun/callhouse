@@ -18,6 +18,8 @@ import type { z } from "zod";
 import type {
   activityItemSchema,
   activityResponseSchema,
+  adminOperationSchema,
+  adminOperationsResponseSchema,
   calendarHolidaysResponseSchema,
   bookOrderSchema,
   bookResponseSchema,
@@ -26,6 +28,24 @@ import type {
   configResponseSchema,
   errorSchema,
   fairResponseSchema,
+  pricerServiceSchema,
+  servicesResponseSchema,
+  flywheelAssetSchema,
+  flywheelDistributionSchema,
+  flywheelResponseSchema,
+  earnAccountSchema,
+  earnAdapterMoveSchema,
+  earnQueuedRequestSchema,
+  earnQueueSchema,
+  earnResponseSchema,
+  earnVaultSchema,
+  houseEpochSchema,
+  houseListResponseSchema,
+  houseMarketResponseSchema,
+  houseNavSchema,
+  houseQueueItemSchema,
+  houseSharesSchema,
+  houseVaultSchema,
   healthResponseSchema,
   heroCardResponseSchema,
   historyItemSchema,
@@ -36,6 +56,11 @@ import type {
   makerEpochSchema,
   makerResponseSchema,
   makersResponseSchema,
+  rewardClaimSchema,
+  rewardClaimsResponseSchema,
+  rewardEpochSchema,
+  rewardEpochsResponseSchema,
+  vaultResponseSchema,
   marketSchema,
   marketSeriesResponseSchema,
   marketsResponseSchema,
@@ -43,6 +68,7 @@ import type {
   orderKindSchema,
   pnlResponseSchema,
   positionsResponseSchema,
+  pricingProvenanceSchema,
   quoteSchema,
   seriesDetailResponseSchema,
   seriesRefSchema,
@@ -65,8 +91,91 @@ import type {
 
 export type Money = { raw: string; decimals: number; formatted: string };
 
+/** A USDG-denominated price: six base-unit decimals per whole share. */
+export type UsdgPrice = { raw: string; decimals: 6; formatted: string };
+
 /** Money whose raw may carry a leading "-" (PnL only). */
 export type SignedMoney = { raw: string; decimals: number; formatted: string };
+
+export type PricingProvenance = {
+  contract: "O3-307/1";
+  provider: string;
+  providerProduct: string | null;
+  method: "listed" | "interpolated" | "extrapolated" | "modeled" | "external-indicative";
+  methodDetail: string | null;
+  contributingExpiries: number[];
+  identity: {
+    market: string;
+    issuer: string | null;
+    token: { chainId: number; address: string; uiMultiplier: string | null };
+    option: {
+      side: "call" | "put";
+      strike: Money;
+      expiry: number;
+      timeZone: "America/New_York";
+      exercise: "european";
+      payoff: "cash-value";
+      settlement: "oracle-twap";
+    };
+    listed: {
+      providerInstrumentId: string | null;
+      root: string | null;
+      side: "call" | "put";
+      strike: string;
+      expiry: number | null;
+      multiplier: number | null;
+      exercise: string | null;
+      settlement: string | null;
+    }[];
+  };
+  observations: {
+    listedQuotes: {
+      providerInstrumentId: string | null;
+      bid: string | null;
+      ask: string | null;
+      bidSize: string | null;
+      askSize: string | null;
+      currency: string;
+      observedAt: number | null;
+    }[];
+    vendorTheoretical: {
+      product: string;
+      value: string | null;
+      iv: number | null;
+      currency: string;
+      observedAt: number | null;
+    }[];
+  };
+  clocks: {
+    quoteObservedAt: number | null;
+    tradeObservedAt: number | null;
+    underlyingObservedAt: number | null;
+    volatilityObservedAt: number | null;
+    publishedAt: number | null;
+    receivedAt: number;
+    computedAt: number;
+  };
+  ages: { quoteS: number | null; tradeS: number | null; underlyingS: number | null; volatilityS: number | null };
+  entitlement: {
+    class: "real-time" | "delayed" | "end-of-day" | "indicative" | "unknown";
+    declaredDelayS: number | null;
+    rightsRef: string | null;
+  };
+  expiryClock: {
+    expiry: number;
+    timeZone: "America/New_York";
+    basis: "trading-time" | "calendar-time";
+    yearsToExpiry: number | null;
+  };
+  quality: {
+    readiness: "ready" | "degraded" | "unavailable";
+    reasons: string[];
+    uncertainty: { ivLow: number | null; ivHigh: number | null; fairLow: Money | null; fairHigh: Money | null } | null;
+    disagreement: { provider: string; fairBps: number | null } | null;
+    fallback: { from: string; to: string; reason: string } | null;
+  };
+  pricedSpot: Money | null;
+};
 
 export type SeriesStatus = "open" | "cutoff" | "expired" | "settling" | "held" | "settled";
 
@@ -95,6 +204,7 @@ export type Quote = {
   iv: number | null;
   delta: number | null;
   last: Money | null;
+  fairProvenance?: PricingProvenance | null;
 };
 
 export type Card = {
@@ -131,9 +241,192 @@ export type Win = {
 
 export type ApiError = { error: { code: string; message: string } };
 
+export type PendingAdminOperation = {
+  /** `operationId:nonce`. Unique per row; `id` alone is not. See api-schema `adminOperationSchema`. */
+  key: string;
+  id: string;
+  role: string;
+  target: string;
+  selector: string | null;
+  label: string;
+  caller: string;
+  scheduledAt: number;
+  readyAt: number;
+};
+
+export type AdminOperation = PendingAdminOperation & {
+  status: "pending" | "executed" | "canceled";
+};
+
+export type AdminOperationsResponse = { items: AdminOperation[]; nextCursor: string | null };
+
+export type FlywheelAsset = {
+  asset: string;
+  symbol: string | null;
+  decimals: number | null;
+  amountRaw: string;
+};
+
+export type FlywheelDistribution = {
+  id: string;
+  asset: string;
+  symbol: string | null;
+  decimals: number | null;
+  assetInRaw: string;
+  usdgInRaw: string;
+  treasuryOutRaw: string;
+  buybackAddedRaw: string;
+  ts: number;
+  tx: string;
+};
+
+export type FlywheelResponse = {
+  configured: boolean;
+  splitter: string | null;
+  tokenAddress: string | null;
+  tokenDecimals: number | null;
+  burnedTotal: string | null;
+  burned7d: string | null;
+  revenue7d: FlywheelAsset[];
+  held: FlywheelAsset[];
+  lastDistribution: FlywheelDistribution | null;
+  distributions: FlywheelDistribution[];
+};
+
+export type EarnQueuedRequest = {
+  id: string;
+  status: "queued" | "fulfilled" | "cancelled";
+  sharesQueued: string;
+  assetsRequested: string | null;
+  fulfilledAssets: string | null;
+  requestedAt: number;
+};
+
+export type EarnAccount = {
+  address: string;
+  shares: string | null;
+  queued?: EarnQueuedRequest[];
+};
+
+export type EarnAdapterMove = {
+  adapter: string | null;
+  direction: "pull" | "push" | null;
+  requested: string;
+  delivered: string | null;
+  ts: number;
+  tx: string;
+};
+
+export type EarnQueue = {
+  depth: number;
+  oldestRequestedAt: number | null;
+};
+
+export type EarnVault = {
+  vault: string;
+  asset: string | null;
+  adapter: string | null;
+  paused: boolean | null;
+  sharesSupply: string | null;
+  deposited: string | null;
+  skimmed: string | null;
+  queue?: EarnQueue;
+  lastAdapterMove?: EarnAdapterMove | null;
+  /** T-OP-086: display-only mark per 1e18 shares; null when not read. */
+  indicativeAssetsPerShare?: string | null;
+  indicativeTotalAssets?: string | null;
+  hasOpenPosition?: boolean | null;
+};
+
+export type EarnResponse = {
+  configured: boolean;
+  vaults?: EarnVault[];
+  account?: EarnAccount | null;
+};
+
+export type HouseNav = {
+  epoch: string;
+  at: number;
+  /** Null: EpochRolled does not name the leg (`v2HouseNav.usdg`). Never 0. */
+  usdg: Money | null;
+  /** Null for the same reason (`v2HouseNav.stockUnits`). Never 0. */
+  stockUnits: string | null;
+  settlementPrice: Money;
+  navUsdg: Money;
+};
+
+export type HouseEpoch = {
+  id: string;
+  /** Null until observed (`v2HouseEpoch.start` / `.end`). Never coerced to 0. */
+  start: number | null;
+  end: number | null;
+  nav: HouseNav | null;
+  resultUsdg: SignedMoney | null;
+};
+
+export type HouseQueueItem = {
+  kind: "deposit" | "withdraw";
+  account: string;
+  assets: string | null;
+  stockAmount?: string | null;
+  shares: string | null;
+  requestedAt: number;
+};
+
+export type HouseShares = {
+  address: string;
+  shares: string | null;
+  queued?: HouseQueueItem[];
+};
+
+export type HouseVault = {
+  market: string;
+  vault: string | null;
+  /** Null: no epoch row observed. The vault is still listed. */
+  currentEpoch: HouseEpoch | null;
+  sharesSupply: string | null;
+};
+
+export type HouseListResponse = {
+  items: HouseVault[];
+  nextCursor: string | null;
+};
+
+/** Alias the AC names `HouseResponse`; the wire schema is `houseListResponseSchema`. */
+export type HouseResponse = HouseListResponse;
+
+export type HouseMarketResponse = {
+  market: string;
+  vault: string | null;
+  /** Null: no epoch row observed. */
+  currentEpoch: HouseEpoch | null;
+  epochs: HouseEpoch[];
+  shares?: HouseShares | null;
+  queue?: HouseQueueItem[];
+};
+
 // ---------------------------------------------------------------------------------------------
 // /v2/health, /v2/config, /v2/markets
 // ---------------------------------------------------------------------------------------------
+
+/**
+ * /v2/services — readiness of the services the indexer does not run (T-424).
+ *
+ * `healthy` is true only when `reason` is `"ready"`, so a consumer can branch on `healthy` alone
+ * and still be fail-closed, and read `reason` only to say why. `reasons` is the pricer's own closed
+ * set, passed through untouched. Times are unix seconds; the pricer emits ISO on its own endpoint
+ * and the indexer converts at the boundary.
+ */
+export type PricerService = {
+  healthy: boolean;
+  reason: "ready" | "not_configured" | "timeout" | "http_error" | "malformed_body" | "not_ready" | "stale";
+  reasons: ("loop-wedged" | "no-completed-tick" | "tick-failed" | "role-unread"
+    | "role-refused" | "role-delayed" | "fair-stale" | "state-unknown")[];
+  checkedAt: number;
+  lastEvaluationAt: number | null;
+};
+
+export type ServicesResponse = { pricer: PricerService };
 
 export type HealthResponse = {
   status: "ok" | "lagging" | "degraded";
@@ -143,6 +436,10 @@ export type HealthResponse = {
 };
 
 export type LadderDefaults = { rungs: number; firstOtmBps: number; stepBps: number; cardTargetBps: number };
+
+export type PayoutRoute =
+  | { venue: "v3"; fee: number }
+  | { venue: "v4"; fee: number; tickSpacing: number; poolId: string };
 
 export type ConfigResponse = {
   chainId: number;
@@ -160,8 +457,22 @@ export type ConfigResponse = {
     makerVault: string | null;
     makerRegistry: string | null;
     rewardsDistributor: string | null;
+    accessManager?: string | null;
+    stockZap?: string | null;
     sources: { chainlink: string | null; univ3: string | null; dataStreams: string | null };
   };
+  flywheel?: { feeSplitter: string | null; buybackExecutor: string | null };
+  safes?: { admin: string | null; treasury: string | null };
+  access?: {
+    manager: string;
+    roles: {
+      id: number;
+      name: string;
+      delayS: number;
+      holders: { address: string; delayS: number }[];
+    }[];
+  };
+  pendingOperations?: PendingAdminOperation[];
   fees: {
     premiumFeeBps: number;
     resaleFeeBps: number;
@@ -170,6 +481,8 @@ export type ConfigResponse = {
     makerRebateBps: number;
     exerciseFeeBps: number;
     mintFeePpm: number;
+    /** T-OP-120 (G7): Clearinghouse `maxPayoutSlippageBps`, null until a payout adapter has been set. */
+    maxPayoutSlippageBps: number | null;
   };
   pendingFees: {
     premiumFeeBps: number;
@@ -191,6 +504,7 @@ export type ConfigResponse = {
     minSeriesLead: number;
     mintFeePeriod: number;
     mintFeeCeilPpm: number;
+    feeChangeDelay?: number;
   };
   ladder: { weekly: LadderDefaults; daily: LadderDefaults };
 };
@@ -200,13 +514,17 @@ export type Market = {
   name: string;
   underlying: string;
   status: "planned" | "live" | "paused";
+  /** T-OP-099. In the owner's launch set (registry `launchSet`); `status` is the chain's word, this is the registry's. */
+  launch: boolean;
   spot: Money | null;
   spotUpdatedAt: number | null;
   strikeTick: Money;
   puts: boolean;
   mintFeePpm: number;
+  settlement?: { sourceCount: number; uncorroboratedDelayS: number; route: PayoutRoute | null };
   expiries: number[];
-  stats: { volume24h: Money; premium7d: Money; openInterestUnits: string; seriesOpen: number };
+  /** `asOf` is the indexed head both windows end at, 0 when no checkpoint was readable (T-425). */
+  stats: { volume24h: Money; premium7d: Money; asOf: number; openInterestUnits: string; seriesOpen: number };
 };
 
 export type MarketsResponse = Market[];
@@ -217,6 +535,8 @@ export type MarketsResponse = Market[];
 
 export type MarketSeriesResponse = {
   items: { series: SeriesRef; quote: Quote; openInterestUnits: string; volume24h: Money }[];
+  /** The indexed head each item's `volume24h` window ends at (T-425). */
+  asOf: number;
   nextCursor: string | null;
 };
 
@@ -291,6 +611,7 @@ export type LongPosition = {
   units: string;
   avgCost: Money;
   mark: Money | null;
+  markSource?: "fair" | "best-bid" | null;
   unrealised: SignedMoney | null;
   claimable: Money | null;
 };
@@ -343,7 +664,7 @@ export type HistoryItem =
         tx: string;
       }
     >
-  | SeriesHistory<"mint", { units: string; collateral: Money; fee: Money; longTo: string; tx: string }>
+  | SeriesHistory<"mint", { units: string; collateral: Money; fee: Money; payer?: string; longTo: string; tx: string }>
   | SeriesHistory<"close", { units: string; collateralFreed: Money; feeRefund: Money; realisedPnl: SignedMoney | null; tx: string }>
   | SeriesHistory<
       "redemption",
@@ -427,6 +748,19 @@ export type CalendarHolidaysResponse = {
   items: { dayIndex: number; isHoliday: boolean; isSessionDay: boolean }[];
 };
 
+export type StrategyPricingState = {
+  /** Current live AutoRoller ask, in USDG6 per whole share. */
+  currentAsk: UsdgPrice | null;
+  /** Exact tick-aligned interval for an active, live, out-of-the-money AutoRoller ask; otherwise null. */
+  band: { min: UsdgPrice; max: UsdgPrice } | null;
+  lastRepricedAt: number | null;
+  lastRepricedPrice: UsdgPrice | null;
+  /** Number of Repriced events since the current position was rolled. */
+  repriceCount: number;
+  /** Current pricing-service estimate, in USDG6 per whole share. */
+  fair: UsdgPrice | null;
+};
+
 export type StrategiesResponse = {
   items: {
     writer: string;
@@ -437,6 +771,7 @@ export type StrategiesResponse = {
     orderId: string | null;
     expiry: number | null;
     lastRolledAt: number | null; lastStaleCancelAt: number | null; staleSpot: Money | null;
+    pricing?: StrategyPricingState;
   }[];
   nextCursor: string | null;
 };
@@ -457,13 +792,29 @@ export type PnlResponse = Win & {
   spotAtEntry: Money | null;
 };
 
+/**
+ * Whether a `selfTradeUnits` of 0 means "nobody is self-trading" or "the detector could not see
+ * it". Both cheap evasions - one extra price tick, or an off-chain-funded second wallet - drive
+ * the counted total to exactly 0, so the bare number cannot answer it. `unseenUnits` is never
+ * added to `selfTradeUnits`: a suspicion is not a measurement.
+ */
+export type SelfTradeCoverage = {
+  status: "detected" | "clean" | "blind";
+  unseenUnits: string;
+  reasons: { reason: "price-above-counted-band" | "no-link-evidence"; units: string; fills: number }[];
+};
+
 export type StatsResponse = {
+  /** The indexed head every windowed figure below ends at, 0 with no checkpoint (T-425). */
+  asOf: number;
   volume24h: Money;
   volumeAll: Money;
   premiumAll: Money;
   feesAll: Money;
   contractsFilled: string;
   holders: number;
+  selfTradeUnits?: string;
+  selfTradeCoverage?: SelfTradeCoverage;
   biggestWinDay: Win | null;
   biggestWinWeek: Win | null;
 };
@@ -472,16 +823,31 @@ export type StatsResponse = {
 // Makers, fair value
 // ---------------------------------------------------------------------------------------------
 
-export type MakerEpoch = { id: number; start: number; end: number };
+/**
+ * The scoring policy the epoch's figures were produced under. Additive and optional: an absent `band`
+ * means the producer does not publish its policy, and a consumer must not infer one. The values are
+ * OQ-14 placeholders and are not approved for funded use.
+ */
+export type MakerBand = { bps: number; minUsdg: Money };
+
+export type MakerEpoch = { id: number; start: number; end: number; band?: MakerBand };
 
 export type MakerStats = {
+  /** Comparable only within one policy; an item without it is policy 1 (see api-schema.ts). */
+  benchmarkPolicy: number;
+  samples: { absent: number; valid: number; missingReference: number };
   uptimePct: number;
   avgSpreadBps: number | null;
+  /** Always the 100 bps band, whatever `epoch.band` says. Its name pins its meaning. */
   depthWithin100bps: string;
+  /** The same statistic inside `epoch.band`. Optional and new; never an alias of the field above. */
+  depthInBand?: string;
   fills: number;
   volume: Money;
   rebates: Money;
   score: number;
+  selfTradeUnits?: string;
+  selfTradeCoverage?: SelfTradeCoverage;
 };
 
 export type MakersResponse = {
@@ -492,9 +858,63 @@ export type MakersResponse = {
 
 export type MakerResponse = { maker: string; tierBps: number; epochs: ({ epoch: MakerEpoch } & MakerStats)[] };
 
+export type RewardEpoch = {
+  distributor: string;
+  epochId: number;
+  root: string;
+  total: Money;
+  claimed: Money;
+};
+
+export type RewardEpochsResponse = {
+  program: string;
+  distributors: { distributor: string; funded: Money; defunded: Money; balance: Money }[];
+  items: RewardEpoch[];
+  nextCursor: string | null;
+};
+
+export type RewardClaim = {
+  program: string;
+  distributor: string;
+  epochId: number;
+  index: number;
+  amount: Money;
+  claimed: boolean;
+  tx: string | null;
+};
+
+export type RewardClaimsResponse = { address: string; items: RewardClaim[]; nextCursor: string | null };
+
+export type VaultBalance = { asset: string; symbol: string; free: Money };
+
+export type VaultResponse = {
+  vault: string;
+  protocol: true;
+  balances: { wallet: VaultBalance[]; ledger: VaultBalance[] };
+  limits: {
+    maxSeriesUnits: string;
+    maxTotalNotional: string;
+    askToleranceBps: number;
+    maxBidBpsOfSpot: number;
+    maxOrderLifetime: number;
+    maxDailyOutflow: string;
+  };
+  outflow: { used: Money; cap: Money };
+  liveOrderCount: number;
+  trackedSeries: string[];
+};
+
 export type FairResponse =
-  | { fair: Money; iv: number; delta: number; source: "cboe" | "model"; asOf: number }
-  | { fair: null; reason: string };
+  | {
+      fair: Money;
+      iv: number;
+      delta: number;
+      source: "cboe" | "model";
+      asOf: number;
+      spot?: Money;
+      provenance?: PricingProvenance;
+    }
+  | { fair: null; reason: string; reasonCode?: string; provenance?: PricingProvenance };
 
 // ---------------------------------------------------------------------------------------------
 // Compile-time equality with the schemas. Nothing below exists at runtime.
@@ -523,6 +943,7 @@ type Wire<S extends z.ZodTypeAny> = z.infer<S>;
 export type ApiTypeAssertions = [
   Assert<Equals<Money, Wire<typeof moneySchema>>>,
   Assert<Equals<SignedMoney, Wire<typeof signedMoneySchema>>>,
+  Assert<Equals<PricingProvenance, Wire<typeof pricingProvenanceSchema>>>,
   Assert<Equals<SeriesStatus, Wire<typeof seriesStatusSchema>>>,
   Assert<Equals<SeriesRef, Wire<typeof seriesRefSchema>>>,
   Assert<Equals<Quote, Wire<typeof quoteSchema>>>,
@@ -532,7 +953,28 @@ export type ApiTypeAssertions = [
   Assert<Equals<Level, Wire<typeof levelSchema>>>,
   Assert<Equals<Win, Wire<typeof winSchema>>>,
   Assert<Equals<ApiError, Wire<typeof errorSchema>>>,
+  Assert<Equals<AdminOperation, Wire<typeof adminOperationSchema>>>,
+  Assert<Equals<AdminOperationsResponse, Wire<typeof adminOperationsResponseSchema>>>,
+  Assert<Equals<FlywheelAsset, Wire<typeof flywheelAssetSchema>>>,
+  Assert<Equals<FlywheelDistribution, Wire<typeof flywheelDistributionSchema>>>,
+  Assert<Equals<FlywheelResponse, Wire<typeof flywheelResponseSchema>>>,
+  Assert<Equals<EarnQueuedRequest, Wire<typeof earnQueuedRequestSchema>>>,
+  Assert<Equals<EarnAccount, Wire<typeof earnAccountSchema>>>,
+  Assert<Equals<EarnAdapterMove, Wire<typeof earnAdapterMoveSchema>>>,
+  Assert<Equals<EarnQueue, Wire<typeof earnQueueSchema>>>,
+  Assert<Equals<EarnVault, Wire<typeof earnVaultSchema>>>,
+  Assert<Equals<EarnResponse, Wire<typeof earnResponseSchema>>>,
+  Assert<Equals<HouseNav, Wire<typeof houseNavSchema>>>,
+  Assert<Equals<HouseEpoch, Wire<typeof houseEpochSchema>>>,
+  Assert<Equals<HouseQueueItem, Wire<typeof houseQueueItemSchema>>>,
+  Assert<Equals<HouseShares, Wire<typeof houseSharesSchema>>>,
+  Assert<Equals<HouseVault, Wire<typeof houseVaultSchema>>>,
+  Assert<Equals<HouseListResponse, Wire<typeof houseListResponseSchema>>>,
+  Assert<Equals<HouseResponse, Wire<typeof houseListResponseSchema>>>,
+  Assert<Equals<HouseMarketResponse, Wire<typeof houseMarketResponseSchema>>>,
   Assert<Equals<HealthResponse, Wire<typeof healthResponseSchema>>>,
+  Assert<Equals<PricerService, Wire<typeof pricerServiceSchema>>>,
+  Assert<Equals<ServicesResponse, Wire<typeof servicesResponseSchema>>>,
   Assert<Equals<ConfigResponse, Wire<typeof configResponseSchema>>>,
   Assert<Equals<Market, Wire<typeof marketSchema>>>,
   Assert<Equals<MarketsResponse, Wire<typeof marketsResponseSchema>>>,
@@ -561,5 +1003,10 @@ export type ApiTypeAssertions = [
   Assert<Equals<MakerEpoch, Wire<typeof makerEpochSchema>>>,
   Assert<Equals<MakersResponse, Wire<typeof makersResponseSchema>>>,
   Assert<Equals<MakerResponse, Wire<typeof makerResponseSchema>>>,
+  Assert<Equals<RewardEpoch, Wire<typeof rewardEpochSchema>>>,
+  Assert<Equals<RewardEpochsResponse, Wire<typeof rewardEpochsResponseSchema>>>,
+  Assert<Equals<RewardClaim, Wire<typeof rewardClaimSchema>>>,
+  Assert<Equals<RewardClaimsResponse, Wire<typeof rewardClaimsResponseSchema>>>,
+  Assert<Equals<VaultResponse, Wire<typeof vaultResponseSchema>>>,
   Assert<Equals<FairResponse, Wire<typeof fairResponseSchema>>>,
 ];

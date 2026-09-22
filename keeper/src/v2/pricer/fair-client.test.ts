@@ -29,7 +29,7 @@ test('a priced answer: the query carries ticker, strike, expiry and type; fair.r
   const { status, body } = fairResponse({ ok: true, fairUsdg6: 816_164n, iv: 0.310557, delta: 0.183571, source: 'cboe', method: 'listed-contract', days: ['2026-09-18'], spotUsdg6: 212_210_000n, asOf: 1_789_415_999 });
   const seen: string[] = [];
   const client = new PricingClient({ baseUrl: 'http://pricing:8790', timeoutMs: 1_000, fetch: fakeFetch(() => json(body, status), seen) });
-  assert.deepEqual(await client.fair(REQUEST), { ok: true, fair: 816_164n, source: 'cboe', asOf: 1_789_415_999 });
+  assert.deepEqual(await client.fair(REQUEST), { ok: true, fair: 816_164n, source: 'cboe', asOf: 1_789_415_999, spot: 212_210_000n });
   assert.equal(seen[0], 'http://pricing:8790/fair?ticker=NVDA&strike=220000000&expiry=1789761600&type=call');
   // The service's own query parser reads back exactly the series asked about (strike in USDG base units, not dollars).
   assert.deepEqual(parseFairQuery(Object.fromEntries(new URL(seen[0]!).searchParams)), { ok: true, ticker: 'NVDA', strikeUsdg6: 220_000_000n, expiry: 1_789_761_600, type: 'call' });
@@ -58,4 +58,26 @@ test('parseFairBody: a fair that is not a canonical integer string, or a 200 wit
   assert.deepEqual(parseFairBody(200, 'nope'), { ok: false, reason: 'HTTP 200: not a JSON object' });
   assert.deepEqual(parseFairBody(200, { fair: null }), { ok: false, reason: 'HTTP 200' });
   assert.deepEqual(parseFairBody(200, { fair: { raw: '0' }, source: 'model' }), { ok: true, fair: 0n, source: 'model', asOf: null });
+});
+
+test('parseFairBody: extra provenance is optional; unknown keys are ignored; a missing provenance is not a failure', () => {
+  const withProv = parseFairBody(200, {
+    fair: { raw: '2000000' },
+    source: 'cboe',
+    asOf: 1_789_415_999,
+    spot: { raw: '212210000', decimals: 6 },
+    provenance: {
+      quality: { readiness: 'ready', reasons: [] },
+      clocks: { quoteObservedAt: 1_789_416_100, receivedAt: 1_789_416_200 },
+      identity: { market: 'NVDA', token: { address: '0xd0601CE157Db5bdC3162BbaC2a2C8aF5320D9EEC' } },
+      ignored: true,
+    },
+  });
+  assert.equal(withProv.ok, true);
+  if (withProv.ok) {
+    assert.equal(withProv.spot, 212_210_000n);
+    assert.equal(withProv.provenance?.quality?.readiness, 'ready');
+    assert.equal(withProv.provenance?.clocks?.quoteObservedAt, 1_789_416_100);
+    assert.equal(withProv.provenance?.identity?.market, 'NVDA');
+  }
 });

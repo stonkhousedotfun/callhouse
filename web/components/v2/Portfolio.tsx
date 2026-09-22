@@ -10,6 +10,8 @@ import { useNotice, useV2ReceiptNotice } from "@/components/TxToast";
 import { Button, Notice, PageHead, Panel } from "@/components/ui";
 import { ConversionFloor } from "@/components/v2/ConversionFloor";
 import { PendingFeeNotice } from "@/components/v2/PendingFeeNotice";
+import { PendingOperationsNotice } from "@/components/v2/PendingOperationsNotice";
+import { WithdrawalTerms, type WithdrawalTiming } from "@/components/v2/WithdrawalTerms";
 import { publicClient, txUrl } from "@/lib/chain";
 import { clearinghouseAbi } from "@/lib/abi/v2/clearinghouse";
 import { orderBookAbi } from "@/lib/abi/v2/orderBook";
@@ -18,14 +20,18 @@ import { v2Api } from "@/lib/v2/api";
 import { V2_DEPLOYMENT, requireV2Address, v2ConfigWarnings } from "@/lib/v2/config";
 import { assertPortfolioSeries, assertPayoutPrefsMatch, assertSeriesTermsMatch, readAccountOnChain, readOrderPreflight,
   readPayoutPrefs, readSeriesOnChain, type PayoutPrefs } from "@/lib/v2/chainReads";
-import { useBook, useConfig, useFair, useMarkets, usePositions, v2Keys } from "@/lib/v2/hooks";
+import { useBook, useConfig, useFair, useMarkets, usePositions, useSeries, useStrategies, v2Keys } from "@/lib/v2/hooks";
 import { readWriterRent } from "@/lib/v2/earnTx";
+import { summariseHistory, type StockAmount } from "@/lib/v2/historySummary";
 import { shortIdOf } from "@/lib/v2/seriesId";
 import { sharesToUnits, type TakerFeeParams } from "@/lib/v2/payoff";
 import { formatShares, formatUsdg } from "@/lib/v2/payoffCard";
 import { expiryCountdown, orderIdentityMatches, payoffSentence, positionOutcome, quoteSell, splitResale, verifySellOrders,
   type SellQuote } from "@/lib/v2/portfolio";
 import { safeBuyQuote, staleSelectedOrders } from "@/lib/v2/ticket";
+import { portfolioPricingStatus, selectPortfolioSmartPricingStrategies, smartPricingOffer,
+  type IndexedStrategy } from "@/lib/v2/smartPricing";
+import { stamp } from "@/lib/v2/time";
 import { approveExact, cancel, close, place, redeem, replace, setPayoutInKind, setTokenApproval,
   recheckTakeQuote, take, withdraw, type WriteContext } from "@/lib/v2/tx";
 import { V2ConfirmedStepError } from "@/lib/v2/txStatus";
@@ -35,8 +41,6 @@ type Run = (id: string, title: string, work: (context: WriteContext) => Promise<
 const tabs: readonly { id: Tab; label: string }[] = [
   { id: "positions", label: "Positions" }, { id: "orders", label: "Orders" }, { id: "history", label: "History" },
 ];
-const date = (unix: number) => new Intl.DateTimeFormat("en-US", { timeZone: "America/New_York", month: "short", day: "numeric", year: "numeric", hour: "numeric", minute: "2-digit", timeZoneName: "short" })
-  .format(new Date(unix * 1000));
 const label = (ticker: string, strike: string, put: boolean) => `${ticker} $${strike} ${put ? "put" : "call"}`;
 const parsePrice = (value: string): bigint => {
   const price = parseUnits(value, 6);
@@ -48,7 +52,7 @@ const feesFrom = (config: ReturnType<typeof useConfig>["data"]): TakerFeeParams 
   takerFeeFlat: BigInt(config.fees.takerFeeFlat.raw), takerFeeCapBps: config.fees.takerFeeCapBps,
 } : null;
 
-async function executeSellQuote(context: WriteContext, quote: SellQuote, longId: bigint, underlying: Address, resaleFeeBps: number) {
+async function executeSellQuote(context: WriteContext, quote: SellQuote, longId: bigint, underlying: Address) {
   if (!quote.limitPrice || quote.filled <= 0n) throw new Error("No live bids are selected.");
   const ids = quote.orderIds.map(BigInt);
   const current = await readOrderPreflight(ids, underlying);
@@ -59,7 +63,7 @@ async function executeSellQuote(context: WriteContext, quote: SellQuote, longId:
     limitPrice: quote.limitPrice, writeToSell: false, recipient: context.account,
   };
   const params = await recheckTakeQuote(context, takeRequest,
-    { filled: quote.filled, premium: quote.premium, fee: quote.fee, resaleFeeBps });
+    { filled: quote.filled, premium: quote.premium, takerFee: quote.fee, sellerFees: quote.sellerFee });
   await take(context, params);
 }
 
@@ -95,11 +99,64 @@ function usePortfolioWrites(address: Address | undefined) {
   return { run, ready, exitReady, busy, success, config, fees: feesFrom(config.data) };
 }
 
-function LongCard({ position, history, now, account, payoutPrefs, run, ready, exitReady, busy, fees, resaleFeeBps, pendingFees }: {
+export function AutoPricedAskCard({ row, pricerAvailable, dataUnavailable }: {
+  row: IndexedStrategy; pricerAvailable: boolean; dataUnavailable: boolean;
+}) {
+  const status = portfolioPricingStatus(row);
+  const pricing = row.pricing;
+  const currentAsk = pricing?.currentAsk ?? null;
+  const fair = pricing?.fair ?? null;
+  const band = pricing?.band ?? null;
+  const current = pricing !== undefined && row.orderId !== null && currentAsk !== null;
+  const repricing = current && pricerAvailable && fair !== null && !dataUnavailable;
+  const askLabel = repricing ? "Current live ask" : "Last indexed ask";
+  const ask = currentAsk
+    ? `${currentAsk.formatted} USDG`
+    : status.kind === "withdrawn" ? "Withdrawn"
+      : status.kind === "no-live-order" ? "No live order"
+        : pricing === undefined ? "Not reported" : "Unavailable";
+  const readiness = dataUnavailable
+    ? "Portfolio pricing data could not be refreshed. The last indexed ask is shown, but this card is not currently tracking repricing."
+    : pricing === undefined
+      ? "This legacy strategy does not include indexed pricing state. Its ask, fair value, band, and repricing status are not reported."
+      : row.orderId === null
+        ? status.kind === "withdrawn"
+          ? "The auto-priced ask was withdrawn. There is no live order currently repricing."
+          : "The strategy is active, but there is no live order currently repricing."
+        : !pricerAvailable
+          ? "The last indexed ask remains live, but the pricer is unavailable and it is not currently repricing."
+          : fair === null
+            ? "The last indexed ask remains live, but fair data is unavailable and it is not currently repricing."
+            : "The pricer and fair data are available for this live ask.";
+
+  return <Panel as="article">
+    <div className="flex flex-wrap items-start justify-between gap-3"><div>
+      <p className="text-xs font-semibold uppercase tracking-wider text-ink-2">Auto-priced ask</p>
+      <h3 className="mt-1 font-display text-xl font-bold">{row.ticker}</h3>
+    </div><span className="rounded-sm bg-accent-soft px-3 py-1.5 text-sm font-bold text-accent-text">{status.label}</span></div>
+    <dl className="mt-4 grid grid-cols-2 gap-3 text-sm sm:grid-cols-3">
+      <div><dt className="text-ink-3">{askLabel}</dt><dd className="num font-semibold">{ask}</dd></div>
+      <div><dt className="text-ink-3">Current fair estimate</dt><dd className="num font-semibold">{fair === null ? "Unavailable" : `${fair.formatted} USDG`}</dd></div>
+      <div><dt className="text-ink-3">Exact band</dt><dd className="num font-semibold">{band
+        ? `${band.min.formatted}–${band.max.formatted} USDG` : "Unavailable"}</dd></div>
+      <div><dt className="text-ink-3">Last reprice</dt><dd className="num font-semibold">{pricing?.lastRepricedAt
+        ? `${pricing.lastRepricedPrice?.formatted ?? "Price unavailable"}${pricing.lastRepricedPrice ? " USDG" : ""} · ${stamp(pricing.lastRepricedAt)}`
+        : "Not recorded"}</dd></div>
+      <div><dt className="text-ink-3">Reprice count</dt><dd className="num font-semibold">{pricing ? pricing.repriceCount : "Unavailable"}</dd></div>
+      <div><dt className="text-ink-3">Order</dt><dd className="num break-all font-semibold">{row.orderId ?? "None"}</dd></div>
+    </dl>
+    <p role="status" className="mt-4 text-sm text-ink-2">{readiness}</p>
+    <p className="mt-2 text-xs text-ink-3">The band limits repricing; it does not promise a fill or make an unchanged ask safe as the market moves.</p>
+    <Button className="mt-4" size="sm" variant="ghost"
+      href={`/earn/${row.ticker.toLowerCase()}?edit=smart-pricing#auto-roll`}>Edit band in Auto-roll</Button>
+  </Panel>;
+}
+
+function LongCard({ position, history, now, account, payoutPrefs, run, ready, exitReady, busy, fees, resaleFeeBps, pendingFees, withdrawalTiming }: {
   position: LongPosition; history: HistoryItem[]; now: number; account: Address;
   payoutPrefs: PayoutPrefs | null;
   run: Run; ready: boolean; exitReady: boolean; busy: string | null; fees: TakerFeeParams | null; resaleFeeBps: number;
-  pendingFees: ConfigResponse["pendingFees"];
+  pendingFees: ConfigResponse["pendingFees"]; withdrawalTiming: WithdrawalTiming | null;
 }) {
   const longId = position.series.longId;
   const [size, setSize] = useState(formatShares(BigInt(position.units)));
@@ -112,6 +169,7 @@ function LongCard({ position, history, now, account, payoutPrefs, run, ready, ex
     staleTime: 15_000, refetchInterval: 15_000 });
   const book = useBook(longId);
   const fair = useFair(longId);
+  const detail = useSeries(longId);
   const outcome = positionOutcome(position, "long", history, now, walletBalance.data);
   const units = tryUnits(size);
   const available = walletBalance.data ?? 0n;
@@ -141,7 +199,7 @@ function LongCard({ position, history, now, account, payoutPrefs, run, ready, ex
     if (!units || units > available || !quote || quote.filled !== units || !quote.limitPrice)
       throw new Error("Choose a size fully covered by live bids.");
     await approval(context, units);
-    await executeSellQuote(context, quote, BigInt(longId), getAddress(position.series.underlying), resaleFeeBps);
+    await executeSellQuote(context, quote, BigInt(longId), getAddress(position.series.underlying));
   }
 
   async function list(context: WriteContext) {
@@ -152,7 +210,7 @@ function LongCard({ position, history, now, account, payoutPrefs, run, ready, ex
     const expiry = Math.min(position.series.expiry - 1, Math.floor(Date.now() / 1000) + 86_400);
     if (expiry <= Math.floor(Date.now() / 1000)) throw new Error("This option is too close to expiry to list.");
     if (crossing.crossing.filled > 0n)
-      await executeSellQuote(context, crossing.crossing, BigInt(longId), getAddress(position.series.underlying), resaleFeeBps);
+      await executeSellQuote(context, crossing.crossing, BigInt(longId), getAddress(position.series.underlying));
     if (crossing.restingUnits > 0n) {
       try { await place(context, BigInt(longId), 1, price, crossing.restingUnits, expiry); }
       catch (error) { throw crossing.crossing.filled > 0n
@@ -174,7 +232,7 @@ function LongCard({ position, history, now, account, payoutPrefs, run, ready, ex
   return <Panel as="article" className="min-w-0">
     <div className="flex flex-wrap items-start justify-between gap-3"><div><p className="text-xs font-semibold uppercase tracking-wider text-ink-2">Long position</p>
       <h3 className="mt-1 font-display text-xl font-bold">{label(position.series.ticker, position.series.strike.formatted, position.series.isPut)}</h3>
-      <p className="mt-1 text-sm text-ink-2">{date(position.series.expiry)} · {now ? expiryCountdown(position.series.expiry, now) : "Checking expiry…"}</p></div>
+      <p className="mt-1 text-sm text-ink-2">{stamp(position.series.expiry)} · {now ? expiryCountdown(position.series.expiry, now) : "Checking expiry…"}</p></div>
       <span className="num rounded-sm bg-accent-soft px-3 py-1.5 font-bold text-accent-text">{formatShares(BigInt(position.units))} shares held or listed</span></div>
     <p className="mt-4 text-sm">{payoffSentence(position)}</p>
     {!position.series.isPut ? <ConversionFloor underlying={position.series.underlying} /> : null}
@@ -195,6 +253,7 @@ function LongCard({ position, history, now, account, payoutPrefs, run, ready, ex
         : book.isError ? "Bid depth is unavailable. Try again when the book recovers." : "No bids cover this size; you can list at your price."}</p>
       {pendingFees ? <PendingFeeNotice className="mt-3" effectiveAt={pendingFees.effectiveAt} nextFees={pendingFees}
         kind={listing ? "resale" : "resaleImmediate"} /> : null}
+      <PendingOperationsNotice className="mt-3" />
       <div className="mt-3 flex flex-wrap gap-2"><Button size="sm" disabled={!ready || Boolean(busy) || walletBalance.data === undefined || !units || units > available || quote?.filled !== units}
         onClick={() => void run(`${key}-sell`, "Sell confirmed", sellNow)}>Sell now</Button>
         <Button size="sm" variant="ghost" disabled={!ready || Boolean(busy)} onClick={() => setListing((value) => !value)}>List for sale</Button></div>
@@ -206,6 +265,10 @@ function LongCard({ position, history, now, account, payoutPrefs, run, ready, ex
         <Button className="mt-3" size="sm" disabled={!ready || Boolean(busy) || !book.data || !split || walletBalance.data === undefined || !units || units > available}
           onClick={() => void run(`${key}-list`, "Resale order submitted", list)}>Sell crossing bids and list remainder</Button></div> : null}
     </div> : null}
+    <WithdrawalTerms className="mt-4" surface="redemption" expiry={position.series.expiry}
+      status={detail.data?.series.status ?? position.series.status} timing={withdrawalTiming}
+      candidateFinalizableAt={detail.data?.settlement?.candidate?.finalizableAt ?? null}
+      settledAt={detail.data?.settlement?.settledAt ?? null} now={now || null} />
     {outcome.collect ? <Button className="mt-4" size="sm" disabled={!exitReady || Boolean(busy) || walletBalance.data === undefined || !payoutPrefs}
       onClick={() => void run(`${key}-collect`, "Payout collected", collect, false)}>Collect</Button> : null}
     {outcome.withdraw ? <p className="mt-2 text-sm text-ink-2">Withdraw from the Stonkhouse balance below.</p> : null}
@@ -236,10 +299,6 @@ function ShortCard({ position, history, now, spot, account, usdg, payoutPrefs, r
   const outcome = positionOutcome(position, "short", history, now, walletBalance.data);
   const open = ["open", "cutoff"].includes(position.series.status) && now < position.series.expiry;
   const closeAllowed = position.series.status !== "settled";
-  const closeRefund = useQuery({ queryKey: ["v2", "close-refund", longId, units?.toString()],
-    enabled: Boolean(units && closeAllowed && V2_DEPLOYMENT.contracts.clearinghouse),
-    queryFn: () => publicClient.readContract({ address: requireV2Address("clearinghouse"), abi: clearinghouseAbi,
-      functionName: "closeRefund", args: [BigInt(longId), units!] }), staleTime: 10_000, refetchInterval: 10_000 });
   const strike = BigInt(position.series.strike.raw);
   const spotRaw = spot ? BigInt(spot.raw) : null;
   const inMoney = spotRaw === null ? null : position.series.isPut ? spotRaw < strike : spotRaw > strike;
@@ -275,9 +334,9 @@ function ShortCard({ position, history, now, spot, account, usdg, payoutPrefs, r
     if (changed.length) throw new Error("An ask changed. Refresh the book and review the buyback cost.");
     const takeRequest = { longId: BigInt(longId), buying: true, orderIds: ids, units, minUnits: units,
       limitPrice: quote.limitPrice, writeToSell: false, recipient: account };
-    const expected = { filled: units, premium: quote.buy.premium, fee: quote.buy.fee };
+    const expected = { filled: units, premium: quote.buy.premium, takerFee: quote.buy.fee, sellerFees: 0n };
     await recheckTakeQuote(context, takeRequest, expected);
-    await approveExact(context, usdg, requireV2Address("orderBook"), expected.premium + expected.fee);
+    await approveExact(context, usdg, requireV2Address("orderBook"), expected.premium + expected.takerFee);
     const params = await recheckTakeQuote(context, takeRequest, expected);
     await take(context, params);
     try { await close(context, BigInt(longId), units); }
@@ -297,15 +356,15 @@ function ShortCard({ position, history, now, spot, account, usdg, payoutPrefs, r
   return <Panel as="article">
     <div className="flex flex-wrap items-start justify-between gap-3"><div><p className="text-xs font-semibold uppercase tracking-wider text-ink-2">Written option · short note</p>
       <h3 className="mt-1 font-display text-xl font-bold">{label(position.series.ticker, position.series.strike.formatted, position.series.isPut)}</h3>
-      <p className="mt-1 text-sm text-ink-2">{date(position.series.expiry)} · {now ? expiryCountdown(position.series.expiry, now) : "Checking expiry…"}</p></div>
+      <p className="mt-1 text-sm text-ink-2">{stamp(position.series.expiry)} · {now ? expiryCountdown(position.series.expiry, now) : "Checking expiry…"}</p></div>
       <span className="num rounded-sm bg-surface-2 px-3 py-1.5 font-semibold">{formatShares(BigInt(position.units))} shares</span></div>
     <dl className="mt-5 grid grid-cols-2 gap-3 text-sm sm:grid-cols-3">
       <div><dt className="text-ink-3">Premium received</dt><dd className="num font-semibold">{position.premiumReceived.formatted} USDG</dd></div>
       <div><dt className="text-ink-3">Collateral locked</dt><dd className="num font-semibold">{position.collateralLocked.formatted} {position.series.isPut ? "USDG" : position.series.ticker}</dd></div>
       <div><dt className="text-ink-3">Moneyness now</dt><dd className="font-semibold">{inMoney === null ? "Spot unavailable" : inMoney ? "In the money" : "Out of the money"}</dd></div>
     </dl>
-    <p className="mt-3 text-xs text-ink-3">Premium is shown in USDG before writer rent and gas. This series pins writer rent at {position.series.mintFeePpm} ppm per week, charged in {position.series.isPut ? "USDG" : position.series.ticker + " Stock Tokens"}. Rent is shown separately in activity.</p>
-    <p className="mt-4 text-sm text-ink-2">This note can be transferred. Buying back matching long units and closing returns collateral and unused rent to whoever closes before expiry; the buy and close are two separate transactions.</p>
+    <p className="mt-3 text-xs text-ink-3">Premium received is shown after the seller fee and before gas.</p>
+    <p className="mt-4 text-sm text-ink-2">This note can be transferred. Buying back matching long units and closing returns collateral; the buy and close are two separate transactions.</p>
     <p className="mt-3 text-sm font-semibold">{outcome.label}</p>
     {open || closeAllowed ? <div className="mt-5 border-t border-line pt-4"><label htmlFor={`buyback-size-${longId}`} className="block text-sm font-semibold">Size to close in shares</label>
       <input id={`buyback-size-${longId}`} inputMode="decimal" value={size} onChange={(event) => setSize(event.target.value)}
@@ -315,7 +374,6 @@ function ShortCard({ position, history, now, spot, account, usdg, payoutPrefs, r
         ? `Buyback estimate: ${formatUsdg(quote.buy.cost)} USDG including taker fee.`
         : book.isError ? "Ask depth is unavailable right now." : "No asks cover this size. You can close if you already hold matching longs."}</p>
         : <p className="mt-2 text-sm text-ink-2">Trading ended at expiry. If you already hold matching long units, you can still close before settlement.</p>}
-      <p className="mt-2 text-xs text-ink-3">Unused rent refund if closed now: {closeRefund.data !== undefined && !closeRefund.isError ? `${formatUnits(closeRefund.data, position.series.isPut ? 6 : 18)} ${position.series.isPut ? "USDG" : position.series.ticker}` : "unavailable"}. The refund decreases with time and credits your free Stonkhouse balance. No rent is refunded at or after expiry.</p>
       <div className="mt-3 flex flex-wrap gap-2">{open ? <Button size="sm" disabled={!ready || Boolean(busy) || walletBalance.data === undefined || !units || units > available || quote?.buy.filledUnits !== units || !usdg}
         onClick={() => void run(`${key}-buyback`, "Buyback and close confirmed", buyBack)}>Buy back and close</Button> : null}
         <Button size="sm" variant="ghost" disabled={!exitReady || Boolean(busy) || walletBalance.data === undefined || !units || units > available}
@@ -375,7 +433,7 @@ function OrderCard({ order, usdg, account, fees, resaleFeeBps, pendingFees, now,
           BigInt(order.series.longId), requireV2Address("orderBook"));
         if (chain.longBalance < units) throw new Error("Your wallet does not hold the replacement size after cancellation.");
         if (!chain.approvedForAll) await setTokenApproval(context, requireV2Address("orderBook"), true);
-        await executeSellQuote(context, crossing.crossing, BigInt(order.series.longId), getAddress(order.series.underlying), resaleFeeBps);
+        await executeSellQuote(context, crossing.crossing, BigInt(order.series.longId), getAddress(order.series.underlying));
         immediateSaleConfirmed = true;
         if (crossing.restingUnits > 0n)
           await place(context, BigInt(order.series.longId), 1, newPrice, crossing.restingUnits, current.validUntil);
@@ -399,14 +457,14 @@ function OrderCard({ order, usdg, account, fees, resaleFeeBps, pendingFees, now,
       const rent = await readWriterRent(getAddress(order.series.underlying), order.series.isPut, BigInt(order.series.strike.raw),
         order.series.expiry, units, context.account);
       const collateral = (order.series.isPut ? BigInt(order.series.strike.raw) / 100n : 10n ** 16n) * units;
-      if (rent.free === null || rent.free < collateral + rent.rent) throw new Error("Deposit enough free collateral for the replacement size and writer rent.");
+      if (rent.free === null || rent.free < collateral + rent.rent) throw new Error("Deposit enough free collateral for the replacement size.");
     }
     await replace(context, BigInt(order.orderId), newPrice, units);
   }
 
   return <Panel as="article">
     <div className="flex flex-wrap justify-between gap-3"><div><h3 className="font-display text-lg font-bold">{label(order.series.ticker, order.series.strike.formatted, order.series.isPut)}</h3>
-      <p className="mt-1 text-sm text-ink-2">{order.kind === "Bid" ? "Bid" : order.kind === "AskResale" ? "Resale ask" : "Writer ask"} #{order.orderId} · {now && order.validUntil <= now ? "Expired; cancel to recover escrow" : `valid until ${date(order.validUntil)}`}</p></div>
+      <p className="mt-1 text-sm text-ink-2">{order.kind === "Bid" ? "Bid" : order.kind === "AskResale" ? "Resale ask" : "Writer ask"} #{order.orderId} · {now && order.validUntil <= now ? "Expired; cancel to recover escrow" : `valid until ${stamp(order.validUntil)}`}</p></div>
       <p className="num font-semibold">{formatShares(remaining)} shares at {order.price.formatted} USDG</p></div>
     <p className="mt-2 text-sm text-ink-2">{formatShares(BigInt(order.filled))} shares filled.</p>
     <div className="mt-4 flex flex-wrap gap-2"><Button size="sm" variant="ghost" disabled={!exitReady || Boolean(busy)} onClick={() => void run(`${key}-cancel`, "Order cancelled", cancelOrder, false)}>Cancel</Button>
@@ -444,26 +502,75 @@ function Ledger({ rows, run, exitReady, busy }: { rows: { asset: string; symbol:
   </Panel>;
 }
 
-function HistoryRows({ items }: { items: HistoryItem[] }) {
-  const { address } = useAccount();
+function historyAsset(item: HistoryItem, usdgAddress?: string | null): string {
+  if (item.kind === "deposit" || item.kind === "withdrawal") return item.data.symbol;
+  if (item.kind === "redemption") return item.data.asset.toLowerCase() === item.series.underlying.toLowerCase()
+    ? `${item.series.ticker} Stock Tokens` : usdgAddress && item.data.asset.toLowerCase() === usdgAddress.toLowerCase()
+      ? "USDG" : `token ${item.data.asset}`;
+  return "USDG";
+}
+
+export function HistoryRows({ items, address, usdgAddress }: { items: HistoryItem[]; address?: string; usdgAddress?: string | null }) {
   if (!items.length) return <Panel><p className="text-ink-2">No activity has been recorded for this wallet yet.</p></Panel>;
   return <ol className="space-y-3">{items.map((item) => {
     const pnl = "realisedPnl" in item.data ? item.data.realisedPnl : null;
     const win = pnl && BigInt(pnl.raw) > 0n && item.longId;
-    const amount = "amount" in item.data ? item.data.amount.formatted : "premium" in item.data ? item.data.premium.formatted : null;
+    const amount = "amount" in item.data ? `${item.data.amount.formatted} ${historyAsset(item, usdgAddress)}`
+      : item.kind === "fill" ? `${item.data.premium.formatted} USDG`
+        : item.kind === "mint" ? `${item.data.collateral.formatted} ${item.series.isPut ? "USDG" : `${item.series.ticker} Stock Tokens`} collateral`
+          : item.kind === "close" ? `${item.data.collateralFreed.formatted} ${item.series.isPut ? "USDG" : `${item.series.ticker} Stock Tokens`} collateral freed` : null;
     return <li key={item.id}><Panel as="article" pad="sm" className="flex flex-wrap items-start justify-between gap-3">
-      <div><p className="text-xs text-ink-3">{date(item.ts)}</p><h3 className="mt-1 font-semibold capitalize">{item.kind}</h3>
+      <div><p className="text-xs text-ink-3">{stamp(item.ts)}</p><h3 className="mt-1 font-semibold capitalize">{item.kind}</h3>
         {item.kind === "redemption" ? <p className="mt-1 text-xs font-bold text-accent-text">
           {BigInt(item.data.amount.raw) > 0n ? "Paid" : "Expired without payout"}</p> : null}
         {item.series ? <p className="mt-1 text-sm text-ink-2">{label(item.series.ticker, item.series.strike.formatted, item.series.isPut)}</p> : null}
-        {item.kind === "mint" ? <p className="mt-1 text-sm text-ink-2">Writer rent charged on this mint: {item.data.fee.formatted} {item.data.fee.decimals === 6 ? "USDG" : item.series?.ticker ?? "Stock Tokens"}</p> : null}
-        {item.kind === "close" ? <p className="mt-1 text-sm text-ink-2">Unused rent refunded: {item.data.feeRefund.formatted} {item.series?.isPut ? "USDG" : item.series?.ticker ?? "Stock Tokens"}</p> : null}
-        {pnl ? <p className={`num mt-2 text-sm font-semibold ${BigInt(pnl.raw) >= 0n ? "text-accent-text" : "text-danger"}`}>{item.kind === "redemption" && item.data.side === "short" ? "Realised P&L before writer rent" : "Realised P&L"}: {pnl.formatted} USDG</p> : null}</div>
-      <div className="text-right"><p className="num text-sm font-semibold">{amount ? `${amount} ${item.kind === "redemption" && item.data.amount.decimals !== 6 ? item.series?.ticker ?? "tokens" : "USDG"}` : ""}</p>
+        {pnl ? <p className={`num mt-2 text-sm font-semibold ${BigInt(pnl.raw) >= 0n ? "text-accent-text" : "text-danger"}`}>Realised P&amp;L: {pnl.formatted} USDG</p> : null}</div>
+      <div className="text-right"><p className="num text-sm font-semibold">{amount ?? ""}</p>
+        {item.kind === "fill" ? <><p className="num mt-1 text-xs text-ink-2">Fee paid: {item.data.fee.formatted} USDG</p>
+          <p className="num text-xs text-ink-2">Rebate: {item.data.rebate.formatted} USDG</p></> : null}
+        {item.kind === "mint" ? <p className="num mt-1 text-xs text-ink-2">{item.data.payer
+          ? address ? item.data.payer.toLowerCase() === address.toLowerCase() ? "Mint fee paid by this wallet"
+            : "Mint fee paid by the writer, not this wallet" : "Mint fee payer recorded"
+          : "Mint fee payer unavailable"}: {item.data.fee.formatted} {item.series.isPut ? "USDG" : `${item.series.ticker} Stock Tokens`}</p> : null}
+        {item.kind === "close" ? <p className="num mt-1 text-xs text-ink-2">Fee refund: {item.data.feeRefund.formatted} {item.series.isPut ? "USDG" : `${item.series.ticker} Stock Tokens`}</p> : null}
+        {item.kind === "redemption" ? <p className="mt-1 text-xs text-ink-2">Fee: not itemized in this history record.</p> : null}
+        {item.kind === "deposit" || item.kind === "withdrawal" ? <p className="mt-1 text-xs text-ink-2">Fee: not reported for this ledger move.</p> : null}
         <div className="mt-2 flex flex-wrap justify-end gap-2"><Button size="xs" variant="ghost" href={txUrl(item.data.tx)}>View transaction</Button>
           {win && address && item.longId ? <Button size="xs" variant="ghost" href={`/pnl/${item.longId}-${address.toLowerCase()}`}>Share win</Button> : null}</div></div>
     </Panel></li>;
   })}</ol>;
+}
+
+export function HistorySummaryPanel({ summary, complete, stale, onHistory }: {
+  summary: ReturnType<typeof summariseHistory>; complete: boolean; stale: boolean; onHistory: () => void;
+}) {
+  return <Panel as="section" className="mb-5" aria-label="Indexed history summary">
+    <div className="flex flex-wrap items-center justify-between gap-2"><h2 className="font-display text-lg font-bold">From indexed activity</h2>
+      <Button size="xs" variant="ghost" onClick={onHistory}>See history rows</Button></div>
+    <p className="mt-1 text-xs text-ink-2">{complete ? "All returned history pages loaded." : "Partial: older activity is not loaded. Open History and load older activity for more."}
+      {stale ? " Showing saved activity while the indexer recovers." : ""}</p>
+    <dl className="mt-4 grid gap-3 text-sm sm:grid-cols-2 lg:grid-cols-4">
+      <div><dt className="text-ink-2">Realised P&amp;L (USDG-valued)</dt><dd className="num font-semibold">{formatUsdg(summary.realisedUsdg)} USDG</dd>
+        <Button size="xs" variant="ghost" onClick={onHistory} aria-label="View realised P&L history rows">View rows</Button></div>
+      <div><dt className="text-ink-2">Primary maker premium, net</dt><dd className="num font-semibold">{formatUsdg(summary.primaryMakerPremiumUsdg)} USDG</dd>
+        <Button size="xs" variant="ghost" onClick={onHistory} aria-label="View maker premium history rows">View rows</Button></div>
+      <div><dt className="text-ink-2">Attributable USDG fees paid</dt><dd className="num font-semibold">{formatUsdg(summary.feesPaidUsdg)} USDG</dd>
+        <p className="text-xs text-ink-3">Fills {formatUsdg(summary.fillFeesUsdg)} · put mints {formatUsdg(summary.mintFeesUsdg)}</p>
+        <Button size="xs" variant="ghost" onClick={onHistory} aria-label="View attributable USDG fee history rows">View rows</Button></div>
+      <div><dt className="text-ink-2">Fill rebates</dt><dd className="num font-semibold">{formatUsdg(summary.fillRebatesUsdg)} USDG</dd>
+        <Button size="xs" variant="ghost" onClick={onHistory} aria-label="View fill rebate history rows">View rows</Button></div>
+    </dl>
+    <p className="mt-3 text-xs text-ink-2">Realised P&amp;L is a USDG value, not necessarily USDG received. Net primary maker premium is a separate view, not an amount to add to P&amp;L.</p>
+    {summary.stockPayouts.length ? <div className="mt-3 text-sm"><h3 className="font-semibold">Long-call Stock Tokens paid in kind (not net gains)</h3>
+      <ul className="mt-1 flex flex-wrap gap-x-5 gap-y-1">{summary.stockPayouts.map((payout: StockAmount) =>
+        <li key={`${payout.ticker}:${payout.asset}:${payout.decimals}`} className="num">{formatUnits(payout.raw, payout.decimals)} {payout.ticker} Stock Tokens
+          <Button size="xs" variant="ghost" onClick={onHistory} aria-label={`View ${payout.ticker} Stock Token payout history rows`}>View rows</Button></li>)}</ul></div> : null}
+    {summary.stockMintFees.length ? <div className="mt-3 text-sm"><h3 className="font-semibold">Attributable Stock Token mint fees paid</h3>
+      <ul className="mt-1 flex flex-wrap gap-x-5 gap-y-1">{summary.stockMintFees.map((fee: StockAmount) =>
+        <li key={`${fee.ticker}:${fee.asset}:${fee.decimals}`} className="num">{formatUnits(fee.raw, fee.decimals)} {fee.ticker} Stock Tokens
+          <Button size="xs" variant="ghost" onClick={onHistory} aria-label={`View ${fee.ticker} mint fee history rows`}>View rows</Button></li>)}</ul></div> : null}
+    <p className="mt-3 text-xs text-ink-2">Fee totals include fills and mint fees whose payer matches this wallet. They exclude {summary.mintFeesWithoutPayer} mint row{summary.mintFeesWithoutPayer === 1 ? "" : "s"} without payer identity and {summary.mintFeesPaidByAnother} gifted mint fee{summary.mintFeesPaidByAnother === 1 ? "" : "s"} paid by another wallet. Close fee refunds are shown on their rows; redemption and ledger moves do not itemize fees. Stock Token amounts are never added to USDG.</p>
+  </Panel>;
 }
 
 export function Portfolio() {
@@ -474,11 +581,15 @@ export function Portfolio() {
     const timer = window.setInterval(tick, 30_000); return () => window.clearInterval(timer); }, []);
   const positions = usePositions(address);
   const markets = useMarkets();
+  const strategies = useStrategies({ active: true, limit: 200 });
+  const services = useQuery({ queryKey: ["v2", "services"], enabled: Boolean(address),
+    queryFn: () => v2Api.getServices(), staleTime: 30_000, refetchInterval: 30_000, retry: false });
   const history = useInfiniteQuery({ queryKey: ["v2", "portfolio-history", address?.toLowerCase()], enabled: Boolean(address),
     queryFn: ({ pageParam, signal }) => v2Api.getHistory(address!, { limit: 50, cursor: pageParam }, { signal }),
     initialPageParam: undefined as string | undefined, getNextPageParam: (last) => last.nextCursor ?? undefined,
     staleTime: 15_000, refetchInterval: 15_000 });
-  const historyItems = history.data?.pages.flatMap((page) => page.items) ?? [];
+  const historyItems = useMemo(() => history.data?.pages.flatMap((page) => page.items) ?? [], [history.data]);
+  const summary = useMemo(() => summariseHistory(historyItems, address), [historyItems, address]);
   const writes = usePortfolioWrites(address);
   const payoutPrefs = useQuery({ queryKey: ["v2", "payoutPrefs", address?.toLowerCase()],
     enabled: Boolean(address && V2_DEPLOYMENT.contracts.clearinghouse),
@@ -487,6 +598,14 @@ export function Portfolio() {
   const usdg = writes.config.data ? getAddress(writes.config.data.usdg.address) : null;
   const spots = new Map((markets.isError ? undefined : markets.data)?.map((market) => [market.ticker, market.spot]) ?? []);
   const mismatch = writes.config.data ? v2ConfigWarnings(writes.config.data) : [];
+  const autoPriced = useMemo(() => address ? selectPortfolioSmartPricingStrategies(
+    strategies.data?.items ?? [], address, markets.data ?? []) : [],
+  [address, strategies.data, markets.data]);
+  const pricerAvailable = now !== null && smartPricingOffer(
+    services.isError ? null : services.data?.pricer, now).offered;
+  const pricingDataUnavailable = strategies.isError || markets.isError;
+  const pricingIdentityUnreadable = (strategies.isError && !strategies.data) || (markets.isError && !markets.data);
+  const pricingIdentityLoading = (strategies.isPending && !strategies.data) || (markets.isPending && !markets.data);
 
   return <>
     <PageHead eyebrow="Your account" title="Portfolio" lede="Hold or sell a position, manage orders, and collect settled payouts." />
@@ -495,6 +614,9 @@ export function Portfolio() {
         ? "App and indexer deployment settings differ. Trading is paused until they match."
         : "Trading opens when the v2 indexer, contracts and wallet are ready. Payout choices, claims and withdrawals only need the wallet and contracts."}</Notice> : null}
       {writes.success ? <Notice tone="accent" role="status" className="mb-5">{writes.success}. Portfolio data refreshes after the indexer catches up.</Notice> : null}
+      {history.data ? <HistorySummaryPanel summary={summary} complete={!history.hasNextPage} stale={history.isError}
+        onHistory={() => setTab("history")} /> : <Panel role="status" className="mb-5">{history.isPending
+        ? "Loading your fee and gain history…" : "Fee and gain history is unavailable while the indexer recovers."}</Panel>}
       <div className="mb-6 flex flex-wrap gap-2" role="group" aria-label="Portfolio views">
         {tabs.map(({ id, label: text }) => <Button key={id} variant={tab === id ? "primary" : "ghost"} size="sm"
           aria-pressed={tab === id} onClick={() => setTab(id)}>{text}</Button>)}
@@ -518,6 +640,18 @@ export function Portfolio() {
                   ? "On-chain payout choices are unavailable. Collection waits until the chain connection recovers."
                   : "Checking your on-chain payout choice. Collection waits until this read succeeds."}</p>}
             </Panel>
+            {pricingIdentityLoading ? <Panel role="status" className="mb-5">Loading auto-priced asks…</Panel>
+              : pricingIdentityUnreadable ? <Notice tone="warn" role="status" className="mb-5" title="Auto-priced asks unavailable">
+                Strategy pricing or its exact market identity could not be read. Portfolio cannot show a current ask, fair estimate, band, or repricing state until the indexer recovers.
+              </Notice>
+                : autoPriced.length ? <section className="mb-5" aria-labelledby="auto-priced-asks-title">
+                  <div className="mb-3"><h2 id="auto-priced-asks-title" className="font-display text-lg font-bold">Auto-priced asks</h2>
+                    <p className="mt-1 text-sm text-ink-2">Live order price, current estimate, writer limits, and repricing readiness for this connected wallet.</p></div>
+                  {pricingDataUnavailable ? <Notice tone="warn" role="status" className="mb-4">Showing saved strategy data while the indexer recovers.</Notice> : null}
+                  <div className="grid gap-4 lg:grid-cols-2">{autoPriced.map((row) => <AutoPricedAskCard
+                    key={`${row.writer}:${row.underlying}`} row={row} pricerAvailable={pricerAvailable}
+                    dataUnavailable={pricingDataUnavailable} />)}</div>
+                </section> : null}
             {!positions.data
               ? <Panel role="status">{positions.isPending ? "Loading your positions…" : "Positions are unavailable. Try refreshing when the indexer recovers."}</Panel>
               : <>
@@ -525,12 +659,12 @@ export function Portfolio() {
                 {positions.data.longs.length + positions.data.shorts.length === 0 ? <Panel><p className="text-ink-2">No open positions for this wallet. <Button href="/" size="sm" variant="ghost">Explore options</Button></p></Panel> : <div className="grid gap-4 lg:grid-cols-2">
                   {positions.data.longs.map((item) => <LongCard key={`long-${item.series.longId}`} position={item} history={historyItems} now={now ?? 0} account={address} payoutPrefs={chainPrefs}
                     run={writes.run} ready={writes.ready} exitReady={writes.exitReady} busy={writes.busy} fees={writes.fees} resaleFeeBps={writes.config.data?.fees.resaleFeeBps ?? 0}
-                    pendingFees={writes.config.data?.pendingFees ?? null} />)}
+                    pendingFees={writes.config.data?.pendingFees ?? null} withdrawalTiming={writes.config.data?.constants ?? null} />)}
                   {positions.data.shorts.map((item) => <ShortCard key={`short-${item.series.longId}`} position={item} history={historyItems} now={now ?? 0} payoutPrefs={chainPrefs}
                     spot={spots.get(item.series.ticker) ?? null} account={address} usdg={usdg} run={writes.run} ready={writes.ready} exitReady={writes.exitReady} busy={writes.busy} fees={writes.fees} />)}
                 </div>}
                 {positions.data.strategies.filter((row) => row.lastStaleCancelAt && row.currentSeries && !row.orderId).map((row) => <Notice key={row.ticker} tone="info" role="status" className="mt-4" title="Ask withdrawn">
-                  {row.ticker} auto-roll ask at ${row.currentSeries!.strike.formatted} was withdrawn after spot reached ${row.staleSpot?.formatted ?? "—"} on {date(row.lastStaleCancelAt!)}. Filled positions remain. The next roll waits until after {date(row.currentSeries!.expiry)}.
+                  {row.ticker} auto-roll ask at ${row.currentSeries!.strike.formatted} was withdrawn after spot reached ${row.staleSpot?.formatted ?? "—"} on {stamp(row.lastStaleCancelAt!)}. Filled positions remain. The next roll waits until after {stamp(row.currentSeries!.expiry)}.
                 </Notice>)}
                 <Ledger rows={positions.data.ledger} run={writes.run} exitReady={writes.exitReady} busy={writes.busy} />
               </>}
@@ -544,7 +678,7 @@ export function Portfolio() {
               : <Panel><p className="text-ink-2">No open orders. Resting bids and asks will appear here.</p></Panel>
             : !history.data ? <Panel role="status">{history.isPending ? "Loading your history…" : "History is unavailable. Try again when the indexer recovers."}</Panel>
               : <>{history.isError ? <Notice tone="warn" className="mb-4">Showing saved activity while the indexer recovers.</Notice> : null}
-                <HistoryRows items={historyItems} />
+                <HistoryRows items={historyItems} address={address} usdgAddress={usdg} />
                 {history.hasNextPage ? <div className="mt-5 text-center"><Button variant="ghost" disabled={history.isFetchingNextPage}
                   onClick={() => void history.fetchNextPage()}>{history.isFetchingNextPage ? "Loading…" : "Load older activity"}</Button></div> : null}</>}
       </div>

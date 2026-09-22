@@ -9,7 +9,8 @@
  */
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { pullAtOf, type FairInput, type LiveOrder } from './engine.js';
+import { pullAtOf, type FairInput, type LiveOrder, type QuoteFees } from './engine.js';
+import { flatForRoll } from './epoch.js';
 import { bookedCalls, fairRequests, planTick, selectedSeries, twoSidedCount, type MarketView, type MmPlanParams, type MmTx, type SeriesView, type TickInput, type VaultView } from './planner.js';
 
 const U = '0x00000000000000000000000000000000000000aa';
@@ -41,11 +42,16 @@ const PARAMS: MmPlanParams = {
   syncIntervalS: 900,
   depositTokens: true,
   maxQuoteLifetimeS: 0,
+  epochWindDownS: 600,
 };
+
+const LAUNCH_FEES: QuoteFees = { current: { premiumFeeBps: 500, resaleFeeBps: 0 }, pending: null };
 
 const vault = (over: Partial<VaultView> = {}): VaultView => ({
   isQuoter: true,
+  quoterDelay: 0,
   tradingPaused: false,
+  fees: LAUNCH_FEES,
   limits: { maxSeriesUnits: 10_000n, maxTotalNotional: 250_000_000_000n, askToleranceBps: 100, maxBidBpsOfSpot: 1_000, maxOrderLifetime: 0, maxDailyOutflow: 2_500_000_000n },
   outflow: { used: 0n, available: 2_500_000_000n },
   totalNotional: 0n,
@@ -54,6 +60,7 @@ const vault = (over: Partial<VaultView> = {}): VaultView => ({
   freeCollateral: new Map([[U, 100n * 10n ** 18n]]),
   walletTokens: new Map([[U, 0n]]),
   tracked: [],
+  epoch: null,
   ...over,
 });
 
@@ -77,7 +84,9 @@ const view = (i: number, over: Partial<SeriesView> = {}): SeriesView => ({
   orders: [],
   ...over,
 });
-const fairOf = (i: number): FairInput => ({ ok: true, fair: 3_000_000n - BigInt(i) * 400_000n, delta: 0.45 - i * 0.07, iv: 0.5, asOf: NOW - 120, source: 'model' });
+// T-484: `asOf` follows the tick's `now`, not the module's NOW. A wind-down tick runs hours after NOW, and the fair
+// checks now reach that path, so a fixture pinned to NOW - 120 is genuinely stale there and halts the series.
+const fairOf = (i: number, now: number = NOW): FairInput => ({ ok: true, fair: 3_000_000n - BigInt(i) * 400_000n, delta: 0.45 - i * 0.07, iv: 0.5, asOf: now - 120, source: 'model' });
 
 function input(n: number, over: Partial<TickInput> = {}): TickInput {
   const series = Array.from({ length: n }, (_, i) => view(i));
@@ -94,6 +103,8 @@ function input(n: number, over: Partial<TickInput> = {}): TickInput {
     fairs: new Map(series.map((s, i) => [s.info.longId.toString(), fairOf(i)])),
     params: PARAMS,
     refreshS: 600,
+    protocolAccounts: new Set<string>(),
+    protocolBook: [],
     ...over,
   };
 }
@@ -355,4 +366,277 @@ test('bookedCalls: only Bid places, Bid replaces (the net) and cancels of a Bid 
   assert.ok(cancelCredit <= 0n && placed >= 0n);
   // The bucket the bot projects from those calls never goes below 0, whatever it cancels.
   assert.ok(booked.every((b) => typeof b.delta === 'bigint'));
+});
+
+test('epoch === null is unrestricted: the same two-sided places as today', () => {
+  const plan = planTick(input(2, { vault: vault({ epoch: null }) }));
+  assert.equal(twoSidedCount(plan), 2);
+  assert.equal(plan.series.every((s) => s.halt === null), true);
+});
+
+test('a series with expiry > epochEnd is never selected, halted epoch-outside, and is not a fair request', () => {
+  const epochEnd = EXPIRY;
+  const i = input(2, { vault: vault({ epoch: { epochEnd, index: 1, rollDue: false } }) });
+  i.series = [
+    view(0, { info: { longId: 0n, underlying: U, isPut: false, strike: strikeOf(0), expiry: epochEnd } }),
+    view(1, { info: { longId: 1n, underlying: U, isPut: false, strike: strikeOf(1), expiry: epochEnd + 86_400 } }),
+  ];
+  i.fairs = new Map(i.series.map((s, n) => [s.info.longId.toString(), fairOf(n)]));
+  const plan = planTick(i);
+  assert.deepEqual(plan.selected, [0n]);
+  assert.equal(plan.series.find((s) => s.longId === 1n)!.halt?.halt, 'epoch-outside');
+  assert.equal(plan.series.find((s) => s.longId === 1n)!.targets, null);
+  const requested = fairRequests(i).map((s) => s.info.longId);
+  assert.deepEqual(requested, [0n]);
+  assert.equal(selectedSeries(i).map((s) => s.longId).includes(1n), false);
+});
+
+test('wind-down: a vault walks from mid-epoch to the boundary, last plan places nothing and is flatForRoll', () => {
+  const epochEnd = EXPIRY;
+  const wind = 14_400; // before the pull window (15 min before mint cutoff)
+  const epoch = { epochEnd, index: 1n, rollDue: false };
+  const params = { ...PARAMS, epochWindDownS: wind };
+  const inside = view(0);
+  const mid = input(1, { now: NOW, vault: vault({ epoch }), params, series: [inside], fairs: new Map([['0', fairOf(0)]]) });
+  const midPlan = planTick(mid);
+  assert.ok(midPlan.txs.some((t) => t.type === 'place' && t.slot === 'bid'));
+  assert.ok(midPlan.txs.some((t) => t.type === 'place' && t.slot === 'write'));
+  assert.equal(midPlan.series[0]!.halt, null);
+
+  const longs = view(0, {
+    exposure: { longs: 100n, shorts: 0n, bids: 0n, resale: 0n, writes: 0n, live: 0n },
+  });
+  const lead = input(1, {
+    now: epochEnd - wind,
+    vault: vault({ epoch }),
+    params,
+    series: [longs],
+    fairs: new Map([['0', fairOf(0, epochEnd - wind)]]),
+  });
+  const leadPlan = planTick(lead);
+  assert.equal(leadPlan.series[0]!.halt?.halt, 'epoch-winddown');
+  assert.equal(leadPlan.series[0]!.targets?.bid, null);
+  assert.equal(leadPlan.series[0]!.targets?.write, null);
+  assert.ok(leadPlan.series[0]!.targets?.resale !== null && leadPlan.series[0]!.targets!.resale!.units > 0n);
+  assert.ok(leadPlan.txs.every((t) => t.type !== 'place' || t.slot === 'resale'));
+  assert.ok(!leadPlan.txs.some((t) => t.type === 'place' && (t.slot === 'bid' || t.slot === 'write')));
+
+  const flat = view(0, { exposure: { longs: 0n, shorts: 0n, bids: 0n, resale: 0n, writes: 0n, live: 0n } });
+  const last = input(1, {
+    now: epochEnd - wind + 1,
+    vault: vault({ epoch }),
+    params,
+    series: [flat],
+    fairs: new Map([['0', fairOf(0, epochEnd - wind + 1)]]),
+  });
+  const lastPlan = planTick(last);
+  assert.equal(lastPlan.series[0]!.halt?.halt, 'epoch-winddown');
+  assert.equal(lastPlan.txs.filter((t) => t.type === 'place' || t.type === 'replace').length, 0);
+  assert.equal(
+    flatForRoll(last.series.map((s) => s.exposure ?? { longs: 1n, shorts: 0n, resale: 0n })),
+    true,
+  );
+});
+
+test('T-474: a wind-down series whose fair carries to zero at the oracle\'s spot is halted, not priced', () => {
+  // epoch-winddown returns from haltBeforeFair, so haltOf never judges the fair on this path: the planner must.
+  const epochEnd = EXPIRY;
+  const wind = 14_400;
+  const params = { ...PARAMS, epochWindDownS: wind };
+  const longs = view(0, { exposure: { longs: 100n, shorts: 0n, bids: 0n, resale: 0n, writes: 0n, live: 0n } });
+  const at = (fair: FairInput) =>
+    planTick(input(1, { now: epochEnd - wind, vault: vault({ epoch: { epochEnd, index: 1n, rollDue: false } }), params, series: [longs], fairs: new Map([['0', fair]]) }));
+
+  // Control: a fair that stays positive still unwinds through a resale ask.
+  const control = at(fairOf(0, epochEnd - wind));
+  assert.equal(control.series[0]!.halt?.halt, 'epoch-winddown');
+  assert.ok(control.txs.some((t) => t.type === 'place' && t.slot === 'resale'), 'the control does place a resale ask');
+
+  // 0.5 USDG at delta 0.4, priced 2 USDG above the oracle's spot: carried to zero.
+  const zero = at({ ok: true, fair: 500_000n, delta: 0.4, iv: 0.5, asOf: epochEnd - wind - 60, source: 'model', spot: SPOT + 2_000_000n });
+  assert.equal(zero.series[0]!.halt?.halt, 'fair-unavailable', 'a zero QUOTED fair halts the wind-down too');
+  assert.equal(zero.series[0]!.targets, null);
+  assert.ok(!zero.txs.some((t) => t.type === 'place' || t.type === 'replace'), 'nothing is rested at a tick');
+});
+
+test('T-484: a wind-down series is priced only from a fair that passes every fair check haltOf runs', () => {
+  // epoch-winddown returns from haltBeforeFair, so haltOf never reaches the fair checks on this path, and T-474 carried
+  // over only the zero case. The planner's pricing branch now runs fairCheckOf, the SAME function haltOf runs.
+  const epochEnd = EXPIRY;
+  const wind = 14_400;
+  const now = epochEnd - wind;
+  const params = { ...PARAMS, epochWindDownS: wind, fairSpotToleranceBps: 300 };
+  const longs = view(0, { exposure: { longs: 100n, shorts: 0n, bids: 0n, resale: 0n, writes: 0n, live: 0n } });
+  const at = (fair: FairInput) =>
+    planTick(input(1, { now, vault: vault({ epoch: { epochEnd, index: 1n, rollDue: false } }), params, series: [longs], fairs: new Map([['0', fair]]) }));
+  const good = { ok: true as const, fair: 3_000_000n, delta: 0.45, iv: 0.5, asOf: now - 120, source: 'model', spot: SPOT };
+
+  // Control: the fair passes every check, and the wind-down unwinds through a resale ask.
+  const control = at(good);
+  assert.equal(control.series[0]!.halt?.halt, 'epoch-winddown');
+  assert.ok(control.txs.some((t) => t.type === 'place' && t.slot === 'resale'), 'the control does place a resale ask');
+
+  // A STALE fair: asOf one second past MM_FAIR_MAX_AGE_S (1,800) with the session open.
+  const stale = at({ ...good, asOf: now - 1_801 });
+  assert.equal(stale.series[0]!.halt?.halt, 'fair-stale', 'a stale fair halts the wind-down instead of pricing it');
+  assert.equal(stale.series[0]!.targets, null);
+  assert.equal(stale.series[0]!.prices, null);
+  assert.ok(!stale.txs.some((t) => t.type === 'place' || t.type === 'replace'), 'no resale ask from a stale fair');
+
+  // A SPOT-MISMATCHED fair: priced 400 bps from the oracle's spot, the tolerance is 300.
+  const mismatch = at({ ...good, spot: (SPOT * 10_400n) / 10_000n });
+  assert.equal(mismatch.series[0]!.halt?.halt, 'fair-spot-mismatch', 'a spot-mismatched fair halts the wind-down instead of pricing it');
+  assert.equal(mismatch.series[0]!.targets, null);
+  assert.equal(mismatch.series[0]!.prices, null);
+  assert.ok(!mismatch.txs.some((t) => t.type === 'place' || t.type === 'replace'), 'no resale ask from a mismatched fair');
+});
+
+// THE SENT HALF IS NOT HERE, BY CHARTER (T-OP-132, K8-05 suspicion 4). This proves the bid is not PLANNED: `plan.txs`
+// is the list `MmQuoter.execute` walks, so nothing below can reach the sender. Whether it is not SENT is a quoter fact:
+// `execute` is private (quoter.ts), reached only from `tickOne` after the chain read, and the sender is `ctx.sender`.
+// That test needs the tick harness quoter.test.ts already has (T-540's seam) and belongs there, in that file's fence.
+test('protocol-cross: a bid that would rest at or above a protocol-owned ask is skipped, and /state sees the halt', () => {
+  const first = planTick(input(1));
+  const bid = first.txs.find((t): t is Extract<MmTx, { type: 'place' }> => t.type === 'place' && t.slot === 'bid');
+  assert.ok(bid);
+  const protocol = '0x00000000000000000000000000000000000000bb';
+  const crossed = input(1, {
+    protocolAccounts: new Set([protocol]),
+    protocolBook: [{ longId: 0n, maker: protocol.toUpperCase(), kind: 'AskWrite', price: bid.price }],
+  });
+  const plan = planTick(crossed);
+  assert.equal(plan.series[0]!.halt?.halt, 'protocol-cross');
+  assert.equal(plan.series[0]!.targets?.bid, null);
+  assert.ok(!plan.txs.some((t) => t.type === 'place' && t.slot === 'bid'));
+  assert.ok(plan.txs.some((t) => t.type === 'place' && t.slot === 'write'), 'the uncrossed write still rests');
+});
+
+
+/*//////////////////////////////////////////////////////////////
+     T-OP-133: THE VAULT'S ASK IS THE FALLBACK (MM_ASK_FALLBACK_ONLY)
+//////////////////////////////////////////////////////////////*/
+
+const OTHER = '0x00000000000000000000000000000000000000cc';
+const otherAsk = (longId: bigint, maker = OTHER, kind: 'AskWrite' | 'AskResale' = 'AskWrite') => ({ id: 900n + longId, maker, kind, price: 9_000_000n, remaining: 50n });
+
+// PROVE BY BREAKING (authored): force `fallbackOnly` to false in planTick (or run with askFallbackOnly: false, which
+// the last case does deliberately) and this test goes red at "no ask target" -- the vault asks into the other maker.
+test('other-asker: a third-party live ask on the series halts the ask side only, cancels the resting vault ask, and leaves the bid', () => {
+  const resting = liveOrder({ id: 7n, kind: 'AskWrite', price: 3_400_000n, units: 100n });
+  const plan = planTick(input(2, {
+    series: [view(0, { orders: [resting] }), view(1)],
+    otherAskers: new Map([['0', [otherAsk(0n)]]]),
+  }));
+  const halted = plan.series.find((s) => s.longId === 0n)!;
+  assert.equal(halted.halt?.halt, 'other-asker', 'visible in /state by name');
+  assert.match(halted.halt?.detail ?? '', /1 live ask from 0x00000000000000000000000000000000000000cc/);
+  assert.equal(halted.targets?.write, null, 'no ask target');
+  assert.equal(halted.targets?.resale, null);
+  assert.notEqual(halted.targets?.bid, null, 'the bid is untouched by the flag');
+  assert.ok(plan.txs.some((t) => t.type === 'cancel' && t.orderIds.includes(7n)), 'the resting vault ask is cancelled');
+  assert.ok(!plan.txs.some((t) => t.type === 'place' && t.slot === 'write' && t.longId === 0n), 'nothing asks into the other maker');
+  assert.ok(plan.txs.some((t) => t.type === 'place' && t.slot === 'bid' && t.longId === 0n), 'the bid still rests');
+  // The sibling series with no other asker quotes both sides as before.
+  const free = plan.series.find((s) => s.longId === 1n)!;
+  assert.equal(free.halt, null);
+  assert.ok(plan.txs.some((t) => t.type === 'place' && t.slot === 'write' && t.longId === 1n));
+});
+
+test('other-asker: the ask returns the tick the book clears; the vault\'s OWN resting ask never counts (no flapping)', () => {
+  const own = liveOrder({ id: 8n, kind: 'AskWrite', price: 3_400_000n, units: 100n });
+  // reads.readOtherAskers drops the vault's own orders, so a tick with an empty entry plans the ask as usual.
+  const plan = planTick(input(1, { series: [view(0, { orders: [own] })], otherAskers: new Map([['0', []]]) }));
+  assert.equal(plan.series[0]!.halt, null);
+  assert.notEqual(plan.series[0]!.targets?.write, null, 'the ask is planned again');
+  assert.ok(!plan.txs.some((t) => t.type === 'cancel' && t.orderIds.includes(8n)), 'the own ask is kept or replaced, not cancelled for itself');
+});
+
+test('other-asker: a protocol account\'s ask (the HouseVault covered call) COUNTS as another asker -- documented, owner-flippable', () => {
+  const protocol = '0x00000000000000000000000000000000000000bb';
+  const plan = planTick(input(1, {
+    protocolAccounts: new Set([protocol]),
+    otherAskers: new Map([['0', [otherAsk(0n, protocol, 'AskResale')]]]),
+  }));
+  assert.equal(plan.series[0]!.halt?.halt, 'other-asker');
+  assert.equal(plan.series[0]!.targets?.write, null);
+  assert.ok(!plan.txs.some((t) => t.type === 'place' && t.slot === 'write'));
+});
+
+test('other-asker: MM_ASK_FALLBACK_ONLY=0 restores the always-quote; the read is simply not consulted', () => {
+  const plan = planTick(input(1, {
+    params: { ...PARAMS, askFallbackOnly: false },
+    otherAskers: new Map([['0', [otherAsk(0n)]]]),
+  }));
+  assert.equal(plan.series[0]!.halt, null);
+  assert.notEqual(plan.series[0]!.targets?.write, null, 'with the flag off the vault asks alongside the other maker');
+  assert.ok(plan.txs.some((t) => t.type === 'place' && t.slot === 'write'));
+});
+
+test('other-asker: a suppressed ask does not spend the shared write pool, so the next series gets the collateral', () => {
+  // Two series on one asset, a pool that covers exactly one full ask; series 0 has another asker.
+  const cpu = 10n ** 16n;
+  const one = 100n * cpu + 100n * cpu; // generous: one ask plus rent headroom
+  const plan = planTick(input(2, {
+    vault: vault({ freeCollateral: new Map([[U, one]]) }),
+    otherAskers: new Map([['0', [otherAsk(0n)]]]),
+  }));
+  const s1 = plan.series.find((s) => s.longId === 1n)!;
+  assert.equal(s1.sizes?.write, 100n, 'series 1 gets the whole ask: series 0 reserved nothing');
+});
+
+/*//////////////////////////////////////////////////////////////
+        SAFETY INPUTS ARE REQUIRED (F-APP-KEEPER-01, T-OP-085)
+//////////////////////////////////////////////////////////////*/
+
+// The four K8-05 inputs used to be read behind `??` defaults that turned an ABSENT input into "protection off"
+// (epoch -> unrestricted, epochWindDownS -> 0, protocolAccounts -> empty, protocolBook -> empty). TypeScript
+// declares all four required, so no typed caller ever missed them and every existing test above passes them --
+// which is exactly why nothing could see the defaults fire. These tests reach the planner the way a refactor
+// that drops an argument would: through a cast the compiler does not check. Each one asserts the throw NAMES
+// the input. PROVE-BY-BREAKING (authored, T-OP-085 ledger): restore `epoch: input.vault.epoch ?? null` at the
+// `selectedSeries` call in planner.ts and `required: vault.epoch undefined throws from every entry point` goes
+// red at its first assertion, because `selectedSeries` then plans an unrestricted vault instead of throwing.
+
+/** Removes one key so the value is `undefined` at runtime while the object still satisfies the type at compile time. */
+function without<T extends object>(obj: T, key: keyof T): T {
+  const copy: Record<string, unknown> = { ...(obj as Record<string, unknown>) };
+  delete copy[key as string];
+  return copy as T;
+}
+
+test('required: vault.epoch undefined throws from every entry point, and null is still legal', () => {
+  const i = input(2);
+  const noEpoch: TickInput = { ...i, vault: without(i.vault, 'epoch') };
+  assert.throws(() => selectedSeries(noEpoch), /required safety input "vault\.epoch"/);
+  assert.throws(() => fairRequests(noEpoch), /required safety input "vault\.epoch"/);
+  assert.throws(() => planTick(noEpoch), /required safety input "vault\.epoch"/);
+  // `null` is the documented "treasury MakerVault, unrestricted" value and must keep working.
+  assert.equal(twoSidedCount(planTick(input(2, { vault: vault({ epoch: null }) }))), 2);
+});
+
+test('required: params.epochWindDownS undefined throws, naming it; 0 supplied explicitly is legal', () => {
+  const i = input(2);
+  const noWindDown: TickInput = { ...i, params: without(i.params, 'epochWindDownS') };
+  assert.throws(() => fairRequests(noWindDown), /required safety input "params\.epochWindDownS"/);
+  assert.throws(() => planTick(noWindDown), /required safety input "params\.epochWindDownS"/);
+  assert.doesNotThrow(() => planTick(input(2, { params: { ...PARAMS, epochWindDownS: 0 } })));
+});
+
+test('required: protocolAccounts undefined throws, naming it; an explicit empty set is legal', () => {
+  const noAccounts = without(input(2), 'protocolAccounts');
+  assert.throws(() => planTick(noAccounts), /required safety input "protocolAccounts"/);
+  assert.doesNotThrow(() => planTick(input(2, { protocolAccounts: new Set<string>() })));
+});
+
+test('required: protocolBook undefined throws, naming it; an explicit empty book is legal', () => {
+  const noBook = without(input(2), 'protocolBook');
+  assert.throws(() => planTick(noBook), /required safety input "protocolBook"/);
+  assert.doesNotThrow(() => planTick(input(2, { protocolBook: [] })));
+});
+
+test('required: the guard checks presence, not truthiness -- a well-formed input never trips it', () => {
+  // Every earlier test in this file is the positive control: full inputs plan. This pins the order of checks so
+  // a missing epoch is reported before a missing book when both are absent (the operator fixes the first wire).
+  const both = without(without(input(2), 'protocolBook'), 'protocolAccounts');
+  assert.throws(() => planTick(both), /"protocolAccounts"/);
 });

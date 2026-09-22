@@ -4,6 +4,13 @@
  *
  *   pnpm --filter @callhouse/keeper v2:devnet-mm
  *   DEVNET_PORT=8560 CONTRACTS_DIR=/path/to/callhouse-contracts pnpm --filter @callhouse/keeper v2:devnet-mm
+ *   pnpm --filter @callhouse/keeper v2:devnet-mm -- --pricing-url http://127.0.0.1:8790
+ *   PRICING_URL=http://127.0.0.1:8790 pnpm --filter @callhouse/keeper v2:devnet-mm
+ *
+ * --pricing-url (or PRICING_URL): run against a real running pricing service instead of the
+ * harness's stand-in. Step C (a ticker whose /fair turns null) belongs to the stand-in and is
+ * skipped with an explicit note then; every other step runs unchanged. The default path is
+ * untouched.
  *
  * WHAT RUNS. ops/devnet/up.sh brings up the seeded devnet: MakerVault funded with 100,000 USDG in its wallet and 100 NVDA
  * in its Clearinghouse ledger, QUOTER_ROLE on anvil account 10, two vault quotes the seed placed on NVDA weekly1-r0,
@@ -21,14 +28,15 @@
  *                      ask floor, bid < fair < ask; at most one order per kind per series; the seed's orders adopted
  *   B  discipline      a second tick with nothing moved sends nothing (no replace under MM_REQUOTE_BPS)
  *   C  no fair         /fair answers null for TSLA: every TSLA vault quote is pulled, NVDA untouched
- *   D  taker fill      a buyer lifts a vault AskWrite (its deadline capped before a pending fee change, the dapp's
+ *   D  taker fill      a buyer lifts a vault AskWrite (its taker-side fees capped by TakeParams.maxTotalFee, the v8
  *                      rule): the vault is short, the sale is booked at the seller fee of its OrderFilled log,
  *                      /state's net delta goes negative, the skew raises the quotes, and the vault's quotes are
  *                      replaced higher on chain
  *   E  rent and cap    INTERFACE_VERSION 7: every advertised AskWrite is fillable WHOLE at the head block —
  *                      OrderBook.quoteTake answers its full remaining units, collateral plus the Clearinghouse's
- *                      rent — and the asks on one asset together fit in the vault's free collateral. Then the admin
- *                      drops maxDailyOutflow under what the bids escrow: the next tick trims them inside the
+ *                      rent — and the asks on one asset together fit in the vault's free collateral. Then the Safe,
+ *                      through the admin driver, drops maxDailyOutflow under what the bids escrow (a TREASURY_ADMIN
+ *                      call, so it warps 24 h): the next tick trims them inside the
  *                      remaining allowance instead of reverting, /state shows the budget, and v2_mm_outflow pages
  *   F  kill switch     POST /kill without or with a wrong token: 401; with MM_KILL_TOKEN: every vault order cancelled
  *                      (no live order left on the book); a later tick places nothing; POST /resume quotes again
@@ -55,6 +63,7 @@ import { makerVaultAbi } from '../abi/makerVault.js';
 import { orderBookAbi } from '../abi/orderBook.js';
 import { settlementOracleAbi } from '../abi/settlementOracle.js';
 import { loadV2Config, type MmConfig } from '../config.js';
+import { resolveDevnetPricingUrl } from '../devnet-pricing-url.js';
 import { bsDelta, bsPrice, tradingYears } from '../pricing/bs.js';
 import { bigintReplacer, V2Store } from '../store.js';
 import { collateralNeeded, remainingLife } from '../mintFee.js';
@@ -70,6 +79,13 @@ const RPC = `http://127.0.0.1:${PORT}`;
 const OUT = mkdtempSync(join(tmpdir(), 'mm-devnet-'));
 const KILL_TOKEN = randomBytes(32).toString('hex');
 /** The stand-in pricing service's vols (the seed prices its asks with the same). */
+/**
+ * `type(uint128).max` for `TakeParams.maxTotalFee`, i.e. NO cap. Correct for a QUOTE -- `quoteTake` does not
+ * enforce the field (IOrderBook.sol:137) -- and WRONG for a take, where it would make `FeeAboveMax` unreachable
+ * and turn a real protection into decoration. Every take in this file derives its bound from a quote instead.
+ */
+const UINT128_MAX = (1n << 128n) - 1n;
+
 const IV: Record<string, number> = { NVDA: 0.55, TSLA: 0.65 };
 
 const chain = defineChain({ id: 4663, name: 'Stonkhouse devnet', nativeCurrency: { name: 'Ether', symbol: 'ETH', decimals: 18 }, rpcUrls: { default: { http: [RPC] } } });
@@ -118,6 +134,31 @@ async function warpTo(ts: number): Promise<void> {
 
 async function read<T>(address: Address, abi: Abi, functionName: string, args: readonly unknown[] = []): Promise<T> {
   return pub.readContract({ address, abi, functionName, args } as never) as Promise<T>;
+}
+
+/**
+ * A MakerVault `setLimits` through the ONE admin driver, never straight from an admin EOA.
+ *
+ * Under v8 `MakerVault.setLimits((uint64,uint128,uint16,uint16,uint32,uint128))` is TREASURY_ADMIN
+ * (`ops/abis/v2/roles.json` targets.MakerVault) and that role carries a real 86,400 s delay
+ * (`roles.json` delaysS.TREASURY_ADMIN), so a direct `sendAs(admin, ...)` reverts. Every devnet admin call goes
+ * schedule -> warp -> execute as the impersonated Safe, through `ops/v2/devnet-admin.mjs` (06-QUIRKS D.8).
+ *
+ * The signature string is spelled EXACTLY as roles.json spells it, because the driver looks the role up by that
+ * string; a differently-spaced equivalent is a different key and finds no role.
+ *
+ * NOTE THE SIDE EFFECT, which section E has to live with: executing a TREASURY_ADMIN call warps the chain
+ * forward past the delay. See the comment at the head of section E2.
+ */
+const SET_LIMITS_SIG = 'setLimits((uint64,uint128,uint16,uint16,uint32,uint128))';
+type VaultLimits = { maxSeriesUnits: bigint; maxTotalNotional: bigint; askToleranceBps: number; maxBidBpsOfSpot: number; maxOrderLifetime: number; maxDailyOutflow: bigint };
+async function setVaultLimits(vault: Address, limits: VaultLimits, label: string): Promise<void> {
+  const tuple = JSON.stringify([
+    String(limits.maxSeriesUnits), String(limits.maxTotalNotional), limits.askToleranceBps,
+    limits.maxBidBpsOfSpot, limits.maxOrderLifetime, String(limits.maxDailyOutflow),
+  ]);
+  const { code, out } = await run('node', ['ops/v2/devnet-admin.mjs', vault, SET_LIMITS_SIG, tuple], {});
+  if (code !== 0) throw new Error(`${label}: devnet-admin.mjs exited ${code}\n${out}`);
 }
 
 async function sendAs(from: Address, call: { address: Address; abi: Abi; functionName: string; args: readonly unknown[] }): Promise<unknown> {
@@ -300,15 +341,17 @@ async function main(): Promise<void> {
   say(`  the seed left ${[...seededLive.values()].flat().length} live vault order(s)`);
 
   const nullTickers = new Set<string>();
-  const pricing = await startPricing(D, nullTickers);
-  say(`  stand-in pricing service on ${pricing.url}`);
+  const pricingUrl = resolveDevnetPricingUrl(process.argv.slice(2), process.env);
+  const standIn = pricingUrl.url === null;
+  const pricing = standIn ? await startPricing(D, nullTickers) : null;
+  say(standIn ? `  stand-in pricing service on ${pricing!.url}` : `  real pricing service at ${pricingUrl.url} (${pricingUrl.source}): the stand-in is off`);
 
   step('start the MM bot (in process, startMm) on env/mm-bot.env');
   const env = {
     ...parseEnvFile(join(DEVNET_DIR, 'env', 'mm-bot.env')),
     KEEPER_DB_PATH: join(OUT, 'mm.db'),
     MM_PORT: '0',
-    PRICING_URL: pricing.url,
+    PRICING_URL: standIn ? pricing!.url : pricingUrl.url!,
     MM_KILL_TOKEN: KILL_TOKEN,
     // Five minutes: the harness drives every tick with wake().
     POLL_INTERVAL_MS: '300000',
@@ -413,20 +456,26 @@ async function main(): Promise<void> {
     check(afterB === beforeB, `B: a tick with no market move sent no place, replace or cancel (${afterB - beforeB} sent: ${JSON.stringify((stB?.lastTxs ?? []).map((t: { what: string }) => t.what))})`);
 
     /* ---------------------------------------------------------------- C */
-    step('C. /fair null for TSLA: its quotes are pulled');
-    const tslaLiveBefore = [...(await liveBySeries(D))].filter(([id]) => (stB?.series ?? []).some((s: { longId: string; ticker: string }) => s.longId === id && s.ticker === 'TSLA'));
-    say(`  TSLA series with live vault orders before: ${tslaLiveBefore.length}`);
-    nullTickers.add('TSLA');
-    await tick(mm);
-    const stC = await state(mm);
-    const liveC = await liveBySeries(D);
-    const tslaIds = new Set((stC?.series ?? []).filter((s: { ticker: string }) => s.ticker === 'TSLA').map((s: { longId: string }) => s.longId));
-    const tslaLiveAfter = [...liveC.keys()].filter((id) => tslaIds.has(id));
-    const tslaHalts = (stC?.series ?? []).filter((s: { ticker: string; selected: boolean }) => s.ticker === 'TSLA' && s.selected).map((s: { halt: { halt: string } | null }) => s.halt?.halt ?? 'none');
-    check(tslaLiveBefore.length > 0 && tslaLiveAfter.length === 0, `C: no live vault order left on TSLA (${tslaLiveBefore.length} series before, ${tslaLiveAfter.length} after)`);
-    check(tslaHalts.length > 0 && tslaHalts.every((h: string) => h === 'fair-unavailable'), `C: every selected TSLA series halts fair-unavailable (${[...new Set(tslaHalts)].join(', ')})`);
-    check([...liveC].filter(([, o]) => twoSided(o)).length >= 5, 'C: NVDA still quoted on both sides on >= 5 series');
-    nullTickers.delete('TSLA');
+    let stC: any;
+    if (standIn) {
+      step('C. /fair null for TSLA: its quotes are pulled');
+      const tslaLiveBefore = [...(await liveBySeries(D))].filter(([id]) => (stB?.series ?? []).some((s: { longId: string; ticker: string }) => s.longId === id && s.ticker === 'TSLA'));
+      say(`  TSLA series with live vault orders before: ${tslaLiveBefore.length}`);
+      nullTickers.add('TSLA');
+      await tick(mm);
+      stC = await state(mm);
+      const liveC = await liveBySeries(D);
+      const tslaIds = new Set((stC?.series ?? []).filter((s: { ticker: string }) => s.ticker === 'TSLA').map((s: { longId: string }) => s.longId));
+      const tslaLiveAfter = [...liveC.keys()].filter((id) => tslaIds.has(id));
+      const tslaHalts = (stC?.series ?? []).filter((s: { ticker: string; selected: boolean }) => s.ticker === 'TSLA' && s.selected).map((s: { halt: { halt: string } | null }) => s.halt?.halt ?? 'none');
+      check(tslaLiveBefore.length > 0 && tslaLiveAfter.length === 0, `C: no live vault order left on TSLA (${tslaLiveBefore.length} series before, ${tslaLiveAfter.length} after)`);
+      check(tslaHalts.length > 0 && tslaHalts.every((h: string) => h === 'fair-unavailable'), `C: every selected TSLA series halts fair-unavailable (${[...new Set(tslaHalts)].join(', ')})`);
+      check([...liveC].filter(([, o]) => twoSided(o)).length >= 5, 'C: NVDA still quoted on both sides on >= 5 series');
+      nullTickers.delete('TSLA');
+    } else {
+      step('C. skipped: a real pricing service cannot be told to turn TSLA null; the default path covers it');
+      stC = await state(mm);
+    }
 
     /* ---------------------------------------------------------------- D */
     step('D. a taker lifts a vault ask: the inventory skews the quotes');
@@ -444,17 +493,38 @@ async function main(): Promise<void> {
       nvdaRows.map((s: { longId: string; quote: { bid: string | null; ask: string } }) => [s.longId, { bid: s.quote.bid === null ? null : BigInt(s.quote.bid), ask: BigInt(s.quote.ask) }]),
     );
     const cy = getAddress(D.accounts.cy!);
-    // The dapp's take rule since INTERFACE_VERSION 6: while a fee change is pending the deadline stops before it takes
-    // effect (a take then pays the fees it was quoted or reverts DeadlinePassed); otherwise it stays under 24 h.
-    const [, feesEffectiveAt] = await read<readonly [unknown, number]>(D.contracts.orderBook, orderBookAbi, 'pendingFeeParams');
+    // INTERFACE_VERSION 8 RETIRES THE DEADLINE-CAP WORKAROUND. Up to v7 this take capped its deadline at
+    // `pendingFeeParams().effectiveAt - 1` so a scheduled fee change could not overcharge it: the take paid the
+    // fees it was quoted or reverted DeadlinePassed. That was a PROXY for the real concern -- it refused by TIME,
+    // which also refuses perfectly good fills -- and v8 states the concern directly with `TakeParams.maxTotalFee`.
+    // So the cap, the `pendingFeeParams` read that existed only to feed it, and the deadline arithmetic are gone,
+    // and the deadline is now an ordinary one-hour bound.
     const takeAt = await now();
     const takeFrom = await pub.getBlockNumber();
-    const deadline = Number(feesEffectiveAt) === 0 ? takeAt + 3_600 : Math.min(takeAt + 3_600, Number(feesEffectiveAt) - 1);
+    const deadline = takeAt + 3_600;
+    const takeParams = {
+      longId: longIdD,
+      buying: true,
+      orderIds: [pick.ask.id],
+      units: pick.ask.units - pick.ask.filled,
+      minUnits: 1n,
+      limitPrice: pick.ask.price,
+      writeToSell: false,
+      recipient: cy,
+      deadline,
+    };
+    // The cap is DERIVED from a quote of the same params, never `type(uint128).max`, which would make FeeAboveMax
+    // unreachable and turn the protection into decoration. `quoteTake` does not enforce the cap (IOrderBook.sol:137),
+    // so the quote is taken with it wide open and its answer sets the real bound. Buying, so the cap is the taker
+    // fee alone: the seller fee on an ask hit is the MAKER's (OrderBook quoteTake returns sellerFees as 0 on a buy).
+    const [, , quotedTakerFee] = await read<readonly [bigint, bigint, bigint, bigint]>(
+      D.contracts.orderBook, orderBookAbi, 'quoteTake', [{ ...takeParams, maxTotalFee: UINT128_MAX }],
+    );
     await sendAs(cy, {
       address: D.contracts.orderBook,
       abi: orderBookAbi,
       functionName: 'take',
-      args: [{ longId: longIdD, buying: true, orderIds: [pick.ask.id], units: pick.ask.units - pick.ask.filled, minUnits: 1n, limitPrice: pick.ask.price, writeToSell: false, recipient: cy, deadline }],
+      args: [{ ...takeParams, maxTotalFee: quotedTakerFee }],
     });
     const [, , detail] = await read<readonly [bigint, bigint, { shorts: bigint }]>(vault, makerVaultAbi, 'exposure', [longIdD]);
     say(`  cy bought ${pick.ask.units - pick.ask.filled} units of ${pick.row.longId} (delta ${pick.row.fair.delta.toFixed(3)}) from vault order ${pick.ask.id} at ${pick.ask.price}; the vault holds ${detail.shorts} shorts`);
@@ -503,8 +573,12 @@ async function main(): Promise<void> {
     const needByAsset = new Map<string, bigint>();
     for (const { longId, o } of writeAsks) {
       const remaining = o.units - o.filled;
-      const [unitsFilled] = await read<readonly [bigint, bigint, bigint]>(D.contracts.orderBook, orderBookAbi, 'quoteTake', [
-        { longId, buying: true, orderIds: [o.id], units: remaining, minUnits: 1n, limitPrice: o.price, writeToSell: false, recipient: getAddress(D.accounts.cy!), deadline: tE + 600 },
+      // FOUR return values, not three: INTERFACE_VERSION 8 appended `sellerFees`. Declaring three here was a silent
+      // type lie -- only `unitsFilled` is read, so nothing failed, which is exactly why it survived.
+      // `maxTotalFee` is wide open because this is a QUOTE and quoteTake does not enforce the cap (IOrderBook.sol:137);
+      // the section-D take that actually pays derives a real bound from its own quote.
+      const [unitsFilled] = await read<readonly [bigint, bigint, bigint, bigint]>(D.contracts.orderBook, orderBookAbi, 'quoteTake', [
+        { longId, buying: true, orderIds: [o.id], units: remaining, minUnits: 1n, limitPrice: o.price, writeToSell: false, recipient: getAddress(D.accounts.cy!), deadline: tE + 600, maxTotalFee: UINT128_MAX },
       ]);
       if (unitsFilled === remaining) fillable += 1;
       else say(`       order ${o.id}: quoteTake fills ${unitsFilled} of ${remaining}`);
@@ -526,12 +600,18 @@ async function main(): Promise<void> {
 
     // E2. THE OUTFLOW CAP. Drop maxDailyOutflow to a third of what the vault's live bids escrow and let the bot
     // re-plan: it must quote SMALLER bids inside what is left, never send a place the cap would refuse.
-    const admin = getAddress(D.accounts.admin!);
     const limitsBefore = await read<{ maxSeriesUnits: bigint; maxTotalNotional: bigint; askToleranceBps: number; maxBidBpsOfSpot: number; maxOrderLifetime: number; maxDailyOutflow: bigint }>(vault, makerVaultAbi, 'limits');
     const bidEscrow = [...liveE.values()].flat().filter((o) => o.kind === 0).reduce((sum, o) => sum + (o.price * (o.units - o.filled)) / 100n, 0n);
     const lowCap = bidEscrow / 3n;
     check(bidEscrow > 0n && lowCap > 0n, `E: the vault's live bids escrow ${bidEscrow} USDG base units; the cap goes to ${lowCap}`);
-    await sendAs(admin, { address: vault, abi: makerVaultAbi, functionName: 'setLimits', args: [{ ...limitsBefore, maxDailyOutflow: lowCap }] });
+    // E2 AND THE 24 h WARP. Both setLimits calls below go through the admin driver, which for a TREASURY_ADMIN
+    // call schedules, WARPS THE CHAIN 86,400 s (roles.json delaysS.TREASURY_ADMIN) and then executes. That warp
+    // lands in the middle of a section that asserts a DAILY outflow bucket, so the assertions after it are read
+    // against a chain a day older than the one the bids were placed on. What that does to each of them is written
+    // out in the ledger entry for this task; the short version is that `outflow()` used/available resets with the
+    // day, and any order whose validUntil or expiry fell inside the warp is gone. Do not read the checks below as
+    // if the clock had not moved.
+    await setVaultLimits(vault, { ...limitsBefore, maxDailyOutflow: lowCap }, 'E2: drop the daily outflow cap');
     const [usedE, availableE] = await read<readonly [bigint, bigint]>(vault, makerVaultAbi, 'outflow');
     say(`  cap ${limitsBefore.maxDailyOutflow} -> ${lowCap}; outflow() used ${usedE}, available ${availableE}`);
     await tick(mm);
@@ -548,7 +628,9 @@ async function main(): Promise<void> {
     check(usedAfter <= lowCap, `E: the bucket never went past the cap (used ${usedAfter} of ${lowCap}): no place was refused`);
     check((stOut?.lastTxs ?? []).every((t: { status: string }) => t.status !== 'simulation-reverted'), 'E: no vault call was refused on chain');
     // Put the cap back, so the kill switch and the journal checks run against the deployed configuration.
-    await sendAs(admin, { address: vault, abi: makerVaultAbi, functionName: 'setLimits', args: [limitsBefore] });
+    // This is a SECOND TREASURY_ADMIN call and therefore a second 24 h warp: by the time section F runs the chain
+    // is two days past where section E started.
+    await setVaultLimits(vault, limitsBefore, 'E2: restore the daily outflow cap');
 
     /* ---------------------------------------------------------------- F */
     step('F. the kill switch');
@@ -602,7 +684,7 @@ async function main(): Promise<void> {
     db.close();
   } finally {
     await mm.close().catch(() => undefined);
-    pricing.server.close();
+    pricing?.server.close();
   }
 }
 

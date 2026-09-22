@@ -81,7 +81,7 @@ const UINT_RE = /^(0|[1-9]\d*)$/;
 // ---------------------------------------------------------------------------------------------
 
 /**
- * Phrases the post must never contain: scripts/copy-lint.mjs's FORBIDDEN table (which cannot be
+ * Phrases the post must never contain: disclosure policy (copy-lint enforced this until it was removed on 2026-09-21; nothing checks it now)'s FORBIDDEN table (which cannot be
  * imported: it lints on load) plus the ops/publish-template.md "numbers never to publish" words and
  * return promises. The test also runs copy-lint's own regexes over real posts.
  */

@@ -1,9 +1,13 @@
 import type { Metadata } from "next";
 import { notFound, permanentRedirect } from "next/navigation";
 
+import { MarketAccessGate } from "@/components/v2/MarketAccessGate";
+import { NotListedMarket } from "@/components/v2/NotListedMarket";
 import { SeriesPage as SeriesView } from "@/components/v2/SeriesPage";
 import { parseV2Series, parseV2Ticker } from "@/app/v2-route-params";
 import { PUBLIC_V2_ROBOTS } from "@/lib/devPreview";
+import { isV2Live } from "@/lib/markets";
+import { NOT_LISTED_LABEL } from "@/lib/v2/marketAccess";
 
 type Params = { ticker: string; series: string };
 
@@ -12,6 +16,10 @@ export async function generateMetadata({ params }: { params: Promise<Params> }):
   const market = parseV2Ticker(ticker);
   const id = market ? parseV2Series(market, series) : undefined;
   if (!market || !id) return { title: "Not found — StonkHouse", robots: { index: false } };
+  if (!isV2Live(market.ticker)) return {
+    title: `${market.ticker} — ${NOT_LISTED_LABEL}`,
+    robots: { index: false, follow: PUBLIC_V2_ROBOTS.follow },
+  };
   return {
     title: `${market.ticker} option ${id} — StonkHouse`,
     alternates: { canonical: `/${ticker}/${id}` },
@@ -30,5 +38,9 @@ export default async function SeriesPage({ params, searchParams }: { params: Pro
   const initialShares = rawShares && /^(?:[1-9]\d{0,3}|0)(?:\.\d{1,2})?$/.test(rawShares) && Number(rawShares) > 0 ? rawShares : undefined;
   const suffix = query.buy === "1" ? `?buy=1${initialShares ? `&shares=${encodeURIComponent(initialShares)}` : ""}` : "";
   if (series !== id) permanentRedirect(`/${ticker}/${id}${suffix}`);
-  return <SeriesView ticker={market.ticker} longId={id} initialShares={initialShares} openTicket={query.buy === "1"} />;
+  const registered = market.v2.registeredAt !== null;
+  if (!isV2Live(market.ticker)) return <NotListedMarket ticker={market.ticker} />;
+  return <MarketAccessGate ticker={market.ticker} registered={registered} releaseStatus={market.v2.status}>
+    <SeriesView ticker={market.ticker} longId={id} initialShares={initialShares} openTicket={query.buy === "1"} />
+  </MarketAccessGate>;
 }

@@ -33,7 +33,7 @@ export default function DocsPage() {
         <p className="text-[15.5px] text-ink-2">This page describes the current app. The external documentation linked below covers legacy v1 accounts, not v2 trading.</p>
         <ol className="grid gap-3 text-[15.5px] text-ink-2">
           <li><strong className="text-ink">Buy:</strong> Compare live asks by market, expiry, strike, total cost including fees, and max loss. A quote can change before your transaction confirms. The full amount paid can be lost.</li>
-          <li><strong className="text-ink">Write:</strong> In Earn, choose an available series and deposit the required Stock Tokens for a covered call, or USDG for a cash-secured put where supported. Set an ask; premium and collateral rent apply only if a buyer fills it. Transactions also cost gas.</li>
+          <li><strong className="text-ink">Write:</strong> In Earn, choose an available series and deposit the required Stock Tokens for a covered call, or USDG for a cash-secured put where supported. Set an ask; the current v2 launch fee takes 5% of premium on a first sale and 0% on a true resale. Review any scheduled fee notice before confirming. Transactions also cost gas.</li>
           <li><strong className="text-ink">Manage:</strong> Portfolio shows positions, resting orders, and balances. You can cancel an unfilled order, sell an eligible long position, or withdraw a free balance there.</li>
           <li><strong className="text-ink">Settle:</strong> Expiry does not itself complete settlement. A separate on-chain settlement step needs an available oracle result and may be delayed or disputed. Once the series is settled, check Portfolio for a payout to redeem and any balance to withdraw.</li>
         </ol>

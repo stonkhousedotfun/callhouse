@@ -70,7 +70,7 @@ describe("CyclePricingWords: reason codes are never echoed", () => {
   });
 
   it.each([
-    // Assembled at runtime: this file is scanned by copy-lint.
+    // Assembled at runtime, a habit from when copy-lint scanned this file (removed 2026-09-21).
     ["an unknown code", ["guar" + "anteed", "40", "a" + "py", "yield"].join("-")],
     ["an Object.prototype key", "constructor"],
   ])("%s is dropped", (_name, code) => {

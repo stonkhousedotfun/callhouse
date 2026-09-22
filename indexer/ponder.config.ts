@@ -8,12 +8,22 @@ import { seaportAbi } from "./abis/seaport";
 import { valoremClearAbi } from "./abis/valoremClear";
 import { vaultAbi } from "./abis/vault";
 import { writerAccountAbi } from "./abis/writerAccount";
+import { accessManagerAbi } from "./abis/v2/accessManager";
 import { autoRollerAbi } from "./abis/v2/autoRoller";
+import { buybackExecutorAbi } from "./abis/v2/buybackExecutor";
+import { earnVaultAbi } from "./abis/v2/earnVault";
+import { houseVaultAbi } from "./abis/v2/houseVault";
+import { houseVaultFactoryAbi } from "./abis/v2/houseVaultFactory";
+import { stockZapAbi } from "./abis/v2/stockZap";
 import { clearinghouseAbi } from "./abis/v2/clearinghouse";
 import { expiryCalendarAbi } from "./abis/v2/expiryCalendar";
+import { feeSplitterAbi } from "./abis/v2/feeSplitter";
 import { keeperRewardsAbi } from "./abis/v2/keeperRewards";
+import { makerVaultAbi } from "./abis/v2/makerVault";
 import { makerRegistryAbi } from "./abis/v2/makerRegistry";
 import { orderBookAbi } from "./abis/v2/orderBook";
+import { payoutAdapterAbi } from "./abis/v2/payoutAdapter";
+import { rewardsDistributorAbi } from "./abis/v2/rewardsDistributor";
 import { settlementOracleAbi } from "./abis/v2/settlementOracle";
 import {
   ASSET,
@@ -27,12 +37,24 @@ import {
   START_BLOCK,
   USDG,
   VAULT,
+  V2_ACCESS_MANAGER,
   V2_AUTO_ROLLER,
+  V2_BUYBACK_EXECUTOR,
   V2_CLEARINGHOUSE,
+  V2_EARN_START_BLOCK,
+  V2_EARN_VAULT,
   V2_EXPIRY_CALENDAR,
+  V2_FEE_SPLITTER,
+  V2_FLYWHEEL_START_BLOCK,
+  V2_HOUSE_START_BLOCK,
+  V2_HOUSE_VAULT_FACTORY,
   V2_KEEPER_REWARDS,
+  V2_MAKER_VAULT,
   V2_MAKER_REGISTRY,
   V2_ORDER_BOOK,
+  V2_PAYOUT_ROUTER,
+  V2_ZAP_HELPER,
+  V2_REWARDS_DISTRIBUTORS,
   V2_SETTLEMENT_ORACLE,
   V2_START_BLOCK,
 } from "./lib/env";
@@ -282,6 +304,102 @@ function keeperRewardsContract(address: Address) {
   return { KeeperRewards: { abi: keeperRewardsAbi, chain, address, startBlock: V2_START_BLOCK!, endBlock: END_BLOCK } };
 }
 
+function accessManagerContract(address: Address) {
+  return { AccessManager: { abi: accessManagerAbi, chain, address, startBlock: V2_START_BLOCK!, endBlock: END_BLOCK } };
+}
+
+function payoutRouterContract(address: Address) {
+  return { PayoutRouter: { abi: payoutAdapterAbi, chain, address, startBlock: V2_START_BLOCK!, endBlock: END_BLOCK } };
+}
+
+function feeSplitterContract(address: Address) {
+  return { FeeSplitter: { abi: feeSplitterAbi, chain, address, startBlock: V2_FLYWHEEL_START_BLOCK!, endBlock: END_BLOCK } };
+}
+
+function buybackExecutorContract(address: Address) {
+  return { BuybackExecutor: { abi: buybackExecutorAbi, chain, address, startBlock: V2_FLYWHEEL_START_BLOCK!, endBlock: END_BLOCK } };
+}
+
+function makerVaultContract(address: Address) {
+  return { MakerVault: { abi: makerVaultAbi, chain, address, startBlock: V2_START_BLOCK!, endBlock: END_BLOCK } };
+}
+
+function rewardsDistributorContract(addresses: readonly Address[]) {
+  return { RewardsDistributor: { abi: rewardsDistributorAbi, chain, address: [...addresses], startBlock: V2_START_BLOCK!, endBlock: END_BLOCK } };
+}
+
+/** P8-06 House vaults: one factory plus clones discovered from VaultCreated.vault. */
+function houseVaultContracts(factoryAddress: Address) {
+  if (V2_HOUSE_START_BLOCK === undefined) {
+    throw new Error("[callhouse/indexer] houseVaultContracts called without V2_HOUSE_START_BLOCK");
+  }
+  return {
+    HouseVaultFactory: {
+      abi: houseVaultFactoryAbi,
+      chain,
+      address: factoryAddress,
+      startBlock: V2_HOUSE_START_BLOCK,
+      endBlock: END_BLOCK,
+    },
+    HouseVault: {
+      abi: houseVaultAbi,
+      chain,
+      address: factory({
+        address: factoryAddress,
+        event: getAbiItem({ abi: houseVaultFactoryAbi, name: "VaultCreated" }),
+        parameter: "vault",
+        startBlock: V2_HOUSE_START_BLOCK,
+        endBlock: END_BLOCK,
+      }),
+      startBlock: V2_HOUSE_START_BLOCK,
+      endBlock: END_BLOCK,
+    },
+  };
+}
+
+/**
+ * P8-01/P8-02 lending periphery: the Earn vault and the stateless zap helper. Each is a single
+ * deployed address rather than a factory, so neither needs the `factory()` discovery the House
+ * vaults use.
+ *
+ * X8-06. These sources are the thing that was missing: `src/v2/earn.ts` carried its registrations
+ * as PROSE because registering a handler for a contract this config does not have breaks the
+ * virtual `ponder:registry` types for every handler file in the package. The generated ABI modules
+ * it was waiting for now exist (`abis/v2/earnVault.ts`, `abis/v2/stockZap.ts`), so the block below
+ * is what turns those comments back into code.
+ *
+ * Both share `V2_EARN_START_BLOCK`, which lib/env.ts already refuses to accept without one of the
+ * two addresses and refuses to omit when either is set.
+ *
+ * T-532 (X8-06A's suspicion, checked). ONE BLOCK FOR TWO CONTRACTS IS SAFE ONLY IN ONE DIRECTION, and
+ * nothing here can check the direction. Ponder starts each source at `startBlock`; a source that starts
+ * BEFORE its creation block merely backfills empty blocks, a source that starts AFTER it silently drops
+ * every log in between and nothing downstream can tell a quiet contract from a late start. So the value
+ * must be the EARLIER of the two deployment blocks, which is the vault's: the zap does not depend on the
+ * vault at construction (StockZap takes the PayoutRouter and the Clearinghouse, not the EarnVault), and
+ * script/v2/DeployEarnVault.s.sol deploys the vault first and SKIPS the zap when the router or the
+ * clearinghouse is absent -- so the one documented "late second deployment" is a zap deployed after the
+ * vault, which this single block handles at the cost of backfill. The loss case is the reverse: an
+ * operator re-setting this variable to a LATER block (the zap's, after such a second deployment). The
+ * env docs pin the value to the vault's deploy block (ops/v2-env.mjs, ops/v2/env/indexer-v2.env); no
+ * runtime guard enforces it, because neither contract's creation block is known here without an RPC.
+ * A per-contract start block read from the registry would make the direction unrepresentable; that is
+ * env + runbook work outside this file.
+ */
+function earnVaultContract(address: Address) {
+  if (V2_EARN_START_BLOCK === undefined) {
+    throw new Error("[callhouse/indexer] earnVaultContract called without V2_EARN_START_BLOCK");
+  }
+  return { EarnVault: { abi: earnVaultAbi, chain, address, startBlock: V2_EARN_START_BLOCK, endBlock: END_BLOCK } };
+}
+
+function stockZapContract(address: Address) {
+  if (V2_EARN_START_BLOCK === undefined) {
+    throw new Error("[callhouse/indexer] stockZapContract called without V2_EARN_START_BLOCK");
+  }
+  return { StockZap: { abi: stockZapAbi, chain, address, startBlock: V2_EARN_START_BLOCK, endBlock: END_BLOCK } };
+}
+
 /**
  * The full set of sources, as the types see it. At runtime a group is present only when its
  * address is set; the cast is what lets `ponder.on("Vault:…")` and `ponder.on("Factory:…")` both
@@ -289,7 +407,12 @@ function keeperRewardsContract(address: Address) {
  * lib/registry.ts is what keeps a handler for an absent group from being registered.
  */
 type Contracts = ReturnType<typeof vaultContracts> & ReturnType<typeof factoryContracts> & ReturnType<typeof v2Contracts>
-  & ReturnType<typeof expiryCalendarContract> & ReturnType<typeof keeperRewardsContract>;
+  & ReturnType<typeof expiryCalendarContract> & ReturnType<typeof keeperRewardsContract>
+  & ReturnType<typeof accessManagerContract> & ReturnType<typeof payoutRouterContract>
+  & ReturnType<typeof feeSplitterContract> & ReturnType<typeof buybackExecutorContract>
+  & ReturnType<typeof makerVaultContract> & ReturnType<typeof rewardsDistributorContract>
+  & ReturnType<typeof houseVaultContracts>
+  & ReturnType<typeof earnVaultContract> & ReturnType<typeof stockZapContract>;
 
 const contracts = {
   ...(VAULT === undefined ? {} : vaultContracts(VAULT)),
@@ -297,6 +420,17 @@ const contracts = {
   ...(V2_CLEARINGHOUSE === undefined ? {} : v2Contracts()),
   ...(V2_EXPIRY_CALENDAR === undefined ? {} : expiryCalendarContract(V2_EXPIRY_CALENDAR)),
   ...(V2_KEEPER_REWARDS === undefined ? {} : keeperRewardsContract(V2_KEEPER_REWARDS)),
+  ...(V2_ACCESS_MANAGER === undefined ? {} : accessManagerContract(V2_ACCESS_MANAGER)),
+  ...(V2_PAYOUT_ROUTER === undefined ? {} : payoutRouterContract(V2_PAYOUT_ROUTER)),
+  ...(V2_FEE_SPLITTER === undefined ? {} : feeSplitterContract(V2_FEE_SPLITTER)),
+  ...(V2_BUYBACK_EXECUTOR === undefined ? {} : buybackExecutorContract(V2_BUYBACK_EXECUTOR)),
+  ...(V2_MAKER_VAULT === undefined ? {} : makerVaultContract(V2_MAKER_VAULT)),
+  ...(V2_REWARDS_DISTRIBUTORS.length === 0 ? {} : rewardsDistributorContract(
+    V2_REWARDS_DISTRIBUTORS.map((item) => item.address),
+  )),
+  ...(V2_HOUSE_VAULT_FACTORY === undefined ? {} : houseVaultContracts(V2_HOUSE_VAULT_FACTORY)),
+  ...(V2_EARN_VAULT === undefined ? {} : earnVaultContract(V2_EARN_VAULT)),
+  ...(V2_ZAP_HELPER === undefined ? {} : stockZapContract(V2_ZAP_HELPER)),
 } as Contracts;
 
 /** Periodic maintenance for order expiry and series cutoff. Like contracts, this source is

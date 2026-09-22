@@ -100,12 +100,13 @@ export function registerAccountRoutes(app: Hono) {
         const avgCost = remainingUnits === 0n ? 0n : remainingCost * 100n / remainingUnits;
         const quote = await quoteFor(series);
         const mark = series.status === "open" ? quote?.fair ?? quote?.bestBid ?? null : null;
+        const markSource = mark === null ? null : quote?.fair !== null && quote?.fair !== undefined ? "fair" as const : "best-bid" as const;
         const unrealised = mark === null ? null : signedMoney(BigInt(mark.raw) * units / 100n -
           (remainingUnits === 0n ? 0n : remainingCost * units / remainingUnits));
         const claimable = series.status === "settled" && prefs.inKind && series.longPayoutPerUnit !== null
           ? money(series.longPayoutPerUnit * walletUnits, series.isPut ? 6 : 18) : null;
         longs.push({ series: seriesWire(series), units: units.toString(), avgCost: money(avgCost),
-          mark, unrealised, claimable });
+          mark, markSource, unrealised, claimable });
       }
     }
     for (const balance of balances) {
@@ -210,7 +211,8 @@ export function registerAccountRoutes(app: Hono) {
       const series = byId.get(row.longId.toString()); if (!series) continue;
       add(row.block, row.logIndex, row.id, { id: row.id, kind: "mint", ts: Number(row.ts), longId: row.longId.toString(),
         series: seriesWire(series), data: { units: row.units.toString(), collateral: money(row.collateral, series.isPut ? 6 : 18),
-          fee: money(row.fee, series.isPut ? 6 : 18), longTo: address(row.longTo), tx: row.tx } });
+          fee: money(row.fee, series.isPut ? 6 : 18), payer: address(row.writer),
+          longTo: address(row.longTo), tx: row.tx } });
     }
     for (const row of closes) {
       if (row.account.toLowerCase() !== key) continue;

@@ -18,19 +18,53 @@ import { after, before, describe, test } from "node:test";
 import {
   ABI_TEXT,
   ACTIONS,
+  applyOracleHaltLogs,
+  BUYBACK_COOLDOWN,
   CONFIG_EVENTS,
   DEDICATED_EVENTS,
   DEFAULTS,
   DEFAULT_REGISTRY,
+  FEE_CHANGE_DELAY,
   KINDS,
   KIND_RE,
+  MANAGER_OPERATION_EVENTS,
+  MANAGER_ROLE_EVENTS,
+  MAX_HOOK_FEE_BPS,
+  MAX_REPRICE_DROP_BPS,
+  MAX_ROUTE_FEE_BPS,
   MAX_TENOR,
+  MIN_SAFE_THRESHOLD,
   MIN_SERIES_LEAD,
+  OWN_KIND_EVENTS,
   PINS_DIRTY_EVENTS,
   RANK,
+  ROLE_MANIFEST,
   SCAN_EVENTS,
+  SPLITTER_EVENTS,
   UsageError,
+  ZERO,
+  applyFlywheelLogs,
+  buybackClock,
+  checkBuyback,
+  checkManagerWiring,
+  checkRoute,
+  checkRouteDecode,
+  checkSafeThreshold,
+  checkSplitter,
+  checkTokenPool,
+  checkTvl,
+  tvlFaults,
+  loadRoleManifest,
+  managerEventFindings,
+  parsePayoutRoute,
+  reasonText,
+  roleDelayS,
+  roleLabel,
+  routeCurrencies,
+  routeVenueName,
+  v4PoolId,
   adminEventFindings,
+  repriceFindings,
   alertPayload,
   applyScanLogs,
   checkBacklog,
@@ -38,6 +72,7 @@ import {
   checkFeedMismatch,
   checkFeedProxy,
   checkFeedStale,
+  checkPriceDivergence,
   checkHeadLag,
   checkHealth,
   checkMarketOracle,
@@ -45,15 +80,20 @@ import {
   checkMintRent,
   checkPendingFees,
   checkPinSimulation,
+  checkPricerActivity,
   checkPinnedBy,
   checkPinnedConfig,
   checkPool,
+  checkQuoteReadiness,
   checkRewards,
   checkRollerAsk,
   checkRoundJumps,
+  checkSourceAges,
+  checkSourceSwitch,
   checkSafe,
   checkStockToken,
   checkUsdg,
+  checkHouseEpoch,
   checkVault,
   checkVaultOutflow,
   closeOfDay,
@@ -61,9 +101,11 @@ import {
   decodePinRevert,
   emptyState,
   exitCodeFor,
+  expiryTenor,
   expectedPinnedConfig,
   feeRises,
   feeScheduledFindings,
+  fingerprintOf,
   finding,
   fixed,
   gridCloses,
@@ -72,13 +114,18 @@ import {
   loadViem,
   mapLimit,
   marketsInScope,
+  marketSourceLabels,
   modelSpendPerExpiry,
   multiplierEventFindings,
+  oracleHaltFindings,
+  oracleHaltTopics,
   observedSpend,
   parseArgs,
   parseRegistry,
   pinTargets,
+  probeTargets,
   prePinFindings,
+  readFairAnswer,
   reconcile,
   markDelivered,
   marketStretch,
@@ -89,8 +136,9 @@ import {
   roundIdsToRead,
   runOnce,
   scanEventName,
+  unknownPricingReasons,
 } from "./monitor.mjs";
-import { C, FakeChain, SRC, addr, defaultRead, fakeViem, kindsOf, market, options, rawLog, tmp, transportError, writeRegistry } from "./fake-chain.mjs";
+import { C, FakeChain, SRC, USDG, addr, defaultRead, fakeViem, kindsOf, market, options, rawLog, tmp, transportError, viem, writeRegistry } from "./fake-chain.mjs";
 
 const U = "0xd0601CE157Db5bdC3162BbaC2a2C8aF5320D9EEC";
 const ORACLE = "0x4b8c2BEFfecbdc4BeD6e6826e62093F0Cf635E78";
@@ -99,6 +147,15 @@ const UNI = "0x5d46388aD462fF7f92587fE4872e97668e98329d";
 const E = 1_789_675_200;
 const t = { ...DEFAULTS };
 const kinds = (fs) => fs.map((f) => `${f.kind}/${f.severity}`).sort();
+
+// OWN8-09 (46c3e6b5) turned a DARK audit-trigger notice into a fault: with `auditTriggerUsdg` 0 and
+// USDG actually held by the v2 contracts, `tvlFaults` now pages instead of staying silent, because
+// "off with collateral in the contracts is the notice being dark exactly when it matters". Every
+// fixture below that builds a registry holds USDG through `defaultRead`, so this kind is part of the
+// truth of those passes and the exact-list assertions have to name it. Do NOT filter it out of
+// `kindsOf` instead: filtering here is precisely the change that would hide the notice going dark in
+// production, which is the condition OWN8-09 exists to surface.
+const TVL_DARK = "v2_mon_tvl_audit_trigger";
 
 const expiry = (over = {}) => ({
   oracle: ORACLE,
@@ -254,6 +311,81 @@ describe("maker vault", () => {
   test("inventory floors", () => {
     const f = checkVault({ ...base, usdgAvailable: 99_999_999n, tokens: [{ ticker: "NVDA", token: U, available: 10n ** 18n - 1n }] }, t);
     assert.deepEqual(kinds(f), ["v2_mon_vault_inventory_low/warn", "v2_mon_vault_inventory_low/warn"]);
+  });
+});
+
+describe("house vault epoch stall (SEC-14)", () => {
+  const HV = "0x9A1f2C3D4e5F60718293A4b5C6d7E8F901234567";
+  // epochEnd is in the past by two hours; the default houseEpochStallS is 1800.
+  const END = 1_800_000_000;
+  const base = {
+    address: HV,
+    ticker: "NVDA",
+    epochId: 7n,
+    epochEnd: END,
+    now: END + 7200,
+    boundary: { finalized: true, price: 222_500_000n },
+    series: [{ longId: "7", label: "NVDA call 222.50 2027-01-15T21:00:00Z", exists: true, settled: true, longs: 0n, shorts: 0n, live: 0 }],
+  };
+  const kindsOf = (f) => f.map((x) => `${x.kind}/${x.severity}`);
+
+  test("a flat, priced, rollable boundary is not a stall", () => assert.deepEqual(checkHouseEpoch(base, t), []));
+
+  test("a healthy long epoch that has not ended is never a stall", () =>
+    assert.deepEqual(
+      checkHouseEpoch({ ...base, now: END - 1, series: [{ ...base.series[0], settled: false, live: 3 }] }, t),
+      [],
+    ));
+
+  test("past epochEnd but inside the grace window stays quiet", () =>
+    assert.deepEqual(checkHouseEpoch({ ...base, now: END + 1799, series: [{ ...base.series[0], settled: false }] }, t), []));
+
+  test("an unsettled tracked series past the grace window fires once, with the recovery in the message", () => {
+    const f = checkHouseEpoch({ ...base, series: [{ ...base.series[0], settled: false }] }, t);
+    assert.deepEqual(kindsOf(f), ["v2_mon_house_epoch_stall/error"]);
+    assert.equal(f[0].key, `${HV.toLowerCase()}:7`);
+    assert.match(f[0].message, /is not settled/);
+    assert.match(f[0].message, /RECOVERY: cancel the live orders/);
+    assert.match(f[0].message, /2-of-3 admin Safe/);
+    assert.equal(f[0].data.overdueS, 7200);
+    assert.deepEqual(f[0].data.blockers, ["NVDA call 222.50 2027-01-15T21:00:00Z is not settled"]);
+  });
+
+  test("a live order alone is a stall, and so is held exposure", () => {
+    const live = checkHouseEpoch({ ...base, series: [{ ...base.series[0], live: 2 }] }, t);
+    assert.deepEqual(kindsOf(live), ["v2_mon_house_epoch_stall/error"]);
+    assert.match(live[0].data.blockers[0], /still holds 2 live orders/);
+    const held = checkHouseEpoch({ ...base, series: [{ ...base.series[0], longs: 300n }] }, t);
+    assert.match(held[0].data.blockers[0], /still holds 3.00 long/);
+  });
+
+  test("an unfinalized boundary price is a blocker; an UNREAD one is not", () => {
+    const unfinalized = checkHouseEpoch({ ...base, boundary: { finalized: false, price: 0n } }, t);
+    assert.deepEqual(kindsOf(unfinalized), ["v2_mon_house_epoch_stall/error"]);
+    assert.match(unfinalized[0].data.blockers[0], /settlement price is not Finalized/);
+    assert.equal(unfinalized[0].data.boundaryFinalized, false);
+    // null = the read failed. Paging for a condition the pass never observed is the defect this row removes.
+    assert.deepEqual(checkHouseEpoch({ ...base, boundary: null }, t), []);
+  });
+
+  test("a series the Clearinghouse does not know is not counted as unsettled", () =>
+    assert.deepEqual(checkHouseEpoch({ ...base, series: [{ ...base.series[0], exists: false, settled: false }] }, t), []));
+
+  test("every blocker on one vault is one finding, not three pages", () => {
+    const f = checkHouseEpoch(
+      {
+        ...base,
+        boundary: { finalized: false, price: 0n },
+        series: [
+          { ...base.series[0], settled: false, live: 1 },
+          { longId: "9", label: "NVDA put 200.00 2027-01-15T21:00:00Z", exists: true, settled: true, longs: 0n, shorts: 500n, live: 0 },
+        ],
+      },
+      t,
+    );
+    assert.equal(f.length, 1);
+    assert.equal(f[0].data.blockers.length, 4);
+    assert.equal(f[0].data.trackedSeries, 2);
   });
 });
 
@@ -571,18 +703,22 @@ describe("v6: fee schedule", () => {
 
   test("the log replay gives each schedule the fees in effect when it was scheduled, idempotently", () => {
     const scan = emptyState(4663, "x").scan;
-    const at = (t) => BigInt(t + 86_400);
+    // Written in terms of the constant, not of 86,400: INTERFACE_VERSION 8 doubled FEE_CHANGE_DELAY, and a replay
+    // test with the old number baked in stops exercising "a change already due when the next is scheduled" and
+    // passes anyway, reporting nothing.
+    const at = (t) => BigInt(t + FEE_CHANGE_DELAY);
+    const afterDue = FEE_CHANGE_DELAY + 3600;
     const A = { ...FEES, premiumFeeBps: 600 };
     const B = { ...FEES, premiumFeeBps: 700 };
     const Cf = { ...FEES, premiumFeeBps: 300 };
     const ctor = v6log("FeeParamsSet", V6.BOOK, { params: FEES });
     const sA = v6log("FeeParamsScheduled", V6.BOOK, { params: A, effectiveAt: at(1000) });
     const sB = v6log("FeeParamsScheduled", V6.BOOK, { params: B, effectiveAt: at(2000) }); // replaces A before it is due
-    const sC = v6log("FeeParamsScheduled", V6.BOOK, { params: Cf, effectiveAt: at(2000 + 90_000) }); // after B is due
+    const sC = v6log("FeeParamsScheduled", V6.BOOK, { params: Cf, effectiveAt: at(2000 + afterDue) }); // after B is due
     const out = applyScanLogs(scan, [ctor, sA, sB, sC], v6addresses);
     const before = out.filter((e) => e.eventName === "FeeParamsScheduled").map((e) => e.feesBefore.premiumFeeBps);
     assert.deepEqual(before, [500, 500, 700]);
-    assert.deepEqual(scan.fees, { current: B, pending: Cf, effectiveAt: 2000 + 90_000 + 86_400 });
+    assert.deepEqual(scan.fees, { current: B, pending: Cf, effectiveAt: 2000 + afterDue + FEE_CHANGE_DELAY });
     const again = applyScanLogs(scan, [sC], v6addresses); // the reorg overlap re-reads the last blocks
     assert.equal(again[0].feesBefore.premiumFeeBps, 700);
     const blind = applyScanLogs(emptyState(4663, "x").scan, [sA], v6addresses);
@@ -907,10 +1043,9 @@ const typeOf = (i) => (i.type.startsWith("tuple") ? `(${(i.components ?? []).map
 const typesOf = (items) => (items ?? []).map(typeOf).join(",");
 const sigOf = (e) => `${e.name}(${typesOf(e.inputs)})`;
 
-describe("v7: the hand-written ABIs match the exported ones", () => {
+describe("v7 + v8: the hand-written ABIs match the exported ones", () => {
   const viem = loadViem();
-  // Which compiled ABI each hand-written view list belongs to. The rest (ERC-20, USDG, the Stock Token, the
-  // Chainlink proxy, the Safe, the pool) are third-party contracts with no artifact of ours.
+  // Which compiled ABI each hand-written view list belongs to. The rest are listed in THEIRS below.
   const OURS = {
     clearinghouse: "Clearinghouse",
     clearinghouseConfig: "Clearinghouse",
@@ -923,7 +1058,24 @@ describe("v7: the hand-written ABIs match the exported ones", () => {
     keeperRewards: "KeeperRewards",
     autoRoller: "AutoRoller",
     makerVault: "MakerVault",
+    // INTERFACE_VERSION 8.
+    accessManager: "AccessManager",
+    payoutRouter: "IPayoutRouter",
+    payoutAdapter: "UniV3PayoutAdapter",
+    feeSplitter: "IFeeSplitter",
   };
+  // Third-party contracts with no artifact of ours: ERC-20, USDG, the Stock Token and its registry, the Chainlink
+  // proxy, the Safe, a raw pool.
+  const THEIRS = ["erc20", "usdg", "stockToken", "stockRegistry", "feed", "safe", "pool"];
+
+  // The guard on the guard. The loop below only checks the keys OURS names, so ADDING a view list to ABI_TEXT and
+  // forgetting to name it here checks nothing at all and the suite stays green — the permissive direction. This
+  // fails the moment a key belongs to neither list.
+  test("every hand-written view list is either checked against an artifact or declared third-party", () => {
+    const declared = new Set([...Object.keys(OURS), ...THEIRS]);
+    const undeclared = Object.keys(ABI_TEXT).filter((k) => !declared.has(k));
+    assert.deepEqual(undeclared, [], "ABI_TEXT keys checked by nothing");
+  });
 
   // The point of the whole suite: monitor.mjs decodes series(), market() and limits() POSITIONALLY from these
   // strings. v7 appended a field to each of the three, and a monitor left on the v6 tuples reads the new returns
@@ -943,12 +1095,75 @@ describe("v7: the hand-written ABIs match the exported ones", () => {
 
   test("every scanned event signature is one a v2 contract emits", () => {
     const emitted = new Set();
-    for (const name of Object.values(OURS).concat(["UniV3PayoutAdapter", "RewardsDistributor", "MakerRegistry"])) {
+    for (const name of Object.values(OURS).concat(["UniV3PayoutAdapter", "RewardsDistributor", "MakerRegistry", "IBuybackExecutor"])) {
       for (const e of abiJson(name)) if (e.type === "event") emitted.add(sigOf(e));
     }
     for (const item of viem.parseAbi(SCAN_EVENTS)) {
       assert.ok(emitted.has(sigOf(item)), `no v2 contract emits ${sigOf(item)}`);
     }
+  });
+
+  // THE ONE THAT CANNOT BE FELT. IPayoutRouter.routes and UniV3PayoutAdapter.routes are the SAME selector with
+  // different returns, so decoding the router's answer with the adapter's list succeeds and reads the venue enum
+  // as an address. Pinned here from the exports, both halves: the selectors must be equal AND the returns must
+  // not be — if a later change made the tuples agree this test would be pointless and would say so.
+  test("v8: routes(address) is one selector with two different return tuples", () => {
+    const routerRoutes = abiJson("IPayoutRouter").find((e) => e.type === "function" && e.name === "routes");
+    const adapterRoutes = abiJson("UniV3PayoutAdapter").find((e) => e.type === "function" && e.name === "routes");
+    assert.ok(routerRoutes && adapterRoutes, "both artifacts must declare routes()");
+    const sel = (e) => viem.toFunctionSelector(`function ${sigOf(e)}`);
+    assert.equal(sel(routerRoutes), "0xd7409659", "IPayoutRouter.routes selector");
+    assert.equal(sel(adapterRoutes), "0xd7409659", "UniV3PayoutAdapter.routes selector");
+    assert.notEqual(typesOf(routerRoutes.outputs), typesOf(adapterRoutes.outputs), "the collision is only dangerous while the tuples differ");
+    assert.equal(typesOf(routerRoutes.outputs), "(uint8,uint24,int24,address,uint16)");
+    assert.equal(typesOf(adapterRoutes.outputs), "address,uint24");
+    // And the monitor's two hand-written lists must be the two shapes, not two copies of one.
+    const hand = (key) => typesOf(viem.parseAbi(ABI_TEXT[key]).find((i) => i.type === "function" && i.name === "routes").outputs);
+    assert.equal(hand("payoutRouter"), typesOf(routerRoutes.outputs));
+    assert.equal(hand("payoutAdapter"), typesOf(adapterRoutes.outputs));
+  });
+
+  test("v8: the manager, router and splitter topics match the pinned contract events", () => {
+    const topic = (sig) => viem.toEventSelector(sig);
+    const src = readFileSync(new URL("./monitor.mjs", import.meta.url), "utf8");
+    const expected = {
+      "OperationScheduled(bytes32 indexed operationId, uint32 indexed nonce, uint48 schedule, address caller, address target, bytes data)":
+        "0x82a2da5dee54ea8021c6545b4444620291e07ee83be6dd57edb175062715f3b4",
+      "OperationExecuted(bytes32 indexed operationId, uint32 indexed nonce)": "0x76a2a46953689d4861a5d3f6ed883ad7e6af674a21f8e162707159fc9dde614d",
+      "OperationCanceled(bytes32 indexed operationId, uint32 indexed nonce)": "0xbd9ac67a6e2f6463b80927326310338bcbb4bdb7936ce1365ea3e01067e7b9f7",
+      "RoleGranted(uint64 indexed roleId, address indexed account, uint32 delay, uint48 since, bool newMember)":
+        "0xf98448b987f1428e0e230e1f3c6e2ce15b5693eaf31827fbd0b1ec4b424ae7cf",
+      "RoleRevoked(uint64 indexed roleId, address indexed account)": "0xf229baa593af28c41b1d16b748cd7688f0c83aaf92d4be41c44005defe84c166",
+      "RoleAdminChanged(uint64 indexed roleId, uint64 indexed admin)": "0x1fd6dd7631312dfac2205b52913f99de03b4d7e381d5d27d3dbfe0713e6e6340",
+      "RoleGuardianChanged(uint64 indexed roleId, uint64 indexed guardian)": "0x7a8059630b897b5de4c08ade69f8b90c3ead1f8596d62d10b6c4d14a0afb4ae2",
+      "RoleGrantDelayChanged(uint64 indexed roleId, uint32 delay, uint48 since)": "0xfeb69018ee8b8fd50ea86348f1267d07673379f72cffdeccec63853ee8ce8b48",
+      "TargetFunctionRoleUpdated(address indexed target, bytes4 selector, uint64 indexed roleId)":
+        "0x9ea6790c7dadfd01c9f8b9762b3682607af2c7e79e05a9f9fdf5580dde949151",
+      "TargetAdminDelayUpdated(address indexed target, uint32 delay, uint48 since)": "0xa56b76017453f399ec2327ba00375dbfb1fd070ff854341ad6191e6a2e2de19c",
+      "TargetClosed(address indexed target, bool closed)": "0x90d4e7bb7e5d933792b3562e1741306f8be94837e1348dacef9b6f1df56eb138",
+      "RouteSet(address indexed asset, uint8 venue, bytes32 poolId, uint24 fee, uint16 feeBps)": "0xadc0c7d7edaf45c70c9c1135c172efd179926c663b67dca1e2b568c73670d447",
+      "RouteCleared(address indexed asset)": "0xf13e05d9cb53ed68362bc7ee84fb0c6c651d6493c29a2a2847c4926aeed3258b",
+      "Distributed(address indexed asset, uint256 assetIn, uint256 usdgIn, uint256 treasuryOut, uint256 buybackAdded)":
+        "0xac34a64bfd07da55a58f5cdd4ef06f701da1d29b4164e748c52efa857fa4810a",
+      "DistributionSkipped(address indexed asset, bytes32 reason)": "0x909c9a749e25b695e78c231c84211fe590416c4ad5904132283c15b2d911f10c",
+      "BoughtBack(uint256 usdgIn, uint256 tokenOut)": "0x15b90a6a755d5ed0f929f1f40375d58183388d8d9e2f8e9a2efa93043e70f6de",
+      "Burned(uint256 amount)": "0xd83c63197e8e676d80ab0122beba9a9d20f3828839e9a1d6fe81d242e9cd7e6e",
+      "MinterSet(address indexed minter, bool allowed)": "0x583b0aa0e528532caf4b907c11d7a8158a122fe2a6fb80cd9b09776ebea8d92d",
+      "DefaultMarketFeesSet(uint16 exerciseFeeBps, uint32 mintFeePpm)": "0xa20eb2fd8695b7b27879d7fb19174625c3f42b8167d57c41bebeb8795f98bba3",
+      "DiscountModuleSet(address indexed module)": "0x43fab025147db74d6b090f20292d9d2228109b30e23de9f14d9b53c473093b52",
+      "TreasurySet(address indexed treasury)": "0x3c864541ef71378c6229510ed90f376565ee42d9c5e0904a984a9e863e6db44f",
+      "FeesSwept(address indexed asset, address indexed to, uint256 amount)": "0x244e51bc38c1452fa8aaf487bcb4bca36c2baa3a5fbdb776b1eabd8dc6d277cd",
+    };
+    for (const [sig, t0] of Object.entries(expected)) {
+      assert.ok(src.includes(`"event ${sig}"`), `SCAN_EVENTS has ${sig}`);
+      assert.equal(topic(`event ${sig}`), t0, sig);
+    }
+    // AccessControl's RoleGranted and the manager's share a NAME and nothing else. If these ever matched, every
+    // manager role change would be read as a bytes32 role hash and named after the wrong role.
+    assert.notEqual(
+      topic("event RoleGranted(uint64 indexed roleId, address indexed account, uint32 delay, uint48 since, bool newMember)"),
+      topic("event RoleGranted(bytes32 indexed role, address indexed account, address indexed sender)"),
+    );
   });
 
   test("the v7 topics and the CANCEL_STALE action match the pinned contract events", () => {
@@ -1191,9 +1406,10 @@ describe("v7: the scan's rent ledger and roller positions", () => {
     const scan = emptyState(4663, "x").scan;
     const key = `${W.toLowerCase()}:${U.toLowerCase()}`;
     applyScanLogs(scan, [log("Rolled", AR, { writer: W, underlying: U, longId: 84n, orderId: 7n, strike: 5n, expiry: E, price: 1n, units: 100n }, 20, 0)], addresses);
-    assert.deepEqual(scan.roller[key], { w: W, u: U, e: E });
+    // `p`: the ask price the roll rested, kept so a Repriced can be measured against it (T-OP-090).
+    assert.deepEqual(scan.roller[key], { w: W, u: U, e: E, p: "1" });
     applyScanLogs(scan, [log("StaleAskCancelled", AR, { writer: W, underlying: U, longId: 84n, orderId: 7n, spot: 6n, updatedAt: 1n }, 21, 0)], addresses);
-    assert.deepEqual(scan.roller[key], { w: W, u: U, e: E }, "the position survives its ask");
+    assert.deepEqual(scan.roller[key], { w: W, u: U, e: E, p: "1" }, "the position survives its ask");
     applyScanLogs(scan, [log("StrategyStopped", AR, { writer: W, underlying: U }, 22, 0)], addresses);
     assert.equal(scan.roller[key], undefined);
     // Another contract's Rolled is not ours.
@@ -1320,6 +1536,60 @@ describe("payload, kinds, exit codes", () => {
   });
 });
 
+test("price divergence: calibrated band is strict, escalates on a second head, then clears", () => {
+  const base = {
+    ticker: "NVDA", underlying: addr(0xa001), chainlinkSource: SRC.chainlink, poolSource: SRC.univ3,
+    feedPrice: 100_000_000n, poolPrice: 102_000_000n, bandBps: 200, head: 10n,
+  };
+  assert.deepEqual(checkPriceDivergence(base), { findings: [], streak: null }, "exact band is quiet");
+  const first = checkPriceDivergence({ ...base, poolPrice: 102_500_000n });
+  assert.equal(first.findings[0].severity, "warn");
+  assert.equal(first.findings[0].data.gapBps, 250);
+  assert.deepEqual(first.streak, { head: "10", count: 1 });
+  assert.equal(checkPriceDivergence({ ...base, poolPrice: 102_500_000n }, first.streak).findings[0].severity, "warn", "same head is not a second pass");
+  const second = checkPriceDivergence({ ...base, poolPrice: 102_500_000n, head: 11n }, first.streak);
+  assert.equal(second.findings[0].severity, "error");
+  assert.equal(second.findings[0].data.passes, 2);
+  assert.deepEqual(checkPriceDivergence({ ...base, poolPrice: 101_000_000n, head: 12n }, second.streak), { findings: [], streak: null });
+  assert.deepEqual(checkPriceDivergence({ ...base, feedPrice: 0n }, second.streak), { findings: [], streak: null });
+});
+
+test("price divergence pass reads both sources, persists streak, and never pages on an unavailable pool", async () => {
+  const dir = tmp("monitor-divergence-");
+  try {
+    const nvda = market("NVDA", 1, { pool: addr(0x9001), floor: "1" });
+    const registry = writeRegistry(dir, { markets: [nvda] });
+    const chain = new FakeChain({ timestamp: Date.UTC(2026, 8, 21, 15) / 1000 });
+    let poolOk = true;
+    let poolPrice = 102_500_000n;
+    chain.read = (address, fn, args) => {
+      if (fn === "latest" && address.toLowerCase() === SRC.chainlink.toLowerCase()) return [true, 100_000_000n, BigInt(chain.head.timestamp)];
+      if (fn === "latest" && address.toLowerCase() === SRC.univ3.toLowerCase()) return [poolOk, poolOk ? poolPrice : 0n, BigInt(chain.head.timestamp)];
+      return defaultRead(chain, address, fn, args);
+    };
+    const opts = options(dir, registry, [], { MONITOR_DIVERGENCE_BANDS: "NVDA=200" });
+    const first = await runOnce(opts, { viem: fakeViem(chain) });
+    assert.equal(first.checks.divergence.status, "ok");
+    assert.equal(first.findings.find((f) => f.kind === "v2_mon_price_divergence")?.severity, "warn");
+    chain.setHead(chain.head.number + 1n, chain.head.timestamp + 60);
+    const second = await runOnce(opts, { viem: fakeViem(chain) });
+    assert.equal(second.findings.find((f) => f.kind === "v2_mon_price_divergence")?.severity, "error");
+    poolOk = false;
+    chain.setHead(chain.head.number + 1n, chain.head.timestamp + 60);
+    const missing = await runOnce(opts, { viem: fakeViem(chain) });
+    assert.equal(missing.checks.divergence.status, "incomplete");
+    assert.equal(kindsOf(missing).includes("v2_mon_price_divergence"), false);
+    poolOk = true;
+    poolPrice = 100_500_000n;
+    chain.setHead(chain.head.number + 1n, chain.head.timestamp + 60);
+    const clear = await runOnce(opts, { viem: fakeViem(chain) });
+    assert.equal(clear.checks.divergence.status, "ok");
+    assert.equal(kindsOf(clear).includes("v2_mon_price_divergence"), false);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 describe("arguments and registry", () => {
   test("rpc required; thresholds, health, tickers; the token only from the environment", () => {
     assert.throws(() => parseArgs([], {}), UsageError);
@@ -1336,6 +1606,10 @@ describe("arguments and registry", () => {
     assert.deepEqual(o.tickers, ["nvda", "TSLA"]);
     assert.equal(o.token, "t".repeat(32));
     assert.equal(DEFAULTS.lateS, 7200, "defaults are not mutated");
+    assert.deepEqual(parseArgs(["--rpc", "http://x", "--divergence-band", "tsla=240"], { MONITOR_DIVERGENCE_BANDS: "NVDA=210" }).divergenceBands, { NVDA: 210, TSLA: 240 });
+    assert.deepEqual(parseArgs(["--rpc", "http://x"], {}).divergenceBands, {}, "un-calibrated markets stay inactive");
+    assert.throws(() => parseArgs(["--rpc", "http://x", "--divergence-band", "NVDA=300"], {}), /1\.\.299/);
+    assert.throws(() => parseArgs(["--rpc", "http://x"], { MONITOR_DIVERGENCE_BANDS: "NVDA=200,nvda=210" }), /duplicate/);
     assert.throws(() => parseArgs(["--rpc", "http://x", "--token", "abc"], {}), /unknown argument --token/);
     assert.throws(() => parseArgs(["--rpc", "http://x", "--threshold", "nope=1"], {}), /unknown threshold/);
     assert.throws(() => parseArgs(["--rpc", "ftp://x"], {}), /http/);
@@ -1480,12 +1754,12 @@ describe("a pass against an in-memory chain", () => {
 
   test("a readable anchor block pages the admin-role grant found since the last run", async () => {
     const { r2 } = await anchorRun({ anchorReadFails: false });
-    assert.deepEqual(kindsOf(r2), ["v2_mon_config_changed"]);
+    assert.deepEqual(kindsOf(r2), ["v2_mon_config_changed", TVL_DARK]);
   });
 
   test("a 429 on the anchor read keeps the scan state: nothing is adopted and no baseline is wiped", async () => {
     const { r2, s2 } = await anchorRun({ anchorReadFails: true });
-    assert.deepEqual(kindsOf(r2), ["v2_mon_config_changed"], "the RoleGranted must still page");
+    assert.deepEqual(kindsOf(r2), ["v2_mon_config_changed", TVL_DARK], "the RoleGranted must still page");
     assert.equal(s2.scan.adoptConfigUntil, "20000", "the adoption boundary must not jump to the head");
     assert.equal(Object.keys(s2.feeds).length, 1, "feed baselines must survive a failed anchor read");
     assert.ok(
@@ -1656,7 +1930,7 @@ describe("a pass against an in-memory chain", () => {
       return defaultRead(chain, address, fn, args);
     };
     const r = await runOnce(options(dir, registry), { viem: fakeViem(chain) });
-    assert.deepEqual(kindsOf(r), ["v2_mon_pool_wiring", "v2_mon_pool_wiring"], "one for the pool, one for the floor");
+    assert.deepEqual(kindsOf(r), [TVL_DARK, "v2_mon_pool_wiring", "v2_mon_pool_wiring"], "one for the pool, one for the floor");
     assert.equal(r.exit, 1);
   });
 
@@ -1711,7 +1985,7 @@ describe("a pass against an in-memory chain", () => {
       chain.setHead(20_060n, chain.head.timestamp + 6);
 
       const blind = await runOnce(options(dir, registry), { viem: fakeViem(chain) });
-      assert.deepEqual(blind.sent.map((s) => `${s.kind}/${s.delivered}/${s.logged}`), ["v2_mon_config_changed/false/true"]);
+      assert.deepEqual(blind.sent.map((s) => `${s.kind}/${s.delivered}/${s.logged}`), ["v2_mon_config_changed/false/true", `${TVL_DARK}/false/true`]);
       assert.equal(blind.deliveryFailures, 0, "nowhere to send is not a delivery failure");
       assert.equal(blind.exit, 1, "and must not raise the exit code to 4");
 
@@ -1719,9 +1993,9 @@ describe("a pass against an in-memory chain", () => {
       const wired = await runOnce(options(dir, registry, [], { ALERT_WEBHOOK: `http://127.0.0.1:${port}/alert` }), { viem: fakeViem(chain) });
       assert.deepEqual(
         wired.sent.map((s) => `${s.kind}/${s.reason}/${s.delivered}`),
-        ["v2_mon_config_changed/retry/true"],
+        [`${TVL_DARK}/retry/true`, "v2_mon_config_changed/retry/true"],
       );
-      assert.deepEqual(received, ["v2_mon_config_changed"]);
+      assert.deepEqual(received, [TVL_DARK, "v2_mon_config_changed"]);
     } finally {
       relay.close();
     }
@@ -1858,7 +2132,7 @@ describe("a pass against an in-memory chain", () => {
         await runOnce(opts, { viem: fakeViem(chain) });
         chain.setHead(chain.head.number + 600n, chain.head.timestamp + 60);
       }
-      assert.deepEqual(received, ["v2_mon_pool_liquidity_low"], `one pool ±1 % around its floor over four passes: ${JSON.stringify(received)}`);
+      assert.deepEqual(received, [TVL_DARK, "v2_mon_pool_liquidity_low"], `one pool ±1 % around its floor over four passes: ${JSON.stringify(received)}`);
       const state = JSON.parse(readFileSync(path.join(dir, "state.json"), "utf8"));
       assert.ok(state.alerts[`v2_mon_pool_liquidity_low:${addr(0x9001)}`] !== undefined, "and the condition stays open until liquidity clears the band");
     } finally {
@@ -1874,7 +2148,7 @@ describe("a pass against an in-memory chain", () => {
     const chain = new FakeChain({ head: 20_000n });
     chain.read = (address, fn, args) => (fn === "outflow" ? [2_400_000_000n, 100_000_000n] : defaultRead(chain, address, fn, args));
     const r = await runOnce(options(dir, registry), { viem: fakeViem(chain) });
-    assert.deepEqual(kindsOf(r), ["v2_mon_vault_outflow"]);
+    assert.deepEqual(kindsOf(r), ["v2_mon_vault_outflow", TVL_DARK]);
     assert.equal(r.findings[0].severity, "error");
     assert.match(r.checks.vault.detail, /24 h outflow 2400\.00 used of 2500\.00/);
   });
@@ -1953,13 +2227,13 @@ describe("a pass against an in-memory chain", () => {
     };
     const opts = options(dir, registry);
     const r1 = await runOnce(opts, { viem: fakeViem(chain) });
-    assert.deepEqual(kindsOf(r1), [], "one pass over the strike is not evidence yet");
+    assert.deepEqual(kindsOf(r1), [TVL_DARK], "one pass over the strike is not evidence yet: nothing pages but the dark audit trigger");
     const s1 = JSON.parse(readFileSync(path.join(dir, "state.json"), "utf8"));
     assert.deepEqual(s1.scan.rollerStale[`${W}:${U2}`], { orderId: "7", since: now });
 
     chain.setHead(20_100n, now + 120);
     const r2 = await runOnce(opts, { viem: fakeViem(chain) });
-    assert.deepEqual(kindsOf(r2), ["v2_mon_roller_ask_overtaken"]);
+    assert.deepEqual(kindsOf(r2), ["v2_mon_roller_ask_overtaken", TVL_DARK]);
     assert.equal(r2.findings[0].severity, "error");
     assert.match(r2.findings[0].message, /NVDA \(call 200\.00, 5\.00 shares left.*at or past its strike for 2 min/);
 
@@ -1967,17 +2241,345 @@ describe("a pass against an in-memory chain", () => {
     live = false;
     chain.setHead(20_200n, now + 180);
     const r3 = await runOnce(opts, { viem: fakeViem(chain) });
-    assert.deepEqual(kindsOf(r3), []);
+    assert.deepEqual(kindsOf(r3), [TVL_DARK], "the roller page clears; the dark audit trigger is unrelated and stays");
     const s3 = JSON.parse(readFileSync(path.join(dir, "state.json"), "utf8"));
     assert.equal(s3.alerts[`v2_mon_roller_ask_overtaken:${W.toLowerCase()}:${U2.toLowerCase()}`], undefined, "the condition closes when the ask is gone");
     assert.deepEqual(s3.scan.rollerStale, {});
     assert.ok(s3.scan.roller[`${W.toLowerCase()}:${U2.toLowerCase()}`] !== undefined, "the position stays tracked until its expiry is long past");
+  });
+
+  // T-437. A setMarketOracle moves the market's pointer and leaves every series already created on the oracle
+  // createSeries pinned into it, which is what cancelStale reads (T-310) and what the series settles on. Two series
+  // under ONE underlying can therefore be judged on two different oracles in one pass. A monitor reading the
+  // registry's published SettlementOracle (or the market's pointer) judges both on a price the contract does not use,
+  // and never pages for the in-the-money ask left resting.
+  test("T-437: two series on one underlying with different pinned oracles are each judged on their own", async () => {
+    const dir = scratch("monitor-roller-oracles-");
+    const registry = writeRegistry(dir, { markets: [market("NVDA", 1)], deployBlock: 1000 });
+    const now = 1_790_000_000;
+    const U2 = addr(0xa001);
+    const W1 = addr(0xf1);
+    const W2 = addr(0xf2);
+    const ORACLE_A = addr(0x0ec1);
+    const ORACLE_B = addr(0x0ec2);
+    const expiry = now + 3 * 86_400;
+    const ROLLED =
+      "event Rolled(address indexed writer, address indexed underlying, uint256 longId, uint256 orderId, uint128 strike, uint40 expiry, uint128 price, uint64 units)";
+    const chain = new FakeChain({ head: 20_000n, timestamp: now });
+    [
+      [W1, 84n, 7n, 0],
+      [W2, 85n, 8n, 1],
+    ].forEach(([w, longId, orderId, logIndex]) => {
+      chain.logs.push(
+        rawLog(ROLLED, { writer: w, underlying: U2, longId, orderId, strike: 200_000_000n, expiry, price: 5n, units: 500n }, { address: C.autoRoller, blockNumber: 5000, logIndex }),
+      );
+    });
+
+    /** Every oracle address a trySpot was sent to, lower-case. */
+    const asked = [];
+    chain.read = (address, fn, args) => {
+      switch (fn) {
+        case "position":
+          return String(args[0]).toLowerCase() === W1.toLowerCase() ? [84n, 7n, expiry] : [85n, 8n, expiry];
+        case "getOrders":
+          return args[0].map((id) => ({ maker: id === 7n ? W1 : W2, longId: id === 7n ? 84n : 85n, kind: 2, price: 5n, units: 500n, filled: 0n, validUntil: expiry, cancelled: false }));
+        case "series":
+          return {
+            underlying: U2,
+            isPut: false,
+            expiry: BigInt(expiry),
+            strike: 200_000_000n,
+            // Series 84 kept oracle A; series 85 was created later on oracle B. Neither is the published one.
+            oracle: args[0] === 84n ? ORACLE_A : ORACLE_B,
+            exerciseFeeBps: 30,
+            settled: false,
+            settlementPrice: 0n,
+            longPayoutPerUnit: 0n,
+            feePerUnit: 0n,
+            shortPayoutPerUnit: 0n,
+            mintFeePpm: 80,
+            mintFeesHeld: 0n,
+          };
+        case "trySpot": {
+          const who = String(address).toLowerCase();
+          asked.push(who);
+          // A is past the 200.00 strike, B is short of it. Anything else - the published oracle, the market's
+          // pointer - answers short too, so reading one of those pages for neither writer.
+          return [true, who === ORACLE_A.toLowerCase() ? 210_000_000n : 190_000_000n, BigInt(chain.head.timestamp)];
+        }
+        default:
+          return defaultRead(chain, address, fn, args);
+      }
+    };
+
+    const opts = options(dir, registry);
+    await runOnce(opts, { viem: fakeViem(chain) });
+    assert.deepEqual([...new Set(asked)].sort(), [ORACLE_A.toLowerCase(), ORACLE_B.toLowerCase()].sort(), "one trySpot per pinned series oracle");
+    assert.ok(!asked.includes(String(C.settlementOracle).toLowerCase()), "the registry's published oracle is not a spot source for an existing series");
+    const s1 = JSON.parse(readFileSync(path.join(dir, "state.json"), "utf8"));
+    assert.deepEqual(
+      Object.keys(s1.scan.rollerStale),
+      [`${W1.toLowerCase()}:${U2.toLowerCase()}`],
+      "only the series whose OWN oracle has overtaken it starts the clock",
+    );
+
+    chain.setHead(20_100n, now + 120);
+    const r2 = await runOnce(opts, { viem: fakeViem(chain) });
+    // Only this page's findings: the rest of the pass is another check's business and not what is pinned here.
+    const roller = r2.findings.filter((f) => f.kind.startsWith("v2_mon_roller"));
+    assert.deepEqual(roller.map((f) => f.kind), ["v2_mon_roller_ask_overtaken"], "one page, not two and not none");
+    assert.equal(roller[0].id, `v2_mon_roller_ask_overtaken:${W1.toLowerCase()}:${U2.toLowerCase()}`, "and it names the writer whose series oracle overtook it");
+    assert.match(roller[0].message, /spot 210\.00/, "the price it judged on is oracle A's, the one series 84 pinned - not B's 190.00 and not the published oracle's");
   });
 });
 
 /* -------------------------------------------------------------------------------------------------
  * The always-on loop, as a real child process.
  * ------------------------------------------------------------------------------------------------- */
+/* -------------------------------------------------------------------------------------------------
+ * T-OP-090. AutoRoller.Repriced: the PRICER lane moving a writer's ask. T-OP-063 capped each reprice to a
+ * MAX_REPRICE_DROP_BPS drop so a leaked key needs several calls to reach the floor, and the contract NatSpec
+ * (AutoRoller.sol:134) promises each one pages. The scan remembers the ask each roll rested and each reprice set;
+ * repriceFindings judges every new reprice against the price it replaced (floor-ward step) and against the
+ * registry pricer key (foreign sender), and warns the rest at a rate cap. Nothing typed in: the signature is the
+ * ABI's, the cap is the contract's mirrored constant, the key is the registry's.
+ * ------------------------------------------------------------------------------------------------- */
+describe("T-OP-090: AutoRoller.Repriced pages a floor-ward step and a foreign sender, warns the rest at a cap", () => {
+  const ROLLER = "0x1111111111111111111111111111111111111a07";
+  const PRICER = "0x00000000000000000000000000000000000000c1";
+  const OTHER = "0x00000000000000000000000000000000000000c2";
+  const WRITER = "0x00000000000000000000000000000000000000d1";
+  const addresses = { ...v6addresses, autoRoller: ROLLER };
+  const tickerOf = (a) => (a.toLowerCase() === U.toLowerCase() ? "NVDA" : "OTHER");
+  let n = 0;
+  const log = (eventName, args, over = {}) => {
+    n += 1;
+    return { eventName, address: ROLLER, args, blockNumber: 1000n + BigInt(n), transactionHash: `0x${String(0xa000 + n).padStart(64, "0")}`, logIndex: 0, ...over };
+  };
+  const rolled = (price) => log("Rolled", { writer: WRITER, underlying: U, longId: 7n, orderId: 100n, strike: 230_000_000n, expiry: 1_800_000_000n, price, units: 10n });
+  const repriced = (price, over = {}) => log("Repriced", { writer: WRITER, underlying: U, oldOrderId: 100n, newOrderId: 101n, price }, over);
+  const senderOf = (events, from) => new Map(events.map((e) => [e.transactionHash.toLowerCase(), from]));
+  const ctx = (events, from = PRICER, over = {}) => ({ t: DEFAULTS, pricerKey: PRICER, senders: senderOf(events, from), tickerOf, ...over });
+  const fresh = () => ({ series: {}, expiryDone: {}, rentAt: null });
+
+  test("the scan signature is the ABI's Repriced, and the cap mirrors AutoRoller.MAX_REPRICE_DROP_BPS", () => {
+    const abi = JSON.parse(readFileSync(path.join(ABIS, "AutoRoller.json"), "utf8"));
+    const ev = abi.find((x) => x.type === "event" && x.name === "Repriced");
+    const sig = `Repriced(${ev.inputs.map((i) => `${i.type}${i.indexed ? " indexed" : ""} ${i.name}`).join(", ")})`;
+    assert.ok(SCAN_EVENTS.includes(`event ${sig}`), `SCAN_EVENTS carries the ABI's ${sig}`);
+    assert.ok(DEDICATED_EVENTS.has("Repriced"), "Repriced has its own kinds, so v2_mon_config_changed never pages it");
+    assert.equal(MAX_REPRICE_DROP_BPS, 2_500);
+  });
+
+  test("fold: a roll remembers the ask, a reprice is collected with the price it replaced and then remembers its own", () => {
+    const scan = fresh();
+    const r1 = repriced(2_000_000n);
+    const out = applyScanLogs(scan, [rolled(2_500_000n), r1], addresses);
+    assert.equal(out.length, 1);
+    assert.equal(out[0].eventName, "Repriced");
+    assert.equal(out[0].priceBefore, "2500000", "the roll's ask is what the reprice replaced");
+    assert.equal(scan.roller[`${WRITER.toLowerCase()}:${U.toLowerCase()}`].p, "2000000", "the reprice is now the remembered ask");
+    const r2 = repriced(1_900_000n);
+    assert.equal(applyScanLogs(scan, [r2], addresses)[0].priceBefore, "2000000", "the second reprice sees the first");
+    // The REORG_OVERLAP replay of an already-counted log neither re-collects it nor moves the remembered ask.
+    assert.deepEqual(applyScanLogs(scan, [r2], addresses), []);
+    assert.equal(scan.roller[`${WRITER.toLowerCase()}:${U.toLowerCase()}`].p, "1900000");
+    // A reprice for a position the scan never saw rolled is collected with no prior price.
+    const orphan = log("Repriced", { writer: OTHER, underlying: U, oldOrderId: 5n, newOrderId: 6n, price: 1_000_000n });
+    assert.equal(applyScanLogs(scan, [orphan], addresses)[0].priceBefore, null);
+    // Not from the AutoRoller: ignored.
+    assert.deepEqual(applyScanLogs(fresh(), [repriced(1n, { address: V6.BOOK })], addresses), []);
+  });
+
+  test("(a) a floor-ward step pages: the drop is at least the fraction of the per-call cap; a small move does not", () => {
+    // 20 % of the ask in one call = 0.8 x the 25 % cap: the boundary, inclusive.
+    const step = repriced(2_000_000n, { priceBefore: "2500000" });
+    const out = repriceFindings([step], "100", ctx([step]));
+    assert.deepEqual(kinds(out), ["v2_mon_reprice_floorward/error"]);
+    assert.equal(out[0].event, true);
+    assert.equal(out[0].key, `${step.transactionHash.toLowerCase()}:0`);
+    assert.match(out[0].message, /2\.50 -> 2\.00 \(-20 %\).*sender is the registry pricer key/);
+    // Just under the boundary: an ordinary warn.
+    const small = repriced(2_000_001n, { priceBefore: "2500000" });
+    assert.deepEqual(kinds(repriceFindings([small], "100", ctx([small]))), ["v2_mon_repriced/warn"]);
+    // A raise is never floor-ward.
+    const up = repriced(2_600_000n, { priceBefore: "2500000" });
+    assert.deepEqual(kinds(repriceFindings([up], "100", ctx([up]))), ["v2_mon_repriced/warn"]);
+    // No prior price: the drop cannot be judged, the warn says so.
+    const unknown = repriced(1n, { priceBefore: null });
+    const u = repriceFindings([unknown], "100", ctx([unknown]));
+    assert.deepEqual(kinds(u), ["v2_mon_repriced/warn"]);
+    assert.match(u[0].message, /ask the scan never saw/);
+    // The fraction is a threshold: at 1 only a maximal (25 %) step pages.
+    assert.deepEqual(kinds(repriceFindings([step], "100", ctx([step], PRICER, { t: { ...DEFAULTS, repricePageDropFraction: 1 } }))), ["v2_mon_repriced/warn"]);
+    const maximal = repriced(1_875_000n, { priceBefore: "2500000" });
+    assert.deepEqual(kinds(repriceFindings([maximal], "100", ctx([maximal], PRICER, { t: { ...DEFAULTS, repricePageDropFraction: 1 } }))), ["v2_mon_reprice_floorward/error"]);
+  });
+
+  test("(b) a foreign sender pages, with or without a floor-ward step; an unknown sender or no pricer key is said, not assumed", () => {
+    const e = repriced(2_490_000n, { priceBefore: "2500000" });
+    const out = repriceFindings([e], "100", ctx([e], OTHER));
+    assert.deepEqual(kinds(out), ["v2_mon_reprice_foreign_sender/error"]);
+    assert.match(out[0].message, new RegExp(`sent by ${OTHER}, which is NOT the registry pricer key ${PRICER}`));
+    assert.equal(out[0].data.sender, OTHER);
+    // Both at once: two pages, one key each.
+    const both = repriced(1_900_000n, { priceBefore: "2500000" });
+    const two = repriceFindings([both], "100", ctx([both], OTHER));
+    assert.deepEqual(kinds(two), ["v2_mon_reprice_floorward/error", "v2_mon_reprice_foreign_sender/error"]);
+    assert.match(two.find((f) => f.kind === "v2_mon_reprice_floorward").message, /sender is foreign/);
+    // Sender lookup failed: not foreign, and the warn says the sender could not be read.
+    const unread = repriceFindings([e], "100", ctx([e], null));
+    assert.deepEqual(kinds(unread), ["v2_mon_repriced/warn"]);
+    assert.match(unread[0].message, /sender could not be read/);
+    // No pricer key in the registry: the condition is not judged.
+    const nokey = repriceFindings([e], "100", ctx([e], OTHER, { pricerKey: null }));
+    assert.deepEqual(kinds(nokey), ["v2_mon_repriced/warn"]);
+    assert.match(nokey[0].message, /no pricer key in the registry/);
+  });
+
+  test("(c) a normal pricer reprice is quiet: one warn, no page; adopted history is silent", () => {
+    const e = repriced(2_480_000n, { priceBefore: "2500000" });
+    const out = repriceFindings([e], "100", ctx([e]));
+    assert.deepEqual(kinds(out), ["v2_mon_repriced/warn"]);
+    assert.match(out[0].message, /2\.50 -> 2\.48 \(-0\.8 %\); sent by the registry pricer key/);
+    assert.deepEqual(repriceFindings([repriced(2_480_000n, { priceBefore: "2500000", blockNumber: 100n })], "100", ctx([e])), [], "at or before adoptUntil is adopted");
+  });
+
+  test("the warn is rate-capped: repriceWarnCap individually, then one summary; pages are never capped", () => {
+    const events = [];
+    for (let i = 0; i < 6; i++) events.push(repriced(2_490_000n - BigInt(i), { priceBefore: "2500000" }));
+    const out = repriceFindings(events, "100", ctx(events));
+    const warns = out.filter((f) => f.kind === "v2_mon_repriced");
+    assert.equal(warns.length, DEFAULTS.repriceWarnCap + 1, "cap individual warns plus one summary");
+    const summary = warns[warns.length - 1];
+    assert.match(summary.message, /3 more AutoRoller\.Repriced in this run \(NVDA\).*capped at 3 per run/);
+    assert.equal(summary.data.count, 3);
+    assert.ok(summary.key.endsWith(":summary"));
+    // Six floor-ward steps: six pages, no cap.
+    const steps = events.map((e) => ({ ...e, args: { ...e.args, price: 1_900_000n } }));
+    assert.equal(repriceFindings(steps, "100", ctx(steps)).filter((f) => f.kind === "v2_mon_reprice_floorward").length, 6);
+    // The cap is a threshold.
+    assert.equal(repriceFindings(events, "100", ctx(events, PRICER, { t: { ...DEFAULTS, repriceWarnCap: 10 } })).length, 6);
+  });
+});
+
+/* -------------------------------------------------------------------------------------------------
+ * T-OP-083. The issuer's OraclePaused() / OracleUnpaused() LOGS on the launch tokens page v2_mon_oracle_halted
+ * (error) and clear themselves. The per-poll oraclePaused() flag (v2_mon_oracle_paused, warn) cannot see a halt
+ * that starts and ends between two polls; the log can. The topics are derived from the event signatures with
+ * viem, never typed; the addresses come from the registry rows named by --launch, never typed.
+ * ------------------------------------------------------------------------------------------------- */
+describe("T-OP-083: the launch tokens' OraclePaused() log pages and clears itself", () => {
+  const dirs = [];
+  const scratch = (prefix) => {
+    const d = tmp(prefix);
+    dirs.push(d);
+    return d;
+  };
+  after(() => {
+    for (const d of dirs) rmSync(d, { recursive: true, force: true });
+  });
+  const topics = oracleHaltTopics(viem);
+  const halted = (token, blockNumber, logIndex = 0) => rawLog("event OraclePaused()", {}, { address: token, blockNumber, logIndex });
+  const unhalted = (token, blockNumber, logIndex = 0) => rawLog("event OracleUnpaused()", {}, { address: token, blockNumber, logIndex });
+  const tickerOf = (a) => (a.toLowerCase() === addr(0xa1).toLowerCase() ? "NVDA" : a.toLowerCase() === addr(0xa2).toLowerCase() ? "SPCX" : "OTHER");
+
+  test("the topics are the keccak of the two IOraclePausable signatures", () => {
+    // Re-derived, and pinned to what ops/abis/StockToken.json records as _topic0 for the same two events.
+    assert.equal(topics.paused, "0xe28b7053f432ae5400c6168140cbe15638399715519a0a39b16b505fb9fc9d9a");
+    assert.equal(topics.unpaused, "0xa274116fec684497d55e11cc9516edaa8d206c8b5f84c4603e32572c37f8e6dd");
+    assert.equal(topics.paused, viem.keccak256(viem.toHex("OraclePaused()")));
+  });
+
+  test("fold: OraclePaused opens, OracleUnpaused closes, chain order wins over arrival order, replay is idempotent", () => {
+    const nvda = addr(0xa1);
+    const halts = {};
+    // Arrival order reversed on purpose: the unpause at block 120 arrives before the pause at block 100.
+    applyOracleHaltLogs(halts, [unhalted(nvda, 120), halted(nvda, 100)], tickerOf, topics);
+    assert.deepEqual(halts, {}, "pause then unpause, in chain order, leaves no halt open");
+    applyOracleHaltLogs(halts, [halted(nvda, 130)], tickerOf, topics);
+    assert.equal(halts[nvda.toLowerCase()].block, "130");
+    assert.equal(halts[nvda.toLowerCase()].ticker, "NVDA");
+    applyOracleHaltLogs(halts, [halted(nvda, 130)], tickerOf, topics); // the REORG_OVERLAP replay
+    assert.equal(halts[nvda.toLowerCase()].block, "130", "a replayed pause changes nothing");
+    // A log with a foreign topic on the same address (the fake chain returns every log for an address) is ignored.
+    const other = rawLog("event UIMultiplierUpdated(uint256 oldMultiplier, uint256 newMultiplier, uint256 effectiveAtTimestamp)", { oldMultiplier: 1n, newMultiplier: 2n, effectiveAtTimestamp: 3n }, { address: nvda, blockNumber: 140 });
+    applyOracleHaltLogs(halts, [other], tickerOf, topics);
+    assert.equal(halts[nvda.toLowerCase()].block, "130");
+  });
+
+  test("findings: one error per launch token with an open halt; a non-launch token's halt is kept but never paged", () => {
+    const nvda = addr(0xa1);
+    const tsla = addr(0xa3);
+    const halts = applyOracleHaltLogs({}, [halted(nvda, 100), halted(tsla, 101)], tickerOf, topics);
+    const out = oracleHaltFindings(halts, [nvda]);
+    assert.deepEqual(out.map((f) => [f.kind, f.severity, f.key]), [["v2_mon_oracle_halted", "error", nvda.toLowerCase()]]);
+    assert.match(out[0].message, /NVDA OraclePaused\(\) at block 100/);
+    assert.match(out[0].message, /veto a pool-only candidate/);
+    assert.deepEqual(oracleHaltFindings(applyOracleHaltLogs(halts, [unhalted(nvda, 102)], tickerOf, topics), [nvda]), [], "clears on OracleUnpaused");
+  });
+
+  test("a pass: fires on the NVDA log, clears on the unpause, ignores a third token, and never scans below the deploy block", async () => {
+    const dir = scratch("monitor-halt-");
+    const NVDA = market("NVDA", 1);
+    const SPCX = market("SPCX", 2);
+    const TSLA = market("TSLA", 3);
+    const registry = writeRegistry(dir, { markets: [NVDA, SPCX, TSLA], deployBlock: 1000 });
+    const chain = new FakeChain({ head: 20_000n });
+    const seen = [];
+    chain.getLogsHook = ({ from, event }) => {
+      if (event?.name === "OraclePaused" || event?.name === "OracleUnpaused") seen.push({ name: event.name, from: from.toString() });
+    };
+    // Below the deploy block: a halt log the bounded scan must never see (the "unbounded eth_getLogs" defect T-OP-009 is about).
+    chain.tokenLogs.push(halted(NVDA.asset, 500));
+    // A third, non-launch token halts: not the launch set, not a page.
+    chain.tokenLogs.push(halted(TSLA.asset, 15_000));
+    const opts = options(dir, registry, ["--launch", "NVDA,SPCX"]);
+
+    const r1 = await runOnce(opts, { viem: fakeViem(chain) });
+    assert.ok(seen.length >= 2, `both halt events were scanned: ${JSON.stringify(seen)}`);
+    assert.ok(seen.every((x) => BigInt(x.from) >= 1000n), `every halt scan starts at or above the deploy block: ${JSON.stringify(seen)}`);
+    assert.ok(!kindsOf(r1).includes("v2_mon_oracle_halted"), `no page from a pre-deploy log or a third token: ${JSON.stringify(kindsOf(r1))}`);
+    assert.equal(r1.checks.tokens.status, "ok");
+    assert.match(r1.checks.tokens.detail, /OraclePaused\/OracleUnpaused log\(s\) for NVDA, SPCX/);
+
+    // THE PAGE: NVDA halts between two polls of oraclePaused() (the flag reads false at both), the log is enough.
+    chain.tokenLogs.push(halted(NVDA.asset, 20_100));
+    chain.setHead(20_200n, chain.head.timestamp + 60);
+    const r2 = await runOnce(opts, { viem: fakeViem(chain) });
+    const page = r2.findings.filter((f) => f.kind === "v2_mon_oracle_halted");
+    assert.equal(page.length, 1, `one page for NVDA: ${JSON.stringify(kindsOf(r2))}`);
+    assert.equal(page[0].id, `v2_mon_oracle_halted:${NVDA.asset.toLowerCase()}`, "keyed by the token, so one page per halt");
+    assert.equal(page[0].severity, "error");
+    assert.match(page[0].message, /NVDA OraclePaused\(\) at block 20100/);
+
+    // Still halted next run: the same page stays open (dedupe), no second copy.
+    chain.setHead(20_300n, chain.head.timestamp + 60);
+    const r3 = await runOnce(opts, { viem: fakeViem(chain) });
+    assert.equal(r3.findings.filter((f) => f.kind === "v2_mon_oracle_halted").length, 1, "the halt stays reported while it lasts");
+
+    // THE CLEAR: OracleUnpaused lands; the finding is gone and the state no longer carries the halt.
+    chain.tokenLogs.push(unhalted(NVDA.asset, 20_350));
+    chain.setHead(20_400n, chain.head.timestamp + 60);
+    const r4 = await runOnce(opts, { viem: fakeViem(chain) });
+    assert.ok(!kindsOf(r4).includes("v2_mon_oracle_halted"), `cleared: ${JSON.stringify(kindsOf(r4))}`);
+    const state = JSON.parse(readFileSync(opts.state, "utf8"));
+    assert.equal(state.alerts[`v2_mon_oracle_halted:${NVDA.asset.toLowerCase()}`], undefined, "the open page is gone from the dedupe store (it resolves)");
+    assert.deepEqual(state.tokens.oracleHalts, {}, "no halt left in state");
+    assert.equal(state.tokens.haltCursor, "20400", "the halt cursor reached the head");
+  });
+
+  test("a launch ticker the registry does not carry is named, not guessed", async () => {
+    const dir = scratch("monitor-halt-missing-");
+    const NVDA = market("NVDA", 1);
+    const registry = writeRegistry(dir, { markets: [NVDA], deployBlock: 1000 });
+    const chain = new FakeChain({ head: 20_000n });
+    const r = await runOnce(options(dir, registry, ["--launch", "NVDA,SPCX"]), { viem: fakeViem(chain) });
+    assert.equal(r.checks.tokens.status, "ok");
+    assert.match(r.checks.tokens.detail, /not in the registry: SPCX/);
+  });
+});
+
 describe("the --interval loop", () => {
   const MONITOR = fileURLToPath(new URL("./monitor.mjs", import.meta.url));
   let dir;
@@ -2037,5 +2639,1589 @@ describe("the --interval loop", () => {
     assert.ok(alive, `the loop must still be running after two delivered exit-3 passes. Output:\n${out}`);
     assert.ok((out.match(/exit 3$/gm) ?? []).length >= 2, `at least two passes. Output:\n${out}`);
     assert.equal(code, 0);
+  });
+});
+
+/* -------------------------------------------------------------------------------------------------
+ * F3 O3-304: priceability, source clocks, provider/method switches and pricer work.
+ *
+ * Every input here is a fixture: the bodies the pricing service and the pricer serve TODAY
+ * (keeper/src/v2/pricing/server.ts, keeper/src/v2/pricer/pricer.ts state()), plus the additive §5.1
+ * `provenance` object no build emits yet, to prove the monitor reads it when one does and never
+ * requires it. No network: the pure checks take the parsed bodies, and the one whole-pass test serves
+ * them from a local http server on 127.0.0.1.
+ * ------------------------------------------------------------------------------------------------- */
+describe("F3: quote readiness, per tenor (O3-304)", () => {
+  // A Thursday close is a daily; the Friday that ends its week is that week's weekly.
+  const DAILY = closeOfDay(Math.floor(Date.UTC(2026, 8, 17) / 86_400_000));
+  const DAILY2 = closeOfDay(Math.floor(Date.UTC(2026, 8, 16) / 86_400_000));
+  const WEEKLY = closeOfDay(Math.floor(Date.UTC(2026, 8, 18) / 86_400_000));
+  const NEXT_WEEKLY = closeOfDay(Math.floor(Date.UTC(2026, 8, 25) / 86_400_000));
+
+  const ok = (expiry) => ({ expiry, status: "ok" });
+  const probe = (expiry, over = {}) =>
+    readFairAnswer(200, { fair: { raw: "120000", decimals: 6, formatted: "0.12" }, source: "cboe", spot: { raw: "1", decimals: 6, formatted: "0" }, asOf: expiry - 3600, ...over });
+  const withSeries = (p, expiry, side = "call") => ({ ...p, expiry, side, strike: "231.00" });
+
+  const market = (over = {}) => ({
+    ticker: "NVDA",
+    chain: { named: true, usable: "ok", error: null },
+    surface: { ok: true, reason: null, expiries: [ok(DAILY), ok(WEEKLY), ok(NEXT_WEEKLY)] },
+    seriesExpiries: [DAILY, WEEKLY],
+    probes: [withSeries(probe(DAILY), DAILY), withSeries(probe(WEEKLY), WEEKLY)],
+    ...over,
+  });
+
+  test("every expiry and every probed series priceable: nothing pages, and both tenors report ready", () => {
+    const r = checkQuoteReadiness(market());
+    assert.deepEqual(r.findings, []);
+    assert.deepEqual(
+      r.rows.map((x) => `${x.tenor}/${x.ready}`).sort(),
+      ["daily/true", "weekly/true"],
+    );
+  });
+
+  test("a daily that fails while the weeklies pass pages under its OWN key; the weekly stays silent", () => {
+    const r = checkQuoteReadiness(
+      market({
+        surface: { ok: true, reason: null, expiries: [{ expiry: DAILY, status: "no-quotes" }, ok(WEEKLY), ok(NEXT_WEEKLY)] },
+      }),
+    );
+    assert.deepEqual(
+      r.findings.map((f) => `${f.kind}:${f.key}`),
+      ["v2_mon_quote_unready:NVDA:daily"],
+      "the weekly must not page and must not absorb the daily",
+    );
+    assert.match(r.findings[0].message, /another tenor pricing does not make it ready/);
+    assert.deepEqual(r.findings[0].data.reasons, ["no-quotes"]);
+    const rows = Object.fromEntries(r.rows.map((x) => [x.tenor, x.ready]));
+    assert.deepEqual(rows, { daily: false, weekly: true }, "a weekly pass is never a market pass");
+  });
+
+  test("a daily expiry a live series settles on that the provider does not list at all is that tenor's failure, not a silence", () => {
+    const r = checkQuoteReadiness(
+      market({
+        // The provider lists only the weeklies; the daily the series settles on is simply absent.
+        surface: { ok: true, reason: null, expiries: [ok(WEEKLY), ok(NEXT_WEEKLY)] },
+        seriesExpiries: [DAILY, WEEKLY],
+        probes: [withSeries(probe(WEEKLY), WEEKLY)],
+      }),
+    );
+    assert.deepEqual(r.findings.map((f) => f.key), ["NVDA:daily"]);
+    assert.deepEqual(r.findings[0].data.reasons, ["expiry-not-listed"]);
+    assert.match(r.findings[0].data.failing[0], /a live series settles on it/);
+  });
+
+  test("a reason code this build does not know is NOT ready and pages on its own (§5.1)", () => {
+    const r = checkQuoteReadiness(
+      market({
+        probes: [withSeries(probe(DAILY, { fair: null, reason: "vendor-rate-limited" }), DAILY), withSeries(probe(WEEKLY), WEEKLY)],
+      }),
+    );
+    assert.deepEqual(r.findings.map((f) => f.kind).sort(), ["v2_mon_pricing_reason_unknown", "v2_mon_quote_unready"]);
+    const unknown = r.findings.find((f) => f.kind === "v2_mon_pricing_reason_unknown");
+    assert.deepEqual(unknown.data.codes, ["vendor-rate-limited"]);
+    assert.equal(r.rows.find((x) => x.tenor === "daily").ready, false, "an unknown code counts as not ready");
+    assert.deepEqual(unknownPricingReasons(["no-quotes", "quote-age-unknown", "made-up"]), ["made-up"]);
+  });
+
+  test("§5.1 provenance is read when a build serves it and never required: a degraded readiness and a stated reason are both not ready", () => {
+    const degraded = withSeries(
+      probe(DAILY, { provenance: { provider: "cboe-delayed", method: "extrapolated", quality: { readiness: "degraded", reasons: ["quote-age-unknown", "extrapolated"] } } }),
+      DAILY,
+    );
+    const r = checkQuoteReadiness(market({ probes: [degraded, withSeries(probe(WEEKLY), WEEKLY)] }));
+    assert.deepEqual(r.findings.map((f) => f.key), ["NVDA:daily"]);
+    assert.deepEqual(r.findings[0].data.reasons, ["quote-age-unknown", "extrapolated"]);
+    // The same body without provenance is judged on the legacy fields alone and passes.
+    assert.deepEqual(checkQuoteReadiness(market()).findings, []);
+  });
+
+  test("a zero fair is a price, a null fair is a refusal (§5.1: neither is ever encoded as the other)", () => {
+    const zero = readFairAnswer(200, { fair: { raw: "0", decimals: 6, formatted: "0" }, source: "model", asOf: DAILY });
+    assert.equal(zero.answered, true);
+    assert.equal(zero.ok, true, "a zero estimate is an estimate");
+    const none = readFairAnswer(200, { fair: null, reason: "no-quotes", detail: {} });
+    assert.deepEqual([none.answered, none.ok, none.reason], [true, false, "no-quotes"]);
+    const unknownTicker = readFairAnswer(404, { fair: null, reason: "unknown-ticker" });
+    assert.equal(unknownTicker.answered, true, "404 unknown-ticker is an answer about the data");
+    for (const status of [400, 500, 502, 0]) {
+      assert.equal(readFairAnswer(status, { fair: null, reason: "internal-error" }).answered, false, `HTTP ${status} says nothing about priceability`);
+    }
+    assert.equal(readFairAnswer(200, null).answered, false, "a body that is not JSON is not an answer");
+  });
+
+  test("a chain the service refuses refuses every series of that market, whatever /health's process status says", () => {
+    const r = checkQuoteReadiness(market({ chain: { named: true, usable: "chain-stale", error: null } }));
+    assert.deepEqual(r.findings.map((f) => `${f.kind}:${f.key}`), ["v2_mon_quote_unready:NVDA"]);
+    assert.equal(r.findings[0].data.scope, "market");
+    assert.match(r.findings[0].message, /whatever the process's \/health says/);
+    const missing = checkQuoteReadiness(market({ chain: { named: false, usable: "ok", error: null } }));
+    assert.equal(missing.findings[0].data.reason, "unknown-ticker");
+  });
+
+  test("a transport failure on a probe is never priceability: it is left out of the readiness count", () => {
+    const dead = { ...readFairAnswer(0, null), expiry: DAILY, side: "call", strike: "231.00" };
+    const r = checkQuoteReadiness(market({ probes: [dead, withSeries(probe(WEEKLY), WEEKLY)] }));
+    assert.deepEqual(r.findings, [], "a probe that never reached the service does not make a series unready");
+    assert.equal(r.rows.find((x) => x.tenor === "daily").series, 0);
+  });
+
+  test("the tenor of a close: the last session of its Monday-Friday week is the weekly", () => {
+    assert.equal(expiryTenor(WEEKLY), "weekly", "Friday 18 September 2026");
+    assert.equal(expiryTenor(DAILY), "daily", "Thursday 17 September 2026");
+    assert.equal(expiryTenor(DAILY2), "daily", "Wednesday 16 September 2026");
+    // Thanksgiving week 2026: the NYSE shuts Thursday 26 November, so Friday still ends the week.
+    const thanksgiving = closeOfDay(Math.floor(Date.UTC(2026, 10, 26) / 86_400_000));
+    assert.equal(expiryTenor(thanksgiving), "daily", "a full holiday is never a weekly");
+    assert.equal(expiryTenor(closeOfDay(Math.floor(Date.UTC(2026, 10, 27) / 86_400_000))), "weekly");
+    // Good Friday 2026 (3 April) is shut, so Thursday 2 April ends that week.
+    assert.equal(expiryTenor(closeOfDay(Math.floor(Date.UTC(2026, 3, 2) / 86_400_000))), "weekly");
+  });
+
+  test("probes are bounded, daily-first and round-robin, so one market's weeklies cannot crowd out another's daily", () => {
+    const series = [
+      { longId: "1", ticker: "NVDA", expiry: NEXT_WEEKLY, side: "call", strike: "300000000" },
+      { longId: "2", ticker: "NVDA", expiry: WEEKLY, side: "call", strike: "200000000" },
+      { longId: "3", ticker: "NVDA", expiry: DAILY, side: "call", strike: "100000000" },
+      { longId: "4", ticker: "TSLA", expiry: WEEKLY, side: "put", strike: "400000000" },
+      { longId: "5", ticker: "TSLA", expiry: DAILY, side: "call", strike: "500000000" },
+      { longId: "6", ticker: "TSLA", expiry: DAILY2, side: "call", strike: "600000000" },
+    ];
+    const now = DAILY2 - 86_400;
+    assert.deepEqual(
+      probeTargets(series, now, 2).map((s) => `${s.ticker}/${s.tenor}/${s.longId}`),
+      ["NVDA/daily/3", "TSLA/daily/6"],
+      "with a budget of two, both markets get their nearest daily",
+    );
+    assert.deepEqual(probeTargets(series, now, 4).map((s) => s.longId), ["3", "6", "2", "5"]);
+    assert.deepEqual(probeTargets(series, now, 99).length, 6);
+    assert.deepEqual(probeTargets(series, now, 0), []);
+    // An expired series is never probed: /fair would refuse it `expired` and teach nobody anything.
+    assert.deepEqual(probeTargets(series, NEXT_WEEKLY, 99), []);
+  });
+});
+
+describe("F3: source clock ages, unknown included (O3-304, D5)", () => {
+  const now = 1_789_675_200;
+  const ages = (clocks, over = {}) => checkSourceAges({ ticker: "NVDA", now, clocks }, { ...DEFAULTS, ...over });
+
+  test("an age this build cannot compute is null — UNKNOWN — and is never reported as 0", () => {
+    const r = ages({ quote: null, underlying: now - 400, volatility: null, published: null });
+    assert.deepEqual(r.ages, { quoteS: null, underlyingS: 400, volatilityS: null, publishedS: null });
+    assert.deepEqual(r.findings, [], "with no operator limit the ages are reported and nothing pages");
+  });
+
+  test("with a limit set, an UNKNOWN age fails it: an unknown age is not fresh", () => {
+    const r = ages({ quote: null, underlying: now - 400, volatility: null, published: null }, { quoteAgeS: 1800 });
+    assert.deepEqual(r.findings.map((f) => `${f.kind}:${f.key}`), ["v2_mon_source_age:NVDA:quote"]);
+    assert.match(r.findings[0].message, /UNKNOWN .* an unknown age is not fresh and is never 0/);
+    assert.deepEqual(r.findings[0].data, { ticker: "NVDA", clock: "quote", observedAt: null, ageSeconds: null, limitSeconds: 1800 });
+  });
+
+  test("a stale observation pages; one inside the limit does not; the publication clock never pages", () => {
+    const limits = { quoteAgeS: 1800, underlyingAgeS: 1800, volatilityAgeS: 1800 };
+    const fresh = ages({ quote: now - 10, underlying: now - 1800, volatility: now - 1, published: now - 999_999 }, limits);
+    assert.deepEqual(fresh.findings, [], "exactly at the limit is inside it, and publication time is not a source observation");
+    const stale = ages({ quote: now - 1801, underlying: now - 10, volatility: now - 10, published: now }, limits);
+    assert.deepEqual(stale.findings.map((f) => f.key), ["NVDA:quote"]);
+    assert.equal(stale.findings[0].data.ageSeconds, 1801);
+    assert.match(stale.findings[0].message, /a refetch advances ingestion time only and never this one/);
+  });
+
+  test("a clock stamped in the future is clamped to 0 age, never a negative one", () => {
+    assert.equal(ages({ quote: now + 600, underlying: null, volatility: null, published: null }).ages.quoteS, 0);
+  });
+});
+
+describe("F3: provider and method switches (O3-304)", () => {
+  const labels = (over = {}) => ({ provider: null, method: null, source: "cboe", ...over });
+
+  test("the first poll of a market cannot be a switch", () => {
+    assert.deepEqual(checkSourceSwitch({ key: "NVDA", label: "NVDA", previous: null, current: labels() }), []);
+  });
+
+  test("a provider switch between two polls is a warn event, keyed on the transition", () => {
+    const f = checkSourceSwitch({
+      key: "NVDA",
+      label: "NVDA",
+      previous: labels({ provider: "cboe-delayed", method: "listed" }),
+      current: labels({ provider: "massive-opra", method: "listed" }),
+    });
+    assert.deepEqual(f.map((x) => `${x.kind}/${x.severity}/${x.key}`), ["v2_mon_source_switch/warn/NVDA:provider:cboe-delayed>massive-opra"]);
+    assert.equal(f[0].event, true, "a switch pages once per transition, not every pass");
+    assert.match(f[0].message, /calibrated on the old one/);
+  });
+
+  test("a method switch listed -> modeled is its own event", () => {
+    const f = checkSourceSwitch({
+      key: "NVDA",
+      label: "NVDA",
+      previous: labels({ provider: "cboe-delayed", method: "listed" }),
+      current: labels({ provider: "cboe-delayed", method: "modeled" }),
+    });
+    assert.deepEqual(f.map((x) => x.data.field), ["method"]);
+    assert.deepEqual([f[0].data.from, f[0].data.to], ["listed", "modeled"]);
+  });
+
+  test("today's observable switch is the legacy `source` label: cboe (exact listed contract) -> model", () => {
+    const f = checkSourceSwitch({ key: "NVDA", label: "NVDA", previous: labels({ source: "cboe" }), current: labels({ source: "model" }) });
+    assert.deepEqual(f.map((x) => `${x.data.field}/${x.severity}`), ["source/warn"]);
+    assert.match(f[0].message, /cboe = the cboe-delayed provider on an exact listed contract/);
+  });
+
+  test("a label appearing or disappearing is info, not a false provider change", () => {
+    const appears = checkSourceSwitch({ key: "NVDA", label: "NVDA", previous: labels(), current: labels({ provider: "cboe-delayed" }) });
+    assert.deepEqual(appears.map((x) => x.severity), ["info"]);
+    assert.match(appears[0].message, /nothing stated one before/);
+    const gone = checkSourceSwitch({ key: "NVDA", label: "NVDA", previous: labels({ provider: "cboe-delayed" }), current: labels() });
+    assert.deepEqual(gone.map((x) => x.severity), ["info"]);
+    assert.match(gone[0].message, /is not evidence of the old one/);
+  });
+
+  test("one label per market: the common value, or `mixed` when two probed series disagree", () => {
+    const a = readFairAnswer(200, { fair: { raw: "1" }, source: "cboe", asOf: 1 });
+    const b = readFairAnswer(200, { fair: { raw: "1" }, source: "model", asOf: 1 });
+    const dead = readFairAnswer(0, null);
+    assert.deepEqual(marketSourceLabels([a, a]), { provider: null, method: null, source: "cboe" });
+    assert.deepEqual(marketSourceLabels([a, b]).source, "mixed");
+    assert.deepEqual(marketSourceLabels([dead]), { provider: null, method: null, source: null }, "a failed probe states nothing");
+  });
+});
+
+describe("F3: the pricer is running versus the pricer is evaluating (O3-304)", () => {
+  const now = 1_789_675_200;
+  const body = (over = {}) => ({
+    mode: "pricer",
+    ticks: 40,
+    lastTickAt: new Date((now - 30) * 1000).toISOString(),
+    sessionOpen: true,
+    hasRole: true,
+    strategies: 3,
+    outcomes: { repriced: 5, "not-due": 100, "fair-unavailable": 2 },
+    ...over,
+  });
+  const act = (over = {}, previous = null, t = DEFAULTS) => checkPricerActivity({ answered: true, body: body(over), now, previous }, t);
+
+  test("a pricer whose counters moved since the last poll is active", () => {
+    const first = act();
+    assert.deepEqual(first.findings, []);
+    assert.deepEqual(first.seen, { evaluations: 107, ticks: 40, at: now });
+    assert.equal(first.activity.evaluations, 107, "an evaluation is one pair on one tick: the outcomes histogram");
+    const moved = act({ ticks: 41, outcomes: { repriced: 6, "not-due": 100, "fair-unavailable": 2 } }, { evaluations: 107, ticks: 40, at: now - 5000 });
+    assert.deepEqual(moved.findings, []);
+    assert.equal(moved.seen.at, now, "the window restarts the moment it evaluates anything");
+  });
+
+  test("a pricer that answers but has evaluated nothing for the window pages v2_mon_pricer_idle", () => {
+    const idle = act({}, { evaluations: 107, ticks: 40, at: now - 1000 });
+    assert.deepEqual(idle.findings.map((f) => `${f.kind}/${f.severity}/${f.key}`), ["v2_mon_pricer_idle/warn/pricer"]);
+    assert.equal(idle.findings[0].data.idleSeconds, 1000);
+    assert.equal(idle.findings[0].data.evaluations, 107);
+    assert.match(idle.findings[0].message, /Asks already placed keep their last price while it is stopped/);
+    assert.deepEqual(idle.seen, { evaluations: 107, ticks: 40, at: now - 1000 }, "the stored mark is not moved by a poll that saw nothing");
+  });
+
+  test("a tick clock that is stale on its own face is idle too, and an unknown one is never read as 0", () => {
+    const stale = act({ lastTickAt: new Date((now - 4000) * 1000).toISOString() }, { evaluations: 107, ticks: 40, at: now - 5 });
+    assert.deepEqual(stale.findings.map((f) => f.kind), ["v2_mon_pricer_idle"]);
+    assert.equal(stale.findings[0].data.tickAgeSeconds, 4000);
+    const unknown = act({ lastTickAt: null }, { evaluations: 107, ticks: 40, at: now - 1000 });
+    assert.equal(unknown.findings[0].data.lastTickAt, null);
+    assert.match(unknown.findings[0].message, /UNKNOWN time .* an unknown age is not 0/);
+  });
+
+  test("outside the 24/5 session the pricer is meant to do nothing, so the window restarts instead of paging", () => {
+    const closed = act({ sessionOpen: false }, { evaluations: 107, ticks: 40, at: now - 100_000 });
+    assert.deepEqual(closed.findings, []);
+    assert.equal(closed.seen.at, now);
+  });
+
+  test("no strategy to reprice is not idle: the loop is running and there is nothing to evaluate", () => {
+    const quiet = act({ strategies: 0, ticks: 41, outcomes: {} }, { evaluations: 0, ticks: 40, at: now - 100_000 });
+    assert.deepEqual(quiet.findings, [], "the tick counter moved, so the pricer is working");
+    assert.equal(quiet.activity.evaluations, 0);
+  });
+
+  test("pricerIdleS 0 turns the alert off; a pricer that never answered leaves the stored mark alone", () => {
+    assert.deepEqual(act({}, { evaluations: 107, ticks: 40, at: now - 100_000 }, { ...DEFAULTS, pricerIdleS: 0 }).findings, []);
+    const down = checkPricerActivity({ answered: false, body: null, now, previous: { evaluations: 107, ticks: 40, at: now - 100_000 } }, DEFAULTS);
+    assert.deepEqual(down, { activity: null, seen: null, findings: [] }, "a dead process is v2_mon_service_down, never this page");
+  });
+});
+
+describe("F3: a whole pass against a fixture pricing service and pricer (O3-304)", () => {
+  const dirs = [];
+  const servers = [];
+  after(() => {
+    for (const s of servers) s.close();
+    for (const d of dirs) rmSync(d, { recursive: true, force: true });
+  });
+  const scratch = (prefix) => {
+    const d = tmp(prefix);
+    dirs.push(d);
+    return d;
+  };
+  const listen = (handler) =>
+    new Promise((resolve) => {
+      const server = createServer(handler);
+      servers.push(server);
+      server.listen(0, "127.0.0.1", () => resolve(`http://127.0.0.1:${server.address().port}`));
+    });
+
+  // A whole pass judges series against the WALL clock (an expired series is never probed), so the two
+  // fixture series sit in the next trading week: the week's last session is its weekly, the one before a daily.
+  const [DAILY, WEEKLY] = (() => {
+    let day = Math.floor(Date.now() / 86_400_000) + 2;
+    while (!(isTradingDay(day) && expiryTenor(closeOfDay(day)) === "weekly")) day += 1;
+    let daily = day - 1;
+    while (!isTradingDay(daily)) daily -= 1;
+    return [closeOfDay(daily), closeOfDay(day)];
+  })();
+  const NVDA = addr(0xa001);
+
+  /** A state file the pass will load: the log scan's own record of two live series, one per tenor. */
+  const seed = (dir, registry, chainId = 4663) => {
+    const reg = parseRegistry(JSON.parse(readFileSync(registry, "utf8")), registry);
+    const file = path.join(dir, "state.json");
+    writeFileSync(
+      file,
+      JSON.stringify({
+        ...emptyState(chainId, fingerprintOf(reg, chainId)),
+        scan: {
+          ...emptyState(chainId, fingerprintOf(reg, chainId)).scan,
+          series: {
+            10: { u: NVDA, e: DAILY, put: false, k: "231000000", o: addr(0xc001), p: 80 },
+            12: { u: NVDA, e: WEEKLY, put: false, k: "235000000", o: addr(0xc001), p: 80 },
+          },
+        },
+      }),
+    );
+    return file;
+  };
+
+  /** The pricing service, answering from fixtures. `plan` decides what each series and expiry says. */
+  const pricingService = (plan) =>
+    listen((req, res) => {
+      const url = new URL(req.url, "http://x");
+      const json = (status, body) => res.writeHead(status, { "content-type": "application/json" }).end(JSON.stringify(body));
+      if (url.pathname === "/health") return json(200, { status: "ok", service: "callhouse-pricing", settings: { maxChainAgeS: 1800 }, chains: { NVDA: { ok: true, usable: plan.usable ?? "ok", fetchedAt: new Date().toISOString(), error: null, chainTimestamp: "2026-09-17 16:00:00", lastTradeTime: "2026-09-17 15:59:58", options: 900 } } });
+      if (url.pathname === "/surface/NVDA") return json(200, { ticker: "NVDA", expiries: (plan.expiries ?? [DAILY, WEEKLY]).map((e) => ({ expiry: e, status: plan.status?.[e] ?? "ok", strikes: [] })) });
+      if (url.pathname === "/fair") {
+        const expiry = Number(url.searchParams.get("expiry"));
+        const refusal = plan.refuse?.[expiry];
+        if (refusal !== undefined) return json(200, { fair: null, reason: refusal, detail: {} });
+        return json(200, { fair: { raw: "120000", decimals: 6, formatted: "0.12" }, iv: 0.4, delta: 0.2, source: plan.source ?? "cboe", spot: { raw: "231000000", decimals: 6, formatted: "231" }, asOf: plan.asOf ?? Math.floor(Date.now() / 1000) - 120 });
+      }
+      return json(404, { reason: "not-found" });
+    });
+
+  const pricerService = (state) =>
+    listen((req, res) => {
+      if (req.url !== "/state") return res.writeHead(404).end("{}");
+      if (state() === null) return res.writeHead(503, { "content-type": "application/json" }).end(JSON.stringify({ error: "no state yet; the first tick has not completed", mode: "pricer" }));
+      res.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify(state()));
+    });
+
+  test("all ready: the pass is clean, both tenors report ready, and the labels are remembered for the next poll", async () => {
+    const dir = scratch("monitor-pricing-ok-");
+    const registry = writeRegistry(dir, { markets: [market("NVDA", 1)] });
+    const statePath = seed(dir, registry);
+    const pricing = await pricingService({});
+    const opts = options(dir, registry, ["--pricing", pricing]);
+    const r = await runOnce(opts);
+    assert.deepEqual(kindsOf(r).filter((k) => k.startsWith("v2_mon_quote") || k.startsWith("v2_mon_source") || k.startsWith("v2_mon_pricing")), []);
+    assert.equal(r.checks.pricing.status, "ok");
+    assert.match(r.checks.pricing.detail, /2 of 2 market-tenor\(s\) ready/);
+    assert.match(r.checks.pricing.detail, /daily ready, weekly ready/);
+    // The quote and volatility clocks are not served today: they print "unknown", never "0 s".
+    assert.match(r.checks.pricing.detail, /ages quote unknown .* vol unknown/);
+    assert.ok(r.notes.some((n) => /\/v2\/config\.services \(X3-301/.test(n)), "the pass says what the API does not serve yet");
+    assert.ok(r.notes.some((n) => /no \/fair answer carried §5\.1 `provenance`/.test(n)));
+    const state = JSON.parse(readFileSync(statePath, "utf8"));
+    assert.deepEqual(state.pricing.sources.NVDA.source, "cboe");
+    assert.equal(state.pricing.sources.NVDA.provider, null, "the provider is not served, so none is stored");
+  });
+
+  test("a daily refused while the weekly prices pages the daily alone, and an unknown code pages beside it", async () => {
+    const dir = scratch("monitor-pricing-daily-");
+    const registry = writeRegistry(dir, { markets: [market("NVDA", 1)] });
+    seed(dir, registry);
+    const pricing = await pricingService({ refuse: { [DAILY]: "vendor-rate-limited" } });
+    const r = await runOnce(options(dir, registry, ["--pricing", pricing]));
+    const ours = r.findings.filter((f) => f.kind.startsWith("v2_mon_quote") || f.kind.startsWith("v2_mon_pricing"));
+    assert.deepEqual(ours.map((f) => f.id).sort(), ["v2_mon_pricing_reason_unknown:NVDA", "v2_mon_quote_unready:NVDA:daily"]);
+    assert.match(r.checks.pricing.detail, /daily NOT ready \(0\/1 expiries, 1\/1 series\), weekly ready/);
+  });
+
+  test("a service that is down and a series that is not ready are two different alerts", async () => {
+    const dir = scratch("monitor-pricing-down-");
+    const registry = writeRegistry(dir, { markets: [market("NVDA", 1)] });
+    seed(dir, registry);
+    const pricing = await pricingService({ usable: "chain-stale" });
+    // The same process answers /health for the health check and refuses every price for the pricing check.
+    const r = await runOnce(options(dir, registry, ["--pricing", pricing, "--health", `pricing=${pricing}/nope`]));
+    const ours = r.findings.filter((f) => f.kind === "v2_mon_service_down" || f.kind === "v2_mon_quote_unready");
+    assert.deepEqual(ours.map((f) => f.id).sort(), ["v2_mon_quote_unready:NVDA", "v2_mon_service_down:pricing"]);
+    assert.notEqual(ours[0].kind, ours[1].kind, "process health and priceability never share a page");
+  });
+
+  test("a legacy `source` switch between two passes is an event of its own", async () => {
+    const dir = scratch("monitor-pricing-switch-");
+    const registry = writeRegistry(dir, { markets: [market("NVDA", 1)] });
+    seed(dir, registry);
+    let source = "cboe";
+    const pricing = await listen((req, res) => {
+      const url = new URL(req.url, "http://x");
+      const json = (status, body) => res.writeHead(status, { "content-type": "application/json" }).end(JSON.stringify(body));
+      if (url.pathname === "/health") return json(200, { status: "ok", settings: { maxChainAgeS: 1800 }, chains: { NVDA: { ok: true, usable: "ok", error: null, chainTimestamp: "t", lastTradeTime: "t" } } });
+      if (url.pathname === "/surface/NVDA") return json(200, { expiries: [DAILY, WEEKLY].map((e) => ({ expiry: e, status: "ok" })) });
+      return json(200, { fair: { raw: "120000", decimals: 6, formatted: "0.12" }, source, spot: { raw: "1", decimals: 6, formatted: "0" }, asOf: Math.floor(Date.now() / 1000) - 60 });
+    });
+    const opts = options(dir, registry, ["--pricing", pricing]);
+    const first = await runOnce(opts);
+    assert.deepEqual(kindsOf(first).filter((k) => k === "v2_mon_source_switch"), [], "the first poll has nothing to compare to");
+    source = "model";
+    const second = await runOnce(opts);
+    const switched = second.findings.filter((f) => f.kind === "v2_mon_source_switch");
+    assert.deepEqual(switched.map((f) => f.id), ["v2_mon_source_switch:NVDA:source:cboe>model"]);
+    assert.equal(switched[0].severity, "warn");
+    const third = await runOnce(opts);
+    assert.deepEqual(third.findings.filter((f) => f.kind === "v2_mon_source_switch"), [], "the switch is not re-found while the label sits still");
+    // With no webhook the first send was only printed, so it is retried — never raised a second time as new.
+    assert.deepEqual(third.sent.filter((s) => s.kind === "v2_mon_source_switch").map((s) => s.reason), ["retry"]);
+  });
+
+  test("an idle pricer pages while a working one does not, and neither is the /health page", async () => {
+    const dir = scratch("monitor-pricer-idle-");
+    const registry = writeRegistry(dir, { markets: [market("NVDA", 1)] });
+    seed(dir, registry);
+    let ticks = 40;
+    const pricer = await pricerService(() => ({
+      mode: "pricer",
+      ticks,
+      lastTickAt: new Date().toISOString(),
+      sessionOpen: true,
+      hasRole: true,
+      strategies: 2,
+      outcomes: { repriced: ticks },
+    }));
+    const opts = options(dir, registry, ["--pricer", pricer, "--threshold", "pricerIdleS=1"]);
+    const first = await runOnce(opts);
+    assert.deepEqual(kindsOf(first).filter((k) => k === "v2_mon_pricer_idle"), [], "the first poll only records the counters");
+    ticks += 1;
+    const working = await runOnce(opts);
+    assert.deepEqual(kindsOf(working).filter((k) => k === "v2_mon_pricer_idle"), []);
+    assert.match(working.checks.pricing.detail, /pricer 41 tick\(s\), 41 evaluation\(s\), 2 strategies/);
+    await new Promise((r) => setTimeout(r, 1100));
+    const idle = await runOnce(opts); // counters frozen
+    assert.deepEqual(idle.findings.filter((f) => f.kind === "v2_mon_pricer_idle").map((f) => f.id), ["v2_mon_pricer_idle:pricer"]);
+    assert.match(idle.checks.pricing.detail, /no --pricing: priceability unchecked/);
+  });
+
+  test("a pricer that has not finished a tick answers 503; that is process health, so the check goes incomplete and pages nothing", async () => {
+    const dir = scratch("monitor-pricer-503-");
+    const registry = writeRegistry(dir, { markets: [market("NVDA", 1)] });
+    seed(dir, registry);
+    const pricer = await pricerService(() => null);
+    const r = await runOnce(options(dir, registry, ["--pricer", pricer]));
+    assert.deepEqual(kindsOf(r).filter((k) => k === "v2_mon_pricer_idle"), []);
+    assert.equal(r.checks.pricing.status, "incomplete");
+    assert.match(r.checks.pricing.detail, /no tick completed yet/);
+  });
+
+  test("with neither flag the check is skipped, and every alert name the monitor can emit is documented", () => {
+    const dir = scratch("monitor-pricing-off-");
+    const registry = writeRegistry(dir, { markets: [market("NVDA", 1)] });
+    const opts = options(dir, registry);
+    assert.equal(opts.pricing, null);
+    assert.equal(opts.pricer, null);
+    // ops/runbooks.test.mjs checks the runbook direction; this is the catalogue direction.
+    const alerts = readFileSync(path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "alerts.md"), "utf8");
+    for (const kind of Object.keys(KINDS)) assert.ok(alerts.includes(`\`${kind}\``), `${kind} has no ops/alerts.md entry`);
+    for (const kind of ["v2_mon_quote_unready", "v2_mon_pricing_reason_unknown", "v2_mon_source_age", "v2_mon_source_switch", "v2_mon_pricer_idle"]) {
+      assert.ok(KINDS[kind] !== undefined && KINDS[kind].runbook.includes("§V"), `${kind} needs a runbook anchor`);
+    }
+  });
+
+  test("the pricing base url is validated, and the flags are the ones the runbooks may pass", () => {
+    const dir = scratch("monitor-pricing-args-");
+    const registry = writeRegistry(dir, { markets: [] });
+    assert.throws(() => options(dir, registry, ["--pricing", "ftp://nope"]), UsageError);
+    assert.throws(() => options(dir, registry, ["--pricer", "not a url"]), UsageError);
+    assert.equal(options(dir, registry, ["--pricing", "http://p:8790/"]).pricing, "http://p:8790", "a trailing slash is stripped: the monitor appends its own paths");
+    assert.equal(options(dir, registry, [], { MONITOR_PRICING_URL: "http://p:8790", MONITOR_PRICER_URL: "http://q:8792" }).pricer, "http://q:8792");
+  });
+});
+
+/* ---------------------------------------------------------------------------------------------- */
+/*  INTERFACE_VERSION 8: the manager, the Safes, the flywheel, v4 routes, the inverted rent alert  */
+/* ---------------------------------------------------------------------------------------------- */
+
+const MANAGER = addr(0xac1);
+const SPLITTER = addr(0xf51);
+const ADMIN_SAFE = addr(0x5a1);
+const ASSET = addr(0xa001);
+
+let v8tx = 0;
+const v8log = (eventName, args, over = {}) => {
+  v8tx += 1;
+  return { eventName, args, blockNumber: 900n, transactionHash: `0x${String(v8tx).padStart(64, "a")}`, logIndex: 0, ...over };
+};
+const mctx = (over = {}) => ({ names: { [MANAGER.toLowerCase()]: "accessManager", [ADMIN_SAFE.toLowerCase()]: "adminSafe" }, manifest: ROLE_MANIFEST.manifest, selectors: null, now: 1_700_000_000, ...over });
+
+describe("v8: the role manifest is read, not transcribed", () => {
+  test("ops/abis/v2/roles.json is the source of the ids, delays and admins", () => {
+    const m = ROLE_MANIFEST.manifest;
+    assert.equal(ROLE_MANIFEST.why, null, "the manifest beside the ABIs must be readable");
+    assert.equal(m.interfaceVersion, 8);
+    // Spot-checked against the file, not against a copy of it in this test: read it here too.
+    const onDisk = JSON.parse(readFileSync(path.join(ABIS, "roles.json"), "utf8"));
+    assert.deepEqual(m.ids, onDisk.roles);
+    assert.deepEqual(m.delaysS, onDisk.delaysS);
+    assert.equal(Object.keys(m.ids).length, 11, "eleven roles");
+    assert.equal(roleLabel(7), "GUARDIAN (7)");
+    assert.equal(roleDelayS(m.ids.MARKET_FEE_MANAGER), onDisk.delaysS.MARKET_FEE_MANAGER);
+  });
+
+  test("an unknown id is named unknown and has no delay; it is never folded into ADMIN or 0", () => {
+    assert.match(roleLabel(99), /^role 99 \(not in the manifest\)$/);
+    assert.equal(roleDelayS(99), null, "an unknown role's delay is unknown, not 0");
+  });
+
+  test("a manifest that cannot be read leaves the monitor watching, not blind", () => {
+    const missing = loadRoleManifest(path.join(tmpdir(), "no-such-roles-file.json"));
+    assert.equal(missing.manifest, null);
+    assert.match(missing.why, /no-such-roles-file/);
+    assert.match(roleLabel(3, null), /^role 3 /, "roles still page, by id");
+  });
+
+  test("a manifest with two names on one id is refused rather than silently collapsed", () => {
+    const file = path.join(mkdtempSync(path.join(tmpdir(), "roles-dup-")), "roles.json");
+    writeFileSync(file, JSON.stringify({ interfaceVersion: 8, roles: { ADMIN: 0, IMPOSTOR: 0 } }));
+    const r = loadRoleManifest(file);
+    assert.equal(r.manifest, null);
+    assert.match(r.why, /are both 0/);
+  });
+});
+
+describe("v8: AccessManager events", () => {
+  test("a scheduled operation names the function, the role and the guardian that can cancel it", () => {
+    const selectors = { "0xdeadbeef": { contract: "OrderBook", signature: "setFeeParams((uint16,uint16,uint32,uint16,uint16))", role: "FEE_MANAGER" } };
+    const out = managerEventFindings(
+      [v8log("OperationScheduled", { operationId: "0x11", nonce: 1, schedule: 1_700_086_400, caller: ADMIN_SAFE, target: addr(0xc2), data: "0xdeadbeef0000" })],
+      null,
+      mctx({ selectors }),
+    );
+    assert.equal(out.length, 1);
+    assert.equal(out[0].kind, "v2_mon_manager_operation");
+    assert.equal(out[0].severity, "error");
+    assert.match(out[0].message, /OrderBook\.setFeeParams/);
+    assert.match(out[0].message, /FEE_MANAGER/);
+    assert.match(out[0].message, /GUARDIAN role can cancel it/, "roles.json roleGuardian says GUARDIAN guards FEE_MANAGER");
+    assert.match(out[0].message, /expires one week/);
+  });
+
+  test("a selector the manifest does not carry is said to be unknown, and said to belong to ADMIN", () => {
+    const out = managerEventFindings(
+      [v8log("OperationScheduled", { operationId: "0x12", nonce: 1, schedule: 1_700_086_400, caller: ADMIN_SAFE, target: addr(0xc2), data: "0xfeedface0000" })],
+      null,
+      mctx({ selectors: {} }),
+    );
+    assert.match(out[0].message, /0xfeedface/);
+    assert.match(out[0].message, /not in the role manifest/);
+    assert.match(out[0].message, /belongs to ADMIN/);
+  });
+
+  test("executed pages error and cancelled pages warn: a cancel is the brake, a run is the change", () => {
+    const [exec] = managerEventFindings([v8log("OperationExecuted", { operationId: "0x13", nonce: 1 })], null, mctx());
+    const [cancel] = managerEventFindings([v8log("OperationCanceled", { operationId: "0x14", nonce: 1 })], null, mctx());
+    assert.equal(exec.severity, "error");
+    assert.equal(cancel.severity, "warn");
+    assert.equal(exec.kind, "v2_mon_manager_operation");
+    assert.equal(cancel.kind, "v2_mon_manager_operation");
+  });
+
+  test("a grant whose execution delay is not the manifest's says so by name", () => {
+    const id = ROLE_MANIFEST.manifest.ids.CONFIG_ADMIN;
+    const want = ROLE_MANIFEST.manifest.delaysS.CONFIG_ADMIN;
+    const right = managerEventFindings([v8log("RoleGranted", { roleId: id, account: ADMIN_SAFE, delay: want, since: 1, newMember: true })].map((l) => ({ ...l, eventName: "ManagerRoleGranted" })), null, mctx());
+    const wrong = managerEventFindings([v8log("RoleGranted", { roleId: id, account: ADMIN_SAFE, delay: 0, since: 1, newMember: true })].map((l) => ({ ...l, eventName: "ManagerRoleGranted" })), null, mctx());
+    assert.equal(right.length, 1, "every grant pages, right delay or not");
+    assert.doesNotMatch(right[0].message, /different clock/);
+    assert.match(wrong[0].message, /different clock/);
+    assert.match(wrong[0].message, /CONFIG_ADMIN/);
+  });
+
+  test("a re-grant is not nothing: it changes the delay, and the message says so", () => {
+    const [f] = managerEventFindings([{ ...v8log("x", { roleId: 1, account: ADMIN_SAFE, delay: 60, since: 1, newMember: false }), eventName: "ManagerRoleGranted" }], null, mctx());
+    assert.match(f.message, /re-grant CHANGES the delay/);
+  });
+
+  test("every manager role and target event pages, and RoleLabel is the only cosmetic one", () => {
+    const events = [
+      { eventName: "ManagerRoleRevoked", args: { roleId: 8, account: addr(0xbad) } },
+      { eventName: "ManagerRoleAdminChanged", args: { roleId: 8, admin: 0 } },
+      { eventName: "RoleGuardianChanged", args: { roleId: 1, guardian: 0 } },
+      { eventName: "RoleGrantDelayChanged", args: { roleId: 1, delay: 3600, since: 1 } },
+      { eventName: "TargetFunctionRoleUpdated", args: { target: addr(0xc2), selector: "0xaabbccdd", roleId: 6 } },
+      { eventName: "TargetAdminDelayUpdated", args: { target: addr(0xc2), delay: 3600, since: 1 } },
+      { eventName: "TargetClosed", args: { target: addr(0xc2), closed: true } },
+      { eventName: "RoleLabel", args: { roleId: 1, label: "fees" } },
+    ].map((e, i) => v8log(e.eventName, e.args, { logIndex: i }));
+    const out = managerEventFindings(events, null, mctx());
+    assert.equal(out.length, events.length, "every one of them pages");
+    assert.deepEqual(new Set(out.map((f) => f.kind)), new Set(["v2_mon_manager_role"]));
+    const bySeverity = Object.fromEntries(out.map((f, i) => [events[i].eventName, f.severity]));
+    assert.equal(bySeverity.RoleLabel, "warn");
+    for (const [name, sev] of Object.entries(bySeverity)) if (name !== "RoleLabel") assert.equal(sev, "error", name);
+    assert.match(out[6].message, /CLOSED/);
+  });
+
+  test("AccessControl's bytes32 RoleGranted is NOT a manager event, and the manager's is not a config event", () => {
+    // The trap this whole rename exists for: same name, different topic, different meaning.
+    const accessControl = v8log("RoleGranted", { role: `0x${"0".repeat(64)}`, account: addr(0xbad), sender: addr(0xbad) });
+    assert.deepEqual(managerEventFindings([accessControl], null, mctx()), [], "a bytes32 grant is not a manager grant");
+    assert.equal(scanEventName(accessControl), "RoleGranted", "and it keeps its own name");
+    const manager = { eventName: "RoleGranted", args: { roleId: 0, account: addr(0xbad), delay: 0, since: 1, newMember: true } };
+    assert.equal(scanEventName(manager), "ManagerRoleGranted");
+    assert.equal(scanEventName({ eventName: "RoleRevoked", args: { roleId: 0, account: addr(0xbad) } }), "ManagerRoleRevoked");
+    assert.equal(scanEventName({ eventName: "RoleAdminChanged", args: { roleId: 0, admin: 1 } }), "ManagerRoleAdminChanged");
+    assert.equal(scanEventName({ eventName: "RouteSet", args: { asset: ASSET, venue: 1, poolId: "0x00", fee: 3000, feeBps: 30 } }), "RouterRouteSet");
+    assert.equal(scanEventName({ eventName: "RouteSet", args: { asset: ASSET, pool: addr(0x1), fee: 3000 } }), "RouteSet", "the v7 adapter's keeps its name");
+  });
+
+  test("history before the first run is adopted, as it is for every other admin event", () => {
+    const e = v8log("ManagerRoleGranted", { roleId: 0, account: addr(0xbad), delay: 0, since: 1, newMember: true }, { blockNumber: 500n });
+    assert.deepEqual(managerEventFindings([e], 600n, mctx()), []);
+    assert.equal(managerEventFindings([e], 400n, mctx()).length, 1);
+  });
+
+  test("no manager event can be paged twice: every one is in OWN_KIND_EVENTS", () => {
+    // configEventFindings is handed everything NOT in OWN_KIND_EVENTS. Declaring an event's severity in
+    // CONFIG_EVENTS and forgetting this set would page it under two kinds; leaving it out of both would
+    // drop it silently. Both directions are checked here.
+    for (const name of [...MANAGER_ROLE_EVENTS, ...MANAGER_OPERATION_EVENTS, ...SPLITTER_EVENTS, ...DEDICATED_EVENTS]) {
+      assert.ok(OWN_KIND_EVENTS.has(name), `${name} would be paged by configEventFindings as well`);
+    }
+    const manager = [...MANAGER_ROLE_EVENTS, ...MANAGER_OPERATION_EVENTS];
+    const dropped = manager.filter((n) => CONFIG_EVENTS[n] === undefined && !OWN_KIND_EVENTS.has(n));
+    assert.deepEqual(dropped, [], "an event in neither list is never collected by the scan at all");
+  });
+});
+
+describe("v8: the manager's state against the manifest", () => {
+  const row = (over = {}) => ({ roleId: 1, name: "FEE_MANAGER", chainAdmin: 0, chainGuardian: 7, wantAdmin: 0, wantGuardian: 7, ...over });
+  const member = (over = {}) => ({ label: "adminSafe", address: ADMIN_SAFE, roleId: 1, roleName: "FEE_MANAGER", isMember: true, executionDelay: 172800, wantMember: true, wantDelayS: 172800, ...over });
+
+  test("a manager that matches the manifest pages nothing", () => {
+    assert.deepEqual(checkManagerWiring({ manager: MANAGER, rows: [row()], members: [member()] }), []);
+  });
+
+  test("a moved role admin or guardian pages, and says which is which", () => {
+    const admin = checkManagerWiring({ manager: MANAGER, rows: [row({ chainAdmin: 6 })], members: [] });
+    const guard = checkManagerWiring({ manager: MANAGER, rows: [row({ chainGuardian: 0 })], members: [] });
+    assert.equal(admin.length, 1);
+    assert.match(admin[0].key, /:1:admin$/);
+    assert.match(admin[0].message, /OPS_ADMIN \(6\) on chain/);
+    assert.match(guard[0].key, /:1:guardian$/);
+    assert.match(guard[0].message, /guardian/);
+  });
+
+  test("a holder that does not hold its role, and one that holds a role it should not, both page", () => {
+    const missing = checkManagerWiring({ manager: MANAGER, rows: [], members: [member({ isMember: false })] });
+    const extra = checkManagerWiring({ manager: MANAGER, rows: [], members: [member({ wantMember: false })] });
+    assert.match(missing[0].key, /:missing$/);
+    assert.match(missing[0].message, /does NOT hold/);
+    assert.match(extra[0].key, /:extra$/);
+  });
+
+  test("a member whose execution delay is not the manifest's pages: the delay IS the protection", () => {
+    const shorter = checkManagerWiring({ manager: MANAGER, rows: [], members: [member({ executionDelay: 0 })] });
+    assert.equal(shorter.length, 1);
+    assert.match(shorter[0].key, /:delay$/);
+    assert.match(shorter[0].message, /less time to notice and cancel/);
+  });
+
+  test("a read that failed is unknown and is judged by nothing, in every column", () => {
+    assert.deepEqual(checkManagerWiring({ manager: MANAGER, rows: [row({ chainAdmin: null, chainGuardian: null })], members: [member({ isMember: null, executionDelay: null })] }), []);
+    // and specifically: a null delay on a real member is not read as 0
+    assert.deepEqual(checkManagerWiring({ manager: MANAGER, rows: [], members: [member({ executionDelay: null })] }), []);
+  });
+});
+
+describe("v8: a Safe that is already wrong", () => {
+  test("2 of 3 is quiet; 1 of 3 pages WITH NO HISTORY AT ALL", () => {
+    assert.deepEqual(checkSafeThreshold({ safe: ADMIN_SAFE, label: "Admin Safe", threshold: 2n, owners: 3 }), []);
+    const one = checkSafeThreshold({ safe: ADMIN_SAFE, label: "Admin Safe", threshold: 1n, owners: 3 });
+    assert.equal(one.length, 1);
+    assert.equal(one[0].kind, "v2_mon_safe_threshold");
+    assert.equal(one[0].severity, "error");
+    assert.match(one[0].message, /One key now moves everything/);
+    // The point of the check: checkSafe, the change detector, sees nothing here — there is no baseline.
+    assert.deepEqual(checkSafe(undefined, { nonce: 1n, threshold: 1n, owners: [addr(1), addr(2), addr(3)] }, { safe: ADMIN_SAFE, label: "Admin Safe", feeds: [] }).findings, []);
+  });
+
+  test("a threshold above the owner count is a Safe nothing can ever execute from", () => {
+    const out = checkSafeThreshold({ safe: ADMIN_SAFE, label: "Treasury Safe", threshold: 4n, owners: 3 });
+    assert.equal(out.length, 1);
+    assert.match(out[0].key, /:unreachable$/);
+    assert.match(out[0].message, /no transaction can ever be executed/);
+  });
+
+  test("a Safe that could not be read is unknown, not healthy", () => {
+    assert.deepEqual(checkSafeThreshold({ safe: ADMIN_SAFE, label: "Admin Safe", threshold: null, owners: null }), []);
+  });
+
+  test("checkSafe carries a label, so the protocol Safes do not page as the feed owner's", () => {
+    const prev = checkSafe(undefined, { nonce: 1n, threshold: 2n, owners: [addr(1), addr(2)] }, { safe: ADMIN_SAFE, label: "Admin Safe", feeds: ["Admin Safe"] }).baseline;
+    const [f] = checkSafe(prev, { nonce: 1n, threshold: 1n, owners: [addr(1), addr(2)] }, { safe: ADMIN_SAFE, label: "Admin Safe", feeds: ["Admin Safe"] }).findings;
+    assert.match(f.message, /^Admin Safe /);
+    const [g] = checkSafe(prev, { nonce: 1n, threshold: 1n, owners: [addr(1), addr(2)] }, { safe: ADMIN_SAFE, feeds: ["NVDA"] }).findings;
+    assert.match(g.message, /^Feed owner Safe /, "the default is unchanged for the feed Safes");
+  });
+});
+
+describe("v8: the fee splitter and the buyback", () => {
+  const flyState = () => ({ lastDistributedAt: null, pendingSince: null, floorMisses: {}, lastBoughtBackAt: null, fundedSince: null });
+  const skip = (reason, at = 0) => ({ eventName: "DistributionSkipped", args: { asset: ASSET, reason: `0x${Buffer.from(reason).toString("hex").padEnd(64, "0")}` }, transactionHash: `0x${String(at).padStart(64, "b")}` });
+
+  test("a bytes32 reason reads as the word the contract packed into it", () => {
+    assert.equal(reasonText(`0x${Buffer.from("BELOW_FLOOR").toString("hex").padEnd(64, "0")}`), "BELOW_FLOOR");
+    assert.equal(reasonText("0x"), "0x", "an empty reason stays what it was, rather than becoming an empty word");
+  });
+
+  test("consecutive skips of one reason build a streak; a distribution clears it", () => {
+    const fly = flyState();
+    applyFlywheelLogs(fly, [skip("BELOW_FLOOR", 1)], 1000, SPLITTER);
+    applyFlywheelLogs(fly, [skip("BELOW_FLOOR", 2)], 2000, SPLITTER);
+    assert.equal(fly.floorMisses[ASSET.toLowerCase()].count, 2);
+    assert.equal(fly.pendingSince, 1000, "the clock starts at the first evidence, not the last");
+    applyFlywheelLogs(fly, [skip("NO_SPOT", 3)], 3000, SPLITTER);
+    assert.deepEqual({ ...fly.floorMisses[ASSET.toLowerCase()] }, { reason: "NO_SPOT", count: 1, lastAt: 3000 }, "a different reason is a different streak");
+    applyFlywheelLogs(fly, [{ eventName: "Distributed", args: { asset: ASSET, assetIn: 1n, usdgIn: 1n, treasuryOut: 1n, buybackAdded: 0n }, transactionHash: "0xd" }], 4000, SPLITTER);
+    assert.equal(fly.floorMisses[ASSET.toLowerCase()], undefined);
+    assert.equal(fly.pendingSince, null);
+    assert.equal(fly.lastDistributedAt, 4000);
+  });
+
+  test("fees only start the clock when they land ON the splitter", () => {
+    const mine = flyState();
+    const theirs = flyState();
+    const swept = (to) => ({ eventName: "FeesSwept", args: { asset: ASSET, to, amount: 5n }, transactionHash: "0xf" });
+    applyFlywheelLogs(mine, [swept(SPLITTER)], 100, SPLITTER);
+    applyFlywheelLogs(theirs, [swept(addr(0xdead))], 100, SPLITTER);
+    assert.equal(mine.pendingSince, 100);
+    assert.equal(theirs.pendingSince, null);
+  });
+
+  test("a BoughtBack with no Burned in its transaction is returned; one with a Burned is not", () => {
+    const fly = flyState();
+    const bought = (tx) => ({ eventName: "BoughtBack", args: { usdgIn: 50_000_000n, tokenOut: 10n }, transactionHash: tx });
+    const burned = (tx) => ({ eventName: "Burned", args: { amount: 10n }, transactionHash: tx });
+    assert.deepEqual(applyFlywheelLogs(fly, [bought("0x1"), burned("0x1")], 10, SPLITTER), [], "the honest case");
+    const bad = applyFlywheelLogs(flyState(), [bought("0x2")], 10, SPLITTER);
+    assert.equal(bad.length, 1);
+    const out = checkBuyback({ splitter: SPLITTER, now: 10, balance: 0n, lastBuybackAt: null, fundedSince: null, unburned: bad }, DEFAULTS);
+    assert.equal(out.length, 1);
+    assert.equal(out[0].kind, "v2_mon_buyback_unburned");
+    assert.equal(out[0].severity, "error");
+    assert.match(out[0].message, /NO Burned in the same transaction/);
+  });
+
+  test("idle: fees waiting past the threshold page, and a threshold of 0 turns it off", () => {
+    const x = { splitter: SPLITTER, now: 100_000, lastDistributedAt: null, pendingSince: 10_000, floorMisses: [] };
+    assert.deepEqual(checkSplitter({ ...x, now: 10_000 + DEFAULTS.splitterIdleS }, DEFAULTS), [], "exactly at the limit is not past it");
+    const late = checkSplitter({ ...x, now: 10_000 + DEFAULTS.splitterIdleS + 1 }, DEFAULTS);
+    assert.equal(late.length, 1);
+    assert.equal(late[0].kind, "v2_mon_splitter_idle");
+    assert.match(late[0].message, /permissionless/);
+    assert.deepEqual(checkSplitter(x, { ...DEFAULTS, splitterIdleS: 0 }), []);
+    assert.deepEqual(checkSplitter({ ...x, pendingSince: null }, DEFAULTS), [], "nothing waiting is not late");
+  });
+
+  test("a floor-miss streak pages only once it is a streak, and names the reason", () => {
+    const at = (count) => checkSplitter({ splitter: SPLITTER, now: 5, lastDistributedAt: null, pendingSince: null, floorMisses: [{ asset: ASSET, ticker: "NVDA", reason: "BELOW_FLOOR", count, lastAt: 4 }] }, DEFAULTS);
+    assert.deepEqual(at(DEFAULTS.splitterFloorMisses - 1), []);
+    const out = at(DEFAULTS.splitterFloorMisses);
+    assert.equal(out[0].kind, "v2_mon_splitter_floor_miss");
+    assert.match(out[0].message, /BELOW_FLOOR/);
+    assert.match(out[0].message, /held, not dumped/);
+  });
+
+  test("lastBuybackAt 0 is NEVER, and an age is never measured from it", () => {
+    // The contract returns 0 before the first buyback. Read as a timestamp it is 1970, and the age
+    // becomes fifty-five years: the splitter pages "stuck" with an absurd number that buries the real
+    // signal. Both the mapping and what the alert then says are pinned here.
+    assert.equal(buybackClock(0), null);
+    assert.equal(buybackClock(0n), null);
+    assert.equal(buybackClock(null), null);
+    assert.equal(buybackClock(1_700_000_000), 1_700_000_000);
+
+    const now = 1_000_000;
+    const raw0 = checkBuyback({ splitter: SPLITTER, now, balance: 60_000_000n, lastBuybackAt: 0, fundedSince: now - DEFAULTS.buybackStuckS - 1, unburned: [] }, DEFAULTS);
+    assert.equal(raw0.length, 1);
+    assert.equal(raw0[0].kind, "v2_mon_buyback_stuck");
+    assert.match(raw0[0].message, /\(never\)/);
+    assert.doesNotMatch(raw0[0].message, /1970/);
+    assert.equal(raw0[0].data.lastBuybackAt, null, "and the payload carries unknown, not 0");
+    // The age must come from when the balance was funded, not from the epoch.
+    assert.equal(raw0[0].data.ageS, DEFAULTS.buybackStuckS + 1);
+  });
+
+  test("stuck needs a balance, a passed cooldown and the age; each one alone is quiet", () => {
+    const now = 1_000_000;
+    const old = now - DEFAULTS.buybackStuckS - 1;
+    const stuck = { splitter: SPLITTER, now, balance: 60_000_000n, lastBuybackAt: old, fundedSince: null, unburned: [] };
+    assert.equal(checkBuyback(stuck, DEFAULTS).length, 1);
+    assert.deepEqual(checkBuyback({ ...stuck, balance: 0n }, DEFAULTS), [], "no balance, nothing to buy with");
+    assert.deepEqual(checkBuyback({ ...stuck, balance: null }, DEFAULTS), [], "an unread balance is unknown, not zero and not stuck");
+    assert.deepEqual(checkBuyback({ ...stuck, lastBuybackAt: now - 10 }, DEFAULTS), [], "inside the cooldown it is not stuck, it is waiting");
+    assert.deepEqual(checkBuyback(stuck, { ...DEFAULTS, buybackStuckS: 0 }), []);
+    // and the cooldown itself is the compiled one, not a number written here twice
+    assert.deepEqual(checkBuyback({ ...stuck, lastBuybackAt: now - BUYBACK_COOLDOWN + 1 }, DEFAULTS), []);
+  });
+});
+
+describe("v8: payout routes, and the selector they share", () => {
+  const routerRoute = (over = {}) => ({ venue: 2, fee: 3000, tickSpacing: 60, v3Pool: ZERO, feeBps: 30, ...over });
+
+  test("a route that matches the registry pages nothing", () => {
+    const want = { venue: "v4", fee: 3000, tickSpacing: 60, poolId: `0x${"5".repeat(64)}` };
+    assert.deepEqual(checkRoute({ ticker: "NVDA", asset: ASSET, route: routerRoute(), registryRoute: want, poolId: want.poolId }), []);
+  });
+
+  test("venue, fee and tick spacing mismatches each page under their own key", () => {
+    const want = { venue: "v4", fee: 3000, tickSpacing: 60, poolId: null };
+    const keys = (route) => checkRoute({ ticker: "NVDA", asset: ASSET, route, registryRoute: want, poolId: null }).map((f) => f.key.split(":").pop());
+    assert.deepEqual(keys(routerRoute({ venue: 1 })), ["venue"]);
+    assert.deepEqual(keys(routerRoute({ fee: 500 })), ["fee"]);
+    assert.deepEqual(keys(routerRoute({ tickSpacing: 10 })), ["tickSpacing"]);
+  });
+
+  test("a registry pool id that is not what its own key hashes to pages: for v4 the id IS the pin", () => {
+    const want = { venue: "v4", fee: 3000, tickSpacing: 60, poolId: `0x${"1".repeat(64)}` };
+    const out = checkRoute({ ticker: "NVDA", asset: ASSET, route: routerRoute(), registryRoute: want, poolId: `0x${"2".repeat(64)}` });
+    assert.equal(out.length, 1);
+    assert.match(out[0].key, /:poolId$/);
+    assert.match(out[0].message, /the id IS the pin/);
+  });
+
+  test("no route on chain with one published, and one on chain with none published, are different alerts", () => {
+    const missing = checkRoute({ ticker: "NVDA", asset: ASSET, route: routerRoute({ venue: 0, fee: 0, tickSpacing: 0, feeBps: 0 }), registryRoute: { venue: "v3", fee: 3000, tickSpacing: null, poolId: null }, poolId: null });
+    assert.match(missing[0].key, /:missing$/);
+    assert.match(missing[0].message, /paid in Stock Tokens/);
+    const extra = checkRoute({ ticker: "NVDA", asset: ASSET, route: routerRoute(), registryRoute: null, poolId: null });
+    assert.match(extra[0].key, /:unpublished$/);
+    // and the genuinely quiet case: no route published, none on chain
+    assert.deepEqual(checkRoute({ ticker: "NVDA", asset: ASSET, route: routerRoute({ venue: 0 }), registryRoute: null, poolId: null }), []);
+  });
+
+  test("a fee tier above the ceiling, and a cached fee above what the floor counts", () => {
+    const want = { venue: "v3", fee: 20_000, tickSpacing: null, poolId: null };
+    const tier = checkRoute({ ticker: "NVDA", asset: ASSET, route: routerRoute({ venue: 1, fee: 20_000, feeBps: 200 }), registryRoute: want, poolId: null });
+    const keys = tier.map((f) => f.key.split(":").pop());
+    assert.ok(keys.includes("tier"), "above MAX_ROUTE_FEE_TIER");
+    assert.ok(keys.includes("feeBps"), `above MAX_ROUTE_FEE_BPS (${MAX_ROUTE_FEE_BPS})`);
+    assert.equal(tier.find((f) => f.key.endsWith("feeBps")).severity, "warn");
+  });
+
+  test("an unread route is judged by nothing", () => {
+    assert.deepEqual(checkRoute({ ticker: "NVDA", asset: ASSET, route: null, registryRoute: { venue: "v3", fee: 3000, tickSpacing: null, poolId: null }, poolId: null }), []);
+  });
+
+  test("the decode guard fires in BOTH directions and is silent when they agree", () => {
+    assert.deepEqual(checkRouteDecode({ address: addr(0xc7), interfaceVersion: 8, isAdapter: false }), [], "v8 registry, router deployed");
+    assert.deepEqual(checkRouteDecode({ address: addr(0xc7), interfaceVersion: 7, isAdapter: true }), [], "v7 registry, adapter deployed");
+    const v8OnAdapter = checkRouteDecode({ address: addr(0xc7), interfaceVersion: 8, isAdapter: true });
+    const v7OnRouter = checkRouteDecode({ address: addr(0xc7), interfaceVersion: 7, isAdapter: false });
+    assert.equal(v8OnAdapter.length, 1);
+    assert.equal(v7OnRouter.length, 1);
+    for (const [f] of [v8OnAdapter, v7OnRouter]) {
+      assert.equal(f.kind, "v2_mon_route_decode");
+      assert.equal(f.severity, "error");
+      assert.match(f.message, /0xd7409659/, "the message names the selector both shapes share");
+    }
+    assert.match(v8OnAdapter[0].message, /without reverting/);
+    // A probe that failed is unknown: it must not be read as "it is the router".
+    assert.deepEqual(checkRouteDecode({ address: addr(0xc7), interfaceVersion: 8, isAdapter: null }), []);
+  });
+
+  test("the v4 pool id is the keccak of the key, currencies in sort order", () => {
+    const viem = loadViem();
+    const { currency0, currency1 } = routeCurrencies(ASSET, USDG);
+    assert.ok(currency0 < currency1, "v4 sorts the currencies");
+    assert.deepEqual(routeCurrencies(USDG, ASSET), { currency0, currency1 }, "and the order does not depend on the arguments' order");
+    const id = v4PoolId(viem, { currency0, currency1, fee: 3000, tickSpacing: 60, hooks: ZERO });
+    // Computed the other way round, from viem's own encoder rather than from the same word() helper.
+    const encoded = viem.encodeAbiParameters(
+      [{ type: "address" }, { type: "address" }, { type: "uint24" }, { type: "int24" }, { type: "address" }],
+      [currency0, currency1, 3000, 60, ZERO],
+    );
+    assert.equal(id, viem.keccak256(encoded));
+  });
+
+  test("the venue enum names what it knows and refuses to fold what it does not into none", () => {
+    assert.equal(routeVenueName(0), "none");
+    assert.equal(routeVenueName(1), "v3");
+    assert.equal(routeVenueName(2), "v4");
+    assert.match(routeVenueName(9), /not in IPayoutRouter.Venue/);
+    assert.equal(routeVenueName(null), null);
+  });
+
+  test("parsePayoutRoute takes the two published shapes and refuses anything else", () => {
+    assert.equal(parsePayoutRoute(null, "x"), null);
+    assert.deepEqual(parsePayoutRoute({ venue: "v3", fee: 3000 }, "x"), { venue: "v3", fee: 3000, tickSpacing: null, poolId: null });
+    assert.throws(() => parsePayoutRoute({ venue: "v5", fee: 1 }, "x"), /is not v3 \| v4/);
+    assert.throws(() => parsePayoutRoute({ venue: "v4", fee: 1, tickSpacing: 60, poolId: "0x1234" }, "x"), /32-byte v4 pool id/);
+  });
+});
+
+describe("v8: the STONKHOUSE pool and the audit trigger", () => {
+  const key = { currency0: addr(0x1), currency1: addr(0x2), fee: 3000, tickSpacing: 60, hooks: ZERO };
+  const POOL = `0x${"7".repeat(64)}`;
+
+  test("a hookless pool inside the fee ceiling, with a matching id, pages nothing", () => {
+    assert.deepEqual(checkTokenPool({ poolId: POOL, poolKey: key, recomputedPoolId: POOL, depth: null }, DEFAULTS), []);
+  });
+
+  test("a hook, a fee above the ceiling, or an id that does not match its key each page", () => {
+    const hooked = checkTokenPool({ poolId: POOL, poolKey: { ...key, hooks: addr(0xbad) }, recomputedPoolId: POOL, depth: null }, DEFAULTS);
+    assert.match(hooked[0].message, /HOOKLESS/);
+    const fat = checkTokenPool({ poolId: POOL, poolKey: { ...key, fee: (MAX_HOOK_FEE_BPS + 1) * 100 }, recomputedPoolId: POOL, depth: null }, DEFAULTS);
+    assert.equal(fat.length, 1);
+    assert.match(fat[0].key, /:fee$/);
+    assert.deepEqual(checkTokenPool({ poolId: POOL, poolKey: { ...key, fee: MAX_HOOK_FEE_BPS * 100 }, recomputedPoolId: POOL, depth: null }, DEFAULTS), [], "exactly at the ceiling is allowed");
+    const wrongId = checkTokenPool({ poolId: POOL, poolKey: key, recomputedPoolId: `0x${"8".repeat(64)}`, depth: null }, DEFAULTS);
+    assert.match(wrongId[0].message, /the only pin there is/);
+  });
+
+  test("an unknown depth fails a set floor, and pages nothing when no floor is set", () => {
+    assert.deepEqual(checkTokenPool({ poolId: POOL, poolKey: key, recomputedPoolId: POOL, depth: null }, DEFAULTS), [], "off by default");
+    const t2 = { ...DEFAULTS, tokenPoolMinDepth: 1_000_000 };
+    const unknown = checkTokenPool({ poolId: POOL, poolKey: key, recomputedPoolId: POOL, depth: null }, t2);
+    assert.equal(unknown[0].kind, "v2_mon_token_pool_depth");
+    assert.match(unknown[0].message, /An unknown depth is not a deep pool/);
+    assert.deepEqual(checkTokenPool({ poolId: POOL, poolKey: key, recomputedPoolId: POOL, depth: 1_000_000n }, t2), [], "exactly at the floor is not below it");
+    assert.equal(checkTokenPool({ poolId: POOL, poolKey: key, recomputedPoolId: POOL, depth: 999_999n }, t2).length, 1);
+  });
+
+  test("the audit trigger pages at half and again at the trigger, and never on a partial sum", () => {
+    const t2 = { ...DEFAULTS, auditTriggerUsdg: 1_000_000_000_000 };
+    const at = (locked) => checkTvl(
+      { locked, parts: [{ name: "clearinghouse", amount: locked ?? 0n }], usdgTotalSupply: 10n ** 12n, headAgeS: 0, holdersFound: 2, holdersExpected: 2 },
+      t2,
+    );
+    assert.deepEqual(at(499_999_999_999n), []);
+    const half = at(500_000_000_000n);
+    assert.equal(half[0].severity, "warn");
+    assert.equal(half[0].key, "half");
+    assert.match(half[0].message, /the notice, not the deadline/);
+    const full = at(1_000_000_000_000n);
+    assert.equal(full[0].severity, "error");
+    assert.equal(full[0].key, "full");
+    // OWN8-09 CHANGED THIS LINE, and it used to assert the opposite:
+    //   assert.deepEqual(at(null), [], "a TVL that could not be summed is unknown, never a partial total")
+    // The half of it that was right is kept — `locked` is still null on an incomplete read and no
+    // partial sum is ever compared against the trigger. What was wrong was the OUTPUT: returning []
+    // made "could not read it" and "has not crossed yet" produce the identical silence, and silence is
+    // the only thing the owner ever sees from this alert. It now pages a fault instead.
+    const unknown = at(null);
+    assert.equal(unknown.length, 1, "an unsummable TVL must page, not go quiet");
+    assert.equal(unknown[0].key, "fault");
+    assert.equal(unknown[0].severity, "error");
+    assert.match(unknown[0].message, /UNKNOWN/);
+    assert.deepEqual(unknown[0].data.lockedUsdg6, null, "and it still refuses to publish a partial total");
+
+    assert.deepEqual(checkTvl({ locked: 0n, parts: [], usdgTotalSupply: 1n }, DEFAULTS), [],
+      "off by default, with nothing locked, stays silent: an empty protocol needs no audit notice");
+  });
+});
+
+describe("v8 OWN8-09: every way the audit notice can go quiet", () => {
+  // The defect this closes is not a wrong number. It is that the alert's ONLY output is silence, so a
+  // notice that has stopped measuring anything is indistinguishable from a protocol below $1M.
+  const ON = { ...DEFAULTS, auditTriggerUsdg: 1_000_000_000_000 };
+  const healthy = {
+    locked: 1n, parts: [{ name: "clearinghouse", amount: 1n }],
+    usdgTotalSupply: 10n ** 12n, headAgeS: 0, holdersFound: 2, holdersExpected: 2,
+  };
+  const faultOf = (over, t = ON) => tvlFaults({ ...healthy, ...over }, t);
+
+  test("the healthy shape faults on nothing — the GREEN control", () => {
+    // Asserted first: a fault detector that fires on everything is worth no more than one that never does.
+    assert.deepEqual(faultOf({}), []);
+    assert.deepEqual(tvlFaults({ ...healthy, locked: 0n }, ON), [], "a genuine zero under a live trigger is not a fault");
+  });
+
+  test("an unreadable total faults instead of going silent", () => {
+    const f = faultOf({ locked: null });
+    assert.equal(f.length, 1);
+    assert.equal(f[0].key, "fault");
+    assert.match(f[0].data.reasons.join(" "), /could not be read/);
+  });
+
+  test("a MIS-REGISTERED USDG faults, and that is the case a balance sum cannot see", () => {
+    // The dangerous one. A wrong shared.usdg answers balanceOf 0 for every holder, so the total is a
+    // comfortable zero, the check completes, and reconcile() DELETES any live alert. totalSupply is
+    // the discriminator between "the protocol holds nothing" and "we are asking the wrong contract".
+    for (const supply of [null, undefined, 0n]) {
+      const f = faultOf({ locked: 0n, usdgTotalSupply: supply });
+      assert.equal(f.length, 1, `supply ${String(supply)}`);
+      assert.match(f[0].data.reasons.join(" "), /totalSupply|wrong address/);
+    }
+    assert.deepEqual(faultOf({ locked: 0n, usdgTotalSupply: 1n }), [],
+      "a live token holding nothing is NOT a fault, or every pre-launch run pages");
+  });
+
+  test("a stale head faults: a stale total pages late, and late equals never here", () => {
+    assert.deepEqual(faultOf({ headAgeS: ON.tvlMaxAgeS }), [], "exactly at the limit is not past it");
+    const f = faultOf({ headAgeS: ON.tvlMaxAgeS + 1 });
+    assert.equal(f.length, 1);
+    assert.match(f[0].data.reasons.join(" "), /stale/);
+  });
+
+  test("a short holder set faults: the sum is structurally late", () => {
+    const f = faultOf({ holdersFound: 1, holdersExpected: 2 });
+    assert.equal(f.length, 1);
+    assert.match(f[0].data.reasons.join(" "), /1 of 2/);
+  });
+
+  test("the trigger being OFF while the protocol HOLDS value is the dark-notice fault", () => {
+    // auditTriggerUsdg is 0 in DEFAULTS, no registry carries it and MONITOR_THRESHOLDS is in no env
+    // file, so the notice ships dark. Off with an empty protocol is a legitimate choice and stays
+    // quiet; off with collateral in the contracts is the failure OWN8-09 exists to prevent.
+    assert.deepEqual(tvlFaults({ ...healthy, locked: 0n }, DEFAULTS), [], "off and empty is silent");
+    const f = tvlFaults({ ...healthy, locked: 500_000_000_000n }, DEFAULTS);
+    assert.equal(f.length, 1);
+    assert.match(f[0].data.reasons.join(" "), /is OFF/);
+    assert.deepEqual(tvlFaults({ ...healthy, locked: null }, DEFAULTS), [],
+      "off and unknown stays silent too: an off notice owes no reading");
+  });
+
+  test("several faults at once are ONE page with every reason named", () => {
+    // alertId is kind:key, so one key is one page and one resolution. Sharing the key loses nothing
+    // because every one of these has the same operator action.
+    const f = faultOf({ locked: null, usdgTotalSupply: 0n, headAgeS: 99_999, holdersFound: 1, holdersExpected: 2 });
+    assert.equal(f.length, 1, "one finding, not four");
+    assert.equal(f[0].data.reasons.length, 4, "and all four reasons are named in it");
+  });
+
+  test("the fault names OWN8-09's next action and warns against reading silence as safety", () => {
+    const f = faultOf({ locked: null })[0];
+    assert.match(f.message, /ops\/v8\/tvl-threshold\.mjs/, "it must name the tool that derives the trigger");
+    assert.match(f.message, /Do not read the absence of an OWN8-09 page/);
+    assert.match(f.message, /V3-D33/);
+  });
+
+  test("a fault still resolves: the same shape without the fault produces nothing", () => {
+    // If a fault could never clear it would be an event, not a condition, and would page forever.
+    assert.equal(faultOf({ locked: null }).length, 1);
+    assert.deepEqual(faultOf({}), []);
+  });
+});
+
+describe("v8: the rent alert, inverted, in both directions", () => {
+  const market8 = (over = {}) => ({ ticker: "NVDA", underlying: ASSET, enabled: true, chainPpm: 0, registryPpm: 0, interfaceVersion: 8, allowRent: false, ...over });
+  const market7 = (over = {}) => ({ ticker: "NVDA", underlying: ASSET, enabled: true, chainPpm: 80, registryPpm: 80, interfaceVersion: 7, ...over });
+
+  test("v8 healthy: rent 0 on chain and 0 in the registry pages NOTHING", () => {
+    // Under v7 this exact market pages twice. If the branch were ever written with the v7 comparison,
+    // this assertion is what fails.
+    assert.deepEqual(checkMintFee(market8()), []);
+  });
+
+  test("v8: rent charged on chain pages, error while the market is enabled and warn before", () => {
+    const on = checkMintFee(market8({ chainPpm: 80 }));
+    assert.equal(on.length, 1);
+    assert.equal(on[0].kind, "v2_mon_mint_fee_charged");
+    assert.equal(on[0].severity, "error");
+    assert.match(on[0].key, /:chain$/);
+    assert.match(on[0].message, /PINNED at that rate for its whole life/);
+    assert.match(on[0].message, /72 h/, "the fix is the MARKET_FEE_MANAGER lane, and it is not instant");
+    const notYet = checkMintFee(market8({ chainPpm: 80, enabled: false }));
+    assert.equal(notYet[0].severity, "warn");
+  });
+
+  test("v8: a registry that publishes rent pages too, and says whether allowRent let it through", () => {
+    const plain = checkMintFee(market8({ registryPpm: 40 }));
+    assert.equal(plain.length, 1);
+    assert.match(plain[0].key, /:registry$/);
+    assert.match(plain[0].message, /build-markets.mjs --check refuses this/);
+    const allowed = checkMintFee(market8({ registryPpm: 40, allowRent: true }));
+    assert.match(allowed[0].message, /allowRent is true/);
+  });
+
+  test("v7 is untouched: the run-off deployment still pages when rent is MISSING", () => {
+    assert.deepEqual(checkMintFee(market7()), [], "a healthy v7 market");
+    const zero = checkMintFee(market7({ chainPpm: 0, registryPpm: 0 }));
+    assert.equal(zero.length, 2);
+    assert.deepEqual(new Set(zero.map((f) => f.kind)), new Set(["v2_mon_mint_fee_zero"]));
+  });
+
+  test("an unknown interface version keeps the v7 reading rather than guessing v8", () => {
+    const unknown = checkMintFee({ ...market7(), interfaceVersion: null });
+    assert.deepEqual(unknown, [], "v7 healthy rows stay quiet");
+    assert.equal(checkMintFee({ ...market7(), interfaceVersion: null, chainPpm: 0 }).length, 1);
+  });
+
+  test("v8: a series pinned at a non-zero rate pages, and one at zero does not", () => {
+    const base = { longId: "1", label: "NVDA call", ppm: 0, marketPpm: 0, paid: 0n, refunded: 0n, accrued: 0n, mints: 3, zeroFeeMints: 3, settled: false, complete: true, interfaceVersion: 8 };
+    assert.deepEqual(checkMintRent(base), [], "v8 healthy: no rent charged, no alert");
+    const charged = checkMintRent({ ...base, ppm: 80, paid: 500n, accrued: 500n });
+    assert.equal(charged.length, 1);
+    assert.equal(charged[0].kind, "v2_mon_mint_fee_charged");
+    assert.match(charged[0].key, /:series$/);
+    assert.match(charged[0].message, /pinned at creation and never changes/);
+    // the v7 free-mint reading must NOT fire under v8: those keys belong to the other branch
+    assert.equal(charged.filter((f) => f.kind === "v2_mon_mint_rent").length, 0);
+  });
+
+  test("v7 rent ledger checks are unchanged", () => {
+    const v7 = { longId: "1", label: "NVDA call", ppm: 80, marketPpm: 80, paid: 0n, refunded: 0n, accrued: 0n, mints: 3, zeroFeeMints: 3, settled: false, complete: true, interfaceVersion: 7 };
+    const out = checkMintRent(v7);
+    assert.equal(out.length, 1);
+    assert.equal(out[0].kind, "v2_mon_mint_rent");
+    assert.match(out[0].key, /:free-mint$/);
+  });
+});
+
+describe("v8: a whole pass against an in-memory v8 deployment", () => {
+  const scratch = (prefix) => {
+    const dir = mkdtempSync(path.join(tmpdir(), prefix));
+    after(() => rmSync(dir, { recursive: true, force: true }));
+    return dir;
+  };
+  const ASSET8 = addr(0xa001);
+  const MANAGER8 = addr(0xac1);
+  const SPLITTER8 = addr(0xf51);
+  const EXEC8 = addr(0xf52);
+  const SAFE_ADMIN = addr(0x5a1);
+  const SAFE_TREASURY = addr(0x5a2);
+  const ROLES = JSON.parse(readFileSync(path.join(ABIS, "roles.json"), "utf8"));
+  const reverts = () => {
+    const e = new Error("execution reverted");
+    e.name = "ContractFunctionRevertedError";
+    throw e;
+  };
+
+  /** A v8 registry: the v8 blocks the monitor reads, with everything the deploy write-back fills in. */
+  function writeV8Registry(dir, { payoutRoute = { venue: "v4", fee: 3000, tickSpacing: 60, poolId: null }, mintFeePpm = 0 } = {}) {
+    const viem = loadViem();
+    const key = { ...routeCurrencies(ASSET8, USDG), fee: 3000, tickSpacing: 60, hooks: ZERO };
+    const route = payoutRoute === null ? null : { ...payoutRoute, poolId: payoutRoute.poolId ?? v4PoolId(viem, key) };
+    const tokenKey = { currency0: addr(0x11), currency1: addr(0x12), fee: 3000, tickSpacing: 60, hooks: ZERO };
+    const file = path.join(dir, "registry-v8.json");
+    writeFileSync(
+      file,
+      JSON.stringify({
+        shared: {
+          chainId: 4663,
+          usdg: USDG,
+          multicall3: null,
+          safes: { admin: SAFE_ADMIN, treasury: SAFE_TREASURY },
+          token: { address: addr(0x13), symbol: "STONK", decimals: 18, poolKey: tokenKey, poolId: v4PoolId(viem, tokenKey) },
+        },
+        v2: {
+          interfaceVersion: 8,
+          deployBlock: 1000,
+          defaults: {},
+          fees: { mintFeePpm: 0, allowRent: false },
+          contracts: { ...C, accessManager: MANAGER8, sources: { ...SRC, dataStreams: null } },
+          bots: { cranker: addr(0xb01), pricer: addr(0xb02), quoter: addr(0xb03), guardian: addr(0xb04) },
+          flywheel: { feeSplitter: SPLITTER8, buybackExecutor: EXEC8, deployBlock: 1000 },
+        },
+        markets: [{ ticker: "NVDA", asset: ASSET8, feed: addr(0xb001), feedAggregator: null, v2: { status: "live", univ3Pool: null, univ3MinLiquidity: null, mintFeePpm, payoutRoute: route } }],
+      }),
+    );
+    return file;
+  }
+
+  /** A healthy v8 chain: the manifest's roles wired as published, both Safes 2-of-3, a matching route. */
+  const v8Read = (chain, over = {}) => (address, fn, args) => {
+    const a = address.toLowerCase();
+    if (over[fn] !== undefined) {
+      const r = over[fn](address, args);
+      if (r !== undefined) return r;
+    }
+    if (a === MANAGER8.toLowerCase()) {
+      const roleName = Object.entries(ROLES.roles).find(([, id]) => id === Number(args[0]))?.[0];
+      switch (fn) {
+        case "getRoleAdmin":
+          return BigInt(ROLES.roles[ROLES.roleAdmin[roleName] ?? "ADMIN"]);
+        case "getRoleGuardian":
+          return BigInt(ROLES.roles[ROLES.roleGuardian[roleName] ?? "ADMIN"]);
+        case "hasRole":
+          return [true, ROLES.delaysS[roleName]];
+        default:
+          break;
+      }
+    }
+    if (a === SPLITTER8.toLowerCase()) {
+      if (fn === "buybackBalance") return 0n;
+      if (fn === "lastBuybackAt") return 0n;
+    }
+    if (a === C.payoutAdapter.toLowerCase()) {
+      if (fn === "factory") reverts(); // the router has no factory(): this is what identifies it
+      if (fn === "routes") return { venue: 2, fee: 3000, tickSpacing: 60, v3Pool: ZERO, feeBps: 30 };
+    }
+    if (a === SAFE_ADMIN.toLowerCase() || a === SAFE_TREASURY.toLowerCase()) {
+      if (fn === "getOwners") return [addr(1), addr(2), addr(3)];
+      if (fn === "getThreshold") return 2n;
+    }
+    return defaultRead(chain, address, fn, args);
+  };
+
+  test("every v8 check actually runs, and a healthy v8 deployment pages none of them", async () => {
+    const dir = scratch("monitor-v8-ok-");
+    const chain = new FakeChain({ head: 20_000n });
+    chain.read = v8Read(chain);
+    const r = await runOnce(options(dir, writeV8Registry(dir)), { viem: fakeViem(chain) });
+    // The wiring, not the pure functions: a check that is never called is indistinguishable from one
+    // that found nothing, and the unit tests above cannot tell the difference.
+    for (const name of ["manager", "safes", "flywheel", "routes", "tokenpool"]) {
+      assert.equal(r.checks[name]?.status, "ok", `${name}: ${JSON.stringify(r.checks[name])}`);
+    }
+    // OWN8-09 (46c3e6b5) deliberately stopped this check reporting `skipped`: record() files a
+    // skipped check as completed and reconcile() then DELETES the conditions it remembers, so a
+    // mis-registered `shared.usdg` used to CLEAR a live audit-trigger alert instead of raising one.
+    // The check now always has an opinion. Here the registry names holders that hold nothing, so the
+    // opinion is a clean "ok" with no finding -- which the v8kinds assertion below still proves.
+    assert.equal(r.checks.tvl.status, "ok", "the check completes with an opinion even while the trigger is off");
+    // OWN8-09 (46c3e6b5): this fixture holds 2,000,000 USDG with `auditTriggerUsdg` 0, and a funded
+    // protocol whose audit notice is dark is a fault by design -- "off with collateral in the
+    // contracts is the notice being dark exactly when it matters". So the healthy-deployment claim is
+    // that it pages this ONE notice and nothing else; any other v8 kind appearing here is a regression.
+    const v8kinds = kindsOf(r).filter((k) => /manager|safe_threshold|splitter|buyback|route_|mint_fee|token_pool|tvl/.test(k));
+    assert.deepEqual(v8kinds, [TVL_DARK], `a healthy v8 deployment pages only the dark audit trigger: ${JSON.stringify(kindsOf(r))}`);
+    assert.match(r.checks.manager.detail, /11 roles/);
+    assert.match(r.checks.routes.detail, /NVDA v4/);
+  });
+
+  // ---------------------------------------------------------------------------------------------
+  // T-491. The two tests below are the first in this file to run a full pass with the audit trigger
+  // ON. Until fake-chain answered totalSupply, they could not exist: the trigger-on branch of
+  // tvlFaults pushed "USDG's totalSupply could not be read", checkTvl returns on any fault, and the
+  // half and full arms were unreachable end to end. The unit tests elsewhere in this file call
+  // checkTvl directly and so never exercised the wiring that feeds it.
+  //
+  // The arithmetic, which is not obvious from the source: fake-chain keys balanceOf on the TOKEN
+  // address, so BOTH holders the v8 registry names (clearinghouse, makerVault) read as holding
+  // USDG_BALANCE. Locked is therefore 2,000,000 USDG in every v8 fixture, and the trigger chosen
+  // here is what selects the arm:
+  //     trigger <= 2,000,000            -> full
+  //     2,000,000 < trigger <= 4,000,000 -> half   (locked >= trigger/2, locked < trigger)
+  //     trigger > 4,000,000             -> neither
+  const TVL_TRIGGER_FULL = "1000000000000"; // 1,000,000 USDG, below the 2,000,000 locked
+  const TVL_TRIGGER_HALF = "3000000000000"; // 3,000,000 USDG: half is 1,500,000, locked sits between
+
+  const v8TvlPass = async (prefix, trigger) => {
+    const dir = scratch(prefix);
+    const chain = new FakeChain({ head: 20_000n });
+    chain.read = v8Read(chain);
+    const opts = options(dir, writeV8Registry(dir), ["--threshold", `auditTriggerUsdg=${trigger}`]);
+    return runOnce(opts, { viem: fakeViem(chain) });
+  };
+
+  test("trigger ON and crossed: a full pass reaches checkTvl's FULL arm", async () => {
+    const r = await v8TvlPass("monitor-v8-tvl-full-", TVL_TRIGGER_FULL);
+    const tvl = r.findings.filter((x) => x.kind === TVL_DARK);
+    assert.equal(tvl.length, 1, `exactly one audit-trigger finding: ${JSON.stringify(kindsOf(r))}`);
+    // The arm, not the prose. A report finding carries `id` = `${kind}:${key}`, and `key` is what
+    // checkTvl sets to "fault", "half" or "full" -- so the id IS the arm. A ":fault" here would mean
+    // the pass never got past tvlFaults, which is the state this row fixed.
+    assert.equal(tvl[0].id, `${TVL_DARK}:full`, `not the full arm: ${tvl[0].message}`);
+    assert.equal(tvl[0].severity, "error");
+    // The sum reached the arm intact. The wiring totals the balances and decides `complete` BEFORE
+    // checkTvl is called, so a fault skips the arm, never the sum -- detail proves the total the arm
+    // actually saw, and 2,000,000 is USDG_BALANCE times the two holders this registry names.
+    assert.equal(r.checks.tvl.status, "ok");
+    assert.match(r.checks.tvl.detail, /^2000000\.00 USDG locked \(clearinghouse 1000000\.00, makerVault 1000000\.00\) against a 1000000\.00 USDG trigger$/);
+  });
+
+  test("trigger ON and half crossed: the same pass reaches the HALF arm instead", async () => {
+    const r = await v8TvlPass("monitor-v8-tvl-half-", TVL_TRIGGER_HALF);
+    const tvl = r.findings.filter((x) => x.kind === TVL_DARK);
+    assert.equal(tvl.length, 1, `exactly one audit-trigger finding: ${JSON.stringify(kindsOf(r))}`);
+    assert.equal(tvl[0].id, `${TVL_DARK}:half`, `not the half arm: ${tvl[0].message}`);
+    assert.equal(tvl[0].severity, "warn");
+    assert.equal(r.checks.tvl.status, "ok");
+    assert.match(r.checks.tvl.detail, /^2000000\.00 USDG locked \(clearinghouse 1000000\.00, makerVault 1000000\.00\) against a 3000000\.00 USDG trigger$/);
+  });
+
+  test("a 1-of-3 Admin Safe pages on the FIRST pass, with no baseline to compare against", async () => {
+    const dir = scratch("monitor-v8-safe-");
+    const chain = new FakeChain({ head: 20_000n });
+    chain.read = v8Read(chain, { getThreshold: (address) => (address.toLowerCase() === SAFE_ADMIN.toLowerCase() ? 1n : undefined) });
+    const r = await runOnce(options(dir, writeV8Registry(dir)), { viem: fakeViem(chain) });
+    const f = r.findings.filter((x) => x.kind === "v2_mon_safe_threshold");
+    assert.equal(f.length, 1, `findings: ${JSON.stringify(kindsOf(r))}`);
+    assert.match(f[0].message, /Admin Safe/);
+    assert.equal(f[0].severity, "error");
+  });
+
+  test("rent charged on a v8 chain pages the INVERTED alert, and the same market on v7 does not", async () => {
+    const dir = scratch("monitor-v8-rent-");
+    const chain = new FakeChain({ head: 20_000n });
+    chain.read = v8Read(chain, {
+      market: (address) => (address.toLowerCase() === C.clearinghouse.toLowerCase() ? { enabled: true, mintPaused: false, strikeTick: 100n, exerciseFeeBps: 25, oracle: C.settlementOracle, mintFeePpm: 80 } : undefined),
+    });
+    const r = await runOnce(options(dir, writeV8Registry(dir)), { viem: fakeViem(chain) });
+    const charged = r.findings.filter((x) => x.kind === "v2_mon_mint_fee_charged");
+    assert.equal(charged.length, 1, `findings: ${JSON.stringify(kindsOf(r))}`);
+    assert.match(charged[0].message, /INTERFACE_VERSION 8 charges no writer rent/);
+    assert.equal(kindsOf(r).filter((k) => k === "v2_mon_mint_fee_zero").length, 0, "the v7 alert must not fire on a v8 registry");
+  });
+
+  test("a payout contract of the wrong shape stops the route check instead of decoding it", async () => {
+    const dir = scratch("monitor-v8-decode-");
+    const chain = new FakeChain({ head: 20_000n });
+    // The v7 adapter standing where interface 8 says the router is: it answers factory().
+    chain.read = v8Read(chain, {
+      factory: (address) => (address.toLowerCase() === C.payoutAdapter.toLowerCase() ? addr(0xfac) : undefined),
+      routes: (address) => (address.toLowerCase() === C.payoutAdapter.toLowerCase() ? [addr(0x999), 3000] : undefined),
+    });
+    const r = await runOnce(options(dir, writeV8Registry(dir)), { viem: fakeViem(chain) });
+    const decode = r.findings.filter((x) => x.kind === "v2_mon_route_decode");
+    assert.equal(decode.length, 1, `findings: ${JSON.stringify(kindsOf(r))}`);
+    assert.equal(r.checks.routes.status, "incomplete");
+    assert.match(r.checks.routes.detail, /no route decoded/);
+    // And crucially: nothing was decoded, so no route alert carries a venue-as-address.
+    assert.deepEqual(r.findings.filter((x) => x.kind === "v2_mon_route_wiring"), []);
+  });
+
+  test("a route the registry does not match pages under its own key", async () => {
+    const dir = scratch("monitor-v8-route-");
+    const chain = new FakeChain({ head: 20_000n });
+    chain.read = v8Read(chain, { routes: (address) => (address.toLowerCase() === C.payoutAdapter.toLowerCase() ? { venue: 1, fee: 500, tickSpacing: 0, v3Pool: addr(0x777), feeBps: 5 } : undefined) });
+    const r = await runOnce(options(dir, writeV8Registry(dir)), { viem: fakeViem(chain) });
+    // A report finding carries `id` ("<kind>:<key>"), not the raw key.
+    const keys = r.findings.filter((x) => x.kind === "v2_mon_route_wiring").map((f) => f.id.split(":").pop());
+    assert.deepEqual(new Set(keys), new Set(["venue", "fee", "tickSpacing"]), `keys: ${JSON.stringify(keys)}`);
+    assert.ok(r.findings.some((f) => /routes over v3 on chain and the registry publishes v4/.test(f.message)));
+  });
+
+  test("a manager whose delays are not the manifest's pages, one alert per member", async () => {
+    const dir = scratch("monitor-v8-mgr-");
+    const chain = new FakeChain({ head: 20_000n });
+    chain.read = v8Read(chain, { hasRole: (address) => (address.toLowerCase() === MANAGER8.toLowerCase() ? [true, 0] : undefined) });
+    const r = await runOnce(options(dir, writeV8Registry(dir)), { viem: fakeViem(chain) });
+    const wiring = r.findings.filter((x) => x.kind === "v2_mon_manager_wiring");
+    // Exactly the published (holder, role) pairs whose manifest delay is not 0 can disagree with a chain
+    // that reports 0 for every member — counted from the manifest, not from a number written here.
+    const expected = Object.entries(ROLES.holders).flatMap(([, roles]) => roles).filter((name) => ROLES.delaysS[name] > 0).length;
+    const delayFindings = wiring.filter((f) => f.id.endsWith(":delay"));
+    assert.equal(delayFindings.length, expected, `delay findings: ${JSON.stringify(delayFindings.map((f) => f.id))}`);
+    assert.ok(expected > 0, "the manifest must have at least one delayed holder, or this test proves nothing");
+    assert.ok(wiring.every((f) => f.severity === "error"));
+    assert.match(delayFindings[0].message, /delay IS the protection/);
+  });
+});
+
+/* ------------------------------------------------------------------------------------------------ */
+/*  T-180: the v8 events that reached no branch at all                                               */
+/* ------------------------------------------------------------------------------------------------ */
+
+describe("v8: PayoutRouter route events", () => {
+  const ROUTER = addr(0x0ce);
+  const names = { [ROUTER.toLowerCase()]: "payoutRouter" };
+  // NVDA publishes a v3 route; TSLA publishes NONE. TSLA is the case with no steady-state coverage at
+  // all: checkRoute only compares a published route, so for TSLA a clear is indistinguishable from the
+  // steady state and these events are the only record that anything happened.
+  const markets = [
+    { ticker: "NVDA", asset: U, v2: { payoutRoute: { venue: "v3", fee: 500, tickSpacing: null, poolId: null } } },
+    { ticker: "TSLA", asset: V6.TSLA, v2: { payoutRoute: null } },
+  ];
+  const ctx = { names, clearinghouse: V6.CH, settlementOracle: ORACLE, markets, dataStreamsListed: [] };
+  const one = (log) => adminEventFindings([log], "100", ctx);
+  const routerSet = (asset, over = {}) =>
+    v6log("RouterRouteSet", ROUTER, { asset, venue: 1, poolId: `0x${"0".repeat(64)}`, fee: 500, feeBps: 5, ...over });
+  const cleared = (asset) => v6log("RouteCleared", ROUTER, { asset });
+
+  test("a RouterRouteSet that matches the registry warns, and every disagreement pages error", () => {
+    assert.deepEqual(kinds(one(routerSet(U))), ["v2_mon_route_changed/warn"]);
+    assert.match(one(routerSet(U))[0].message, /payoutRouter\.RouteSet\(NVDA, venue v3, fee 500, 5 bps\).*registry route/);
+    // venue, fee tier, and the ceiling the Clearinghouse can count
+    assert.deepEqual(kinds(one(routerSet(U, { venue: 2 }))), ["v2_mon_route_changed/error"]);
+    assert.match(one(routerSet(U, { venue: 2 }))[0].message, /registry publishes v3 and the route is now v4/);
+    assert.deepEqual(kinds(one(routerSet(U, { fee: 3000 }))), ["v2_mon_route_changed/error"]);
+    assert.deepEqual(kinds(one(routerSet(U, { fee: 10_001 }))), ["v2_mon_route_changed/error"]);
+    assert.match(one(routerSet(U, { fee: 10_001 }))[0].message, /above 10000/);
+    // an asset the registry does not list, and one it lists with no route
+    assert.deepEqual(kinds(one(routerSet(V6.ADMIN))), ["v2_mon_route_changed/error"]);
+    assert.deepEqual(kinds(one(routerSet(V6.TSLA))), ["v2_mon_route_changed/error"]);
+    assert.match(one(routerSet(V6.TSLA))[0].message, /publishes no payout route for TSLA/);
+    // a cached fee the Clearinghouse cannot fully count is a warn, not silence
+    assert.deepEqual(kinds(one(routerSet(U, { feeBps: 250 }))), ["v2_mon_route_changed/warn"]);
+    assert.match(one(routerSet(U, { feeBps: 250 }))[0].message, /counts at most 100/);
+  });
+
+  test("venue none through setRoute is the same outcome as a clear, and is judged the same way", () => {
+    assert.deepEqual(kinds(one(routerSet(U, { venue: 0 }))), ["v2_mon_route_changed/error"]);
+    assert.match(one(routerSet(U, { venue: 0 }))[0].message, /paid in Stock Tokens instead of USDG/);
+    assert.deepEqual(kinds(one(routerSet(V6.TSLA, { venue: 0 }))), ["v2_mon_route_changed/warn"]);
+  });
+
+  test("RouteCleared pages for BOTH markets, and the unpublished one is the whole point", () => {
+    const published = one(cleared(U));
+    assert.deepEqual(kinds(published), ["v2_mon_route_changed/error"]);
+    assert.match(published[0].message, /payoutRouter\.RouteCleared\(NVDA\).*paid in Stock Tokens instead of USDG/);
+
+    // THE CASE WITH NO OTHER COVERAGE. The periodic checkRoute is silent here by design — assert that,
+    // so this test fails if someone ever decides the event branch is redundant.
+    assert.deepEqual(checkRoute({ ticker: "TSLA", asset: V6.TSLA, route: { venue: 0, fee: 0, tickSpacing: 0, feeBps: 0 }, registryRoute: null, poolId: null }), [],
+      "checkRoute says nothing about a cleared route on a market with no published route: the event branch is the only coverage");
+    const unpublished = one(cleared(V6.TSLA));
+    assert.deepEqual(kinds(unpublished), ["v2_mon_route_changed/warn"]);
+    assert.match(unpublished[0].message, /only record that it happened/);
+  });
+
+  test("both v8 names stay in DEDICATED_EVENTS, so the catch-all never double-pages them", () => {
+    assert.ok(DEDICATED_EVENTS.has("RouterRouteSet") && DEDICATED_EVENTS.has("RouteCleared"));
+    assert.equal(CONFIG_EVENTS.RouterRouteSet, undefined);
+    assert.equal(CONFIG_EVENTS.RouteCleared, undefined);
+    assert.deepEqual(configEventFindings([routerSet(U), cleared(U)], "100", names), [],
+      "configEventFindings must stay silent: these have a kind of their own");
+  });
+});
+
+describe("v8: a refused buyback is not a stuck one", () => {
+  const now = 1_800_000_000;
+  const fly = () => ({ lastDistributedAt: null, pendingSince: null, floorMisses: {}, lastBoughtBackAt: null, fundedSince: null, lastSkip: null });
+  const skipLog = (reason) => ({ eventName: "BuybackSkipped", args: { reason: `0x${Buffer.from(reason).toString("hex").padEnd(64, "0")}` }, transactionHash: `0x${"c".repeat(64)}` });
+  const stuck = { splitter: SPLITTER, now, balance: 60_000_000n, lastBuybackAt: null, fundedSince: now - DEFAULTS.buybackStuckS - 1, lastSkip: null, unburned: [] };
+
+  test("applyFlywheelLogs REMEMBERS BuybackSkipped instead of dropping it", () => {
+    const f = fly();
+    applyFlywheelLogs(f, [skipLog("EMPTY")], now, SPLITTER);
+    assert.deepEqual(f.lastSkip, { reason: "EMPTY", at: now });
+    // a buy that went through answers every refusal before it
+    applyFlywheelLogs(f, [{ eventName: "BoughtBack", args: { usdgIn: 1n, tokenOut: 1n }, transactionHash: `0x${"d".repeat(64)}` }, { eventName: "Burned", args: { amount: 1n }, transactionHash: `0x${"d".repeat(64)}` }], now + 1, SPLITTER);
+    assert.equal(f.lastSkip, null);
+  });
+
+  test("a fresh skip re-aims the page at the dial, and names the right operation", () => {
+    const empty = checkBuyback({ ...stuck, lastSkip: { reason: "EMPTY", at: now - 60 } }, DEFAULTS);
+    assert.deepEqual(kinds(empty), ["v2_mon_buyback_skipped/error"]);
+    assert.match(empty[0].message, /the zero is buybackCap.*switched OFF by configuration.*Do not chase the cranker/s);
+    assert.match(empty[0].message, /setBuybackCap is FEE_MANAGER at a 48 h delay/);
+    assert.equal(empty[0].data.reason, "EMPTY");
+
+    const noexec = checkBuyback({ ...stuck, lastSkip: { reason: "NO_EXECUTOR", at: now - 60 } }, DEFAULTS);
+    assert.deepEqual(kinds(noexec), ["v2_mon_buyback_skipped/error"]);
+    assert.match(noexec[0].message, /setBuybackExecutor \/ setToken are TREASURY_ADMIN at a 24 h delay/);
+  });
+
+  test("a STALE skip is still stuck: the contract refused once and then nothing called again", () => {
+    const old = checkBuyback({ ...stuck, lastSkip: { reason: "EMPTY", at: now - DEFAULTS.buybackStuckS - 1 } }, DEFAULTS);
+    assert.deepEqual(kinds(old), ["v2_mon_buyback_stuck/warn"]);
+    assert.match(old[0].message, /older than the .* window, so the contract refused once and then nothing called again/);
+    // and with no skip at all, the page says so rather than implying coverage it does not have
+    const none = checkBuyback(stuck, DEFAULTS);
+    assert.deepEqual(kinds(none), ["v2_mon_buyback_stuck/warn"]);
+    assert.match(none[0].message, /emitted no BuybackSkipped, so nothing has called buyback\(\)/);
+    assert.match(none[0].message, /dry-running cranker .* looks exactly like a stopped one from here/);
+  });
+
+  test("the stuck clock ages from when THIS balance was funded, not from the previous buyback", () => {
+    // Funded 7 h ago, last bought 1 h ago. Ageing from the buyback gives 1 h and says nothing; ageing
+    // from the funding gives 7 h, past the 6 h threshold, and pages.
+    const x = { splitter: SPLITTER, now, balance: 60_000_000n, lastBuybackAt: now - 3600, fundedSince: now - 25_200, lastSkip: null, unburned: [] };
+    const out = checkBuyback(x, DEFAULTS);
+    assert.deepEqual(kinds(out), ["v2_mon_buyback_stuck/warn"]);
+    assert.equal(out[0].data.ageS, 25_200, "the age is measured from fundedSince");
+    // fundedSince unknown falls back to the last buyback rather than inventing an age
+    assert.deepEqual(checkBuyback({ ...x, fundedSince: null }, DEFAULTS), [], "1 h since the last buy is not stuck");
+  });
+});
+
+describe("v8: our own Safes are not the feed owner's", () => {
+  const owners = [addr(1), addr(2), addr(3)];
+  const base = (ctx) => checkSafe(undefined, { nonce: 1n, threshold: 2n, owners }, ctx).baseline;
+
+  test("a protocol Safe pages under its own kinds, group and runbook", () => {
+    const ctx = { safe: ADMIN_SAFE, label: "Admin Safe", feeds: [], protocol: true };
+    const prev = base(ctx);
+    const nonce = checkSafe(prev, { nonce: 2n, threshold: 2n, owners }, ctx).findings;
+    assert.deepEqual(kinds(nonce), ["v2_mon_protocol_safe_nonce_changed/info"]);
+    assert.equal(nonce[0].check, "config", "not the feeds group");
+    assert.match(nonce[0].message, /This is OUR multisig/);
+    assert.ok(!/Usually another feed/.test(nonce[0].message), "the feed body must not reach our Safes");
+
+    const cfg = checkSafe(prev, { nonce: 1n, threshold: 1n, owners }, ctx).findings;
+    assert.deepEqual(kinds(cfg), ["v2_mon_protocol_safe_config_changed/error"]);
+    assert.equal(cfg[0].check, "config");
+    assert.match(cfg[0].message, /Changing who signs for this protocol/);
+    assert.ok(KINDS.v2_mon_protocol_safe_config_changed.runbook.includes("§V55"));
+  });
+
+  test("the feed owner Safe is unchanged: same kinds, same group, same body", () => {
+    const ctx = { safe: ADMIN_SAFE, feeds: ["NVDA"] };
+    const prev = base(ctx);
+    const nonce = checkSafe(prev, { nonce: 2n, threshold: 2n, owners }, ctx).findings;
+    assert.deepEqual(kinds(nonce), ["v2_mon_safe_nonce_changed/info"]);
+    assert.equal(nonce[0].check, "feeds");
+    assert.match(nonce[0].message, /^Feed owner Safe .* \(NVDA\) executed a transaction.*Usually another feed/);
+    const cfg = checkSafe(prev, { nonce: 1n, threshold: 1n, owners }, ctx).findings;
+    assert.deepEqual(kinds(cfg), ["v2_mon_safe_config_changed/warn"]);
+    assert.equal(cfg[0].check, "feeds");
+  });
+});
+
+/* -------------------------------------------------------------------------------------------------
+ * T-239: the ops-only publication packet.
+ *
+ * These guard ops/runbooks/ops-only-publication.md's `publication-manifest` block, which
+ * ops/go-live-v2.sh --check-public-ref reads. They live in this file because T-239's scope names it
+ * and no other test file; they are about the runbook, not about monitor.mjs.
+ * ---------------------------------------------------------------------------------------------- */
+describe("ops-only publication manifest", () => {
+  const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..");
+  const RUNBOOK = path.join(REPO_ROOT, "ops", "runbooks", "ops-only-publication.md");
+
+  /** The same block the shell gate parses, parsed the same way. */
+  const manifest = () => {
+    const block = readFileSync(RUNBOOK, "utf8").match(/```publication-manifest\n([\s\S]*?)```/);
+    assert.ok(block, "ops-only-publication.md has no ```publication-manifest block");
+    const lists = {};
+    for (const line of block[1].split("\n")) {
+      if (!line.trim() || line.trim().startsWith("#")) continue;
+      const at = line.indexOf(":");
+      assert.ok(at > 0, `malformed manifest line: ${JSON.stringify(line)}`);
+      lists[line.slice(0, at).trim()] = line.slice(at + 1).trim().split(/\s+/).filter(Boolean);
+    }
+    return lists;
+  };
+
+  test("the block parses and carries a core list and a monitor list", () => {
+    const lists = manifest();
+    assert.ok(Array.isArray(lists.core) && lists.core.length > 0, "core: is missing or empty");
+    assert.ok(Array.isArray(lists.monitor) && lists.monitor.length > 0, "monitor: is missing or empty");
+  });
+
+  test("EVERY PATH THE PACKET NAMES EXISTS IN THIS REPOSITORY", () => {
+    // A packet that names a file nobody has cannot be published, and the shell gate would report it
+    // as "absent from the public ref" -- which reads as "not published yet" when the truth is
+    // "does not exist anywhere". This is the check that tells those two apart.
+    const lists = manifest();
+    const missing = [];
+    for (const [name, paths] of Object.entries(lists)) {
+      for (const rel of paths) {
+        try {
+          readFileSync(path.join(REPO_ROOT, rel));
+        } catch {
+          missing.push(`${name}: ${rel}`);
+        }
+      }
+    }
+    assert.deepEqual(missing, [], `the packet names paths that do not exist here: ${missing.join(", ")}`);
+  });
+
+  test("the manifest names no secret-bearing path", () => {
+    // The runbook's own rule: no ops/v2/env-dev/*, no bot key files, no .env carrying a value.
+    const offending = Object.values(manifest())
+      .flat()
+      .filter((rel) => /(^|\/)\.env$|env-dev|\.callhouse-keys|\.key$|secret/i.test(rel));
+    assert.deepEqual(offending, [], `the packet would publish secret-bearing paths: ${offending.join(", ")}`);
   });
 });

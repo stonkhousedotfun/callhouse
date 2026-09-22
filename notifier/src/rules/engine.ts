@@ -3,7 +3,13 @@
  * enqueue what they produce, persist. One tick, in order:
  *
  *   1. load the previous snapshot, the cursor and the watch set (verified, enabled subscriptions);
- *   2. GET /v2/markets for spot; an unavailable spot skips spot-driven rules, not receipts;
+ *      GET /v2/config and, when a stored deployment anchor differs from the one just read, drop
+ *      the cursor and snapshot so the tick starts at the storm-guard floor (now − maxAgeS). A
+ *      failed config read leaves cursor, snapshot and stored anchor untouched (like a failed
+ *      markets read). An absent stored anchor is recorded, not treated as a change.
+ *   2. GET /v2/markets for spot and its `spotUpdatedAt` (the "as of" of price-driven messages); an
+ *      unavailable spot skips spot-driven rules, not receipts. A successful read also refreshes the
+ *      ticker cache the API refuses unknown price alerts against (markets.ts);
  *   3. GET /v2/feed/activity?since=<cursor.since − lookback> and page it; keep the items not seen;
  *   4. refresh /v2/accounts/:address/positions for WATCHED wallets only: those an item touched
  *      (taker, maker and fill recipient are all in `accounts`), those never read, and the stalest
@@ -53,9 +59,10 @@ import { EnqueueError, type EnqueueResult } from '../delivery.js';
 import type { Db } from '../db.js';
 import type { EventKind } from '../events.js';
 import { errorCode, type Logger } from '../log.js';
+import type { MarketsCache } from '../markets.js';
 import { dayIndexOf, SESSION_SCAN_DAYS } from './calendar.js';
-import { CALENDAR_MAX_DAYS, IndexerError, type ActivityItem, type IndexerClient } from './indexer.js';
-import { deriveState, eventRules, RULE_TIMING, stateRules, type EnqueueRequest } from './rules.js';
+import { CALENDAR_MAX_DAYS, IndexerError, assertInterfaceVersion, deploymentAnchor, liveFeesKey, type ActivityItem, type ApiConfig, type IndexerClient } from './indexer.js';
+import { deriveState, eventRules, mergeAdminOperations, RULE_TIMING, stateRules, type EnqueueRequest } from './rules.js';
 import { emptySnapshot, holdingsFrom, type Holdings, type SettlementInfo, type Snapshot, type SnapshotState } from './snapshot.js';
 import { loadState, loadWatchSet, saveState, type Cursor } from './store.js';
 
@@ -98,6 +105,8 @@ export interface RulesDeps {
   enqueue: Enqueue;
   logger: Logger;
   now: () => Date;
+  /** Filled with the tickers of every successful /v2/markets read; the API reads it (markets.ts). */
+  markets?: MarketsCache;
   options?: Partial<RulesOptions>;
 }
 
@@ -186,17 +195,87 @@ export class RulesEngine {
     const now = Math.floor(nowDate.getTime() / 1000);
     const floor = now - o.maxAgeS;
 
-    // 1. previous state, watch set
+    // 1. previous state, watch set, deployment anchor
     const stored = await loadState(db, logger);
-    const before: Snapshot = { ...(stored.snapshot ?? emptySnapshot()), holdings: stored.holdings };
+    let before: Snapshot = { ...(stored.snapshot ?? emptySnapshot()), holdings: stored.holdings };
     const watch = await loadWatchSet(db);
+    let observedAnchor: string | null = null;
+    let anchorReset = false;
+    let pendingFeesEffectiveAt: number | null = before.pendingFeesEffectiveAt;
+    let liveKey: string | null = before.liveFeesKey;
+    let adminOperations = mergeAdminOperations(before.adminOperations, []);
+    let cfg: ApiConfig | null = null;
+    try {
+      cfg = await indexer.config();
+    } catch (error) {
+      logger.warn({ code: codeOf(error) }, 'config unavailable; leaving cursor and stored anchor');
+    }
+    // K8-231. THE VERSION CHECK IS DELIBERATELY OUTSIDE THE CATCH ABOVE.
+    //
+    // An UNREADABLE config is a transient failure and the tick continues on stored state; an
+    // interface this build does not implement is neither transient nor recoverable, and the two must
+    // not share a handler. Put `assertInterfaceVersion` inside that `try` and the catch swallows it
+    // into 'config unavailable', the tick runs on, and the pin silently becomes a log line - a check
+    // that cannot fail, which is the defect this row exists to close, one layer down.
+    //
+    // It throws before the admin-operations read and before any rule runs, so a tick that saw a
+    // foreign interface reads nothing further, persists nothing and enqueues nothing.
+    if (cfg !== null) {
+      assertInterfaceVersion(cfg);
+      observedAnchor = deploymentAnchor(cfg);
+      pendingFeesEffectiveAt = cfg.pendingFees === undefined || cfg.pendingFees === null ? null : cfg.pendingFees.effectiveAt;
+      liveKey = cfg.fees === undefined ? null : liveFeesKey(cfg.fees);
+    }
+    try {
+      const ops = await indexer.adminOperations();
+      // X8-181, F-APP-OPS-02. MERGE BY KEY (T-435: `key`, not `id`, which a reschedule reuses); do
+      // not rebuild. `adminOperations = {}` threw the previous
+      // tick's map away, so an operation that had left the page it was last seen on was ABSENT rather
+      // than CHANGED - and the rule below only fires on a status that differs from a remembered one
+      // (rules.ts adminOperationNotices). With only the pending page fetched, every operation that
+      // reached a terminal state vanished exactly as it became worth telling someone about.
+      //
+      // The client now returns all three statuses, so an executed or canceled operation arrives here
+      // with its REAL final status and overwrites the remembered `pending`. Nothing infers a status
+      // from a disappearance: an operation can also leave the pending page by EXPIRING
+      // (indexer/src/api/v2/admin.ts filters pending on `expiresAt > indexedAt` while its stored
+      // status stays `pending`), and an expired operation is on no page at all. Such an operation
+      // keeps its remembered `pending` and no notice fires, which is correct - there is no
+      // expired notice to send, and guessing `executed` would report a governance action that never
+      // happened.
+      adminOperations = mergeAdminOperations(adminOperations, ops);
+    } catch (error) {
+      logger.warn({ code: codeOf(error) }, 'admin operations unavailable; leaving stored operations');
+    }
+    if (observedAnchor !== null) {
+      const previous = stored.anchor;
+      // Previous-absent is not a change: first boot (or an unreadable row) records the anchor
+      // and resets nothing. Delete this `previous !== null` guard and the first-boot test goes red.
+      if (previous !== null && previous !== observedAnchor) {
+        logger.info({ oldAnchor: previous, newAnchor: observedAnchor }, 'deployment anchor changed; resetting activity cursor');
+        stored.cursor = null;
+        stored.snapshot = null;
+        stored.holdings = {};
+        before = { ...emptySnapshot(), holdings: {} };
+        anchorReset = true;
+      }
+    }
 
     // 2. spot
     const spots: Record<string, string> = {};
+    const spotTimes: Record<string, number> = {};
     try {
-      for (const market of await indexer.markets()) {
-        if (market.spot !== null && market.spot.decimals === 6) spots[market.ticker] = market.spot.raw;
+      const markets = await indexer.markets();
+      for (const market of markets) {
+        if (market.spot === null || market.spot.decimals !== 6) continue;
+        spots[market.ticker] = market.spot.raw;
+        // Paired by the API schema: a market with a spot has a spotUpdatedAt. The guard keeps the
+        // observation time out of the payload rather than inventing one if that ever stops holding.
+        if (market.spotUpdatedAt !== null) spotTimes[market.ticker] = market.spotUpdatedAt;
       }
+      // The API's ticker list, for the price-alert check (markets.ts). Only a successful read
+      // replaces it, so an outage leaves the last list standing instead of emptying the cache.
+      this.deps.markets?.set(markets.map((market) => market.ticker), now);
     } catch (error) {
       logger.warn({ code: codeOf(error) }, 'market spots unavailable; continuing receipt rules');
     }
@@ -372,10 +451,13 @@ export class RulesEngine {
     const calendar = await this.sessionDaysAfter([...afterDays], now);
 
     // 7. rules
-    const after = deriveState(before, { at: now, spots, alerts: watch.alerts, settlements, holdings, sessionDays: calendar.sessionDays });
+    const after = deriveState(before, {
+      at: now, spots, spotTimes, alerts: watch.alerts, settlements, holdings,
+      sessionDays: calendar.sessionDays, pendingFeesEffectiveAt, liveFeesKey: liveKey, adminOperations,
+    });
     const requests: EnqueueRequest[] = [];
     for (const item of fresh) requests.push(...eventRules(item, before, after));
-    requests.push(...stateRules(before, after));
+    requests.push(...stateRules(before, after, watch.addresses));
 
     // 8. enqueue
     const result: TickResult = {
@@ -412,13 +494,29 @@ export class RulesEngine {
     const snapshot: SnapshotState = {
       at: after.at,
       spots: after.spots,
+      spotTimes: after.spotTimes,
       alerts: after.alerts,
       strikeSides: after.strikeSides,
       alertStates: after.alertStates,
       settlements: after.settlements,
       sessionDays: after.sessionDays,
+      // The fee and admin-operation fields are what the NEXT tick compares against: fee_notice fires
+      // on a change of pendingFeesEffectiveAt/liveFeesKey and admin_operation on a change of status.
+      // Omitting them here persisted the schema defaults instead, so every restart re-announced a
+      // scheduled fee change and lost the pending operations it had already told the subscriber about.
+      pendingFeesEffectiveAt: after.pendingFeesEffectiveAt,
+      liveFeesKey: after.liveFeesKey,
+      adminOperations: after.adminOperations,
     };
-    await saveState(db, { cursor: { since, seen, resume }, snapshot, changedHoldings: changed, watched: watch.addresses, now: nowDate });
+    await saveState(db, {
+      cursor: { since, seen, resume },
+      snapshot,
+      changedHoldings: changed,
+      watched: watch.addresses,
+      now: nowDate,
+      anchor: observedAnchor,
+      clearHoldings: anchorReset,
+    });
 
     if (items > 0 || result.requests > 0 || refreshFailed > 0 || calendar.failed > 0 || result.invalid > 0) {
       logger.info(

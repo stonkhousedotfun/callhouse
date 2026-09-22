@@ -9,6 +9,12 @@ const WAD = 10n ** 18n;
 const USDG_CENT = 10_000n;
 const MAX_EXERCISE_FEE_BPS = 200n;
 const MAX_PAYOUT_FEE_SHARE_BPS = 1_000n;
+/** Clearinghouse conversion bounds (callhouse-contracts v8 ee14bfbc, src/v2/interfaces/V2Constants.sol:88 and :91).
+ * `MAX_PAYOUT_SLIPPAGE_CEIL_BPS` caps `maxPayoutSlippageBps` in setPayoutAdapter (Clearinghouse.sol:446) AND the
+ * combined slippage-plus-route-fee in `_conversionFloor` (:1185-1188); `MAX_ROUTE_FEE_BPS` clamps the adapter's
+ * routeFeeBps read (:1183). Both are the worst case the app assumes when the chain value is not on the wire. */
+export const MAX_PAYOUT_SLIPPAGE_CEIL_BPS = 300;
+export const MAX_ROUTE_FEE_BPS = 100;
 
 export type TakerFeeParams = { takerFeeFlat: bigint; takerFeeCapBps: number };
 export type Ask = { orderId: string; price: bigint; units: bigint;
@@ -25,6 +31,16 @@ export type BuyCost = {
   fills: { orderId: string; price: bigint; units: bigint; premium: bigint }[];
 };
 export type PayoffPosition = { isPut: boolean; strike: bigint; units: bigint; exerciseFeeBps: number };
+/** The two Clearinghouse-side conversion parameters the explorer needs (G7): the indexed `maxPayoutSlippageBps`
+ * (or the ceiling when the wire has none) and the route fee (the ceiling; the adapter's per-asset read is not on
+ * the wire). */
+export type ConversionTerms = { slippageBps: number; routeFeeBps: number };
+/** G2. What USDG conversion of a call payout can deliver: `low` at the contract's conversion floor, `high` the
+ * in-kind value at the settlement price. `floorBps` is the floor as a share of value, for copy. */
+export type UsdgBand = { low: bigint; high: bigint; floorBps: number };
+/** The three P&L figures of one scenario. `pct` and `multiple` are floored to two decimals (a loss floors away from
+ * zero); both are null when nothing was paid. */
+export type Pnl = { pnl: bigint; pct: number | null; multiple: number | null };
 export type MoneyRaw = { raw: string; decimals: number };
 export type CardSentenceInput = {
   series: { ticker: string; expiry: number; isPut?: boolean };
@@ -186,6 +202,68 @@ export function breakeven(position: PayoffPosition, cost: bigint): bigint | null
 export function maxLoss(cost: bigint): bigint {
   requireNonnegative(cost, "cost");
   return cost;
+}
+
+function conversionBps(slippageBps: number, routeFeeBps: number): number {
+  if (!Number.isInteger(slippageBps) || slippageBps < 0 || slippageBps > MAX_PAYOUT_SLIPPAGE_CEIL_BPS) {
+    throw new RangeError("slippageBps exceeds the contract ceiling");
+  }
+  if (!Number.isInteger(routeFeeBps) || routeFeeBps < 0) throw new RangeError("routeFeeBps must be a nonnegative integer");
+  // Clearinghouse._conversionFloor (ee14bfbc :1183-1188): the route fee clamps to MAX_ROUTE_FEE_BPS, then the sum
+  // clamps to MAX_PAYOUT_SLIPPAGE_CEIL_BPS.
+  const routeFee = routeFeeBps > MAX_ROUTE_FEE_BPS ? MAX_ROUTE_FEE_BPS : routeFeeBps;
+  const total = slippageBps + routeFee;
+  return total > MAX_PAYOUT_SLIPPAGE_CEIL_BPS ? MAX_PAYOUT_SLIPPAGE_CEIL_BPS : total;
+}
+
+/** G2. The USDG band a converted call payout lands in. `valueUsdg` is the in-kind value at the settlement price
+ * (what `payoutAt` returns for a call); the floor mirrors Clearinghouse._conversionFloor (ee14bfbc :1189)
+ * `value * (BPS - min(maxPayoutSlippageBps + routeFee, MAX_PAYOUT_SLIPPAGE_CEIL_BPS)) / BPS`, floored. Calls only:
+ * a put is paid in USDG outright (Clearinghouse.sol:1092-1096) and has no band. */
+export function usdgPayoutBand(valueUsdg: bigint, slippageBps: number, routeFeeBps: number): UsdgBand {
+  requireNonnegative(valueUsdg, "valueUsdg");
+  const bps = conversionBps(slippageBps, routeFeeBps);
+  const floorBps = Number(BPS) - bps;
+  return { low: (valueUsdg * BigInt(floorBps)) / BPS, high: valueUsdg, floorBps };
+}
+
+/** Floor toward negative infinity, so a loss never displays smaller than it is. */
+function floorDiv(numerator: bigint, denominator: bigint): bigint {
+  const q = numerator / denominator;
+  return (numerator % denominator !== 0n && (numerator < 0n) !== (denominator < 0n)) ? q - 1n : q;
+}
+
+/** Net P&L of one scenario: `payoutAt(price) - cost`, with the percentage of cost and the multiple, both floored to
+ * two decimals. Rounds the way the rest of this file does: a displayed gain is never more than the chain pays. */
+export function pnlAt(price: bigint, position: PayoffPosition, cost: bigint): Pnl {
+  requireNonnegative(cost, "cost");
+  const pnl = payoutAt(price, position) - cost;
+  if (cost === 0n) return { pnl, pct: null, multiple: null };
+  const hundredthsOfPct = floorDiv(pnl * 10_000n, cost);
+  if (hundredthsOfPct > BigInt(Number.MAX_SAFE_INTEGER)) throw new RangeError("percentage too large to display");
+  return { pnl, pct: Number(hundredthsOfPct) / 100, multiple: multipleAt(price, position, cost) };
+}
+
+/** G4. The USDG break-even of a call: the first price whose converted payout, AT THE CONVERSION FLOOR, covers the
+ * cost. For a put it is the in-kind break-even (a put is paid in USDG), so callers can use one function for both
+ * sides. Null when no price in the option's payout reaches the cost, as in {breakeven}. */
+export function breakevenUsdg(position: PayoffPosition, cost: bigint, slippageBps: number, routeFeeBps = MAX_ROUTE_FEE_BPS): bigint | null {
+  validatePosition(position);
+  requireNonnegative(cost, "cost");
+  conversionBps(slippageBps, routeFeeBps);
+  if (position.isPut) return breakeven(position, cost);
+  if (cost === 0n) return position.strike;
+  const covers = (price: bigint) => usdgPayoutBand(payoutAt(price, position), slippageBps, routeFeeBps).low >= cost;
+  let low = position.strike;
+  let high = position.strike * 2n;
+  // A call's in-kind value per unit tends to UNIT * price / WAD, so the floor keeps rising with price.
+  while (!covers(high)) high *= 2n;
+  while (low < high) {
+    const mid = (low + high) / 2n;
+    if (covers(mid)) high = mid;
+    else low = mid + 1n;
+  }
+  return low;
 }
 
 /** Multiple rounds down to two decimals; null when nothing was paid. */

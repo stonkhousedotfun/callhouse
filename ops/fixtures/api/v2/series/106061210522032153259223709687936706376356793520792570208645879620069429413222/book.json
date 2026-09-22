@@ -9,7 +9,7 @@
       "units": "100",
       "orders": [
         {
-          "orderId": "1051",
+          "orderId": "1052",
           "maker": "0xd3b47D8a6B8e3fc6160Cd02634CF7Ae74aDeB66f",
           "units": "100",
           "onChainRemainingUnits": "100",
@@ -31,15 +31,15 @@
       "units": "40",
       "orders": [
         {
-          "orderId": "1050",
+          "orderId": "1051",
           "maker": "0xd3b47D8a6B8e3fc6160Cd02634CF7Ae74aDeB66f",
           "units": "40",
           "onChainRemainingUnits": "40",
-          "makerFreeUnits": "2309",
+          "makerFreeUnits": "2310",
           "makerFreeCollateral": {
-            "raw": "23099855773809523808",
+            "raw": "23100000000000000000",
             "decimals": 18,
-            "formatted": "23.099855773809523808"
+            "formatted": "23.1"
           },
           "kind": "AskWrite",
           "validUntil": 1789759800
@@ -55,15 +55,15 @@
       "units": "30",
       "orders": [
         {
-          "orderId": "1018",
+          "orderId": "1019",
           "maker": "0x70556BaA315dD8d467ea452aBcd7deEbEa073Ff9",
           "units": "30",
           "onChainRemainingUnits": "30",
-          "makerFreeUnits": "189",
+          "makerFreeUnits": "190",
           "makerFreeCollateral": {
-            "raw": "1899990803571428571",
+            "raw": "1900000000000000000",
             "decimals": 18,
-            "formatted": "1.899990803571428571"
+            "formatted": "1.9"
           },
           "kind": "AskWrite",
           "validUntil": 1789759800

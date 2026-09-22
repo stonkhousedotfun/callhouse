@@ -1,5 +1,13 @@
 # Safe topology and key roles
 
+> **Scope. §1-§7 of this file are the v1 vault, and only the v1 vault.** Their role table
+> (`KEEPER_ROLE` / `GUARDIAN_ROLE` as `bytes32` on the vault, §"Role identifiers" below), their powers
+> table (`setPolicy`, `haltWrites`, `acceptValoremFee`, §1) and the deploy-day checklist (§7) are
+> still true of the v1 vault in run-off and are kept for it. **None of it describes v8.** The v8
+> topology — two Safes and an `AccessManager` holding eleven roles — is **§8**, and the procedures
+> are `runbooks/v8-safes.md` (creating the Safes, signing without the Safe web app) and
+> `runbooks/v8-roles.md` (schedule, execute, cancel, rotate).
+
 Four keys. Two of them are Safes, one is a hot EOA, one is a Safe that holds no power at all.
 
 | Key | Form | Threshold | Holds | Lives |
@@ -29,7 +37,7 @@ explicit `null` until then. Never assume `null` means `address(0)`.
 
 ---
 
-## 1. Admin Safe — 2 of 3
+## 1. Admin Safe — 2 of 3 (v1 vault)
 
 Holds `DEFAULT_ADMIN_ROLE`. Governance, not operations. It should sign a handful of times a year.
 
@@ -92,7 +100,7 @@ If it is not acceptable, the answer is a timelock, higher compiled floors or a l
 
 ---
 
-## 2. Keeper — hot EOA
+## 2. Keeper — hot EOA (v1 vault)
 
 Holds `KEEPER_ROLE`. The only key that signs weekly.
 
@@ -149,7 +157,7 @@ are in `ops/runbooks/incident.md` §4. Do not panic-move inventory; there is non
 
 ---
 
-## 3. Guardian — 1 of 1, separate hardware, different continent
+## 3. Guardian — 1 of 1, separate hardware, different continent (v1 vault)
 
 An emergency brake that is deliberately weak. Its whole value is that it can be used without a quorum
 at 03:00 local, so it is given only powers that are safe to hand one person.
@@ -190,7 +198,7 @@ halt stops new money coming in while somebody works out why it was pulled.
 
 ---
 
-## 4. "The guardian can halt and cancel but can never move tokens to itself"
+## 4. "The guardian can halt and cancel but can never move tokens to itself" (v1 vault)
 
 This is the load-bearing claim on this page. Do not take it on faith — it is checkable in about two
 minutes, and every reviewer should check it.
@@ -302,7 +310,7 @@ claim, or the USDG index.
 
 ---
 
-## 5. The caps governance cannot move
+## 5. The caps governance cannot move (v1 vault)
 
 Compiled into `Policy` and into `Vault`. These are the bytecode, not the configuration.
 
@@ -326,7 +334,7 @@ live spot.
 
 ---
 
-## 6. Fee Safe
+## 6. Fee Safe (v1 vault)
 
 Receives the protocol fee on harvested premium (5% at launch; strike proceeds are never fee'd). **Holds no role on the vault**, is not a signer on
 anything, and cannot call any vault function that a stranger could not.
@@ -360,7 +368,7 @@ cast call $VAULT "pendingFeeUsdg()(uint256)" --rpc-url $RH_RPC   # before close:
 
 ---
 
-## 7. Deploy-day checklist
+## 7. Deploy-day checklist (v1 vault)
 
 **The checks below are automated.** `script/Verify.s.sol` in `contracts/` (stonkhousedotfun/callhouse-contracts)
 performs every one of them and more: the vault's and both libraries' bytecode byte for byte against the
@@ -415,3 +423,129 @@ Record every address in `ops/addresses.json` under `chains.4663.ours`, replacing
 (`vault`, `clearinghouse` = `vault.clear()`, both libraries — the CREATE2 addresses for the pinned
 build are in `contracts/docs/DEPLOY.md` — both Safes, guardian, keeper, the deploy block), and set
 `adminPhase`.
+
+---
+
+## 8. INTERFACE_VERSION 8 — two Safes and one AccessManager
+
+Everything above this heading is the v1 vault. v8 keeps none of its shape: there is no
+`DEFAULT_ADMIN_ROLE`, no `bytes32` role, and **no v8 target contract holds a role at all**. One
+OpenZeppelin `AccessManager` holds every role, maps `(target, selector) -> role`, and carries a
+per-member execution delay; the targets inherit `src/v2/access/Managed.sol`, which grants nothing and
+knows no role ids.
+
+The procedures live in two runbooks and are not repeated here:
+
+| Page | What it is for |
+|---|---|
+| [`runbooks/v8-safes.md`](runbooks/v8-safes.md) | creating both Safes on chain 4663 and signing a transaction **without** the Safe web app (`getTransactionHash`, two signatures in ascending owner order, `execTransaction`) |
+| [`runbooks/v8-roles.md`](runbooks/v8-roles.md) | schedule → wait → send, the direct-call rule, cancelling, and rotating a hot key through `OPS_ADMIN` with no delay |
+
+### The keys
+
+| Key | Form | Threshold | Holds | Registry key |
+|---|---|---|---|---|
+| **Admin Safe** | Safe | **2 of 3** | every role in the manifest's `holders.adminSafe` | `shared.safes.admin`, and `shared.admin` written the same |
+| **Treasury Safe** | Safe | **2 of 3** | **no role.** It is the `treasury` the vault, `KeeperRewards`, `RewardsDistributor` and the `FeeSplitter` pay out to | `shared.safes.treasury` |
+| **guardian** | hot EOA, index 63 | 1 of 1 | `GUARDIAN` | `v2.bots.guardian`, and `shared.guardian` written the same |
+| **pricer** | hot EOA, index 61 | 1 of 1 | `PRICER` | `v2.bots.pricer` |
+| **quoter** | hot EOA, index 62 | 1 of 1 | `QUOTER` | `v2.bots.quoter` |
+| **cranker** | hot EOA, index 60 | 1 of 1 | `BUYBACK` | `v2.bots.cranker` |
+| **ops wallet** | hot EOA | 1 of 1 | **no role**; receives capped gas top-ups from the Treasury Safe | `shared.opsWallet` |
+
+Same three owner keys on both Safes, on separate devices. Two Safes rather than one is the point:
+the signatures that move protocol money are not the signatures that change protocol configuration.
+`ops/markets/build-markets.mjs:928-944` enforces both halves of that — `shared.safes.admin` must
+equal `shared.admin`, and the two Safes must not be the same address — and `node
+ops/markets/build-markets.mjs --check` is where you find out.
+
+The four bot indices and their roles are fixed in `ops/v2/derive-bot-keys.sh:55-58` and
+`ops/markets/build-markets.mjs:243-245`. v7's indices 50-52 are burned and never reused: v7 runs off
+beside v8, and a shared key would make a v7 incident a v8 incident too.
+
+### The eleven roles — read them, do not retype them
+
+The manifest is `ops/abis/v2/roles.json`, this repository's mirror of `script/v2/roles.v8.json` in
+callhouse-contracts. It carries the role ids, the execution delays, `roleAdmin`, `roleGuardian`,
+`holders`, the `(contract, selector) -> role` map and an `unrestricted` block of entry points that
+deliberately carry **no** role. Print it rather than copying numbers out of it:
+
+```bash
+node -e '
+const r = require("./ops/abis/v2/roles.json");
+for (const [name, id] of Object.entries(r.roles)) {
+  console.log([String(id).padStart(2), name.padEnd(18), `delay ${String(r.delaysS[name]).padStart(6)} s`,
+    `admin ${(r.roleAdmin[name] ?? "ADMIN").padEnd(9)}`, `guardian ${r.roleGuardian[name] ?? "-"}`,
+    `holders ${Object.entries(r.holders).filter(([, v]) => v.includes(name)).map(([k]) => k).join(",")}`].join("  "));
+}'
+```
+
+The shape that matters, stated without numbers because the numbers are in the file:
+
+- **`ADMIN` is manager-only.** No target function maps to it. An unmapped `restricted` selector falls
+  to `ADMIN` by default, which is exactly the mistake the access-matrix test exists to catch — so an
+  `ADMIN` row appearing against a target function is a defect, not a configuration.
+- **`OPS_ADMIN` is manager-only too**, and is the role admin of the four hot-key roles. That, plus its
+  zero delay, is what makes a leaked bot key a single Safe transaction with no waiting
+  (`incident-v2.md` §4, `runbooks/v8-roles.md` §6).
+- **`GUARDIAN` is the brake, and it is one-way.** It pauses, vetoes and clears a route, and it is set
+  as the guardian role of the delayed money lanes, so it can cancel their scheduled operations. It
+  can start nothing.
+- **`ADMIN` has no guardian and cannot be given one** (an AccessManager limit). Role grants, revokes,
+  role-admin changes and selector re-mappings are therefore visible for the whole of `ADMIN`'s delay
+  and cancellable only by `ADMIN` itself. Exits are never pausable, so users can leave in that window.
+  This is a stated limit, not a promise the design removes.
+- **The deployer renounces `ADMIN` in the deploy batch.** `VerifyV8` fails if any EOA holds the
+  manager-side roles afterwards.
+
+> **Known staleness, 2026-09-20.** The copy in this repository is two rows behind the contracts
+> source: the contracts tip maps `FeeSplitter.setOracle(address)` and `FeeSplitter.setToken(address)`
+> to `TREASURY_ADMIN` and the copy here has neither. Neither is a bot role and no delay changes. Read
+> `script/v2/roles.v8.json` in callhouse-contracts when you need the FeeSplitter's full admin surface,
+> and say which file you read.
+
+### Verify rather than trust this file
+
+```bash
+REG=ops/markets/tier1.json
+eval "$(node -e '
+const r = JSON.parse(require("fs").readFileSync(process.argv[1], "utf8"));
+const v = { MANAGER: r.v2.contracts.accessManager, SAFE_ADMIN: r.shared.safes.admin,
+  SAFE_TREASURY: r.shared.safes.treasury, VAULT: r.v2.contracts.makerVault };
+for (const [k, x] of Object.entries(v)) console.log(`export ${k}=${x ?? ""}`);' "$REG")"
+
+# 1. Both Safes are 2-of-3, and they are not the same Safe
+for S in $SAFE_ADMIN $SAFE_TREASURY; do
+  echo -n "$S "; cast call $S "getThreshold()(uint256)" --rpc-url $RH_RPC
+  cast call $S "getOwners()(address[])" --rpc-url $RH_RPC
+done
+
+# 2. Every role the manifest says the Admin Safe holds, it holds — with the manifest's delay
+node -e 'const r=require("./ops/abis/v2/roles.json");
+  for (const n of r.holders.adminSafe) console.log(r.roles[n], n, r.delaysS[n]);' |
+while read -r ID NAME DELAY; do
+  printf '%-18s ' "$NAME"; cast call $MANAGER "hasRole(uint64,address)(bool,uint32)" "$ID" $SAFE_ADMIN --rpc-url $RH_RPC
+  echo "   manifest delay $DELAY"
+done
+
+# 3. The Treasury Safe holds NOTHING, and is where protocol money goes
+node -e 'const r=require("./ops/abis/v2/roles.json"); console.log(Object.values(r.roles).join(" "));' |
+  tr ' ' '\n' | while read -r ID; do cast call $MANAGER "hasRole(uint64,address)(bool,uint32)" "$ID" $SAFE_TREASURY --rpc-url $RH_RPC; done   # all false
+cast call $VAULT "treasury()(address)" --rpc-url $RH_RPC    # == $SAFE_TREASURY
+
+# 4. No EOA holds a manager-side role (the deployer really did renounce)
+cast call $MANAGER "hasRole(uint64,address)(bool,uint32)" "$(node -e 'process.stdout.write(String(require("./ops/abis/v2/roles.json").roles.ADMIN))')" <deployer> --rpc-url $RH_RPC   # false
+```
+
+`ops/v2/monitor.mjs` runs the same comparison continuously and pages `v2_mon_manager_wiring`
+(`ops/alerts.md` §V54) until the chain and the manifest agree, `v2_mon_manager_role` (§V53) on any
+change to who may do what, and `v2_mon_safe_threshold` (§V55) on sight for a protocol Safe below two
+signatures. A change nobody on the rota owns is `runbooks/incident-v2.md` §5.
+
+### Deploy day
+
+There is no v8 equivalent of §7's checklist in this file yet: `C8-10` (`DeployV8` / `VerifyV8`) and
+`F8-03` (the devnet admin driver) are both open on the v8 board, and `VerifyV8` is where those
+assertions will live. Until they land, the commands above are the manual cross-check, and
+`runbooks/v8-safes.md` §1 is the part that must be done first — none of this is real until the Safe
+singleton and factory are proved to have code on this chain.

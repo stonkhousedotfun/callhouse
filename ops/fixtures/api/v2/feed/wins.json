@@ -18,16 +18,16 @@
         "expiry": 1789156800,
         "tenor": "weekly",
         "mintCutoff": 1789155000,
-        "mintFeePpm": 80,
+        "mintFeePpm": 0,
         "mintFeesHeld": {
           "raw": "0",
           "decimals": 18,
           "formatted": "0"
         },
         "mintFeesAccrued": {
-          "raw": "28992063492064",
+          "raw": "0",
           "decimals": 18,
-          "formatted": "0.000028992063492064"
+          "formatted": "0"
         },
         "status": "settled"
       },
@@ -63,16 +63,16 @@
         "expiry": 1789156800,
         "tenor": "weekly",
         "mintCutoff": 1789155000,
-        "mintFeePpm": 80,
+        "mintFeePpm": 0,
         "mintFeesHeld": {
           "raw": "0",
           "decimals": 18,
           "formatted": "0"
         },
         "mintFeesAccrued": {
-          "raw": "70952380952381",
+          "raw": "0",
           "decimals": 18,
-          "formatted": "0.000070952380952381"
+          "formatted": "0"
         },
         "status": "settled"
       },
@@ -82,11 +82,11 @@
         "formatted": "0.5434"
       },
       "payout": {
-        "raw": "6113879",
+        "raw": "4585409",
         "decimals": 6,
-        "formatted": "6.113879"
+        "formatted": "4.585409"
       },
-      "multiple": 11.25,
+      "multiple": 8.43,
       "settledAt": 1789156958,
       "tx": "0x7f4daf0b48fb870233bff31494c65609b82394dedd800f0781681333f181d216"
     },
@@ -108,16 +108,16 @@
         "expiry": 1789156800,
         "tenor": "weekly",
         "mintCutoff": 1789155000,
-        "mintFeePpm": 80,
+        "mintFeePpm": 0,
         "mintFeesHeld": {
           "raw": "0",
           "decimals": 18,
           "formatted": "0"
         },
         "mintFeesAccrued": {
-          "raw": "36567460317462",
+          "raw": "0",
           "decimals": 18,
-          "formatted": "0.000036567460317462"
+          "formatted": "0"
         },
         "status": "settled"
       },
@@ -153,16 +153,16 @@
         "expiry": 1789156800,
         "tenor": "weekly",
         "mintCutoff": 1789155000,
-        "mintFeePpm": 80,
+        "mintFeePpm": 0,
         "mintFeesHeld": {
           "raw": "0",
           "decimals": 18,
           "formatted": "0"
         },
         "mintFeesAccrued": {
-          "raw": "25853174603176",
+          "raw": "0",
           "decimals": 18,
-          "formatted": "0.000025853174603176"
+          "formatted": "0"
         },
         "status": "settled"
       },
@@ -198,16 +198,16 @@
         "expiry": 1789156800,
         "tenor": "weekly",
         "mintCutoff": 1789155000,
-        "mintFeePpm": 80,
+        "mintFeePpm": 0,
         "mintFeesHeld": {
           "raw": "0",
           "decimals": 18,
           "formatted": "0"
         },
         "mintFeesAccrued": {
-          "raw": "25853174603176",
+          "raw": "0",
           "decimals": 18,
-          "formatted": "0.000025853174603176"
+          "formatted": "0"
         },
         "status": "settled"
       },

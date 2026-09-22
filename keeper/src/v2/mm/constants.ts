@@ -18,8 +18,14 @@ export const UNITS_PER_SHARE = 100n;
 export const SETTLEMENT_WINDOW = 1_800;
 /** MakerVault.MAX_LIVE_ORDERS_PER_SERIES. The bot keeps at most three (bid, write ask, resale ask). */
 export const MAX_LIVE_ORDERS_PER_SERIES = 16;
-/** V2Constants.FEE_CHANGE_DELAY: OrderBook.setFeeParams takes effect this long after it is scheduled (INTERFACE_VERSION 6). */
-export const FEE_CHANGE_DELAY_S = 86_400;
+/**
+ * V2Constants.FEE_CHANGE_DELAY: OrderBook.setFeeParams takes effect this long after it is scheduled.
+ * INTERFACE_VERSION 8 raised it from 24 h to 48 h (owner decision V3-D13) — read from
+ * `callhouse-contracts src/v2/interfaces/V2Constants.sol:60`, `uint40 internal constant FEE_CHANGE_DELAY =
+ * 48 hours`, whose own comment at :56-59 explains that this is the window makers and takers see ON CHAIN
+ * and that the AccessManager's 48 h FEE_MANAGER execution delay runs BEFORE the change is even scheduled.
+ */
+export const FEE_CHANGE_DELAY_S = 172_800;
 /** V2Constants.PREMIUM_FEE_CEIL_BPS: the most premiumFeeBps and resaleFeeBps can ever be. */
 export const PREMIUM_FEE_CEIL_BPS = 1_000;
 /**

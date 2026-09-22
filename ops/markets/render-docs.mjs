@@ -2,7 +2,8 @@
 /**
  * Render the public "Markets" docs page from the market registry.
  *
- *   ops/markets/tier1.json (+ v2-sources.json)  ->  callhouse-docs/product/markets.md   (and its GitBook mirror)
+ *   ops/markets/tier1.json (+ v2-sources.json + v7-legacy.json)
+ *     -> callhouse-docs/product/markets.md (and its GitBook mirror)
  *
  * WHY A RENDERER AND NOT A HAND-WRITTEN PAGE
  *   The docs promise "trust only the addresses on this page". With 35 markets that is 70 token and
@@ -22,11 +23,12 @@
  *   - per market, ordered live -> paused -> planned, then canary -> wave1 -> wave2, then ticker:
  *       * v2 status (with the registration date and tx once registered), wave, Stock Token,
  *         Chainlink feed, settlement sources: Chainlink always; + Uniswap v3 TWAP with the pool when
- *         `v2.univ3Pool` is set; oracle settings a market overrides;
+ *         `v2.univ3Pool` is set; the separate v3-or-v4 payout route; oracle settings a market overrides;
  *       * strike tick in USDG, puts yes/no, the weekly and daily ladder shape (expiries ahead,
  *         strikes, first distance, step) from `v2.defaults` with the market's `v2.overrides` merged;
- *   - the v2 contracts (`v2.contracts`, null -> "not recorded"), the deploy block, and the
- *     third-party contracts v2 relies on (USDG, Uniswap v3 periphery);
+ *   - the v2 contracts (`v2.contracts`), flywheel contracts (`v2.flywheel`), Admin and Treasury
+ *     Safes (`shared.safes`), their deploy blocks, and the third-party contracts v2 relies on;
+ *   - the interface-7 contract set and its registered markets from the frozen `v7-legacy.json` input;
  *   - legacy: the v1 factories that exist (live or paused rows; NVDA today) with their run-off state
  *     (`v1RunOff`, with the freeze date when `v1FrozenAt` is set), and the count of per-market
  *     factories that were never built (superseded-by-v2);
@@ -41,8 +43,9 @@
  *     unix seconds on a factory with `v1RunOff: true`;
  *   - a registered (live / paused) v2 market without registeredAt + registerTx, a live v2 market
  *     while the Clearinghouse address is null;
- *   - a `v2.contracts`, `v2.contracts.sources` or `v2.defaults` key it does not know, or an override
- *     outside `v2.defaults`: a schema change must reach this page, not vanish from it;
+ *   - a `v2.contracts`, `v2.contracts.sources`, `v2.flywheel`, `shared.safes` or `v2.defaults` key it
+ *     does not know, or an override outside `v2.defaults`: a schema change must reach this page;
+ *   - a missing or non-interface-7 `v7-legacy.json`, or one without its `_legacy` marker;
  *   - a `v2.interfaceVersion` other than RENDERS_INTERFACE_VERSION. Registry schema v2 has no
  *     "Data Streams enabled for this market" field (`dataStreamsFeedId` is the recon's stream id,
  *     set for all 35 whether or not access exists), and C2-12 registers the source for no market, so
@@ -71,14 +74,27 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
+// T-OP-138. The six external contracts' KEY LIST comes from the builder, never from a second hand-written
+// copy: `build-markets.mjs` is where T-OP-114 defined it, and a list re-typed here would agree with it right
+// up to the day one of them changed. Importing the module runs no build (its `main()` is guarded by
+// `isMain`); it reads only node built-ins.
+import { V2_EXTERNAL_CONTRACT_NAMES } from "./build-markets.mjs";
+
 const here = path.dirname(fileURLToPath(import.meta.url));
 const appRoot = path.resolve(here, "..", "..");
 const REGISTRY = path.join(here, "tier1.json");
 const RECON = path.join(here, "v2-sources.json");
+const LEGACY = path.join(here, "v7-legacy.json");
 const EXPLORER = "https://robinhoodchain.blockscout.com";
 
 /** The registry interface version this page is written for (see WHAT IT REFUSES). */
-const RENDERS_INTERFACE_VERSION = 7; // v7 adds mint fees and the v2 vault to the registry; the configured settlement-source pools are read from the registry, not assumed from a prior interface version.
+const RENDERS_INTERFACE_VERSION = 8; // `dataStreamsFeedId` still does not say whether Data Streams is enabled for a market, so the configured-source refusal remains version-pinned instead of being inferred.
+const LEGACY_INTERFACE_VERSION = 7;
+// Mirrored from contracts/src/v2/interfaces/V2Constants.sol:44,48,95 at the v8 contract source:
+// the settlement window, v3 snapshot grace, and largest accepted payout-route fee tier.
+const SETTLEMENT_WINDOW_S = 1800;
+const SNAPSHOT_GRACE_S = 600;
+const MAX_ROUTE_FEE_TIER = 10_000;
 /** Every v1 status the registry may carry (build-markets.mjs validates the same list). */
 const V1_STATUSES = ["live", "paused", "planned", "superseded-by-v2"];
 const V2_STATUS_ORDER = ["live", "paused", "planned"];
@@ -94,10 +110,11 @@ const V2_CONTRACTS = [
   ["expiryCalendar", "ExpiryCalendar", "Which timestamps are valid daily and weekly expiries"],
   ["keeperRewards", "KeeperRewards", "Small USDG bounties for permissionless lifecycle calls"],
   ["autoRoller", "AutoRoller", "Writers' auto-roll strategies"],
-  ["payoutAdapter", "PayoutAdapter", "Converts payouts to USDG through Uniswap v3"],
+  ["payoutAdapter", "PayoutRouter", "Attempts eligible winning-call conversion to USDG over the configured Uniswap v3 or v4 route"],
   ["makerVault", "MakerVault", "The protocol's market-making vault"],
   ["makerRegistry", "MakerRegistry", "Market maker rebate tiers"],
   ["rewardsDistributor", "RewardsDistributor", "Market maker reward claims per epoch"],
+  ["accessManager", "AccessManager", "Delayed administration and instant guardian controls"],
 ];
 /** `v2.contracts.sources`: key, contract name, what it does. */
 const V2_SOURCES = [
@@ -105,6 +122,64 @@ const V2_SOURCES = [
   ["univ3", "UniV3TwapSource", "Settlement source: Uniswap v3 pool TWAPs"],
   ["dataStreams", "DataStreamsSource", "Settlement source: Chainlink Data Streams (enabled for no market)"],
 ];
+/**
+ * The six EXTERNAL v2 contracts (T-OP-114): `v2.contracts` keys the deploy wrapper reads and T-OP-116's
+ * externals step writes back, but which DeployV8 does not create. ACCEPTED WHEN PRESENT, never required:
+ * the committed registry does not carry them until the first write-back, and `checkKeys` below refuses
+ * any name outside core ∪ externals exactly as before. What each one does, looked up BY THE IMPORTED
+ * LIST — the page order and the key set are the builder's; only the prose lives here, and a key the
+ * builder knows that this table cannot describe throws at load (`describeExternals`), so the list and
+ * the prose cannot drift apart silently.
+ */
+// Prose mirrors each contract's @notice at callhouse-contracts leekzor/v8 (HouseVault.sol:22, HouseVaultFactory.sol:13,
+// Hedger.sol:19, RewardsDistributor via DeployLenderRewards.s.sol, EarnVault.sol:25, StockVenueAdapter.sol:7).
+const V2_EXTERNAL_DESCRIPTIONS = {
+  houseVault: ["HouseVault", "The user-funded market maker: one instance per market; depositors fund it with USDG and Stock Tokens"],
+  houseVaultFactory: ["HouseVaultFactory", "Deploys one HouseVault per market and keeps the index of them (created by LISTING)"],
+  hedger: ["Hedger", "Posts USDG, borrows stock, sells it via the payout route and buys it back via Uniswap v4"],
+  rewardsDistributorLender: ["RewardsDistributor (lender)", "The second RewardsDistributor instance: lender reward claims per epoch, paid in the $STONKHOUSE token"],
+  earnVault: ["EarnVault", "The Earn vault: depositors pay one ERC-20 in and get shares"],
+  stockVenueAdapter: ["StockVenueAdapter", "The Earn vault's stock-side venue adapter (shipped disabled)"],
+};
+/** `[key, name, what]` for every external, in the builder's order; throws if the two disagree. */
+function describeExternals() {
+  const known = Object.keys(V2_EXTERNAL_DESCRIPTIONS);
+  const missing = V2_EXTERNAL_CONTRACT_NAMES.filter((k) => !known.includes(k));
+  const extra = known.filter((k) => !V2_EXTERNAL_CONTRACT_NAMES.includes(k));
+  if (missing.length || extra.length) {
+    throw new Error(`V2_EXTERNAL_DESCRIPTIONS disagrees with build-markets.mjs V2_EXTERNAL_CONTRACT_NAMES${missing.length ? `: no description for ${missing.join(", ")}` : ""}${extra.length ? `: describes ${extra.join(", ")}, which the builder does not know` : ""}`);
+  }
+  return V2_EXTERNAL_CONTRACT_NAMES.map((k) => [k, ...V2_EXTERNAL_DESCRIPTIONS[k]]);
+}
+const V2_EXTERNALS = describeExternals();
+/** Closed v8 periphery blocks that are not members of `v2.contracts`. */
+const V2_FLYWHEEL = [
+  ["feeSplitter", "FeeSplitter", "Protocol fee receiver and distributor"],
+  ["buybackExecutor", "V4BuybackExecutor", "Restricted Uniswap v4 execution for the fee flywheel"],
+];
+const SHARED_SAFES = [
+  ["admin", "Admin Safe", "2-of-3 owner Safe for delayed administration"],
+  ["treasury", "Treasury Safe", "2-of-3 Safe that holds protocol treasury assets"],
+];
+/** The archived interface-7 set has the pre-v8 `v2.contracts` shape. */
+const LEGACY_V2_CONTRACTS = [
+  ["clearinghouse", "Clearinghouse", "Markets, series, collateral, settlement and redemption"],
+  ["orderBook", "OrderBook", "Bids, resale asks and write-on-fill asks"],
+  ["settlementOracle", "SettlementOracle", "The settlement price of each market and expiry"],
+  ["expiryCalendar", "ExpiryCalendar", "Which timestamps are valid daily and weekly expiries"],
+  ["keeperRewards", "KeeperRewards", "Small USDG bounties for permissionless lifecycle calls"],
+  ["autoRoller", "AutoRoller", "Writers' auto-roll strategies"],
+  ["payoutAdapter", "UniV3PayoutAdapter", "Attempts eligible winning-call conversion over Uniswap v3"],
+  ["makerVault", "MakerVault", "The protocol's market-making vault"],
+  ["makerRegistry", "MakerRegistry", "Market maker rebate tiers"],
+  ["rewardsDistributor", "RewardsDistributor", "Market maker reward claims per epoch"],
+];
+// IPayoutRouter.sol:41-45 names None, V3 and V4. The registry mirrors None as null and the other
+// two as lower-case `venue` values, matching ops/v2/monitor.mjs's existing vocabulary.
+const PAYOUT_ROUTE_KEYS = {
+  v3: ["venue", "fee"],
+  v4: ["venue", "fee", "tickSpacing", "poolId"],
+};
 /** The shape of `v2.defaults` this page renders; a market's `v2.overrides` may name any subset. */
 const LADDER_SHAPE = { rungs: 0, firstOtmBps: 0, stepBps: 0, cardTargetBps: 0 };
 const DEFAULTS_SHAPE = {
@@ -201,12 +276,23 @@ function ladderCell(eff, def, tenor) {
 function sourcesCell(m, eff, def) {
   const sources = ["Chainlink"];
   if (m.v2.univ3Pool) sources.push(`Uniswap v3 TWAP ${addr(m.v2.univ3Pool)}`);
-  // Data Streams is never listed: registry interface 2 cannot say it is enabled (see the header).
+  // Data Streams is never listed: registry interface 8 still cannot say it is enabled (see the header).
   const own = [];
   if (eff.maxDeviationBps !== def.maxDeviationBps) own.push(`agreement within ${pct(eff.maxDeviationBps)}`);
   if (eff.uncorroboratedDelayS !== def.uncorroboratedDelayS) own.push(`single-source delay ${duration(eff.uncorroboratedDelayS)}`);
   if (eff.spotMaxAgeS !== def.spotMaxAgeS) own.push(`spot max age ${duration(eff.spotMaxAgeS)}`);
   return sources.join(" + ") + (own.length ? ` (${own.join(", ")})` : "");
+}
+
+/** The payout execution route is deliberately separate from the settlement-source pool. */
+function payoutRouteCell(route) {
+  if (route === null) return "No route — winning calls pay in Stock Tokens in kind";
+  // IPayoutRouter.sol:47 defines `fee` as hundredths of a bip on both venues. `pct()` takes basis
+  // points, so divide by 100 before formatting (3000 -> 30 bps -> 0.3%).
+  const tier = pct(route.fee / 100);
+  if (route.venue === "v3") return `Uniswap v3 — ${tier} fee tier`;
+  // A v4 pool has no address. Its bytes32 id is the pin (IPayoutRouter.sol:20-23), so do not use addr().
+  return `Uniswap v4 — ${tier} fee tier, tick spacing ${route.tickSpacing}, pool id \`${route.poolId}\``;
 }
 
 function statusCell(v) {
@@ -231,9 +317,18 @@ function validate(reg, recon) {
   if (v2.interfaceVersion !== RENDERS_INTERFACE_VERSION) {
     throw new Error(`v2.interfaceVersion is ${JSON.stringify(v2.interfaceVersion)}; this page is written for ${RENDERS_INTERFACE_VERSION} (re-check the Data Streams rule, then bump RENDERS_INTERFACE_VERSION)`);
   }
-  const contractKeys = [...V2_CONTRACTS.map(([k]) => k), "sources"];
+  // T-OP-138: the core set and `sources` are exact; an external key is known only when present (the
+  // builder's rule, build-markets.mjs validateV2Top). Any other name still throws.
+  const present = V2_EXTERNAL_CONTRACT_NAMES.filter((k) => k in v2.contracts);
+  const contractKeys = [...V2_CONTRACTS.map(([k]) => k), ...present, "sources"];
   checkKeys(v2.contracts, contractKeys, "v2.contracts");
+  for (const k of present) {
+    const a = v2.contracts[k];
+    if (a !== null && !(typeof a === "string" && /^0x[0-9a-fA-F]{40}$/.test(a))) throw new Error(`v2.contracts.${k} is neither null nor an address`);
+  }
   checkKeys(v2.contracts.sources, V2_SOURCES.map(([k]) => k), "v2.contracts.sources");
+  checkKeys(v2.flywheel, [...V2_FLYWHEEL.map(([k]) => k), "deployBlock"], "v2.flywheel");
+  checkKeys(reg.shared?.safes, SHARED_SAFES.map(([k]) => k), "shared.safes");
   checkShape(v2.defaults, DEFAULTS_SHAPE, "v2.defaults", { subset: false });
   if (!recon || !Number.isSafeInteger(recon.observedBlock) || typeof recon.checkedAt !== "string") {
     throw new Error(`${path.relative(appRoot, RECON)} is missing or has no observedBlock / checkedAt (the pools and periphery are stamped with them)`);
@@ -261,6 +356,23 @@ function validate(reg, recon) {
     if (!V2_WAVE_ORDER.includes(v.wave)) throw new Error(`${t}: v2.wave ${JSON.stringify(v.wave)} is not ${V2_WAVE_ORDER.join(" | ")}`);
     if (typeof v.strikeTick !== "string" || !/^[1-9][0-9]*$/.test(v.strikeTick)) throw new Error(`${t}: v2.strikeTick must be a positive decimal string`);
     if (typeof v.puts !== "boolean") throw new Error(`${t}: v2.puts must be true or false`);
+    if (v.payoutRoute !== null) {
+      if (!isObject(v.payoutRoute)) throw new Error(`${t}: v2.payoutRoute must be null or an object`);
+      const routeKeys = PAYOUT_ROUTE_KEYS[v.payoutRoute.venue];
+      if (!routeKeys) throw new Error(`${t}: v2.payoutRoute.venue ${JSON.stringify(v.payoutRoute.venue)} is not ${Object.keys(PAYOUT_ROUTE_KEYS).join(" | ")}`);
+      checkKeys(v.payoutRoute, routeKeys, `${t}.v2.payoutRoute`);
+      if (!Number.isSafeInteger(v.payoutRoute.fee) || v.payoutRoute.fee < 1 || v.payoutRoute.fee > MAX_ROUTE_FEE_TIER) {
+        throw new Error(`${t}: v2.payoutRoute.fee must be an integer in [1, ${MAX_ROUTE_FEE_TIER}]`);
+      }
+      if (v.payoutRoute.venue === "v4") {
+        if (!Number.isSafeInteger(v.payoutRoute.tickSpacing) || v.payoutRoute.tickSpacing < 1) {
+          throw new Error(`${t}: v2.payoutRoute.tickSpacing must be a positive integer`);
+        }
+        if (typeof v.payoutRoute.poolId !== "string" || !/^0x[0-9a-fA-F]{64}$/.test(v.payoutRoute.poolId)) {
+          throw new Error(`${t}: v2.payoutRoute.poolId must be a 32-byte v4 pool id`);
+        }
+      }
+    }
     checkShape(v.overrides, DEFAULTS_SHAPE, `${t}.v2.overrides`, { subset: true });
     if (v.status !== "planned" && (!Number.isSafeInteger(v.registeredAt) || typeof v.registerTx !== "string")) {
       throw new Error(`${t}: v2.status ${v.status} needs registeredAt and registerTx`);
@@ -285,6 +397,32 @@ function validate(reg, recon) {
   }
 }
 
+/** Validate only the archived fields this page reads; do not run the interface-8 validator on v7. */
+function validateLegacy(legacy) {
+  const rel = path.relative(appRoot, LEGACY);
+  if (!legacy) throw new Error(`${rel} is missing; the interface-7 contract set cannot be omitted from this page`);
+  if (typeof legacy._legacy !== "string" || legacy._legacy.trim() === "") {
+    throw new Error(`${rel} has no _legacy marker; refusing to republish a current registry as the interface-7 set`);
+  }
+  if (!isObject(legacy.v2) || legacy.v2.interfaceVersion !== LEGACY_INTERFACE_VERSION) {
+    throw new Error(`${rel} must record v2.interfaceVersion ${LEGACY_INTERFACE_VERSION}; refusing to label another interface as the legacy set`);
+  }
+  if (!Number.isSafeInteger(legacy.v2.deployBlock) || legacy.v2.deployBlock <= 0) {
+    throw new Error(`${rel} has no positive v2.deployBlock`);
+  }
+  const contractKeys = [...LEGACY_V2_CONTRACTS.map(([k]) => k), "sources"];
+  checkKeys(legacy.v2.contracts, contractKeys, "v7-legacy.v2.contracts");
+  checkKeys(legacy.v2.contracts.sources, V2_SOURCES.map(([k]) => k), "v7-legacy.v2.contracts.sources");
+  if (!Array.isArray(legacy.markets)) throw new Error(`${rel} has no markets array`);
+  for (const market of legacy.markets) {
+    const status = market.v2?.status;
+    if (status !== "live" && status !== "paused") continue;
+    if (!Number.isSafeInteger(market.v2.registeredAt) || typeof market.v2.registerTx !== "string") {
+      throw new Error(`${rel}: ${market.ticker} is ${status} but has no registeredAt / registerTx`);
+    }
+  }
+}
+
 function checkKeys(obj, keys, where) {
   if (!isObject(obj)) throw new Error(`${where} must be an object`);
   for (const k of keys) if (!(k in obj)) throw new Error(`${where}.${k} is missing`);
@@ -294,8 +432,9 @@ function checkKeys(obj, keys, where) {
 // ---------------------------------------------------------------------------------------------
 // The page.
 // ---------------------------------------------------------------------------------------------
-function render(reg, recon) {
+function render(reg, recon, legacy) {
   validate(reg, recon);
+  validateLegacy(legacy);
   const v2 = reg.v2;
   const def = v2.defaults;
   const rank = (m) => [V2_STATUS_ORDER.indexOf(m.v2.status), V2_WAVE_ORDER.indexOf(m.v2.wave)];
@@ -313,8 +452,17 @@ function render(reg, recon) {
   const v1Factories = reg.markets.filter((m) => m.status === "live" || m.status === "paused").sort((a, b) => a.ticker.localeCompare(b.ticker));
   const v1Live = v1Factories.filter((m) => m.status === "live" && m.v1RunOff !== true);
   const superseded = reg.markets.filter((m) => m.status === "superseded-by-v2");
-  const contracts = [...V2_CONTRACTS.map(([k]) => v2.contracts[k]), ...V2_SOURCES.map(([k]) => v2.contracts.sources[k])];
-  const anyDeployed = contracts.some(Boolean) || v2.deployBlock !== null;
+  const contracts = [
+    ...V2_CONTRACTS.map(([k]) => v2.contracts[k]),
+    ...V2_EXTERNALS.map(([k]) => v2.contracts[k] ?? null),
+    ...V2_SOURCES.map(([k]) => v2.contracts.sources[k]),
+    ...V2_FLYWHEEL.map(([k]) => v2.flywheel[k]),
+    ...SHARED_SAFES.map(([k]) => reg.shared.safes[k]),
+  ];
+  const anyDeployed = contracts.some(Boolean) || v2.deployBlock !== null || v2.flywheel.deployBlock !== null;
+  const legacyRegistered = legacy.markets
+    .filter((m) => m.v2?.status === "live" || m.v2?.status === "paused")
+    .sort((a, b) => a.ticker.localeCompare(b.ticker));
   const reconDate = recon.checkedAt.slice(0, 10);
 
   const L = [];
@@ -329,7 +477,7 @@ function render(reg, recon) {
     `Stonkhouse v2 is unaudited. Stock Tokens carry market and issuer risks. Buyers can lose their full cost; writers can lose collateral. Stonkhouse is not available to US persons. Read [Risks](../resources/risks.md) before using the product.`,
     `{% endhint %}`,
     ``,
-    `A market is one Stock Token listed on the shared v2 contracts. Every market uses the same Clearinghouse, order book, settlement oracle and expiry calendar; every series belongs to one market and settles on that market's price sources. What is per market: the Stock Token, its Chainlink feed, the Uniswap v3 pool where there is one, the strike tick, the strike ladders, whether puts are listed, and the oracle settings. [Fees](fees.md) has what a contract costs.`,
+    `A market is one Stock Token listed on the shared v2 contracts. Every market uses the same Clearinghouse, order book, settlement oracle and expiry calendar; every series belongs to one market and settles on that market's price sources. What is per market: the Stock Token, its Chainlink feed, the Uniswap v3 pool where there is one for settlement, the separate payout route where one is configured, the strike tick, the strike ladders, whether puts are listed, and the oracle settings. [Fees](fees.md) has what a contract costs.`,
     ``,
     `{% hint style="warning" %}`,
     `**Trust only the production addresses on this page or on [Addresses](../protocol/addresses.md), and check them on chain yourself.** This page is generated from the operations registry; the end of the page says where and when each kind of address was checked. Do not treat an address omitted from the production registry as an official Stonkhouse address without owner publication and on-chain verification.`,
@@ -369,20 +517,20 @@ function render(reg, recon) {
     ``,
     `## Tokens, feeds and settlement sources`,
     ``,
-    `A market's settlement price for an expiry is a time-weighted average over the last 30 minutes before expiry (16:00 New York), and every series of that market and expiry shares it. [Oracle and settlement](../protocol/oracle-and-settlement.md) has the full rules. The sources:`,
+    `A market's settlement price for an expiry is a time-weighted average over the last ${duration(SETTLEMENT_WINDOW_S)} before expiry (16:00 New York), and every series of that market and expiry shares it. [Oracle and settlement](../protocol/oracle-and-settlement.md) has the full rules. The sources:`,
     ``,
     `* **Chainlink**: every market. The market's Chainlink feed in the table, averaged from the feed's on-chain round history. It needs no keeper.`,
-    `* **Uniswap v3 TWAP**: the ${pooled.length} ${pooled.length === 1 ? "market" : "markets"} with a pool in the table. The pool's time-weighted price over the same 30 minutes, recorded by a keeper within 10 minutes after expiry, and counted only while the pool's liquidity is above the market's floor. The same pool is the route the payout adapter converts through; [Settlement and payout](../buying/settlement-and-payout.md) says when a payout arrives in Stock Tokens instead.`,
+    `* **Uniswap v3 TWAP**: the ${pooled.length} ${pooled.length === 1 ? "market" : "markets"} with a pool in the table. The pool's time-weighted price over the same ${duration(SETTLEMENT_WINDOW_S)}, recorded by a keeper within ${duration(SNAPSHOT_GRACE_S)} after expiry, and counted only while the pool's liquidity is above the market's floor. This pool corroborates settlement; payout conversion uses the separate route in the table. [Settlement and payout](../buying/settlement-and-payout.md) says when a payout arrives in Stock Tokens instead.`,
     `* **Data Streams**: enabled for no market. The registry records each market's Chainlink Data Streams id, but the source settles nothing until an admin adds it to a market, which needs Data Streams access. When it is added it becomes the market's first source.`,
     ``,
     `When two sources agree within ${pct(def.maxDeviationBps)}, the price is final at once. With one source, or two that disagree, the highest-priority available price becomes a candidate that is final ${duration(def.uncorroboratedDelayS)} later unless the guardian vetoes it. ${chainlinkOnly === 0 ? "Every market has two sources." : `The ${chainlinkOnly} ${chainlinkOnly === 1 ? "market" : "markets"} on Chainlink alone always take${chainlinkOnly === 1 ? "s" : ""} that path.`} Those figures are the registry's defaults (\`maxDeviationBps\`, \`uncorroboratedDelayS\`); a market's own setting shows in its row, and the settlement oracle holds the values in force.`,
     ``,
-    `| Ticker | Status | Wave | Stock Token | Chainlink feed | Settlement sources |`,
-    `|---|---|---|---|---|---|`,
+    `| Ticker | Status | Wave | Stock Token | Chainlink feed | Settlement sources | Payout route |`,
+    `|---|---|---|---|---|---|---|`,
   );
   for (const m of markets) {
     L.push(
-      `| **${m.ticker}** | ${statusCell(m.v2)} | ${WAVE_LABEL[m.v2.wave]} | ${addr(m.asset)} | ${addr(m.feed)} (\`${m.feedDescription}\`) | ${sourcesCell(m, eff.get(m.ticker), def)} |`,
+      `| **${m.ticker}** | ${statusCell(m.v2)} | ${WAVE_LABEL[m.v2.wave]} | ${addr(m.asset)} | ${addr(m.feed)} (\`${m.feedDescription}\`) | ${sourcesCell(m, eff.get(m.ticker), def)} | ${payoutRouteCell(m.v2.payoutRoute)} |`,
     );
   }
 
@@ -433,6 +581,33 @@ function render(reg, recon) {
   for (const [k, name, what] of V2_SOURCES) {
     L.push(`| \`${name}\` | ${what} | ${v2.contracts.sources[k] ? addr(v2.contracts.sources[k]) : notRecorded} |`);
   }
+  for (const [k, name, what] of V2_FLYWHEEL) {
+    L.push(`| \`${name}\` | ${what} | ${v2.flywheel[k] ? addr(v2.flywheel[k]) : notRecorded} |`);
+  }
+  for (const [k, name, what] of SHARED_SAFES) {
+    L.push(`| \`${name}\` | ${what} | ${reg.shared.safes[k] ? addr(reg.shared.safes[k]) : notRecorded} |`);
+  }
+  if (v2.flywheel.deployBlock !== null) {
+    L.push(``, `The flywheel contracts were deployed from block **${block(v2.flywheel.deployBlock)}**.`);
+  }
+
+  // External v2 contracts (T-OP-114 / T-OP-138): deployed by their own steps after the core set, so each
+  // carries its own start block. A key the registry does not carry yet renders exactly like a null one.
+  const notDeployed = "not deployed";
+  L.push(
+    ``,
+    `### External v2 contracts`,
+    ``,
+    `These contracts are part of v2 but are deployed separately from the core set above, each by its own step, and each is recorded with its own start block once it exists. A contract listed as *${notDeployed}* has no address in this registry yet.`,
+    ``,
+    `| Contract | What it does | Address | Deployed from block |`,
+    `|---|---|---|---|`,
+  );
+  for (const [k, name, what] of V2_EXTERNALS) {
+    const a = v2.contracts[k] ?? null;
+    const b = v2.externalDeployBlocks?.[k] ?? null;
+    L.push(`| \`${name}\` | ${what} | ${a ? addr(a) : notDeployed} | ${b !== null ? block(b) : "—"} |`);
+  }
   L.push(
     ``,
     `v2 also relies on these third-party contracts. USDG's address is a constant of the registry, not a read: what the registry checks on chain at block ${block(reg.verifiedAtBlock)} is that every configured Uniswap v3 pool holds exactly this token and the market's Stock Token. The Uniswap v3 contracts had code at block ${block(recon.observedBlock)} (${reconDate}). Check USDG yourself: \`cast call ${reg.shared.usdg} "symbol()(string)"\` on \`${reg.rpc}\` answers \`USDG\`, \`decimals()(uint8)\` answers 6.`,
@@ -444,6 +619,29 @@ function render(reg, recon) {
     `| Uniswap \`SwapRouter02\` | ${addr(v2.uniswapV3.swapRouter02)} |`,
     `| Uniswap \`QuoterV2\` | ${addr(v2.uniswapV3.quoterV2)} |`,
   );
+
+  // Archived interface-7 set. This is intentionally separate from the v8 markets and wave tables.
+  L.push(
+    ``,
+    `## Legacy interface-7 contract set`,
+    ``,
+    `The archived \`ops/markets/v7-legacy.json\` registry records the earlier **interface 7** deployment from block **${block(legacy.v2.deployBlock)}**. These addresses belong to that contract set, not to the interface-8 deployment above.`,
+    ``,
+    `The owner-controlled run-off procedure, if applied, stops new series and new units from being written. Closing, redeeming, withdrawing, cancelling an order and selling an existing long on the order book remain available. The registry does not record whether that procedure has been applied.`,
+    ``,
+    `| Interface-7 contract | What it does | Address |`,
+    `|---|---|---|`,
+  );
+  for (const [k, name, what] of LEGACY_V2_CONTRACTS) {
+    L.push(`| \`${name}\` | ${what} | ${addr(legacy.v2.contracts[k])} |`);
+  }
+  for (const [k, name, what] of V2_SOURCES) {
+    L.push(`| \`${name}\` | ${what} | ${addr(legacy.v2.contracts.sources[k])} |`);
+  }
+  L.push(``, `Markets registered on the interface-7 set:`, ``, `| Ticker | Interface-7 status |`, `|---|---|`);
+  for (const market of legacyRegistered) {
+    L.push(`| **${market.ticker}** | ${statusCell(market.v2)} |`);
+  }
 
   // Legacy v1 factories.
   L.push(``, `## Legacy v1 factories`, ``);
@@ -471,7 +669,7 @@ function render(reg, recon) {
     ``,
     `This page is rendered from the operations registry (\`ops/markets/tier1.json\` in the app repository) by \`ops/markets/render-docs.mjs\`. Every Stock Token and Chainlink feed address in the registry was read on chain at block **${block(reg.verifiedAtBlock)}** on \`${reg.rpc}\`; the registry was generated at **${reg.generatedAt}**. The feed list is Chainlink's \`us_equities_24/5\` directory for chain 4663 (${reg.feedsSource.equity} equity feeds of ${reg.feedsSource.total}); the token list is the issuer's ${reg.tokensSource.total} Stock Tokens. A feed that later disappears from Chainlink's directory fails the registry check rather than silently dropping a market.`,
     ``,
-    `The v2 settings (status, wave, strike tick, pool, puts, ladders and contract addresses) are kept by hand in the registry and validated by \`ops/markets/build-markets.mjs --check\`. The Uniswap v3 pools come from the source recon (\`ops/markets/v2-sources.json\`) at block **${block(recon.observedBlock)}** (${recon.checkedAt}); every registry check confirms on chain that each pool holds the market's Stock Token and USDG and is the pool the Uniswap v3 factory returns. v1 factory addresses and deploy blocks are written back by their deploy script. The 30-minute settlement window and the 10-minute snapshot grace are compiled constants of the v2 contracts. Where the prose and the code disagree, the code is the specification.`,
+    `The v2 settings (status, wave, strike tick, settlement-source pool, payout route, puts, ladders and contract addresses) are kept by hand in the registry and validated by \`ops/markets/build-markets.mjs --check\`. The Uniswap v3 settlement pools come from the source recon (\`ops/markets/v2-sources.json\`) at block **${block(recon.observedBlock)}** (${recon.checkedAt}); every registry check confirms on chain that each pool holds the market's Stock Token and USDG and is the pool the Uniswap v3 factory returns. Payout routes are separate hand-kept values; the same check recomputes every v4 pool id from its hookless PoolKey. The interface-7 addresses and registrations come only from \`ops/markets/v7-legacy.json\`. v1 factory addresses and deploy blocks are written back by their deploy script. The ${duration(SETTLEMENT_WINDOW_S)} settlement window and the ${duration(SNAPSHOT_GRACE_S)} snapshot grace are compiled constants of the v2 contracts. Where the prose and the code disagree, the code is the specification.`,
     ``,
     `## Related`,
     ``,
@@ -491,7 +689,8 @@ function render(reg, recon) {
 // ---------------------------------------------------------------------------------------------
 const reg = JSON.parse(readFileSync(REGISTRY, "utf8"));
 const recon = existsSync(RECON) ? JSON.parse(readFileSync(RECON, "utf8")) : null;
-const page = render(reg, recon);
+const legacy = existsSync(LEGACY) ? JSON.parse(readFileSync(LEGACY, "utf8")) : null;
+const page = render(reg, recon, legacy);
 
 /** Default targets: the root page and the GitBook mirror, when that checkout has one. */
 function targets() {

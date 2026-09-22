@@ -16,16 +16,16 @@
     "expiry": 1789156800,
     "tenor": "weekly",
     "mintCutoff": 1789155000,
-    "mintFeePpm": 80,
+    "mintFeePpm": 0,
     "mintFeesHeld": {
       "raw": "0",
       "decimals": 18,
       "formatted": "0"
     },
     "mintFeesAccrued": {
-      "raw": "25853174603176",
+      "raw": "0",
       "decimals": 18,
-      "formatted": "0.000025853174603176"
+      "formatted": "0"
     },
     "status": "settled"
   },

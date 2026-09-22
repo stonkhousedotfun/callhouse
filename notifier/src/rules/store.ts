@@ -23,15 +23,20 @@ export const cursorSchema = z.object({
 });
 export type Cursor = z.infer<typeof cursorSchema>;
 
+export const anchorSchema = z.string().min(1);
+export type StoredAnchor = z.infer<typeof anchorSchema>;
+
 export interface StoredState {
   cursor: Cursor | null;
   snapshot: SnapshotState | null;
   holdings: Record<string, Holdings>;
+  /** Deployment identity last observed from /v2/config. Null means none stored or unreadable. */
+  anchor: StoredAnchor | null;
 }
 
 export async function loadState(db: Queryable, logger: Logger): Promise<StoredState> {
   const { rows } = await db.query<{ name: string; value: unknown }>(
-    `SELECT name, value FROM notifier.rules_state WHERE name IN ('cursor', 'snapshot')`,
+    `SELECT name, value FROM notifier.rules_state WHERE name IN ('cursor', 'snapshot', 'anchor')`,
   );
   const byName = new Map(rows.map((r) => [r.name, r.value]));
   const parse = <S extends z.ZodTypeAny>(name: string, schema: S): z.infer<S> | null => {
@@ -54,7 +59,12 @@ export async function loadState(db: Queryable, logger: Logger): Promise<StoredSt
   }
   if (unreadable > 0) logger.warn({ unreadable }, 'rules holdings unreadable, refetching them');
 
-  return { cursor: parse('cursor', cursorSchema), snapshot: parse('snapshot', snapshotStateSchema), holdings };
+  return {
+    cursor: parse('cursor', cursorSchema),
+    snapshot: parse('snapshot', snapshotStateSchema),
+    holdings,
+    anchor: parse('anchor', anchorSchema),
+  };
 }
 
 /**
@@ -63,13 +73,28 @@ export async function loadState(db: Queryable, logger: Logger): Promise<StoredSt
  */
 export async function saveState(
   db: Db,
-  a: { cursor: Cursor; snapshot: SnapshotState; changedHoldings: Record<string, Holdings>; watched: Set<string>; now: Date },
+  a: {
+    cursor: Cursor;
+    snapshot: SnapshotState;
+    changedHoldings: Record<string, Holdings>;
+    watched: Set<string>;
+    now: Date;
+    /** When null, the stored `anchor` row is left untouched (config read failed). */
+    anchor: StoredAnchor | null;
+    /** Drop every holdings row (deployment cutover). */
+    clearHoldings?: boolean;
+  },
 ): Promise<void> {
   await db.transaction(async (tx) => {
-    for (const [name, value] of [
+    if (a.clearHoldings) {
+      await tx.query('DELETE FROM notifier.rules_holdings');
+    }
+    const rows: [string, unknown][] = [
       ['cursor', a.cursor],
       ['snapshot', a.snapshot],
-    ] as const) {
+    ];
+    if (a.anchor !== null) rows.push(['anchor', a.anchor]);
+    for (const [name, value] of rows) {
       await tx.query(
         `INSERT INTO notifier.rules_state (name, value, updated_at) VALUES ($1, $2::jsonb, $3::timestamptz)
          ON CONFLICT (name) DO UPDATE SET value = EXCLUDED.value, updated_at = EXCLUDED.updated_at`,
@@ -85,6 +110,32 @@ export async function saveState(
     }
     await tx.query(`DELETE FROM notifier.rules_holdings WHERE NOT (address = ANY($1::text[]))`, [[...a.watched]]);
   });
+}
+
+export interface RulesStats {
+  /** Wallets the engine watches: every address with a verified, enabled subscription. */
+  watchSet: number;
+  /**
+   * Seconds since the OLDEST holdings refresh the engine has on record, i.e. how far behind the
+   * slowest watched wallet's positions are (F4 D17: the monitor warns before it hurts). null when
+   * no wallet has been read yet — a watched wallet with no row at all is not an age.
+   */
+  oldestRefreshAgeS: number | null;
+}
+
+/** The two rules numbers /health reports. Read from the tables, so a tick need not have run. */
+export async function loadRulesStats(db: Queryable, now: Date): Promise<RulesStats> {
+  const { rows } = await db.query<{ watch_set: number; oldest: Date | string | null }>(
+    `SELECT (SELECT count(DISTINCT address)::int FROM notifier.subscription
+              WHERE verified_at IS NOT NULL AND disabled_at IS NULL) AS watch_set,
+            (SELECT min(fetched_at) FROM notifier.rules_holdings) AS oldest`,
+  );
+  const row = rows[0];
+  const oldest = row?.oldest == null ? null : new Date(row.oldest).getTime();
+  return {
+    watchSet: row?.watch_set ?? 0,
+    oldestRefreshAgeS: oldest === null || Number.isNaN(oldest) ? null : Math.max(0, Math.floor((now.getTime() - oldest) / 1000)),
+  };
 }
 
 export interface WatchSet {

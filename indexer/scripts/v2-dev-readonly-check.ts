@@ -20,7 +20,7 @@ const registryContracts = z.object({
   expiryCalendar: registryAddress, keeperRewards: registryAddress,
   autoRoller: registryAddress, payoutAdapter: registryAddress,
   makerVault: registryAddress, makerRegistry: registryAddress,
-  rewardsDistributor: registryAddress,
+  rewardsDistributor: registryAddress, accessManager: registryAddress,
   sources: z.object({ chainlink: registryAddress, univ3: registryAddress,
     dataStreams: registryAddress }),
 });
@@ -37,7 +37,7 @@ const registrySchema = z.object({
 });
 
 // Reuse the producer's established field validators, selecting only stable manifest fields.
-// Deliberately do not accept this subset check as validation of the complete v7 response.
+// Deliberately do not accept this subset check as validation of the complete v8 response.
 const configSchema = configResponseSchema.pick({ chainId: true, interfaceVersion: true,
   deployBlock: true, usdg: true, contracts: true, fees: true }).strip().extend({
   fees: configResponseSchema.shape.fees.strip(),
@@ -128,8 +128,8 @@ function sameAddress(a: string | null, b: string | null): boolean {
 export async function checkDeployedDev(options: Options): Promise<Report> {
   const report: Report = { scope: "read-only-deployment-manifest", status: "failed",
     registrySha256: null, checks: [], pendingChecks: [
-      "Rent charge, refund and accrual behavior: requires the separate v7 acceptance suite.",
-      "Series, events and on-chain state parity: requires the separate v7 acceptance suite.",
+      "Rent charge, refund and accrual behavior: requires the separate v8 acceptance suite.",
+      "Series, events and on-chain state parity: requires the separate v8 acceptance suite.",
     ] };
   let url: URL;
   let registry: z.infer<typeof registrySchema>;
@@ -141,7 +141,7 @@ export async function checkDeployedDev(options: Options): Promise<Report> {
     url = baseUrl(options.baseUrl, options.allowLoopback ?? false);
     timeoutMs = boundedInteger(options.timeoutMs ?? 10_000, 10, 30_000, "timeoutMs");
     maxLagSeconds = boundedInteger(options.maxLagSeconds ?? 120, 0, 3_600, "maxLagSeconds");
-    version = boundedInteger(options.expectedInterfaceVersion ?? 7, 1, 1_000, "interfaceVersion");
+    version = boundedInteger(options.expectedInterfaceVersion ?? 8, 1, 1_000, "interfaceVersion");
     chainId = boundedInteger(options.expectedChainId ?? 4663, 1, Number.MAX_SAFE_INTEGER, "chainId");
     let bytes: Buffer;
     try {
@@ -163,9 +163,25 @@ export async function checkDeployedDev(options: Options): Promise<Report> {
     if (registry.shared.chainId !== chainId) throw new Error("Registry chain ID does not match expected chain.");
     if (!registry.markets.some((market) => market.v2.status === "live"))
       throw new Error("Registry has no intended live markets.");
-    if (registry.markets.some((market) => market.v2.status !== "planned" &&
-      (market.v2.mintFeePpm ?? market.v2.overrides?.mintFeePpm ?? registry.v2.fees.mintFeePpm) === 0))
+    // THE RENT RULE IS INVERTED PER INTERFACE, NOT REMOVED AND NOT APPLIED FLAT.
+    // v7 charged collateral rent and a registered market with zero effective rent was the fault.
+    // INTERFACE_VERSION 8 launches rent at 0 with `allowRent: false` (06-QUIRKS §C), so the fault is
+    // the opposite one: a registered market that quietly still charges rent. Deleting the check
+    // would let a dev deployment that re-enabled v7 rent pass this gate in silence, which is the one
+    // outcome worse than either rule.
+    //
+    // It MUST stay keyed to `version`, because `--interface-version 7` is still supported (see the
+    // CLI option below) so the checker can be pointed at the v7 run-off deployment. A flat v8 rule
+    // would refuse every v7 registry for having exactly the rent v7 requires.
+    const effectiveRent = (market: typeof registry.markets[number]): number =>
+      market.v2.mintFeePpm ?? market.v2.overrides?.mintFeePpm ?? registry.v2.fees.mintFeePpm;
+    const registered = registry.markets.filter((market) => market.v2.status !== "planned");
+    if (version >= 8) {
+      if (registered.some((market) => effectiveRent(market) !== 0))
+        throw new Error("Interface 8 registered markets must have zero effective writer rent.");
+    } else if (registered.some((market) => effectiveRent(market) === 0)) {
       throw new Error("Registered markets must have nonzero effective writer rent.");
+    }
     if (new Set(registry.markets.map((market) => market.ticker)).size !== registry.markets.length ||
         new Set(registry.markets.map((market) => market.asset.toLowerCase())).size !== registry.markets.length)
       throw new Error("Registry has duplicate market identities.");
@@ -211,6 +227,10 @@ export async function checkDeployedDev(options: Options): Promise<Report> {
           if (key === "sources") {
             for (const source of Object.keys(registry.v2.contracts.sources) as (keyof typeof registry.v2.contracts.sources)[])
               if (!sameAddress(config.contracts.sources[source], registry.v2.contracts.sources[source])) details.push(`contracts.sources.${source} differs from registry.`);
+          } else if (key === "accessManager") {
+            if (config.contracts.accessManager !== undefined &&
+                !sameAddress(config.contracts.accessManager, registry.v2.contracts.accessManager))
+              details.push("contracts.accessManager differs from registry.");
           } else if (!sameAddress(config.contracts[key], registry.v2.contracts[key])) details.push(`contracts.${key} differs from registry.`);
         }
       }

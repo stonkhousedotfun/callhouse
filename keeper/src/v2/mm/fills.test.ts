@@ -73,7 +73,10 @@ function harness() {
   const deps = { client: client as never, logClient: logClient as never, mm, log, orderBook: BOOK, vault: VAULT, deployBlock: 0n };
   const place = (orderId: bigint, row: ChainOrderRow, filledSeen = 0n) => {
     orders.set(orderId, row);
-    mm.ingestOrders([{ order: { orderId, longId: LONG, kind: row.kind, price: row.price, units: row.units, filledSeen }, closed: false }], orderId, 0);
+    // WITH THE VAULT. Production ingests per vault (quoter.ts ingestOrders passes a.vault) and
+    // openOrders(vault) has been strict since T-124, so a vault-less ingest here seeded rows the code under
+    // test could never see - which is why this file went red the moment anyone ran it again.
+    mm.ingestOrders([{ order: { orderId, longId: LONG, kind: row.kind, price: row.price, units: row.units, filledSeen }, closed: false }], orderId, 0, VAULT);
   };
   return { mm, deps, orders, logs, logCalls, warnings, place, failLogs: (e: Error | null) => (logsError = e) };
 }
@@ -119,7 +122,7 @@ test('across a fee activation: a resale fill made at 10 % and seen after the cut
   const naive = replayLedger(h.mm.ledger().map((e) => (e.type === 'fill' && e.side === 'sell' ? { type: 'fill', longId: e.longId, side: e.side, units: e.units, price: e.price, feeBps: NEW.resaleFeeBps, at: e.at } : e)));
   assert.equal(naive.realisedByDay.get(Math.floor((T + 60) / DAY)), -500_000n);
   assert.equal(lossStop(naive, T + 60, 600_000n).tripped, false, 'booked at the new fees the stop would not have tripped');
-  assert.deepEqual(h.mm.fillCheckpoint(), { block: 110n, at: T + 60, ...NEW });
+  assert.deepEqual(h.mm.fillCheckpoint(VAULT), { block: 110n, at: T + 60, ...NEW });
 });
 
 test('across a fee activation with the logs unreadable: booked at the higher of the two regimes (10 %), with a warning; the stop still trips', async () => {
@@ -148,8 +151,8 @@ test('across a fee activation with the logs unreadable: booked at the higher of 
   assert.equal(raised.type === 'fill' && raised.feeBps, 1_000);
 });
 
-test('logs that do not account for the fill, a gap of 24 h or more, or no previous look: the compiled ceiling (10 %)', async () => {
-  // A 3 % → 0 % cut with the fill's log missing: inside 24 h the two ends bound it (3 %)...
+test('logs that do not account for the fill, a gap of 48 h or more, or no previous look: the compiled ceiling (10 %)', async () => {
+  // A 3 % → 0 % cut with the fill's log missing: inside the delay the two ends bound it (3 %)...
   const within = harness();
   within.place(2n, { kind: 'AskResale', price: 2_000_000n, units: 100n, filled: 0n });
   await trackVaultOrders(within.deps, { premiumFeeBps: 500, resaleFeeBps: 300 }, { blockNumber: 100n, timestamp: T });
@@ -160,13 +163,16 @@ test('logs that do not account for the fill, a gap of 24 h or more, or no previo
   assert.equal(a.type === 'fill' && a.feeBps, 300);
   assert.equal(a.type === 'fill' && a.sellerFee, undefined);
 
-  // ...a day or more between looks can hide any number of changes...
+  // ...but a gap of at least FEE_CHANGE_DELAY_S between looks can hide any number of changes, because a
+  // second change can be scheduled the moment the first takes effect. INTERFACE_VERSION 8 raised that
+  // delay from 24 h to 48 h (V2Constants.sol:60), so the gap that reaches the ceiling is now 2 days: at
+  // T + DAY the two ends still bound it and this case would return 300, not the ceiling.
   const gap = harness();
   gap.place(2n, { kind: 'AskResale', price: 2_000_000n, units: 100n, filled: 0n });
   await trackVaultOrders(gap.deps, { premiumFeeBps: 500, resaleFeeBps: 300 }, { blockNumber: 100n, timestamp: T });
   gap.orders.get(2n)!.filled = 100n;
   gap.failLogs(new Error('refused'));
-  await trackVaultOrders(gap.deps, NEW, { blockNumber: 900_000n, timestamp: T + DAY });
+  await trackVaultOrders(gap.deps, NEW, { blockNumber: 900_000n, timestamp: T + 2 * DAY });
   const b = gap.mm.ledger()[0]!;
   assert.equal(b.type === 'fill' && b.feeBps, 1_000);
 
@@ -260,12 +266,28 @@ test('the store keeps a sale\'s exact premium and fee and the checkpoint; a rebi
   const exact = { type: 'fill' as const, longId: '9', side: 'sell' as const, units: 100n, price: 2_000_000n, feeBps: 1_000, premium: 2_000_000n, sellerFee: 200_000n, at: T };
   mm.recordOrderProgress(1n, 100n, true, exact);
   assert.deepEqual(mm.ledger(), [exact]);
-  assert.equal(mm.fillCheckpoint(), null);
+  assert.equal(mm.fillCheckpoint(VAULT), null);
+  mm.setFillCheckpoint({ block: 110n, at: T, premiumFeeBps: 500, resaleFeeBps: 0 }, VAULT);
+  assert.deepEqual(mm.fillCheckpoint(VAULT), { block: 110n, at: T, premiumFeeBps: 500, resaleFeeBps: 0 });
+  mm.store.setMeta(`${MM_META.fillCheckpoint}:${VAULT.toLowerCase()}`, 'not json');
+  assert.equal(mm.fillCheckpoint(VAULT), null, 'an unreadable checkpoint is none: the next sale is booked conservatively');
   mm.setFillCheckpoint({ block: 110n, at: T, premiumFeeBps: 500, resaleFeeBps: 0 });
-  assert.deepEqual(mm.fillCheckpoint(), { block: 110n, at: T, premiumFeeBps: 500, resaleFeeBps: 0 });
-  mm.store.setMeta(MM_META.fillCheckpoint, 'not json');
-  assert.equal(mm.fillCheckpoint(), null, 'an unreadable checkpoint is none: the next sale is booked conservatively');
-  mm.setFillCheckpoint({ block: 110n, at: T, premiumFeeBps: 500, resaleFeeBps: 0 });
-  assert.equal(mm.bind({ ...DEPLOYMENT, vault: '0x00000000000000000000000000000000000000fb' }), true);
-  assert.equal(mm.fillCheckpoint(), null);
+  assert.equal(mm.bind({ ...DEPLOYMENT, orderBook: '0x00000000000000000000000000000000000000b1' }), true);
+  assert.equal(mm.fillCheckpoint(VAULT), null);
+});
+
+test('the fill checkpoint is PER VAULT: one vault advancing it does not move another (F-DAPP-02)', () => {
+  const mm = new MmStore(new V2Store(':memory:'));
+  const vaultB = '0x00000000000000000000000000000000000000fb' as Address;
+  mm.setFillCheckpoint({ block: 500n, at: T, premiumFeeBps: 500, resaleFeeBps: 0 }, VAULT);
+
+  // THE BUG THIS REPLACES. One global key meant vault B read vault A's block as its own resume point, so it
+  // scanned a handful of blocks instead of its own range and booked its sales against whatever fee regime
+  // that window carried -- wrong, silently, and most wrongly across a scheduled fee change.
+  assert.equal(mm.fillCheckpoint(vaultB), null, 'B has never checkpointed: it must not inherit A\'s block');
+  assert.deepEqual(mm.fillCheckpoint(VAULT), { block: 500n, at: T, premiumFeeBps: 500, resaleFeeBps: 0 });
+
+  mm.setFillCheckpoint({ block: 900n, at: T + 1, premiumFeeBps: 250, resaleFeeBps: 10 }, vaultB);
+  assert.equal(mm.fillCheckpoint(VAULT)?.block, 500n, "B's checkpoint must not move A's");
+  assert.equal(mm.fillCheckpoint(vaultB)?.premiumFeeBps, 250, 'each vault keeps its own fee regime');
 });

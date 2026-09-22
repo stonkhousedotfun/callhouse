@@ -4,6 +4,7 @@ import { useState } from "react";
 import type { Abi } from "viem";
 import { useAccount, useWriteContract } from "wagmi";
 
+import { CHAIN_ID } from "@/lib/chain";
 import { MARKET, VAULT, vaultAbi } from "@/lib/contracts";
 import { WAD, fmtAsset, fmtUsdg, fmtWadPercent } from "@/lib/format";
 import type { AccountPosition, VaultSnapshot } from "@/lib/hooks";
@@ -54,7 +55,9 @@ export function StrandedBanner({
    *  the pages stack their sections with a gap. */
   className?: string;
 }) {
-  const { address, isConnected } = useAccount();
+  const { address, isConnected, chainId } = useAccount();
+  // W8-450, same pair as AccountView.tsx. No silent network switch; a wrong network refuses and says so.
+  const wrongNetwork = isConnected && chainId !== CHAIN_ID;
   const { writeContractAsync } = useWriteContract();
   const run = useTxRunner();
   const [busy, setBusy] = useState(false);
@@ -83,7 +86,8 @@ export function StrandedBanner({
       : undefined;
 
   async function retry() {
-    if (!VAULT) return;
+    // Refused here as well as on the button: the button is not the only way into this function.
+    if (!VAULT || wrongNetwork) return;
     const vault = VAULT;
     setBusy(true);
     try {
@@ -94,6 +98,8 @@ export function StrandedBanner({
             abi: vaultAbi as unknown as Abi,
             functionName: "retryStrandedClaim",
             args: [],
+            // W8-450: without this @wagmi/core 3.6.5 disables its chain assertion entirely.
+            chainId: CHAIN_ID,
           }),
         { pending: "Retrying the stranded claim", success: "Claim redeemed — the week's collateral and strike USDG are home" },
       );
@@ -171,9 +177,12 @@ export function StrandedBanner({
             ) : null}
           </Rows>
           <div className="mt-3 flex max-w-[720px] flex-wrap items-center gap-x-4 gap-y-2">
-            <Button size="sm" disabled={busy || !isConnected || !VAULT} onClick={retry}>
+            <Button size="sm" disabled={busy || !isConnected || !VAULT || wrongNetwork} onClick={retry}>
               {busy ? "Working…" : "Retry claim"}
             </Button>
+            {wrongNetwork ? (
+              <span className="text-[12.5px] leading-snug text-ink-2">Switch to Robinhood Chain to retry.</span>
+            ) : null}
             <span className="min-w-0 flex-1 basis-60 text-[12.5px] leading-snug text-ink-3">
               Anyone can send this. It reverts StillStranded while the cause persists and settles the claim the
               first time Valorem lets it through; nothing here needs the keeper.

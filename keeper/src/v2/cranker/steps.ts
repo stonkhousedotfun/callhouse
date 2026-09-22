@@ -32,6 +32,8 @@
 import { encodeFunctionData, getAddress, parseAbi, type Address, type Hex, type PublicClient } from 'viem';
 import { autoRollerAbi } from '../abi/autoRoller.js';
 import { clearinghouseAbi } from '../abi/clearinghouse.js';
+import { houseVaultAbi } from '../abi/houseVault.js';
+import { houseVaultFactoryAbi } from '../abi/houseVaultFactory.js';
 import { expiryCalendarAbi } from '../abi/expiryCalendar.js';
 import { orderBookAbi } from '../abi/orderBook.js';
 import { settlementOracleAbi } from '../abi/settlementOracle.js';
@@ -42,7 +44,8 @@ import { marketByUnderlying, TENORS, v2Markets, type Tenor } from '../registry.j
 import { longIdOf, shortIdOf } from '../seriesId.js';
 import type { V2Store } from '../store.js';
 import { describeError, revertDetail, type ExecuteOptions } from '../tx.js';
-import { GAS, PIN_REFUSED_RECHECK_S, ROLL_OPEN_GRACE_S, SNAPSHOT_GRACE, UNIT } from './constants.js';
+import { GAS, PIN_REFUSED_RECHECK_S, ROLL_OPEN_GRACE_S, SETTLEMENT_STATUS, SNAPSHOT_GRACE, UNIT } from './constants.js';
+import { rollDue } from '../mm/house.js';
 import { advanced, type CrankAlerts, type CrankOutcome, type CrankSender, type FixedGasCall } from './effects.js';
 import type { CrankerIndex } from './index-store.js';
 import type { IndexerClient } from './indexer-client.js';
@@ -51,7 +54,7 @@ import {
   chunkCreates,
   expiryKeyString,
   isDeadOrder,
-  ladderSearchStart,
+  ladderSlots,
   planExpiry,
   planLadder,
   planPinGroup,
@@ -63,6 +66,7 @@ import {
   selectRedeemable,
   splitChunk,
   sweepDue,
+  upcomingLadderExpiries,
   type ExpiryKey,
   type GasChunk,
   type HolderView,
@@ -70,10 +74,10 @@ import {
   type PinGroupView,
 } from './planner.js';
 import { decodeRevertData, pinRefusalOf, type PinRefusal } from './pin.js';
-import { okResult, readHolders, readMany, readOrders, surveyExpiries, type AnyRead, type ExpirySurvey } from './reads.js';
+import { marketOracleOf, okResult, readHolders, readMany, readOrders, surveyExpiries, type AnyRead, type ExpirySurvey } from './reads.js';
 import { scanLogs, type LogClient } from './scanner.js';
 
-export const STEP_ORDER = ['index', 'stale', 'snapshot', 'finalize', 'settle', 'prune', 'redeem', 'ladders', 'rolls', 'housekeeping'] as const;
+export const STEP_ORDER = ['index', 'stale', 'snapshot', 'finalize', 'settle', 'prune', 'redeem', 'ladders', 'rolls', 'housekeeping', 'flywheel'] as const;
 export type StepName = (typeof STEP_ORDER)[number];
 
 export interface ActionRecord {
@@ -102,6 +106,12 @@ export interface CrankAddresses {
   settlementOracle: Address;
   expiryCalendar: Address;
   autoRoller: Address | null;
+  /**
+   * The FeeSplitter (`v2.flywheel.feeSplitter`), null until the v8 flywheel is deployed. Nullable for the same
+   * reason `autoRoller` is: distribute and buyback are ONE step of eleven, and ops/v2/env/cranker.env:26-27
+   * already promises the operator that an empty V2_FEE_SPLITTER makes the cranker skip them and run the rest.
+   */
+  feeSplitter: Address | null;
   multicall3: Address;
 }
 
@@ -136,6 +146,8 @@ export const snapshotMetaKey = (k: ExpiryKey) => `cranker:snapshot:${expiryKeySt
 export const settledSeenMetaKey = (longId: bigint) => `cranker:settled-seen:${longId}`;
 export const ladderAnchorMetaKey = (underlying: string, expiry: number, isPut: boolean, tenor: Tenor) => `cranker:ladder:${underlying.toLowerCase()}:${expiry}:${isPut ? 'P' : 'C'}:${tenor}`;
 export const sweepMetaKey = (asset: string) => `cranker:sweep:${asset.toLowerCase()}`;
+/** When the flywheel step last ran a pass (head seconds). One key: the pass is claim, distribute and buyback together. */
+export const flywheelMetaKey = 'cranker:flywheel';
 /** A refused settlement pin of one (oracle, underlying, expiry) (planner.pinGroupKey): JSON PinRefusedMark. */
 export const pinRefusedMetaKey = (group: string) => `cranker:pin-refused:${group}`;
 /** An order OrderBook.prune skipped alone under the gas cap (its maker rejects the refund): the head timestamp it was seen. */
@@ -145,10 +157,10 @@ export const rollsOffsetMetaKey = 'cranker:rolls:offset';
 /** Most rolls per tick that earn no ROLL bounty (under AutoRoller.minRollUnits): each costs the cranker ~700k gas. */
 export const ROLLS_BELOW_BOUNTY_PER_TICK = 10;
 
-const newReport = (step: StepName): StepReport => ({ step, actions: [], notes: {}, wakeAt: [] });
+export const newReport = (step: StepName): StepReport => ({ step, actions: [], notes: {}, wakeAt: [] });
 
 /** How many sends a step may still make this tick; none once the tick must yield (CrankContext.yieldWhen). */
-class Budget {
+export class Budget {
   used = 0;
   constructor(
     readonly max: number,
@@ -179,8 +191,17 @@ function summarizeResult(result: unknown): unknown {
  * Send (or, dry, judge) one call and record it in the report; pages v2_tx_revert on a revert, a lost receipt, or a
  * broadcast that failed: the signing wallet is pinned to RH_RPC while reads fall back, so a primary that answers reads
  * but refuses sends would otherwise leave /health ok while nothing reaches the chain.
+ *
+ * AND v2_rpc_lag WHEN THE SIMULATION GOT NO ANSWER (T-556, T-202's suspicion 2). A full outage never reaches here:
+ * runtime.ts probes the chain first and a probe that fails on every RPC pages v2_rpc_lag, throws, and stales the
+ * heartbeat. A PARTIAL outage does reach here -- the head answers, eth_call does not (a rate limit, a timeout, a node
+ * that stopped serving simulations) -- as an ordinary `simulation-reverted` carrying `transportError: true`. Before this
+ * the steps treated that as a contract's answer: prune and redeem dropped it (fellShort excludes it, so the chunk was
+ * simply skipped), rolls listed it as "reverting", settle paged v2_settle_stuck as "reverts (null)" and cancelStale
+ * paged "refused (no reason)". Nothing said the node. This names it once, at the one place every send passes, keyed
+ * per step kind so a node that is down for an hour pages once per step and not once per series.
  */
-async function send(ctx: CrankContext, report: StepReport, budget: Budget, what: string, call: FixedGasCall, options: ExecuteOptions<unknown>): Promise<CrankOutcome> {
+export async function send(ctx: CrankContext, report: StepReport, budget: Budget, what: string, call: FixedGasCall, options: ExecuteOptions<unknown>): Promise<CrankOutcome> {
   const outcome = await ctx.sender.execute(call, options);
   budget.spend(outcome);
   const record: ActionRecord = { what, kind: options.kind, key: options.key, status: outcome.status };
@@ -193,6 +214,16 @@ async function send(ctx: CrankContext, report: StepReport, budget: Budget, what:
   if (outcome.status === 'send-failed' || outcome.status === 'unconfirmed') record.error = outcome.error.slice(0, 300);
   if (outcome.status === 'no-op' || outcome.status === 'confirmed' || outcome.status === 'would-send') record.result = summarizeResult(outcome.result);
   report.actions.push(record);
+  if (outcome.status === 'simulation-reverted' && outcome.transportError === true) {
+    await ctx.alerts.raise({
+      kind: 'v2_rpc_lag',
+      dedupeKey: `transport:${options.kind}`,
+      once: false,
+      severity: 'warn',
+      message: `cranker ${what}: the node did not answer the simulation (${outcome.error.slice(0, 160)}). This is a transport failure, not a contract refusal: nothing was sent and the step retries next tick`,
+      data: { kind: options.kind, key: options.key, status: outcome.status, transportError: true, error: outcome.error.slice(0, 300) },
+    });
+  }
   if (outcome.status === 'reverted' || outcome.status === 'unconfirmed' || outcome.status === 'send-failed') {
     const why = outcome.status === 'reverted' ? 'reverted on chain' : outcome.status === 'unconfirmed' ? 'not confirmed in time' : `could not be broadcast (${outcome.error.slice(0, 160)})`;
     await ctx.alerts.raise({
@@ -206,7 +237,7 @@ async function send(ctx: CrankContext, report: StepReport, budget: Budget, what:
   return outcome;
 }
 
-async function head(ctx: CrankContext): Promise<Head> {
+export async function head(ctx: CrankContext): Promise<Head> {
   return readHead(ctx.client);
 }
 
@@ -277,7 +308,14 @@ interface RollerOrderStruct {
 interface RollerSeriesStruct {
   isPut: boolean;
   strike: bigint;
+  /** The oracle createSeries pinned into the series: the one it settles on and AutoRoller.cancelStale reads (T-310). */
+  oracle: Address;
 }
+
+const ZERO_ADDRESS = '0x0000000000000000000000000000000000000000';
+
+/** stepStale's spot key: one oracle's price for one underlying. Two series of one underlying may differ (T-437). */
+const spotKey = (oracle: Address, underlying: Address): string => `${oracle.toLowerCase()}:${underlying.toLowerCase()}`;
 
 /** The (writer, underlying) pairs with an AutoRoller strategy: the cranker's log index ∪ the indexer's active list. */
 async function strategyPairs(ctx: CrankContext): Promise<{ list: Array<{ writer: Address; underlying: Address }>; indexer: string }> {
@@ -305,6 +343,15 @@ async function strategyPairs(ctx: CrankContext): Promise<{ list: Array<{ writer:
  * ORDER AND BUDGET, as the rolls step does it: bounty-paying cancels first, at most
  * STALE_BELOW_BOUNTY_PER_TICK below the threshold, so a crowd of dust strategies cannot spend the tick.
  *
+ * ORACLE (T-437). The spot of each ask comes from ITS SERIES' pinned oracle (`Clearinghouse.series(longId).oracle`),
+ * which is what `cancelStale` reads on chain since T-310 and what the series settles on. Never `market(u).oracle`: a
+ * `setMarketOracle` moves the market's pointer and leaves every existing series on its old oracle, and a mirror that
+ * read the market's would decide "not overtaken" on a price the contract does not use, leaving an in-the-money ask
+ * resting. Two series under one underlying can therefore be judged on two oracles in one tick, so spots are keyed by
+ * (oracle, underlying). A series whose read failed has no known oracle: no spot is read for it from any oracle and
+ * planStale answers `unread`. (stepRolls keeps `market(u).oracle`: a roll plans the NEW series, and AutoRoller.roll
+ * reads the market's oracle for exactly that.)
+ *
  * ALERTS. `planStale` mirrors the contract's own conditions, so a simulation that still refuses means the writer's
  * ask cannot be withdrawn by anyone but the writer: `v2_stale_cancel_failed`, as `warn` for the `NotAuthorized` of a
  * revoked delegate (only the writer can restore it) and `error` otherwise.
@@ -324,19 +371,23 @@ export async function stepStale(ctx: CrankContext): Promise<StepReport> {
     return report;
   }
 
-  const underlyings = [...new Set(list.map((p) => p.underlying))];
   const first = await readMany(
     ctx.client,
     [
       ...list.map((p): AnyRead => ({ address: roller, abi: autoRollerAbi, functionName: 'position', args: [p.writer, p.underlying] })),
-      ...underlyings.map((u): AnyRead => ({ address: ctx.addresses.clearinghouse, abi: clearinghouseAbi, functionName: 'market', args: [u] })),
       { address: roller, abi: autoRollerAbi, functionName: 'minRollUnits' },
     ],
     h.blockNumber,
   );
   const positions = list.map((_, i) => okResult<readonly [bigint, bigint, number]>(first[i]));
-  const oracleOf = new Map(underlyings.map((u, i) => [u, okResult<MarketConfigStruct>(first[list.length + i])?.oracle ?? ctx.addresses.settlementOracle]));
-  const minRollUnits = okResult<bigint>(first[list.length + underlyings.length]) ?? 0n;
+  // FAIL CLOSED (coordinator amendment M-57015e47e436488e, from T-290 M-32bbd7e2207b408b). The minimum decides which
+  // cancels earn the bounty and which fall under STALE_BELOW_BOUNTY_PER_TICK; `?? 0n` made every cancel "earn" it on a
+  // failed read and so lifted the cap. Nothing is planned or sent this tick; the next tick reads it again.
+  const minRollUnits = okResult<bigint>(first[list.length]);
+  if (minRollUnits === undefined) {
+    report.notes = { strategies: list.length, indexer, minRollUnits: null, skipped: 'minRollUnits() read failed: no ask is judged this tick rather than judged against a minimum of 0' };
+    return report;
+  }
 
   // Only a pair with a tracked ask inside its period can be withdrawn: nothing else costs a read.
   const live = list.map((p, i) => ({ p, position: positions[i] })).filter((x) => x.position !== undefined && x.position[1] !== 0n && h.timestamp < Number(x.position[2]));
@@ -346,41 +397,57 @@ export async function stepStale(ctx: CrankContext): Promise<StepReport> {
   }
   const orderIds = live.map((x) => x.position![1]);
   const longIds = [...new Set(live.map((x) => x.position![0]))];
-  const spotUnderlyings = [...new Set(live.map((x) => x.p.underlying))];
   const second = await readMany(
     ctx.client,
     [
       { address: ctx.addresses.orderBook, abi: orderBookAbi, functionName: 'getOrders', args: [orderIds] },
       ...longIds.map((id): AnyRead => ({ address: ctx.addresses.clearinghouse, abi: clearinghouseAbi, functionName: 'series', args: [id] })),
-      ...spotUnderlyings.map((u): AnyRead => ({ address: oracleOf.get(u)!, abi: settlementOracleAbi, functionName: 'trySpot', args: [u] })),
     ],
     h.blockNumber,
   );
   const orders = okResult<readonly RollerOrderStruct[]>(second[0]) ?? [];
-  const seriesOf = new Map(longIds.map((id, i) => [id.toString(), okResult<RollerSeriesStruct>(second[1 + i])]));
+  // A series that could not be read, or reads back with no oracle, has no known pinned oracle: it is not judged.
+  const seriesOf = new Map(
+    longIds.map((id, i) => {
+      const s = okResult<RollerSeriesStruct>(second[1 + i]);
+      return [id.toString(), s === undefined || typeof s.oracle !== 'string' || s.oracle.toLowerCase() === ZERO_ADDRESS ? undefined : s] as const;
+    }),
+  );
+  // One trySpot per (pinned oracle, underlying) that some live ask is judged on.
+  const spotReads = [
+    ...new Map(
+      live.flatMap((x) => {
+        const s = seriesOf.get(x.position![0].toString());
+        return s === undefined ? [] : [[spotKey(s.oracle, x.p.underlying), { oracle: getAddress(s.oracle), underlying: x.p.underlying }] as const];
+      }),
+    ).values(),
+  ];
+  const third = spotReads.length === 0 ? [] : await readMany(ctx.client, spotReads.map((r): AnyRead => ({ address: r.oracle, abi: settlementOracleAbi, functionName: 'trySpot', args: [r.underlying] })), h.blockNumber);
   const spotOf = new Map(
-    spotUnderlyings.map((u, i) => {
-      const r = okResult<readonly [boolean, bigint, bigint]>(second[1 + longIds.length + i]);
-      return [u, r !== undefined && r[0] && r[1] > 0n ? r[1] : null] as const;
+    spotReads.map((r, i) => {
+      const res = okResult<readonly [boolean, bigint, bigint]>(third[i]);
+      return [spotKey(r.oracle, r.underlying), res !== undefined && res[0] && res[1] > 0n ? res[1] : null] as const;
     }),
   );
 
   const decided = live.map((x, i) => {
     const order = orders[i];
     const series = seriesOf.get(x.position![0].toString());
+    const spot = series === undefined ? null : (spotOf.get(spotKey(series.oracle, x.p.underlying)) ?? null);
     return {
       p: x.p,
       longId: x.position![0],
       orderId: x.position![1],
-      spot: spotOf.get(x.p.underlying) ?? null,
+      oracle: series?.oracle ?? null,
+      spot,
       strike: series?.strike ?? null,
       decision: planStale({
         orderId: x.position![1],
         positionExpiry: Number(x.position![2]),
         now: h.timestamp,
-        order: order === undefined || order.maker.toLowerCase() === '0x0000000000000000000000000000000000000000' ? null : { units: BigInt(order.units), filled: BigInt(order.filled), validUntil: Number(order.validUntil), cancelled: order.cancelled },
+        order: order === undefined || order.maker.toLowerCase() === ZERO_ADDRESS ? null : { units: BigInt(order.units), filled: BigInt(order.filled), validUntil: Number(order.validUntil), cancelled: order.cancelled },
         series: series === undefined ? null : { isPut: series.isPut, strike: series.strike },
-        spot: spotOf.get(x.p.underlying) ?? null,
+        spot,
         minRollUnits,
       }),
     };
@@ -407,7 +474,7 @@ export async function stepStale(ctx: CrankContext): Promise<StepReport> {
       { address: roller, abi: autoRollerAbi, functionName: 'cancelStale', args: [d.p.writer, d.p.underlying], gas: GAS.cancelStale },
       { kind: 'cancelStale', key, worthSending: (did) => did === true },
     );
-    cancelled.push({ writer: d.p.writer, ticker, orderId: d.orderId.toString(), spot: d.spot, strike: d.strike, status: outcome.status });
+    cancelled.push({ writer: d.p.writer, ticker, orderId: d.orderId.toString(), oracle: d.oracle, spot: d.spot, strike: d.strike, status: outcome.status });
     if (outcome.status === 'simulation-reverted') {
       // planStale already held every condition the contract returns `false` for, so a refusal here is a state only
       // the writer (a revoked delegate) or the admin can change.
@@ -448,6 +515,30 @@ export async function stepStale(ctx: CrankContext): Promise<StepReport> {
                             SNAPSHOT
 //////////////////////////////////////////////////////////////*/
 
+/**
+ * T-469. After a mined snapshot, the expiry surveyed again at the receipt's block through the planner's own reads: the
+ * number of its sources that price the window there and did not in `before`, or null unless EVERY source prices it (a
+ * source left dark is what the next snapshot, or v2_snapshot_missed, is for). Null also when the sources are unknown or
+ * the read fails: the mark is not set on what could not be seen.
+ */
+async function recordedAtBlock(ctx: CrankContext, before: ExpirySurvey, at: Head): Promise<number | null> {
+  const label = `${tickerOf(ctx, before.key.underlying)} ${before.key.expiry}`;
+  try {
+    const [after] = await survey(ctx, [before.key], at, false);
+    const sources = after?.view.sources ?? [];
+    const dark = sources.filter((x) => !x.windowOk).map((x) => x.address);
+    if (sources.length === 0 || dark.length > 0) {
+      ctx.log.warn({ expiry: label, block: at.blockNumber.toString(), dark }, 'a mined snapshot left sources that do not price the window: not marked, the next tick asks again');
+      return null;
+    }
+    const wasOk = new Set(before.view.sources.filter((x) => x.windowOk).map((x) => x.address.toLowerCase()));
+    return sources.filter((x) => !wasOk.has(x.address.toLowerCase())).length;
+  } catch (error) {
+    ctx.log.warn({ expiry: label, block: at.blockNumber.toString(), error: describeError(error) }, 'could not re-read the sources after a mined snapshot: not marked');
+    return null;
+  }
+}
+
 export async function stepSnapshot(ctx: CrankContext, keys: readonly ExpiryKey[]): Promise<StepReport> {
   const report = newReport('snapshot');
   const budget = new Budget(ctx.config.tuning.maxTxPerStep);
@@ -469,8 +560,17 @@ export async function stepSnapshot(ctx: CrankContext, keys: readonly ExpiryKey[]
       { kind: 'snapshot', key: expiryKeyString(s.key), worthSending: (recorded) => Number(recorded) > 0 },
     );
     // Recorded, or nothing to record at a time inside the window: either way finalize may follow.
-    if (!ctx.sender.dryRun && (outcome.status === 'confirmed' || outcome.status === 'no-op') && h.timestamp <= s.key.expiry + SNAPSHOT_GRACE) {
-      ctx.store.setMeta(snapshotMetaKey(s.key), JSON.stringify({ at: h.timestamp, recorded: outcome.status === 'confirmed' ? Number(outcome.result) : 0 }));
+    if (ctx.sender.dryRun || h.timestamp > s.key.expiry + SNAPSHOT_GRACE) continue;
+    if (outcome.status === 'no-op') {
+      ctx.store.setMeta(snapshotMetaKey(s.key), JSON.stringify({ at: h.timestamp, recorded: 0 }));
+    } else if (outcome.status === 'confirmed') {
+      // T-469. The mark stops every later snapshot of this expiry, lets finalize go ahead of it and silences
+      // v2_snapshot_missed (planner.planExpiry), and a confirmed outcome's `result` is the SIMULATION's count (tx.ts).
+      // SettlementOracle.snapshot calls each source's `record` raw, so a source that fails on chain leaves a successful
+      // receipt. The mark and its count are read from the sources at the mined block; left unset, the next tick asks
+      // again, and a snapshot with nothing left to record then marks it through the no-op above.
+      const recorded = await recordedAtBlock(ctx, s, { blockNumber: outcome.blockNumber, timestamp: h.timestamp });
+      if (recorded !== null) ctx.store.setMeta(snapshotMetaKey(s.key), JSON.stringify({ at: h.timestamp, recorded }));
     }
   }
   report.notes = { surveyed: surveys.length, upcomingWithOpenInterest: upcoming };
@@ -518,6 +618,16 @@ export async function stepFinalize(ctx: CrankContext, keys: readonly ExpiryKey[]
                              SETTLE
 //////////////////////////////////////////////////////////////*/
 
+/** T-462. Whether chain state at `blockNumber` shows the series settled; false when that read fails. */
+async function settledAtBlock(ctx: CrankContext, longId: bigint, blockNumber: bigint): Promise<boolean> {
+  try {
+    return (await ctx.client.readContract({ address: ctx.addresses.clearinghouse, abi: clearinghouseAbi, functionName: 'series', args: [longId], blockNumber })).settled;
+  } catch (error) {
+    ctx.log.warn({ longId: longId.toString(), block: blockNumber.toString(), error: describeError(error) }, 'could not read the series a mined settle covered: its settled mark waits for the next survey');
+    return false;
+  }
+}
+
 export async function stepSettle(ctx: CrankContext, keys: readonly ExpiryKey[]): Promise<StepReport> {
   const report = newReport('settle');
   const budget = new Budget(ctx.config.tuning.maxTxPerStep, ctx.yieldWhen);
@@ -550,7 +660,12 @@ export async function stepSettle(ctx: CrankContext, keys: readonly ExpiryKey[]):
           worthSending: (advancedNow) => advancedNow === true,
         },
       );
-      if (advanced(outcome) && !ctx.sender.dryRun) ctx.store.setMeta(settledSeenMetaKey(longId), String(h.timestamp));
+      // T-462. Clearinghouse.settle returns false, with a successful receipt, when the price is not final on chain, and a
+      // confirmed outcome carries the SIMULATED `true`. The mark starts the redeem backlog clock, so it is taken from the
+      // series at the mined block; a read that fails leaves it unset, and the next survey of a settled series sets it.
+      if (outcome.status === 'confirmed' && !ctx.sender.dryRun && (await settledAtBlock(ctx, longId, outcome.blockNumber))) {
+        ctx.store.setMeta(settledSeenMetaKey(longId), String(h.timestamp));
+      }
       if (outcome.status === 'no-op' || outcome.status === 'simulation-reverted') {
         stuck.push({ longId: longId.toString(), what, status: outcome.status, ...(outcome.status === 'simulation-reverted' ? { revert: outcome.revert } : {}) });
       }
@@ -582,6 +697,23 @@ export async function stepSettle(ctx: CrankContext, keys: readonly ExpiryKey[]):
 const fellShort = (outcome: CrankOutcome): boolean => outcome.status === 'no-op' || (outcome.status === 'simulation-reverted' && outcome.revert === null && outcome.transportError !== true);
 
 /**
+ * T-462. The ids of a mined prune chunk that the book shows dead at the receipt's block: what the prune did, not what its
+ * simulation said it would. A read that fails marks none of them: an order wrongly left live is re-read next tick, and
+ * one wrongly marked dead is never looked at again.
+ */
+async function deadAtBlock(ctx: CrankContext, ids: readonly bigint[], blockNumber: bigint, label: string): Promise<bigint[]> {
+  try {
+    const dead = (await readOrders(ctx.client, ctx.addresses.orderBook, ids, blockNumber)).filter(isDeadOrder).map((o) => o.id);
+    const live = ids.filter((id) => !dead.includes(id));
+    if (live.length > 0) ctx.log.warn({ label, orderIds: live.map(String), block: blockNumber.toString() }, 'a mined prune left orders live that its simulation counted: they stay live for the next tick');
+    return dead;
+  } catch (error) {
+    ctx.log.warn({ label, orderIds: ids.map(String), block: blockNumber.toString(), error: describeError(error) }, 'could not read the orders a mined prune covered: none marked dead');
+    return [];
+  }
+}
+
+/**
  * OrderBook.prune in chunks of fixed per-order gas. A chunk the simulation says prunes nothing, or that runs out of gas
  * as a whole (a resale ask whose maker's ERC-1155 hook burns the gas prune forwards to it leaves the book 1/64, too
  * little for the rest of a chunk), is split in halves, down to one order under the gas cap (planner.splitChunk). One
@@ -605,8 +737,12 @@ async function pruneOrders(ctx: CrankContext, report: StepReport, budget: Budget
       { kind: 'prune', key: `${ids[0]}`, worthSending: (n) => (n as bigint) > 0n },
     );
     if (outcome.status === 'confirmed') {
-      if (!ctx.sender.dryRun) ctx.index.markOrdersDead(ids);
-      pruned += Number(outcome.result as bigint);
+      // T-462. A confirmed outcome's `result` is the SIMULATION's count (tx.ts), and the receipt reads success whether
+      // or not the mined prune skipped an order (a refund the maker rejects leaves it live, OrderBook.prune). What is
+      // dead is read from the book at the mined block; an order the prune skipped stays live for the next tick.
+      const dead = await deadAtBlock(ctx, ids, outcome.blockNumber, label);
+      if (!ctx.sender.dryRun && dead.length > 0) ctx.index.markOrdersDead(dead);
+      pruned += dead.length;
       continue;
     }
     if (outcome.status === 'would-send') {
@@ -662,6 +798,23 @@ export async function stepPrune(ctx: CrankContext, keys: readonly ExpiryKey[]): 
 /*//////////////////////////////////////////////////////////////
                              REDEEM
 //////////////////////////////////////////////////////////////*/
+
+/**
+ * T-462. The holders of a mined redeemBatch chunk that still hold the token at the receipt's block: the ones the batch
+ * skipped (redeemBatch runs each holder in its own try/catch, so the receipt reads success either way, and redeeming
+ * burns the whole balance). A read that fails returns every holder: counted as not redeemed, the expiry stays open.
+ */
+async function stillHeldAtBlock(ctx: CrankContext, tokenId: bigint, holders: readonly HolderView[], blockNumber: bigint, label: string): Promise<string[]> {
+  try {
+    const after = await readHolders(ctx.client, ctx.addresses.clearinghouse, tokenId, holders.map((x) => getAddress(x.holder)), blockNumber);
+    const left = after.filter((v) => v.balance > 0n).map((v) => v.holder);
+    if (left.length > 0) ctx.log.warn({ label, tokenId: tokenId.toString(), holders: left, block: blockNumber.toString() }, 'a mined redeemBatch left holders its simulation counted: they stay in the backlog');
+    return left;
+  } catch (error) {
+    ctx.log.warn({ label, tokenId: tokenId.toString(), holders: holders.length, block: blockNumber.toString(), error: describeError(error) }, 'could not read the holders a mined redeemBatch covered: none counted as redeemed');
+    return holders.map((x) => x.holder);
+  }
+}
 
 async function holderCandidates(ctx: CrankContext, tokenId: bigint, side: 'long' | 'short', longId: bigint, askIndexer: boolean): Promise<{ holders: Address[]; indexer: 'ok' | 'off' | string }> {
   const fromLogs = ctx.index.holdersOf(tokenId);
@@ -722,6 +875,7 @@ export async function stepRedeem(ctx: CrankContext, keys: readonly ExpiryKey[]):
     const queue: GasChunk<HolderView>[] = chunkByGas(selection.redeem, { gasOf, baseGas: GAS.redeemBase, capGas: cap, maxItems: 200 });
     let redeemed = 0;
     let skipped = 0;
+    const minedSkipped: string[] = [];
     const label = `${tickerOf(ctx, series.underlying)} ${series.isPut ? 'put' : 'call'} ${series.strike} ${series.expiry} ${t.isLong ? 'long' : 'short'}`;
     while (queue.length > 0 && budget.left) {
       const chunk = queue.shift()!;
@@ -734,7 +888,14 @@ export async function stepRedeem(ctx: CrankContext, keys: readonly ExpiryKey[]):
         { address: ctx.addresses.clearinghouse, abi: clearinghouseAbi, functionName: 'redeemBatch', args: [tokenId, chunk.items.map((x) => getAddress(x.holder))], gas: chunk.gas },
         { kind: 'redeemBatch', key: tokenId.toString(), worthSending: (count) => (count as bigint) === BigInt(n) },
       );
-      if (advanced(outcome)) redeemed += n;
+      if (outcome.status === 'confirmed') {
+        // T-462. Worth sending only when the SIMULATION redeemed all n, and a confirmed outcome carries that simulated
+        // count, not the mined one. Redeemed is what chain state shows at the mined block; a holder the batch skipped
+        // stays in `remaining`, so the expiry stays open and the backlog accounting below sees it.
+        const left = await stillHeldAtBlock(ctx, tokenId, chunk.items, outcome.blockNumber, label);
+        redeemed += n - left.length;
+        minedSkipped.push(...left);
+      } else if (outcome.status === 'would-send') redeemed += n; // a dry run has no mined block: today's count
       else if (fellShort(outcome)) {
         // Fewer redeemed than asked under this limit (an inner out-of-gas swallowed by the batch's try/catch), or the
         // whole call out of gas (a holder that ran out mid-batch leaves the next one 1/64 of the gas): split.
@@ -744,7 +905,7 @@ export async function stepRedeem(ctx: CrankContext, keys: readonly ExpiryKey[]):
     }
     const remaining = selection.redeem.length - redeemed - skipped;
     remainingByExpiry.set(t.survey, (remainingByExpiry.get(t.survey) ?? 0) + remaining + skipped + (unaccounted > 0n ? 1 : 0));
-    summaries.push({ token: label, tokenId: tokenId.toString(), supply, candidates: candidates.length, redeemable: selection.redeem.length, redeemed, skipped, optedOut: selection.optedOut, zeroPayout: selection.zeroPayout, unaccounted });
+    summaries.push({ token: label, tokenId: tokenId.toString(), supply, candidates: candidates.length, redeemable: selection.redeem.length, redeemed, skipped, minedSkipped, optedOut: selection.optedOut, zeroPayout: selection.zeroPayout, unaccounted });
 
     const seenRaw = ctx.store.getMeta(settledSeenMetaKey(t.longId));
     const settledSeen = seenRaw === null ? h.timestamp : Number(seenRaw);
@@ -803,20 +964,10 @@ interface MarketConfigStruct {
   oracle: Address;
 }
 
-async function upcomingExpiries(ctx: CrankContext, now: number, weekly: boolean, count: number): Promise<number[]> {
-  const out: number[] = [];
-  let after = ladderSearchStart(now);
-  while (out.length < count) {
-    let next: number;
-    try {
-      next = Number(await ctx.client.readContract({ address: ctx.addresses.expiryCalendar, abi: expiryCalendarAbi, functionName: 'nextExpiry', args: [after, weekly] }));
-    } catch {
-      break; // nothing within the calendar's search window
-    }
-    out.push(next);
-    after = next;
-  }
-  return out;
+function upcomingExpiries(ctx: CrankContext, now: number, weekly: boolean, count: number): Promise<number[]> {
+  return upcomingLadderExpiries(now, weekly, count, async (after, w) =>
+    Number(await ctx.client.readContract({ address: ctx.addresses.expiryCalendar, abi: expiryCalendarAbi, functionName: 'nextExpiry', args: [after, w] })),
+  );
 }
 
 export async function stepLadders(ctx: CrankContext): Promise<StepReport> {
@@ -843,11 +994,11 @@ export async function stepLadders(ctx: CrankContext): Promise<StepReport> {
     return report;
   }
   const configs = markets.map((m, i) => (marketReads[i]?.ok ? (marketReads[i]!.result as MarketConfigStruct) : null));
-  const spotReads = await readMany(
-    ctx.client,
-    markets.map((m, i): AnyRead => ({ address: configs[i]?.oracle ?? ctx.addresses.settlementOracle, abi: settlementOracleAbi, functionName: 'trySpot', args: [m.underlying] })),
-    h.blockNumber,
-  );
+  // A market whose market() read failed has no known oracle: no spot is read for it (below it is skipped as unread).
+  const oracles = markets.map((_, i) => marketOracleOf(marketReads[i]));
+  const priced = markets.map((_, i) => i).filter((i) => oracles[i] !== null);
+  const pricedReads = priced.length === 0 ? [] : await readMany(ctx.client, priced.map((i): AnyRead => ({ address: oracles[i]!, abi: settlementOracleAbi, functionName: 'trySpot', args: [markets[i]!.underlying] })), h.blockNumber);
+  const spotReads = new Map(priced.map((i, k) => [i, pricedReads[k]]));
 
   const maxAhead: Record<Tenor, number> = { weekly: 0, daily: 0 };
   for (const m of markets) for (const tenor of TENORS) maxAhead[tenor] = Math.max(maxAhead[tenor], m.v2.params.expiriesAhead[tenor]);
@@ -859,37 +1010,32 @@ export async function stepLadders(ctx: CrankContext): Promise<StepReport> {
   const creates = new Map<string, { underlying: Address; isPut: boolean; strike: bigint; expiry: number; ticker: string; oracle: Address }>();
   markets.forEach((m, i) => {
     const cfg = configs[i];
-    const spotRead = spotReads[i];
+    const spotRead = spotReads.get(i);
     const note: Record<string, unknown> = { ticker: m.ticker };
     notes.push(note);
-    if (cfg === null || cfg === undefined || cfg.strikeTick === 0n) return void (note.skipped = 'not registered on the Clearinghouse');
+    if (cfg === null || cfg === undefined) return void (note.skipped = 'market() read failed: its oracle is unknown, nothing is priced or created this tick');
+    if (cfg.strikeTick === 0n) return void (note.skipped = 'not registered on the Clearinghouse');
     if (!cfg.enabled) return void (note.skipped = 'market disabled');
     const [ok, spot] = spotRead?.ok ? (spotRead.result as readonly [boolean, bigint, bigint]) : [false, 0n, 0n];
     if (!ok || spot === 0n) return void (note.skipped = 'spot not fresh (trySpot not ok): ladders wait for a fresh price');
     note.spot = spot;
     const planned: unknown[] = [];
-    for (const tenor of TENORS) {
-      const ahead = m.v2.params.expiriesAhead[tenor];
-      for (const expiry of expiries[tenor].slice(0, ahead)) {
-        const existingAll = ctx.index.seriesOf(m.underlying, expiry);
-        for (const isPut of m.v2.puts ? [false, true] : [false]) {
-          const anchorKey = ladderAnchorMetaKey(m.underlying, expiry, isPut, tenor);
-          const anchorRaw = ctx.store.getMeta(anchorKey);
-          const plan = planLadder({
-            spot,
-            ladder: m.v2.params.ladder[tenor],
-            strikeTick: cfg.strikeTick,
-            isPut,
-            existing: existingAll.filter((s) => s.isPut === isPut).map((s) => s.strike),
-            anchor: anchorRaw === null ? null : BigInt(anchorRaw),
-          });
-          if (!ctx.sender.dryRun && (anchorRaw === null || BigInt(anchorRaw) !== plan.anchor)) ctx.store.setMeta(anchorKey, plan.anchor.toString());
-          if (plan.create.length > 0) planned.push({ tenor, expiry, type: isPut ? 'put' : 'call', reason: plan.reason, strikes: plan.create });
-          for (const strike of plan.create) {
-            const id = longIdOf(m.underlying, isPut, strike, expiry);
-            creates.set(id.toString(), { underlying: m.underlying, isPut, strike, expiry, ticker: m.ticker, oracle: cfg.oracle });
-          }
-        }
+    for (const { tenor, expiry, isPut } of ladderSlots(m.v2.params, m.v2.puts, expiries)) {
+      const anchorKey = ladderAnchorMetaKey(m.underlying, expiry, isPut, tenor);
+      const anchorRaw = ctx.store.getMeta(anchorKey);
+      const plan = planLadder({
+        spot,
+        ladder: m.v2.params.ladder[tenor],
+        strikeTick: cfg.strikeTick,
+        isPut,
+        existing: ctx.index.seriesOf(m.underlying, expiry).filter((s) => s.isPut === isPut).map((s) => s.strike),
+        anchor: anchorRaw === null ? null : BigInt(anchorRaw),
+      });
+      if (!ctx.sender.dryRun && (anchorRaw === null || BigInt(anchorRaw) !== plan.anchor)) ctx.store.setMeta(anchorKey, plan.anchor.toString());
+      if (plan.create.length > 0) planned.push({ tenor, expiry, type: isPut ? 'put' : 'call', reason: plan.reason, strikes: plan.create });
+      for (const strike of plan.create) {
+        const id = longIdOf(m.underlying, isPut, strike, expiry);
+        creates.set(id.toString(), { underlying: m.underlying, isPut, strike, expiry, ticker: m.ticker, oracle: cfg.oracle });
       }
     }
     note.planned = planned;
@@ -1135,10 +1281,19 @@ export async function stepRolls(ctx: CrankContext): Promise<StepReport> {
   const BASE = 2;
   const sessionOpen = okResult<boolean>(reads[0]) === true;
   const sessionOpenAtGrace = okResult<boolean>(reads[1]) === true;
-  const oracleOf = new Map(underlyings.map((u, i) => [u, okResult<MarketConfigStruct>(reads[BASE + list.length * PER + i])?.oracle ?? ctx.addresses.settlementOracle]));
-  const minRollUnits = okResult<bigint>(reads[BASE + list.length * PER + underlyings.length]) ?? 0n;
-  const spots = await readMany(ctx.client, underlyings.map((u): AnyRead => ({ address: oracleOf.get(u)!, abi: settlementOracleAbi, functionName: 'trySpot', args: [u] })), h.blockNumber);
-  const spotRead = new Map(underlyings.map((u, i) => [u, okResult<readonly [boolean, bigint, bigint]>(spots[i])]));
+  // A market whose market() read failed has no known oracle: no spot is read for it, so its writers read as spot-stale
+  // (no new roll) and are flagged marketUnread. A close-out does not use the spot and still goes ahead.
+  const oracleOf = new Map(underlyings.map((u, i) => [u, marketOracleOf(reads[BASE + list.length * PER + i])]));
+  // FAIL CLOSED (coordinator amendment M-57015e47e436488e): with the minimum unread, `?? 0n` let every roll count as
+  // bounty-paying and bypassed ROLLS_BELOW_BOUNTY_PER_TICK. No roll or close-out is planned this tick; the next reads again.
+  const minRollUnits = okResult<bigint>(reads[BASE + list.length * PER + underlyings.length]);
+  if (minRollUnits === undefined) {
+    report.notes = { strategies: list.length, sessionOpen, sessionOpenAtGrace, indexer, minRollUnits: null, skipped: 'minRollUnits() read failed: no roll is planned this tick rather than planned against a minimum of 0' };
+    return report;
+  }
+  const priced = underlyings.filter((u) => oracleOf.get(u) !== null);
+  const spots = priced.length === 0 ? [] : await readMany(ctx.client, priced.map((u): AnyRead => ({ address: oracleOf.get(u)!, abi: settlementOracleAbi, functionName: 'trySpot', args: [u] })), h.blockNumber);
+  const spotRead = new Map(priced.map((u, i) => [u, okResult<readonly [boolean, bigint, bigint]>(spots[i])]));
   const spotFresh = new Map(underlyings.map((u) => [u, spotRead.get(u)?.[0] === true]));
   const spotUpdatedAt = new Map(underlyings.map((u) => [u, spotRead.get(u)?.[0] === true ? Number(spotRead.get(u)![2]) : 0]));
   // Was the reading itself taken inside a regular session? The open grace accepts it then, whatever the clock says.
@@ -1186,7 +1341,7 @@ export async function stepRolls(ctx: CrankContext): Promise<StepReport> {
   let belowBounty = 0;
   let attempted = 0;
   for (const { p, decision, earnsBounty } of ordered) {
-    decisions.push({ writer: p.writer, ticker: tickerOf(ctx, p.underlying), ...decision, ...(earnsBounty ? {} : { belowMinRollUnits: true }) });
+    decisions.push({ writer: p.writer, ticker: tickerOf(ctx, p.underlying), ...decision, ...(earnsBounty ? {} : { belowMinRollUnits: true }), ...(oracleOf.get(p.underlying) === null ? { marketUnread: true } : {}) });
     if (!decision.roll || !budget.left) continue;
     if (!earnsBounty) {
       if (belowBounty >= ROLLS_BELOW_BOUNTY_PER_TICK) continue;
@@ -1219,13 +1374,244 @@ export async function stepRolls(ctx: CrankContext): Promise<StepReport> {
     }
   }
   if (!ctx.sender.dryRun && list.length > 0) ctx.store.setMeta(rollsOffsetMetaKey, String((start + Math.max(1, attempted)) % list.length));
-  report.notes = { strategies: list.length, sessionOpen, sessionOpenAtGrace, indexer, minRollUnits, belowMinRollUnitsSent: belowBounty, decisions, reverting };
+  const marketUnread = underlyings.filter((u) => oracleOf.get(u) === null).map((u) => tickerOf(ctx, u));
+  report.notes = { strategies: list.length, sessionOpen, sessionOpenAtGrace, indexer, minRollUnits, belowMinRollUnitsSent: belowBounty, decisions, reverting, ...(marketUnread.length > 0 ? { marketUnread } : {}) };
   return report;
 }
 
 /*//////////////////////////////////////////////////////////////
                           HOUSEKEEPING
 //////////////////////////////////////////////////////////////*/
+
+/*//////////////////////////////////////////////////////////////
+                 HOUSE VAULT EPOCH ROLL (T-OP-117)
+//////////////////////////////////////////////////////////////*/
+
+/**
+ * `HouseVault.rollEpoch()` is PERMISSIONLESS and nothing in the keeper sent it (T-OP-100 finding (c)): the MM bot
+ * computes `rollDue` (mm/house.ts) to stop opening risk, and stopped there. Without a sender, the first weekly
+ * boundary after launch prices no deposit and no withdrawal until a human calls the function. This is the sender.
+ *
+ * WHERE IT RUNS. Inside `stepHousekeeping`, after the sweeps, on the housekeeping step's own budget. A step of its own
+ * in STEP_ORDER would need a `case` in cranker/cranker.ts (outside T-OP-117's fence), so until that row lands the roll
+ * rides the step that already runs once per tick after settle/prune/redeem - which is the order it needs: a vault is
+ * only flat once its series are settled and redeemed. Actions carry `kind: 'house-roll'` so /metrics and the journal
+ * can tell them apart.
+ *
+ * WHICH KEY. The cranker's (CRANKER_PK). `rollEpoch` is `unrestricted` in roles.v8.json, so any key may send it; the
+ * QUOTER key is the MM bot's and spends the MM budget on quoting - a boundary call from it would compete with the
+ * bot's own cancels at exactly the moment it must be flat. Cranking is the cranker's job.
+ *
+ * THE PRECONDITIONS ARE THE CONTRACT'S, MIRRORED FROM HouseVault.sol (callhouse-contracts v8, `rollEpoch` NatSpec):
+ *   1. `block.timestamp >= epochEnd`  (TooEarly)               -> `rollDue(epochEnd, head.timestamp)`;
+ *   2. every tracked series settled and the vault flat          -> `trackedSeries()` x `clearinghouse.series(id).settled`
+ *      (`_requireFlat`: no longs, shorts or live orders)           and `exposure(id).detail` longs/shorts/live == 0;
+ *   3. `oracle.settlementPrice(underlying, epochEnd)` Finalized  -> the vault's own `oracle()` and `underlying()`.
+ * Nothing looser is invented here; a vault that fails 2 or 3 is reported with the reason and NOT sent, because the
+ * send would revert `NotSettled`. A send that reverts anyway (a race with a fill, an unpriced donation) is recorded
+ * with its reason by `send` and is re-evaluated from chain state next tick - never retried blind.
+ *
+ * THE FACTORY ADDRESS. The cranker config has no House factory field (config.ts, outside this fence); the MM bot's
+ * `MM_HOUSE_FACTORY` is the one place the operator already names it. `houseFactoryFor` reads `CRANKER_HOUSE_FACTORY`
+ * then `MM_HOUSE_FACTORY` from the environment, strictly validated, and answers null - a documented no-op - when
+ * neither is set. Moving this into `CrankerTuning` is the follow-up named in the ledger.
+ */
+
+/**
+ * rollEpoch: `_redeemSettled` redeems every settled tracked series the vault still holds (a long redeem that converts
+ * an ITM call payout through the PayoutRouter is ~450k, GAS.redeemConvertEach), `_requireFlat` re-reads each tracked
+ * series, then fee transfer, burns and mints. 2.5M covers several tracked series with conversions; a boundary with
+ * more is the exception, and a fixed limit that is too small reverts loudly rather than doing half a boundary.
+ * NOT MEASURED on a fork yet - the ledger says so.
+ */
+export const HOUSE_ROLL_GAS = 2_500_000n;
+
+/**
+ * How long `rollDue` may stay true before `v2_house_roll_overdue` pages. 7 hours = the oracle's uncorroborated delay
+ * (SettlementOracle.DEFAULT_UNCORROBORATED_DELAY, 6 h: a single-ok-source expiry cannot finalize sooner) plus one hour
+ * for the settle/redeem steps to run after finalization. Inside that window an unrolled boundary is the settlement
+ * chain doing its job, not an incident; past it, either the oracle is Held (GUARDIAN vetoed; SEC-21 rota) or nothing
+ * is sending, and a human should look. The launch pair is dual-source and normally finalizes at expiry + 120 s.
+ */
+export const HOUSE_ROLL_OVERDUE_S = 7 * 3_600;
+
+/** `HouseVault.rollEpoch` per vault; the dedupe key of the overdue page is the vault. */
+export const HOUSE_ROLL_KIND = 'house-roll';
+
+export interface HouseVaultRollView {
+  epochEnd: number;
+  epochId: bigint;
+  underlying: Address;
+  oracle: Address;
+  tracked: readonly bigint[];
+}
+
+export interface HouseTrackedView {
+  longId: bigint;
+  settled: boolean;
+  longs: bigint;
+  shorts: bigint;
+  live: bigint;
+}
+
+/** The chain reads the roll needs, injectable so the decision is tested without an RPC (the house.ts pattern). */
+export interface HouseRollReads {
+  factory: Address | null;
+  discover: (factory: Address, blockNumber: bigint) => Promise<readonly Address[]>;
+  readVault: (vault: Address, blockNumber: bigint) => Promise<HouseVaultRollView | null>;
+  readTracked: (vault: Address, tracked: readonly bigint[], blockNumber: bigint) => Promise<readonly HouseTrackedView[]>;
+  /** `oracle.settlementPrice(underlying, epochEnd)` is Finalized. */
+  readFinalized: (oracle: Address, underlying: Address, epochEnd: number, blockNumber: bigint) => Promise<boolean>;
+}
+
+const STRICT_ADDRESS = /^0x[0-9a-fA-F]{40}$/;
+
+/** CRANKER_HOUSE_FACTORY, else MM_HOUSE_FACTORY; null when unset or not an address (never a partial read). */
+export function houseFactoryFor(env: NodeJS.ProcessEnv = process.env): Address | null {
+  const raw = (env.CRANKER_HOUSE_FACTORY ?? env.MM_HOUSE_FACTORY ?? '').trim();
+  if (raw === '') return null;
+  if (!STRICT_ADDRESS.test(raw)) return null;
+  try {
+    return getAddress(raw);
+  } catch {
+    return null;
+  }
+}
+
+export function chainHouseRollReads(ctx: CrankContext, factory: Address | null = houseFactoryFor()): HouseRollReads {
+  return {
+    factory,
+    discover: async (f, blockNumber) => (await ctx.client.readContract({ address: f, abi: houseVaultFactoryAbi, functionName: 'vaults', blockNumber })) as readonly Address[],
+    readVault: async (vault, blockNumber) => {
+      try {
+        const [epochEnd, epochId, underlying, oracle, tracked] = await Promise.all([
+          ctx.client.readContract({ address: vault, abi: houseVaultAbi, functionName: 'epochEnd', blockNumber }),
+          ctx.client.readContract({ address: vault, abi: houseVaultAbi, functionName: 'epochId', blockNumber }),
+          ctx.client.readContract({ address: vault, abi: houseVaultAbi, functionName: 'underlying', blockNumber }),
+          ctx.client.readContract({ address: vault, abi: houseVaultAbi, functionName: 'oracle', blockNumber }),
+          ctx.client.readContract({ address: vault, abi: houseVaultAbi, functionName: 'trackedSeries', blockNumber }),
+        ]);
+        return { epochEnd: Number(epochEnd), epochId: epochId as bigint, underlying: underlying as Address, oracle: oracle as Address, tracked: tracked as readonly bigint[] };
+      } catch {
+        return null;
+      }
+    },
+    readTracked: async (vault, tracked, blockNumber) => {
+      if (tracked.length === 0) return [];
+      const reads: AnyRead[] = [];
+      for (const id of tracked) {
+        reads.push({ address: ctx.addresses.clearinghouse, abi: clearinghouseAbi, functionName: 'series', args: [id] });
+        reads.push({ address: vault, abi: houseVaultAbi, functionName: 'exposure', args: [id] });
+      }
+      const results = await readMany(ctx.client, reads, blockNumber);
+      return tracked.map((longId, i) => {
+        const series = results[2 * i];
+        const exposure = results[2 * i + 1];
+        // A failed read is NOT flat: the contract would still see the position, so the roll would revert.
+        const settled = series?.ok === true && (series.result as { settled: boolean }).settled === true;
+        const detail = exposure?.ok === true ? ((exposure.result as readonly unknown[])[2] as { longs: bigint; shorts: bigint; live: bigint }) : null;
+        return { longId, settled, longs: detail?.longs ?? 1n, shorts: detail?.shorts ?? 1n, live: detail?.live ?? 1n };
+      });
+    },
+    readFinalized: async (oracle, underlying, epochEnd, blockNumber) => {
+      const [status] = (await ctx.client.readContract({ address: oracle, abi: settlementOracleAbi, functionName: 'settlementPrice', args: [underlying, epochEnd], blockNumber })) as readonly [number, bigint];
+      return (SETTLEMENT_STATUS[Number(status)] ?? 'None') === 'Finalized';
+    },
+  };
+}
+
+export interface HouseRollNote {
+  vault: Address;
+  epochId: string;
+  epochEnd: number;
+  decision: 'not-due' | 'not-finalized' | 'not-flat' | 'unreadable' | 'sent' | 'no-budget';
+  detail?: string;
+  overdueS?: number;
+}
+
+/**
+ * Rolls every House vault of the configured factory whose boundary is due and whose preconditions hold; pages
+ * `v2_house_roll_overdue` for a boundary that has been due longer than HOUSE_ROLL_OVERDUE_S without rolling, and
+ * clears it when the vault is not due (it rolled, by this bot or by hand). Exported for the test; `stepHousekeeping`
+ * calls it.
+ */
+export async function houseRoll(ctx: CrankContext, report: StepReport, budget: Budget, h: Head, reads: HouseRollReads = chainHouseRollReads(ctx)): Promise<HouseRollNote[]> {
+  const notes: HouseRollNote[] = [];
+  if (reads.factory === null) return notes;
+  let vaults: readonly Address[];
+  try {
+    vaults = await reads.discover(reads.factory, h.blockNumber);
+  } catch (error) {
+    report.notes.houseRoll = { factory: reads.factory, error: `vaults() failed: ${String(error).slice(0, 200)}` };
+    return notes;
+  }
+  for (const vault of vaults) {
+    const key = vault.toLowerCase();
+    const view = await reads.readVault(vault, h.blockNumber);
+    if (view === null) {
+      notes.push({ vault, epochId: '?', epochEnd: 0, decision: 'unreadable' });
+      continue;
+    }
+    const note: HouseRollNote = { vault, epochId: view.epochId.toString(), epochEnd: view.epochEnd, decision: 'not-due' };
+    notes.push(note);
+    if (!rollDue(view.epochEnd, h.timestamp)) {
+      ctx.alerts.clear('v2_house_roll_overdue', key);
+      continue;
+    }
+    const overdueS = h.timestamp - view.epochEnd;
+    note.overdueS = overdueS;
+    // Precondition 3 first: it is one read and it is the usual reason a due boundary waits.
+    const finalized = await reads.readFinalized(view.oracle, view.underlying, view.epochEnd, h.blockNumber);
+    if (!finalized) {
+      note.decision = 'not-finalized';
+      note.detail = `oracle ${view.oracle} settlementPrice(${view.underlying}, ${view.epochEnd}) is not Finalized`;
+    } else {
+      const tracked = await reads.readTracked(vault, view.tracked, h.blockNumber);
+      const blocking = tracked.filter((t) => !t.settled || t.longs !== 0n || t.shorts !== 0n || t.live !== 0n);
+      if (blocking.length > 0) {
+        note.decision = 'not-flat';
+        note.detail = blocking.map((t) => `${t.longId}:${t.settled ? 'held/live' : 'unsettled'}`).join(',');
+      }
+    }
+    if (note.decision !== 'not-due') {
+      // Due and blocked. Inside the settlement chain's own delay this is normal; past it, page.
+      if (overdueS > HOUSE_ROLL_OVERDUE_S) {
+        await ctx.alerts.raise({
+          kind: 'v2_house_roll_overdue',
+          dedupeKey: key,
+          once: false,
+          severity: 'error',
+          message: `House vault ${vault} epoch ${view.epochId} ended ${Math.floor(overdueS / 60)} min ago and has not rolled: ${note.decision} (${note.detail ?? ''}). rollEpoch() is permissionless - see ops/alerts.md v2_house_roll_overdue`,
+          data: { vault, epochId: view.epochId.toString(), epochEnd: view.epochEnd, overdueS, decision: note.decision, detail: note.detail ?? null },
+        });
+      }
+      continue;
+    }
+    if (!budget.left) {
+      note.decision = 'no-budget';
+      continue;
+    }
+    const before = view.epochId;
+    const outcome = await send(
+      ctx,
+      report,
+      budget,
+      `rollEpoch ${vault} epoch ${before}`,
+      { address: vault, abi: houseVaultAbi, functionName: 'rollEpoch', args: [], gas: HOUSE_ROLL_GAS },
+      {
+        kind: HOUSE_ROLL_KIND,
+        key: `${key}:${before}`,
+        // Already rolled (by hand, or by an earlier tick whose receipt was lost): epochId moved past the one we read.
+        isAdvanced: async () => ((await ctx.client.readContract({ address: vault, abi: houseVaultAbi, functionName: 'epochId' })) as bigint) > before,
+      },
+    );
+    note.decision = 'sent';
+    note.detail = outcome.status;
+    if (outcome.status === 'confirmed' || outcome.status === 'already-advanced') ctx.alerts.clear('v2_house_roll_overdue', key);
+    if (outcome.status === 'simulation-reverted') note.detail = `simulation-reverted: ${outcome.revert ?? outcome.error.slice(0, 120)}`;
+  }
+  return notes;
+}
 
 export async function stepHousekeeping(ctx: CrankContext, usdg: Address): Promise<StepReport> {
   const report = newReport('housekeeping');
@@ -1264,6 +1650,7 @@ export async function stepHousekeeping(ctx: CrankContext, usdg: Address): Promis
     if ((outcome.status === 'confirmed' || outcome.status === 'already-advanced') && !ctx.sender.dryRun) ctx.store.setMeta(sweepMetaKey(asset), String(h.timestamp));
     swept.push({ asset, amount, status: outcome.status });
   }
-  report.notes = { expiredOpenOrders: candidates.length, markedDead: dead.length, prunable: prunable.length, pruned, unprunable: unprunable.map(String), fees: swept };
+  const houseRollNotes = await houseRoll(ctx, report, budget, h);
+  report.notes = { expiredOpenOrders: candidates.length, markedDead: dead.length, prunable: prunable.length, pruned, unprunable: unprunable.map(String), fees: swept, houseRoll: houseRollNotes };
   return report;
 }

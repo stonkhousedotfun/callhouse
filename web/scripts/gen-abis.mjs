@@ -242,9 +242,24 @@ const V2_MODULES = [
     what: "AutoRoller: set-and-forget writer strategies, rolled by keepers and repriced by PRICER_ROLE.",
   },
   {
+    name: "accessManager",
+    sources: ["AccessManager.json"],
+    what: "AccessManager: delayed role authority for the v8 deployment.",
+  },
+  {
+    name: "feeSplitter",
+    sources: ["FeeSplitter.json", "IFeeSplitter.json"],
+    what: "FeeSplitter: protocol-fee distribution, buyback allocation and burns.",
+  },
+  {
+    name: "buybackExecutor",
+    sources: ["V4BuybackExecutor.json", "IBuybackExecutor.json"],
+    what: "V4BuybackExecutor: splitter-only USDG-to-STONKHOUSE execution and burn.",
+  },
+  {
     name: "payoutAdapter",
-    sources: ["UniV3PayoutAdapter.json", "PayoutAdapter.json", "IPayoutAdapter.json"],
-    what: "PayoutAdapter: swaps an in-kind Stock Token payout to USDG through Uniswap v3.",
+    sources: ["PayoutRouter.json", "IPayoutRouter.json", "IPayoutAdapter.json"],
+    what: "PayoutRouter: converts in-kind payouts to USDG over configured Uniswap v3 or v4 routes.",
   },
   {
     name: "makerRegistry",
@@ -264,11 +279,81 @@ const V2_MODULES = [
     what: "RewardsDistributor: per-epoch Merkle claims of USDG.",
   },
   {
+    // P8-02. Absent from ops/abis/v2 until the contract lane exports it; the loop below then
+    // silently skips this row, so abis/v2/earnVault.ts does not exist yet and nothing imports it.
+    name: "earnVault",
+    sources: ["EarnVault.json", "IEarnVault.json"],
+    what: "EarnVault: the LENDING vault — shares against supplied stock or USDG, venue adapter, yield skim.",
+  },
+  {
+    // P8-01. The contract is landed (src/v2/periphery/StockZap.sol) but is not in
+    // script/v2/abi-manifest.txt, so export-abis.sh does not copy it here yet; see T-78.
+    name: "stockZap",
+    sources: ["StockZap.json", "IStockZap.json"],
+    what: "StockZap: stateless USDG<->Stock Token zaps over the PayoutRouter's pinned route.",
+  },
+  {
     name: "v2Errors",
     sources: ["V2Errors.json"],
     what: "V2Errors: the shared custom errors of every v2 contract.",
   },
+  {
+    // P8-06. Absent from ops/abis/v2 until T-78 adds HouseVaultFactory to
+    // script/v2/abi-manifest.txt; the loop then skips this row. Indexing uses
+    // lib/v2/houseVaultEvents.ts until the artefact lands.
+    name: "houseVaultFactory",
+    sources: ["HouseVaultFactory.json"],
+    what: "HouseVaultFactory: LISTING deploys one HouseVault per underlying.",
+  },
+  {
+    // P8-06. Same export gap as houseVaultFactory. Do not stand in MakerVault.json.
+    name: "houseVault",
+    sources: ["HouseVault.json"],
+    what: "HouseVault: user-funded weekly-epoch market maker; depositor shares, queued deposits/withdrawals.",
+  },
 ];
+
+/**
+ * COVERAGE, BOTH DIRECTIONS (T-300).
+ *
+ * The generation loop at the bottom of this file reads `const source = m.sources.find(v2Present)`
+ * and then `if (source) renderV2Module(...)`. That bare `if` is the whole defect this block exists
+ * for: it skips silently in BOTH directions. An ABI that ops/abis/v2 exports and no module names is
+ * not drifted and not missing - it is unseen; and a module whose sources are all absent produces
+ * nothing and says nothing.
+ *
+ * ALL THREE GENERATORS HAD THE SAME SHAPE. web/scripts/gen-abis.mjs, indexer/scripts/gen-abis.mjs
+ * and keeper/scripts/gen-abis.mjs each carried that identical two-line loop, so all three are fixed
+ * together here rather than one being cited as different. The keeper's was in neither audit's scope
+ * (CH3 covered the indexer, CH4 the web) and was found while fencing this row.
+ *
+ * NOT SET EQUALITY, DELIBERATELY. Some exported ABIs legitimately have no consumer module, so
+ * requiring the two sets to match would fire on a clean tree and the next lane would add exclusions
+ * until it went green - which is the unguarded list this row is about. The rule instead is that
+ * every PRESENT export must be ACCOUNTED FOR by name, either by a module that names it as a source
+ * or by V2_UNWIRED_ABIS below, and that adding one requires a deliberate edit in this file.
+ *
+ * The fourth instance of this class lives in the contracts repo, in script/v2/export-abis.sh's
+ * manifest half, and belongs to T-279-C8-ABI-EXPORT-GUARD-GAPS. It is cited here, not touched.
+ */
+/**
+ * Exported ABI files that deliberately have no generated consumer module. This is a named
+ * exclusion ledger, not set equality: V2_MODULES may still name absent future/fallback sources,
+ * but every ABI that is present under ops/abis/v2 must be accounted for here or in that table.
+ * COPIED TABLE: keep identical in indexer/scripts/gen-abis.mjs and keeper/scripts/gen-abis.mjs.
+ */
+const V2_UNWIRED_ABIS = new Set([
+  "Erc4626VenueAdapter.json", // EarnVault venue implementation; consumers call the vault, not the adapter.
+  "Hedger.json", // No registry/config address or app/keeper call site exists yet.
+  "IFeeDiscount.json", // OrderBook collaborator interface, not a standalone consumer target.
+  "IFundingSource.json", // Funding seam used behind OrderBook/EarnVault, not called directly.
+  "StockLoanAdapter.json", // EarnVault funding implementation, not called directly by these packages.
+  "StockVenueAdapter.json", // EarnVault venue implementation, not called directly by these packages.
+  "UniV3PayoutAdapter.json", // Legacy v7 adapter; v8 consumers use the PayoutRouter module.
+]);
+
+/** JSON metadata exported beside the ABIs, but not itself a contract ABI. */
+const V2_NON_ABI_JSON = new Set(["roles.json"]);
 
 /** Every module but v2Errors merges these fragments (see renderV2Module). */
 const V2_ERRORS = "V2Errors.json";
@@ -305,6 +390,36 @@ const readV2Abi = (file) =>
     .map(cleanItem);
 
 const v2Present = (file) => existsSync(path.join(opsAbisV2, file));
+
+const v2AbiFiles = () =>
+  readdirSync(opsAbisV2)
+    .filter((file) => file.endsWith(".json") && !V2_NON_ABI_JSON.has(file))
+    .sort();
+
+/** Present ABI exports that neither generate a module nor have a deliberate named exclusion. */
+const unwiredV2 = () => {
+  const accountedFor = new Set([...V2_MODULES.flatMap((module) => module.sources), ...V2_UNWIRED_ABIS]);
+  return v2AbiFiles().filter((file) => !accountedFor.has(file));
+};
+
+/** Keep an old exclusion from silently blessing a later, unrelated ABI with the same name. */
+const absentV2Unwired = () => [...V2_UNWIRED_ABIS].filter((file) => !v2Present(file)).sort();
+
+/**
+ * Modules whose every named source is absent from ops/abis/v2.
+ *
+ * The generation loop at the bottom of this file skips a sourceless module with a bare `if`, and
+ * that silence is the other half of the defect the coverage checks above exist to remove: an ABI
+ * the contracts repo exports and nobody wires is now visible, and a module wired here that nothing
+ * exports must be nameable too. It is NOT an error. A module row deliberately lands before its ABI
+ * is exported, and making this red would turn a planned row into a broken tree - the failure the
+ * named-exclusion design above was chosen to avoid. So it prints, always, and the exit code does
+ * not move.
+ */
+const dormantV2 = () =>
+  V2_MODULES.filter((module) => !module.sources.some(v2Present))
+    .map((module) => `${module.name} (no source present: ${module.sources.join(", ")})`)
+    .sort();
 
 /**
  * One v2 module. A concrete contract's artefact lists only the errors its own bytecode raises and
@@ -373,6 +488,20 @@ const staleV2 = () => {
     .sort();
 };
 
+const reportV2Coverage = (unwired, absentUnwired) => {
+  for (const file of unwired) {
+    console.error(`unwired: ops/abis/v2/${file} (not named in V2_MODULES or V2_UNWIRED_ABIS)`);
+  }
+  for (const file of absentUnwired) {
+    console.error(`stale allowance: ops/abis/v2/${file} (named in V2_UNWIRED_ABIS but absent)`);
+  }
+};
+
+const unwired = unwiredV2();
+const absentUnwired = absentV2Unwired();
+const dormant = dormantV2();
+for (const entry of dormant) console.log(`dormant: ${entry}`);
+
 if (check) {
   const drifted = [];
   const missing = [];
@@ -382,16 +511,29 @@ if (check) {
     else if (readFileSync(file, "utf8") !== expected) drifted.push(rel);
   }
   const stale = staleV2();
-  if (drifted.length + missing.length + stale.length === 0) {
+  const outputProblems = drifted.length + missing.length + stale.length;
+  const coverageProblems = unwired.length + absentUnwired.length;
+  if (outputProblems + coverageProblems === 0) {
     console.log(`gen-abis --check: ${outputs.size} files match ops/`);
   } else {
     for (const rel of drifted) console.error(`drifted: ${rel}`);
     for (const rel of missing) console.error(`missing: ${rel}`);
     for (const rel of stale) console.error(`stale:   ${rel} (no source in ops/abis/v2)`);
-    console.error("gen-abis --check: generated files differ from ops/; run `pnpm gen:abis` and commit the result");
+    reportV2Coverage(unwired, absentUnwired);
+    if (outputProblems) {
+      console.error("gen-abis --check: generated files differ from ops/; run `pnpm gen:abis` and commit the result");
+    }
+    if (coverageProblems) {
+      console.error("gen-abis --check: exported ABI coverage is incomplete; update V2_MODULES or V2_UNWIRED_ABIS");
+    }
     process.exit(1);
   }
 } else {
+  if (unwired.length + absentUnwired.length > 0) {
+    reportV2Coverage(unwired, absentUnwired);
+    console.error("gen-abis: exported ABI coverage is incomplete; update V2_MODULES or V2_UNWIRED_ABIS");
+    process.exit(1);
+  }
   for (const [rel, { body: contents, summary }] of outputs) {
     const file = path.join(pkgRoot, rel);
     mkdirSync(path.dirname(file), { recursive: true });

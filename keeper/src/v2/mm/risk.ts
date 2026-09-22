@@ -86,9 +86,20 @@ export interface SizeLimits {
   outflowBudget: bigint;
   /** Clearinghouse.free(vault, asset) per lower-case asset. */
   freeCollateral: ReadonlyMap<string, bigint>;
+  /**
+   * T-OP-133, MM_WRITE_OVERSUBSCRIBE_BPS. The per-asset write budget the ASKS ARE SIZED AGAINST is
+   * `free x bps / 10_000`; 10_000 is today's exact budget (the advertised sum never exceeds `free`). Above it the
+   * book is ONE POOL shared by every ask on the asset: each single ask still fits `maxWriteUnits(free)`, so any ONE
+   * fill is always covered, and only several fills of different series inside one tick can outrun the pool -- the
+   * book then SKIPS the uncoverable fill at plan time (`OrderBook._plan`, filled whole or skipped, never cut) and
+   * catches a mint that still fails at delivery, so a taker never reverts on our shortfall. `undefined` = 10_000.
+   */
+  writeOversubscribeBps?: number;
   bidUnits: bigint;
   askUnits: bigint;
 }
+
+export const WRITE_OVERSUBSCRIBE_BPS_EXACT = 10_000;
 
 export type SizeCap = 'series-units' | 'total-notional' | 'usdg' | 'collateral' | 'outflow';
 
@@ -125,8 +136,16 @@ export function planSizes(series: readonly SizeSeries[], limits: SizeLimits): Se
   let running = limits.totalNotional;
   let usdgLeft = limits.usdgBudget;
   let outflowLeft = max(limits.outflowBudget, 0n);
+  // Two views of the same pool (T-OP-133): `collateralLeft` is the SIZING budget, oversubscribed by
+  // MM_WRITE_OVERSUBSCRIBE_BPS and run down by every ask planned on the asset; `freeActual` is what the chain
+  // holds, the bound every SINGLE ask must fit so that any one fill is covered. At 10_000 bps they coincide.
+  const oversubscribe = BigInt(limits.writeOversubscribeBps ?? WRITE_OVERSUBSCRIBE_BPS_EXACT);
   const collateralLeft = new Map<string, bigint>();
-  for (const [asset, free] of limits.freeCollateral) collateralLeft.set(asset.toLowerCase(), free);
+  const freeActual = new Map<string, bigint>();
+  for (const [asset, free] of limits.freeCollateral) {
+    collateralLeft.set(asset.toLowerCase(), (free * oversubscribe) / BigInt(WRITE_OVERSUBSCRIBE_BPS_EXACT));
+    freeActual.set(asset.toLowerCase(), free);
+  }
 
   const out: SeriesSizes[] = [];
   for (const s of series) {
@@ -158,8 +177,10 @@ export function planSizes(series: readonly SizeSeries[], limits: SizeLimits): Se
       const left = collateralLeft.get(asset) ?? 0n;
       const remaining = remainingLife(s.expiry, limits.now);
       if (write > 0n && s.collateralPerUnit > 0n) {
-        // Collateral PLUS rent, the book's own budget: the exact inverse for one fill of the whole ask.
-        const affordable = maxWriteUnits(left, s.collateralPerUnit, s.mintFeePpm, remaining);
+        // Collateral PLUS rent, the book's own budget: the exact inverse for one fill of the whole ask -- against
+        // the pool's remaining SIZING budget, and never above what the chain would cover for this ONE fill.
+        const single = maxWriteUnits(freeActual.get(asset) ?? 0n, s.collateralPerUnit, s.mintFeePpm, remaining);
+        const affordable = min(maxWriteUnits(left, s.collateralPerUnit, s.mintFeePpm, remaining), single);
         if (affordable < write) {
           write = affordable;
           capped.add('collateral');

@@ -69,6 +69,15 @@ export const NYSE_HOLIDAYS_2028: readonly string[] = ['2028-01-17', '2028-02-21'
 /** The v2 pricing clock's table: every year the on-chain ExpiryCalendar is seeded for. PRICING_NYSE_HOLIDAYS replaces it. */
 export const NYSE_HOLIDAYS_2026_2028: readonly string[] = [...NYSE_HOLIDAYS_2026_2027, ...NYSE_HOLIDAYS_2028];
 
+/**
+ * NYSE early closes (13:00 New York) for the same years, as ops/markets/v2-sources.json lists them: the day after
+ * Thanksgiving and Christmas Eve 2026, the day after Thanksgiving 2027, and 3 July and the day after Thanksgiving 2028.
+ * INFORMATIONAL: no clock here or in pricing/bs.ts models them (a session still runs to 16:00), and the on-chain
+ * ExpiryCalendar keeps its 16:00 close on these days. The pricing-coverage report (v2/pricing/coverage.ts) flags an
+ * expiry that falls on one.
+ */
+export const NYSE_EARLY_CLOSES_2026_2028: readonly string[] = ['2026-11-27', '2026-12-24', '2027-11-26', '2028-07-03', '2028-11-24'];
+
 export const NEW_YORK = 'America/New_York';
 
 /** The regular NYSE close, local time. */

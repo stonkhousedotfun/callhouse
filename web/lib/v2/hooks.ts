@@ -5,6 +5,7 @@ import { useQuery } from "@tanstack/react-query";
 
 import {
   v2Api,
+  type AdminOperationsOptions,
   type ApiUnavailable,
   type ActivityOptions,
   type CardsOptions,
@@ -16,14 +17,27 @@ import {
 
 const LIVE = { staleTime: 15_000, refetchInterval: 15_000, refetchOnWindowFocus: true } as const;
 const FRESH = { staleTime: 0, refetchInterval: 5_000, refetchOnWindowFocus: true, retry: 0 } as const;
+export const ALL_MARKET_SERIES_POLICY = {
+  staleTime: 5 * 60_000,
+  refetchInterval: false,
+  refetchOnWindowFocus: false,
+  refetchOnReconnect: false,
+  retry: false,
+} as const;
 
 /** Shared prefixes for invalidating after a transaction. */
 export const v2Keys = {
   all: ["v2"] as const,
   health: ["v2", "health"] as const,
   config: ["v2", "config"] as const,
+  adminOperations: (filters: AdminOperationsOptions = {}) => ["v2", "adminOperations", filters] as const,
+  flywheel: ["v2", "flywheel"] as const,
+  earn: (address?: string) => ["v2", "earn", address?.toLowerCase()] as const,
+  house: ["v2", "house"] as const,
+  houseMarket: (market: string | undefined, address?: string) => ["v2", "houseMarket", market, address?.toLowerCase()] as const,
   markets: ["v2", "markets"] as const,
   marketSeries: (ticker: string | undefined, filters: MarketSeriesOptions = {}) => ["v2", "marketSeries", ticker, filters] as const,
+  allMarketSeries: (ticker: string | undefined, filters: Omit<MarketSeriesOptions, "cursor" | "limit"> = {}) => ["v2", "allMarketSeries", ticker, filters] as const,
   series: (longId: string | undefined) => ["v2", "series", longId] as const,
   book: (longId: string | undefined, depth: number) => ["v2", "book", longId, depth] as const,
   holders: (longId: string | undefined, filters: PageOptions & { side?: "long" | "short" } = {}) => ["v2", "holders", longId, filters] as const,
@@ -58,11 +72,38 @@ export function useHealth() {
 export function useConfig() {
   return useV2Query(v2Keys.config, (signal) => v2Api.getConfig({ signal }), true, true);
 }
+export function useAdminOperations(filters: AdminOperationsOptions = {}) {
+  return useV2Query(v2Keys.adminOperations(filters), (signal) => v2Api.getAdminOperations(filters, { signal }));
+}
+export function useFlywheel() {
+  return useV2Query(v2Keys.flywheel, (signal) => v2Api.getFlywheel({ signal }));
+}
+export function useEarn(address?: string) {
+  return useV2Query(v2Keys.earn(address), (signal) => v2Api.getEarn({ address }, { signal }));
+}
+export function useHouse() {
+  return useV2Query(v2Keys.house, (signal) => v2Api.getHouse({ signal }));
+}
+export function useHouseMarket(market: string | undefined, address?: string) {
+  return useV2Query(v2Keys.houseMarket(market, address), (signal) => v2Api.getHouseMarket(market!, { address }, { signal }), Boolean(market));
+}
 export function useMarkets() {
   return useV2Query(v2Keys.markets, (signal) => v2Api.getMarkets({ signal }));
 }
 export function useMarketSeries(ticker?: string, filters: MarketSeriesOptions = {}) {
   return useV2Query(v2Keys.marketSeries(ticker, filters), (signal) => v2Api.getMarketSeries(ticker!, filters, { signal }), Boolean(ticker));
+}
+export function useAllMarketSeries(
+  ticker?: string,
+  filters: Omit<MarketSeriesOptions, "cursor" | "limit"> = {},
+  options: { enabled?: boolean } = {},
+) {
+  return useQuery({
+    queryKey: v2Keys.allMarketSeries(ticker, filters),
+    queryFn: ({ signal }) => v2Api.getAllMarketSeries(ticker!, filters, { signal }),
+    enabled: Boolean(ticker) && options.enabled === true,
+    ...ALL_MARKET_SERIES_POLICY,
+  });
 }
 export function useSeries(longId?: string) {
   return useV2Query(v2Keys.series(longId), (signal) => v2Api.getSeries(longId!, { signal }), Boolean(longId));

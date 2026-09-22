@@ -5,7 +5,7 @@
  * in lib/api.ts. lib/hooks.ts and lib/history.ts are React and wagmi bound and are not in scope
  * for a node run; a jsdom environment is deliberately absent, because it would make it easy to
  * test rendered copy instead of the numbers behind it, and the copy already has its own gate in
- * scripts/copy-lint.mjs (which also scans this file and every test under web/).
+ * copy-lint, which scanned this file and every test under web/ until it was removed on 2026-09-21.
  *
  * The one piece of configuration that matters is the alias: tsconfig maps `@/*` to the package
  * root, and a module that imports `@/lib/contracts` has to resolve the same way under vitest as
@@ -13,6 +13,7 @@
  *
  * `passWithNoTests` is deliberately NOT set. An empty run must fail. A test step that goes green
  * with zero tests is not a gate, and CI runs `pnpm --filter @callhouse/web test` as a gate.
+ * A glob that cannot see a committed test file is the same false green as an empty run.
  */
 import { defineConfig } from "vitest/config";
 
@@ -24,6 +25,6 @@ export default defineConfig({
   },
   test: {
     environment: "node",
-    include: ["lib/**/*.test.ts", "components/**/*.test.ts"],
+    include: ["lib/**/*.test.{ts,tsx}", "components/**/*.test.{ts,tsx}"],
   },
 });

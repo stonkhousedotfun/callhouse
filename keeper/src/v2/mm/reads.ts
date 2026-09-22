@@ -2,7 +2,8 @@
  * The views an MM tick plans from, read in multicalls pinned to the tick's head block (chain.ts multicallMany; a view
  * that reverts is a failed outcome, not a thrown batch). Nothing here decides (planner.ts) or sends (quoter.ts).
  */
-import { getAbiItem, keccak256, parseAbi, toBytes, zeroHash, type AbiEvent, type Address } from 'viem';
+import { getAbiItem, parseAbi, toFunctionSelector, zeroAddress, type AbiEvent, type Address } from 'viem';
+import { accessManagerAbi } from '../abi/accessManager.js';
 import { clearinghouseAbi } from '../abi/clearinghouse.js';
 import { expiryCalendarAbi } from '../abi/expiryCalendar.js';
 import { makerVaultAbi } from '../abi/makerVault.js';
@@ -17,14 +18,22 @@ import type { ExposureDetail, MarketView, SeriesView, VaultLimits } from './plan
 
 export const erc20Abi = parseAbi(['function balanceOf(address) view returns (uint256)']);
 
-export const QUOTER_ROLE = keccak256(toBytes('QUOTER_ROLE'));
-export const DEFAULT_ADMIN_ROLE = zeroHash;
+/**
+ * The vault call the QUOTER role authorises. INTERFACE_VERSION 8 asks the AccessManager whether this key
+ * may make THIS call, rather than asking the vault whether this key holds a role — a `Managed` target has
+ * no role storage and no `hasRole` at all. Derived from the signature, never pasted as hex, and verified
+ * byte-identical between `script/v2/roles.v8.json` (MakerVault.place -> QUOTER) and the published
+ * `ops/abis/v2/MakerVault.json`.
+ */
+export const VAULT_PLACE_SELECTOR = toFunctionSelector('place(uint256,uint8,uint128,uint64,uint40)');
 
 export interface MmAddresses {
   clearinghouse: Address;
   orderBook: Address;
   vault: Address;
   usdg: Address;
+  /** The AccessManager the vault is Managed by. Required for V2_MODE=mm (config.ts MODE_CONTRACTS). */
+  manager: Address;
 }
 
 const lc = (a: string): string => a.toLowerCase();
@@ -46,11 +55,19 @@ export interface VaultState {
   totalNotional: bigint;
   tracked: bigint[];
   isQuoter: boolean;
+  /**
+   * The manager's `delay` for this (key, target, selector). 0 with `isQuoter` false means "not a member,
+   * or the selector is not mapped"; non-zero means "a member, but every call must be scheduled first" —
+   * which the bot cannot do, so it is still not quoting. The two are one alert with different causes.
+   */
+  quoterDelay: number;
   tradingPaused: boolean;
   owed: bigint;
   makerOrderCount: bigint;
   usdgWallet: bigint;
   fees: { premiumFeeBps: number; resaleFeeBps: number };
+  /** OrderBook.pendingFeeParams(): the zero value when nothing is scheduled, so effectiveAt 0 means none. */
+  pendingFees: { params: { premiumFeeBps: number; resaleFeeBps: number }; effectiveAt: number };
   sessionOpen: boolean;
   sessionClose: number | null;
 }
@@ -61,8 +78,12 @@ export async function readVaultState(client: MulticallClient, a: MmAddresses, in
     { address: a.vault, abi: makerVaultAbi, functionName: 'limits' },
     { address: a.vault, abi: makerVaultAbi, functionName: 'totalNotional' },
     { address: a.vault, abi: makerVaultAbi, functionName: 'trackedSeries' },
-    { address: a.vault, abi: makerVaultAbi, functionName: 'hasRole', args: [QUOTER_ROLE, input.signer] },
-    { address: a.vault, abi: makerVaultAbi, functionName: 'hasRole', args: [DEFAULT_ADMIN_ROLE, input.signer] },
+    // INTERFACE_VERSION 8. r[3] and r[4] REPLACE the two v7 vault hasRole reads IN PLACE, deliberately:
+    // reads.ts decodes this array POSITIONALLY by hardcoded index, so removing a call and letting the rest
+    // slide down is quirk B.1 in v8-plan/06-QUIRKS.md — every later read would return a plausible value
+    // from the wrong call and nothing would fail. Reusing the two freed slots leaves r[5]..r[12] untouched.
+    { address: a.manager, abi: accessManagerAbi, functionName: 'canCall', args: [input.signer, a.vault, VAULT_PLACE_SELECTOR] },
+    { address: a.orderBook, abi: orderBookAbi, functionName: 'pendingFeeParams' },
     { address: a.orderBook, abi: orderBookAbi, functionName: 'tradingPaused' },
     { address: a.orderBook, abi: orderBookAbi, functionName: 'owed', args: [a.vault] },
     { address: a.orderBook, abi: orderBookAbi, functionName: 'makerOrderCount', args: [a.vault] },
@@ -77,6 +98,11 @@ export async function readVaultState(client: MulticallClient, a: MmAddresses, in
   // Six fields since INTERFACE_VERSION 7: a positional decode that drops maxDailyOutflow would not encode setLimits.
   const limits = must<{ maxSeriesUnits: bigint; maxTotalNotional: bigint; askToleranceBps: number; maxBidBpsOfSpot: number; maxOrderLifetime: number; maxDailyOutflow: bigint }>(r[0], 'vault.limits');
   const fees = must<{ premiumFeeBps: number; resaleFeeBps: number }>(r[8], 'orderBook.feeParams');
+  // canCall returns (bool immediate, uint32 delay). `immediate` IS the question the bot has: may this key
+  // make this call right now, with no scheduling? A delayed member answers false, which is correct — the
+  // bot has no scheduling path — and the delay is carried so the alert can say which of the two it is.
+  const canPlace = must<readonly [boolean, number]>(r[3], 'manager.canCall(vault.place)');
+  const pending = must<readonly [{ premiumFeeBps: number; resaleFeeBps: number }, number]>(r[4], 'orderBook.pendingFeeParams');
   const sessionOpen = must<boolean>(r[10], 'calendar.isRegularSession');
   const outflow = must<readonly [bigint, bigint]>(r[12], 'vault.outflow');
   return {
@@ -91,12 +117,20 @@ export async function readVaultState(client: MulticallClient, a: MmAddresses, in
     outflow: { used: outflow[0], available: outflow[1] },
     totalNotional: must<bigint>(r[1], 'vault.totalNotional'),
     tracked: [...must<readonly bigint[]>(r[2], 'vault.trackedSeries')],
-    isQuoter: must<boolean>(r[3], 'vault.hasRole(QUOTER_ROLE)') || must<boolean>(r[4], 'vault.hasRole(DEFAULT_ADMIN_ROLE)'),
+    // NO ADMIN FALLBACK. v7 OR-ed in DEFAULT_ADMIN_ROLE membership; v8 does not, and re-adding it is the
+    // single easiest way to silently recreate the bug this deletes. It loses nothing: roles.v8.json lists
+    // QUOTER among the Admin Safe's own holdings, so the Safe is a QUOTER member in its own right.
+    isQuoter: canPlace[0],
+    quoterDelay: Number(canPlace[1]),
     tradingPaused: must<boolean>(r[5], 'orderBook.tradingPaused'),
     owed: must<bigint>(r[6], 'orderBook.owed'),
     makerOrderCount: must<bigint>(r[7], 'orderBook.makerOrderCount'),
     usdgWallet: must<bigint>(r[9], 'usdg.balanceOf(vault)'),
     fees: { premiumFeeBps: Number(fees.premiumFeeBps), resaleFeeBps: Number(fees.resaleFeeBps) },
+    pendingFees: {
+      params: { premiumFeeBps: Number(pending[0].premiumFeeBps), resaleFeeBps: Number(pending[0].resaleFeeBps) },
+      effectiveAt: Number(pending[1]),
+    },
     sessionOpen,
     sessionClose: sessionOpen ? Number(must<bigint>(r[11], 'calendar.closeOf')) : null,
   };
@@ -321,6 +355,77 @@ export async function readOrderFillLogs(
     to = from - 1n;
   }
   return { logs, coveredFrom };
+}
+
+/**
+ * T-OP-133 (MM_ASK_FALLBACK_ONLY). The live asks OTHER makers rest on each managed series, so the planner can hold
+ * the vault's own ask back while someone else is offering. `OrderBook.ordersOfSeries` (OrderBook.sol:554) pages an
+ * APPEND-ONLY id list that includes dead orders, so the read is bounded from the TAIL: `seriesOrderCount` first, then
+ * the last `tail` ids of each series in one multicall, then one `getOrders` batch over all of them. An ask is counted
+ * when it is live at `now` (maker set, not cancelled, unfilled units, validUntil in the future or 0), an AskWrite or
+ * AskResale, and its maker is not `vault`. Protocol accounts (the HouseVault's covered-call ask) are NOT filtered
+ * here: the planner counts them as other askers by design (README, "fallback-only asks").
+ *
+ * WHY THE TAIL IS ENOUGH: an ask older than `tail` placements on one series would have to sit under `tail` newer
+ * orders without expiring; at the launch cadence (the bot re-places every session, the book expires at the close) the
+ * tail of 64 is the whole live set. A count above the tail is reported in `truncated` so /state can say the read was
+ * partial rather than the book empty.
+ */
+export interface OtherAsk {
+  id: bigint;
+  maker: string;
+  kind: 'AskWrite' | 'AskResale';
+  price: bigint;
+  remaining: bigint;
+}
+export interface OtherAskers {
+  /** By decimal longId: live asks from makers other than the vault. Every managed series has an entry. */
+  asks: ReadonlyMap<string, OtherAsk[]>;
+  /** Series whose id list was longer than the tail read (their oldest orders were not inspected). */
+  truncated: readonly string[];
+}
+
+export async function readOtherAskers(
+  client: MulticallClient & Pick<import('viem').PublicClient, 'readContract'>,
+  a: Pick<MmAddresses, 'orderBook' | 'vault'>,
+  longIds: readonly bigint[],
+  now: number,
+  blockNumber: bigint,
+  tail = 64n,
+): Promise<OtherAskers> {
+  const asks = new Map<string, OtherAsk[]>(longIds.map((id) => [id.toString(), []]));
+  const truncated: string[] = [];
+  if (longIds.length === 0) return { asks, truncated };
+  const counts = await readMany(client, longIds.map((longId) => ({ address: a.orderBook, abi: orderBookAbi, functionName: 'seriesOrderCount', args: [longId] })), blockNumber);
+  const pages: AnyRead[] = [];
+  const pageOf: bigint[] = [];
+  longIds.forEach((longId, i) => {
+    const count = okResult<bigint>(counts[i]) ?? 0n;
+    if (count === 0n) return;
+    if (count > tail) truncated.push(longId.toString());
+    const cursor = count > tail ? count - tail : 0n;
+    pages.push({ address: a.orderBook, abi: orderBookAbi, functionName: 'ordersOfSeries', args: [longId, cursor, tail] });
+    pageOf.push(longId);
+  });
+  if (pages.length === 0) return { asks, truncated };
+  const idPages = await readMany(client, pages, blockNumber);
+  const ids: bigint[] = [];
+  idPages.forEach((r) => {
+    const page = okResult<readonly [readonly bigint[], bigint]>(r);
+    if (page !== undefined) ids.push(...page[0]);
+  });
+  const orders = await readOrders(client, a.orderBook, ids, blockNumber);
+  const self = lc(a.vault);
+  for (const o of orders) {
+    if (o.maker === zeroAddress || o.cancelled || o.filled >= o.units) continue;
+    if (o.validUntil !== 0 && o.validUntil <= now) continue;
+    if (o.kind !== 'AskWrite' && o.kind !== 'AskResale') continue;
+    if (lc(o.maker) === self) continue;
+    const list = asks.get(o.longId.toString());
+    if (list === undefined) continue;
+    list.push({ id: o.id, maker: lc(o.maker), kind: o.kind, price: o.price, remaining: o.units - o.filled });
+  }
+  return { asks, truncated };
 }
 
 /** OrderBook.getOrders in pages, one outcome per id (an unknown id is maker zero). */

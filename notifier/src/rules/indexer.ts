@@ -1,13 +1,19 @@
 /**
- * The indexer API v2 as the rules engine reads it: five routes, a deadline on
+ * The indexer API v2 as the rules engine reads it: six routes, a deadline on
  * every call, and a zod parse of every response before anything trusts it.
  *
  *   GET /v2/markets                          spot per ticker
- *   GET /v2/feed/activity?since&cursor       fills, settlements, redemptions, rolls, oldest first
+ *   GET /v2/feed/activity?since&cursor       every ACTIVITY_KINDS item, oldest first: fills,
+ *                                            settlements, redemptions, rolls, stale cancels
  *   GET /v2/accounts/:address/positions      holdings of ONE subscribed wallet (the watch set)
  *   GET /v2/calendar/holidays?fromDay&toDay  ExpiryCalendar session days, at most 62 per call
  *   GET /v2/series/:longId                   fallback only: a settled long whose settlement item
  *                                            was never seen (engine.ts step 5)
+ *   GET /v2/config                           chainId, interfaceVersion, deployBlock — the
+ *                                            deployment anchor (engine.ts), and the interface
+ *                                            version this build refuses to run against when it is
+ *                                            not IMPLEMENTED_INTERFACE_VERSION. Other config keys
+ *                                            are ignored here (this schema is not `.strict()`).
  *
  * SCHEMAS MIRROR web/lib/v2/api-schema.ts (the frozen contract; indexer/src/api/v2/schema.ts is
  * its twin) for the fields read here, copied rather than imported: web/ is a Next app and this
@@ -76,6 +82,136 @@ export const marketsSchema = z.array(
     'spot and spotUpdatedAt must both be available or unavailable'),
 );
 export type ApiMarket = z.infer<typeof marketsSchema>[number];
+
+/* ------------------------------------------------------------------ /v2/config */
+
+/**
+ * Copied from web/lib/v2/api-schema.ts configResponseSchema:528-532, not imported: this package
+ * builds alone. chainId and interfaceVersion are countSchema (number, int, nonnegative);
+ * deployBlock is uintStringSchema.nullable(). Not `.strict()`: the indexer already validates.
+ */
+const feeBps = z.number().int().nonnegative();
+export const pendingFeesSchema = z.object({
+  premiumFeeBps: feeBps,
+  resaleFeeBps: feeBps,
+  takerFeeFlat: apiMoneySchema,
+  takerFeeCapBps: feeBps,
+  makerRebateBps: feeBps,
+  /** Unix seconds. Source: web/lib/v2/api-schema.ts configResponseSchema.pendingFees.effectiveAt. */
+  effectiveAt: unix,
+}).nullable();
+export const liveFeesSchema = z.object({
+  premiumFeeBps: feeBps,
+  resaleFeeBps: feeBps,
+  takerFeeFlat: apiMoneySchema,
+  takerFeeCapBps: feeBps,
+  makerRebateBps: feeBps,
+});
+export const configSchema = z.object({
+  chainId: z.number().int().nonnegative(),
+  interfaceVersion: z.number().int().nonnegative(),
+  deployBlock: uintString.nullable(),
+  fees: liveFeesSchema.optional(),
+  pendingFees: pendingFeesSchema.optional(),
+});
+export type ApiConfig = z.infer<typeof configSchema>;
+
+/**
+ * The interface version THIS BINARY implements.
+ *
+ * Mirrored from `web/lib/v2/config.ts` (`remote.interfaceVersion !== 8`), the pin the dapp already
+ * carries, so the two consumers of /v2/config state the same number rather than each deriving one.
+ * It is a BUILD-TIME constant and is deliberately NOT read from the indexer: a value taken from the
+ * peer you are checking cannot disagree with it, and a check that cannot fail is not a check.
+ *
+ * This is the opposite stance from `deploymentAnchor` below, whose inputs are runtime deployment
+ * IDENTITY and must never be hardcoded. Identity says WHICH deployment; this says WHICH PAYLOAD
+ * SHAPES this build was written to decode. The anchor covers a cutover; it does not cover a build
+ * pointed at an indexer of a different interface, because the anchor has no opinion about the
+ * version it merely concatenates (`:176`).
+ *
+ * Raise it in the same commit that teaches this package a new payload shape.
+ */
+export const IMPLEMENTED_INTERFACE_VERSION = 8;
+export type ApiPendingFees = NonNullable<z.infer<typeof pendingFeesSchema>>;
+export type ApiLiveFees = z.infer<typeof liveFeesSchema>;
+
+export function liveFeesKey(fees: ApiLiveFees): string {
+  return JSON.stringify([
+    fees.premiumFeeBps, fees.resaleFeeBps, fees.takerFeeFlat.raw, fees.takerFeeFlat.decimals,
+    fees.takerFeeCapBps, fees.makerRebateBps,
+  ]);
+}
+
+/** The contract's own rule for `key` (web/lib/v2/api-schema.ts OPERATION_KEY_RE): `<operationId>:<nonce>`. */
+const operationKey = z.string().regex(/^0x[0-9a-f]{64}:(0|[1-9]\d{0,9})$/, 'expected <operationId>:<nonce>');
+
+export const adminOperationSchema = z.object({
+  /**
+   * T-435. THE PER-OPERATION IDENTITY, and the only thing this package keys an operation on. `id` is
+   * AccessManager's operation id and it REPEATS: rescheduling the same call reuses it, so two live
+   * operations can share one `id` and only `key` (T-434) tells them apart.
+   */
+  key: operationKey,
+  id: z.string().min(1),
+  role: z.string().min(1),
+  target: address,
+  /**
+   * T-435. NULLABLE, as the contract declares it: null when the scheduled calldata is shorter than a
+   * four-byte selector, a case the indexer serves on purpose (indexer/src/api/v2/routes.test.ts,
+   * 'keeps a scheduled selector-less operation visible in both public views'). This copy used to
+   * require a string, and because the page is parsed as one array a single selector-less operation
+   * failed `adminOperationsPageSchema` and threw away EVERY operation on the page. The notifier reads
+   * no selector; null is accepted and simply absent downstream.
+   */
+  selector: z.string().regex(/^0x[0-9a-f]{8}$/).nullable(),
+  label: z.string().min(1),
+  caller: address,
+  scheduledAt: unix,
+  readyAt: unix,
+  status: z.enum(['pending', 'executed', 'canceled']),
+});
+export type ApiAdminOperation = z.infer<typeof adminOperationSchema>;
+export const adminOperationsPageSchema = z.object({
+  items: z.array(adminOperationSchema),
+  nextCursor: z.string().nullable().optional(),
+});
+
+/**
+ * X8-181. The three statuses `/v2/admin/operations` serves, asked for one at a time because the route
+ * takes exactly one (`indexer/src/api/v2/admin.ts:92-95`: `status` defaults to `pending` and anything
+ * outside this set is a `bad_status` error). Asking for only `pending`, which is what the default did,
+ * means the notifier never sees an operation reach a terminal state — and `executed` and `canceled` are
+ * the half that actually moved protocol state.
+ *
+ * Deliberately NOT `executed` only: a canceled operation is a different notice, not a missing one.
+ */
+const ADMIN_OPERATION_STATUSES = ['pending', 'executed', 'canceled'] as const;
+
+/** The route's own ceiling (`indexer/src/api/v2/shared.ts` `limit()`: default 50, capped at 200). */
+const ADMIN_OPERATIONS_PAGE = 200;
+
+/**
+ * Pages per status before the read gives up. 200 x 25 is 5,000 operations of one status, which the
+ * AccessManager will not produce in the life of this deployment; the bound exists so a cursor the route
+ * never stops advancing cannot hang a tick, not because the ceiling is expected.
+ *
+ * Reaching it THROWS rather than returning a short list. A truncated read looks exactly like a complete
+ * one to every caller, and the engine's catch already does the right thing with a failure: it keeps the
+ * operations it had and logs. Returning the first 5,000 silently would be the same defect this task
+ * exists to fix, one layer down.
+ */
+export const ADMIN_OPERATIONS_MAX_PAGES = 25;
+
+/**
+ * The deployment identity persisted as rules_state.anchor.
+ * Composition: `${chainId}:${interfaceVersion}:${deployBlock}` with the JSON token `null`
+ * (four letters) when deployBlock is null, so a missing block is distinct from the uint
+ * string "0". Values come from /v2/config at runtime — never a hardcoded chain or version.
+ */
+export function deploymentAnchor(config: ApiConfig): string {
+  return `${config.chainId}:${config.interfaceVersion}:${config.deployBlock === null ? 'null' : config.deployBlock}`;
+}
 
 /* ------------------------------------------------------------------ /v2/feed/activity */
 
@@ -161,6 +297,16 @@ export const activityItemSchema = z.discriminatedUnion('kind', [
   }),
 ]);
 export type ActivityItem = z.infer<typeof activityItemSchema>;
+
+/**
+ * The `kinds` GET /v2/feed/activity is asked for (F4 D4). Explicit rather than omitted, because the
+ * union above has no catch-all: one kind the notifier cannot parse fails the whole page, so the
+ * indexer must stay free to ship a new feed kind before the notifier knows it. The price of that is
+ * this list — a kind added to the union and forgotten here is never read, which is exactly how the
+ * v7 `stale_cancel` withdrawal went missing. engine.test.ts pins the list against the union and
+ * against the route's 64-character bound on the parameter (indexer api/v2/machine.ts).
+ */
+export const ACTIVITY_KINDS = ['fill', 'settlement', 'redemption', 'roll', 'stale_cancel'] as const satisfies readonly ActivityItem['kind'][];
 export type FillItem = Extract<ActivityItem, { kind: 'fill' }>;
 export type SettlementItem = Extract<ActivityItem, { kind: 'settlement' }>;
 export type RedemptionItem = Extract<ActivityItem, { kind: 'redemption' }>;
@@ -235,6 +381,46 @@ export class IndexerError extends Error {
   }
 }
 
+/**
+ * /v2/config reported an interface this build was not written for.
+ *
+ * An `IndexerError` subclass so the engine's `codeOf` and its tick-failure log report it with a
+ * route and a code like every other indexer failure, rather than as a bare `Error`.
+ */
+export class InterfaceVersionError extends IndexerError {
+  constructor(
+    readonly observed: number,
+    readonly implemented: number = IMPLEMENTED_INTERFACE_VERSION,
+  ) {
+    super('/v2/config', 'interface-version-unsupported');
+    this.name = 'InterfaceVersionError';
+    this.message = `indexer /v2/config: interface version ${observed}, this build implements ${implemented}`;
+  }
+}
+
+/**
+ * Fail closed on an interface this build does not implement.
+ *
+ * BEFORE THIS EXISTED the notifier read `interfaceVersion` and used it for identity only (`:176`),
+ * so a v8 binary pointed at a v7 indexer of the SAME deployment anchor decoded v7 payloads with v8
+ * expectations and sent whatever survived the zod parse. The schemas here are not `.strict()` by
+ * deliberate design (see the header), which is exactly why a wrong-version payload does not
+ * announce itself: a field that moved or changed meaning parses, and a field that vanished fails
+ * only if it happened to be required. Degrading quietly is the failure mode; refusing the tick is
+ * the fix.
+ *
+ * Throwing is what makes it fail closed. `RulesEngine.runOnce` persists nothing when it throws and
+ * enqueues nothing, so no notice is ever derived from a payload this build cannot claim to
+ * understand; the run loop counts the failure, backs off and keeps reporting `failing` in health.
+ * The notifier's API and delivery worker keep running — an operator can still read the failure and
+ * the already-enqueued mail still goes out.
+ */
+export function assertInterfaceVersion(config: ApiConfig): void {
+  if (config.interfaceVersion !== IMPLEMENTED_INTERFACE_VERSION) {
+    throw new InterfaceVersionError(config.interfaceVersion);
+  }
+}
+
 export interface IndexerClient {
   markets(): Promise<ApiMarket[]>;
   activity(query: { since: number; cursor?: string | null; limit: number }): Promise<ActivityPage>;
@@ -242,6 +428,8 @@ export interface IndexerClient {
   /** Inclusive; at most CALENDAR_MAX_DAYS days (the client refuses a wider range before any request). */
   calendar(fromDay: number, toDay: number): Promise<ApiCalendar>;
   series(longId: string): Promise<ApiSeriesDetail>;
+  config(): Promise<ApiConfig>;
+  adminOperations(): Promise<ApiAdminOperation[]>;
 }
 
 export const INDEXER_TIMEOUT_MS = 10_000;
@@ -280,7 +468,7 @@ export function createIndexerClient(options: { baseUrl: string; timeoutMs?: numb
   return {
     markets: () => get('markets', '/v2/markets', marketsSchema),
     activity: ({ since, cursor, limit }) => {
-      const params = new URLSearchParams({ since: String(since), kinds: 'fill,settlement,redemption,roll', limit: String(limit) });
+      const params = new URLSearchParams({ since: String(since), kinds: ACTIVITY_KINDS.join(','), limit: String(limit) });
       if (cursor !== undefined && cursor !== null) params.set('cursor', cursor);
       return get('activity', `/v2/feed/activity?${params.toString()}`, activityPageSchema);
     },
@@ -294,6 +482,30 @@ export function createIndexerClient(options: { baseUrl: string; timeoutMs?: numb
     series: (longId) => {
       if (!/^(0|[1-9]\d*)$/.test(longId)) return Promise.reject(new IndexerError('series', 'bad_long_id'));
       return get('series', `/v2/series/${longId}`, seriesDetailSchema);
+    },
+    config: () => get('config', '/v2/config', configSchema),
+    adminOperations: async () => {
+      // One query per status, each followed to exhaustion through nextCursor - which the page schema
+      // has always declared (:140) and which the old single call discarded, so a second page of
+      // simultaneously pending operations was invisible.
+      const items: ApiAdminOperation[] = [];
+      for (const status of ADMIN_OPERATION_STATUSES) {
+        let cursor: string | undefined;
+        let pages = 0;
+        for (;;) {
+          const query = new URLSearchParams({ status, limit: String(ADMIN_OPERATIONS_PAGE) });
+          if (cursor !== undefined) query.set('cursor', cursor);
+          const page = await get('admin_operations', `/v2/admin/operations?${query.toString()}`, adminOperationsPageSchema);
+          items.push(...page.items);
+          pages += 1;
+          cursor = page.nextCursor ?? undefined;
+          if (cursor === undefined) break;
+          if (pages >= ADMIN_OPERATIONS_MAX_PAGES) {
+            throw new Error(`admin operations: ${status} still had a cursor after ${pages} pages of ${ADMIN_OPERATIONS_PAGE}; refusing to report a truncated list`);
+          }
+        }
+      }
+      return items;
     },
   };
 }

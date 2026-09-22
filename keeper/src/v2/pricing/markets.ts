@@ -10,6 +10,12 @@
  * Strict like config.ts: a registry this service cannot trust refuses to boot, with every problem
  * listed, instead of pricing some markets against a wrong feed. A market with no `cboe` block is
  * kept (it has a spot) and every price for it is refused as `chain-unavailable`.
+ *
+ * IDENTITY (K3-311). `token` is the registry's canonical Stock Token for the market: `asset`, the
+ * chain id from `shared.chainId` and `verification.uiMultiplier`, each null when the registry does not
+ * carry it. It is informational (pricing provenance and identity checks); a missing or malformed value
+ * leaves the market unmapped instead of refusing the boot, and `token` is absent when there is no
+ * valid `asset`. There is no issuer field in the registry, so the canonical issuer is null.
  */
 import { readFileSync } from 'node:fs';
 import { getAddress, isAddress, type Address } from 'viem';
@@ -19,6 +25,7 @@ export interface PricingMarket {
   ticker: string;
   feed: Address;
   cboe: { root: string; url: string } | null;
+  token?: { chainId: number | null; address: Address; uiMultiplier: string | null };
 }
 
 export interface PricingRegistry {
@@ -38,6 +45,10 @@ const httpsUrl = z.string().refine((raw) => {
     return false;
   }
 }, 'not an https URL');
+
+const chainIdSchema = z.number().int().positive();
+/** The token's uiMultiplier as the registry verified it: a decimal integer string (1e18-scaled). */
+const uiMultiplierSchema = z.string().regex(/^[1-9]\d{0,40}$/);
 
 const registrySchema = z.object({
   defaults: z
@@ -68,9 +79,16 @@ export function parsePricingRegistry(json: unknown): PricingRegistry {
     throw new Error(`the market registry is not usable for pricing:\n${lines.join('\n')}`);
   }
   const markets = new Map<string, PricingMarket>();
+  const chainId = chainIdSchema.safeParse((json as { shared?: { chainId?: unknown } } | null)?.shared?.chainId);
   for (const m of parsed.data.markets) {
     if (markets.has(m.ticker)) throw new Error(`the market registry lists ${m.ticker} twice`);
-    markets.set(m.ticker, { ticker: m.ticker, feed: m.feed, cboe: m.cboe ? { root: m.cboe.root, url: m.cboe.url } : null });
+    const market: PricingMarket = { ticker: m.ticker, feed: m.feed, cboe: m.cboe ? { root: m.cboe.root, url: m.cboe.url } : null };
+    const asset = address.safeParse((m as { asset?: unknown }).asset);
+    if (asset.success) {
+      const ui = uiMultiplierSchema.safeParse((m as { verification?: { uiMultiplier?: unknown } }).verification?.uiMultiplier);
+      market.token = { chainId: chainId.success ? chainId.data : null, address: asset.data, uiMultiplier: ui.success ? ui.data : null };
+    }
+    markets.set(m.ticker, market);
   }
   return {
     markets,

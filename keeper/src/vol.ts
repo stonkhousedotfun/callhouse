@@ -559,17 +559,35 @@ export function filterQuotes(calls: readonly CboeOption[]): CboeOption[] {
 
 export type SpotMapping = { ok: true; ratio: number; tokenSpot: number; divergenceBps: number } | VolFailure;
 
+/** Registry `verification.uiMultiplier` is 1e18-scaled; 1e18 is one share per token. */
+export const UNIT_UI_MULTIPLIER = 10n ** 18n;
+
 /**
- * The moneyness ratio `tokenSpot / shareSpot`, refused when it is further than `maxDivergenceBps`
- * from 1: the token's multiplier is ~8 bps, so hundreds of bps mean one of the two spots is
- * wrong or from a different day.
+ * The moneyness ratio after dividing the token spot by `uiMultiplier()` (1e18-scaled, from the
+ * registry, never guessed). Refused when that ratio is further than `maxDivergenceBps` from 1.
+ * A missing multiplier is treated as 1e18 so a 1:1 token is unchanged; a 100× token is not
+ * flagged as 9999% divergent.
  */
-export function mapSpot(shareSpot: number, spotUsdg6: bigint, maxDivergenceBps: number): SpotMapping {
+export function mapSpot(
+  shareSpot: number,
+  spotUsdg6: bigint,
+  maxDivergenceBps: number,
+  uiMultiplier: string | null = null,
+): SpotMapping {
   const tokenSpot = Number(spotUsdg6) / 1e6;
   if (!(Number.isFinite(shareSpot) && shareSpot > 0) || !(tokenSpot > 0)) {
     return { ok: false, reason: 'vol-inconsistent', detail: { why: 'a spot is not positive', shareSpot: String(shareSpot), spotUsdg6: spotUsdg6.toString() } };
   }
-  const ratio = tokenSpot / shareSpot;
+  let scaled = Number(UNIT_UI_MULTIPLIER);
+  if (uiMultiplier !== null && uiMultiplier !== '') {
+    const n = Number(uiMultiplier);
+    if (!(n > 0) || !Number.isFinite(n)) {
+      return { ok: false, reason: 'vol-inconsistent', detail: { why: 'uiMultiplier is not a positive number', uiMultiplier } };
+    }
+    scaled = n;
+  }
+  const shareEquivalent = tokenSpot * Number(UNIT_UI_MULTIPLIER) / scaled;
+  const ratio = shareEquivalent / shareSpot;
   const divergenceBps = Math.abs(ratio - 1) * 10_000;
   // 206 / 200 is 300.0000000000002 bps in floats: the limit is inclusive, not a float artefact.
   if (divergenceBps > maxDivergenceBps + 1e-6) {
@@ -820,6 +838,8 @@ export interface VolSettings {
   expectedRoot?: string;
   /** Full-day NYSE closures for the session freshness check. Default the built-in table. */
   holidays?: readonly string[];
+  /** Registry 1e18-scaled uiMultiplier; omitted or null is a unit token (1e18). */
+  uiMultiplier?: string | null;
 }
 
 /**
@@ -850,7 +870,7 @@ export function checkVolMarket(ctx: VolContext | null | undefined, spotUsdg6: bi
   if (quotes.length < 2) {
     return { ok: false, reason: 'vol-no-quotes', detail: { closeDay, listedCalls: String(expiry.calls.length), usableQuotes: String(quotes.length), ...skipped } };
   }
-  const spot = mapSpot(chain.shareSpot, spotUsdg6, settings.maxDivergenceBps);
+  const spot = mapSpot(chain.shareSpot, spotUsdg6, settings.maxDivergenceBps, settings.uiMultiplier ?? null);
   if (!spot.ok) return spot;
   return {
     ok: true,

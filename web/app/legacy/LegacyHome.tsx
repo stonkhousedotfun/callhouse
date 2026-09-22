@@ -7,7 +7,7 @@
  * A market moves from the second card to the first by turning live in ops/markets/tier1.json,
  * gen:markets and a rebuild. The old pooled vault is closed; collect a queued redemption on /collect.
  *
- * Copy discipline (scripts/copy-lint.mjs): what a market IS and where it is, never what it might
+ * Copy discipline (disclosure policy (copy-lint enforced this until it was removed on 2026-09-21; nothing checks it now)): what a market IS and where it is, never what it might
  * pay. "Planned" is a statement about a registry row, not a promise of a date.
  *
  * Status matches stonkhouse.fun: beta, pending audit.

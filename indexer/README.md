@@ -1,11 +1,14 @@
 # @callhouse/indexer
 
-Ponder indexer and read API for the Stonkhouse covered-call vault on **Robinhood Chain mainnet
+Ponder indexer and read API for Stonkhouse on **Robinhood Chain mainnet
 (chain id 4663)**.
 
-It watches one vault, the Valorem clearinghouse it writes into, the Seaport 1.6 order book it
-lists on, and the two tokens that move in and out of it. It turns that into a small Postgres
-schema and a JSON API that the web app and the keeper read.
+V2 watches all markets through one Clearinghouse (`V2_CLEARINGHOUSE`). The legacy sources watch
+one product per process: the pooled vault (`VAULT_ADDRESS`), or a factory market
+(`FACTORY_ADDRESS`: an `AccountFactory` and its `WriterAccount` clones, see "Factory markets"
+below), or both. V2 and legacy sources may run together. For the vault that is the vault itself, the Valorem clearinghouse it writes into,
+the Seaport 1.6 order book it lists on, and the two tokens that move in and out of it. It turns
+that into a small Postgres schema and a JSON API that the web app and the keeper read.
 
 The vault it indexes is the **write-on-fill** redesign (contracts branch
 `redesign/a2-own-strikes-2026-09-13`): the keeper creates a weekly Valorem option type and
@@ -25,7 +28,7 @@ outcome — and so is a week whose claim is stranded.
 ## Quick start
 
 ```bash
-cp .env.example .env.local          # fill in VAULT_ADDRESS and START_BLOCK
+cp .env.example .env.local          # fill in a legacy group, a v2 group, or both
 pnpm --filter @callhouse/indexer dev
 ```
 
@@ -45,12 +48,24 @@ pnpm --filter @callhouse/indexer codegen     # ponder codegen: the config and sc
 
 | Variable | Required | Meaning |
 |---|---|---|
-| `PONDER_RPC_URL_4663` | yes | Archive RPC that serves historical `eth_call` and `eth_getLogs`. Production uses `https://robinhood-mainnet.g.alchemy.com/v2/<key>`. `rpc.mainnet.chain.robinhood.com` cannot backfill: it answers "metadata is not found" on a historical `eth_call`. |
-| `VAULT_ADDRESS` (alias `VAULT`) | yes | The deployed Stonkhouse vault. |
-| `START_BLOCK` | yes | Block the vault was deployed in. |
+| `PONDER_RPC_URL_4663` | yes | Archive RPC that serves historical `eth_call` and `eth_getLogs` for a VAULT deployment (the vault handlers `eth_call` past blocks during backfill; `rpc.mainnet.chain.robinhood.com` answers "historical state ... is not available"). Production uses `https://robinhood-mainnet.g.alchemy.com/v2/<key>`. A FACTORY market backfills logs on the public RPC and wants the archive only for the optional `Factory:setup` settings read (see "Factory markets"). |
+| `VAULT_ADDRESS` (alias `VAULT`) | one of the three groups | The deployed pooled vault. The NVDA legacy deployment sets this and only this, as before. |
+| `FACTORY_ADDRESS` (alias `FACTORY`) | one of the three groups | A factory market's `AccountFactory` (`ops/markets/tier1.json` → `deployment.factory`). See "Factory markets". |
+| `V2_CLEARINGHOUSE` | one of the three groups | The v2 Clearinghouse shared by every v2 market. Distinct from the legacy Valorem `CLEARINGHOUSE`. |
+| `V2_ORDER_BOOK` / `V2_SETTLEMENT_ORACLE` / `V2_AUTO_ROLLER` / `V2_MAKER_REGISTRY` | with `V2_CLEARINGHOUSE` | The four other v2 event sources; all five addresses must be set together. |
+| `V2_EXPIRY_CALENDAR` / `V2_KEEPER_REWARDS` | no | Optional periphery event sources. When set, calendar policy changes and keeper bounties/rewards are indexed from `V2_START_BLOCK`. When the calendar is unset, a nonweekly series cannot be identified as a whitelisted special expiry from events and appears as daily. |
+| `V2_REWARDS_DISTRIBUTORS` | no | JSON array of `{ "program": "<open string>", "address": "0x..." }`. Every listed instance is indexed from `V2_START_BLOCK`; keep replaced instances listed while they still carry claims. `V2_REWARDS_DISTRIBUTOR` remains the maker-only fallback and, when both are set, must match a `maker` row. |
+| `V2_ACCESS_MANAGER` / `V2_PAYOUT_ROUTER` | no | Optional v8 authority and payout-route event sources, indexed from `V2_START_BLOCK`. They are refused without `V2_CLEARINGHOUSE`. |
+| `V2_FEE_SPLITTER` / `V2_BUYBACK_EXECUTOR` | no | Optional v8 flywheel event sources. The executor is refused without the splitter. Both use the earlier `V2_FLYWHEEL_START_BLOCK`. |
+| `V2_START_BLOCK` | with `V2_CLEARINGHOUSE` | First v2 deployment block; no genesis default. |
+| `V2_FLYWHEEL_START_BLOCK` | with `V2_FEE_SPLITTER` | Splitter deployment block. The splitter is constructed before the core because it is the core fee recipient, so using `V2_START_BLOCK` would miss its earliest events. |
+| `PRICING_URL` | no | Optional HTTP(S) pricing service for v2 quotes and cards. |
+| `MARKET` | no | The ticker the factory market is published under. A label; default `NVDA`. |
+| `START_BLOCK` | with a legacy address | Block the legacy product was deployed in (a factory market: its `deployment.deployBlock`). |
 | `DATABASE_URL` | no | Postgres. Omit for a local PGlite DB under `.ponder/pglite`. |
 | `DATABASE_PRIVATE_URL` | no | Railway-style private URL; Ponder prefers it over `DATABASE_URL`. Set one, not both. |
 | `DATABASE_SCHEMA` | yes | Ponder refuses to start without a schema; `--schema <name>` also works. Leave unset on Railway (see "Deploy"). |
+| `DATABASE_VIEWS_SCHEMA` | no | Stable Ponder view namespace. The v8 Railway service uses `callhouse_v2`; it must use a different Postgres database from a simultaneously running v7 service with the same view namespace. |
 | `END_BLOCK` | no | Stop indexing here. Leave unset in production. Used to bound a replay. |
 | `PGLITE_DIRECTORY` | no | Force PGlite at this path, even with `DATABASE_URL` set. For the fork sync's throwaway database; leave unset otherwise. |
 | `LIVE_READ_TIMEOUT_MS` | no | Deadline on one batched live read. Default 8000. |
@@ -58,9 +73,172 @@ pnpm --filter @callhouse/indexer codegen     # ponder codegen: the config and sc
 | `SEAPORT` / `USDG` / `ASSET` / `MULTICALL3` | no | Override the built-in mainnet addresses for a fork. |
 | `PORT` | no | The HTTP port. Ponder reads it before `--port`. |
 
-`VAULT_ADDRESS` and `START_BLOCK` have no defaults on purpose. Chain 4663 is past block
-61,000,000; a scan from genesis is hours of `eth_getLogs` over a period when the vault did not
-exist. The config throws with an explanatory message rather than quietly indexing nothing.
+V2 cards read `lib/v2/cardRegistry.generated.json`, a small committed projection of
+`ops/markets/tier1.json`. The indexer image excludes `ops/`, so regenerate it with
+`pnpm --filter @callhouse/indexer gen:card-registry` whenever its card inputs change. The indexer
+test gate runs `check:card-registry` and fails on drift; the Dockerfile asserts that the snapshot
+is present in the production tree.
+
+### V2 replay and read API map
+
+`src/v2/` reduces contract logs into the `v2*` tables in `ponder.schema.ts`. The
+`src/api/v2/` routes read that projection; `schema.ts` is the exact response contract
+mirrored by `web/lib/v2/api-schema.ts`. Keep the schema, generated fixtures, and web
+consumer in sync. The chain remains authoritative for writes and settlement: the web
+checks deployment config and selected orders on chain, then simulates its transaction.
+
+The OrderBook logs `FeeParamsScheduled` when its admin schedules a change. The indexer
+stores the active and pending values in `v2OrderBookState`; activation emits no second
+log. `/v2/config` evaluates the stored schedule at the **indexed checkpoint's block
+timestamp**, so an API response never applies a future fee based on the host clock.
+The web checks `pendingFeeParams` and `quoteTake` at the same chain block before a take,
+and caps the take deadline before any pending activation. A client must refresh its
+quote after approval and inspect the confirmed `Taken` event for the actual fill size.
+
+`/v2/series/:id/book` exposes an AskWrite's individually fillable `units`, its
+`onChainRemainingUnits` before collateral clipping, and `makerFreeUnits` shared by
+that maker's writer asks. The web ticket walks orders in price order, reserves the
+shared maker budget, and skips an order when the contract would lack collateral
+for that call's planned units. `quoteTake` is still the final chain check because
+operator approval, pauses and balances can change after indexing.
+
+Account positions include open and expired orders that still custody escrow; the
+clock's `expired` projection does not release assets. Only on-chain cancellation or
+pruning does that. Short `premiumReceived` comes from `v2WriterSeriesPremium`, one
+row per writer and series. The block-end PnL reducer updates that row only for
+primary fills after `matchTakeFees` has allocated each whole-call taker fee across
+all of its fills, including any resale fills in the same call. Do not reconstruct
+it by summing `v2Take.takerFee` or filtering fills before fee matching: either
+loses per-fill rounding or charges resale fees to a primary writer. A schema
+change adding this projection needs a fresh Ponder replay before serving the new
+API; an empty table would make historical premiums show as zero.
+
+Public market, win and leaderboard routes scope filters, time windows and pagination
+in SQL before loading related rows. `/v2/pnl/:id` can
+describe a profitable resale before settlement; its `settlementPrice` is then `null`.
+`/v2/markets/:ticker/series` uses an opaque ascending `(expiry, strike, longId)`
+keyset so a series that changes status between pages cannot shift and hide the
+next row. Offset-based v2 lists (series trades, cards, wins, leaderboard and
+makers) accept starts through 10,000 and return HTTP 400 for a deeper cursor;
+they stop issuing `nextCursor` beyond that ceiling. Legacy v1 list offsets clamp
+at 10,000. For an unbounded event stream, use the keyset `/v2/feed/activity`
+cursor. Public v2 response caching ignores query keys that
+the route does not read, but retains its actual filters and cursors; update
+`src/api/cache.ts` whenever a new query option is added. Concurrent callers
+with the same normalized key share one successful response computation.
+`/v2/feed/activity` is the notifier's keyset feed. Each event kind reads at most
+`limit + 1` rows and loads only the series those rows reference. Settlement rows
+are also filtered and paged in SQL, with a three-block safety lag. A timestamp
+seek sets the settlement block floor for `since` requests. Preserve the
+`(block, logIndex, id)` cursor order and bounded reads when adding event kinds.
+Account history reads `realisedDeltaUsdg` from each indexed resale fill, close or long
+redemption. That is the event's USDG value minus the FIFO basis consumed by that event;
+the cumulative `v2PositionPnl.realisedUsdg` belongs to the position and must not be
+copied to every fill in a multi-fill transaction. Short redemptions have no long
+position PnL. A later token transfer can invalidate a previously ranked win, so the
+PnL reducer refreshes rankings when it marks transfer-in on a closed position.
+`/v2/markets` keeps indexed rows present if a live settlement-oracle spot reverts or
+times out. `src/api/v2/chain.ts` drops only the failed underlying from the batched
+result; `markets.ts` emits `{ spot: null, spotUpdatedAt: null }` for that ticker.
+Consumers must treat the pair as unavailable, not as zero or a stale card price.
+`/v2/cards` uses the same settlement-oracle spot. It keeps fillable asks in the
+catalogue with `card.spot: null` if that live read fails; the hero is unavailable
+until a spot returns. The pricing service's Cboe share spot is used for fair
+pricing and never substitutes for the token oracle spot on a card.
+The card catalogue and hero rank globally computed, executable asks. `loadCards`
+prunes series with no live ask in SQL, then shares one in-flight result across all
+card filters and the hero for 15 seconds per indexer process. Response cache expiry
+is capped at the snapshot expiry. This controls public query amplification, but
+each refresh can still read every live ask; a hard work cap would require a
+materialized card candidate view or an explicit active-series policy.
+The web disables new buys, bids and writing for the affected ticker while retaining
+withdrawal, cancellation, close and claim paths. The route test exercises one
+healthy and one failed oracle result, and both API schemas enforce the paired nulls.
+For a source-level map, start with `src/api/v2/{markets,bookData,accounts,feed}.ts`,
+`src/v2/{orderBook,pnl,clock}.ts` and `lib/v2/{fees,windows}.ts`.
+
+#### Selected-20 scale regression
+
+Run the deterministic scale gate without an RPC or external database:
+
+```bash
+pnpm --filter @callhouse/indexer scale:v2
+# optional, still bounded: V2_SCALE_SAMPLES=50 pnpm --filter @callhouse/indexer scale:v2
+```
+
+`scripts/v2-scale.ts` pins the approved target set (NVDA plus the nineteen additions) rather
+than taking every registry row. The generated indexer projection carries both default and
+per-market `expiriesAhead` alongside the ladder overrides. The harness resolves those values and
+calls the keeper's production `ladderStrikes` helper, including bps compounding, outward tick
+rounding, coarse-tick deduplication and the contract strike band. It also mirrors the production
+`ExpiryCalendar.nextExpiry` search over the committed holiday table, computes the production
+`longIdOf`, and uses the same long-id-keyed deduplication as `stepLadders`. At the pinned Friday
+head, the first daily and weekly close overlap: the generated target asks for 500 nominal ladder
+slots, 50 identical tuples collapse, and 450 canonical call series remain. SGOV and the deferred
+markets are deliberately absent; this is not the optional 34-market stress case and creates no
+rollout commitment.
+
+`scripts/v2-scale.test.ts` builds the relevant committed Ponder columns, defaults, constraints and
+indexes in PGlite, captures the real Clearinghouse handlers, then replays 20 `MarketRegistered`
+events followed by 450 `SeriesCreated` events in production planner order. Every event has
+deterministic block, transaction and log metadata. Before timing, the fixture seeds the committed
+holiday rows and configures the calendar address, so every series runs the deployed handler's
+holiday-table SQL classification branch. Deterministic client stubs serve only the handlers' symbol
+and mint-cutoff reads; the test asserts that the fallback calendar and `isWeekly` RPC reads remain
+zero. The reported `handlerReplay.ms` times this ordered local handler/SQL replay. Only after that
+timer stops does the fixture insert 450 live asks, collateral balances and recent fills for API
+load. Those order/fill inserts are not called backfill and are not part of the replay metric.
+
+The same run calls the real Hono routes with strict response-schema validation. It clears both
+response and shared-computation caches before each timed request, discards two warm-ups, and reports
+uncached p95 over 20 samples for `/v2/markets`, `/v2/cards`, `/v2/markets/NVDA/series` and one
+`/v2/series/:longId` detail. The last two measurements cover the API's `/v2/series` family; there is
+no bare `/v2/series` route. The card pagination check follows each returned cursor and requires the
+current 200/200/50 pages to end with a null cursor.
+
+`scripts/v2-scale.baseline.json` records the registry projection hash, base revision, fixture shape,
+machine/Node provenance and the median of three measured local runs. The regression ceilings are
+6,000 ms for handler replay and 32/650/550/35 ms for the four routes above. A test requires every
+ceiling to provide at least 4x measured headroom while remaining below 10x the committed baseline,
+so a ten-times regression cannot pass. These machine-sensitive CI guardrails are not production
+SLOs and do not claim owner agreement. Handler replay still excludes RPC log fetch/decoding,
+Ponder scheduling and checkpoint management, RPC transport, networked Postgres and Railway
+contention. O3-105's pinned-fork soak owns that end-to-end evidence; do not use this local number to
+size a release window. The harness reviewed as X3-102 candidate `a20e61d` does not measure the
+cold-Ponder target below: it remains local handler/PGlite replay and API evidence. X3-102 ends at
+that evidence plus the agreed target definition; O3-105 owns executing and reporting the target.
+
+The O3-105 target starts from candidate `a20e61d` and a chain 4663 fork pinned at block `65785744`,
+warped to unix time `1800000000`. Replay `V2_START_BLOCK=65780341` through the block containing the
+final canonical `SeriesCreated`. The exact set is SPCX, SPY, NVDA, MU, QQQ, SNDK, AAPL, MSFT,
+INTC, TSLA, META, AMD, GOOGL, AMZN, MSTR, PLTR, DELL, ORCL, TSM and CRWV; SGOV and every deferred
+market are excluded. The bounded dataset contains 29 `HolidaySet`, 20 `MarketRegistered` and 450
+unique `SeriesCreated` events from 500 nominal slots after 50 long-id collisions: 450 calls, zero
+puts, 200 daily series and 250 weekly series.
+
+Each of three runs starts with a fresh PostgreSQL database containing neither application state nor
+`ponder_sync` state; fixture construction is untimed. Completion requires Ponder to finish
+historical indexing, the first subsequent `/ready` response to return 200, the checkpoint to equal
+the final event block, and exact table cardinalities of 29 holidays, 20 markets and 450 series. Use
+a monotonic timer from `Started backfill indexing` to that first `/ready` 200, polled every 250 ms,
+and report the median of three runs. The reference host is Apple M3 Max (16 cores, 48 GiB), Darwin
+arm64, Node 24.20.0, Ponder 0.17.10, PostgreSQL 14.23 and Anvil 1.6.0 commit `f83bad9`, with one
+indexer process and no other soak services. Pass at a median no greater than 60,000 ms; an
+incomplete run or any cardinality mismatch fails. This is a local cold-Ponder regression target,
+not a hosted or production SLO. Keep the existing 32/650/550/35 ms API p95 gates above, and do not
+add the 60-second target to `scale:v2`, which cannot measure it.
+
+The gate reproduces every index already declared on the touched tables. If a ceiling fails, first
+capture the route and query plan on the target Postgres shape; add a schema index only with a
+before/after measurement. A passing run is evidence that no extra index is justified at this
+fixture size, not proof that larger history or production hardware will behave identically.
+
+All source addresses and their start blocks have no defaults on purpose. Chain 4663
+is past block 61,000,000; a scan from genesis is hours of `eth_getLogs` over a period when the
+product did not exist. The config throws with an explanatory message rather than quietly indexing
+nothing, and it throws when no source group is set. A route for a legacy product a deployment does not
+index answers `404 {"configured": false}` (`/v1/vault*` on a factory-only deployment, `/v1/market*`
+on a vault-only one) rather than an empty tape.
 
 Gone with the redesign, and refused if you look for them in `lib/env.ts`: `REGISTRY`,
 `REGISTRY_START_BLOCK`, `OVERCALL_ORDERS_URL`, `OVERCALL_MARKET`, `OVERCALL_FEE_RECIPIENT`,
@@ -111,6 +289,90 @@ To start over, drop the schema (`DROP SCHEMA callhouse CASCADE`) or `rm -rf .pon
 Postgres. Every setting and variable is in `ops/deploy.md` §11; the four facts that decide whether
 a deploy works:
 
+For v8, use **one new `indexer-v2` service for all markets**. Give it a separate Postgres
+service/database from the v7 indexer that remains alive for the run-off: both use the fixed
+`DATABASE_VIEWS_SCHEMA=callhouse_v2`, so sharing a database would collide even though their
+internal deployment schemas differ. Do not migrate, copy or drop the v7 rows; v8 starts from a
+fresh schema and replays from its own deployment blocks. Set
+`V2_CLEARINGHOUSE`, `V2_ORDER_BOOK`, `V2_SETTLEMENT_ORACLE`, `V2_AUTO_ROLLER`,
+`V2_MAKER_REGISTRY`, and `V2_START_BLOCK` from the deployed v2 registry; set
+`V2_EXPIRY_CALENDAR`, `V2_KEEPER_REWARDS`, `V2_ACCESS_MANAGER`, and `V2_PAYOUT_ROUTER` when
+deployed. Set `V2_FEE_SPLITTER`, `V2_BUYBACK_EXECUTOR`, and `V2_FLYWHEEL_START_BLOCK` from
+`v2.flywheel`. Leave the legacy source groups
+(`VAULT_ADDRESS`, `FACTORY_ADDRESS`, `START_BLOCK`) unset on this service. Leave
+`DATABASE_SCHEMA` unset on Railway: `indexer/Dockerfile` uses the deployment id as the schema,
+and `indexer/railway.json` holds traffic until `/ready` returns 200 after backfill. Use an archive
+`PONDER_RPC_URL_4663` that serves historical logs and contract reads; the public RPC is suitable
+for a short devnet fork, not a production backfill. Do not set `END_BLOCK` in production.
+
+### V2 devnet sync gate
+
+Start a **fresh** local devnet, then run the harness from the same callhouse checkout:
+
+```bash
+CONTRACTS_DIR=/path/to/callhouse-contracts-on-v2 ops/devnet/up.sh
+MARKETS_REGISTRY=$PWD/ops/devnet/tier1.devnet.json pnpm --filter @callhouse/indexer gen:v2-registry
+pnpm --filter @callhouse/indexer v2:devnet-check
+git restore -- indexer/lib/v2/marketRegistry.generated.ts
+ops/devnet/down.sh
+```
+
+`up.sh` leaves anvil running in its own session, so the harness may run from another shell. Generate
+the indexer registry from the devnet registry before starting Ponder: the committed registry is for
+production and has no local deployment addresses. Restore that tracked generated file after the
+harness, including after a failed run, and do not commit the rehearsal snapshot. The harness reads
+the generated `ops/devnet/addresses.json` and `ops/devnet/env/indexer.env`, refuses a non-loopback
+or non-anvil RPC, starts its own bounded Ponder process on port 42170 with a new temporary PGlite
+database, and stops that
+process on exit. It waits for `/ready` and the v2 indexed block, then compares the API with viem
+chain logs and views: all series terms, an active book and its totals, wallet balances, settlement
+amounts, and redeemed winners. `V2_DEVNET_API_PORT` and `V2_DEVNET_SYNC_TIMEOUT_MS` override its
+port and fifteen-minute timeout. The devnet's generated registry and env files are rehearsal inputs;
+never commit or deploy them.
+
+### Deployed-dev read-only manifest check
+
+After the dev deployment and historical replay finish, use the exact saved registry from that
+deployment and its explicit dev indexer URL. This command makes four HTTP GET requests and has
+no RPC, signing, database, deploy, time-warp or service-control capability:
+
+```bash
+pnpm --filter @callhouse/indexer v2:dev-readonly-check \
+  --base-url https://YOUR-DEV-INDEXER-HOST \
+  --registry /absolute/path/to/pinned-dev-registry.json \
+  --registry-sha256 SHA256_OF_THAT_REGISTRY \
+  --interface-version 7 --chain-id 4663
+```
+
+`--base-url` and `--registry` are required; neither falls back to an environment variable or
+production registry. `--registry-sha256` is an optional content pin; obtain it from the deployment
+handoff and pass it to reject the wrong file before making requests. The JSON result always
+records the registry content hash. Interface version defaults to 7 and chain ID to 4663, so a
+registry and API that agree on an older version or another chain still fail.
+
+The checker requires a positive deployment block, all 13 nonzero contract/source addresses
+(including a deployed but unused DataStreamsSource), and at least one intended live market.
+It checks `/ready`, health and indexed block/lag, config chain/version/block/USDG, every contract
+address, all seven effective fee fields including writer rent, and the registry's live/paused market set,
+underlyings, puts policy, strike ticks and effective per-market rent. Missing, zero or over-ceiling
+rent on a live or paused market fails before any HTTP request. Planned registry markets need not have indexed rows;
+an unexpected live market fails. An authorized fee change requires a corresponding registry pin.
+
+Each request has a 10-second deadline including its body (`--timeout-ms`, maximum 30 seconds)
+and a 1 MiB body limit. Healthy lag must be at most 120 seconds (`--max-lag-seconds`). The command
+does not retry, follow redirects, print the endpoint URL or echo upstream error bodies. HTTPS is
+required; local HTTP fixtures require `--allow-loopback`. URLs with credentials, query strings
+or fragments are refused. This option permits fixture GETs only; it never enables chain writes.
+
+Exit 0 and `manifest_passed` cover **only this manifest check**. The output explicitly leaves
+writer-rent behavior and series/event/on-chain parity pending for the separate acceptance suite.
+This does not replace X2-06/W2-14, the local Anvil harness,
+full v7 functional tests or deploy authorization. Until dev addresses and the final registry are
+handed off, validate this checker using its local HTTP fixture tests; do not substitute live
+production inputs.
+
+### Deployment schema and readiness
+
 - **The schema changes on every deploy.** The image runs
   `ponder start --schema ${DATABASE_SCHEMA:-$RAILWAY_DEPLOYMENT_ID}`. Leave `DATABASE_SCHEMA`
   **unset** on Railway. A schema remembers the build that created it — reusing one with different
@@ -118,6 +380,9 @@ a deploy works:
   locked by a heartbeat while the old deployment is still serving, which Railway keeps doing until
   the new one is healthy. The first was reproduced against a local Postgres; the second is
   Ponder 0.17's `tryAcquireLockAndMigrate` (`Failed to acquire lock on schema`).
+- **The v8 deployment is not a v7 migration.** Keep the v7 run-off indexer and its database
+  untouched. Start v8 against a separate Postgres database with a fresh deployment-id schema;
+  this also isolates the fixed `DATABASE_VIEWS_SCHEMA=callhouse_v2` view namespace used by both.
 - **A new schema is not a cold backfill.** RPC responses are cached in the shared `ponder_sync`
   schema; a redeploy re-runs the handlers over cached logs and only fetches blocks newer than the
   cache. Old deployment schemas stay in the database until `ponder db prune`.
@@ -157,6 +422,8 @@ curl -s  localhost:42069/v1/health # {"status":"ok", …, "lag":{"blocks":"123",
 | `StockTokenIn` / `StockTokenOut` | NVDA token | `to` / `from` = vault | Exact asset balance without an RPC read. |
 | `UsdgIn` / `UsdgOut` | USDG | `to` / `from` = vault | Exact USDG balance. |
 | `StockToken` | NVDA token | — | The issuer's switches: oracle pause, transfer pause, ERC-8056 multiplier. |
+| `Factory` | `FACTORY_ADDRESS` | — | Factory market only. Accounts created and rekeyed, the week (`WeekSet`), the halt, policy / fee recipient / cap, roles. |
+| `WriterAccount` | `factory(AccountCreated.account)` | — | Factory market only. Every clone's events; Ponder resolves the address set from the factory's `AccountCreated`. |
 
 Two sources per token because a log filter **ANDs** its topics: `from == vault` and
 `to == vault` cannot be expressed as one filter. Ponder fetches only the events that have a
@@ -369,6 +636,16 @@ One row per (role, account). Rows are never deleted: a revoked grant keeps `gran
 with a `revokedAt`, so the history survives. `roleName` resolves the hash to
 `DEFAULT_ADMIN_ROLE`, `KEEPER_ROLE` or `GUARDIAN_ROLE`.
 
+### The factory market's tables
+
+Populated only with `FACTORY_ADDRESS`; see "Factory markets" for the model. `market` (one row, the
+factory: settings, the current week, totals), `writer_account` (one row per clone, keyed by its
+address: owner, status, the pinned listing, lifetime totals), `market_week` (one row per `WeekSet`,
+`${factory}-${weekId}`, with what the accounts did under it), `lot_fill` (one row per `LotFilled`,
+`${tx}-${logIndex}`), `account_settlement` (one row per `Settled`, same key, with the outcome) and
+`market_role` (the factory's AccessControl grants, never deleted). The vault tables above are not
+touched by any of them.
+
 ### `vault_snapshot` — append-only state trail
 
 One row per state-changing event, keyed `${blockNumber}-${logIndex}`, with a `reason` naming the
@@ -392,7 +669,11 @@ max-age=15`. Responses carry `x-cache: HIT|MISS`.
 | GET | `/v1/listings/:hash` | One order by hash. |
 | GET | `/v1/strands` | Every stranded claim, newest first. |
 | GET | `/v1/snapshots` | The raw state trail. |
-| GET | `/v1/health` | Indexer head vs chain head, lag in blocks and seconds, and whether a claim is stranded. |
+| GET | `/v1/market` | Factory market: the market row, the current week with totals, accounts by status, pending lots, roles. Index only, no live read. |
+| GET | `/v1/market/weeks` | Every week the keeper set, newest first, each with its listings, fills and settlements. `?limit=`, `?offset=`. |
+| GET | `/v1/market/fills` | Every lot filled, newest first. `?account=` (the clone) or `?owner=`. |
+| GET | `/v1/market/accounts/:address` | One account by clone address OR owner address, with its fills and settlements. |
+| GET | `/v1/health` | Indexer head vs chain head, lag in blocks and seconds, the vault's phase / strand state and the factory's week / halt / counts. Each product's block is null when it is not configured. |
 | POST | `/graphql` | Auto-generated from `ponder.schema.ts`. The escape hatch. |
 
 ### The stranded fields
@@ -450,7 +731,9 @@ and refuses to build if an app route shadows one. Its `/health` is a bare livene
   "indexer": { "head": "61154100", "headAt": "2026-09-12T13:49:22.000Z" },
   "rpc":     { "head": "61154107", "reachable": true },
   "lag":     { "blocks": "7", "seconds": "14" },
-  "vault":   { "phase": 1, "phaseName": "Listed", "cycle": 1, "writesHalted": false, "stranded": false }
+  "market":  "NVDA",
+  "vault":   { "phase": 1, "phaseName": "Listed", "cycle": 1, "writesHalted": false, "stranded": false },
+  "factory": null                        // or { "address", "ticker", "week", "writesHalted", "accounts", "pendingLots", "settingsVerified", … }
 }
 ```
 
@@ -477,6 +760,111 @@ Each batch carries a deadline (`LIVE_READ_TIMEOUT_MS`, default 8s). A view that 
 batch that times out, or a chain with no Multicall3 all degrade to `null`, and the response
 still goes out with `live: false` and the indexed figures in place — `spotUsdg` reverting is
 itself a signal, because the vault refuses to arm or fill on a stale price.
+
+---
+
+## Factory markets
+
+**The audit finding this section answers (2026-09-15).** The indexer was pooled-vault-shaped —
+"one vault" in every source, table and route — and had ZERO coverage of the factory product
+(`contracts/src/solo/`: one `AccountFactory` per market, one `WriterAccount` clone per user), which
+is the product every Tier 1 market runs on, NVDA included (factory `0xc4A5Cd0D…2BBb`, live since
+block 64,038,234). The web app's `/account` and `/book` pages read the factory and every clone
+over RPC in the browser (`accountCount`, `liveAt`, each clone's views), so a factory market had
+**no public tape at all**: no history of weeks, fills or settlements, nothing a dashboard or an
+alert could read without an archive node. The `FACTORY_ADDRESS` mode below is that tape.
+
+### One deployment per market
+
+The Tier 1 plan runs one keeper and one indexer process per market, env-driven, and this package
+follows it: there is no multi-market indexer and no list of factories in the config. A market's
+deployment is:
+
+```
+FACTORY_ADDRESS = ops/markets/tier1.json → markets[ticker].deployment.factory
+MARKET          = the ticker (a label on the payloads; nothing is derived from it)
+START_BLOCK     = markets[ticker].deployment.deployBlock
+VAULT_ADDRESS   unset
+```
+
+and everything else is the same as the vault's: one Postgres, a schema per deployment
+(`DATABASE_SCHEMA` unset on Railway, `RAILWAY_DEPLOYMENT_ID` otherwise, "Deploy (Railway)" above),
+`/ready` as the healthcheck. Both addresses may be set on one deployment (the NVDA vault could
+carry its factory's tape beside its own); the sources and the handlers are registered per product
+(`ponder.config.ts`, `lib/registry.ts`), and the vault's are byte-for-byte what they were.
+
+`ASSET` and `CLEARINGHOUSE` are vault-only and stay unset on a market deployment: the `addresses`
+group every `/v1/market*` payload carries publishes the market's OWN asset and Clear, read from
+the factory at `Factory:setup` — null until that read answers, never the NVDA token or the
+vault's Clear, which the env defaults would otherwise advertise on every market. `/v1/market`'s
+`market.contracts` is the same two values with a `verified` flag beside them.
+
+Two older documents describe this service differently and are superseded on those points by this
+section: `ops/deploy.md` §14.3 (the per-market indexer follows neither Seaport nor the Clear —
+the clones' own events carry the fills and the verdicts — and needs no archive endpoint beyond
+the optional setup read) and `docs/TECHSPEC-TIER1-MULTIMARKET.md` §5.3 (`/v1/market/fills` carries
+the whole premium only, not the fee split, and no route carries per-account balances; balances
+stay a live RPC read — "Log-only, and what that costs" below).
+
+### Log-only, and what that costs
+
+No factory handler makes an `eth_call`. The public RPC for chain 4663 has no historical state
+(`eth_call` at a past block answers `historical state … is not available`), per-market archive
+endpoints are not provisioned, and a backfill that reads the chain per event would stall on the
+endpoint the market actually runs against. So a factory market backfills on the public RPC from
+logs alone — 131k blocks of the NVDA factory's history in about a minute on 2026-09-15 — and the
+schema is shaped by what logs can say:
+
+- **The factory is the clock.** `WeekSet(id, strikeUsdg, exerciseTs, baseExpiryTs, askUsdg)`
+  creates a `market_week` row; the factory numbers its own weeks. Accounts that `list` afterwards
+  pin those terms (`LotsListed(weekId, optionId, lots, askUsdg)`); an account's expiry is
+  `baseExpiryTs + index`, one second per account, so no two share a Valorem bucket.
+- **`LotFilled` is the fill.** One order, one contract, `premiumUsdg` = the whole ask (Seaport pays
+  the seller's part to the owner and the fee item to the fee recipient directly). Seaport is NOT a
+  source for the clones: a `filter` needs fixed addresses and the set of clones is dynamic, and
+  the event already carries the order hash for anyone who wants the consideration items.
+- **`Settled(nvdaReturned, strikeUsdg)` is the verdict**, read against the listing's fills
+  (`lib/factoryLifecycle.ts settlementOutcome`): `unfilled` (no fills, no claim — the most likely
+  outcome, and a row), `assigned` (strike USDG in), `expired` (collateral back, no USDG), and
+  `unredeemed` — fills and NOTHING back, which means `tryRedeemClaim` failed and the account keeps
+  its claim (`list` reverts `StillOpen` until it is resolved). The last one is logged as a warning.
+- **Account status** (`writer_account.status`): `idle` → `pending` (`WriteRequested(n)`) → `listed`
+  (`LotsListed`) → `settled` (`Settled`); `WriteRequested(0)` is back to `idle`. `market.pendingLots`
+  is the requests of the accounts currently pending — the keeper's queue.
+- **Balances are not here.** A clone's token transfers cannot be filtered, so an account row has
+  `depositedTotal` / `withdrawnTotal` (a lower bound on what it holds: assignment moves assets out
+  without a `Withdrawn`) and the web keeps reading `idleAssets()` live for the real figure.
+
+### The one optional read: `Factory:setup`
+
+The constructor sets `policy`, `feeRecipient` and `depositCap` without an event, and `PolicySet`
+carries no values, so those come from views or not at all. `Factory:setup` reads them ONCE, before
+any event, pinned to `START_BLOCK` — which needs an archive RPC. On the public RPC the batch fails
+(retried by Ponder for ~2 minutes, so the handler gives it a 30 s deadline and moves on), the
+columns stay null, `market.settingsVerified` is false, and `/v1/market.settings` publishes null
+with `verified: false` — never a zero. `FeeRecipientSet` / `DepositCapSet` still update their
+columns as they arrive; a `PolicySet` stamps `policySetAt` so a reader knows the six policy fields
+may be stale from then. The four immutables (`asset`, `priceFeed`, `clear`, `implementation`) are
+read with Ponder's `cache: "immutable"` at the head instead, which is exact for an immutable and
+works on the public RPC, so `/v1/market.contracts` is verified even where the settings are not.
+**This read is the only reason a factory deployment would want an archive RPC.** A read that
+times out is not retried within a deployment — `Factory:setup` runs once per schema — so the
+settings of a deployment whose read timed out stay `verified: false` until a governance event or
+a redeploy (a new Railway deployment is a new schema, and the read re-runs); the boot log's
+"factory settings unreadable" warn says the same.
+
+### What `/v1/market` answered on the live NVDA factory
+
+Smoke on 2026-09-15 (`FACTORY_ADDRESS=0xc4A5…2BBb`, `START_BLOCK=64038234`, `END_BLOCK` =
+head − 2,000 — see "Deploy (Railway)": a bound at the head can exit 75 on a lagging public-RPC
+node, so `/v1/health` read `lagging` by construction — public RPC, PGlite, no `VAULT_ADDRESS`):
+`/ready` 200 after the backfill, one account created, week 1 set at strike 223.000000 USDG /
+ask 1.000000 USDG, matching the chain; the vault routes 404 `{"configured": false}`.
+`addresses.asset` / `addresses.clearinghouse` on the market payloads were the factory's own
+(`market.contracts`), not the vault's env defaults. The web's `/account` and `/book` still read
+the factory over RPC; moving them onto
+`/v1/market` is the web lane's call, and when it happens the `marketJson` shape gets a fixture
+under `ops/fixtures/api/` the way `cycleJson` has (`src/api/index.test.ts` says so).
 
 ---
 
@@ -556,6 +944,10 @@ alone prints them as bare selectors.
 and two views are ever used. Every signature in it was confirmed against the deployed bytecode
 (`OrderFulfilled` topic0 `0x9d9af8e3…6f31`; see `ops/recon/R2-R9-seaport-order-shape.md`).
 
+`abis/accountFactory.ts` and `abis/writerAccount.ts` are generated from `ops/abis/AccountFactory.json`
+and `ops/abis/WriterAccount.json` (extracted from `callhouse-contracts/out` at main `5eb84d1`), no
+library errors to merge: neither contract links a public library.
+
 Re-run `pnpm gen:abis` after any change under `ops/abis/`, then `pnpm typecheck`.
 
 ---
@@ -563,8 +955,8 @@ Re-run `pnpm gen:abis` after any change under `ops/abis/`, then `pnpm typecheck`
 ## Layout
 
 ```
-ponder.config.ts      chain 4663, the eight sources and their topic filters
-ponder.schema.ts      nine tables and four enums
+ponder.config.ts      chain 4663; the vault's eight sources and the factory market's two, each group registered only with its address
+ponder.schema.ts      the vault's nine tables and four enums, the factory market's six tables and one enum
 ponder-env.d.ts       generated by `ponder codegen`; commit it
 abis/                 generated (+ hand-written seaport.ts)
 lib/env.ts            every address and knob, resolved once
@@ -573,10 +965,15 @@ lib/lifecycle.ts      the pure decisions: harvest origin, close status, strand m
 lib/harvest.ts        one Harvest split into premium and strike proceeds (W-21)
 lib/roles.ts          the three AccessControl role hashes and what each one can do
 lib/deployment.ts     constructor-set vault settings, seeded by Vault:setup
+lib/registry.ts       the registry per product: the real `ponder` when its address is set, a no-op otherwise
+lib/factoryLifecycle.ts  the factory market's pure decisions: account status, pending lots, settlement outcome, week totals
+lib/factoryIndexing.ts   shared reducers for the market, account and week rows
 src/vault.ts          every vault, adapter and Distributor event
 src/valorem.ts        Valorem, narrowed to our writer / claim / option
 src/seaport.ts        OrderFulfilled → contractsSold and the realised price, per fill
 src/token.ts          balances in and out, plus the issuer's switches
+src/factory.ts        the AccountFactory: setup read, accounts, the week, switches, roles
+src/writerAccount.ts  every clone's events: request, listing, fills, settlement, claims, ownership
 src/api/index.ts      the Hono app
 src/api/chain.ts      live reads, each with a deadline
 src/api/cache.ts      the 15s cache
@@ -589,3 +986,64 @@ Files under `src/` other than `src/api/**` are indexing functions and are execut
 build time. Shared code that both the handlers and the API need lives in `lib/`. The handlers
 import `ponder:registry`, which exists only inside a Ponder process, so they are not unit-tested;
 the decisions they delegate to `lib/` are (`vitest.config.ts` says why).
+
+## Interface version 7: rent, stale asks, and replay
+
+The v7 consumers decode the complete six-field MarketConfig and thirteen-field Series tuple.
+Regenerate ABIs from the verified canonical `ops/abis/v2` export and generate the API registry
+from the matching version-7 deployment registry. The registry generator rejects older interfaces.
+Use a **fresh Ponder database/schema replay from the deployment block**; the v6 event topics and
+persisted rows cannot supply the new rent accounting. The replay also populates the per-writer
+premium projection introduced before v7.
+
+- Market `mintFeePpm` changes apply to future series. Each series exposes its pinned rate,
+  `mintFeesHeld` and cumulative `mintFeesAccrued`. The two monetary fields are in **native collateral**:
+  18-decimal Stock Tokens for calls, 6-decimal USDG for puts.
+- `Minted.fee` debits free collateral along with principal. `Closed.feeRefund` credits the closer
+  along with freed collateral. `MintFeesAccrued` follows `SeriesSettled`, clears held rent and records
+  protocol revenue in `v2MintFeeAccrual` with the emitted asset. Held rent is not sweepable revenue.
+- Account mint/close history carries `fee`/`feeRefund` in the same native units. The existing USDG
+  premium, PnL, leaderboard and aggregate trading-fee amounts **exclude collateral rent/refunds**;
+  no Stock Token rent is silently valued or subtracted from USDG. Do not label these figures net
+  of writer rent. To value rent, a future consumer must explicitly supply price source and time.
+- Book `updatedBlock` and `snapshotTimestamp` identify the indexed balance checkpoint. Each
+  write ask includes native `makerFreeCollateral`, original `onChainRemainingUnits` and its
+  individually fillable `units`/`makerFreeUnits`. Expired orders are removed using the later of
+  display and checkpoint time, while rent uses checkpoint time. On-chain quote/simulation remains the transaction
+  authority. Writers share their remaining collateral across one ticket; rent rounds up **once
+  per fill**, and an unfunded proposed fill is skipped whole as in OrderBook._plan.
+- Book and card reads compare the complete Ponder checkpoint before and after their database
+  queries. Normal indexing commits cause a retry; three unstable attempts return uncached 503
+  `snapshot_changing`. Ponder 0.17 publishes projections and checkpoints atomically for normal
+  blocks, but its reorg rollback temporarily leaves the old checkpoint until replacement blocks
+  are processed. These API snapshots therefore are not finality proofs; transaction preflight is
+  still required during a reorg. Missing checkpoints report unhealthy and use conservative time zero.
+- Card depth searches for the largest fully executable ticket rather than summing independent
+  per-order budgets. One-share and one-unit prices mirror the whole-or-skip plan independently.
+- `StaleAskCancelled` clears strategy `orderId`, preserves active/current series/expiry and records
+  `lastStaleCancelAt` plus `staleSpot`. A new roll clears the stale marker. `/v2/feed/activity` supports
+  `kinds=stale_cancel`, including writer, spot, oracle observation time and `nextRollAfter` expiry;
+  its event ID is the deduplication key. A withdrawn ask is not a stopped strategy.
+- `/v2/vault` exposes MakerVault transparency from bounded live reads at one block: wallet and
+  Clearinghouse free balances, all six configured limits, daily outflow, active order count and
+  decimal tracked-series IDs. The route fails with `503 vault_unavailable` when any required live
+  read fails; an absent `V2_MAKER_VAULT` is an explicit `404 not_configured`, never a zero-filled
+  success. Existing deposit, limit, treasury-exit and exposure projections remain the historical
+  source for indexed activity; the route does not duplicate them.
+
+Regression gates cover real handlers against an in-memory Postgres schema (call/put mint, close,
+settlement/accrual and stale withdrawal), native-money API responses, pinned capacity snapshots,
+per-fill rounding, shared budgets and selector/topic drift. X2-06 is extended for native rent
+conservation and capacity against a fresh local replay; the current seed exercises call accrual.
+W2-14 adds call/put mint and close ledger/history parity, stale cancellation and API-outage fallback.
+Put settlement/accrual is covered by the real-handler Postgres test until the local seed adds it.
+Harness implementation/typecheck is not evidence of a completed fork run. The deployed-dev checker
+is separately read-only and validates the deployment manifest, not transaction behavior.
+
+## Posting a maker reward epoch
+
+`pnpm maker:epoch <epoch-id> <budget-usdg-base-units>` reads the completed epoch from `/v2/makers` and writes `ops/maker-epochs/<epoch-id>.json` with allocations, the OpenZeppelin Merkle root and each proof. The budget is an explicit treasury decision. The score snapshot must be final before generating the file.
+
+`RH_RPC=<chain-4663 RPC> pnpm maker:post <epoch-file>` checks the file's complete allocation, root and proofs; confirms the epoch has ended, the chain and registry addresses match, no root has already been posted, and the RewardsDistributor holds at least the new epoch's total. It sends nothing by default. Existing unpaid epochs may need more funding than this one balance check proves.
+
+After review and funding, import the admin key into Foundry's local keystore and run `RH_RPC=<chain-4663 RPC> INDEXER_URL=<final indexer API> pnpm maker:post <epoch-file> --apply --account admin`. Before sending, it recomputes the allocation from the completed indexer score snapshot and refuses a different root. The script passes no key or RPC URL in command arguments to `cast`, then reads the posted root back. A root is immutable for its epoch; inspect the file and budget before `--apply`.

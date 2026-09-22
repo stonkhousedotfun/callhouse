@@ -17,7 +17,13 @@
  *     transition;
  *   - auto_roll skipped reads calendar days in 62-day blocks, caches them, waits past a holiday,
  *     and survives a calendar outage (the tick runs, the warning comes once the days are read);
+ *   - the feed is asked for every activity kind the notifier can parse (a `stale_cancel` item
+ *     produces the v7 auto_roll `withdrawn` message), and price-driven payloads carry the market's
+ *     own `spotUpdatedAt`;
  *   - unreadable stored state starts afresh; wallets that leave the watch set lose their holdings;
+ *   - the interface-version pin (K8-231): a /v2/config version this build does not implement fails
+ *     the tick CLOSED - it throws before any other route is read, persists nothing and enqueues
+ *     nothing - while an UNREADABLE config stays a warning and the tick continues on stored state;
  *   - migration 002 is idempotent; no log line carries a wallet address.
  */
 import assert from 'node:assert/strict';
@@ -34,7 +40,7 @@ import { linkTelegramChat } from '../store.js';
 import { appLinks } from '../templates.js';
 import { captureLogger, createTestDb, json, startFakeServer, TEST_DATA_KEY_HEX, TestClock, type FakeServer, type Recorded, type TestDb } from '../testing.js';
 import { backoffMs, RulesEngine, type RulesOptions } from './engine.js';
-import { createIndexerClient, IndexerError } from './indexer.js';
+import { ACTIVITY_KINDS, activityItemSchema, assertInterfaceVersion, createIndexerClient, IMPLEMENTED_INTERFACE_VERSION, IndexerError, InterfaceVersionError } from './indexer.js';
 
 const cipher = createTargetCipher(Buffer.from(TEST_DATA_KEY_HEX, 'hex'));
 const links = appLinks('https://app.stonkhouse.test');
@@ -75,6 +81,18 @@ class FakeIndexer {
   items: Item[] = [];
   positions: Record<string, unknown> = {};
   series: Record<string, unknown> = {};
+  /**
+   * Values from /v2/config. chainId and deployBlock stay arbitrary — those are runtime identity and
+   * are never hardcoded in production. interfaceVersion is NOT arbitrary any more (K8-231): this
+   * fake stands in for an indexer the build implements, so it serves the pinned version. It is a
+   * literal, not `IMPLEMENTED_INTERFACE_VERSION`, on purpose — a fixture that reads the constant it
+   * is meant to exercise agrees with any value the constant takes, and raising the pin should make
+   * this suite go red until someone has looked at the payload shapes.
+   */
+  config: { chainId: number; interfaceVersion: number; deployBlock: string | null } = {
+    chainId: 1, interfaceVersion: 8, deployBlock: '1',
+  };
+  operations: unknown[] = [];
   /** Day indices the ExpiryCalendar marks as holidays. */
   holidays = new Set<number>();
   honourSince = true;
@@ -94,6 +112,12 @@ class FakeIndexer {
     if (this.override(req.path, res)) return;
     const url = new URL(req.path, 'http://fake');
     const path = url.pathname;
+    if (path === '/v2/config') {
+      return json(res, 200, this.config);
+    }
+    if (path === '/v2/admin/operations') {
+      return json(res, 200, { items: this.operations });
+    }
     if (path === '/v2/markets') {
       return json(res, 200, [
         { ticker: 'NVDA', name: 'NVIDIA', underlying: NVDA, status: 'live', spot: money(this.spot), spotUpdatedAt: 1789589112, strikeTick: money('1000000'), puts: false, expiries: [], stats: {} },
@@ -186,6 +210,27 @@ function fillItem(n: number, ts: number, taker = ALICE, maker = BOB, recipient =
       makerRebate: money('45000'),
       primary: true,
       takerIsBuyer: true,
+      tx: tx(n),
+    },
+  };
+}
+
+/** INTERFACE_VERSION 7: AutoRoller.cancelStale withdrew a roll ask the spot had overtaken. */
+function staleCancelItem(n: number, ts: number, o: { writer?: string; spotUpdatedAt?: number } = {}): Item {
+  const writer = o.writer ?? ALICE;
+  return {
+    id: `${tx(n)}-5`,
+    kind: 'stale_cancel',
+    ts,
+    longId: L221,
+    series: series(L221),
+    accounts: [writer],
+    data: {
+      writer,
+      orderId: String(n),
+      spot: money('223400000'),
+      spotUpdatedAt: o.spotUpdatedAt ?? ts - 30,
+      nextRollAfter: EXPIRY,
       tx: tx(n),
     },
   };
@@ -292,7 +337,12 @@ after(async () => {
 beforeEach(async () => {
   await db.reset();
   clock.ms = Date.parse('2026-09-16T21:00:00Z');
-  Object.assign(fake, { spot: '220000000', items: [], positions: {}, series: {}, holidays: new Set<number>(), honourSince: true, override: () => false });
+  Object.assign(fake, {
+    spot: '220000000', items: [], positions: {}, series: {}, holidays: new Set<number>(),
+    honourSince: true, override: () => false,
+    config: { chainId: 1, interfaceVersion: 8, deployBlock: '1' },
+    operations: [],
+  });
   fake.server.requests.length = 0;
   sent.length = 0;
   allLogs.push(...log.lines);
@@ -312,7 +362,14 @@ test('a tick reads spot, the feed and watched wallets only; receipts go out once
   assert.deepEqual([first.items, first.stale, first.refreshed, first.queued], [1, 0, 1, 1]);
   assert.deepEqual(await keys(), [`fill_receipt:${ALICE}:${L221}:${f1.id}-taker`], 'Bob is not subscribed');
   assert.equal(activityQueries()[0]?.get('since'), String(now() - 6 * HOUR - 60), 'first boot reads from now − 6 h (less the 60 s re-read)');
-  assert.equal(activityQueries()[0]?.get('kinds'), 'fill,settlement,redemption,roll');
+  assert.equal(
+    log.lines.some((l) => l.includes('deployment anchor changed')),
+    false,
+    'first boot has no previous anchor: record it, do not reset',
+  );
+  const { rows: anchors } = await db.query<{ value: unknown }>(`SELECT value FROM notifier.rules_state WHERE name = 'anchor'`);
+  assert.equal(anchors[0]?.value, '1:8:1');
+  assert.equal(activityQueries()[0]?.get('kinds'), ACTIVITY_KINDS.join(','), 'the query asks for the list, not a frozen subset of it');
   assert.ok(fake.paths().includes(`/v2/accounts/${ALICE}/positions`));
   assert.ok(!fake.paths().some((p) => p.includes(BOB) || p.includes('/holders') || p.includes('/strategies')), fake.paths().join(' '));
 
@@ -328,6 +385,17 @@ test('a tick reads spot, the feed and watched wallets only; receipts go out once
   const third = await engine().runOnce();
   assert.deepEqual([third.items, third.queued], [1, 1]);
   assert.deepEqual((await keys()).slice(1), [`fill_receipt:${ALICE}:${L221}:${f2.id}-maker`]);
+});
+
+test('the feed is asked for every kind the notifier can parse, inside the route’s 64-character bound', () => {
+  // The schema union is the notifier's definition of "a kind I can handle"; the query is what it
+  // actually receives. A kind in the first and not the second is a message that can never fire,
+  // which is how the v7 withdrawal notice was lost for a release.
+  const parsable = (activityItemSchema.options as unknown as { shape: { kind: { value: string } } }[]).map((option) => option.shape.kind.value);
+  assert.deepEqual([...ACTIVITY_KINDS].sort(), [...parsable].sort(), 'every parsable activity kind must be requested');
+  assert.ok(ACTIVITY_KINDS.includes('stale_cancel'), 'without stale_cancel the auto_roll withdrawn message never arrives');
+  const parameter = ACTIVITY_KINDS.join(',');
+  assert.ok(parameter.length <= 64, `kinds is ${parameter.length} characters; /v2/feed/activity bounds the parameter at 64`);
 });
 
 test('storm guard: after two days down, the feed is read from now − 6 h and nothing older is sent', async () => {
@@ -497,6 +565,35 @@ test('a settled long that is never redeemed: its settlement is read once, at the
   assert.equal(fake.paths().filter((p) => p.endsWith('/positions')).length, 3, 'refreshed every tick at holdingsRefreshS 0');
 });
 
+test('a stale_cancel item tells the writer its auto-roll ask was withdrawn, once (INTERFACE_VERSION 7)', async () => {
+  await subscribe(ALICE);
+  fake.positions[ALICE] = positionsBody();
+  const at = now() - 45;
+  const cancel = staleCancelItem(11, at);
+  fake.items = [cancel];
+
+  const result = await engine().runOnce();
+  assert.deepEqual([result.items, result.stale, result.queued], [1, 0, 1]);
+  assert.deepEqual(result.byKind, { auto_roll: 1 });
+  assert.deepEqual(await keys(), [`auto_roll:${ALICE}:${L221}:withdrawn-${cancel.id}`], 'keyed on the item, to the writer only');
+
+  const { rows } = await db.query<{ payload: unknown }>(`SELECT payload FROM notifier.delivery WHERE kind = 'auto_roll'`);
+  assert.deepEqual(rows[0]?.payload, {
+    ticker: 'NVDA',
+    status: 'withdrawn',
+    series: { longId: L221, ticker: 'NVDA', isPut: false, strike: { raw: '221000000', decimals: 6 }, expiry: EXPIRY },
+    spot: { raw: '223400000', decimals: 6 },
+    spotUpdatedAt: at - 30,
+    nextRollAfter: EXPIRY,
+  });
+
+  // The lookback re-reads the same page next tick: the seen ids make that no second message.
+  clock.advance(30_000);
+  const again = await engine().runOnce();
+  assert.deepEqual([again.items, again.queued], [0, 0]);
+  assert.equal((await keys()).length, 1);
+});
+
 test('state survives a restart: a strike side and a price alert seen before it make their events after it', async () => {
   await subscribe(ALICE, prefsSchema.parse({ priceAlerts: [{ ticker: 'NVDA', above: '221500000' }] }));
   fake.positions[ALICE] = positionsBody({ longs: [{ longId: L221, units: '50', avgCost: '3800000' }] });
@@ -507,6 +604,16 @@ test('state survives a restart: a strike side and a price alert seen before it m
   fake.spot = '222000000';
   const crossed = await engine().runOnce();
   assert.deepEqual(crossed.byKind, { strike_cross: 1, price_alert: 1 });
+
+  // Both price-driven payloads carry /v2/markets' own spotUpdatedAt, never the tick's clock.
+  const priced = await db.query<{ kind: string; payload: { spotUpdatedAt?: number } }>(
+    `SELECT kind, payload FROM notifier.delivery ORDER BY kind`,
+  );
+  assert.deepEqual(priced.rows.map((r) => [r.kind, r.payload.spotUpdatedAt]), [
+    ['price_alert', 1789589112],
+    ['strike_cross', 1789589112],
+  ]);
+  assert.notEqual(1789589112, now(), 'the observation time is the market’s, not the tick’s');
 
   clock.advance(30_000);
   assert.equal((await engine().runOnce()).requests, 0, 'nothing new while it stays there');
@@ -593,4 +700,135 @@ test('a calendar that cannot be read: the tick still delivers, the warning waits
   assert.deepEqual([stale.calendarFailed, stale.requests], [1, 0]);
   const { rows } = await db.query<{ value: { sessionDays: Record<string, boolean> } }>(`SELECT value FROM notifier.rules_state WHERE name = 'snapshot'`);
   assert.deepEqual(rows[0]?.value.sessionDays, { '20715': false, '20716': false, '20717': true }, 'the stale block still answered');
+});
+
+test('a changed /v2/config anchor drops the cursor back to the storm-guard floor', async () => {
+  await subscribe(ALICE);
+  fake.positions[ALICE] = positionsBody();
+  fake.items = [fillItem(1, now() - 120)];
+  await engine().runOnce();
+  fake.config = { chainId: 1, interfaceVersion: 8, deployBlock: '99' };
+  fake.server.requests.length = 0;
+  fake.items = [fillItem(2, now() - 10)];
+  await engine().runOnce();
+  assert.equal(activityQueries().at(-1)?.get('since'), String(now() - 6 * HOUR - 60), 'cutover re-reads from now − 6 h');
+  assert.ok(log.lines.some((l) => l.includes('deployment anchor changed') && l.includes('1:8:1') && l.includes('1:8:99')));
+});
+
+test('a failed /v2/config read leaves the cursor and stored anchor', async () => {
+  await subscribe(ALICE);
+  fake.positions[ALICE] = positionsBody();
+  fake.items = [fillItem(1, now() - 120)];
+  await engine().runOnce();
+  fake.override = (path, res) => {
+    if (path !== '/v2/config') return false;
+    json(res, 503, { error: { code: 'degraded', message: '' } });
+    return true;
+  };
+  fake.server.requests.length = 0;
+  await engine().runOnce();
+  assert.equal(activityQueries()[0]?.get('since'), String((now() - 120) - 60));
+  const { rows } = await db.query<{ value: unknown }>(`SELECT value FROM notifier.rules_state WHERE name = 'anchor'`);
+  assert.equal(rows[0]?.value, '1:8:1');
+  assert.ok(log.lines.some((l) => l.includes('config unavailable')));
+});
+
+/* ------------------------------------------------------------------ K8-231 interface-version pin */
+
+test('a /v2/config interface version this build does not implement fails the tick CLOSED', async () => {
+  await subscribe(ALICE);
+  fake.positions[ALICE] = positionsBody();
+  fake.items = [fillItem(1, now() - 120)];
+  fake.config = { chainId: 1, interfaceVersion: IMPLEMENTED_INTERFACE_VERSION + 1, deployBlock: '1' };
+  fake.server.requests.length = 0;
+
+  await assert.rejects(
+    engine().runOnce(),
+    (error: unknown) =>
+      error instanceof InterfaceVersionError
+      && error instanceof IndexerError
+      && error.route === '/v2/config'
+      && error.code === 'interface-version-unsupported'
+      && error.observed === IMPLEMENTED_INTERFACE_VERSION + 1
+      && error.implemented === IMPLEMENTED_INTERFACE_VERSION,
+    'the tick rejects with a routed, coded indexer error the run loop can log',
+  );
+
+  // CLOSED, not merely loud. Each of these would still hold if the check only logged, EXCEPT the
+  // route list: that is the one that says the tick stopped rather than carried on degraded.
+  assert.deepEqual(fake.paths(), ['/v2/config'], 'no route is read after the version check');
+  assert.deepEqual(await keys(), [], 'nothing is enqueued from an interface this build cannot decode');
+  assert.deepEqual(sent, [], 'and nothing is delivered');
+  const { rows } = await db.query<{ name: string }>('SELECT name FROM notifier.rules_state ORDER BY name');
+  assert.deepEqual(rows, [], 'nothing is persisted, so the next tick starts from the same place');
+});
+
+test('a v7 indexer under the SAME deployment anchor is refused: the anchor cannot see the version', async () => {
+  // The gap this row closes. `deploymentAnchor` concatenates the version, so it changes only when
+  // the DEPLOYMENT changes; a v7 indexer serving the chain and deploy block this build already
+  // recorded produces a different anchor string but no refusal, and before the pin the tick simply
+  // decoded v7 payloads with v8 expectations. Here the stored anchor is written by a good tick
+  // first, so the refusal below is the version check firing and not a cutover reset.
+  await subscribe(ALICE);
+  fake.positions[ALICE] = positionsBody();
+  fake.items = [fillItem(1, now() - 120)];
+  await engine().runOnce();
+  const beforeState = await db.query<{ name: string; value: unknown }>('SELECT name, value FROM notifier.rules_state ORDER BY name');
+
+  fake.config = { chainId: 1, interfaceVersion: 7, deployBlock: '1' };
+  fake.items = [fillItem(2, now() - 10)];
+  fake.server.requests.length = 0;
+  sent.length = 0;
+
+  await assert.rejects(engine().runOnce(), (error: unknown) => error instanceof InterfaceVersionError && error.observed === 7);
+  assert.deepEqual(fake.paths(), ['/v2/config']);
+  const afterState = await db.query<{ name: string; value: unknown }>('SELECT name, value FROM notifier.rules_state ORDER BY name');
+  assert.deepEqual(afterState.rows, beforeState.rows, 'the refused tick left every stored row exactly as the good tick wrote it');
+});
+
+test('assertInterfaceVersion accepts the pinned version and nothing else', () => {
+  const config = (interfaceVersion: number) => ({ chainId: 1, interfaceVersion, deployBlock: '1', fees: undefined, pendingFees: undefined });
+  assert.doesNotThrow(() => assertInterfaceVersion(config(IMPLEMENTED_INTERFACE_VERSION)));
+  for (const version of [0, 1, 7, 9, 80]) {
+    if (version === IMPLEMENTED_INTERFACE_VERSION) continue;
+    assert.throws(() => assertInterfaceVersion(config(version)), InterfaceVersionError, `version ${version} must be refused`);
+  }
+});
+
+/** One /v2/admin/operations row as the indexer serves it (target and caller from ops/fixtures/api/v2/admin/operations.json). */
+const adminOperation = (id: string, nonce: number, selector: string | null, label: string) => ({
+  key: `${id}:${nonce}`,
+  id,
+  role: 'CONFIG_ADMIN',
+  target: '0x301b1e55217f139123D276B8298284EA2B704ca8',
+  selector,
+  label,
+  caller: '0x31D35771AaE6676aE6DFb4EdF2399D6115b3Af14',
+  scheduledAt: 1789588800,
+  readyAt: 1789675200,
+  status: 'pending',
+});
+
+test('T-435: a page holding one selector-less operation still delivers EVERY operation on it', async () => {
+  // The wire declares `selector` nullable and the indexer serves a selector-less operation on
+  // purpose. The notifier parses the page as one array, so a copy that required a string lost the
+  // whole page: 'admin operations unavailable', the stored operations kept, nothing announced - the
+  // ordinary operation beside it included. That second operation arriving is the assertion that
+  // matters, because it is what shows the blast radius was the page and not the row.
+  await subscribe(ALICE, prefsSchema.parse({ adminOperation: true }));
+  fake.positions[ALICE] = positionsBody();
+  await engine().runOnce(); // first boot records and announces nothing
+
+  const ordinary = adminOperation(`0x${'11'.repeat(32)}`, 1, '0xc44014d2', 'Clearinghouse.setDefaultOracle(address)');
+  const selectorLess = adminOperation(`0x${'22'.repeat(32)}`, 1, null, 'Clearinghouse.fallback()');
+  fake.operations = [selectorLess, ordinary];
+  clock.advance(30_000);
+  await engine().runOnce();
+
+  assert.deepEqual(
+    (await keys()).filter((k) => k.startsWith('admin_operation:')).sort(),
+    [`admin_operation:${ALICE}:${ordinary.key}:pending`, `admin_operation:${ALICE}:${selectorLess.key}:pending`].sort(),
+    'both operations are announced, each under its own key',
+  );
+  assert.equal(log.lines.some((l) => l.includes('admin operations unavailable')), false, 'the page parsed');
 });

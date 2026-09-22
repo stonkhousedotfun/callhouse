@@ -1,7 +1,7 @@
 {
   "items": [
     {
-      "id": "0x1e293d0219102876414ec954396afd399869ec59d84a38558cdf1ede4b672bea-2",
+      "id": "0xe3f7222375fdc35fc61b235035e26c94692e2ad0193193cd7d0453c38b2d2569-3",
       "kind": "fill",
       "ts": 1789488000,
       "longId": "43462217268812087739261944784956455494004279776534947210729604095134131208790",
@@ -19,11 +19,11 @@
         "expiry": 1789761600,
         "tenor": "weekly",
         "mintCutoff": 1789759800,
-        "mintFeePpm": 80,
+        "mintFeePpm": 0,
         "mintFeesHeld": {
-          "raw": "21714285714286",
+          "raw": "0",
           "decimals": 18,
-          "formatted": "0.000021714285714286"
+          "formatted": "0"
         },
         "mintFeesAccrued": {
           "raw": "0",
@@ -33,7 +33,7 @@
         "status": "open"
       },
       "data": {
-        "orderId": "1009",
+        "orderId": "1010",
         "side": "sell",
         "role": "maker",
         "counterparty": "0x300a7AB2f92B536e3f58422372c964B2Bb535ea2",
@@ -49,9 +49,9 @@
           "formatted": "0.15606"
         },
         "fee": {
-          "raw": "0",
+          "raw": "7803",
           "decimals": 6,
-          "formatted": "0"
+          "formatted": "0.007803"
         },
         "rebate": {
           "raw": "7803",
@@ -60,7 +60,55 @@
         },
         "primary": true,
         "realisedPnl": null,
-        "tx": "0x1e293d0219102876414ec954396afd399869ec59d84a38558cdf1ede4b672bea"
+        "tx": "0xe3f7222375fdc35fc61b235035e26c94692e2ad0193193cd7d0453c38b2d2569"
+      }
+    },
+    {
+      "id": "0xe3f7222375fdc35fc61b235035e26c94692e2ad0193193cd7d0453c38b2d2569-2",
+      "kind": "mint",
+      "ts": 1789488000,
+      "longId": "43462217268812087739261944784956455494004279776534947210729604095134131208790",
+      "series": {
+        "longId": "43462217268812087739261944784956455494004279776534947210729604095134131208790",
+        "shortId": "43462217268812087739261944784956455494004279776534947210729604095134131208791",
+        "ticker": "NVDA",
+        "underlying": "0xd0601CE157Db5bdC3162BbaC2a2C8aF5320D9EEC",
+        "isPut": false,
+        "strike": {
+          "raw": "227000000",
+          "decimals": 6,
+          "formatted": "227"
+        },
+        "expiry": 1789761600,
+        "tenor": "weekly",
+        "mintCutoff": 1789759800,
+        "mintFeePpm": 0,
+        "mintFeesHeld": {
+          "raw": "0",
+          "decimals": 18,
+          "formatted": "0"
+        },
+        "mintFeesAccrued": {
+          "raw": "0",
+          "decimals": 18,
+          "formatted": "0"
+        },
+        "status": "open"
+      },
+      "data": {
+        "units": "60",
+        "collateral": {
+          "raw": "600000000000000000",
+          "decimals": 18,
+          "formatted": "0.6"
+        },
+        "fee": {
+          "raw": "0",
+          "decimals": 18,
+          "formatted": "0"
+        },
+        "longTo": "0x300a7AB2f92B536e3f58422372c964B2Bb535ea2",
+        "tx": "0xe3f7222375fdc35fc61b235035e26c94692e2ad0193193cd7d0453c38b2d2569"
       }
     },
     {
@@ -82,33 +130,33 @@
         "expiry": 1789156800,
         "tenor": "weekly",
         "mintCutoff": 1789155000,
-        "mintFeePpm": 80,
+        "mintFeePpm": 0,
         "mintFeesHeld": {
           "raw": "0",
           "decimals": 18,
           "formatted": "0"
         },
         "mintFeesAccrued": {
-          "raw": "70952380952381",
+          "raw": "0",
           "decimals": 18,
-          "formatted": "0.000070952380952381"
+          "formatted": "0"
         },
         "status": "settled"
       },
       "data": {
         "side": "short",
         "tokenId": "97249294176823841346447828561188452006185490110924851379129375223985952864953",
-        "units": "200",
+        "units": "150",
         "asset": "0xd0601CE157Db5bdC3162BbaC2a2C8aF5320D9EEC",
         "amount": {
-          "raw": "1969006381039198000",
+          "raw": "1476754785779398500",
           "decimals": 18,
-          "formatted": "1.969006381039198"
+          "formatted": "1.4767547857793985"
         },
         "amountInKind": {
-          "raw": "1969006381039198000",
+          "raw": "1476754785779398500",
           "decimals": 18,
-          "formatted": "1.969006381039198"
+          "formatted": "1.4767547857793985"
         },
         "toLedger": true,
         "realisedPnl": null,
@@ -116,7 +164,7 @@
       }
     },
     {
-      "id": "0x20c3a4b53c17604ed4837b0b2be74afecc710fc745dee2e74a6eb0f2f78c47e8-1",
+      "id": "0x226719bd7e592fa11315f468ecca9d727ce97afc71aa8744bca02ceabb262834-1",
       "kind": "withdrawal",
       "ts": 1789059600,
       "longId": null,
@@ -130,38 +178,38 @@
           "formatted": "0.5"
         },
         "to": "0xD6b49a27Ead99118b61F0827C7aB2782aea07bE6",
-        "tx": "0x20c3a4b53c17604ed4837b0b2be74afecc710fc745dee2e74a6eb0f2f78c47e8"
+        "tx": "0x226719bd7e592fa11315f468ecca9d727ce97afc71aa8744bca02ceabb262834"
       }
     },
     {
-      "id": "0x727dac45bcde4ac6944654cff877ad4bb80d9468cefcbd861292616e97574a60-1",
+      "id": "0x8c86c55d83a4b69534adf49826e4284705787928bdbf89832176c2b53045e651-2",
       "kind": "close",
       "ts": 1788966000,
-      "longId": "109733135889116194008703981926101410916763203979514320802443652863493208496976",
+      "longId": "97249294176823841346447828561188452006185490110924851379129375223985952864952",
       "series": {
-        "longId": "109733135889116194008703981926101410916763203979514320802443652863493208496976",
-        "shortId": "109733135889116194008703981926101410916763203979514320802443652863493208496977",
+        "longId": "97249294176823841346447828561188452006185490110924851379129375223985952864952",
+        "shortId": "97249294176823841346447828561188452006185490110924851379129375223985952864953",
         "ticker": "NVDA",
         "underlying": "0xd0601CE157Db5bdC3162BbaC2a2C8aF5320D9EEC",
         "isPut": false,
         "strike": {
-          "raw": "214000000",
+          "raw": "216000000",
           "decimals": 6,
-          "formatted": "214"
+          "formatted": "216"
         },
         "expiry": 1789156800,
         "tenor": "weekly",
         "mintCutoff": 1789155000,
-        "mintFeePpm": 80,
+        "mintFeePpm": 0,
         "mintFeesHeld": {
           "raw": "0",
           "decimals": 18,
           "formatted": "0"
         },
         "mintFeesAccrued": {
-          "raw": "36567460317462",
+          "raw": "0",
           "decimals": 18,
-          "formatted": "0.000036567460317462"
+          "formatted": "0"
         },
         "status": "settled"
       },
@@ -173,16 +221,79 @@
           "formatted": "0.5"
         },
         "feeRefund": {
-          "raw": "12619047619047",
+          "raw": "0",
           "decimals": 18,
-          "formatted": "0.000012619047619047"
+          "formatted": "0"
         },
         "realisedPnl": null,
-        "tx": "0x727dac45bcde4ac6944654cff877ad4bb80d9468cefcbd861292616e97574a60"
+        "tx": "0x8c86c55d83a4b69534adf49826e4284705787928bdbf89832176c2b53045e651"
       }
     },
     {
-      "id": "0x060e27e2e0614336c4f67dbb73e5d1968c343c47989be08fe347cccb4182b0a4-2",
+      "id": "0x3b10bca39419abed9611512c935897334042e6af1017d46c3aa4948a84a9f03a-1",
+      "kind": "fill",
+      "ts": 1788965400,
+      "longId": "97249294176823841346447828561188452006185490110924851379129375223985952864952",
+      "series": {
+        "longId": "97249294176823841346447828561188452006185490110924851379129375223985952864952",
+        "shortId": "97249294176823841346447828561188452006185490110924851379129375223985952864953",
+        "ticker": "NVDA",
+        "underlying": "0xd0601CE157Db5bdC3162BbaC2a2C8aF5320D9EEC",
+        "isPut": false,
+        "strike": {
+          "raw": "216000000",
+          "decimals": 6,
+          "formatted": "216"
+        },
+        "expiry": 1789156800,
+        "tenor": "weekly",
+        "mintCutoff": 1789155000,
+        "mintFeePpm": 0,
+        "mintFeesHeld": {
+          "raw": "0",
+          "decimals": 18,
+          "formatted": "0"
+        },
+        "mintFeesAccrued": {
+          "raw": "0",
+          "decimals": 18,
+          "formatted": "0"
+        },
+        "status": "settled"
+      },
+      "data": {
+        "orderId": "1004",
+        "side": "buy",
+        "role": "taker",
+        "counterparty": "0x83daA58d0a8d82D7b971338a03AA2f99bfADf4F8",
+        "units": "50",
+        "price": {
+          "raw": "300000",
+          "decimals": 6,
+          "formatted": "0.3"
+        },
+        "premium": {
+          "raw": "150000",
+          "decimals": 6,
+          "formatted": "0.15"
+        },
+        "fee": {
+          "raw": "15000",
+          "decimals": 6,
+          "formatted": "0.015"
+        },
+        "rebate": {
+          "raw": "0",
+          "decimals": 6,
+          "formatted": "0"
+        },
+        "primary": false,
+        "realisedPnl": null,
+        "tx": "0x3b10bca39419abed9611512c935897334042e6af1017d46c3aa4948a84a9f03a"
+      }
+    },
+    {
+      "id": "0x060e27e2e0614336c4f67dbb73e5d1968c343c47989be08fe347cccb4182b0a4-3",
       "kind": "fill",
       "ts": 1788888600,
       "longId": "97249294176823841346447828561188452006185490110924851379129375223985952864952",
@@ -200,16 +311,16 @@
         "expiry": 1789156800,
         "tenor": "weekly",
         "mintCutoff": 1789155000,
-        "mintFeePpm": 80,
+        "mintFeePpm": 0,
         "mintFeesHeld": {
           "raw": "0",
           "decimals": 18,
           "formatted": "0"
         },
         "mintFeesAccrued": {
-          "raw": "70952380952381",
+          "raw": "0",
           "decimals": 18,
-          "formatted": "0.000070952380952381"
+          "formatted": "0"
         },
         "status": "settled"
       },
@@ -230,9 +341,9 @@
           "formatted": "0.494"
         },
         "fee": {
-          "raw": "0",
+          "raw": "24700",
           "decimals": 6,
-          "formatted": "0"
+          "formatted": "0.0247"
         },
         "rebate": {
           "raw": "24700",
@@ -245,51 +356,51 @@
       }
     },
     {
-      "id": "0x13dc8a59af498dd9d7db2387875dabd8e222c5adeec38c3134c13edbad29b182-1",
+      "id": "0x060e27e2e0614336c4f67dbb73e5d1968c343c47989be08fe347cccb4182b0a4-2",
       "kind": "mint",
-      "ts": 1788797100,
-      "longId": "109733135889116194008703981926101410916763203979514320802443652863493208496976",
+      "ts": 1788888600,
+      "longId": "97249294176823841346447828561188452006185490110924851379129375223985952864952",
       "series": {
-        "longId": "109733135889116194008703981926101410916763203979514320802443652863493208496976",
-        "shortId": "109733135889116194008703981926101410916763203979514320802443652863493208496977",
+        "longId": "97249294176823841346447828561188452006185490110924851379129375223985952864952",
+        "shortId": "97249294176823841346447828561188452006185490110924851379129375223985952864953",
         "ticker": "NVDA",
         "underlying": "0xd0601CE157Db5bdC3162BbaC2a2C8aF5320D9EEC",
         "isPut": false,
         "strike": {
-          "raw": "214000000",
+          "raw": "216000000",
           "decimals": 6,
-          "formatted": "214"
+          "formatted": "216"
         },
         "expiry": 1789156800,
         "tenor": "weekly",
         "mintCutoff": 1789155000,
-        "mintFeePpm": 80,
+        "mintFeePpm": 0,
         "mintFeesHeld": {
           "raw": "0",
           "decimals": 18,
           "formatted": "0"
         },
         "mintFeesAccrued": {
-          "raw": "36567460317462",
+          "raw": "0",
           "decimals": 18,
-          "formatted": "0.000036567460317462"
+          "formatted": "0"
         },
         "status": "settled"
       },
       "data": {
-        "units": "50",
+        "units": "200",
         "collateral": {
-          "raw": "500000000000000000",
+          "raw": "2000000000000000000",
           "decimals": 18,
-          "formatted": "0.5"
+          "formatted": "2"
         },
         "fee": {
-          "raw": "23789682539683",
+          "raw": "0",
           "decimals": 18,
-          "formatted": "0.000023789682539683"
+          "formatted": "0"
         },
-        "longTo": "0xD6b49a27Ead99118b61F0827C7aB2782aea07bE6",
-        "tx": "0x13dc8a59af498dd9d7db2387875dabd8e222c5adeec38c3134c13edbad29b182"
+        "longTo": "0x83daA58d0a8d82D7b971338a03AA2f99bfADf4F8",
+        "tx": "0x060e27e2e0614336c4f67dbb73e5d1968c343c47989be08fe347cccb4182b0a4"
       }
     },
     {

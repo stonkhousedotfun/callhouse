@@ -39,8 +39,11 @@ import {
   type WalletClient,
 } from 'viem';
 import { privateKeyToAccount, type PrivateKeyAccount } from 'viem/accounts';
+import { accessManagerAbi } from './abi/accessManager.js';
 import { autoRollerAbi } from './abi/autoRoller.js';
+import { buybackExecutorAbi } from './abi/buybackExecutor.js';
 import { clearinghouseAbi } from './abi/clearinghouse.js';
+import { feeSplitterAbi } from './abi/feeSplitter.js';
 import { expiryCalendarAbi } from './abi/expiryCalendar.js';
 import { keeperRewardsAbi } from './abi/keeperRewards.js';
 import { makerRegistryAbi } from './abi/makerRegistry.js';
@@ -48,7 +51,7 @@ import { makerVaultAbi } from './abi/makerVault.js';
 import { orderBookAbi } from './abi/orderBook.js';
 import { payoutAdapterAbi } from './abi/payoutAdapter.js';
 import { settlementOracleAbi } from './abi/settlementOracle.js';
-import type { V2ContractName } from './registry.js';
+import type { V2AddressName } from './registry.js';
 
 /*//////////////////////////////////////////////////////////////
                             CLIENTS
@@ -119,7 +122,15 @@ export function createV2Signer(clients: V2Clients, options: { privateKey: Hex; p
                          CONTRACT HANDLES
 //////////////////////////////////////////////////////////////*/
 
-/** The contracts with a generated ABI module, by registry name. */
+/**
+ * The contracts with a generated ABI module, by registry name.
+ *
+ * INTERFACE_VERSION 8 adds three. `accessManager` is what the mm bot and the pricer read their own role from
+ * now that a `Managed` target has no `hasRole` of its own (K8-03); `feeSplitter` is what the cranker claims,
+ * distributes and buys back through (K8-02). `buybackExecutor` is here because it has a generated module and
+ * this map is the index of those — the keeper never calls it, and it cannot: both of its entry points revert
+ * for anyone but the splitter.
+ */
 export const V2_ABIS = {
   clearinghouse: clearinghouseAbi,
   orderBook: orderBookAbi,
@@ -127,10 +138,13 @@ export const V2_ABIS = {
   expiryCalendar: expiryCalendarAbi,
   keeperRewards: keeperRewardsAbi,
   autoRoller: autoRollerAbi,
+  accessManager: accessManagerAbi,
+  feeSplitter: feeSplitterAbi,
+  buybackExecutor: buybackExecutorAbi,
   payoutAdapter: payoutAdapterAbi,
   makerRegistry: makerRegistryAbi,
   makerVault: makerVaultAbi,
-} as const satisfies Partial<Record<V2ContractName, Abi>>;
+} as const satisfies Partial<Record<V2AddressName, Abi>>;
 
 export type AbiContractName = keyof typeof V2_ABIS;
 
@@ -138,11 +152,11 @@ export type AbiContractName = keyof typeof V2_ABIS;
 export type ContractHandle<K extends AbiContractName> = GetContractReturnType<(typeof V2_ABIS)[K], { public: PublicClient }>;
 
 /** A handle for every contract with an ABI; non-null exactly where the address type is. */
-export type ContractHandles<C extends Record<V2ContractName, Address | null>> = {
+export type ContractHandles<C extends Record<V2AddressName, Address | null>> = {
   [K in AbiContractName]: C[K] extends Address ? ContractHandle<K> : ContractHandle<K> | null;
 };
 
-export function contractHandles<C extends Record<V2ContractName, Address | null>>(client: PublicClient, contracts: C): ContractHandles<C> {
+export function contractHandles<C extends Record<V2AddressName, Address | null>>(client: PublicClient, contracts: C): ContractHandles<C> {
   const out: Record<string, unknown> = {};
   for (const name of Object.keys(V2_ABIS) as AbiContractName[]) {
     const address = contracts[name];

@@ -4,6 +4,7 @@ import { useState } from "react";
 import type { Abi } from "viem";
 import { useAccount, useWriteContract } from "wagmi";
 
+import { CHAIN_ID } from "@/lib/chain";
 import { SHARE_TICKER, VAULT, vaultAbi } from "@/lib/contracts";
 import { fmtUsdg } from "@/lib/format";
 import type { AccountPosition, VaultSnapshot } from "@/lib/hooks";
@@ -35,10 +36,15 @@ export function UsdgClaim({
   position: AccountPosition;
   onDone: () => void;
 }) {
-  const { address, isConnected } = useAccount();
+  const { address, isConnected, chainId } = useAccount();
   const { writeContractAsync } = useWriteContract();
   const run = useTxRunner();
   const [busy, setBusy] = useState(false);
+
+  // W8-450. The wallet's chain is read from useAccount and compared with the ONE source of truth the rest
+  // of the app uses, `CHAIN_ID` from @/lib/chain -- the same pair AccountView.tsx reads. Nothing here switches
+  // the wallet's network; a wrong network refuses the action and says so.
+  const wrongNetwork = isConnected && chainId !== CHAIN_ID;
 
   const claimable = position.claimableUsdg ?? 0n;
 
@@ -50,7 +56,8 @@ export function UsdgClaim({
     snapshot.accUsdgPerShare === undefined ? undefined : snapshot.accUsdgPerShare / 1_000_000_000n;
 
   async function claim() {
-    if (!VAULT || !address) return;
+    // Refused here as well as in the render branch: the button is not the only way into this function.
+    if (!VAULT || !address || wrongNetwork) return;
     const vault = VAULT;
     setBusy(true);
     try {
@@ -61,6 +68,9 @@ export function UsdgClaim({
             abi: vaultAbi as unknown as Abi,
             functionName: "claimUsdg",
             args: [],
+            // W8-450. Without this @wagmi/core 3.6.5 keys its chain assertion off `!!chainId` and submits to
+            // whatever network the wallet is on. This is a live vault action.
+            chainId: CHAIN_ID,
           }),
         { pending: "Claiming USDG", success: "USDG claimed" },
       );
@@ -119,6 +129,8 @@ export function UsdgClaim({
       <div className="mt-5">
         {!isConnected ? (
           <ConnectButton block />
+        ) : wrongNetwork ? (
+          <p className="text-[13px] text-ink-2">Switch to Robinhood Chain to claim.</p>
         ) : (
           <Button
             variant={claimable > 0n ? "primary" : "ghost"}

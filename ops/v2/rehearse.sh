@@ -7,6 +7,18 @@
 #   ops/v2/rehearse.sh --skip-web          no Next build, no browser: the story's web actions are sent by script
 #   ops/v2/rehearse.sh --only 3 --keep     one step against what an earlier --keep run left running
 #   ops/v2/rehearse.sh --publish           also copy the report to ops/v2/REHEARSAL-<date>.md (tracked)
+#   ops/v2/rehearse.sh --fork-live [--services cranker,indexer] [--registry <path>]
+#                                         O3-005 live-set fork: no fresh deploy. Forks 4663 at head, impersonates
+#                                         admin/writer/holder, boots the named services against the ALREADY-LIVE
+#                                         addresses, writes a report under a temp dir, tears it down on exit.
+#                                         THE LIVE SET IS v7, so this path reads ops/markets/v7-legacy.json, NOT
+#                                         the tier1.json the numbered steps deploy from -- tier1.json is the v8
+#                                         registry and every contract address in it is null until v8 deploys.
+#                                         Handed a v8 registry it REFUSES by interfaceVersion and names the
+#                                         numbered stack instead, rather than dying on a null address.
+#                                         --registry overrides, for a soak against another committed registry.
+#   ops/v2/rehearse.sh --fork-live --check
+#                                         parse flags, print the live addresses and planned env; no anvil.
 #
 # Steps (one node module each under ops/v2/rehearse/, sharing lib.mjs):
 #   1  1-fork.mjs      anvil fork (the fork block is recorded) -> callhouse-contracts script/v2/DeployV2Batch.sh
@@ -42,20 +54,78 @@ OUT="$R/out"
 export PATH="$HOME/.foundry/bin:$PATH"
 export CONTRACTS_DIR=${CONTRACTS_DIR:-$ROOT/../callhouse-contracts}
 
-KEEP=0; SKIP_WEB=0; ONLY=""; PUBLISH=0
+KEEP=0; SKIP_WEB=0; ONLY=""; PUBLISH=0; FORK_LIVE=0; CHECK=0; SERVICES=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --keep) KEEP=1; shift ;;
     --skip-web) SKIP_WEB=1; shift ;;
     --publish) PUBLISH=1; shift ;;
+    --fork-live) FORK_LIVE=1; shift ;;
+    --registry) FL_REGISTRY=$2; shift 2 ;;
+    --check) CHECK=1; shift ;;
+    --services) [ $# -ge 2 ] || { echo "--services needs a comma list" >&2; exit 2; }; SERVICES=$2; shift 2 ;;
     --only) [ $# -ge 2 ] || { echo "--only needs a step (1-5)" >&2; exit 2; }; ONLY=$2; shift 2 ;;
     -h|--help) sed -n '3,/^# ----/p' "$0" | sed '$d' | sed 's/^# \{0,1\}//'; exit 0 ;;
     *) echo "unknown flag $1 (see --help)" >&2; exit 2 ;;
   esac
 done
 case "$ONLY" in ""|1|2|3|4|5) ;; *) echo "--only takes 1, 2, 3, 4 or 5" >&2; exit 2 ;; esac
+if [ "$FORK_LIVE" = 1 ] && [ -n "$ONLY" ]; then
+  echo "--fork-live cannot be combined with --only (the live-set path is not a numbered O2-03 step)" >&2
+  exit 2
+fi
+if [ "$CHECK" = 1 ] && [ "$FORK_LIVE" != 1 ]; then
+  echo "--check is only valid with --fork-live" >&2
+  exit 2
+fi
 
 die() { echo "REHEARSAL FAILED: $*" >&2; exit 1; }
+
+if [ "$FORK_LIVE" = 1 ]; then
+  command -v node >/dev/null || die "node not on PATH"
+  if [ "$CHECK" != 1 ]; then
+    command -v anvil >/dev/null || die "anvil not on PATH"
+    command -v jq >/dev/null || die "jq not on PATH"
+    for pkg in keeper indexer relay; do
+      [ -d "$ROOT/$pkg/node_modules" ] || die "$pkg/node_modules missing: run pnpm install --frozen-lockfile at $ROOT"
+    done
+  fi
+  LIVE_OUT=$(mktemp -d "${TMPDIR:-/tmp}/rehearse-fork-live.XXXXXX")
+  export REHEARSE_OUT="$LIVE_OUT"
+  mkdir -p "$LIVE_OUT/logs"
+  cleanup_live() {
+    local code=$?
+    if [ "$KEEP" = 1 ]; then
+      echo "left running (--keep) under $LIVE_OUT: node $R/stop.mjs (REHEARSE_OUT=$LIVE_OUT) stops everything"
+    else
+      REHEARSE_OUT="$LIVE_OUT" node "$R/stop.mjs" || echo "stop.mjs failed under $LIVE_OUT" >&2
+      rm -rf "$LIVE_OUT"
+    fi
+    exit "$code"
+  }
+  trap cleanup_live EXIT
+  trap 'exit 130' INT
+  trap 'exit 143' TERM
+  FL_ARGS=(--services "${SERVICES:-cranker,indexer}")
+  [ -n "${FL_REGISTRY:-}" ] && FL_ARGS+=(--registry "$FL_REGISTRY")
+  echo "FORK-LIVE out=$LIVE_OUT services=${SERVICES:-cranker,indexer}"
+  if [ "$CHECK" = 1 ]; then
+    node "$R/fork-live-check.mjs" "${FL_ARGS[@]}"
+  else
+    node "$R/fork-live.mjs" "${FL_ARGS[@]}"
+  fi
+  if [ "$CHECK" = 1 ]; then
+    # --check starts nothing; skip stop/rm of an empty tree by disabling KEEP cleanup's stop noise
+    KEEP=1
+    rm -rf "$LIVE_OUT"
+  elif [ -f "$LIVE_OUT/FORK-LIVE-REPORT.json" ]; then
+    echo "FORK-LIVE report: $LIVE_OUT/FORK-LIVE-REPORT.json"
+    # Print a copy the caller can capture before the EXIT trap deletes the temp dir.
+    jq -c '{mode,forkBlock,nvda:(.nvda|{identical,asset,enabled}),services,keys,seconds}' "$LIVE_OUT/FORK-LIVE-REPORT.json" || true
+  fi
+  exit 0
+fi
+
 for tool in anvil forge cast jq node pnpm initdb postgres pg_isready psql shasum; do
   command -v "$tool" >/dev/null || die "$tool not on PATH"
 done

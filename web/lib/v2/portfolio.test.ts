@@ -3,7 +3,7 @@ import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 
 import type { HistoryItem, LongPosition, PositionsResponse } from "./api-types";
-import { assertResaleFeeMatches, expiryCountdown, orderIdentityMatches, payoffSentence, positionOutcome, quoteSell, splitResale, verifySellOrders } from "./portfolio";
+import { expiryCountdown, orderIdentityMatches, payoffSentence, positionOutcome, quoteSell, splitResale, verifySellOrders } from "./portfolio";
 
 const positions = JSON.parse(readFileSync(fileURLToPath(new URL(
   "../../../ops/fixtures/api/v2/accounts/0xE37876AcBfbA6186E4687f4ef465D9AC21558De3/positions.json", import.meta.url)), "utf8")) as PositionsResponse;
@@ -57,15 +57,6 @@ describe("portfolio position states", () => {
     ] }], 100n, 450_000n, { takerFeeFlat: 100_000n, takerFeeCapBps: 1000 }, 0,
     "0x2222222222222222222222222222222222222222");
     expect(crossing).toMatchObject({ crossing: { filled: 40n, limitPrice: 500_000n }, restingUnits: 60n });
-  });
-
-  it("rejects an effective resale fee that would reduce proceeds below the displayed quote", () => {
-    const quote = quoteSell([{ price: { raw: "10000000", decimals: 6, formatted: "10" }, units: "100", orders: [
-      { orderId: "17", maker: "0x1111111111111111111111111111111111111111", kind: "Bid", units: "100", onChainRemainingUnits: "100", makerFreeCollateral: null, makerFreeUnits: null, validUntil: 100 },
-    ] }], 100n, { takerFeeFlat: 0n, takerFeeCapBps: 0 }, 100);
-    expect(quote.sellerFee).toBe(100_000n);
-    expect(() => assertResaleFeeMatches(100, 100)).not.toThrow();
-    expect(() => assertResaleFeeMatches(100, 500)).toThrow(/on-chain resale fee changed/);
   });
 
   it("refuses to cancel or edit a different on-chain order disguised by an API row", () => {

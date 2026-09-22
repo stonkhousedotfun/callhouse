@@ -17,7 +17,7 @@ import { CheckCircleIcon, InfoIcon, StopIcon, WarnIcon } from "./icons";
  *
  * `title` renders as a <strong> on its own line. The body is a <div>, so it may hold a list.
  *
- * Copy that copy-lint requires on a page (e.g. "Premium is paid only if a buyer fills" on
+ * Copy that disclosure policy (copy-lint enforced this until it was removed on 2026-09-21; nothing checks it now) requires on a page (e.g. "Premium is paid only if a buyer fills" on
  * app/vault/nvda/page.tsx) must be written in that page file as children or title, never as a
  * default inside this component: the linter reads the page file's source text.
  *

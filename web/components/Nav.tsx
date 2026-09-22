@@ -27,9 +27,19 @@ export function Nav() {
     <header data-slot="topbar">
       <Container className="flex flex-wrap items-center gap-x-7 gap-y-2 pb-3 pt-4 lg:py-[22px]">
         <Brand className="order-1" />
+        {/*
+          THE FADE STAYS; THE HIDDEN SCROLLBAR DOES NOT. `[scrollbar-width:none]` used to sit on
+          this element at every width, together with the max-lg fade — so on a phone the links
+          past the fold faded out with no scrollbar, no arrow and no chevron. With eight
+          destinations that meant Trust and Wins were not merely hard to reach but invisible, and
+          a mask that hides the fact that anything is hidden is worse than an honest scrollbar.
+          The suppression is now `lg:` only, where the row does not overflow and there is nothing
+          to hide. The gradient is kept: it reads as "there is more this way" once a scrollbar
+          confirms it, which is the affordance the UX review asked for.
+        */}
         <nav
           aria-label="App"
-          className="relative order-3 -mx-4 w-[calc(100%+2rem)] overflow-x-auto px-4 [scrollbar-width:none] sm:-mx-5 sm:w-[calc(100%+2.5rem)] sm:px-5 max-lg:[mask-image:linear-gradient(to_right,#000_88%,transparent)] lg:order-2 lg:mx-0 lg:mr-auto lg:w-auto lg:overflow-visible lg:px-0 lg:[mask-image:none]"
+          className="relative order-3 -mx-4 w-[calc(100%+2rem)] overflow-x-auto px-4 sm:-mx-5 sm:w-[calc(100%+2.5rem)] sm:px-5 max-lg:[mask-image:linear-gradient(to_right,#000_88%,transparent)] lg:order-2 lg:mx-0 lg:mr-auto lg:w-auto lg:overflow-visible lg:px-0 lg:[scrollbar-width:none] lg:[mask-image:none]"
         >
           <NavLinks />
         </nav>

@@ -25,6 +25,77 @@ function. `rollOpen(uint256,uint112)`, `contractsSold`, `contractsRemaining`, `w
 
 ---
 
+## Factory markets (read this first)
+
+**The vault-shaped steps below belong to the closed pooled vault.** `rollOpen`, `approveListing`,
+`lockBook`, `rollClose`, the phase machine and the redeem queue are `cNVDA`'s
+(`0x88a98931E3682137E7e4D3426f623247f4A4ecbb`), which is closed and only pays out leftovers
+(`app.stonkhouse.fun/collect`). **The live product is the per-market account factory**
+(`src/solo/` in the contracts repository): one `AccountFactory` per Stock Token, isolated
+`WriterAccount` clones, write on fill, one FULL 1-lot Seaport order per lot, each account on its
+own option type. NVDA's factory is `0xc4A5Cd0DE91CaB7F5Ebe2114bc63Fbb43E642BBb` (block
+64,038,234); the other markets go live in waves (`ops/deploy.md` §14). Keep the vault steps for
+the vault; run the factory equivalents in this preamble for every live market.
+
+**Every market, from the registry.** `ops/markets/tier1.json` is the only list of markets
+(`ops/markets/README.md`). Loop over the `live` rows and never type a factory address by hand:
+
+```bash
+# from the app repo root
+REG=ops/markets/tier1.json
+export RH_RPC=https://rpc.mainnet.chain.robinhood.com
+TICKERS=$(node -e 'const r=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8"));console.log(r.markets.filter(m=>m.status==="live").map(m=>m.ticker).join(" "))' "$REG")
+for T in $TICKERS; do
+  eval "$(node -e '
+    const r=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8"));
+    const m=r.markets.find(x=>x.ticker===process.argv[2]);
+    console.log(`FACTORY=${m.deployment.factory} ASSET=${m.asset} FEED=${m.feed} KEEPER=${m.deployment.keeper} MODE=${m.mode}`);
+  ' "$REG" "$T")"
+  CLEAR=$(cast call $FACTORY "clear()(address)" --rpc-url $RH_RPC)
+  echo "== $T factory=$FACTORY asset=$ASSET feed=$FEED keeper=$KEEPER mode=$MODE"
+  cast call $FACTORY "week()(uint32,uint256,uint40,uint40,uint256)" --rpc-url $RH_RPC   # (id, strike6, exerciseTs, baseExpiryTs, ask6)
+  cast call $FACTORY "writesHalted()(bool)"  --rpc-url $RH_RPC
+  cast call $FACTORY "pendingCount()(uint256)" --rpc-url $RH_RPC   # accounts that requested lots and are not listed yet
+  cast call $FACTORY "liveCount()(uint256)"    --rpc-url $RH_RPC   # accounts with live listings this week
+  # ... the per-market reads for this runbook go here ...
+done
+```
+
+The keeper key for a market is `KEEPER_PK` in `~/.callhouse-keys/markets/$T.env` (mode 600,
+written by `ops/markets/derive-keeper-keys.sh`; NVDA's is the original keeper key, mnemonic
+index 1). Load it into the shell only on the ops machine (`set -a; . ~/.callhouse-keys/markets/$T.env; set +a`),
+pass it as `--private-key "$KEEPER_PK"`, and never print, echo or paste it. `cast` takes a raw key
+only as an argument, so it sits in `ps` for the command's lifetime; that is accepted on the
+single-user ops machine — anywhere shared, `cast wallet import <name>` once and use `--account <name>`. One key per market:
+a key that works on TSLA holds no role on AAPL. The guardian (`0x29741A8d283a253E8Ce10aDfd04C6507438b6F39`)
+and the admin (`0xEb82c3D0F89d47453F94f0C2b2a2752e27a19d9b`) are the same on every factory.
+Each market's keeper is its own Railway service, `keeper-<ticker>`:
+
+```bash
+railway ssh --service keeper-$(echo $T | tr '[:upper:]' '[:lower:]') -- wget -qO- http://127.0.0.1:8787/health
+```
+
+ABIs: `ops/abis/AccountFactory.json`, `ops/abis/WriterAccount.json`. Per-account reads take the
+clone address from `pendingAt(i)` / `liveAt(i)`; `listFor(owner)` takes the **owner**, read with
+`owner()` on the clone.
+
+**Factory equivalents of the steps below:**
+
+| Vault step | Factory equivalent, per market |
+|---|---|
+| §1 `phase()`, `isStranded()`, `writesHalted()` | `week()` on the factory: `(id, strikeUsdg, exerciseTs, baseExpiryTs, askUsdg)`. A week whose `baseExpiryTs` is in the past is over and the keeper sets the next one; there is no phase and no strand. `writesHalted()` must be `false`. `pendingCount()` is the work waiting |
+| §2 the oracle | this market's own `$FEED` (`latestRoundData`, `decimals` 8) and `$ASSET "oraclePaused()(bool)"`; `maxPriceAge()(uint32)` on the factory (4 days). Every equity feed sleeps at the weekend the way `RHNVDA / USD` does |
+| §3 the Valorem fee switch | `$CLEAR "feesEnabled()(bool)"` and `$FACTORY "valoremFeeAccepted()(bool)"`. The Clear is **shared**: one flip stops `list` and every fill on every market at once |
+| §4 choose the strike and the window | the keeper's per-market dry run: `pnpm --filter @callhouse/keeper solo:quote` with `ops/keeper/markets/$T.env` loaded prints strike, ask, window and the mode's evidence without sending. Band and floor: `$FACTORY "policy()(uint16,uint16,uint16,uint16,uint16,uint64)"`. `vol` markets take the 0.15-delta strike from Cboe's chain for **this** ticker; `fixed` (SGOV) takes spot + 5%. The ask is never below `minAskUsdg6` (0.10 USDG) |
+| §5 create the option type | not a step: each account creates its own type inside `list` (`expiry = baseExpiryTs + index`) |
+| §6 arm (`rollOpen`) | `setWeek(strike6, exerciseTs, baseExpiryTs, ask6)` by **this market's** keeper (`KEEPER_ROLE`): `cast send $FACTORY "setWeek(uint256,uint40,uint40,uint256)" <strike6> <exerciseTs> <baseExpiryTs> <ask6> --rpc-url $RH_RPC --private-key "$KEEPER_PK"`. Factory checks: exercise > now + 1 h (strict — exactly `now + 3600` reverts `BadWeek`), base expiry ≥ exercise + 1 day, `ask ≤ strike`. Verify with `week()`. Nothing is written |
+| §7 authorise the listing | per pending account: `A=$(cast call $FACTORY "pendingAt(uint256)(address)" 0 --rpc-url $RH_RPC)`, `O=$(cast call $A "owner()(address)" --rpc-url $RH_RPC)`, then `cast send $FACTORY "listFor(address)" $O --rpc-url $RH_RPC --private-key "$KEEPER_PK"` (or the owner calls `list()` on the account). The account posts `requestedLots` FULL 1-lot orders and pins strike, ask, exercise and its own expiry. Verify: `liveCount()`, `liveAt(i)`; on the account `listedLots()`, `listedStrikeUsdg()`, `listedAskUsdg()`, `listedExerciseTs()`, `listedExpiryTs()`, `liveListingCount()` |
+| §8 confirm a fill from our page | `app.stonkhouse.fun/<ticker>/book` (lowercase). The account's `lotOrder(salt)` view returns the exact Seaport components each lot is listed with; the fill is `fulfillOrder` with an empty signature and the account as zone. The hook re-checks the band floor and the premium floor at live spot, as the vault's did |
+| §9 while listed, hourly | `liveCount()`; per live account `contractsWritten()(uint112)` (== lots sold), `claimKey()(uint256)` (non-zero after the first fill), `LotFilled(orderHash, optionId, premiumUsdg)` logs on the account; `keeper-<ticker>` `/health` |
+| §10 close the book | nothing to lock: each order's end time is the account's `listedExerciseTs`, so fills stop there by themselves. `settle()` after `listedExpiryTs` is `close-week.md` |
+
+---
+
 ## 0. Shell setup
 
 Paste this once per session. `VAULT` is filled from `ops/addresses.json` → `chains.4663.ours.vault`

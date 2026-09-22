@@ -13,6 +13,8 @@ describe("v2 revert copy", () => {
   it("decodes v7 stale ask and vault spending reverts", () => {
     expect(explainV2Error({ data: encodeErrorResult({ abi: v2ErrorsAbi, errorName: "InTheMoney" }) })).toMatch(/at or in the money/);
     expect(explainV2Error({ data: encodeErrorResult({ abi: v2ErrorsAbi, errorName: "OutflowCapExceeded", args: [10n, 11n] }) })).toMatch(/spending limit/);
+    expect(explainV2Error({ data: encodeErrorResult({ abi: v2ErrorsAbi, errorName: "FeeAboveMax", args: [2n, 1n] }) }))
+      .toMatch(/above the maximum you approved/);
   });
 
   it("decodes a nested on-chain revert and keeps unknown failures generic", () => {

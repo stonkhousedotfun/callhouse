@@ -1,4 +1,15 @@
 /* Push only. Market pages and transactions never depend on a service-worker cache. */
+function stableNotificationTag(payload, url) {
+  const kind = typeof payload.kind === "string" ? payload.kind : "alert";
+  const input = `${kind}\n${url}\n${payload.title}\n${payload.body}`;
+  let hash = 0x811c9dc5;
+  for (let index = 0; index < input.length; index += 1) {
+    hash ^= input.charCodeAt(index);
+    hash = Math.imul(hash, 0x01000193);
+  }
+  return `stonkhouse-${(hash >>> 0).toString(16).padStart(8, "0")}`;
+}
+
 self.addEventListener("push", (event) => {
   if (!event.data) return;
   let payload;
@@ -11,6 +22,9 @@ self.addEventListener("push", (event) => {
   } catch { /* The app root is the safe fallback. */ }
   event.waitUntil(self.registration.showNotification(payload.title, {
     body: payload.body,
+    icon: "/icon-192.png",
+    badge: "/notification-badge.png",
+    tag: stableNotificationTag(payload, url),
     data: { url },
   }));
 });

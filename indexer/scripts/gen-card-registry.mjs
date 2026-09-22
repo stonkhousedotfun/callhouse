@@ -7,8 +7,14 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
-const source = path.join(root, "ops/markets/tier1.json");
-const destination = path.join(root, "indexer/lib/v2/cardRegistry.generated.json");
+const defaultSource = path.join(root, "ops/markets/tier1.json");
+const registryArg = process.argv.indexOf("--registry");
+if (registryArg !== -1 && !process.argv[registryArg + 1]) throw new Error("--registry needs a path");
+const source = registryArg === -1 ? defaultSource : path.resolve(process.argv[registryArg + 1]);
+const outputArg = process.argv.indexOf("--output");
+if (outputArg !== -1 && !process.argv[outputArg + 1]) throw new Error("--output needs a path");
+const destination = outputArg === -1 ? path.join(root, "indexer/lib/v2/cardRegistry.generated.json")
+  : path.resolve(process.argv[outputArg + 1]);
 
 function object(value, name) {
   if (value === null || typeof value !== "object" || Array.isArray(value)) throw new Error(`${name} must be an object`);
@@ -22,6 +28,18 @@ function ladder(value, name) {
     const entry = value[key];
     if (!Number.isSafeInteger(entry) || entry < 0) throw new Error(`${name}.${key} must be a nonnegative integer`);
     result[key] = entry;
+  }
+  return result;
+}
+
+function expiriesAhead(value, name, partial = false) {
+  object(value, name);
+  const result = {};
+  for (const tenor of ["daily", "weekly"]) {
+    const entry = value[tenor];
+    if (entry === undefined && partial) continue;
+    if (!Number.isSafeInteger(entry) || entry < 0) throw new Error(`${name}.${tenor} must be a nonnegative integer`);
+    result[tenor] = entry;
   }
   return result;
 }
@@ -45,6 +63,8 @@ function project(raw) {
     const marketV2 = object(item.v2, `${item.ticker}.v2`);
     const overrides = object(marketV2.overrides, `${item.ticker}.v2.overrides`);
     const overrideLadder = overrides.ladder === undefined ? undefined : object(overrides.ladder, `${item.ticker}.v2.overrides.ladder`);
+    const overrideExpiries = overrides.expiriesAhead === undefined ? undefined
+      : expiriesAhead(overrides.expiriesAhead, `${item.ticker}.v2.overrides.expiriesAhead`, true);
     const projectedLadder = {};
     if (overrideLadder !== undefined) {
       for (const tenor of ["daily", "weekly"]) {
@@ -60,12 +80,20 @@ function project(raw) {
         projectedLadder[tenor] = validated;
       }
     }
-    return { ticker: item.ticker, v2: { overrides: Object.keys(projectedLadder).length === 0 ? {} : { ladder: projectedLadder } } };
+    const projectedOverrides = {
+      ...(Object.keys(projectedLadder).length === 0 ? {} : { ladder: projectedLadder }),
+      ...(overrideExpiries === undefined || Object.keys(overrideExpiries).length === 0
+        ? {} : { expiriesAhead: overrideExpiries }),
+    };
+    return { ticker: item.ticker, v2: { overrides: projectedOverrides } };
   });
   const projection = {
     v2: {
       fees: { takerFeeFlat: fees.takerFeeFlat, takerFeeCapBps: fees.takerFeeCapBps, exerciseFeeBps: fees.exerciseFeeBps },
-      defaults: { ladder: { weekly: ladder(ladders.weekly, "registry.v2.defaults.ladder.weekly"), daily: ladder(ladders.daily, "registry.v2.defaults.ladder.daily") } },
+      defaults: {
+        ladder: { weekly: ladder(ladders.weekly, "registry.v2.defaults.ladder.weekly"), daily: ladder(ladders.daily, "registry.v2.defaults.ladder.daily") },
+        expiriesAhead: expiriesAhead(defaults.expiriesAhead, "registry.v2.defaults.expiriesAhead"),
+      },
     },
     markets,
   };

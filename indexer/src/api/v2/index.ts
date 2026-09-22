@@ -6,7 +6,14 @@ import { cache15s } from "../cache";
 import { registerMachineRoutes, indexedHead } from "./machine";
 import { registerMarketRoutes } from "./markets";
 import { registerAccountRoutes } from "./accounts";
+import { registerAdminRoutes } from "./admin";
 import { registerFeedRoutes } from "./feed";
+import { registerFlywheelRoutes } from "./flywheel";
+import { registerEarnRoutes } from "./earn";
+import { registerHouseRoutes } from "./house";
+import { registerRewardRoutes } from "./rewards";
+import { registerServiceRoutes } from "./services";
+import { registerVaultRoutes } from "./vault";
 import { ROUTES } from "./schema";
 
 export const v2App = new Hono();
@@ -18,7 +25,10 @@ v2App.use("*", async (c, next) => {
   await next();
 });
 
-v2App.use("*", async (c, next) => c.req.path === "/v2/health" || c.req.path === "/v2/config"
+// /v2/services joins the no-cache list for the reason the route exists: a 15s edge copy would go
+// on reporting a dead pricer as healthy for 15 seconds after it died. services.ts holds its own
+// short cache, which it can invalidate; the edge cannot.
+v2App.use("*", async (c, next) => c.req.path === "/v2/health" || c.req.path === "/v2/config" || c.req.path === "/v2/services"
   ? next() : cache15s(c, next));
 
 /** Keep the producer on the exact strict schema copied from the web consumer. */
@@ -55,3 +65,10 @@ registerMarketRoutes(v2App);
 registerMachineRoutes(v2App);
 registerAccountRoutes(v2App);
 registerFeedRoutes(v2App);
+registerAdminRoutes(v2App);
+registerFlywheelRoutes(v2App);
+registerEarnRoutes(v2App);
+registerHouseRoutes(v2App);
+registerRewardRoutes(v2App);
+registerVaultRoutes(v2App);
+registerServiceRoutes(v2App);

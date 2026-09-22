@@ -223,7 +223,7 @@ for (const target of targets) {
         prefs: { inKind: false, toLedger: true },
         lastKnownLongs: { '123': { units: '40', avgCost: '1250000', seenAt: T0 / 1000 } },
       };
-      const snapshot = { at: T0 / 1000, spots: { NVDA: '215500000' }, alerts: {}, strikeSides: { '123': 'above' as const }, alertStates: {}, settlements: {}, sessionDays: { '20717': false, '20718': true } };
+      const snapshot = { at: T0 / 1000, spots: { NVDA: '215500000' }, spotTimes: { NVDA: T0 / 1000 - 90 }, alerts: {}, strikeSides: { '123': 'above' as const }, alertStates: {}, settlements: {}, sessionDays: { '20717': false, '20718': true }, pendingFeesEffectiveAt: T0 / 1000 + 86400, liveFeesKey: 'fees-1', adminOperations: { 'op-1': { status: 'pending' as const, label: 'setMarketFees' } } };
       const cursor = { since: T0 / 1000, seen: { 'tx-1': T0 / 1000 }, resume: null };
       const watch = await loadWatchSet(db);
       assert.deepEqual([...watch.addresses], [SAMPLE_ADDRESS]);
@@ -231,19 +231,32 @@ for (const target of targets) {
         { ticker: 'NVDA', direction: 'above', threshold: '225000000' },
         { ticker: 'NVDA', direction: 'below', threshold: '210000000' },
       ]);
-      await saveState(db, { cursor, snapshot, changedHoldings: { [SAMPLE_ADDRESS]: holdings, '0xgone': holdings }, watched: watch.addresses, now });
-      assert.deepEqual(await loadState(db, logger), { cursor, snapshot, holdings: { [SAMPLE_ADDRESS]: holdings } });
-      await saveState(db, { cursor, snapshot, changedHoldings: {}, watched: new Set(), now });
+      // anchor: null leaves the stored deployment anchor untouched - this test is about cursor,
+      // snapshot and holdings, and loadState reports the absent anchor as null.
+      await saveState(db, { cursor, snapshot, changedHoldings: { [SAMPLE_ADDRESS]: holdings, '0xgone': holdings }, watched: watch.addresses, now, anchor: null });
+      assert.deepEqual(await loadState(db, logger), { cursor, snapshot, holdings: { [SAMPLE_ADDRESS]: holdings }, anchor: null });
+      await saveState(db, { cursor, snapshot, changedHoldings: {}, watched: new Set(), now, anchor: null });
       assert.deepEqual((await loadState(db, logger)).holdings, {});
 
-      // Rows stored before N2-02b's fields: a snapshot without sessionDays and a strategy without
-      // lastRolledAt still parse (as unknown days and no last roll), rather than starting afresh.
-      const { sessionDays: _days, ...olderSnapshot } = snapshot;
+      // Rows stored before later fields: a snapshot without sessionDays or spotTimes and a strategy
+      // without lastRolledAt still parse (as unknown days, no spot times and no last roll), rather
+      // than starting afresh — an upgrade must not throw away the state it can still read.
+      const {
+        sessionDays: _days, spotTimes: _times,
+        pendingFeesEffectiveAt: _pending, liveFeesKey: _liveKey, adminOperations: _ops,
+        ...olderSnapshot
+      } = snapshot;
       const olderHoldings = { ...holdings, strategies: [{ ticker: 'NVDA', active: true, currentSeries: null }] };
       await db.query(`UPDATE notifier.rules_state SET value = $1::jsonb WHERE name = 'snapshot'`, [JSON.stringify(olderSnapshot)]);
       await db.query(`INSERT INTO notifier.rules_holdings (address, holdings, fetched_at) VALUES ($1, $2::jsonb, $3::timestamptz)`, [SAMPLE_ADDRESS, JSON.stringify(olderHoldings), now]);
       const older = await loadState(db, logger);
-      assert.deepEqual(older.snapshot, { ...olderSnapshot, sessionDays: {} });
+      assert.deepEqual(older.snapshot, {
+        ...olderSnapshot,
+        sessionDays: {}, spotTimes: {},
+        // Same property, extended to the fields X8-181 added: a row stored before them parses as
+        // "no fee change scheduled, no fees block seen, no operations", not as a parse failure.
+        pendingFeesEffectiveAt: null, liveFeesKey: null, adminOperations: {},
+      });
       assert.equal(older.holdings[SAMPLE_ADDRESS]?.strategies[0]?.lastRolledAt, null);
     });
   });

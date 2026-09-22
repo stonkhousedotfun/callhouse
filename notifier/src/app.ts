@@ -21,6 +21,7 @@ import { createTargetCipher } from './crypto.js';
 import { createPgDb, migrate, type Db } from './db.js';
 import { DeliveryService, type DeliveryOptions } from './delivery.js';
 import { createLogger, type Logger } from './log.js';
+import { MarketsCache } from './markets.js';
 import { RulesEngine, type RulesHealth, type RulesOptions } from './rules/engine.js';
 import { createIndexerClient, type IndexerClient } from './rules/indexer.js';
 import { createApp } from './server.js';
@@ -51,6 +52,8 @@ export interface RunningNotifier {
   delivery: DeliveryService;
   /** null when RULES_ENABLED is false. */
   rules: RulesEngine | null;
+  /** The tickers of the engine's last /v2/markets read, shared with the API (markets.ts). */
+  markets: MarketsCache;
   bot: TelegramBot;
   app: ReturnType<typeof createApp>;
   db: Db;
@@ -100,6 +103,10 @@ export async function startNotifier(config: NotifierConfig, overrides: StartOver
     ...(overrides.delivery === undefined ? {} : { options: overrides.delivery }),
   });
 
+  // The engine fills it from /v2/markets; the API refuses price alerts on tickers outside it.
+  // With the engine off it stays empty, which means "unknown", so the API refuses nothing.
+  const markets = new MarketsCache();
+
   // N2-02: the rules engine decides what to send; enqueue is its only way to send anything.
   const rules = config.rules.enabled
     ? new RulesEngine({
@@ -108,6 +115,7 @@ export async function startNotifier(config: NotifierConfig, overrides: StartOver
         enqueue: (kind, address, payload, key) => delivery.enqueue(kind, address, payload, key),
         logger,
         now,
+        markets,
         options: { pollMs: config.rules.pollMs, ...overrides.rules },
       })
     : null;
@@ -132,13 +140,15 @@ export async function startNotifier(config: NotifierConfig, overrides: StartOver
     now,
     logger,
     breakerStates: () => delivery.breakerStates(),
+    deliveryStats: () => delivery.statsLastHour(),
     rulesHealth,
+    markets,
     telegram: bot,
     email,
   });
 
   if (overrides.listen === false) {
-    return { delivery, rules, bot, app, db, server: null, port: null, close: () => db.close() };
+    return { delivery, rules, markets, bot, app, db, server: null, port: null, close: () => db.close() };
   }
 
   await bot.refreshIdentity();
@@ -164,6 +174,7 @@ export async function startNotifier(config: NotifierConfig, overrides: StartOver
   return {
     delivery,
     rules,
+    markets,
     bot,
     app,
     db,

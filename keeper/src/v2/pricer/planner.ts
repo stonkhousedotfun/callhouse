@@ -7,14 +7,14 @@
  *   targetPrice   clamp(fair × (1 + edgeBps), minAskBps · spot, maxAskBps · spot), on the tick grid
  *   differsEnough the "> 10 %" rule against the live ask
  *   evaluationDue right after each roll, then at most once per PRICER_MIN_INTERVAL_S
- *   planCheck     everything that must hold before a fair value is worth asking for, the in-the-money
+ *   planCheck     everything that must hold before a fair value is worth asking for, including the regular session and in-the-money
  *                 refusal of INTERFACE_VERSION 7 included
  *   planReprice   the decision once the fair value is known
  *
  * THE CONTRACT'S RULES, which the send would otherwise discover as a revert (C2-09 AutoRoller.reprice,
- * OrderBook.replace): PRICER_ROLE; strategy active with smartPricing (NotAuthorized); a tracked ask
- * (OrderNotLive(0)); a fresh spot from the market's oracle (`spot()` reverts when stale); the spot short of the
- * strike (InTheMoney, INTERFACE_VERSION 7); the band
+ * OrderBook.replace): the manager admitting `reprice`; strategy active with smartPricing (NotAuthorized); a tracked ask
+ * (OrderNotLive(0)); a fresh spot from the SERIES' pinned oracle (`Series.oracle`, not `market(u).oracle`: T-310 /
+ * T-437; `spot()` reverts when stale); the spot short of the strike (InTheMoney, INTERFACE_VERSION 7); the band
  * `minAskBps × spot ≤ price × 1e4 ≤ maxAskBps × spot`, inclusive and exact (BadPrice); price > 0 and
  * `price % 100 == 0` (BadPrice); the ask not cancelled, not filled and before its validUntil
  * (OrderNotLive). The replacement keeps the remaining units and the validUntil.
@@ -147,11 +147,17 @@ export interface CheckView {
   position: PositionView;
   /** OrderBook.getOrders([position.orderId])[0]; null when not read. */
   order: AskView | null;
-  /** SettlementOracle.trySpot of the market's oracle: null when not ok. */
+  /**
+   * SettlementOracle.trySpot of the series' PINNED oracle (Clearinghouse.series(longId).oracle), the one reprice reads
+   * and the series settles on (T-310/T-437): null when not ok, and null when the series was not read, since then the
+   * oracle is unknown. Never market(u).oracle, which a setMarketOracle moves away from existing series.
+   */
   spot: bigint | null;
   /** Clearinghouse.series(position.longId): the side and strike `reprice` compares the spot with. Null when unread. */
   series: { isPut: boolean; strike: bigint } | null;
   now: number;
+  /** ExpiryCalendar.isRegularSession at the pinned head; null when the read failed. */
+  sessionOpen: boolean | null;
   memory: EvaluationMemory | null;
 }
 
@@ -163,6 +169,8 @@ export type SkipReason =
   | 'order-not-live'
   | 'near-cutoff'
   | 'not-due'
+  | 'market-closed'
+  | 'session-unavailable'
   | 'spot-stale'
   | 'in-the-money';
 
@@ -185,7 +193,7 @@ export const askLive = (o: AskView, now: number): boolean => !o.cancelled && rem
  * pricer therefore stops at this pair: no `/fair` request, no send, and the evaluation clock does not move, so it
  * looks again on the next tick — a spot that falls back below the strike resumes repricing by itself.
  */
-export function planCheck(view: CheckView, settings: { minIntervalS: number }): CheckDecision {
+export function planCheck(view: CheckView, settings: { minIntervalS: number; repriceOffHours: boolean }): CheckDecision {
   if (!view.strategy.active) return { check: false, reason: 'inactive' };
   if (!view.strategy.smartPricing) return { check: false, reason: 'not-smart-pricing' };
   if (view.position.longId === 0n) return { check: false, reason: 'no-position' };
@@ -195,6 +203,8 @@ export function planCheck(view: CheckView, settings: { minIntervalS: number }): 
   if (view.now + CUTOFF_MARGIN_S >= order.validUntil) return { check: false, reason: 'near-cutoff' };
   const due = evaluationDue({ positionLongId: view.position.longId, memory: view.memory, now: view.now, minIntervalS: settings.minIntervalS });
   if (!due.due) return { check: false, reason: 'not-due', nextAt: due.nextAt };
+  if (!settings.repriceOffHours && view.sessionOpen === null) return { check: false, reason: 'session-unavailable' };
+  if (!settings.repriceOffHours && !view.sessionOpen) return { check: false, reason: 'market-closed' };
   if (view.spot === null || view.spot <= 0n) return { check: false, reason: 'spot-stale' };
   if (view.series !== null && overtaken(view.series.isPut, view.series.strike, view.spot)) return { check: false, reason: 'in-the-money' };
   return { check: true, why: due.why, spot: view.spot, order };

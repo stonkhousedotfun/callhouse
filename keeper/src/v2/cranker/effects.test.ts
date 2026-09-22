@@ -133,6 +133,7 @@ test('Cranker.tick with every RPC failing: each step fails on its own, is paged 
         settlementOracle: config.contracts.settlementOracle,
         expiryCalendar: config.contracts.expiryCalendar,
         autoRoller: null,
+        feeSplitter: null,
         multicall3: config.multicall3,
       },
       store,

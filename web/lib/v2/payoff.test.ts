@@ -2,8 +2,12 @@ import { describe, expect, it } from "vitest";
 
 import vectors from "./payoff-vectors.json";
 import {
+  BPS,
+  MAX_PAYOUT_SLIPPAGE_CEIL_BPS,
+  MAX_ROUTE_FEE_BPS,
   UNIT,
   breakeven,
+  breakevenUsdg,
   cardSentence,
   cardTarget,
   collateralPerUnit,
@@ -14,14 +18,16 @@ import {
   multipleAt,
   netPayoutUsdgPerUnit,
   payoutAt,
+  pnlAt,
   premium,
   sharesToUnits,
   shortOutcome,
   takerFee,
+  usdgPayoutBand,
 } from "./payoff";
 
 describe("v2 payoff vectors", () => {
-  for (const v of vectors) {
+  for (const v of vectors.payout) {
     it(v.name, () => {
       const strike = BigInt(v.strike);
       const price = BigInt(v.price);
@@ -143,5 +149,101 @@ describe("scenarios and display", () => {
     expect(cardSentence(card, 100n)).toBe(
       "Pay 1.01 USDG → estimated settlement value 17.20 USDG if NVDA reaches $240.00 by Friday. Max loss: 1.01 USDG.",
     );
+  });
+});
+
+/**
+ * T-OP-120. Every fee term of the explorer, pinned to the contract constant it mirrors. Read at
+ * callhouse-contracts branch v8 ee14bfbc56949f1cb626bb4656ffb0965db1f48f (line numbers cited at that SHA):
+ *   - V2Constants.sol:88  MAX_PAYOUT_SLIPPAGE_CEIL_BPS = 300
+ *   - V2Constants.sol:91  MAX_ROUTE_FEE_BPS = 100
+ *   - V2Constants.sol:80  EXERCISE_FEE_MAX_PAYOUT_SHARE_BPS = 1000, :77 EXERCISE_FEE_CEIL_BPS = 200
+ *   - Clearinghouse.sol:1177-1189 _conversionFloor: value * (BPS - min(maxPayoutSlippageBps + min(routeFee, 100), 300)) / BPS
+ *   - OptionMath.sol:111-113 grossPayoutPerUnit, :130-131 exercise fee, :140-141 longPayoutPerUnit
+ *   - OrderBook.sol:834-841 _takerFee = min(flat, premium * capBps / BPS) - discount
+ * The design example (docs/product/TRADE-PAYOFF-EXPLORER.md §2.5): 300 units, one ask at 4.1333 USDG/share,
+ * strike 230 call, exercise fee 25 bps, settlement 240, taker fee min(0.10 USDG, 10 %).
+ */
+
+describe("T-OP-120 conversion band, P&L and USDG break-even", () => {
+  const call = { isPut: false, strike: 230_000_000n, units: 300n, exerciseFeeBps: 25 };
+  const put = { isPut: true, strike: 230_000_000n, units: 300n, exerciseFeeBps: 25 };
+  const fees = { takerFeeFlat: 100_000n, takerFeeCapBps: 1_000 };
+  const quote = costToBuy([{ orderId: "1", price: 4_133_300n, units: 300n }], 300n, fees);
+
+  it("pins the contract ceilings the app assumes when the wire carries no slippage", () => {
+    expect(MAX_PAYOUT_SLIPPAGE_CEIL_BPS).toBe(300);
+    expect(MAX_ROUTE_FEE_BPS).toBe(100);
+  });
+
+  it("prices the design example the way OrderBook.take does", () => {
+    // OptionMath.premium (:49-50): 4_133_300 * 300 / 100; one taker fee on the total premium (OrderBook.sol:454, :834-841).
+    expect(quote.premium).toBe(12_399_900n);
+    expect(quote.fee).toBe(100_000n);
+    expect(quote.cost).toBe(12_499_900n);
+    expect(quote.averagePrice).toBe(4_133_300n);
+  });
+
+  it("mirrors Clearinghouse._conversionFloor, including both clamps, from the vectors", () => {
+    for (const v of vectors.conversion) {
+      const band = usdgPayoutBand(BigInt(v.value), v.slippageBps, v.routeFeeBps);
+      expect(band, v.name).toEqual({ low: BigInt(v.low), high: BigInt(v.value), floorBps: v.floorBps });
+      // Independent restatement of :1183-1189.
+      const routeFee = Math.min(v.routeFeeBps, 100);
+      const total = Math.min(v.slippageBps + routeFee, 300);
+      expect(band.low, v.name).toBe((BigInt(v.value) * BigInt(10_000 - total)) / BPS);
+    }
+    expect(() => usdgPayoutBand(1n, 301, 0)).toThrow(RangeError);
+    expect(() => usdgPayoutBand(1n, -1, 0)).toThrow(RangeError);
+    expect(() => usdgPayoutBand(-1n, 0, 0)).toThrow(RangeError);
+  });
+
+  it("values the design example call at 240 and floors every step", () => {
+    const price = 240_000_000n;
+    // OptionMath.sol:113 UNIT * (P - K) / P, floored; :130-131 min(UNIT * 25 / BPS, gross * 1000 / BPS); :141 gross - fee.
+    const gross = (UNIT * (price - call.strike)) / price;
+    expect(gross).toBe(416_666_666_666_666n);
+    const fee = exerciseFeePerUnit(gross, UNIT, 25);
+    expect(fee).toBe(25_000_000_000_000n);
+    expect(payoutAt(price, call)).toBe(((gross - fee) * price / 10n ** 18n) * 300n);
+    expect(payoutAt(price, call)).toBe(28_199_700n);
+    const band = usdgPayoutBand(payoutAt(price, call), MAX_PAYOUT_SLIPPAGE_CEIL_BPS, MAX_ROUTE_FEE_BPS);
+    expect(band).toEqual({ low: 27_353_709n, high: 28_199_700n, floorBps: 9_700 });
+    const pnl = pnlAt(price, call, quote.cost);
+    expect(pnl).toEqual({ pnl: 15_699_800n, pct: 125.59, multiple: 2.25 });
+  });
+
+  it("floors a loss away from zero and a gain toward zero", () => {
+    expect(pnlAt(200_000_000n, call, quote.cost)).toEqual({ pnl: -12_499_900n, pct: -100, multiple: 0 });
+    // 1 base unit short of covering: -0.000008 % floors to -0.01 %, never to 0.
+    const almost = { isPut: true, strike: 200_000_000n, units: 1n, exerciseFeeBps: 0 };
+    expect(pnlAt(190_000_000n, almost, 100_001n)).toEqual({ pnl: -1n, pct: -0.01, multiple: 0.99 });
+    expect(pnlAt(190_000_000n, almost, 0n)).toEqual({ pnl: 100_000n, pct: null, multiple: null });
+    expect(() => pnlAt(1n, almost, -1n)).toThrow(RangeError);
+  });
+
+  it("solves the call's two break-evens to the cent and the put's one", () => {
+    const inKind = breakeven(call, quote.cost)!;
+    const inUsdg = breakevenUsdg(call, quote.cost, MAX_PAYOUT_SLIPPAGE_CEIL_BPS)!;
+    expect(inKind).toBe(234_629_667n);
+    expect(inUsdg).toBe(234_772_778n);
+    expect(inUsdg).toBeGreaterThan(inKind);
+    expect(payoutAt(inKind, call)).toBeGreaterThanOrEqual(quote.cost);
+    expect(payoutAt(inKind - 1n, call)).toBeLessThan(quote.cost);
+    const floorAt = (p: bigint) => usdgPayoutBand(payoutAt(p, call), MAX_PAYOUT_SLIPPAGE_CEIL_BPS, MAX_ROUTE_FEE_BPS).low;
+    expect(floorAt(inUsdg)).toBeGreaterThanOrEqual(quote.cost);
+    expect(floorAt(inUsdg - 1n)).toBeLessThan(quote.cost);
+    // Less slippage moves the USDG break-even toward the in-kind one; zero slippage and zero route fee equal it.
+    expect(breakevenUsdg(call, quote.cost, 100)).toBeLessThan(inUsdg);
+    expect(breakevenUsdg(call, quote.cost, 0, 0)).toBe(inKind);
+    // A put is paid in USDG: one break-even, the highest price that still covers the cost.
+    const putBe = breakevenUsdg(put, quote.cost, MAX_PAYOUT_SLIPPAGE_CEIL_BPS)!;
+    expect(putBe).toBe(breakeven(put, quote.cost));
+    expect(putBe).toBe(225_370_400n);
+    expect(payoutAt(putBe, put)).toBeGreaterThanOrEqual(quote.cost);
+    expect(payoutAt(putBe + 1n, put)).toBeLessThan(quote.cost);
+    expect(breakevenUsdg(put, 3_000_000_000n, 300)).toBeNull();
+    expect(breakevenUsdg(call, 0n, 300)).toBe(call.strike);
+    expect(() => breakevenUsdg(call, 1n, 301)).toThrow(RangeError);
   });
 });

@@ -12,6 +12,8 @@
  *                poll intervals before any chain read.
  *   GET /state   the mode's own view (the cranker's per-step metrics, the MM bot's net delta), 503
  *                until the mode has one.
+ *   GET /ready   a mode that mounts readyRoute (the pricer, T-423): READINESS, not liveness, in a body
+ *                that is safe to proxy to a public API. See readyBody.
  *   GET /        service, mode and endpoints.
  *
  * The heartbeat is in memory (ModeHealth), not SQLite as in v1: it only has to outlive a request,
@@ -25,6 +27,7 @@ import { serve, type ServerType } from '@hono/node-server';
 import { Hono } from 'hono';
 import type { Address } from 'viem';
 import type { SigningMode } from './mode.js';
+import { INTERFACE_VERSION } from './registry.js';
 import { bigintReplacer, type V2Store } from './store.js';
 
 /** One chain read per tick: what /health reports and the gas and lag checks judge. */
@@ -188,6 +191,119 @@ export function createModeHealthApp(options: HealthAppOptions): Hono {
   app.get('/', () => json({ service: `callhouse-${options.mode}`, mode: options.mode, endpoints: ['/health', '/state', ...(options.routes?.endpoints ?? [])] }, 200));
 
   return app;
+}
+
+/*//////////////////////////////////////////////////////////////
+                  GET /ready: READINESS, PUBLIC-SAFE
+//////////////////////////////////////////////////////////////*/
+
+/**
+ * Why a mode is not ready (T-423). A CLOSED set: readyBody replaces anything outside it with
+ * `state-unknown`, so a consumer (the indexer, T-424) can switch over it exhaustively and never has to
+ * guess what a new string means. The pricer's four conditions (pricer.ts evaluatePricerReadiness) map
+ * onto it as: loop alive -> loop-wedged; a tick completed -> no-completed-tick, tick-failed; the reprice
+ * authority -> role-unread, role-refused, role-delayed; a qualified fair value -> fair-stale.
+ */
+export const READY_REASONS = [
+  /** The loop is not alive by /health's own rule (evaluateHealth().alive): /health would answer 503. */
+  'loop-wedged',
+  /** No tick has completed since the process started. */
+  'no-completed-tick',
+  /** The latest tick threw, so whatever it would have read is unknown. */
+  'tick-failed',
+  /** No answer to the authority read: never read, or the latest read failed. Unknown is not ready. */
+  'role-unread',
+  /** The authority read answered no. */
+  'role-refused',
+  /** The authority read answered with a non-zero execution delay: every call would need scheduling. */
+  'role-delayed',
+  /** No qualified fair value within the mode's bound, or none at all. */
+  'fair-stale',
+  /** The evaluation threw, or returned something outside this set or not a boolean. */
+  'state-unknown',
+] as const;
+export type ReadyReason = (typeof READY_REASONS)[number];
+
+/** What a mode's readiness rule returns. `lastEvaluationAt` is wall-clock milliseconds, or null. */
+export interface Readiness {
+  ready: boolean;
+  reasons: readonly ReadyReason[];
+  lastEvaluationAt: number | null;
+}
+
+/**
+ * The GET /ready body: these five keys and nothing else. /health's body carries the signer and its
+ * balance, the RPC origins, the contract addresses and the db path, which is why nothing may proxy it to
+ * a public API; this one is built key by key from the Readiness, so a field added to the rule's result
+ * can never reach it.
+ */
+export interface ReadyBody {
+  ready: boolean;
+  reasons: ReadyReason[];
+  /** ISO time of this answer (wall clock). */
+  checkedAt: string;
+  /** ISO time of the mode's latest completed evaluation (wall clock), or null before the first. */
+  lastEvaluationAt: string | null;
+  /** The contract interface this keeper implements (registry.ts INTERFACE_VERSION). */
+  interfaceVersion: number;
+}
+
+const KNOWN_REASONS: ReadonlySet<string> = new Set(READY_REASONS);
+
+function isReadiness(value: unknown): value is Readiness {
+  return typeof value === 'object' && value !== null && typeof (value as Readiness).ready === 'boolean' && Array.isArray((value as Readiness).reasons);
+}
+
+/**
+ * FAIL CLOSED. `ready` is true only when the rule returned exactly `true` AND named no reason against it.
+ * A rule that throws, returns a non-boolean `ready`, a reason outside READY_REASONS, or `ready: false`
+ * with no reason at all yields `ready: false` with `state-unknown`: there is no path by which not knowing
+ * becomes ready, and no path by which not-ready arrives without a reason.
+ */
+export function readyBody(evaluate: (now: number) => Readiness, now: number): ReadyBody {
+  let result: unknown;
+  try {
+    result = evaluate(now);
+  } catch {
+    result = null;
+  }
+  const verdict = isReadiness(result) ? result : null;
+  const reasons: ReadyReason[] = [];
+  let unknown = verdict === null;
+  for (const reason of verdict?.reasons ?? []) {
+    if (!KNOWN_REASONS.has(reason)) unknown = true;
+    else if (!reasons.includes(reason)) reasons.push(reason);
+  }
+  const ready = !unknown && verdict?.ready === true && reasons.length === 0;
+  if (!ready && (unknown || reasons.length === 0) && !reasons.includes('state-unknown')) reasons.push('state-unknown');
+  const at = verdict?.lastEvaluationAt;
+  return {
+    ready,
+    reasons,
+    checkedAt: new Date(now).toISOString(),
+    lastEvaluationAt: typeof at === 'number' && Number.isFinite(at) ? new Date(at).toISOString() : null,
+    interfaceVersion: INTERFACE_VERSION,
+  };
+}
+
+/**
+ * GET /ready as a mode route (ModeDefinition.routes): 200 when ready, 503 when not, the body either way.
+ * The status agrees with the body so a consumer that reads only the code also fails closed.
+ *
+ * NEVER point a restart healthcheck (railway.json healthcheckPath) at /ready. Not-ready includes causes a
+ * restart cannot fix - a revoked role, a pricing service that is down, a closed market leaving no fair
+ * value inside the bound - and a restart on those is the crash loop /health's rules exist to avoid.
+ */
+export function readyRoute(evaluate: (now: number) => Readiness, now: () => number = Date.now): { mount: (app: Hono) => void; endpoints: readonly string[] } {
+  return {
+    mount: (app) => {
+      app.get('/ready', () => {
+        const body = readyBody(evaluate, now());
+        return json(body, body.ready ? 200 : 503);
+      });
+    },
+    endpoints: ['/ready'],
+  };
 }
 
 export interface RunningServer {
