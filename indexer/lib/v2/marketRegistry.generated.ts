@@ -3,29 +3,29 @@
 export const V2_REGISTRY = {
   "chainId": 4663,
   "interfaceVersion": 8,
-  "deployBlock": null,
+  "deployBlock": 69512673,
   "contracts": {
-    "clearinghouse": null,
-    "orderBook": null,
-    "settlementOracle": null,
-    "expiryCalendar": null,
-    "keeperRewards": null,
-    "autoRoller": null,
-    "payoutAdapter": null,
-    "makerVault": null,
-    "makerRegistry": null,
-    "rewardsDistributor": null,
-    "accessManager": null,
-    "houseVault": null,
-    "houseVaultFactory": null,
+    "clearinghouse": "0x1A67948175DFf13426F0d61bfB483579D2ff2EeE",
+    "orderBook": "0x65A97a05e9726DA45794DA206943bbc4280b5ce6",
+    "settlementOracle": "0x0e4F266b73e95dc6d4cA10674DCd5eF353e2BDCD",
+    "expiryCalendar": "0x5d0D98C6774B5db0b83D8Bc16FDd09a8Df826d18",
+    "keeperRewards": "0x475D2649E991f4D2f1E21dEB758cd1d6D76C27c5",
+    "autoRoller": "0x7C6Fbc78c460e7994e6A47f7AEe63E36709ab05D",
+    "payoutAdapter": "0x6d97634501b52D78c8dEb77a7d9105587DBAAf18",
+    "makerVault": "0xfbC35FCc0508788b0a2eAF09bBb3Df04402d30A2",
+    "makerRegistry": "0x6FeecE6CbE97b4f0b453eD6373a599795BdBBeee",
+    "rewardsDistributor": "0x08F233c5E338a35F7Ba6cD16C729AB61f40325ce",
+    "accessManager": "0xb663C1EAEeD4664515Cc864667263f3e75238da3",
+    "houseVault": "0xfb5CcB9CF9249E46D8Af0C4f8fe7Eaa9bD7BfF51",
+    "houseVaultFactory": "0x5BEa4c9887C322d5Ec8C7ae547c25091599774d2",
     "hedger": null,
     "rewardsDistributorLender": null,
-    "earnVault": null,
+    "earnVault": "0xf7d21652473014d1Ca0e22FF75420494cdd09164",
     "stockVenueAdapter": null,
     "sources": {
-      "chainlink": null,
-      "univ3": null,
-      "dataStreams": null
+      "chainlink": "0xD824c6488982473364039e3790063b8bF1f2Cc93",
+      "univ3": "0x48B8d36bA9BB66A033094a84d52c95D20964C666",
+      "dataStreams": "0xF57BB92543de0cA0B97Dc862A31c8E5A32F6b5C5"
     }
   },
   "safes": {
@@ -33,9 +33,9 @@ export const V2_REGISTRY = {
     "treasury": "0x014b996a084690FB27265BfAC157b04e9FeBbF4E"
   },
   "flywheel": {
-    "feeSplitter": null,
-    "buybackExecutor": null,
-    "deployBlock": null
+    "feeSplitter": "0x52a5674FFD2aDe74738d2347ef1366Bdc1881C37",
+    "buybackExecutor": "0xE7Ae90cDCfF293C7434942bEF0aE7C7C59A39565",
+    "deployBlock": 69512673
   },
   "fees": {
     "premiumFeeBps": 500,
@@ -490,7 +490,7 @@ export const V2_REGISTRY = {
       "name": "NVIDIA • Robinhood Token",
       "underlying": "0xd0601CE157Db5bdC3162BbaC2a2C8aF5320D9EEC",
       "uiMultiplier": "1000775159164630595",
-      "status": "planned",
+      "status": "live",
       "strikeTick": "2500000",
       "puts": false,
       "mintFeePpm": 0,
@@ -673,7 +673,7 @@ export const V2_REGISTRY = {
       "name": "SpaceX • Robinhood Token",
       "underlying": "0x4a0E65A3EcceC6dBe60AE065F2e7bb85Fae35eEa",
       "uiMultiplier": "1000000000000000000",
-      "status": "planned",
+      "status": "live",
       "strikeTick": "1000000",
       "puts": false,
       "mintFeePpm": 0,
