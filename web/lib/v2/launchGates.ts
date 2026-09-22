@@ -53,6 +53,43 @@ export function countdownLabel(secondsRemaining: number): string {
   return days > 0 ? `${days}d ${clock}` : clock;
 }
 
+/**
+ * May the House deposit controls be used yet?
+ *
+ * FAIL CLOSED, and that is the whole point of the helper. `undefined` is the gate still being read (or a read
+ * that errored), and an unread gate must not open a deposit: money would go into a vault whose quoting state
+ * nobody has established. `LockedMarket` already takes this position for trading controls ("the controls stay
+ * off until it can [be read]"); deposits follow the same rule.
+ *
+ * Only `done` opens it. A "due" gate is scheduled and executable but the Admin Safe has NOT sent the execute,
+ * so `protocolAccountsConfirmed` is still false on chain and the vault still quotes nothing.
+ */
+export function houseDepositsOpen(gate: LaunchGate | undefined, nowSeconds: number): boolean {
+  return gate !== undefined && launchGatePhase(gate, nowSeconds) === "done";
+}
+
+/**
+ * The one clock for an index row that stands for every launch market's House vault (/vaults), where there is
+ * no single ticker to read. Returns the market whose arming lands SOONEST among those not yet armed, because
+ * that is the first moment the House surface does anything a depositor came for. `null` means every launch
+ * house vault is already armed — the caller shows no clock.
+ *
+ * An unscheduled gate (`scheduledAt === 0`) is still pending and still returned, so the row cannot render as
+ * open merely because nobody has scheduled the arming yet; it sorts last, behind every scheduled one.
+ */
+export function soonestPendingHouseGate(
+  house: Readonly<Record<string, LaunchGate>> | undefined,
+  nowSeconds: number,
+): { ticker: string; gate: LaunchGate } | null {
+  if (!house) return null;
+  const pending = Object.entries(house)
+    .filter(([, gate]) => !houseDepositsOpen(gate, nowSeconds))
+    .map(([ticker, gate]) => ({ ticker, gate }));
+  if (pending.length === 0) return null;
+  const rank = (g: LaunchGate) => (g.scheduledAt === 0 ? Number.POSITIVE_INFINITY : g.scheduledAt);
+  return pending.reduce((best, item) => (rank(item.gate) < rank(best.gate) ? item : best));
+}
+
 function launchMarkets() {
   return LAUNCH_SET.markets.map((ticker) => {
     const row = GENERATED_MARKETS.find((m) => m.ticker === ticker);

@@ -7,7 +7,8 @@
 import { useQuery } from "@tanstack/react-query";
 import { useEffect, useState, type ReactNode } from "react";
 
-import { countdownLabel, launchGatePhase, readLaunchGates, type LaunchGate, type LaunchGates } from "@/lib/v2/launchGates";
+import { countdownLabel, houseDepositsOpen, launchGatePhase, readLaunchGates, soonestPendingHouseGate,
+  type LaunchGate, type LaunchGates } from "@/lib/v2/launchGates";
 
 const LAUNCH_GATES_KEY = ["v2", "launchGates"] as const;
 
@@ -20,6 +21,22 @@ export function useLaunchGates() {
     refetchOnWindowFocus: true,
     retry: 1,
   });
+}
+
+
+/**
+ * Whether this market's House deposit controls may be used, plus the gate behind the answer.
+ *
+ * NO PER-SECOND TICK HERE ON PURPOSE. The answer turns on `gate.done` alone — the arming read back from
+ * chain — so it does not move with the clock, and a control that re-rendered every second would churn a
+ * whole deposit form for nothing. What flips it is `useLaunchGates`' own 15 s refetch.
+ *
+ * `open` is false while the gate is unread, so a failed or in-flight chain read leaves deposits shut.
+ */
+export function useHouseDepositsOpen(ticker: string): { open: boolean; gate: LaunchGate | undefined; isError: boolean } {
+  const gates = useLaunchGates();
+  const gate = gates.data?.house[ticker];
+  return { open: houseDepositsOpen(gate, Math.floor(Date.now() / 1000)), gate, isError: gates.isError };
 }
 
 /** A once-a-second clock in unix seconds; one interval per mounted countdown. */
@@ -108,7 +125,13 @@ export function LockedMarket({ ticker, children }: { ticker: string; children: R
   const t = TRADING_COPY(ticker); const h = HOUSE_COPY(ticker);
   return <>
     <section aria-label={`${ticker} launch countdown`} className="mb-6 rounded-lg border border-line-2 bg-surface p-6">
-      <p className="mb-5 text-center font-display text-xl font-bold">{ticker} is listed. Trading is not open yet.</p>
+      {/* Defence in depth after the 2026-09-22 indexer-veto bug: if this ever renders while the chain says
+          trading is on, the headline must not contradict the clock directly beneath it. */}
+      <p className="mb-5 text-center font-display text-xl font-bold">
+        {gates.data?.trading[ticker]?.done
+          ? `${ticker} trading is enabled on chain. This page is still catching up.`
+          : `${ticker} is listed. Trading is not open yet.`}
+      </p>
       <div className="grid gap-8 sm:grid-cols-2">
         <CountdownClock gate={gates.data?.trading[ticker]} label={`${ticker} trading opens in`} doneLabel={t.doneLabel} unscheduledLabel={t.unscheduledLabel} />
         <CountdownClock gate={gates.data?.house[ticker]} label="House market maker quotes in" doneLabel={h.doneLabel} unscheduledLabel={h.unscheduledLabel} />
@@ -122,15 +145,45 @@ export function LockedMarket({ ticker, children }: { ticker: string; children: R
   </>;
 }
 
-/** The house page's arming line, above the deposit panels (deposits stay open; only quoting waits). */
+/**
+ * The house page's arming clock, above the deposit panels.
+ *
+ * COPY CHANGED 2026-09-22 (owner): deposits are held shut until the vault is armed, so this no longer says
+ * the vault takes them. The contract still would — `protocolAccountsConfirmed` gates quoting, not deposits —
+ * and that is exactly why the app holds the door: a deposit before the arming buys into a vault that quotes
+ * nothing, and the depositor cannot tell that from the form.
+ */
 export function HouseArmNotice({ ticker }: { ticker: string }) {
-  const gates = useLaunchGates();
-  const gate = gates.data?.house[ticker];
-  const now = Math.floor(Date.now() / 1000);
-  if (gate && launchGatePhase(gate, now) === "done") return null;
+  const { open, gate, isError } = useHouseDepositsOpen(ticker);
+  if (open) return null;
   const h = HOUSE_COPY(ticker);
   return <section aria-label={`${ticker} house vault countdown`} className="mb-5 rounded-lg border border-line-2 bg-surface p-6">
     <CountdownClock gate={gate} label={`${ticker} house market maker quotes in`} doneLabel={h.doneLabel} unscheduledLabel={h.unscheduledLabel} />
-    <p className="mt-4 text-center text-sm text-ink-2">Until then the vault takes deposits and withdrawal requests but places no quotes; deposited money waits for the first quoting epoch.</p>
+    <p className="mt-4 text-center text-sm text-ink-2">
+      Deposits open when it starts quoting. Withdrawal requests, claims and the epoch roll work now.
+    </p>
+    {isError ? <p className="mt-2 text-center text-sm text-ink-3">The on-chain arming could not be read; deposits stay shut until it can.</p> : null}
   </section>;
+}
+
+/**
+ * The /vaults index row for House, which stands for every launch market at once and so has no single ticker
+ * to read. Shows the soonest pending arming and nothing at all once every launch vault is armed.
+ */
+export function HouseIndexCountdown() {
+  const gates = useLaunchGates();
+  const pending = soonestPendingHouseGate(gates.data?.house, Math.floor(Date.now() / 1000));
+  if (!pending) return null;
+  const h = HOUSE_COPY(pending.ticker);
+  return <div className="mt-5 border-t border-line pt-4">
+    <CountdownClock gate={pending.gate} size="md"
+      label={`${pending.ticker} house market maker quotes in`} doneLabel={h.doneLabel} unscheduledLabel={h.unscheduledLabel} />
+    {gates.isError ? <p className="mt-2 text-center text-sm text-ink-3">The on-chain arming could not be read; deposits stay shut until it can.</p> : null}
+  </div>;
+}
+
+/** True once at least one launch House vault is armed — the /vaults row's Deposit CTA opens then. */
+export function useHouseIndexOpen(): boolean {
+  const gates = useLaunchGates();
+  return gates.data !== undefined && soonestPendingHouseGate(gates.data.house, Math.floor(Date.now() / 1000)) === null;
 }

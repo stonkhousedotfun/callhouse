@@ -29,7 +29,7 @@ import { useAccount, useWalletClient } from "wagmi";
 import { ConnectButton } from "@/components/ConnectButton";
 import { useNotice, useV2ReceiptNotice } from "@/components/TxToast";
 import { Button, Notice, PageHead, Panel, Table } from "@/components/ui";
-import { HouseArmNotice } from "@/components/v2/LaunchCountdown";
+import { HouseArmNotice, useHouseDepositsOpen } from "@/components/v2/LaunchCountdown";
 import { WithdrawalTerms } from "@/components/v2/WithdrawalTerms";
 import { USDG, USDG_DECIMALS } from "@/lib/contracts";
 import { v2Markets } from "@/lib/markets";
@@ -80,6 +80,9 @@ function countdownLabel(secondsRemaining: number): string {
 }
 
 export function HouseVault({ ticker }: { ticker: string }) {
+  // Deposits are shut until the vault is armed (owner, 2026-09-22); withdrawals, claims and the roll are not.
+  // Fail closed: `open` is false while the arming is unread. HouseArmNotice above carries the clock and why.
+  const { open: depositsOpen } = useHouseDepositsOpen(ticker);
   const { address } = useAccount();
   const wallet = useWalletClient();
   const notice = useNotice();
@@ -164,7 +167,7 @@ export function HouseVault({ ticker }: { ticker: string }) {
         <label htmlFor="house-deposit-usdg" className="mt-4 block text-sm font-semibold">USDG</label>
         <input id="house-deposit-usdg" inputMode="decimal" value={depositUsdg} onChange={(event) => setDepositUsdg(event.target.value)}
           placeholder="100" className="num mt-2 min-h-11 w-full rounded-sm border border-line-2 bg-surface px-3 text-ink" />
-        <Button size="sm" className="mt-3 w-full" disabled={!vault || !address || !!busy || !parsePositive(depositUsdg, USDG_DECIMALS)}
+        <Button size="sm" className="mt-3 w-full" disabled={!depositsOpen || !vault || !address || !!busy || !parsePositive(depositUsdg, USDG_DECIMALS)}
           onClick={() => void act("Deposit USDG into the house vault", async () => {
             const amount = parsePositive(depositUsdg, USDG_DECIMALS);
             if (!amount) throw new Error("Enter a positive deposit.");
@@ -177,7 +180,7 @@ export function HouseVault({ ticker }: { ticker: string }) {
         <input id="house-deposit-stock" inputMode="decimal" value={depositStock} onChange={(event) => setDepositStock(event.target.value)}
           placeholder="1" className="num mt-2 min-h-11 w-full rounded-sm border border-line-2 bg-surface px-3 text-ink" />
         <Button size="sm" variant="ghost" className="mt-3 w-full"
-          disabled={!vault || !address || !underlying || !!busy || !parsePositive(depositStock, STOCK_DECIMALS)}
+          disabled={!depositsOpen || !vault || !address || !underlying || !!busy || !parsePositive(depositStock, STOCK_DECIMALS)}
           onClick={() => void act("Deposit Stock Tokens into the house vault", async () => {
             const amount = parsePositive(depositStock, STOCK_DECIMALS);
             if (!amount) throw new Error("Enter a positive deposit.");

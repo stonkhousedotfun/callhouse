@@ -3,6 +3,7 @@
 import { useEffect, useState } from "react";
 
 import { PayoffCard } from "@/components/v2/PayoffCard";
+import { UnquotedSeries } from "@/components/v2/UnquotedSeries";
 import { Button, Notice, Panel, Segments } from "@/components/ui";
 import { marketQuoteAsOf } from "@/lib/v2/marketSpot";
 import { useCards, useConfig, useHeroCard, useMarkets } from "@/lib/v2/hooks";
@@ -133,10 +134,15 @@ export function Marketplace() {
               spotAvailable={marketQuoteAsOf(card.series.ticker, cards.data!.generatedAt, markets.isError ? undefined : markets.data) !== null}
               quoteAsOf={cards.isError ? null : marketQuoteAsOf(card.series.ticker, cards.data!.generatedAt, markets.isError ? undefined : markets.data)} />
           </li>)}
-        </ul> : cards.isError ? null : <Panel className="mt-6"><h3 className="font-display text-xl font-bold">No asks right now</h3>
-          <p className="mt-2 text-ink-2">No options match these filters. Try another market or expiry, or check back when makers post new asks.</p>
-          <Button size="sm" variant="ghost" className="mt-4" onClick={() => { setTicker(""); setTenor("all"); setType("call"); }}>Clear filters</Button>
-        </Panel>}
+        </ul> : cards.isError ? null : <>
+          <Panel className="mt-6"><h3 className="font-display text-xl font-bold">No asks right now</h3>
+            <p className="mt-2 text-ink-2">No options match these filters. Try another market or expiry, or check back when makers post new asks.</p>
+            <Button size="sm" variant="ghost" className="mt-4" onClick={() => { setTicker(""); setTenor("all"); setType("call"); }}>Clear filters</Button>
+          </Panel>
+          {/* The ladder that exists even with an empty book. "All markets" has no single ticker to ask
+              about, so it falls back to the first live one rather than showing nothing. */}
+          <UnquotedSeries ticker={ticker || markets.data?.find((market) => market.status === "live")?.ticker} type={activeType} />
+        </>}
     </section>
 
     <section aria-labelledby="how-it-works-title" className="pt-16 sm:pt-20">

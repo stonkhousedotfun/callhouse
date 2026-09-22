@@ -486,7 +486,7 @@ function render(reg, recon, legacy) {
   if (livev2.length === 0 && pausedv2.length === 0) {
     L.push(
       ``,
-      `**No v2 market is marked live in this registry.** Every market below is \`planned\`; none of these entries authorizes trading.${v1Live.length ? ` The v1 ${list(v1Live.map((m) => m.ticker))} ${v1Live.length === 1 ? "factory" : "factories"} at the end of this page ${v1Live.length === 1 ? "is" : "are"} still live.` : ""}`,
+      `**No v2 market is marked live in this registry.** Every market below is \`planned\`; none of these entries authorises trading.${v1Live.length ? ` The v1 ${list(v1Live.map((m) => m.ticker))} ${v1Live.length === 1 ? "factory" : "factories"} at the end of this page ${v1Live.length === 1 ? "is" : "are"} still live.` : ""}`,
     );
   }
 
@@ -495,7 +495,7 @@ function render(reg, recon, legacy) {
     ``,
     `## Status and waves`,
     ``,
-    `* **\`planned\`**: not registered according to this registry. It authorizes no series, orders, buying, writing or deposits.`,
+    `* **\`planned\`**: not registered according to this registry. It authorises no series, orders, buying, writing or deposits.`,
     `* **\`live\`**: registered on the live v2 contracts. Buying and writing require an open series, usable orders and active launch controls; this status alone does not mean an automated strike ladder is running.`,
     `* **\`paused\`**: registered, but new risk is stopped: no new series and no new contracts written. Contracts already written still settle and pay out; closing, redeeming, withdrawing and cancelling orders cannot be paused.`,
     ``,
