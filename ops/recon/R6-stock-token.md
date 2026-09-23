@@ -497,10 +497,10 @@ Note `ASSET_PROTECTION_ROLE` — the freeze/wipe key — **is a bare EOA**, not 
 
 | Path | Contents |
 |---|---|
-| `/Users/omaidfaizyar/Desktop/robinhood-dev/callhouse/ops/abis/StockToken.json` | 56 entries — full recovered ABI of impl `0xb354…5ae2`, with per-entry `_selector`, `_topic0` and `_verified` provenance |
-| `/Users/omaidfaizyar/Desktop/robinhood-dev/callhouse/ops/abis/USDG.json` | 94 entries — implementation + both facets, with facet attribution per function |
-| `/Users/omaidfaizyar/Desktop/robinhood-dev/callhouse/ops/recon/R6-stock-tokens-list.json` | All 204 Robinhood Stock Tokens (uid, address, name, symbol, deploy block) |
-| `/Users/omaidfaizyar/Desktop/robinhood-dev/callhouse/ops/recon/R6-stock-token.md` | this file |
+| `<callhouse>/ops/abis/StockToken.json` | 56 entries — full recovered ABI of impl `0xb354…5ae2`, with per-entry `_selector`, `_topic0` and `_verified` provenance |
+| `<callhouse>/ops/abis/USDG.json` | 94 entries — implementation + both facets, with facet attribution per function |
+| `<callhouse>/ops/recon/R6-stock-tokens-list.json` | All 204 Robinhood Stock Tokens (uid, address, name, symbol, deploy block) |
+| `<callhouse>/ops/recon/R6-stock-token.md` | this file |
 
 ## 11. Address appendix (every one confirmed by an `eth_getCode` or log I actually ran)
 

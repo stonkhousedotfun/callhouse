@@ -4,7 +4,7 @@
   "isSnapshot": true,
   "source": {
     "recon": "stonkhouse-plan/status/VENUE-RECON-2026-09-17.md section 5.1",
-    "originalPath": "/Users/omaidfaizyar/.claude/jobs/f3df06ad/tmp/venues/measure/09-final.json",
+    "originalPath": "(local measurement run)",
     "note": "the other 44 rows of that file are usdg-candidate and weth-candidate pools outside the registry and are deliberately not landed"
   },
   "maxDeviationBps": 150,

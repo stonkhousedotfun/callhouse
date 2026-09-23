@@ -5,15 +5,9 @@
 #   ops/v8/derive-safe-owners.sh            # derive/print the three owner addresses
 #   ops/v8/derive-safe-owners.sh --csv      # print just A,B,C for --owners
 #
-# INDICES 70, 71, 72. Fixed here, not allocated. Everything already in use on this phrase:
-#   0 admin/deployer, 1 v1 keeper, 2 v1 guardian, 10-43 v1 market keepers, 50-52 v7 bots,
-#   60-63 v8 bots (ops/v2/derive-bot-keys.sh). 70-72 are free and stay free for this purpose.
-#
-# OWNER DECISION, 2026-09-21: all three Safe owners come from THIS ONE PHRASE, on this one machine.
-# ops/runbooks/v8-safes.md asks for three keys on three separate devices, and this is not that: one
-# seed reconstructs all three signatures, so the 2-of-3 is a shape rather than a control. Recorded
-# here because a later reader will otherwise assume the runbook was followed. The Safe owner set can
-# be changed later by the Safe itself (swapOwner, 2-of-3), so this is reversible without redeploying.
+# The derivation indices are fixed here rather than allocated. How the resulting keys are held is an
+# operator matter and is not recorded in this repository. The Safe owner set can be changed later by
+# the Safe itself (swapOwner, 2-of-3), so the initial choice is reversible without redeploying.
 #
 # Derivation, key handling and the refuse-rather-than-overwrite rule mirror
 # ops/v2/derive-bot-keys.sh exactly: BIP-44 m/44'/60'/0'/0/<index>, the phrase read from the "Phrase"

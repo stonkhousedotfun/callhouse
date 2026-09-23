@@ -11,8 +11,6 @@
 # real address for each rather than one placeholder reused.
 #
 # INDEX ALLOCATION on this phrase, so nothing collides:
-#   0 admin/deployer, 1 v1 keeper, 2 v1 guardian, 10-43 v1 market keepers, 50-52 v7 bots,
-#   60-63 v8 bots (ops/v2/derive-bot-keys.sh), 70-72 Safe owners (ops/v8/derive-safe-owners.sh),
 #   73+ these labelled wallets.
 #
 # Key handling mirrors ops/v2/derive-bot-keys.sh exactly: the phrase goes to a mode-600 tempfile

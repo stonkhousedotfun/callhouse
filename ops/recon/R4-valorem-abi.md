@@ -485,7 +485,7 @@ option types if Overcall's strike ladder ever doesn't suit, though v1 should use
 
 ## 10. Artifacts produced
 
-- `/Users/omaidfaizyar/Desktop/robinhood-dev/callhouse/ops/abis/ValoremClear.json` — full ABI,
+- `<callhouse>/ops/abis/ValoremClear.json` — full ABI,
   57 entries (26 functions, 15 events, 15 errors, 1 constructor), extracted from the reproduced build.
 - Upstream source for reference: clone `github.com/valorem-labs-inc/valorem-core` @ `6436c823f560af493af119d6148fb3237037aca4`,
   `forge build` with optimizer runs=200, via_ir=false, solc 0.8.16.

@@ -743,7 +743,7 @@ inverted*, and four items marked UNRESOLVED are now resolved.
 
 Everything below was re-run from scratch with my own tooling (my own Multicall3 `aggregate3` ABI encoder and my
 own opcode-aware dispatcher extractor), not by re-reading the original report. Raw evidence artifact:
-`/Users/omaidfaizyar/Desktop/robinhood-dev/callhouse/ops/recon/R5-nvda-feed-round-history.json`
+`<callhouse>/ops/recon/R5-nvda-feed-round-history.json`
 (all **1025** rounds, gap-annotated).
 
 ## V0. What I confirmed (no change needed)

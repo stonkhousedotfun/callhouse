@@ -315,7 +315,7 @@ first GETs the page and the image and refuses on anything but 200), and the inde
 a command line.
 
 ```bash
-cd /Users/omaidfaizyar/Desktop/robinhood-dev/callhouse
+cd <callhouse>
 export INDEXER_URL=https://<indexer-v2 domain>
 node ops/v2/daily-win.mjs                                      # 1. read the post, open the page and image URLs
 ( set -a; . <file with X_CONSUMER_KEY, X_CONSUMER_SECRET, X_ACCESS_TOKEN, X_ACCESS_SECRET>; set +a

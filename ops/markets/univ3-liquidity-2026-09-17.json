@@ -22,7 +22,7 @@
   "source": {
     "recon": "stonkhouse-plan/status/VENUE-RECON-2026-09-17.md section 5.1",
     "reconDate": "2026-09-17",
-    "originalPath": "/Users/omaidfaizyar/.claude/jobs/f3df06ad/tmp/venues/measure/16-minliquidity.json",
+    "originalPath": "(local measurement run)",
     "originalSha256": "3412aa1bf2ce9efb808cf91b7101d6991f1b8c117bfc01e2ff238701059b260b",
     "upstream": "univ3-liquidity-sessions-2026-09-17.json in this directory, which is the 13 role=registry rows of the same recon's 09-final.json (the merged 11-session series: observe() where the pool's observation ring still reaches, Swap-log reconstruction elsewhere)",
     "pinnedBlockRange": "65738678-65744833 (2026-09-17 ~22:51-22:56 UTC)",

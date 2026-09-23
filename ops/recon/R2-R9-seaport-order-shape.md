@@ -568,7 +568,7 @@ Seaport for their offerers), so validate-only orders are untested against their 
 
 ## Artifacts
 
-- `/Users/omaidfaizyar/Desktop/robinhood-dev/callhouse/ops/recon/sample-overcall-order.json`
+- `<callhouse>/ops/recon/sample-overcall-order.json`
   — the full decoded real order (parameters + signature + provenance + the live open order as a
   second sample).
 
