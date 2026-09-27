@@ -1,0 +1,40 @@
+{
+  "chain": {
+    "id": 4663,
+    "info-files": ["/opt/archive-node/chain/robinhood-chain-info.json"]
+  },
+  "execution": {
+    "caching": {
+      "archive": true,
+      "state-scheme": "path",
+      "state-history": 0
+    }
+  },
+  "node": {
+    "feed": {
+      "input": {
+        "url": ["wss://feed.mainnet.chain.robinhood.com"]
+      }
+    }
+  },
+  "http": {
+    "addr": "::",
+    "port": 8547,
+    "api": ["net", "web3", "eth", "arb"],
+    "vhosts": ["*"],
+    "corsdomain": []
+  },
+  "ws": {
+    "addr": "::",
+    "port": 8548,
+    "api": ["net", "web3", "eth"]
+  },
+  "persistent": {
+    "global-config": "/data"
+  },
+  "init": {
+    "genesis-json-file": "/opt/archive-node/chain/robinhood-genesis.json",
+    "download-path": "/data/snapshot-download",
+    "validate-checksum": true
+  }
+}

@@ -4,7 +4,7 @@
  * path must not evaluate a single v2 module on the way.
  */
 
-export const V2_MODES = ['cranker', 'pricing', 'mm', 'pricer'] as const;
+export const V2_MODES = ['cranker', 'pricing', 'mm', 'pricer', 'guardian'] as const;
 export type V2Mode = (typeof V2_MODES)[number];
 /** The modes that hold a key and send transactions. */
 export type SigningMode = Exclude<V2Mode, 'pricing'>;
@@ -30,11 +30,11 @@ export interface RunningMode {
   wake?(): void;
 }
 
-/** Thrown by a mode entry whose task has not landed. index.ts turns it into a clear exit. */
+/** Thrown by a mode entry whose implementation has not landed. index.ts turns it into a clear exit. */
 export class ModeNotImplementedError extends Error {
   constructor(
     readonly mode: V2Mode,
-    /** The board task that builds it, e.g. K2-03. */
+    /** The piece of work that builds it. */
     readonly task: string,
   ) {
     super(`V2_MODE=${mode} is not implemented yet (${task} builds it)`);

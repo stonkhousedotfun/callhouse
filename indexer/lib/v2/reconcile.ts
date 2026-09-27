@@ -1,5 +1,5 @@
 /** Match one ERC-1155 delivery to each fill, and the preceding burn/mint to its receipt.
- * The contract's event order is frozen in interfaces §1.8: delivery, then OrderFilled;
+ * The contract's event order is fixed: delivery, then OrderFilled;
  * Taken follows the full loop. Order placement and cancellation escrow moves are never sales. */
 export type IndexedTransfer = {
   id: string; tx: string; longId: bigint; from: string; to: string; units: bigint; logIndex: number;

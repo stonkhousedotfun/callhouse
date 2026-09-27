@@ -2,13 +2,15 @@ import {
   BPS, MAX_PAYOUT_SLIPPAGE_CEIL_BPS, collateralPerUnit, exerciseFeePerUnit, grossPayoutPerUnit, pnlAt, usdgPayoutBand,
   type BuyCost, type ConversionTerms, type PayoffPosition, type Pnl, type TakerFeeParams, type UsdgBand,
 } from "./payoff";
-import { formatShares } from "./payoffCard";
+import { formatPriceExact, formatShares, formatSignedUsdg, formatUsdgCents, group } from "./payoffFormat";
 
-/** The receipt of one scenario (design §2.5): every cash flow of a buy and of its settlement, one line per term,
+// defined once, in the import-free leaf the site twins; re-exported so no caller moves.
+export { formatPriceExact, formatSignedUsdg, formatUsdgCents };
+
+/** The receipt of one scenario: every cash flow of a buy and of its settlement, one line per term,
  * with the rule behind the line in plain words. Pure: no React, no formatting policy beyond the rounding rule that
  * the whole explorer follows — costs round UP to the cent, payouts and P&L round DOWN. */
 
-const CENT = 10_000n;
 const SIX = 1_000_000n;
 /** Stock Token amounts show six decimals, floored: a 0.01-share unit is 1e16 base units, so six places always
  * resolve a whole unit and never invent a fraction the chain does not pay. */
@@ -30,7 +32,7 @@ export type ReceiptLine = {
   value: string;
   /** How the figure was reached, in the scenario's own numbers. */
   note: string;
-  /** The contract rule, written from §1.1 of the design, for the info affordance. */
+  /** The contract rule, in words, for the info affordance. */
   rule: string;
   /** A deduction is rendered with a leading minus. */
   deduction?: boolean;
@@ -71,31 +73,6 @@ export type PayoffReceiptInput = {
   terms: ConversionTerms;
   gas: GasEstimate | null;
 };
-
-function group(value: bigint): string {
-  return value.toString().replace(/\B(?=(\d{3})+(?!\d))/g, ",");
-}
-
-/** USDG to the cent. Costs round up, payouts and P&L down; a negative amount keeps its sign and rounds away
- * from zero when `direction` is "down" (a loss is never shown smaller than it is). */
-export function formatUsdgCents(raw: bigint, direction: "up" | "down"): string {
-  const negative = raw < 0n;
-  const amount = negative ? -raw : raw;
-  const cents = direction === "up" || negative ? (amount + CENT - 1n) / CENT : amount / CENT;
-  return `${negative ? "−" : ""}${group(cents / 100n)}.${(cents % 100n).toString().padStart(2, "0")}`;
-}
-
-/** A signed P&L to the cent, floored (a gain shows no more than the chain pays, a loss no less). */
-export function formatSignedUsdg(raw: bigint): string {
-  return `${raw > 0n ? "+" : ""}${formatUsdgCents(raw, "down")}`;
-}
-
-/** A USDG-6 price, exactly, with at least cents. */
-export function formatPriceExact(raw: bigint): string {
-  const whole = group(raw / SIX);
-  const fraction = (raw % SIX).toString().padStart(6, "0").replace(/0+$/, "").padEnd(2, "0");
-  return `${whole}.${fraction}`;
-}
 
 /** Stock Token base units (18 dp) to six places, floored. */
 export function formatTokens(raw: bigint): string {

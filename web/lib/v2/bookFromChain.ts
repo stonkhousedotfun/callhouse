@@ -22,6 +22,28 @@ export type RawBookOrder = {
   cancelled: boolean;
 };
 
+/**
+ * The take-time conditions the contract applies that an order's own fields do not show. Read at the same
+ * pinned block as the orders. Without them the fallback listed asks the book will not fill, so the page showed a best
+ * ask that the on-chain quote then refused. Contract citations name the function in OrderBook.sol.
+ */
+export type ChainBookGates = {
+  /** `OrderBook.tradingPaused()`: every take reverts `TradingPaused` (OrderBook.sol, via `_whenTrading`). */
+  tradingPaused: boolean;
+  /**
+   * Write-on-fill asks can mint: the market is enabled, minting is not paused and the book is on the Clearinghouse
+   * minter allow-list (OrderBook.sol `plan.mintOpen`). The mint cutoff is applied separately.
+   */
+  mintOpen: boolean;
+  /** Lowercased writers that made the book their Clearinghouse operator (OrderBook.sol `isOperator`). */
+  operators: ReadonlySet<string>;
+  // NO resale-seller gate. A resale ask's longs are escrowed in
+  // the book when it is placed (`_place` :768-769, `_escrowLongs` :799-802), and a buy delivers them from the book
+  // (`_deliver` :1155-1158). `_reserveInventory` (:1125-1135) is the TAKER's inventory when selling into a bid, called
+  // only at :970. This file caps each resale ask at the seller's `balanceOf`, which excludes the escrowed units, so the
+  // fallback hid valid resale asks.
+};
+
 /** Keep the fallback's returned order count aligned with the indexer book endpoint. */
 export const BOOK_ORDERS_PER_SIDE = 200;
 
@@ -36,11 +58,15 @@ export function selectBookSnapshot(indexed: BookResponse | undefined, fallback: 
 export function levelsFromChainOrders(
   orders: readonly RawBookOrder[], freeByMaker: ReadonlyMap<string, bigint>, collateralPerUnit: bigint,
   longId: bigint, now: number, updatedBlock: bigint, mintCutoff = Number.POSITIVE_INFINITY, mintFeePpm = 0, expiry = mintCutoff, collateralDecimals = 18,
+  gates?: ChainBookGates,
 ): BookResponse {
   if (collateralPerUnit <= 0n) throw new RangeError("Invalid series collateral");
+  // Nothing on a paused book is executable, bids included (selling into a bid is a take too).
+  if (gates?.tradingPaused) return { bids: [], asks: [], updatedBlock: updatedBlock.toString(), snapshotTimestamp: now };
   const rent: RentTerms = { collateralPerUnit, mintFeePpm, expiry: Number.isFinite(expiry) ? expiry : now + 604800, snapshotTimestamp: now, mintCutoff };
   const live = orders.filter((order) => !order.cancelled && order.longId === longId && order.validUntil > now &&
     (order.kind !== 2 || now < mintCutoff) &&
+    (order.kind !== 2 || gates === undefined || (gates.mintOpen && gates.operators.has(order.maker.toLowerCase()))) &&
     order.units > order.filled && order.price > 0n && [0, 1, 2].includes(order.kind));
   const priority = (a: RawBookOrder, b: RawBookOrder, descending: boolean) =>
     a.price < b.price ? (descending ? 1 : -1) : a.price > b.price ? (descending ? -1 : 1)
@@ -89,7 +115,8 @@ export async function bookFromChain(longId: bigint, collateralAsset: Address, co
   client: PublicClient = publicClient): Promise<BookResponse> {
   const orderBook = requireV2Address("orderBook");
   const clearinghouse = requireV2Address("clearinghouse");
-  const blockNumber = await client.getBlockNumber();
+  // cacheTime 0. viem caches the head for 4 s, so a book rebuilt right after a replace showed the old block.
+  const blockNumber = await client.getBlockNumber({ cacheTime: 0 });
   const [block, series, pinnedCollateral, pinnedCutoff] = await Promise.all([
     client.getBlock({ blockNumber }),
     client.readContract({ address: clearinghouse, abi: clearinghouseAbi, functionName: "series", args: [longId], blockNumber }),
@@ -116,9 +143,23 @@ export async function bookFromChain(longId: bigint, collateralAsset: Address, co
       validUntil: order.validUntil, cancelled: order.cancelled }));
   }
   const makers = [...new Set(raw.filter((order) => order.kind === 2).map((order) => order.maker.toLowerCase()))] as Address[];
-  const free = makers.length ? await client.multicall({ allowFailure: false, blockNumber,
-    contracts: makers.map((maker) => ({ address: clearinghouse, abi: clearinghouseAbi,
-      functionName: "free" as const, args: [maker, collateralAsset] as const })) }) : [];
+  const [free, operator, tradingPaused, market, bookIsMinter] = await Promise.all([
+    makers.length ? client.multicall({ allowFailure: false, blockNumber,
+      contracts: makers.map((maker) => ({ address: clearinghouse, abi: clearinghouseAbi,
+        functionName: "free" as const, args: [maker, collateralAsset] as const })) }) : [],
+    makers.length ? client.multicall({ allowFailure: false, blockNumber,
+      contracts: makers.map((maker) => ({ address: clearinghouse, abi: clearinghouseAbi,
+        functionName: "isOperator" as const, args: [maker, orderBook] as const })) }) : [],
+    client.readContract({ address: orderBook, abi: orderBookAbi, functionName: "tradingPaused", blockNumber }),
+    client.readContract({ address: clearinghouse, abi: clearinghouseAbi, functionName: "market", args: [series.underlying], blockNumber }),
+    client.readContract({ address: clearinghouse, abi: clearinghouseAbi, functionName: "isMinter", args: [orderBook], blockNumber }),
+  ]);
   const freeByMaker = new Map(makers.map((maker, index) => [maker, free[index]!]));
-  return levelsFromChainOrders(raw, freeByMaker, collateralPerUnit, longId, Number(block.timestamp), blockNumber, mintCutoff, series.mintFeePpm, Number(series.expiry), series.isPut ? 6 : 18);
+  const gates: ChainBookGates = {
+    tradingPaused,
+    mintOpen: market.enabled && !market.mintPaused && bookIsMinter,
+    operators: new Set(makers.filter((_, index) => operator[index] === true)),
+  };
+  return levelsFromChainOrders(raw, freeByMaker, collateralPerUnit, longId, Number(block.timestamp), blockNumber, mintCutoff,
+    series.mintFeePpm, Number(series.expiry), series.isPut ? 6 : 18, gates);
 }

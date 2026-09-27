@@ -205,7 +205,7 @@ test('volAt: a listed expiry, total variance between two, flat before the first 
   assert.ok(listed.ok);
   assert.equal(listed.method, 'listed-expiry');
 
-  // 02-interfaces §5's example: NVDA 231 call, Monday 21 Sep, between the 18th and the 25th.
+  // The worked example: NVDA 231 call, Monday 21 Sep, between the 18th and the 25th.
   const monday = volAt(s, 231, closeOf(21));
   assert.ok(monday.ok);
   assert.equal(monday.method, 'total-variance');

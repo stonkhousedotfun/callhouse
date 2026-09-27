@@ -164,6 +164,17 @@
             "delayS": 0
           }
         ]
+      },
+      {
+        "id": 11,
+        "name": "NEW_LISTING",
+        "delayS": 0,
+        "holders": [
+          {
+            "address": "0x31D35771AaE6676aE6DFb4EdF2399D6115b3Af14",
+            "delayS": 0
+          }
+        ]
       }
     ]
   },

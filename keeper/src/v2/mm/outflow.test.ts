@@ -1,5 +1,5 @@
 /**
- * The MakerVault's daily outflow cap as the bot models it (INTERFACE_VERSION 7, c21).
+ * The MakerVault's daily outflow cap as the bot models it (INTERFACE_VERSION 7).
  *
  * WHY THIS FILE EXISTS: the cap is enforced per call, so a tick that plans more bid escrow than the bucket allows
  * discovers it as a reverted `place` — gas paid, the series left unquoted. And the bucket is shared with every other
@@ -20,6 +20,10 @@ test('bidEscrowOf is OptionMath.premium: price × units / 100, the cash a bid pa
   assert.equal(bidEscrowOf(2_000_000n, 100n), 2_000_000n, '1 share at 2 USDG');
   assert.equal(bidEscrowOf(2_000_000n, 1n), 20_000n);
   assert.equal(bidEscrowOf(0n, 100n), 0n);
+  // Floored like OptionMath.premium (`price * units / UNITS_PER_SHARE`, Solidity division), so the escrow the
+  // House reserve check and the outflow budget count is exactly what OrderBook._pullUsdg takes.
+  assert.equal(bidEscrowOf(199n, 1n), 1n);
+  assert.equal(bidEscrowOf(2_000_100n, 3n), 60_003n);
 });
 
 test('budgetFor: the cap less the level this tick\'s own credits cannot cancel out', () => {

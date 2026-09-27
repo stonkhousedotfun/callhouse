@@ -1,15 +1,17 @@
-import { type Abi, type Address, type Hex, type PublicClient } from "viem";
+import { formatUnits, type Abi, type Address, type Hex, type PublicClient } from "viem";
 
 import { erc20Abi } from "../abi/erc20";
 import { autoRollerAbi } from "../abi/v2/autoRoller";
 import { clearinghouseAbi } from "../abi/v2/clearinghouse";
 import { expiryCalendarAbi } from "../abi/v2/expiryCalendar";
 import { orderBookAbi } from "../abi/v2/orderBook";
+import { settlementOracleAbi } from "../abi/v2/settlementOracle";
 import { publicClient, robinhoodChain } from "../chain";
 import { USDG } from "../contracts";
 import { requireV2Address, V2_DEPLOYMENT } from "./config";
-import { explainV2Error } from "./errors";
+import { explainV2Error, V2_ERROR_TEXT } from "./errors";
 import { mintRent } from "./rent";
+import { TRADING_PAUSED_LINE } from "./tradingGate";
 import { collateralPerUnit } from "./payoff";
 import type { Strategy } from "./api-types";
 import type { WriteContext } from "./tx";
@@ -91,34 +93,67 @@ export async function readRollState(account: Address, underlying: Address, clien
   return { ...position, delegate };
 }
 
-export type AskPreflight = { longId: bigint; exists: boolean; operator: boolean; free: bigint; mintCutoff: number | null; rent: bigint; collateralRequired: bigint };
+/**
+ * MIRROR, DO NOT RE-REASON: Clearinghouse.createSeries (callhouse-contracts src/v2/Clearinghouse.sol) refuses a
+ * NEW series whose strike is outside [spot / 2, spot x 2] of its oracle's `trySpot`, or whose expiry is under
+ * MIN_SERIES_LEAD or over MAX_TENOR from `block.timestamp` (src/v2/interfaces/V2Constants.sol). Named once here.
+ */
+export const STRIKE_BAND_FACTOR = 2n;
+export const MIN_SERIES_LEAD_SECONDS = 3_600;
+export const MAX_TENOR_SECONDS = 45 * 86_400;
+const MAX_UINT128 = (1n << 128n) - 1n;
+
+/**
+ * createSeries's band test on one oracle answer. A read that is not ok, or a zero spot, is no test at all, exactly as
+ * the contract skips it; and a spot beyond uint128 has no upper bound, as the contract writes it to avoid overflow.
+ */
+export function strikeInBand(strike: bigint, spot: { ok: boolean; price: bigint } | null): boolean {
+  if (!spot || !spot.ok || spot.price === 0n) return true;
+  const aboveBand = spot.price <= MAX_UINT128 && strike > spot.price * STRIKE_BAND_FACTOR;
+  return !(strike < spot.price / STRIKE_BAND_FACTOR || aboveBand);
+}
+
+export type AskPreflight = {
+  longId: bigint; exists: boolean; operator: boolean; free: bigint; mintCutoff: number | null; rent: bigint; collateralRequired: bigint;
+  /** The preflight block's timestamp: the chain's clock, for the ask's validUntil. */
+  now: number;
+};
 
 /** Re-read the chain immediately before an ask; API rows are for discovery, not authority. */
 export async function preflightAsk(
   account: Address, underlying: Address, isPut: boolean, strike: bigint, expiry: number, units: bigint,
   expectedPremiumFeeBps: number, client: PublicClient = publicClient,
 ): Promise<AskPreflight> {
-  if (units <= 0n || units > (1n << 64n) - 1n || strike <= 0n || expiry <= Math.floor(Date.now() / 1000))
-    throw new Error("Choose a future expiry, positive strike, and positive size.");
   const block = await client.getBlock({ blockTag: "latest" });
   const blockNumber = block.number;
   const now = Number(block.timestamp);
+  // "future" is judged on the chain's clock, not the browser's.
+  if (units <= 0n || units > (1n << 64n) - 1n || strike <= 0n || expiry <= now)
+    throw new Error("Choose a future expiry, positive strike, and positive size.");
   const clearinghouse = requireV2Address("clearinghouse");
   const orderBook = requireV2Address("orderBook");
   const calendar = requireV2Address("expiryCalendar");
   const collateralAsset = isPut ? USDG : underlying;
-  const [market, validExpiry, operator, free, feeParams, longId] = await Promise.all([
+  const [market, validExpiry, operator, free, feeParams, longId, tradingPaused] = await Promise.all([
     client.readContract({ blockNumber, address: clearinghouse, abi: clearinghouseAbi, functionName: "market", args: [underlying] }),
     client.readContract({ blockNumber, address: calendar, abi: expiryCalendarAbi, functionName: "isValidExpiry", args: [expiry] }),
     client.readContract({ address: clearinghouse, abi: clearinghouseAbi, functionName: "isOperator", blockNumber, args: [account, orderBook] }),
     client.readContract({ address: clearinghouse, abi: clearinghouseAbi, functionName: "free", blockNumber, args: [account, collateralAsset] }),
     client.readContract({ blockNumber, address: orderBook, abi: orderBookAbi, functionName: "feeParams" }),
     client.readContract({ blockNumber, address: clearinghouse, abi: clearinghouseAbi, functionName: "longIdOf", args: [underlying, isPut, strike, expiry] }),
+    client.readContract({ blockNumber, address: orderBook, abi: orderBookAbi, functionName: "tradingPaused" }),
   ]);
+  // OrderBook.place reverts TradingPaused (`_whenTrading`). Refused here, before the operator grant and
+  // createSeries the ask flow sends first, so a paused book costs no gas, with the brake's full line, which
+  // says what still works, as every other click refusal of the OrderBook brake does (tradingGate.ts).
+  if (tradingPaused) throw new Error(TRADING_PAUSED_LINE);
   if (!market.enabled || market.mintPaused) throw new Error("Writing is paused for this market.");
   if (!validExpiry || strike % market.strikeTick !== 0n) throw new Error("Choose a calendar expiry and a strike on the market tick.");
   if (Number(feeParams.premiumFeeBps) !== expectedPremiumFeeBps) throw new Error("The on-chain fee changed. Refresh the market before listing.");
   const exists = await client.readContract({ address: clearinghouse, abi: clearinghouseAbi, functionName: "seriesExists", args: [longId], blockNumber });
+  // A NEW series is created before the ask, after the operator grant, so createSeries's own refusals are
+  // checked here, before any write. An existing series skips them all (createSeries returns its id early).
+  if (!exists) await preflightCreateSeries(client, clearinghouse, market.oracle, underlying, strike, expiry, now, blockNumber);
   const mintCutoff = exists ? Number(await client.readContract({ address: clearinghouse, abi: clearinghouseAbi, functionName: "mintCutoff", args: [longId], blockNumber })) : null;
   if (mintCutoff !== null && mintCutoff <= now + 60) throw new Error("This series is past its writing cutoff.");
   const rent = exists
@@ -126,7 +161,30 @@ export async function preflightAsk(
     : mintRent(units, { collateralPerUnit: collateralPerUnit(isPut, strike), mintFeePpm: market.mintFeePpm, expiry, snapshotTimestamp: now });
   const collateralRequired = units * collateralPerUnit(isPut, strike) + rent;
   if (free < collateralRequired) throw new Error(`Deposit enough free ${isPut ? "USDG" : "Stock Tokens"} for this ask first.`);
-  return { longId, exists, operator, free, mintCutoff, rent, collateralRequired };
+  return { longId, exists, operator, free, mintCutoff, rent, collateralRequired, now };
+}
+
+/**
+ * createSeries's refusals after MarketDisabled and the strike tick (both checked by the caller): CreatePaused, the
+ * expiry window (the calendar is the caller's `isValidExpiry`), then the strike band. Same block as the caller.
+ * A `trySpot` that reverts is skipped, as the contract's `catch {}` skips it; the chain still judges at send time.
+ */
+async function preflightCreateSeries(
+  client: PublicClient, clearinghouse: Address, oracle: Address, underlying: Address, strike: bigint, expiry: number,
+  now: number, blockNumber: bigint,
+): Promise<void> {
+  const [paused, spot] = await Promise.all([
+    client.readContract({ blockNumber, address: clearinghouse, abi: clearinghouseAbi, functionName: "createPaused" }),
+    client.readContract({ blockNumber, address: oracle, abi: settlementOracleAbi, functionName: "trySpot", args: [underlying] })
+      .then(([ok, price]) => ({ ok, price }), () => null),
+  ]);
+  if (paused) throw new Error(V2_ERROR_TEXT.CreatePaused);
+  if (expiry < now + MIN_SERIES_LEAD_SECONDS || expiry > now + MAX_TENOR_SECONDS)
+    throw new Error("Choose an expiry at least 1 hour and at most 45 days away.");
+  if (!strikeInBand(strike, spot)) {
+    const price = spot!.price;
+    throw new Error(`Choose a strike between half and double the current price: ${formatUnits(price / STRIKE_BAND_FACTOR, 6)} to ${formatUnits(price * STRIKE_BAND_FACTOR, 6)} USDG.`);
+  }
 }
 
 export async function readMintCutoff(longId: bigint, client: PublicClient = publicClient): Promise<number> {

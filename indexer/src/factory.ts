@@ -232,7 +232,7 @@ ponder.on("Factory:WeekSet", async ({ event, context }) => {
 ponder.on("Factory:WritesHalted", async ({ event, context }) => {
   const { halted } = event.args;
   await patchMarket(context.db, event, { writesHalted: halted });
-  // WRITES_HALTED from ops/alerts.md: nothing lists and nothing fills until it lifts.
+  // WRITES_HALTED alert: nothing lists and nothing fills until it lifts.
   log.warn({ market: MARKET, halted, txHash: event.transaction.hash }, halted ? "writes halted" : "writes resumed");
 });
 
@@ -290,7 +290,7 @@ ponder.on("Factory:RoleGranted", async ({ event, context }) => {
   const isAdmin = role.toLowerCase() === ROLE_DEFAULT_ADMIN;
   await patchMarket(context.db, event, isAdmin ? { admin: account } : {});
 
-  // ROLE_CHANGE from ops/alerts.md: a grant to an address nobody recognises is the first sign of trouble.
+  // ROLE_CHANGE alert: a grant to an address nobody recognises is the first sign of trouble.
   log.warn({ market: MARKET, role: roleName(role), account, sender, txHash: event.transaction.hash }, "role granted");
 });
 

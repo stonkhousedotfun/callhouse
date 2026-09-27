@@ -9,14 +9,17 @@
  * the relay's identifier and severity rules, including kinds added after the bot-specific tests.
  */
 import assert from 'node:assert/strict';
+import { readdirSync, readFileSync } from 'node:fs';
+import path from 'node:path';
 import { test } from 'node:test';
+import { fileURLToPath } from 'node:url';
 import { ALERT_SEVERITY, Alerter, FAILED_DELIVERY_RETRY_MS } from './alerts.js';
 import { silentLogger } from './logger.js';
 import { V2Store } from './store.js';
 
 const HOUR = 3_600_000;
 
-test('the cranker\'s alert kinds (K2-03) are registered with a severity and are relay identifiers', () => {
+test('the cranker\'s alert kinds are registered with a severity and are relay identifiers', () => {
   const cranker = {
     v2_sources_disagree: 'warn',
     v2_settlement_held: 'error',
@@ -26,8 +29,10 @@ test('the cranker\'s alert kinds (K2-03) are registered with a severity and are 
     v2_low_gas: 'warn',
     // INTERFACE_VERSION 6: a refused settlement pin blocks every series of the expiry until the admin acts.
     v2_pin_refused: 'error',
-    // INTERFACE_VERSION 7 (c16): an overtaken AutoRoller ask the cranker cannot withdraw.
+    // INTERFACE_VERSION 7: an overtaken AutoRoller ask the cranker cannot withdraw.
     v2_stale_cancel_failed: 'error',
+    // A House vault boundary due past HOUSE_ROLL_OVERDUE_S and not rolled.
+    v2_house_roll_overdue: 'error',
   };
   for (const [kind, severity] of Object.entries(cranker)) {
     assert.equal(ALERT_SEVERITY[kind], severity, kind);
@@ -35,7 +40,24 @@ test('the cranker\'s alert kinds (K2-03) are registered with a severity and are 
   }
 });
 
-test('the MM bot\'s alert kinds (K2-04) are registered with a severity and are relay identifiers', () => {
+test('the guardian watch\'s alert kinds are registered with a severity and are relay identifiers', () => {
+  const guardian = {
+    // Every uncorroborated candidate: most are a pool hiccup, so warn.
+    v2_guardian_candidate: 'warn',
+    // A candidate 10x or more from every reference: if nothing vetoes it, it finalizes for good.
+    v2_guardian_scale_fault: 'error',
+    // a candidate priced from a round older than heartbeat + margin (a feed outage).
+    v2_guardian_stale_round: 'error',
+    v2_guardian_vetoed: 'error',
+    v2_guardian_veto_failed: 'error',
+  };
+  for (const [kind, severity] of Object.entries(guardian)) {
+    assert.equal(ALERT_SEVERITY[kind], severity, kind);
+    assert.match(kind, /^[a-z][a-z0-9_]{0,63}$/);
+  }
+});
+
+test('the MM bot\'s alert kinds are registered with a severity and are relay identifiers', () => {
   const mm = {
     v2_mm_killed: 'error',
     v2_mm_resumed: 'info',
@@ -45,13 +67,20 @@ test('the MM bot\'s alert kinds (K2-04) are registered with a severity and are r
     v2_mm_pricing: 'warn',
     v2_mm_tx_rejected: 'warn',
     v2_mm_funds: 'warn',
-    // INTERFACE_VERSION 7 (c21): the vault's daily outflow cap binding, and USDG this bot did not spend.
+    // INTERFACE_VERSION 7: the vault's daily outflow cap binding, and USDG this bot did not spend.
     v2_mm_outflow: 'warn',
     v2_mm_outflow_foreign: 'error',
     v2_mm_wrong_book: 'error',
     v2_mm_epoch_unflat: 'warn',
     v2_mm_protocol_cross: 'warn',
     v2_mm_house_unavailable: 'error',
+    // An MM_VAULTS entry that is a House vault is refused, not quoted without its epoch.
+    v2_mm_vault_is_house: 'error',
+    // The market-safety halts. The guard working, so warn; each names the market that went dark.
+    v2_mm_spot_age: 'warn',
+    v2_mm_open_grace: 'warn',
+    v2_mm_spot_breaker: 'warn',
+    v2_mm_event_halt: 'warn',
   };
   for (const [kind, severity] of Object.entries(mm)) {
     assert.equal(ALERT_SEVERITY[kind], severity, kind);
@@ -59,7 +88,30 @@ test('the MM bot\'s alert kinds (K2-04) are registered with a severity and are r
   }
 });
 
-test('the pricer\'s alert kinds (K2-05) are registered with a severity and are relay identifiers', () => {
+test('the mm bot\'s EarnVault step raises v2_earn_queue_stuck, registered as error and a relay identifier', () => {
+  // Depositors waiting on a queue that is not moving: nothing in the keeper refills a vault short of cash.
+  assert.equal(ALERT_SEVERITY.v2_earn_queue_stuck, 'error');
+  assert.match('v2_earn_queue_stuck', /^[a-z][a-z0-9_]{0,63}$/);
+});
+
+test('every kind in ALERT_SEVERITY is raised somewhere in the keeper source; a retired emitter retires its kind', () => {
+  // The mm bot does not quote the EarnVault, so the cranker's earnPin and its two pages went
+  // with it. A severity row whose only emitter is deleted is a page nothing can raise and an ops index
+  // that lists it anyway. Every kind is raised by name as a string literal outside this table.
+  const src = fileURLToPath(new URL('..', import.meta.url));
+  const table = path.join(src, 'v2', 'alerts.ts');
+  const sources = (readdirSync(src, { recursive: true }) as string[])
+    .filter((f) => f.endsWith('.ts') && !f.endsWith('.test.ts'))
+    .map((f) => path.join(src, f))
+    .filter((f) => f !== table)
+    .map((f) => readFileSync(f, 'utf8'));
+  assert.ok(sources.length > 50, `walked ${sources.length} source files: the walk did not reach keeper/src`);
+  const unraised = Object.keys(ALERT_SEVERITY).filter((kind) => !sources.some((text) => [`'${kind}'`, `"${kind}"`, `\`${kind}\``].some((q) => text.includes(q))));
+  assert.deepEqual(unraised, [], 'registered kinds nothing raises');
+  for (const retired of ['v2_earn_bid_unpinned', 'v2_earn_pin_failed']) assert.equal(ALERT_SEVERITY[retired], undefined, retired);
+});
+
+test('the pricer\'s alert kinds are registered with a severity and are relay identifiers', () => {
   const pricer = {
     v2_pricer_no_role: 'error',
     v2_pricer_fair_unavailable: 'warn',
@@ -136,6 +188,12 @@ test('severity: the table for the scaffold\'s kinds, warn for a kind a mode has 
   assert.deepEqual(posts.map((p) => p.body.severity), ['error', 'info', 'warn', 'error']);
 });
 
+test('v2_house_roll_overdue goes out as error from the table alone, with no severity passed at the raise site', async () => {
+  const { alerter, posts } = setup();
+  await alerter.alert('v2_house_roll_overdue', 'House vault epoch not rolled', { vault: '0x00000000000000000000000000000000000000a1' });
+  assert.deepEqual(posts.map((p) => p.body.severity), ['error']);
+});
+
 test('cooldown per (kind, dedupeKey); force ignores it; clear() lets the next occurrence through', async () => {
   const { alerter, posts, advance } = setup();
   await alerter.alert('v2_rpc_lag', 'lag');
@@ -206,4 +264,62 @@ test('redeliver: a one-off page the relay did not take is sent again from the st
   assert.equal(await alerter.redeliver(), 0);
   assert.deepEqual(posts.slice(3).map((p) => p.body.message), ['low', 'still low']);
   assert.equal((store.db.prepare('SELECT COUNT(*) AS n FROM v2_alerts WHERE delivered = 0').get() as { n: number }).n, 0);
+});
+
+/*
+ * In production every page failed with a bare 'alert webhook unreachable': ALERT_WEBHOOK named a relay that was
+ * never deployed, and nothing in the message said so. A failed delivery now names the webhook's HOST and the reason
+ * (ENOTFOUND: the host does not resolve; ECONNREFUSED: nothing listens; TimeoutError: no answer in 10 s) -- and never the
+ * path, where a Discord or Telegram webhook keeps its secret. The failure is still reported, never silenced.
+ */
+import { unreachableReason, webhookHost } from './alerts.js';
+
+function deliveryProbe(webhook: string, respond: () => Response | Error) {
+  const outcomes: Array<[boolean, string | null]> = [];
+  const alerter = new Alerter({
+    mode: 'cranker',
+    chainId: 4663,
+    webhook,
+    token: null,
+    cooldownMs: HOUR,
+    log: silentLogger(),
+    store: new V2Store(':memory:'),
+    now: () => 1_790_000_000_000,
+    fetch: (async () => {
+      const r = respond();
+      if (r instanceof Error) throw r;
+      return r;
+    }) as typeof fetch,
+    onDelivery: (ok, error) => outcomes.push([ok, error]),
+  });
+  return { alerter, outcomes };
+}
+
+test('an unreachable webhook names its host and the system error code, not the URL', async () => {
+  const cause = Object.assign(new Error('getaddrinfo ENOTFOUND relay.railway.internal'), { code: 'ENOTFOUND' });
+  const { alerter, outcomes } = deliveryProbe('http://relay.railway.internal:8080/alert', () => new TypeError('fetch failed', { cause }));
+  assert.equal(await alerter.alert('v2_error', 'index failed'), false);
+  assert.deepEqual(outcomes, [[false, 'alert webhook unreachable (relay.railway.internal:8080: ENOTFOUND)']]);
+});
+
+test('a webhook with a secret in its path is reported by host only, rejected or unreachable', async () => {
+  const secret = 'https://discord.com/api/webhooks/1234567890/SeCrEtToKeN-abcdef';
+  const rejected = deliveryProbe(secret, () => new Response('no', { status: 404 }));
+  assert.equal(await rejected.alerter.alert('v2_error', 'x'), false);
+  const unreachable = deliveryProbe(secret, () => Object.assign(new Error('The operation was aborted due to timeout'), { name: 'TimeoutError' }));
+  assert.equal(await unreachable.alerter.alert('v2_error', 'x'), false);
+  const messages = [...rejected.outcomes, ...unreachable.outcomes].map(([, m]) => m ?? '');
+  assert.deepEqual(messages, ['alert webhook rejected the POST (HTTP 404 from discord.com)', 'alert webhook unreachable (discord.com: TimeoutError)']);
+  for (const m of messages) {
+    assert.ok(!m.includes('SeCrEtToKeN') && !m.includes('/api/webhooks'), m);
+  }
+});
+
+test('webhookHost and unreachableReason', () => {
+  assert.equal(webhookHost('https://api.telegram.org/bot123:ABC/sendMessage'), 'api.telegram.org');
+  assert.equal(webhookHost('not a url'), 'unparseable webhook URL');
+  assert.equal(unreachableReason(new TypeError('fetch failed', { cause: { code: 'ECONNREFUSED' } })), 'ECONNREFUSED');
+  assert.equal(unreachableReason(Object.assign(new Error('t'), { name: 'TimeoutError' })), 'TimeoutError');
+  assert.equal(unreachableReason(new TypeError('fetch failed')), 'unknown');
+  assert.equal(unreachableReason('a string'), 'unknown');
 });

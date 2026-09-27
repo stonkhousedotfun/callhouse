@@ -1,9 +1,13 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 
 import type { ConfigResponse, SeriesStatus } from "@/lib/v2/api-types";
-import { HOUSE_DISCLOSURE_WEEKLY_WITHDRAWALS } from "@/lib/v2/houseCopy";
+import { houseWithdrawalDisclosure, type HouseCadence } from "@/lib/v2/houseCopy";
+import { cutoffSentences } from "@/lib/v2/houseEpoch";
+import { EARN_QUEUE_PRICING } from "@/lib/v2/vaultCopy";
+import { InfoTip } from "@/components/ui/InfoTip";
+import { Time } from "@/components/ui/Time";
 
 export type WithdrawalTiming = Pick<ConfigResponse["constants"],
   "settlementWindow" | "finalizeDelay" | "snapshotGrace" | "resolveDelay">;
@@ -14,19 +18,15 @@ export type WithdrawalTermsProps = CommonProps & (
   | { surface: "writer"; asset: string; free: string | null; locked: string | null;
       latestExpiry: number | null; timing: WithdrawalTiming | null }
   | { surface: "lending" }
-  | { surface: "house"; boundaryAt: number | null }
+  // required. A missing cadence used to default to "weekly", which printed the weekly disclosure and a
+  // "Fri 4:00 pm ET" cutoff on a daily vault. A caller that does not know the cadence renders houseExitLine instead
+  // (HouseVault does), so there is no honest default to fall back to here.
+  // `marketListsDailies` (the registry's listing; absent = lists them) swaps in the Friday-only disclosure.
+  // `settlementWindow` is the chain's SETTLEMENT_WINDOW() read; the cutoff sentences need it and wait for it.
+  | { surface: "house"; boundaryAt: number | null; cadence: HouseCadence; marketListsDailies?: boolean; settlementWindow?: number | null }
   | { surface: "redemption"; expiry: number; status: SeriesStatus;
       timing: WithdrawalTiming | null; candidateFinalizableAt?: number | null; settledAt?: number | null }
 );
-
-const NEW_YORK = new Intl.DateTimeFormat("en-US", {
-  timeZone: "America/New_York", month: "short", day: "numeric", year: "numeric",
-  hour: "numeric", minute: "2-digit", timeZoneName: "short",
-});
-
-export function newYorkWithdrawalTime(unixSeconds: number): string {
-  return NEW_YORK.format(new Date(unixSeconds * 1_000));
-}
 
 export function withdrawalCountdown(target: number, now: number): string {
   const remaining = Math.max(0, target - now);
@@ -60,50 +60,65 @@ function useWithdrawalClock(provided: number | null | undefined): number | null 
   return provided ?? clock;
 }
 
-function TimingRows({ label, at, now, unavailable }: {
-  label: string; at: number | null; now: number | null; unavailable: string;
+function TermsBox({ className, tip, rows }: {
+  className?: string;
+  tip: ReactNode;
+  rows: readonly (readonly [ReactNode, ReactNode])[];
 }) {
-  return <dl className="mt-2 grid gap-x-3 gap-y-1 text-xs sm:grid-cols-[auto_1fr]">
-    <dt className="font-semibold text-ink">{label}</dt>
-    <dd className="text-ink-2">{at === null ? unavailable : newYorkWithdrawalTime(at)}</dd>
-    <dt className="font-semibold text-ink">Countdown</dt>
-    <dd className="text-ink-2">{at === null ? unavailable : now === null ? "Calculating…" : withdrawalCountdown(at, now)}</dd>
-  </dl>;
+  return <aside aria-label="Withdrawal terms"
+    className={`rounded-md border border-line bg-field px-3.5 py-3 text-[13px] leading-snug ${className ?? ""}`.trim()}>
+    <p className="flex items-center gap-1.5 font-semibold text-ink">When can I withdraw?
+      <InfoTip label="More about withdrawals" align="start" text={tip} /></p>
+    <dl className="mt-2 grid grid-cols-[auto_minmax(0,1fr)] items-baseline gap-x-4 gap-y-1.5">
+      {rows.map(([label, value], index) => <div key={index} className="contents">
+        <dt className="text-ink-3">{label}</dt>
+        <dd className="text-right text-[13px] font-medium text-ink [overflow-wrap:anywhere]">{value}</dd>
+      </div>)}
+    </dl>
+  </aside>;
+}
+
+const para = (text: ReactNode, first = false) => <span className={first ? "block" : "mt-1.5 block"}>{text}</span>;
+
+function countdownText(at: number | null, now: number | null, unavailable: string): ReactNode {
+  return at === null ? unavailable : now === null ? "Calculating…" : withdrawalCountdown(at, now);
 }
 
 export function WithdrawalTerms(props: WithdrawalTermsProps) {
   const now = useWithdrawalClock(props.now);
-  const className = `rounded-sm border border-line-2 bg-surface-2 p-3 ${props.className ?? ""}`.trim();
+  const className = props.className;
 
-  if (props.surface === "lending") return <aside aria-label="Withdrawal terms" className={className}>
-    <p className="text-xs font-bold uppercase tracking-wide text-ink-3">When can I withdraw?</p>
-    <p className="mt-2 text-xs text-ink-2">Redeeming creates a queued request. The queue is served in order by <code>processQueue()</code> when the vault has enough liquid USDG; submitting a request is not an instant withdrawal.</p>
-    <TimingRows label="Queue service time" at={null} now={now}
-      unavailable="No fixed time — it depends on available liquidity" />
-  </aside>;
+  if (props.surface === "lending") return <TermsBox className={className}
+    tip={<>{para(<>Redeeming makes a queued request, paid in order when the vault has enough USDG. It isn&apos;t an instant withdrawal.</>, true)}
+      {para(EARN_QUEUE_PRICING)}</>}
+    rows={[["Queue service time", "No fixed time — it depends on available liquidity"]]} />;
 
-  if (props.surface === "house") return <aside aria-label="Withdrawal terms" className={className}>
-    <p className="text-xs font-bold uppercase tracking-wide text-ink-3">When can I withdraw?</p>
-    <p className="mt-2 text-xs text-ink-2">{HOUSE_DISCLOSURE_WEEKLY_WITHDRAWALS}</p>
-    <TimingRows label="Next boundary" at={props.boundaryAt} now={now}
-      unavailable="Boundary timing is unavailable" />
-  </aside>;
+  if (props.surface === "house") {
+    // The deposit and withdrawal cutoffs are different rules (houseEpoch.cutoffSentences), stated apart;
+    // the weekday wording follows the vault's own cadence, which the caller must supply (no default).
+    const cadence = props.cadence;
+    const windowS = props.settlementWindow ?? null;
+    const cut = props.boundaryAt === null || windowS === null ? null : cutoffSentences(cadence, props.boundaryAt, windowS);
+    return <TermsBox className={className}
+      tip={<>{para(houseWithdrawalDisclosure(cadence, props.marketListsDailies ?? true), true)}
+        {cut ? para(<>{cut.deposit} {cut.withdraw}</>) : null}</>}
+      rows={[["Next close", props.boundaryAt === null ? "Close timing is unavailable" : <Time at={props.boundaryAt} market />],
+        ["Countdown", countdownText(props.boundaryAt, now, "Close timing is unavailable")]]} />;
+  }
 
   if (props.surface === "writer") {
     const times = props.latestExpiry !== null && props.timing
       ? settlementWithdrawalTimes(props.latestExpiry, props.timing) : null;
     const noLock = props.locked === "0";
-    return <aside aria-label="Withdrawal terms" className={className}>
-      <p className="text-xs font-bold uppercase tracking-wide text-ink-3">When can I withdraw?</p>
-      <p className="mt-2 text-xs text-ink-2">Free {props.asset} can be withdrawn at any time. Collateral in an open short stays locked until that series settles and you collect it.</p>
-      <dl className="mt-2 grid gap-x-3 gap-y-1 text-xs sm:grid-cols-[auto_1fr]">
-        <dt className="font-semibold text-ink">Free now</dt><dd className="num text-ink-2">{props.free ?? "Unavailable"} {props.asset}</dd>
-        <dt className="font-semibold text-ink">Locked in shorts</dt><dd className="num text-ink-2">{props.locked ?? "Unavailable"} {props.asset}</dd>
-      </dl>
-      <TimingRows label="Latest shown unlock from" at={noLock ? null : times?.routineAt ?? null} now={now}
-        unavailable={noLock ? "No locked short collateral is shown" : "Unlock timing is unavailable"} />
-      {times ? <p className="mt-2 text-xs text-ink-3">That is the earliest routine settlement time for the latest shown expiry, not a guarantee. If settlement is held, admin resolution only becomes eligible at {newYorkWithdrawalTime(times.adminEligibleAt)}.</p> : null}
-    </aside>;
+    const unlockAt = noLock ? null : times?.routineAt ?? null;
+    const unavailable = noLock ? "Nothing is locked" : "Unlock timing is unavailable";
+    return <TermsBox className={className}
+      tip={<>{para(<>Free {props.asset} can be withdrawn any time. Collateral behind a sold option stays locked until it settles and you collect it.</>, true)}
+        {times ? para(<>The unlock time is the earliest routine settlement time for the latest shown expiry, not a guarantee. If settlement is held, admin resolution only becomes eligible at <Time at={times.adminEligibleAt} market />.</>) : null}</>}
+      rows={[["Free now", props.free === null ? "Unavailable" : `${props.free} ${props.asset}`],
+        ["Locked in sold options", props.locked === null ? "Unavailable" : `${props.locked} ${props.asset}`],
+        ["Latest shown unlock from", unlockAt === null ? unavailable : <Time at={unlockAt} market />],
+        ...(unlockAt !== null ? [["Countdown", countdownText(unlockAt, now, unavailable)] as const] : [])]} />;
   }
 
   const times = props.timing ? settlementWithdrawalTimes(props.expiry, props.timing) : null;
@@ -118,14 +133,13 @@ export function WithdrawalTerms(props: WithdrawalTermsProps) {
     ? "No guaranteed withdrawal time while settlement is held"
     : "Settlement timing is unavailable";
 
-  return <aside aria-label="Withdrawal terms" className={className}>
-    <p className="text-xs font-bold uppercase tracking-wide text-ink-3">When can I withdraw?</p>
-    <p className="mt-2 text-xs text-ink-2">You can resell before expiry while the market is open. On-chain redemption starts only after settlement is final.</p>
-    <TimingRows label={timingLabel} at={availableAt} now={now} unavailable={unavailable} />
-    {props.candidateFinalizableAt && !settled
-      ? <p className="mt-2 text-xs text-ink-3">This uses the live settlement candidate time. A hold, missing source, or restarted candidate can make it later.</p>
-      : held ? <p className="mt-2 text-xs text-ink-3">The timestamp is when the admin path becomes eligible, not a promised withdrawal time.</p>
-        : !settled ? <p className="mt-2 text-xs text-ink-3">This is the earliest routine checkpoint, not a guarantee; final settlement may take longer.</p> : null}
-    {times ? <p className="mt-2 text-xs text-ink-3">The price window starts {newYorkWithdrawalTime(times.windowStartsAt)} and ends at expiry. Snapshot grace ends {newYorkWithdrawalTime(times.snapshotClosesAt)}. If normal settlement cannot finish, admin resolution only becomes eligible {newYorkWithdrawalTime(times.adminEligibleAt)}.</p> : null}
-  </aside>;
+  return <TermsBox className={className}
+    tip={<>{para("You can resell before expiry while the market is open. On-chain redemption starts only after settlement is final.", true)}
+      {props.candidateFinalizableAt && !settled
+        ? para("This uses the live settlement candidate time. A hold, missing source, or restarted candidate can make it later.")
+        : held ? para("The timestamp is when the admin path becomes eligible, not a promised withdrawal time.")
+          : !settled ? para("This is the earliest routine checkpoint, not a guarantee; final settlement may take longer.") : null}
+      {times ? para(<>The price window starts <Time at={times.windowStartsAt} market /> and ends at expiry. Snapshot grace ends <Time at={times.snapshotClosesAt} market />. If normal settlement cannot finish, admin resolution only becomes eligible <Time at={times.adminEligibleAt} market />.</>) : null}</>}
+    rows={[[timingLabel, availableAt === null ? unavailable : <Time at={availableAt} market />],
+      ["Countdown", countdownText(availableAt, now, unavailable)]]} />;
 }

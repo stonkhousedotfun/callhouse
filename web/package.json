@@ -13,12 +13,12 @@
     "acceptance:maker-epochs": "tsx --tsconfig tests/acceptance/tsconfig.json tests/acceptance/maker-epochs.acceptance.ts",
     "acceptance:notifications": "tsx --tsconfig tests/acceptance/tsconfig.json tests/acceptance/notifications.acceptance.ts",
     "acceptance:v2": "tsx --tsconfig tests/acceptance/tsconfig.json tests/acceptance/v2.acceptance.ts",
-    "acceptance:v7legacy": "tsx --tsconfig tests/acceptance/tsconfig.json tests/acceptance/v7-legacy.acceptance.ts",
     "gen:abis": "node scripts/gen-abis.mjs",
     "gen:markets": "node scripts/gen-markets.mjs"
   },
   "dependencies": {
     "@tanstack/react-query": "^5.102.8",
+    "@web3icons/react": "4.1.22",
     "next": "^16.3.5",
     "react": "^19.3.0",
     "react-dom": "^19.3.0",

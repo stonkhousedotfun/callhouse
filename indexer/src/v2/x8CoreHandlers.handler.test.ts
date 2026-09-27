@@ -13,12 +13,24 @@ const handlers = vi.hoisted(() => {
 
 vi.mock("../../lib/registry", () => ({
   v2Ponder: { on: (event: string, handler: Handler) => handlers.set(event, handler) },
+  // Inert, as lib/registry.ts exports it when no HouseVaultFactory is configured: the house-vault
+  // handlers these modules pull in are not this suite's subject.
+  v2HouseVaultPonder: { on: () => undefined },
+  // The vault-event and kinded-factory gates, inert here for the same reason.
+  v2HouseVaultEventsPonder: { on: () => undefined },
+  v2HouseVaultKindedFactoryPonder: { on: () => undefined },
+  v2MakerVaultPonder: { on: (event: string, handler: Handler) => handlers.set(event, handler) },
+  v2RewardsDistributorPonder: { on: (event: string, handler: Handler) => handlers.set(event, handler) },
+  v2RewardsPonder: { on: (event: string, handler: Handler) => handlers.set(event, handler) },
 }));
 
 vi.mock("ponder:schema", () => ({
   default: {
     v2ProtocolState: "v2ProtocolState", v2Minter: "v2Minter", v2OrderBookState: "v2OrderBookState",
     v2FundingSource: "v2FundingSource", v2FundingAttempt: "v2FundingAttempt",
+    v2Order: "v2Order", v2Series: "v2Series", v2OwedCredit: "v2OwedCredit", v2OwedClaim: "v2OwedClaim",
+    v2OracleExpiryConfig: "v2OracleExpiryConfig", v2OraclePinConfirm: "v2OraclePinConfirm",
+    v2OracleMarketConfig: "v2OracleMarketConfig",
   },
 }));
 
@@ -29,8 +41,8 @@ function memoryDb() {
     if (value === undefined) rows.set(name, value = new Map());
     return value;
   };
-  const rowKey = (row: any) => String(row.id ?? row.minter ?? row.maker ?? row.underlying);
-  const lookupKey = (key: any) => String(key.id ?? key.minter ?? key.maker ?? key.underlying);
+  const rowKey = (row: any) => String(row.id ?? row.orderId ?? row.minter ?? row.maker ?? row.longId ?? row.underlying);
+  const lookupKey = (key: any) => String(key.id ?? key.orderId ?? key.minter ?? key.maker ?? key.longId ?? key.underlying);
   return {
     rows,
     find: async (name: string, key: any) => table(name).get(lookupKey(key)) ?? null,
@@ -51,6 +63,14 @@ function memoryDb() {
       table(name).set(id, next);
       return next;
     } }),
+    // OrderPlaced's replace lookup. Every row of the table comes back, with the unset nullable columns null as
+    // Postgres returns them (ponder.schema.ts v2Order); replacementPredecessor applies the same maker / series /
+    // cancel-tx / log-order filters the SQL does, so the result is the same.
+    sql: { select: () => ({ from: (name: string) => ({ where: () => ({ orderBy: () => ({
+      limit: async () => [...table(name).values()].map((row) => ({
+        cancelledTx: null, cancelledLogIndex: null, replacedBy: null, ...row,
+      })),
+    }) }) }) }) },
   };
 }
 
@@ -66,6 +86,7 @@ const event = (args: object, address = "0x000000000000000000000000000000000000c0
 beforeAll(async () => {
   await import("./clearinghouse");
   await import("./orderBook");
+  await import("./stateFacts");
 });
 
 describe("v8 Clearinghouse and OrderBook event reducers", () => {
@@ -134,5 +155,93 @@ describe("v8 Clearinghouse and OrderBook event reducers", () => {
       event: event({ maker: "0x00000000000000000000000000000000000000F6", on: true }),
       context: { db },
     })).rejects.toThrow("disallowed maker");
+  });
+
+  /**
+   * replace() (OrderBook.sol:364-407) emits OrderCancelled(old), OrderPlaced(new) and, for a
+   * delegate-placed AskWrite, OrderPlacedBy(new, placer) in one transaction. The new order gets its placer from
+   * that log, not by copying the predecessor's column.
+   */
+  it("OrderPlacedBy sets placedBy on that order id, including the order a replace creates", async () => {
+    const db = memoryDb();
+    const maker = "0x00000000000000000000000000000000000000aa";
+    const placer = "0x00000000000000000000000000000000000000bb";
+    const longId = 7n;
+    db.rows.set("v2Series", new Map([[String(longId), {
+      longId, mintCutoff: 2_000n, expiry: 3_000n,
+    }]]));
+    const place = (orderId: bigint) => handlers.get("OrderBook:OrderPlaced")!({
+      event: event({ orderId, maker, longId, kind: 2, price: 10n, units: 1n, validUntil: 0n }),
+      context: { db },
+    });
+    await place(1n);
+    expect(db.rows.get("v2Order")?.get("1").placedBy).toBeNull();
+    await handlers.get("OrderBook:OrderPlacedBy")!({
+      event: event({ orderId: 1n, placer }), context: { db },
+    });
+    expect(db.rows.get("v2Order")?.get("1").placedBy).toBe(placer);
+
+    await handlers.get("OrderBook:OrderCancelled")!({
+      event: event({ orderId: 1n, unitsRemaining: 1n, pruned: false }), context: { db },
+    });
+    await place(2n);
+    expect(db.rows.get("v2Order")?.get("1")).toMatchObject({ status: "cancelled", replacedBy: 2n });
+    expect(db.rows.get("v2Order")?.get("2").placedBy).toBeNull();
+    await handlers.get("OrderBook:OrderPlacedBy")!({
+      event: event({ orderId: 2n, placer }), context: { db },
+    });
+    expect(db.rows.get("v2Order")?.get("2").placedBy).toBe(placer);
+    expect(db.rows.get("v2Order")?.get("1").placedBy).toBe(placer);
+  });
+
+  /** OrderPlaced always comes first in the same transaction, so an unknown id is an ingest fault. */
+  it("OrderPlacedBy for an order the indexer never saw placed throws instead of dropping the placer", async () => {
+    const db = memoryDb();
+    await expect(handlers.get("OrderBook:OrderPlacedBy")!({
+      event: event({ orderId: 99n, placer: "0x00000000000000000000000000000000000000bb" }), context: { db },
+    })).rejects.toThrow("OrderPlacedBy 99: unknown order");
+    expect(db.rows.get("v2Order")?.get("99")).toBeUndefined();
+  });
+
+  it("OwedCredited writes a credit row, and SettlementPinConfirmed stores the new pinner", async () => {
+    const db = memoryDb();
+    const account = "0x00000000000000000000000000000000000000cc";
+    await handlers.get("OrderBook:OwedCredited")!({
+      event: event({ account, amount: 40n }), context: { db },
+    });
+    expect([...(db.rows.get("v2OwedCredit")?.values() ?? [])][0]).toMatchObject({ account, amount: 40n });
+    const underlying = "0x00000000000000000000000000000000000000d1";
+    const previousPinner = "0x00000000000000000000000000000000000000d2";
+    const pinner = "0x00000000000000000000000000000000000000d3";
+    const id = `${underlying}-100`;
+    db.rows.set("v2OracleExpiryConfig", new Map([[id, { id, underlying, expiry: 100n }]]));
+    await handlers.get("SettlementOracle:SettlementPinConfirmed")!({
+      event: event({ underlying, expiry: 100, previousPinner, pinner }), context: { db },
+    });
+    expect(db.rows.get("v2OracleExpiryConfig")?.get(id)).toMatchObject({
+      pinner, previousPinner,
+    });
+    expect([...(db.rows.get("v2OraclePinConfirm")?.values() ?? [])][0]).toMatchObject({
+      underlying, expiry: 100n, pinner, previousPinner,
+    });
+  });
+
+  /**
+   * An indexer that started between the pin and its confirmation has no pin row. The confirm row is
+   * still stored and no half-filled pin row is made up (a real Ponder update of a missing row throws; this memory
+   * db would create one, which is what the last assertion catches).
+   */
+  it("SettlementPinConfirmed with no pin row stores the confirm row and creates no pin row", async () => {
+    const db = memoryDb();
+    const underlying = "0x00000000000000000000000000000000000000e1";
+    const previousPinner = "0x00000000000000000000000000000000000000e2";
+    const pinner = "0x00000000000000000000000000000000000000e3";
+    await handlers.get("SettlementOracle:SettlementPinConfirmed")!({
+      event: event({ underlying, expiry: 200, previousPinner, pinner }), context: { db },
+    });
+    expect([...(db.rows.get("v2OraclePinConfirm")?.values() ?? [])]).toEqual([
+      expect.objectContaining({ underlying, expiry: 200n, pinner, previousPinner }),
+    ]);
+    expect(db.rows.get("v2OracleExpiryConfig")?.get(`${underlying}-200`)).toBeUndefined();
   });
 });

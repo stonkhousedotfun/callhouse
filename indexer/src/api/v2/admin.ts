@@ -46,7 +46,7 @@ function operationWire(row: OperationRow) {
     // `id` keeps its meaning and its place on the wire; `key` is the additive unique field.
     key: row.id,
     // The public id is AccessManager's operation id. The internal row key also carries the nonce.
-    // The DB column is `opId` (ponder reserves `operation_id`, T-OP-197); the WIRE name stays `id`.
+    // The DB column is `opId` (ponder reserves `operation_id`); the WIRE name stays `id`.
     id: row.opId,
     role: row.roleName,
     target: address(row.target),
@@ -97,7 +97,7 @@ export async function loadPendingOperations(indexedAt: bigint) {
 
 export function registerAdminRoutes(app: Hono) {
   /**
-   * F-APP-INDEXER-08. THIS IS A PUBLIC, UNAUTHENTICATED GET, like every other v2 route.
+   * THIS IS A PUBLIC, UNAUTHENTICATED GET, like every other v2 route.
    *
    * The `/admin/` segment names the SUBJECT of the route - AccessManager operations - and not an
    * access boundary. Nothing in the v2 app authenticates: the only middleware on the path is the
@@ -105,7 +105,7 @@ export function registerAdminRoutes(app: Hono) {
    * (src/api/v2/index.ts). Read the name as "the admin operations feed", never as "the feed only an
    * admin may read".
    *
-   * DELIBERATELY NOT RENAMED (T-188 acceptance criterion 6d). A name that implied authorization would
+   * DELIBERATELY NOT RENAMED. A name that implied authorization would
    * be worse than one that merely reads oddly, because the next reader would stop looking for the
    * middleware that is not there.
    *

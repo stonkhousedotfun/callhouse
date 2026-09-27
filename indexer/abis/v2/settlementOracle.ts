@@ -232,6 +232,25 @@ export const settlementOracleAbi = [
   },
   {
     "type": "function",
+    "name": "everConfigured",
+    "inputs": [
+      {
+        "name": "underlying",
+        "type": "address",
+        "internalType": "address"
+      }
+    ],
+    "outputs": [
+      {
+        "name": "",
+        "type": "bool",
+        "internalType": "bool"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
     "name": "finalize",
     "inputs": [
       {
@@ -261,6 +280,19 @@ export const settlementOracleAbi = [
   },
   {
     "type": "function",
+    "name": "houseVaultFactory",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "address",
+        "internalType": "address"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
     "name": "isConsumingScheduledOp",
     "inputs": [],
     "outputs": [
@@ -284,6 +316,39 @@ export const settlementOracleAbi = [
       }
     ],
     "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "listMarket",
+    "inputs": [
+      {
+        "name": "underlying",
+        "type": "address",
+        "internalType": "address"
+      },
+      {
+        "name": "sources",
+        "type": "address[]",
+        "internalType": "address[]"
+      },
+      {
+        "name": "maxDeviationBps",
+        "type": "uint16",
+        "internalType": "uint16"
+      },
+      {
+        "name": "uncorroboratedDelay",
+        "type": "uint32",
+        "internalType": "uint32"
+      },
+      {
+        "name": "spotMaxAge",
+        "type": "uint32",
+        "internalType": "uint32"
+      }
+    ],
+    "outputs": [],
+    "stateMutability": "nonpayable"
   },
   {
     "type": "function",
@@ -322,6 +387,24 @@ export const settlementOracleAbi = [
   {
     "type": "function",
     "name": "pin",
+    "inputs": [
+      {
+        "name": "underlying",
+        "type": "address",
+        "internalType": "address"
+      },
+      {
+        "name": "expiry",
+        "type": "uint40",
+        "internalType": "uint40"
+      }
+    ],
+    "outputs": [],
+    "stateMutability": "nonpayable"
+  },
+  {
+    "type": "function",
+    "name": "pinBoundary",
     "inputs": [
       {
         "name": "underlying",
@@ -453,6 +536,19 @@ export const settlementOracleAbi = [
     "inputs": [
       {
         "name": "clearinghouse_",
+        "type": "address",
+        "internalType": "address"
+      }
+    ],
+    "outputs": [],
+    "stateMutability": "nonpayable"
+  },
+  {
+    "type": "function",
+    "name": "setHouseVaultFactory",
+    "inputs": [
+      {
+        "name": "houseVaultFactory_",
         "type": "address",
         "internalType": "address"
       }
@@ -769,6 +865,19 @@ export const settlementOracleAbi = [
   },
   {
     "type": "event",
+    "name": "HouseVaultFactorySet",
+    "inputs": [
+      {
+        "name": "houseVaultFactory",
+        "type": "address",
+        "internalType": "address",
+        "indexed": true
+      }
+    ],
+    "anonymous": false
+  },
+  {
+    "type": "event",
     "name": "KeeperRewardsSet",
     "inputs": [
       {
@@ -949,6 +1058,37 @@ export const settlementOracleAbi = [
   },
   {
     "type": "event",
+    "name": "SettlementPinConfirmed",
+    "inputs": [
+      {
+        "name": "underlying",
+        "type": "address",
+        "internalType": "address",
+        "indexed": true
+      },
+      {
+        "name": "expiry",
+        "type": "uint40",
+        "internalType": "uint40",
+        "indexed": true
+      },
+      {
+        "name": "previousPinner",
+        "type": "address",
+        "internalType": "address",
+        "indexed": true
+      },
+      {
+        "name": "pinner",
+        "type": "address",
+        "internalType": "address",
+        "indexed": false
+      }
+    ],
+    "anonymous": false
+  },
+  {
+    "type": "event",
     "name": "SettlementResolved",
     "inputs": [
       {
@@ -1095,6 +1235,17 @@ export const settlementOracleAbi = [
     "type": "error",
     "name": "AlreadyFinal",
     "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "AlreadyListed",
+    "inputs": [
+      {
+        "name": "asset",
+        "type": "address",
+        "internalType": "address"
+      }
+    ]
   },
   {
     "type": "error",

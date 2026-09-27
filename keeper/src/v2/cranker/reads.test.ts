@@ -1,5 +1,5 @@
 /**
- * T-476. surveyExpiries reads each expiry's candidate() in the same pinned multicall as settlementPrice. A failed
+ * surveyExpiries reads each expiry's candidate() in the same pinned multicall as settlementPrice. A failed
  * candidate read must never look like "no candidate": that value makes planExpiry finalize a Pending expiry every tick
  * and skip the v2_sources_disagree alert, inside the one window (the guardian's veto window) where the alert matters.
  *
@@ -39,7 +39,7 @@ function answers(): Record<string, Answer> {
 }
 
 /**
- * T-496. The chain has TWO blocks with DIFFERENT state, and the fake answers at the block it is asked for.
+ * The chain has TWO blocks with DIFFERENT state, and the fake answers at the block it is asked for.
  *
  * WHY: the cranker pins its post-read to the receipt's block (`readMany` -> `multicallMany(client, calls,
  * { blockNumber })`), and `multicallMany` OMITS the key entirely when the pin is undefined, which viem reads as
@@ -111,7 +111,7 @@ test('a failed candidate() read fails the survey naming the expiry; it is never 
 });
 
 test('the same failure with settlementInfo also failing does not invent a capture state from a default', async () => {
-  // Before T-476, `captured` fell back to `status !== 'None' || finalizableAt !== 0` on the defaulted candidate.
+  // Earlier `captured` fell back to `status !== 'None' || finalizableAt !== 0` on the defaulted candidate.
   const results = answers();
   results.candidate = () => {
     throw new Error('execution reverted: rpc fault');
@@ -123,7 +123,7 @@ test('the same failure with settlementInfo also failing does not invent a captur
 });
 
 /**
- * T-496. THE TEST THAT FAILS WHEN THE PIN IS DROPPED.
+ * THE TEST THAT FAILS WHEN THE PIN IS DROPPED.
  *
  * The survey must read the block it was given, not whatever head happens to be. Head here is one block later and
  * the guardian's veto has already resolved there: the candidate no longer disagrees and is finalizable. At the
@@ -133,7 +133,7 @@ test('the same failure with settlementInfo also failing does not invent a captur
  * head, and the survey reports a candidate that agreed and a plan that finalizes with no `v2_sources_disagree` —
  * finalizing inside the one window where the alert matters, on state from a block the tick never saw.
  */
-test('T-496: the survey reads the block it was pinned to, not head', async () => {
+test('the survey reads the block it was pinned to, not head', async () => {
   const atHead = answers();
   // At head the veto resolved: one source, no disagreement, and past its finalizableAt.
   atHead.candidate = () => [216_000_000n, 0, false, E];

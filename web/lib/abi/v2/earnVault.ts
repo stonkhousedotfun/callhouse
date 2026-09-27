@@ -35,6 +35,38 @@ export const earnVaultAbi = [
         "name": "symbol_",
         "type": "string",
         "internalType": "string"
+      },
+      {
+        "name": "limits_",
+        "type": "tuple",
+        "internalType": "struct EarnVault.Limits",
+        "components": [
+          {
+            "name": "maxSeriesUnits",
+            "type": "uint64",
+            "internalType": "uint64"
+          },
+          {
+            "name": "maxOrderNotional",
+            "type": "uint128",
+            "internalType": "uint128"
+          },
+          {
+            "name": "maxWrittenUnitsPerSeries",
+            "type": "uint64",
+            "internalType": "uint64"
+          },
+          {
+            "name": "maxWrittenNotional",
+            "type": "uint128",
+            "internalType": "uint128"
+          },
+          {
+            "name": "maxDailyOutflow",
+            "type": "uint128",
+            "internalType": "uint128"
+          }
+        ]
       }
     ],
     "stateMutability": "nonpayable"
@@ -93,33 +125,7 @@ export const earnVaultAbi = [
   },
   {
     "type": "function",
-    "name": "MAX_DAILY_OUTFLOW",
-    "inputs": [],
-    "outputs": [
-      {
-        "name": "",
-        "type": "uint256",
-        "internalType": "uint256"
-      }
-    ],
-    "stateMutability": "view"
-  },
-  {
-    "type": "function",
     "name": "MAX_LIVE_ORDERS_PER_SERIES",
-    "inputs": [],
-    "outputs": [
-      {
-        "name": "",
-        "type": "uint256",
-        "internalType": "uint256"
-      }
-    ],
-    "stateMutability": "view"
-  },
-  {
-    "type": "function",
-    "name": "MAX_ORDER_NOTIONAL",
     "inputs": [],
     "outputs": [
       {
@@ -145,39 +151,13 @@ export const earnVaultAbi = [
   },
   {
     "type": "function",
-    "name": "MAX_SERIES_UNITS",
+    "name": "MIN_ASK_BPS_OF_SPOT",
     "inputs": [],
     "outputs": [
       {
         "name": "",
-        "type": "uint256",
-        "internalType": "uint256"
-      }
-    ],
-    "stateMutability": "view"
-  },
-  {
-    "type": "function",
-    "name": "MAX_WRITTEN_NOTIONAL",
-    "inputs": [],
-    "outputs": [
-      {
-        "name": "",
-        "type": "uint256",
-        "internalType": "uint256"
-      }
-    ],
-    "stateMutability": "view"
-  },
-  {
-    "type": "function",
-    "name": "MAX_WRITTEN_UNITS_PER_SERIES",
-    "inputs": [],
-    "outputs": [
-      {
-        "name": "",
-        "type": "uint256",
-        "internalType": "uint256"
+        "type": "uint16",
+        "internalType": "uint16"
       }
     ],
     "stateMutability": "view"
@@ -355,6 +335,24 @@ export const earnVaultAbi = [
   },
   {
     "type": "function",
+    "name": "claimDeferred",
+    "inputs": [
+      {
+        "name": "id",
+        "type": "uint256",
+        "internalType": "uint256"
+      },
+      {
+        "name": "to",
+        "type": "address",
+        "internalType": "address"
+      }
+    ],
+    "outputs": [],
+    "stateMutability": "nonpayable"
+  },
+  {
+    "type": "function",
     "name": "clearinghouse",
     "inputs": [],
     "outputs": [
@@ -365,6 +363,24 @@ export const earnVaultAbi = [
       }
     ],
     "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "close",
+    "inputs": [
+      {
+        "name": "longId",
+        "type": "uint256",
+        "internalType": "uint256"
+      },
+      {
+        "name": "units",
+        "type": "uint64",
+        "internalType": "uint64"
+      }
+    ],
+    "outputs": [],
+    "stateMutability": "nonpayable"
   },
   {
     "type": "function",
@@ -419,6 +435,48 @@ export const earnVaultAbi = [
   },
   {
     "type": "function",
+    "name": "deferred",
+    "inputs": [
+      {
+        "name": "id",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ],
+    "outputs": [
+      {
+        "name": "owner",
+        "type": "address",
+        "internalType": "address"
+      },
+      {
+        "name": "receiver",
+        "type": "address",
+        "internalType": "address"
+      },
+      {
+        "name": "assets",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "deferredAssets",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
     "name": "deposit",
     "inputs": [
       {
@@ -435,6 +493,11 @@ export const earnVaultAbi = [
     "outputs": [
       {
         "name": "shares",
+        "type": "uint256",
+        "internalType": "uint256"
+      },
+      {
+        "name": "requestId",
         "type": "uint256",
         "internalType": "uint256"
       }
@@ -625,6 +688,46 @@ export const earnVaultAbi = [
   },
   {
     "type": "function",
+    "name": "limits",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "tuple",
+        "internalType": "struct EarnVault.Limits",
+        "components": [
+          {
+            "name": "maxSeriesUnits",
+            "type": "uint64",
+            "internalType": "uint64"
+          },
+          {
+            "name": "maxOrderNotional",
+            "type": "uint128",
+            "internalType": "uint128"
+          },
+          {
+            "name": "maxWrittenUnitsPerSeries",
+            "type": "uint64",
+            "internalType": "uint64"
+          },
+          {
+            "name": "maxWrittenNotional",
+            "type": "uint128",
+            "internalType": "uint128"
+          },
+          {
+            "name": "maxDailyOutflow",
+            "type": "uint128",
+            "internalType": "uint128"
+          }
+        ]
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
     "name": "name",
     "inputs": [],
     "outputs": [
@@ -783,6 +886,93 @@ export const earnVaultAbi = [
       }
     ],
     "stateMutability": "nonpayable"
+  },
+  {
+    "type": "function",
+    "name": "previewDeposit",
+    "inputs": [
+      {
+        "name": "assets",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ],
+    "outputs": [
+      {
+        "name": "shares",
+        "type": "uint256",
+        "internalType": "uint256"
+      },
+      {
+        "name": "queued",
+        "type": "bool",
+        "internalType": "bool"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "previewQueued",
+    "inputs": [
+      {
+        "name": "id",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ],
+    "outputs": [
+      {
+        "name": "shares",
+        "type": "uint256",
+        "internalType": "uint256"
+      },
+      {
+        "name": "assets",
+        "type": "uint256",
+        "internalType": "uint256"
+      },
+      {
+        "name": "headNow",
+        "type": "bool",
+        "internalType": "bool"
+      },
+      {
+        "name": "needsVenue",
+        "type": "bool",
+        "internalType": "bool"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "previewRedeem",
+    "inputs": [
+      {
+        "name": "shares",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ],
+    "outputs": [
+      {
+        "name": "assets",
+        "type": "uint256",
+        "internalType": "uint256"
+      },
+      {
+        "name": "queued",
+        "type": "bool",
+        "internalType": "bool"
+      },
+      {
+        "name": "needsVenue",
+        "type": "bool",
+        "internalType": "bool"
+      }
+    ],
+    "stateMutability": "view"
   },
   {
     "type": "function",
@@ -971,6 +1161,46 @@ export const earnVaultAbi = [
   },
   {
     "type": "function",
+    "name": "setLimits",
+    "inputs": [
+      {
+        "name": "limits_",
+        "type": "tuple",
+        "internalType": "struct EarnVault.Limits",
+        "components": [
+          {
+            "name": "maxSeriesUnits",
+            "type": "uint64",
+            "internalType": "uint64"
+          },
+          {
+            "name": "maxOrderNotional",
+            "type": "uint128",
+            "internalType": "uint128"
+          },
+          {
+            "name": "maxWrittenUnitsPerSeries",
+            "type": "uint64",
+            "internalType": "uint64"
+          },
+          {
+            "name": "maxWrittenNotional",
+            "type": "uint128",
+            "internalType": "uint128"
+          },
+          {
+            "name": "maxDailyOutflow",
+            "type": "uint128",
+            "internalType": "uint128"
+          }
+        ]
+      }
+    ],
+    "outputs": [],
+    "stateMutability": "nonpayable"
+  },
+  {
+    "type": "function",
     "name": "setSkimBps",
     "inputs": [
       {
@@ -1071,6 +1301,46 @@ export const earnVaultAbi = [
       }
     ],
     "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "tightenLimits",
+    "inputs": [
+      {
+        "name": "limits_",
+        "type": "tuple",
+        "internalType": "struct EarnVault.Limits",
+        "components": [
+          {
+            "name": "maxSeriesUnits",
+            "type": "uint64",
+            "internalType": "uint64"
+          },
+          {
+            "name": "maxOrderNotional",
+            "type": "uint128",
+            "internalType": "uint128"
+          },
+          {
+            "name": "maxWrittenUnitsPerSeries",
+            "type": "uint64",
+            "internalType": "uint64"
+          },
+          {
+            "name": "maxWrittenNotional",
+            "type": "uint128",
+            "internalType": "uint128"
+          },
+          {
+            "name": "maxDailyOutflow",
+            "type": "uint128",
+            "internalType": "uint128"
+          }
+        ]
+      }
+    ],
+    "outputs": [],
+    "stateMutability": "nonpayable"
   },
   {
     "type": "function",
@@ -1215,6 +1485,37 @@ export const earnVaultAbi = [
         "name": "authority",
         "type": "address",
         "internalType": "address",
+        "indexed": false
+      }
+    ],
+    "anonymous": false
+  },
+  {
+    "type": "event",
+    "name": "DeferredClaimed",
+    "inputs": [
+      {
+        "name": "id",
+        "type": "uint256",
+        "internalType": "uint256",
+        "indexed": true
+      },
+      {
+        "name": "by",
+        "type": "address",
+        "internalType": "address",
+        "indexed": true
+      },
+      {
+        "name": "to",
+        "type": "address",
+        "internalType": "address",
+        "indexed": false
+      },
+      {
+        "name": "assets",
+        "type": "uint256",
+        "internalType": "uint256",
         "indexed": false
       }
     ],
@@ -1378,6 +1679,84 @@ export const earnVaultAbi = [
   },
   {
     "type": "event",
+    "name": "HighWaterMarkSet",
+    "inputs": [
+      {
+        "name": "highWaterMark",
+        "type": "uint256",
+        "internalType": "uint256",
+        "indexed": false
+      }
+    ],
+    "anonymous": false
+  },
+  {
+    "type": "event",
+    "name": "LimitsSet",
+    "inputs": [
+      {
+        "name": "limits",
+        "type": "tuple",
+        "internalType": "struct EarnVault.Limits",
+        "components": [
+          {
+            "name": "maxSeriesUnits",
+            "type": "uint64",
+            "internalType": "uint64"
+          },
+          {
+            "name": "maxOrderNotional",
+            "type": "uint128",
+            "internalType": "uint128"
+          },
+          {
+            "name": "maxWrittenUnitsPerSeries",
+            "type": "uint64",
+            "internalType": "uint64"
+          },
+          {
+            "name": "maxWrittenNotional",
+            "type": "uint128",
+            "internalType": "uint128"
+          },
+          {
+            "name": "maxDailyOutflow",
+            "type": "uint128",
+            "internalType": "uint128"
+          }
+        ],
+        "indexed": false
+      }
+    ],
+    "anonymous": false
+  },
+  {
+    "type": "event",
+    "name": "PaymentDeferred",
+    "inputs": [
+      {
+        "name": "id",
+        "type": "uint256",
+        "internalType": "uint256",
+        "indexed": true
+      },
+      {
+        "name": "receiver",
+        "type": "address",
+        "internalType": "address",
+        "indexed": true
+      },
+      {
+        "name": "assets",
+        "type": "uint256",
+        "internalType": "uint256",
+        "indexed": false
+      }
+    ],
+    "anonymous": false
+  },
+  {
+    "type": "event",
     "name": "PulledFromVenue",
     "inputs": [
       {
@@ -1501,6 +1880,44 @@ export const earnVaultAbi = [
       },
       {
         "name": "value",
+        "type": "uint256",
+        "internalType": "uint256",
+        "indexed": false
+      }
+    ],
+    "anonymous": false
+  },
+  {
+    "type": "event",
+    "name": "VenuePulledForFunding",
+    "inputs": [
+      {
+        "name": "requested",
+        "type": "uint256",
+        "internalType": "uint256",
+        "indexed": false
+      },
+      {
+        "name": "withdrawn",
+        "type": "uint256",
+        "internalType": "uint256",
+        "indexed": false
+      }
+    ],
+    "anonymous": false
+  },
+  {
+    "type": "event",
+    "name": "VenueWrittenOff",
+    "inputs": [
+      {
+        "name": "adapter",
+        "type": "address",
+        "internalType": "address",
+        "indexed": true
+      },
+      {
+        "name": "lastKnown",
         "type": "uint256",
         "internalType": "uint256",
         "indexed": false
@@ -1816,6 +2233,11 @@ export const earnVaultAbi = [
   },
   {
     "type": "error",
+    "name": "VenueUnreadable",
+    "inputs": []
+  },
+  {
+    "type": "error",
     "name": "WrittenNotionalExceeded",
     "inputs": [
       {
@@ -1850,6 +2272,17 @@ export const earnVaultAbi = [
     "type": "error",
     "name": "AlreadyFinal",
     "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "AlreadyListed",
+    "inputs": [
+      {
+        "name": "asset",
+        "type": "address",
+        "internalType": "address"
+      }
+    ]
   },
   {
     "type": "error",

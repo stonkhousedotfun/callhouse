@@ -24,13 +24,13 @@ export function BrandMark({ size = 26, className }: { size?: number; className?:
   );
 }
 
-/** Mark + "stonkhouse" wordmark, linking home. */
+/** Mark + "stonkhouse" wordmark, linking home. At least 44px tall: a touch target in the header. */
 export function Brand({ className }: { className?: string }) {
   return (
     <Link
       href="/"
       className={cn(
-        "inline-flex items-center gap-[9px] rounded-[10px] font-display text-[21px] font-extrabold leading-none tracking-[-0.03em] text-ink no-underline",
+        "inline-flex min-h-11 items-center gap-[9px] rounded-[10px] font-display text-[21px] font-extrabold leading-none tracking-[-0.03em] text-ink no-underline",
         className,
       )}
     >

@@ -1,0 +1,28 @@
+# ops/archive-node/docker-compose.yml — the chain-4663 archive node on a dedicated host.
+#
+#   cd ops/archive-node && cp .env.example .env && $EDITOR .env && docker compose up -d --build
+#
+# Railway Pro cannot hold this node: the database is already past Pro's 1 TB
+# volume cap and Nitro's 64 GB RAM floor is above Pro's 24 GB per replica. This file is the
+# deployment for the recommended alternative, a dedicated NVMe box.
+services:
+  archive-4663:
+    build: .
+    image: callhouse/archive-4663:v3.11.4-7d5ac27
+    env_file: .env
+    volumes:
+      # Local NVMe. Networked/block storage throttles sync (docs.robinhood.com/chain/run-a-full-node).
+      - ${ARCHIVE_DATA_DIR:?set ARCHIVE_DATA_DIR in .env to a path on the NVMe array}:/data
+    ports:
+      # Bind to the private interface only (WireGuard/Tailscale address, or 127.0.0.1 behind a proxy).
+      # Never 0.0.0.0: an open archive RPC is free load for anyone who finds it.
+      - "${ARCHIVE_BIND_ADDR:?set ARCHIVE_BIND_ADDR in .env}:8547:8547"
+      - "${ARCHIVE_BIND_ADDR}:8548:8548"
+    ulimits:
+      nofile: { soft: 1048576, hard: 1048576 }
+    # Nitro flushes state on SIGTERM; a hard kill mid-flush can cost a resync of recent blocks.
+    stop_grace_period: 5m
+    restart: unless-stopped
+    logging:
+      driver: json-file
+      options: { max-size: "100m", max-file: "5" }

@@ -13,7 +13,7 @@ import {
 } from "./cycleNotices";
 
 /**
- * What the cycle page says about the vault's listing. Each case is a screen a reviewer found
+ * What the cycle page says about the vault's listing. Each case is a screen that was found
  * saying something false: a sold-out week rendered as an alarm and then as "escalate", a
  * finished order still being fetched from the feed, and an RPC failure blamed on the keeper.
  *

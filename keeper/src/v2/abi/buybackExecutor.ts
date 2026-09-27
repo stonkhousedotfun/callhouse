@@ -704,6 +704,17 @@ export const buybackExecutorAbi = [
   },
   {
     "type": "error",
+    "name": "RouteRejected",
+    "inputs": [
+      {
+        "name": "reason",
+        "type": "bytes32",
+        "internalType": "bytes32"
+      }
+    ]
+  },
+  {
+    "type": "error",
     "name": "SafeERC20FailedOperation",
     "inputs": [
       {
@@ -743,6 +754,17 @@ export const buybackExecutorAbi = [
     "type": "error",
     "name": "AlreadyFinal",
     "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "AlreadyListed",
+    "inputs": [
+      {
+        "name": "asset",
+        "type": "address",
+        "internalType": "address"
+      }
+    ]
   },
   {
     "type": "error",
@@ -929,17 +951,6 @@ export const buybackExecutorAbi = [
         "name": "hi",
         "type": "uint256",
         "internalType": "uint256"
-      }
-    ]
-  },
-  {
-    "type": "error",
-    "name": "RouteRejected",
-    "inputs": [
-      {
-        "name": "reason",
-        "type": "bytes32",
-        "internalType": "bytes32"
       }
     ]
   },

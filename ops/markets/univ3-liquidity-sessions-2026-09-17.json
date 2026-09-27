@@ -1,9 +1,9 @@
 {
-  "_readme": "UPSTREAM measured session series for univ3-liquidity-2026-09-17.json (T-216-O8-UNIV3-LIQUIDITY-INPUT-SET). The 13 role=registry rows of the recon's 09-final.json, verbatim. Landed so the derived file is reproducible offline: univ3-liquidity.mjs --derive regenerates the derived file from this one and must match it byte for byte.",
+  "_readme": "UPSTREAM measured session series for univ3-liquidity-2026-09-17.json. The 13 role=registry rows of the recon's 09-final.json, verbatim. Landed so the derived file is reproducible offline: univ3-liquidity.mjs --derive regenerates the derived file from this one and must match it byte for byte.",
   "asOf": "2026-09-17",
   "isSnapshot": true,
   "source": {
-    "recon": "stonkhouse-plan/status/VENUE-RECON-2026-09-17.md section 5.1",
+    "recon": "the venue recon report of 2026-09-17, section 5.1 (not in this repository)",
     "originalPath": "(local measurement run)",
     "note": "the other 44 rows of that file are usdg-candidate and weth-candidate pools outside the registry and are deliberately not landed"
   },

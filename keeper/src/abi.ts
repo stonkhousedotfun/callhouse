@@ -167,7 +167,7 @@ const ROLL_OPEN_EVENT = {
 /** The same fragment, for `getLogs`. */
 export const rollOpenEvent = ROLL_OPEN_EVENT;
 
-/** A stranded close (AF-02) reports zero legs here and emits ClaimStranded in the same receipt. */
+/** A stranded close reports zero legs here and emits ClaimStranded in the same receipt. */
 const ROLL_CLOSE_EVENT = {
   type: 'event',
   name: 'RollClose',
@@ -309,7 +309,7 @@ export const vaultAbi = [
     stateMutability: 'view',
   },
 
-  // --- stranded claim (AF-02): `phase == Idle && claimKey != 0` ---
+  // --- stranded claim: `phase == Idle && claimKey != 0` ---
   { type: 'function', name: 'isStranded', inputs: [], outputs: [{ type: 'bool' }], stateMutability: 'view' },
   { type: 'function', name: 'strandGen', inputs: [], outputs: [{ type: 'uint256' }], stateMutability: 'view' },
   { type: 'function', name: 'lastResolvedGen', inputs: [], outputs: [{ type: 'uint256' }], stateMutability: 'view' },
@@ -556,7 +556,7 @@ export const vaultAbi = [
       { name: 'usdgOut', type: 'uint256', indexed: false },
     ],
   },
-  // Stranded-claim state machine (AF-02) and the split payout legs (AF-03, AF-05).
+  // Stranded-claim state machine and the split payout legs.
   CLAIM_STRANDED_EVENT,
   {
     type: 'event',
@@ -598,7 +598,7 @@ export const vaultAbi = [
     The 36 marked "linked library" are raised inside SeaportOrderLib or
     ValoremLib (DELEGATECALL) and are ABSENT from Vault.json: a decoder
     built from that artefact alone prints them as selectors. Generated
-    from contracts/out at ca0e985 (92 unique); the cross-check test
+    from contracts/out at the write-on-fill redesign (92 unique); the cross-check test
     re-derives the list whenever the artefacts are present.
   ------------------------------------------------------------------*/
   { type: 'error', name: 'AccessControlBadConfirmation', inputs: [] }, // OpenZeppelin
@@ -680,7 +680,7 @@ export const vaultAbi = [
   { type: 'error', name: 'TooManyListings', inputs: [{ name: 'authorised', type: 'uint8' }, { name: 'max', type: 'uint8' }] }, // AdapterSeaport.sol:90
   { type: 'error', name: 'UnexpectedLotSize', inputs: [{ name: 'expected', type: 'uint96' }, { name: 'got', type: 'uint96' }] }, // ValoremLib.sol:91 (linked library)
   { type: 'error', name: 'UnitPriceExceedsStrike', inputs: [{ name: 'unitPriceUsdg', type: 'uint256' }, { name: 'strikeUsdg', type: 'uint256' }] }, // SeaportOrderLib.sol:76 (linked library)
-  { type: 'error', name: 'UsdgLegBlocked', inputs: [{ name: 'usdgOwed', type: 'uint256' }] }, // Vault.sol:375 (AF-03: USDG leg could not be paid or deferred)
+  { type: 'error', name: 'UsdgLegBlocked', inputs: [{ name: 'usdgOwed', type: 'uint256' }] }, // Vault.sol:375 (USDG leg could not be paid or deferred)
   { type: 'error', name: 'UseQueue', inputs: [] }, // Vault.sol:358
   { type: 'error', name: 'UtilizationAboveCeiling', inputs: [{ name: 'got', type: 'uint16' }, { name: 'ceilBps', type: 'uint16' }] }, // Policy.sol:92 (MAX_UTILIZATION_CEIL_BPS = 9985)
   { type: 'error', name: 'ValoremFeeNotAccepted', inputs: [{ name: 'feeBps', type: 'uint8' }] }, // Vault.sol:346
@@ -1094,7 +1094,7 @@ export const stockTokenAbi = [
   { type: 'function', name: 'uiMultiplier', inputs: [], outputs: [{ type: 'uint256' }], stateMutability: 'view' },
   // Transfer gates, for the factory keeper's settle guard (solo.ts). `paused()` is the token's own
   // pause OR its access registry's; the blocklist lives on that registry, not on the token
-  // (ops/recon/R5-price-feed.md §3.4, R12 §4). Both names are in ops/abis/StockToken.json.
+  // itself. Both names are in ops/abis/StockToken.json.
   { type: 'function', name: 'paused', inputs: [], outputs: [{ type: 'bool' }], stateMutability: 'view' },
   { type: 'function', name: 'ACCESS_CONTROLLED_REGISTRY', inputs: [], outputs: [{ type: 'address' }], stateMutability: 'view' },
 ] as const;

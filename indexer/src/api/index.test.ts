@@ -453,7 +453,7 @@ describe("cycleJson", () => {
     expect(j.harvest.premiumGross.raw).toBe("48000000");
     // The fee is on the 48 premium alone; the 950 of strike proceeds reach depositors whole.
     expect(j.harvest.fee.raw).toBe("2400000");
-    // W-21: the premium figures are premium only (the same 45.6 a filled, unassigned week
+    // The premium figures are premium only (the same 45.6 a filled, unassigned week
     // earns) and the 995.6 credited to holders is published under its own name.
     expect(j.harvest.premiumNet.raw).toBe("45600000");
     expect(j.harvest.premiumNet).toEqual(cycleJson(FILLED).harvest.premiumNet);
@@ -649,14 +649,14 @@ describe("listingJson", () => {
 });
 
 /**
- * X-2: no enum value the handlers never produce, and none they produce that the API cannot
+ * No enum value the handlers never produce, and none they produce that the API cannot
  * filter on. Each schema enum is pinned to the set of values the code actually writes: the two
  * statuses the handlers assign by hand (`listed` at RollOpen, `filled` at the first
  * OrderFulfilled; `approved` at ListingApproved, `filled` at a complete fill) plus everything the
  * pure lifecycle helpers can return. The fixtures above are the four terminal cycle outcomes; the
  * tape's `status` column can hold nothing else.
  */
-describe("every enum value is produced, and every produced value is an enum value (X-2)", () => {
+describe("every enum value is produced, and every produced value is an enum value", () => {
   it("cycle_status", () => {
     const produced = new Set<string>(["listed", "filled"]);
     for (const stranded of [false, true]) {
@@ -786,8 +786,8 @@ describe("accountStrand (/v1/account/:addr strand)", () => {
  * The `/v1/market*` shapes. Same discipline as `cycleJson` above: money is `{raw, decimals,
  * formatted}`, every uint is a decimal string, timestamps come as seconds AND ISO, and nothing the
  * index did not read is published as a zero. There is no fixture file for these yet — the web's
- * /account and /book still read the factory over RPC (the audit finding this lane documents in
- * indexer/README.md "Factory markets"); when the dapp moves onto `/v1/market`, the fixture goes
+ * /account and /book still read the factory over RPC (a known audit finding);
+ * when the dapp moves onto `/v1/market`, the fixture goes
  * under ops/fixtures/api/ and this test pins it the way `cycleJson` is pinned.
  */
 import { settlementOutcome } from "../../lib/factoryLifecycle";
@@ -1077,7 +1077,7 @@ describe("lotFillJson / settlementJson", () => {
   });
 });
 
-describe("every factory enum value is produced, and every produced value is an enum value (X-2)", () => {
+describe("every factory enum value is produced, and every produced value is an enum value", () => {
   it("writer_account_status", () => {
     expect([...WRITER_ACCOUNT_STATUSES].sort()).toEqual([...writerAccountStatus.enumValues].sort());
   });

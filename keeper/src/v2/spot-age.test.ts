@@ -1,8 +1,8 @@
 /**
  * An old spot the oracle accepts: what the MM bot and the pricer do with it.
  *
- * WHY THIS FILE EXISTS: the registry's spotMaxAgeS is 90000 s (the feeds' 24 h heartbeat plus 1 h, ops/deploy.md
- * §15.13), so SettlementOracle.trySpot is ok on a print up to 25 h old: a quiet feed's last print, the previous
+ * WHY THIS FILE EXISTS: the registry's spotMaxAgeS is 90000 s (the feeds' 24 h heartbeat plus 1 h),
+ * so SettlementOracle.trySpot is ok on a print up to 25 h old: a quiet feed's last print, the previous
  * session's print at the open, or a stalled feed's. trySpot alone (the MM's spot-stale halt, the pricer's planCheck)
  * cannot tell those apart. Neither bot quotes on trySpot alone: every quote and every reprice needs a /fair answer, and
  * the pricing service refuses one when the same feed's print is more than maxSpotDivergenceBps (300) from Cboe's
@@ -13,7 +13,7 @@
  *   - the same print 3.3 % from Cboe is refused `spot-divergence`, the MM halts the series `fair-unavailable` and
  *     cancels its live quotes, and the pricer reads no fair value (pricer.ts leaves the ask alone);
  *   - the known gap: a stalled print inside the 300 bps band is still quoted. The runbook's divergence alert covers
- *     it (ops/deploy.md §15.13), not the bots.
+ *     it, not the bots.
  * DELIBERATELY ABSENT: the chain (the oracle rule `now - updatedAt <= spotMaxAge` is restated below) and HTTP.
  */
 import assert from 'node:assert/strict';
@@ -44,7 +44,7 @@ const OLD = NOW - 86_000;
 
 const round = (answer8dp: bigint, updatedAt: number): FeedRound => ({ roundId: 18_446_744_073_709_552_249n, answer: answer8dp, updatedAt: BigInt(updatedAt), decimals: 8 });
 
-/** SettlementOracle._spot's age rule (78d7f0d L819): stale when `now - updatedAt > spotMaxAge`. */
+/** SettlementOracle._spot's age rule (SettlementOracle.sol): stale when `now - updatedAt > spotMaxAge`. */
 const onChainFresh = (updatedAt: number, spotMaxAgeS: number) => !(NOW - updatedAt > spotMaxAgeS);
 
 async function fairBody(feedRound: FeedRound): Promise<{ status: number; body: unknown }> {
@@ -81,6 +81,11 @@ const PARAMS: MmPlanParams = {
   depositTokens: true,
   maxQuoteLifetimeS: 1_800,
   epochWindDownS: 0,
+  // Safe call selling off: this file pins what it pinned before it; its own tests turn each piece on.
+  spotLagBps: 0,
+  spotLagStaleBps: 0,
+  fairFromSession: false,
+  writeStopMinutes: 0,
 };
 
 const LIVE: LiveOrder[] = [
@@ -98,7 +103,7 @@ function tick(spot: bigint, fresh: boolean, fair: FairInput) {
     spot: fresh ? spot : null,
     exposure: { longs: 0n, shorts: 0n, bids: 100n, resale: 0n, writes: 100n, live: 2n },
     seriesNotional: 0n,
-    askFloor: fresh ? 0n : null,
+    askFloors: fresh ? { write: 0n, resale: 0n } : null,
     bidCap: fresh ? spot / 10n : null,
     collateralAsset: NVDA,
     collateralPerUnit: 10n ** 16n,
@@ -122,6 +127,8 @@ function tick(spot: bigint, fresh: boolean, fair: FairInput) {
       outflow: { used: 0n, available: 2_500_000_000n },
       totalNotional: 0n,
       usdgWallet: 100_000_000_000n,
+      // A treasury vault (epoch null) carries no House reserve.
+      usdgReserved: null,
       owed: 0n,
       freeCollateral: new Map([[NVDA, 100n * 10n ** 18n]]),
       walletTokens: new Map([[NVDA, 0n]]),

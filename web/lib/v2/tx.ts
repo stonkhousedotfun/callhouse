@@ -4,6 +4,7 @@ import { erc20Abi } from "../abi/erc20";
 import { clearinghouseAbi } from "../abi/v2/clearinghouse";
 import { orderBookAbi } from "../abi/v2/orderBook";
 import { publicClient, robinhoodChain } from "../chain";
+import { displayExact } from "../numberFormat";
 import { requireV2Address } from "./config";
 import { explainV2Error } from "./errors";
 import { V2ReceiptUnknownError, waitForV2Receipt } from "./txStatus";
@@ -11,6 +12,8 @@ import { V2ReceiptUnknownError, waitForV2Receipt } from "./txStatus";
 // Mirrors TakeParams.maxTotalFee's uint128 width in contracts/src/v2/interfaces/V2Types.sol.
 const MAX_UINT128 = (1n << 128n) - 1n;
 const TAKE_QUOTE_LIFETIME_SECONDS = 300;
+/** A new resting order (bid remainder, resale ask) lives one day, capped just inside the series expiry. */
+export const RESTING_ORDER_LIFETIME_SECONDS = 86_400;
 
 export type WriteContext = {
   account: Address;
@@ -26,17 +29,22 @@ export class V2WriteError extends Error {
   }
 }
 
-/** Simulate every write against the current chain state, then await inclusion. */
+/**
+ * Simulate every write against the current chain state, then await inclusion. `onSimulated` receives the simulated
+ * call's decoded return value before the wallet is asked (HouseVault.claim() returns what it pays).
+ */
 export async function simulatedWrite(
   context: WriteContext, address: Address, abi: Abi, functionName: string, args: readonly unknown[],
-  onMined?: (receipt: TransactionReceipt) => void,
+  onMined?: (receipt: TransactionReceipt) => void, onSimulated?: (result: unknown) => void,
 ): Promise<Hex> {
   const client = context.client ?? publicClient;
   if (await context.wallet.getChainId() !== robinhoodChain.id) throw new Error("Switch to Robinhood Chain to continue.");
   try {
-    const { request } = await client.simulateContract({
+    const { request, result } = await client.simulateContract({
       account: context.account, address, abi, functionName, args,
     });
+    // Reading the result cannot stop the write it describes.
+    try { onSimulated?.(result); } catch { /* caller treats an unreadable result as unknown */ }
     const hash = await context.wallet.writeContract({ ...request, account: context.account, chain: robinhoodChain });
     const receipt = await waitForV2Receipt(client, hash, functionName);
     // Receipt processing cannot turn a confirmed write into a retryable error.
@@ -56,6 +64,34 @@ export function exactApprovalAmount(allowance: bigint, required: bigint): bigint
   return allowance >= required ? 0n : required;
 }
 
+export type TokenLabel = { symbol: string; decimals: number };
+
+/**
+ * The refusal for a wallet that holds less than a step needs: the token by name and both amounts, every digit. A bare
+ * "this token" left a buyer holding Stock Tokens but no USDG unable to tell that a call is paid in USDG. Without a
+ * label (its read failed) the refusal still stands, in the old words.
+ */
+export function insufficientBalanceText(token: TokenLabel | null, balance: bigint, required: bigint): string {
+  if (!token) return "Your wallet does not have enough of this token.";
+  const amount = (raw: bigint) => `${displayExact(raw, token.decimals)} ${token.symbol}`;
+  return `Your wallet does not have enough ${token.symbol}: it holds ${amount(balance)} and this needs ${amount(required)}.`;
+}
+
+/** The token's own symbol and decimals, read only on the refusal path; null when either read fails or is malformed. */
+async function readTokenLabel(client: PublicClient, asset: Address): Promise<TokenLabel | null> {
+  try {
+    const [symbol, decimals] = await Promise.all([
+      client.readContract({ address: asset, abi: erc20Abi, functionName: "symbol" }),
+      client.readContract({ address: asset, abi: erc20Abi, functionName: "decimals" }),
+    ]);
+    const places = Number(decimals);
+    return typeof symbol === "string" && symbol.trim() && Number.isInteger(places) && places >= 0 && places <= 36
+      ? { symbol: symbol.trim(), decimals: places } : null;
+  } catch {
+    return null;
+  }
+}
+
 export async function approveExact(
   context: WriteContext, asset: Address, spender: Address, required: bigint,
 ): Promise<Hex | null> {
@@ -64,7 +100,7 @@ export async function approveExact(
     { address: asset, abi: erc20Abi, functionName: "balanceOf", args: [context.account] },
     { address: asset, abi: erc20Abi, functionName: "allowance", args: [context.account, spender] },
   ] });
-  if (balance < required) throw new Error("Your wallet does not have enough of this token.");
+  if (balance < required) throw new Error(insufficientBalanceText(await readTokenLabel(client, asset), balance, required));
   const amount = exactApprovalAmount(allowance, required);
   if (amount === 0n) return null;
   return simulatedWrite(context, asset, erc20Abi, "approve", [spender, amount]);
@@ -96,17 +132,34 @@ export async function recheckTakeQuote(
 ): Promise<TakeParams> {
   const client = context.client ?? publicClient;
   const address = requireV2Address("orderBook");
-  const block = await client.getBlock({ blockTag: "latest" });
-  const now = Number(block.timestamp);
-  const quoteParams = { ...request, deadline: now + TAKE_QUOTE_LIFETIME_SECONDS, maxTotalFee: MAX_UINT128 };
-  const [filled, premium, takerFee, sellerFees] = await client.readContract({ account: context.account, address,
-    abi: orderBookAbi, functionName: "quoteTake", args: [quoteParams], blockNumber: block.number });
-  // F-APP-01. `filled`, `premium` and `sellerFees` stay STRICTLY equal: a change in any of them is a
+  // A requote that REVERTS (a quoted order cancelled or repriced between the preflight and this read makes
+  // quoteTake revert BelowMinUnits) used to escape as viem's raw ~936-character error, and the ticket printed it. The
+  // reads are wrapped exactly like a write: V2WriteError carries the decoded buyer copy (explainV2Error) and keeps
+  // viem's error as its `cause`. Only the reads are wrapped; the refusals below are already app copy.
+  // quoteTake is no longer a view: it runs take's own code and rolls it back, so it is simulated (an
+  // eth_call) FROM the taker's account. The answer is that caller's, and a call with no `from` reverts NotAuthorized.
+  const readQuote = async () => {
+    const block = await client.getBlock({ blockTag: "latest" });
+    const now = Number(block.timestamp);
+    const quoteParams = { ...request, deadline: now + TAKE_QUOTE_LIFETIME_SECONDS, maxTotalFee: MAX_UINT128 };
+    const { result: quoted } = await client.simulateContract({ account: context.account, address,
+      abi: orderBookAbi, functionName: "quoteTake", args: [quoteParams], blockNumber: block.number });
+    return { quoteParams, quoted };
+  };
+  let read: Awaited<ReturnType<typeof readQuote>>;
+  try {
+    read = await readQuote();
+  } catch (error) {
+    throw new V2WriteError(error);
+  }
+  const { quoteParams } = read;
+  const [filled, premium, takerFee, sellerFees] = read.quoted;
+  // `filled`, `premium` and `sellerFees` stay STRICTLY equal: a change in any of them is a
   // real change to the trade and must stop it. `takerFee` is bounded instead, and only downwards.
   //
   // WHY. OrderBook applies a taker-fee discount that the client estimate does not model, and it
   // applies it on BOTH sides of this comparison: `take` sets `ex.discountBps = _discountBps(msg.sender)`
-  // (OrderBook.sol:441) and `quoteTake` does the same at :492, so the on-chain quote is already
+  // (OrderBook.take) and `quoteTake` does the same, so the on-chain quote is already
   // discounted while `expected.takerFee` — computed in payoff.ts, which has no discount term at all —
   // is the undiscounted figure. Under exact equality those two disagree the instant FEE_MANAGER calls
   // `setDiscountModule` on a wired deployment, and every taker with a non-zero discount is permanently
@@ -114,14 +167,14 @@ export async function recheckTakeQuote(
   // programme rewards would be the only ones locked out.
   //
   // WHY A BOUND RATHER THAN MODELLING THE DISCOUNT CLIENT-SIDE. `_takerFee` returns
-  // `base - base * discountBps / BPS` (OrderBook.sol:832) — read at the contracts tip, not from a task
-  // description — so the discount can only ever REDUCE the fee. A bound therefore makes no claim about
+  // `base - base * discountBps / BPS` (in OrderBook) — read from the contract source
+  // itself — so the discount can only ever REDUCE the fee. A bound therefore makes no claim about
   // what the discount IS, only that the taker is never charged more than was quoted, which is the
   // property that actually protects them. Mirroring the discount into the estimate would put a second
   // copy of a chain-side value in the client and desync again the next time it changes; that is the
   // failure this finding already is, and it is why the config-constant version is a forbidden fix.
   //
-  // DELIBERATELY NO LOWER BOUND. `_discountBps` clamps to `MAX_DISCOUNT_BPS` (5,000 — IFeeDiscount.sol:10),
+  // DELIBERATELY NO LOWER BOUND. `_discountBps` clamps to `MAX_DISCOUNT_BPS` (5,000, in V2Constants),
   // so a floor of `expected.takerFee / 2` would be derivable. It is not imposed: it would re-introduce a
   // mirrored constant, and if the chain ever raised that ceiling the floor would block exactly the
   // takers this fix unblocks. An unexpectedly LOW fee is not a risk to the taker.
@@ -154,8 +207,30 @@ export async function take(context: WriteContext, params: TakeParams): Promise<T
   return { hash, unitsFilled };
 }
 
+/**
+ * Chain time, from the latest block. OrderBook judges an order's `validUntil` against `block.timestamp`
+ * (`_place` reverts DeadlinePassed for `validUntil <= now`; `replace` reverts OrderNotLive for `now >= validUntil`),
+ * so the browser clock is the wrong input for anything that sets or checks one. A clock ahead of the chain stretched
+ * a resting order past its intended day; a clock more than a day behind produced a validUntil the chain had already
+ * passed. Same source as `recheckTakeQuote` above and zapTx.ts `deadline`.
+ */
+export async function chainNow(client: PublicClient): Promise<number> {
+  const block = await client.getBlock({ blockTag: "latest" });
+  return Number(block.timestamp);
+}
+
+/**
+ * `min(expiry - 1, chain now + RESTING_ORDER_LIFETIME_SECONDS)` for a new resting order, or null when that is not
+ * after chain now (the series is too close to expiry for a new order). The caller supplies the refusal copy.
+ */
+export async function restingValidUntil(client: PublicClient, expiry: number): Promise<number | null> {
+  const now = await chainNow(client);
+  const validUntil = Math.min(expiry - 1, now + RESTING_ORDER_LIFETIME_SECONDS);
+  return validUntil > now ? validUntil : null;
+}
+
 export async function place(context: WriteContext, longId: bigint, kind: 0 | 1 | 2, price: bigint, units: bigint, validUntil: number) {
-  if (price <= 0n || units <= 0n || validUntil <= Math.floor(Date.now() / 1000))
+  if (price <= 0n || units <= 0n || validUntil <= await chainNow(context.client ?? publicClient))
     throw new RangeError("Enter a positive price, quantity and future expiry.");
   return simulatedWrite(context, requireV2Address("orderBook"), orderBookAbi, "place", [longId, kind, price, units, validUntil]);
 }

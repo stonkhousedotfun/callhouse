@@ -1,5 +1,5 @@
 /**
- * Pricing coverage (K3-303): every rung the cranker would list, priced in process, one record each.
+ * Pricing coverage: every rung the cranker would list, priced in process, one record each.
  *
  * WHAT IT COVERS. For each selected market the cranker's OWN ladder: cranker/planner.ts upcomingLadderExpiries
  * (ExpiryCalendar.nextExpiry from ladderSearchStart, the on-chain calendar or localNextExpiry below), ladderSlots
@@ -15,23 +15,23 @@
  * reasons; this file adds what only a coverage run knows:
  *   listing     whether the provider lists the exact contract (same New York day, side and strike, fair.ts's
  *               strike rule), whether that listed quote is usable, and its bid/ask/sizes as supplied;
- *   floor       belowFloor against a house floor (default PROPOSED_HOUSE_FLOOR_USDG6, the F3 D9 PROPOSAL of
+ *   floor       belowFloor against a house floor (default PROPOSED_HOUSE_FLOOR_USDG6, the PROPOSAL of
  *               0.05 USDG fair, not an approved value). A zero fair is below it; a null fair is unknown (null);
  *   early close an expiry on an NYSE early-close day (calendar.ts NYSE_EARLY_CLOSES_2026_2028) is `early-close`:
  *               the listed market stops at 13:00 while the series settles at 16:00, and no clock models that;
  *   events      with an event calendar (earnings dates the operator supplies), an event inside the series' life
- *               or inside the listed inputs it was priced from is `event-uncertainty` (F3 D7: a later listed
+ *               or inside the listed inputs it was priced from is `event-uncertainty` (a later listed
  *               expiry cannot separate an earnings jump from ordinary variance). Without a calendar, `events` is
  *               null (unknown), never [] (none).
  * Either added reason keeps a rung from `ready`. A refused rung is `unavailable` with fair null and the service's
  * refusal reason verbatim; a price of zero is fair "0", never null.
  *
  * WHAT IT REPORTS. Per market and tenor counts (ready / degraded / unavailable / below floor), each tenor on its own
- * line, so a weekly pass never hides a daily failure. F1 registration inputs (identity, strike tick against the
+ * line, so a weekly pass never hides a daily failure. Market-registration inputs (identity, strike tick against the
  * listed spacing, ladder, expiries, listing, floor evidence) separately from MM/pricer quote readiness: a series that
- * is not ready blocks automated quoting on it, not the registration of its market (F3 D9). Suggestions
+ * is not ready blocks automated quoting on it, not the registration of its market. Suggestions
  * (suggestLadders) are derived output only: `overrides.ladder` and a strike-tick flag, never `expiriesAhead`, never
- * zero rungs, never a disabled daily (owner D6), and nothing here writes the registry.
+ * zero rungs, never a disabled daily, and nothing here writes the registry.
  *
  * NO NETWORK OF ITS OWN. Every read goes through a seam: the provider, the feed reader and the calendar read.
  */
@@ -39,13 +39,13 @@ import { formatUnits } from 'viem';
 import { z } from 'zod';
 import { CLOSE_HOUR_ET, NYSE_EARLY_CLOSES_2026_2028, newYorkParts, newYorkTimeToUnix } from '../../calendar.js';
 import { ladderSlots, ladderStrikes, planLadder, upcomingLadderExpiries, type NextExpiryRead } from '../cranker/planner.js';
-import { TENORS, v2Markets, type LadderParams, type Tenor, type V2Market, type V2MarketStatus, type V2Registry } from '../registry.js';
+import { TENORS, v2Markets, type LadderParams, type Tenor, type V2Market, type V2MarketStatus, type V2Registry, type Weekday } from '../registry.js';
 import { isUsableQuote } from './cboe.js';
 import { STANDARD_LISTED_MULTIPLIER, bookState, listedOptionOf, type BookState, type NormalizedChain, type ProviderDescriptor } from './chain.js';
 import { canonicalIdentity, type FairMethod, type FairOutcome, type PricingService } from './fair.js';
 import type { ProvenanceMethod } from './provenance.js';
 import { money, type Money } from './server.js';
-import type { EventCalendar as ServiceEventCalendar } from './short-maturity.js';
+import { eventsCompleteThrough, isDay, type EventCalendar as ServiceEventCalendar } from './short-maturity.js';
 import { tokenSpotFromRound, type SpotReader } from './spot.js';
 
 /*//////////////////////////////////////////////////////////////
@@ -54,7 +54,7 @@ import { tokenSpotFromRound, type SpotReader } from './spot.js';
 
 export const COVERAGE_CONTRACT = 'K3-303/1' as const;
 
-/** F3 D9's PROPOSED house floor: 0.05 USDG fair. A proposal, not an approved parameter. */
+/** PROPOSED house floor: 0.05 USDG fair. A proposal, not an approved parameter. */
 export const PROPOSED_HOUSE_FLOOR_USDG6 = 50_000n;
 
 /** Human output lists tenors daily first: the tenor most likely to fail is read first. */
@@ -122,14 +122,23 @@ export interface MarketEvent {
   /** Unix seconds. */
   at: number;
   label: string | null;
-  /** The New York day, for the pricing service's K3-312 event input (short-maturity.ts). */
+  /** The New York day, for the pricing service's event input (short-maturity.ts). */
   date: string;
   /** bmo before the open, amc after the close, null when only an instant was given (timing unknown). */
   timing: 'bmo' | 'amc' | null;
 }
 
-/** Per registry ticker. A ticker with no entry has no known event (the calendar as a whole is still present). */
-export type EventCalendar = ReadonlyMap<string, readonly MarketEvent[]>;
+/** One ticker's events and the last New York day the list is complete through. */
+export interface TickerEvents {
+  events: readonly MarketEvent[];
+  /** YYYY-MM-DD, New York; null when the list states none, and then it is complete only through its latest row
+   *  (short-maturity.ts eventsCompleteThrough). A later day is unknown, never clear. */
+  through: string | null;
+}
+
+/** Per registry ticker. A ticker with no entry is MISSING: unknown, never "no events", as the pricing
+ *  service reads it (short-maturity.ts eventsInWindow `missing`). */
+export type EventCalendar = ReadonlyMap<string, TickerEvents>;
 
 const eventSchema = z
   .object({
@@ -142,21 +151,34 @@ const eventSchema = z
   .strict()
   .refine((e) => (e.at !== undefined) !== (e.date !== undefined && e.session !== undefined), 'give either `at` (unix seconds) or both `date` and `session`');
 
+/** A ticker's list, or the list with the last day it is complete through (short-maturity.ts eventCalendar's two forms). */
+const tickerEventsSchema = z.union([
+  z.array(eventSchema),
+  z
+    .object({
+      events: z.array(eventSchema),
+      through: z.string().refine(isDay, 'through must be a real YYYY-MM-DD day').optional(),
+    })
+    .strict(),
+]);
+
 /**
  * `{ "NVDA": [{ "kind": "earnings", "date": "YYYY-MM-DD", "session": "after-close" }] }` or `{ "at": <unix s> }`.
  * `before-open` is 09:00 New York that day (inside that day's series); `after-close` one second after its 16:00 close
- * (outside that day's series, inside the next one's). Throws with every problem listed.
+ * (outside that day's series, inside the next one's). A ticker's list may instead be `{ "events": [...], "through":
+ * "YYYY-MM-DD" }`: the list is known only through that New York day, and a series exposed past it is event-uncertain
+ * here and `short` to the pricing service. Throws with every problem listed.
  */
 export function parseEventCalendar(json: unknown): EventCalendar {
-  const parsed = z.record(z.string().regex(/^[A-Z0-9.]{1,8}$/), z.array(eventSchema)).safeParse(json);
+  const parsed = z.record(z.string().regex(/^[A-Z0-9.]{1,8}$/), tickerEventsSchema).safeParse(json);
   if (!parsed.success) {
     throw new Error(`the event calendar is not usable:\n  ${parsed.error.issues.map((i) => `${i.path.join('.') || '(root)'}: ${i.message}`).join('\n  ')}`);
   }
-  const out = new Map<string, MarketEvent[]>();
-  for (const [ticker, events] of Object.entries(parsed.data)) {
-    out.set(
-      ticker,
-      events.map((e) => {
+  const out = new Map<string, TickerEvents>();
+  for (const [ticker, entry] of Object.entries(parsed.data)) {
+    const { events, through } = Array.isArray(entry) ? { events: entry, through: undefined } : entry;
+    out.set(ticker, {
+      events: events.map((e) => {
         if (e.at !== undefined) {
           const { day } = newYorkDay(e.at);
           return { kind: e.kind, at: e.at, label: e.label ?? null, date: day, timing: null };
@@ -165,21 +187,22 @@ export function parseEventCalendar(json: unknown): EventCalendar {
         const at = e.session === 'before-open' ? newYorkTimeToUnix(y, m, d, 9) : newYorkTimeToUnix(y, m, d, CLOSE_HOUR_ET) + 1;
         return { kind: e.kind, at, label: e.label ?? null, date: e.date!, timing: e.session === 'before-open' ? 'bmo' : 'amc' };
       }),
-    );
+      through: through ?? null,
+    });
   }
   return out;
 }
 
 /**
- * The same calendar as the pricing service's K3-312 event input (short-maturity.ts EventCalendar):
+ * The same calendar as the pricing service's event input (short-maturity.ts EventCalendar):
  * the single source of truth for event-uncertainty. The service's reasons ride verbatim in each
  * rung's `reasons`; the coverage's own `events` field only reports which of these events a rung
  * spans (inside-series / inside-inputs), which the service does not say.
  */
 export function toServiceEventCalendar(events: EventCalendar): ServiceEventCalendar {
   const out = new Map<string, { events: Array<{ date: string; kind: string; timing: 'bmo' | 'amc' | null }>; through: string | null }>();
-  for (const [ticker, list] of events) {
-    out.set(ticker, { events: list.map((e) => ({ date: e.date, kind: e.kind, timing: e.timing })), through: null });
+  for (const [ticker, { events: list, through }] of events) {
+    out.set(ticker, { events: list.map((e) => ({ date: e.date, kind: e.kind, timing: e.timing })), through });
   }
   return out;
 }
@@ -193,6 +216,14 @@ export interface RungEvent extends MarketEvent {
 export function rungEvents(events: readonly MarketEvent[], nowS: number, expiry: number, contributingExpiries: readonly number[]): RungEvent[] {
   const end = Math.max(expiry, ...contributingExpiries);
   return events.filter((e) => e.at > nowS && e.at <= end).map((e) => ({ ...e, relation: e.at <= expiry ? 'inside-series' : 'inside-inputs' }));
+}
+
+/** Whether a list stops before the New York day of the rung's exposure end (its expiry or latest contributing listed
+ *  expiry), as short-maturity.ts eventsInWindow's `short`: the day it is complete through is its `through`, else its
+ *  latest row's day (eventsCompleteThrough). Only an empty list with no `through` states no limit. */
+export function calendarShortOf(input: TickerEvents, expiry: number, contributingExpiries: readonly number[]): boolean {
+  const through = eventsCompleteThrough(input);
+  return through !== null && through < newYorkDay(Math.max(expiry, ...contributingExpiries)).day;
 }
 
 /*//////////////////////////////////////////////////////////////
@@ -279,7 +310,9 @@ export interface RungRecord {
   belowFloor: boolean | null;
   listing: ListingPresence;
   session: { earlyClose: boolean; holidayShiftedWeekly: boolean };
-  /** null: no event calendar was supplied (unknown); []: supplied, none applies. */
+  /** null: unknown, because no event calendar was supplied or the supplied one has no entry for this ticker (then
+   *  `reasons` carries event-uncertainty); []: supplied, none applies (unless the calendar stops short of the
+   *  rung's exposure: then `reasons` carries event-uncertainty). */
   events: RungEvent[] | null;
 }
 
@@ -309,6 +342,9 @@ export interface MarketCoverage {
   puts: boolean;
   ladder: Record<Tenor, LadderParams>;
   expiriesAhead: Record<Tenor, number>;
+  /** The weekdays its daily closes carry a ladder on (NVDA mon, wed, fri); `expiries.daily` is the whole
+   *  horizon of closes, and only the listed ones have rungs (ladderSlots). */
+  dailyWeekdays: readonly Weekday[];
   /** The expiries this market's ladder targets, per tenor (possibly fewer than asked: the calendar ran out). */
   expiries: Record<Tenor, number[]>;
   spot: { usdg6: bigint; updatedAt: number; ageSeconds: number } | null;
@@ -521,6 +557,7 @@ async function coverMarket(options: CoverageOptions, market: V2Market, expiries:
     puts: market.v2.puts,
     ladder: market.v2.params.ladder,
     expiriesAhead: market.v2.params.expiriesAhead,
+    dailyWeekdays: market.v2.params.dailyWeekdays,
     expiries: own,
     spot: null,
     ladderError: null,
@@ -532,7 +569,8 @@ async function coverMarket(options: CoverageOptions, market: V2Market, expiries:
   const spot = await readLadderSpot(options.spotReader, market, nowS);
   if (!spot.ok) return { ...base, ladderError: { reason: spot.reason, detail: spot.detail } };
   const earlyCloses = new Set(options.earlyCloses ?? NYSE_EARLY_CLOSES_2026_2028);
-  const events = options.events === null ? null : (options.events.get(market.ticker) ?? []);
+  // A supplied calendar without this ticker is MISSING, not "no events".
+  const events: TickerEventsRead = options.events === null ? null : (options.events.get(market.ticker) ?? 'missing');
   const rungs: RungRecord[] = [];
   for (const { tenor, expiry, isPut } of ladderSlots(market.v2.params, market.v2.puts, expiries)) {
     // The cranker's first ladder at this spot: nothing exists, no anchor (cranker/steps.ts stepLadders).
@@ -583,17 +621,24 @@ interface RungInput {
   floorUsdg6: bigint;
   earlyClose: boolean;
   holidayShiftedWeekly: boolean;
-  events: readonly MarketEvent[] | null;
+  events: TickerEventsRead;
   nowS: number;
 }
+
+/** One ticker's calendar entry; 'missing' when a calendar was supplied without the ticker; null when none was. */
+type TickerEventsRead = TickerEvents | 'missing' | null;
 
 function rungRecord(input: RungInput): RungRecord {
   const { outcome, view, nowS } = input;
   const contributing = outcome.ok ? outcome.provenance.contributingExpiries : [];
-  const events = input.events === null ? null : rungEvents(input.events, nowS, input.expiry, contributing);
+  const listed = input.events === null || input.events === 'missing' ? null : input.events;
+  const events = listed === null ? null : rungEvents(listed.events, nowS, input.expiry, contributing);
+  // A calendar that stops short of the rung's exposure cannot say it is clear past the day it is complete through,
+  // and one with no entry for the ticker says nothing at all.
+  const unknown = input.events === 'missing' || (listed !== null && calendarShortOf(listed, input.expiry, contributing));
   const extra: string[] = [];
   if (input.earlyClose) extra.push('early-close');
-  if (events !== null && events.length > 0) extra.push('event-uncertainty');
+  if (unknown || (events !== null && events.length > 0)) extra.push('event-uncertainty');
   const common = {
     kind: 'rung' as const,
     contract: COVERAGE_CONTRACT,
@@ -645,7 +690,7 @@ function rungRecord(input: RungInput): RungRecord {
     contributingExpiries: p.contributingExpiries,
     clocks: p.clocks,
     ages: agesOf(clocks, computedAt, p.ages.quoteS, p.ages.tradeS, p.ages.underlyingS, p.ages.volatilityS),
-    // §5.1: ready only with no reason at all.
+    // The /fair rule: ready only with no reason at all.
     readiness: reasons.length === 0 ? 'ready' : p.quality.readiness === 'ready' ? 'degraded' : p.quality.readiness,
     reasons,
     fair: money(outcome.fairUsdg6),
@@ -830,7 +875,7 @@ export interface F1Inputs {
   perTenor: Record<Tenor, { rungs: number; exactListed: number; priced: number; belowFloor: number }>;
 }
 
-/** What F1 needs to register the market, whatever its quote readiness. */
+/** What registering the market needs, whatever its quote readiness. */
 export function f1Inputs(report: CoverageReport, earlyCloses: readonly string[] = NYSE_EARLY_CLOSES_2026_2028): F1Inputs[] {
   const early = new Set(earlyCloses);
   return report.markets.map((m) => {
@@ -896,8 +941,8 @@ function firstIndexAllBelow(rungs: readonly RungRecord[]): number | null {
  *   - even rung 0 is: the largest `firstOtmBps` among ¾, ½, ¼ of today's and 0 whose first rung prices at or above
  *     the floor at every expiry (repriced through the same service), else nothing and a note that the floor, not
  *     the ladder, needs review.
- * A tenor that is off stays off and a tenor that is on stays on: no suggestion touches `expiriesAhead` (owner D6
- * keeps every approved daily). Nothing is written anywhere.
+ * A tenor that is off stays off and a tenor that is on stays on: no suggestion touches `expiriesAhead` (every
+ * approved daily is kept). Nothing is written anywhere.
  */
 export async function suggestLadders(report: CoverageReport, service: PricingService): Promise<LadderSuggestion[]> {
   const out: LadderSuggestion[] = [];
@@ -1029,7 +1074,7 @@ export interface RenderedReport {
   suggestions: LadderSuggestion[] | null;
 }
 
-/** Every record as a JSON line: the run header, each rung, tenor summaries, F1 inputs, quote readiness, suggestions. */
+/** Every record as a JSON line: run header, rungs, tenor summaries, registration inputs, readiness, suggestions. */
 export function jsonLines(r: RenderedReport, mode: string): string[] {
   const { report } = r;
   const header = {

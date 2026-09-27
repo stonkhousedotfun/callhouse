@@ -8,7 +8,19 @@
       "scripts/**",
       "package.json",
       "pnpm-lock.yaml",
-      "pnpm-workspace.yaml"
+      "pnpm-workspace.yaml",
+      "keeper/package.json",
+      "indexer/package.json",
+      "ops/markets/tier1.json",
+      "ops/markets/dev.json",
+      "ops/markets/events.json",
+      "ops/v2/monitor.mjs",
+      "ops/abis/v2/roles.json",
+      "ops/v2/go-live-gating.mjs",
+      "ops/v8/prelaunch-gate.mjs",
+      "ops/v8/tvl-threshold.mjs",
+      "ops/maker-epochs/*.json",
+      "ops/fixtures/api/v2/config.json"
     ]
   },
   "deploy": {

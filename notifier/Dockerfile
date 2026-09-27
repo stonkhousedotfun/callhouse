@@ -1,7 +1,7 @@
 # ---------------------------------------------------------------------------------------------
 # @callhouse/notifier  →  user notifications: wallet-signed subscriptions, Telegram, Web Push, email.
 #
-# Modelled on relay/Dockerfile; read that header first. notifier/README.md is the package.
+# Modelled on relay/Dockerfile; read that header first.
 #
 # Railway builds it with the REPO ROOT as the build context, like every image in this repository:
 # pnpm-lock.yaml and pnpm-workspace.yaml live at the root and the install must be workspace-aware.

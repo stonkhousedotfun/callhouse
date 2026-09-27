@@ -10,7 +10,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { collateralNeeded } from '../mintFee.js';
-import { exposureUnits, notionalOf, planSizes, type SizeLimits, type SizeSeries } from './risk.js';
+import { exposureUnits, gateGreeks, greekBreach, marketGreeksOf, notionalOf, planSizes, type MarketGreeks, type SizeLimits, type SizeSeries } from './risk.js';
 
 const NVDA = '0x00000000000000000000000000000000000000aa';
 const UNIT = 10n ** 16n;
@@ -166,10 +166,10 @@ test('planSizes: inventory is offered for resale before writing; a mint-paused m
 });
 
 /*//////////////////////////////////////////////////////////////
-   T-OP-133: ONE OVERSUBSCRIBED WRITE POOL (MM_WRITE_OVERSUBSCRIBE_BPS)
+   ONE OVERSUBSCRIBED WRITE POOL (MM_WRITE_OVERSUBSCRIBE_BPS)
 //////////////////////////////////////////////////////////////*/
 
-// PROVE BY BREAKING (authored): size every ask against `collateralLeft` alone (drop the `single` bound) and the
+// BREAK CHECK: size every ask against `collateralLeft` alone (drop the `single` bound) and the
 // "each ask <= maxWriteUnits(free)" assertion below goes red at 20_000 bps with free = 150 units: the first ask
 // would advertise 100 and the second 100 too, the second above what one fill of it can be covered by after the
 // first fills. Drop the oversubscription factor instead and the "sum advertised == free x bps / 1e4" line goes red.
@@ -202,4 +202,130 @@ test('planSizes: the write pool is free x bps / 1e4 for SIZING, while every sing
 test('planSizes: oversubscription touches asks only; bids escrow real USDG and keep their exact budget', () => {
   const bids = planSizes([s({ longId: 1n }), s({ longId: 2n })], limits({ usdgBudget: 3_000_000n, writeOversubscribeBps: 50_000 }));
   assert.deepEqual(bids.map((x) => [x.bid, x.capped.includes('usdg')]), [[100n, false], [50n, true]]);
+});
+
+/*//////////////////////////////////////////////////////////////
+       P13 (PER-EXPIRY NOTIONAL) AND P14 (GREEK GATE)
+//////////////////////////////////////////////////////////////*/
+
+test('P13: one expiry\'s notional is capped in quoting priority, stored notional of unquoted series included; other expiries are untouched; 0n is off', () => {
+  const E1 = NOW + 86_400;
+  const E2 = NOW + 2 * 86_400;
+  // 300 USDG per expiry. Each series at strike 200 wants 100 units a side = 1 share = 200 USDG of notional.
+  const cap = 300_000_000n;
+  const sizes = planSizes([s({ longId: 1n, expiry: E1 }), s({ longId: 2n, expiry: E1 }), s({ longId: 3n, expiry: E2 })], limits({ maxExpiryNotional: cap, expiryNotional: new Map() }));
+  assert.deepEqual(sizes.map((x) => [x.longId, x.bid, x.write]), [[1n, 100n, 100n], [2n, 50n, 50n], [3n, 100n, 100n]]);
+  assert.deepEqual(sizes[1]!.capped, ['expiry-notional']);
+  assert.ok(sizes[1]!.notional + sizes[0]!.notional <= cap);
+  assert.deepEqual(sizes[2]!.capped, [], 'a different expiry has its own room');
+
+  // An UNQUOTED series of E1 already stores 250 USDG: 50 USDG = 25 units are left for the quoted one.
+  const stored = planSizes([s({ longId: 1n, expiry: E1 })], limits({ maxExpiryNotional: cap, expiryNotional: new Map([[E1, 250_000_000n]]) }));
+  assert.deepEqual([stored[0]!.bid, stored[0]!.write, stored[0]!.capped], [25n, 25n, ['expiry-notional']]);
+
+  // Its OWN stored notional is not counted twice (it is replaced by the planned state, as the total cap does).
+  const own = planSizes([s({ longId: 1n, expiry: E1, seriesNotional: 200_000_000n })], limits({ maxExpiryNotional: cap, expiryNotional: new Map([[E1, 200_000_000n]]) }));
+  assert.deepEqual([own[0]!.bid, own[0]!.write], [100n, 100n]);
+
+  const off = planSizes([s({ longId: 1n, expiry: E1 }), s({ longId: 2n, expiry: E1 })], limits({ maxExpiryNotional: 0n, expiryNotional: new Map([[E1, 10n ** 15n]]) }));
+  assert.deepEqual(off.map((x) => x.bid), [100n, 100n], '0n: no per-expiry cap');
+});
+
+const flatMarket = (): MarketGreeks => ({ delta: { lo: 0, hi: 0 }, gamma: { lo: 0, hi: 0 } });
+const LIM = { maxDeltaShares: 10, maxGamma: 2 };
+
+test('P14 greekBreach: a move past the limit AND away from zero; a move towards zero never breaches, however large the net', () => {
+  assert.equal(greekBreach({ lo: -9, hi: -9 }, -2, 10), true, '-9 -> -11');
+  assert.equal(greekBreach({ lo: -9, hi: -9 }, 2, 10), false, '-9 -> -7: towards zero');
+  assert.equal(greekBreach({ lo: -50, hi: -50 }, 5, 10), false, 'far past the limit, but reducing');
+  assert.equal(greekBreach({ lo: 5, hi: 5 }, -30, 10), true, '5 -> -25 crosses zero and ends past the limit');
+  assert.equal(greekBreach({ lo: 5, hi: 5 }, -12, 10), false, '5 -> -7: inside');
+  assert.equal(greekBreach({ lo: -9, hi: -9 }, -2, 0), false, 'limit 0 is off');
+});
+
+test('P14 gateGreeks: only the side that increases |net delta| is stopped -- a short-delta market loses its call ASK, keeps the BID; a long one the reverse', () => {
+  // 0.4-delta call, 1 share a side. Market already 9.8 shares short delta.
+  const short = { delta: { lo: -9.8, hi: -9.8 }, gamma: { lo: 0, hi: 0 } };
+  const g1 = gateGreeks({ market: short, delta: 0.4, gamma: 0.01, bidUnits: 100n, askUnits: 100n, limits: LIM });
+  assert.deepEqual([g1.bid, g1.ask], [true, false]);
+  assert.match(g1.reasons.join(), /ask: net delta -9\.80 -> -10\.20 shares past 10/);
+  const long = { delta: { lo: 9.8, hi: 9.8 }, gamma: { lo: 0, hi: 0 } };
+  const g2 = gateGreeks({ market: long, delta: 0.4, gamma: 0.01, bidUnits: 100n, askUnits: 100n, limits: LIM });
+  assert.deepEqual([g2.bid, g2.ask], [false, true]);
+  // A put: selling it ADDS delta (put delta is negative), so a long-delta market stops the put ask.
+  const g3 = gateGreeks({ market: { delta: { lo: 9.8, hi: 9.8 }, gamma: { lo: 0, hi: 0 } }, delta: -0.4, gamma: 0.01, bidUnits: 100n, askUnits: 100n, limits: LIM });
+  assert.deepEqual([g3.bid, g3.ask], [true, false]);
+});
+
+test('P14 gateGreeks: gamma -- selling options is short gamma and is stopped past MM_MAX_GAMMA; buying back is not', () => {
+  const m: MarketGreeks = { delta: { lo: 0, hi: 0 }, gamma: { lo: -1.9, hi: -1.9 } };
+  const g = gateGreeks({ market: m, delta: 0, gamma: 0.2, bidUnits: 100n, askUnits: 100n, limits: LIM });
+  assert.deepEqual([g.bid, g.ask], [true, false]);
+  assert.match(g.reasons.join(), /ask: net gamma/);
+});
+
+test('P14 gateGreeks: the range accumulates across series of one market (two asks cannot share the same room), and an unknown greek fails closed', () => {
+  const m = flatMarket();
+  const a = gateGreeks({ market: m, delta: 0.3, gamma: 0, bidUnits: 0n, askUnits: 2_000n, limits: LIM });
+  assert.equal(a.ask, true, '20 shares x 0.3 = -6');
+  const b = gateGreeks({ market: m, delta: 0.3, gamma: 0, bidUnits: 0n, askUnits: 2_000n, limits: LIM });
+  assert.equal(b.ask, false, 'a second -6 would reach -12');
+  assert.deepEqual(m.delta, { lo: -6, hi: 0 });
+  const unknown = gateGreeks({ market: flatMarket(), delta: 0.3, gamma: null, bidUnits: 100n, askUnits: 100n, limits: LIM });
+  assert.deepEqual([unknown.bid, unknown.ask], [false, false]);
+  const off = gateGreeks({ market: flatMarket(), delta: null, gamma: null, bidUnits: 100n, askUnits: 100n, limits: { maxDeltaShares: 0, maxGamma: 0 } });
+  assert.deepEqual([off.bid, off.ask], [true, true], 'both limits off: nothing to gate on');
+});
+
+test('marketGreeksOf: inventory delta and gamma per market, in shares; an unknown greek counts 0', () => {
+  const m = marketGreeksOf([
+    { underlying: NVDA, units: -300n, delta: 0.4, gamma: 0.05 },
+    { underlying: NVDA.toUpperCase().replace('0X', '0x'), units: 100n, delta: 0.2, gamma: null },
+    { underlying: NVDA, units: 0n, delta: 1, gamma: 1 },
+  ]).get(NVDA)!;
+  assert.ok(Math.abs(m.delta.lo - -1.0) < 1e-12 && m.delta.lo === m.delta.hi);
+  assert.ok(Math.abs(m.gamma.lo - -0.15) < 1e-12);
+});
+
+/*//////////////////////////////////////////////////////////////
+   A FAILED READ NEVER LOOSENS A CAP OR A GATE
+//////////////////////////////////////////////////////////////*/
+
+test('P13: an expiry whose stored notional is unread has no room -- nothing grows in it; another expiry is untouched; with the cap off it does not matter', () => {
+  const E1 = NOW + 86_400;
+  const E2 = NOW + 2 * 86_400;
+  const cap = 10n ** 12n; // far above what either series wants: only the unread flag can bind
+  const unread = planSizes([s({ longId: 1n, expiry: E1 }), s({ longId: 2n, expiry: E2 })], limits({ maxExpiryNotional: cap, expiryNotional: new Map([[E1, 0n]]), expiryNotionalUnread: new Set([E1]) }));
+  assert.deepEqual([unread[0]!.bid, unread[0]!.write, unread[0]!.capped], [0n, 0n, ['expiry-notional']], 'E1 is sized as if at its cap');
+  assert.deepEqual([unread[1]!.bid, unread[1]!.write, unread[1]!.capped], [100n, 100n, []], 'E2 keeps its room');
+  // Control: the same sizes with the sum read (0) are not capped.
+  const read = planSizes([s({ longId: 1n, expiry: E1 })], limits({ maxExpiryNotional: cap, expiryNotional: new Map([[E1, 0n]]) }));
+  assert.deepEqual([read[0]!.bid, read[0]!.write, read[0]!.capped], [100n, 100n, []]);
+  const off = planSizes([s({ longId: 1n, expiry: E1 })], limits({ maxExpiryNotional: 0n, expiryNotional: new Map(), expiryNotionalUnread: new Set([E1]) }));
+  assert.deepEqual([off[0]!.bid, off[0]!.write], [100n, 100n], '0n: no per-expiry cap, so an unknown sum changes nothing');
+});
+
+test('P14: a held position whose greek is unknown makes the market\'s net unknown -- gateGreeks opens no side there while the limit is on', () => {
+  const m = marketGreeksOf([
+    { underlying: NVDA, units: 100n, delta: 0.2, gamma: 0.01 },
+    { underlying: NVDA, units: -300n, delta: null, gamma: null },
+  ]).get(NVDA)!;
+  assert.equal(m.deltaUnknown, true);
+  assert.equal(m.gammaUnknown, true);
+  const g = gateGreeks({ market: m, delta: 0.3, gamma: 0.01, bidUnits: 100n, askUnits: 100n, limits: LIM });
+  assert.deepEqual([g.bid, g.ask], [false, false]);
+  assert.match(g.reasons.join(), /market net delta unknown/);
+  // Delta limit off: the gamma half still refuses on its own unknown.
+  const gammaOnly = gateGreeks({ market: m, delta: 0.3, gamma: 0.01, bidUnits: 100n, askUnits: 100n, limits: { maxDeltaShares: 0, maxGamma: 2 } });
+  assert.deepEqual([gammaOnly.bid, gammaOnly.ask], [false, false]);
+  assert.match(gammaOnly.reasons.join(), /market net gamma unknown/);
+  // Control: the same position priced, and both limits off, open both sides.
+  const priced = marketGreeksOf([{ underlying: NVDA, units: 100n, delta: 0.2, gamma: 0.01 }, { underlying: NVDA, units: -300n, delta: 0.1, gamma: 0.01 }]).get(NVDA)!;
+  assert.equal(priced.deltaUnknown, undefined);
+  const ok = gateGreeks({ market: priced, delta: 0.3, gamma: 0.01, bidUnits: 100n, askUnits: 100n, limits: LIM });
+  assert.deepEqual([ok.bid, ok.ask], [true, true]);
+  const off = gateGreeks({ market: m, delta: 0.3, gamma: 0.01, bidUnits: 100n, askUnits: 100n, limits: { maxDeltaShares: 0, maxGamma: 0 } });
+  assert.deepEqual([off.bid, off.ask], [true, true], 'both limits off: nothing to gate on');
+  // A position with no units is not held: its unknown greek does not mark the market.
+  assert.equal(marketGreeksOf([{ underlying: NVDA, units: 0n, delta: null, gamma: null }]).get(NVDA), undefined);
 });

@@ -1,6 +1,7 @@
 /** The browser-facing part of the notifier's v1 HTTP contract. */
 export type Channel = "telegram" | "webpush" | "email";
-export type AlertToggle = "strikeCross" | "expiry24h" | "expiry1h" | "settlement" | "fills" | "writerItmWarning" | "autoRoll";
+export type AlertToggle = "strikeCross" | "expiry24h" | "expiry1h" | "settlement" | "fills" | "writerItmWarning" | "autoRoll"
+  | "feeNotice" | "adminOperation" | "marketLive";
 export type PriceAlert = { ticker: string; above?: string; below?: string };
 export type AlertPrefs = Record<AlertToggle, boolean> & { priceAlerts: PriceAlert[] };
 export type Subscription = {
@@ -35,14 +36,22 @@ export const ALERT_TOGGLES: readonly { key: AlertToggle; label: string; detail: 
   { key: "fills", label: "Order fills", detail: "A buy or sell order fills." },
   { key: "writerItmWarning", label: "Writer warning", detail: "A written option is in the money near expiry." },
   { key: "autoRoll", label: "Auto roll", detail: "A writing strategy rolls to its next series." },
+  { key: "feeNotice", label: "Fee changes", detail: "A protocol fee change is scheduled or takes effect." },
+  { key: "adminOperation", label: "Admin operations", detail: "A protocol admin operation is scheduled, executed or canceled." },
+  { key: "marketLive", label: "New markets", detail: "A market's listing is enabled." },
 ];
 
+/**
+ * Mirrors notifier/src/prefs.ts `prefsSchema`. The three protocol-wide kinds (fee notices, admin operations,
+ * market listings) go to every watched wallet, so they are OFF until the subscriber opts in; the notifier
+ * defaults them off too, and this default is what a first save sends.
+ */
 export const DEFAULT_ALERT_PREFS: AlertPrefs = {
   strikeCross: true, expiry24h: true, expiry1h: true, settlement: true, fills: true,
-  writerItmWarning: true, autoRoll: true, priceAlerts: [],
+  writerItmWarning: true, autoRoll: true, feeNotice: false, adminOperation: false, marketLive: false, priceAlerts: [],
 };
 
-/** A price in USDG (six decimals) to the integer base-unit string expected by N2-01. */
+/** A price in USDG (six decimals) to the integer base-unit string the notifier expects. */
 export function priceToBaseUnits(value: string): string | null {
   const trimmed = value.trim();
   if (!/^(?:0|[1-9]\d{0,11})(?:\.\d{1,6})?$/.test(trimmed)) return null;

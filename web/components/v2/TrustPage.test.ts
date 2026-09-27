@@ -58,13 +58,14 @@ describe("trust page", () => {
     expect(html).toContain("0x0000000000000000000000000000000000000006");
   });
 
-  it("states the guardian limit and current unaudited status", () => {
+  it("states the guardian limit and shows no audit status", () => {
     const html = render(fixture);
 
     expect(html).toContain("cannot cancel ADMIN-lane operations");
     expect(html).toContain("role grants and selector mappings");
-    expect(html).toContain(STATUS.audit);
-    expect(html).toContain(STATUS.auditLine);
+    expect(html).not.toContain(STATUS.audit);
+    expect(html).not.toContain(STATUS.auditLine);
+    expect(html).not.toMatch(/\baudit/i);
   });
 
   it("reports an absent access block without rendering an empty role table", () => {
@@ -141,7 +142,7 @@ describe("trust page roles on a phone", () => {
 });
 
 /**
- * T-431: the pending-operation time comes from the shared `stamp()` in lib/v2/time.ts, not a
+ * The pending-operation time comes from the shared `stamp()` in lib/v2/time.ts, not a
  * local formatter. Two instants at the SAME New York wall-clock time on opposite sides of the US
  * daylight-saving change: a formatter that lost its zone renders 8:00 PM / 9:00 PM on a UTC
  * runner, and one that hard-coded the suffix names the wrong zone for half the year.
@@ -160,6 +161,31 @@ function pending(key: string, id: string, label: string, readyAt: number): Pendi
   };
 }
 
+describe("NEW_LISTING is shown as a zero-delay lane that can only set up a new market", () => {
+  const withNewListing: TrustConfig = { ...fixture, access: { ...fixture.access!, roles: [
+    ...fixture.access!.roles,
+    { id: 11, name: "NEW_LISTING", delayS: 0, holders: [{ address: "0x0000000000000000000000000000000000000004", delayS: 0 }] },
+  ] } };
+  const NOTE = "only set up a market that does not exist yet";
+
+  it("the table and the card list both carry the note on the NEW_LISTING row, beside its No delay", () => {
+    const html = render(withNewListing);
+    const at = html.indexOf("sm:hidden");
+    const table = html.slice(0, at);
+    const cards = cardHalf(html);
+    for (const [half, where] of [[table, "table"], [cards, "cards"]] as const) {
+      expect(half, where).toContain("NEW_LISTING");
+      expect(half, where).toContain(NOTE);
+      expect(half.match(/data-slot="role-scope"/g)?.length, `${where}: one note, on one row`).toBe(1);
+    }
+    expect(table).toMatch(/NEW_LISTING<p[^>]*data-slot="role-scope"[^>]*>No delay by design/);
+  });
+
+  it("no other role carries it", () => {
+    expect(render(fixture)).not.toContain('data-slot="role-scope"');
+  });
+});
+
 describe("trust page pending operations", () => {
   it("renders each ready time in New York, naming EDT or EST by the date", () => {
     const html = render({ ...fixture, pendingOperations: [
@@ -167,8 +193,8 @@ describe("trust page pending operations", () => {
       pending("0xbb:1", "0xbb", "Lower the fee", WINTER),
     ] });
 
-    expect(html).toContain("Sep 21, 2026, 4:00 PM EDT");
-    expect(html).toContain("Jan 21, 2026, 4:00 PM EST");
+    expect(html).toContain("Sep 21, 4:00 PM EDT"); // server render (and hydration) shows New York, zone named; the browser switches to the reader's zone.
+    expect(html).toContain("Jan 21, 4:00 PM EST");
   });
 
   it("keys each row on the unique operation key, not the operationId a reschedule reuses", () => {
@@ -189,5 +215,63 @@ describe("trust page pending operations", () => {
     const source = readFileSync(resolve(import.meta.dirname, "TrustPage.tsx"), "utf8");
     expect(source).toContain("<li key={operation.key}");
     expect(source).not.toContain("key={operation.id}");
+  });
+});
+
+/**
+ * At delay 0 nothing is scheduled, so the guardian has nothing to cancel. The page says so -- only when the
+ * Admin Safe's holder delay reads 0 on every one of role ids 0-5 -- and hides the line when any lane is non-zero,
+ * unread or missing. Pending operations show a ready DATE, never a clock, including one whose readyAt has passed.
+ */
+describe("admin changes at delay 0", () => {
+  const SAFE = "0x0000000000000000000000000000000000000004";
+  const lanes = (delays: Partial<Record<number, number>> = {}, drop?: number) => ({
+    manager: "0x0000000000000000000000000000000000000003",
+    roles: [0, 1, 2, 3, 4, 5].filter((id) => id !== drop).map((id) => ({
+      id, name: `R${id}`, delayS: 0, holders: [{ address: SAFE.toUpperCase().replace("0X", "0x"), delayS: delays[id] ?? 0 }],
+    })),
+  });
+  const ADMIN_LINE = "take effect immediately, with no scheduled notice";
+
+  it("shows the immediate-effect line when every one of role ids 0-5 reads 0 for the Admin Safe", () => {
+    const html = render({ ...fixture, access: lanes() });
+    expect(html).toContain('data-slot="admin-immediate"');
+    expect(html).toContain(ADMIN_LINE);
+    // The guardian sentence stays: it is true again after the lock.
+    expect(html).toContain("cancel scheduled fee");
+  });
+
+  it("hides it when any lane is non-zero, a lane is missing, the access table is unread, or the Safe is unknown", () => {
+    for (const id of [0, 1, 2, 3, 4, 5]) {
+      expect(render({ ...fixture, access: lanes({ [id]: 86_400 }) }), `role ${id} non-zero`).not.toContain(ADMIN_LINE);
+      expect(render({ ...fixture, access: lanes({}, id) }), `role ${id} missing`).not.toContain(ADMIN_LINE);
+    }
+    expect(render({ ...fixture, access: undefined })).not.toContain(ADMIN_LINE);
+    expect(render({ ...fixture, access: lanes(), safes: undefined })).not.toContain(ADMIN_LINE);
+  });
+
+  it("the lede no longer calls the roles delayed", () => {
+    const html = render(fixture);
+    expect(html).not.toContain("delayed roles");
+    expect(html).toContain("role delays");
+  });
+
+  it("pending operations, empty: says none are scheduled", () => {
+    expect(render({ ...fixture, pendingOperations: [] })).toContain("No pending administrative operations are scheduled.");
+  });
+
+  it("pending operations, readyAt already past: the ready date renders, with no countdown and no negative or zero clock", () => {
+    const readyAt = Math.floor(Date.now() / 1000) - 3_600;
+    const op: PendingAdminOperation = {
+      key: `0x${"4".repeat(64)}:1`, id: `0x${"4".repeat(64)}`, role: "FEE_MANAGER", target: "0x1111111111111111111111111111111111111111",
+      selector: "0x12345678", label: "Set burn split", caller: SAFE, scheduledAt: readyAt, readyAt,
+    };
+    const html = render({ ...fixture, pendingOperations: [op] });
+    expect(html).toContain("Set burn split");
+    expect(html).toContain(new Date(readyAt * 1000).toISOString());
+    expect(html).not.toContain('role="timer"');
+    // Visible text only: the <time dateTime> attribute is an ISO stamp with seconds, not a clock a reader sees.
+    const text = html.replace(/<[^>]*>/g, " ");
+    expect(text).not.toMatch(/\d\d:\d\d:\d\d|-\d+\s*(s|sec|m|h)\b|\b0s\b|\bnow\b/);
   });
 });

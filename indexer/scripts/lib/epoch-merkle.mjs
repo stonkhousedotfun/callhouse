@@ -14,21 +14,23 @@
  *   - the node hash: OpenZeppelin's sorted-pair commutative keccak, which `MerkleProof` verifies with
  *   - the layout: `StandardMerkleTree` with its DEFAULT sortLeaves -- hash-sort the leaves, then reverse-fill
  *     a complete tree of 2n-1 nodes
- * Extracted verbatim from `indexer/scripts/maker-epoch.mjs:7-13,104-132`, which is the implementation the
- * published vector `indexer/src/v2/fixtures/maker-epoch-2958.oz.json` was produced with.
+ * Extracted verbatim from the copy `indexer/scripts/maker-epoch.mjs` used to carry (its lines 7-13 and 104-132 before
+ * a change removed them), which is the implementation the published vector
+ * `indexer/src/v2/fixtures/maker-epoch-2958.oz.json` was produced with. `maker-epoch.test.ts` still checks the
+ * maker CLI against that vector, now through this module.
  */
 import { encodeAbiParameters, keccak256, concatHex } from "viem";
 
-/** Seconds in an epoch. Mirrors `maker-epoch.mjs:7`. */
+/** Seconds in an epoch. */
 export const WEEK_SECONDS = 604_800n;
-/** Monday 1970-01-05 00:00 UTC, epoch 0. Mirrors `maker-epoch.mjs:8`. */
+/** Monday 1970-01-05 00:00 UTC, epoch 0. */
 export const FIRST_MONDAY_SECONDS = 345_600n;
-/** The leaf tuple. Mirrors `maker-epoch.mjs:11-13` and the contract's `leaf()` argument order. */
+/** The leaf tuple, in the contract's `leaf()` argument order. */
 export const leafTypes = [
   { type: "uint256" }, { type: "uint256" }, { type: "address" }, { type: "uint256" },
 ];
 
-/** The §1.9 double-hashed leaf. The double hash is why a 64-byte inner node can never pose as a leaf. */
+/** The double-hashed leaf. The double hash is why a 64-byte inner node can never pose as a leaf. */
 export function leaf(epoch, entry) {
   const inner = keccak256(encodeAbiParameters(leafTypes, [epoch, BigInt(entry.index), entry.account, entry.amount]));
   return keccak256(inner);
@@ -41,10 +43,21 @@ export function pair(left, right) {
 
 /**
  * Matches OpenZeppelin StandardMerkleTree: hash-sort leaves, then reverse-fill the complete tree.
+ *
+ * A DUPLICATE INDEX IS REFUSED, NOT RESOLVED. `RewardsDistributor` keys its claim bitmap by the
+ * leaf's index, so two leaves with one index collide on chain and the second can never be claimed. Here the proofs
+ * are keyed by index too, so the second entry used to overwrite the first one's proof without a word. Neither leaf
+ * is dropped or renumbered: which one is wrong is the generator's bug to find.
  * @returns {{root: `0x${string}`, proofs: Map<number, `0x${string}`[]>}} keyed by the entry's PUBLISHED index,
  *          which is its position in the epoch file, not its position in the sorted tree.
  */
 export function merkle(epoch, entries) {
+  const indices = new Set();
+  for (const entry of entries) {
+    const index = BigInt(entry.index);
+    if (indices.has(index)) throw new Error(`duplicate index ${index}: two leaves would share one claim slot`);
+    indices.add(index);
+  }
   const sorted = entries.map((entry) => ({ entry, hash: leaf(epoch, entry) }))
     .sort((a, b) => a.hash.toLowerCase().localeCompare(b.hash.toLowerCase()));
   const n = sorted.length;
@@ -65,7 +78,7 @@ export function merkle(epoch, entries) {
   return { root: tree[0], proofs };
 }
 
-/** The epoch's window, [start, end). Mirrors the arithmetic at `maker-epoch.mjs:38-40`. */
+/** The epoch's window, [start, end). Throws "invalid epoch" when the start does not map back to `epoch`. */
 export function epochWindow(epoch) {
   const start = FIRST_MONDAY_SECONDS + epoch * WEEK_SECONDS;
   if ((start - FIRST_MONDAY_SECONDS) / WEEK_SECONDS !== epoch) throw new Error("invalid epoch");

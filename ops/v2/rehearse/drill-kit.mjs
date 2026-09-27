@@ -1,5 +1,5 @@
 /* -------------------------------------------------------------------------------------------------
- * ops/v2/rehearse/drill-kit.mjs — what the O2-03 failure drills (4-drills.mjs) share.
+ * ops/v2/rehearse/drill-kit.mjs — what the failure drills (4-drills.mjs) share.
  *
  *   sandbox(id, fn)        an isolated scenario on a snapshot of the fork: the live stack's chain-following services
  *                          (indexer, notifier, cranker, mm-bot, pricer) are frozen with SIGSTOP, evm_snapshot, the drill
@@ -9,8 +9,9 @@
  *                          so a deeper revert under a running indexer would be unrecoverable.
  *   flags                  a Stock Token's oraclePaused() and USDG's paused() located in storage by probing the slots
  *                          the view reads (ops/v2/monitor-devnet.mjs's method), then set and cleared by storage writes
- *   positions              writeCall/writePut: a writer deposits collateral and mints to a holder (createSeries first
- *                          when the series does not exist)
+ *   positions              writeTo: a writer deposits collateral plus rent and mints to a holder through the book's
+ *                          minter role (bookMint; createSeries first when the series does not exist)
+ *   admin calls            managed(): an AccessManager-restricted setter scheduled, its delay warped, executed (v8)
  *   expiry                 printWindow (the settlement window's rounds), waits for the cranker's snapshot / finalize
  *   evidence               Telegram stand-in messages after a mark, a bot journal's transactions and alerts, contract
  *                          events since the sandbox's snapshot block
@@ -40,7 +41,7 @@ export const STATUS = { None: 0, Pending: 1, Finalized: 2, Held: 3 };
 /** Frozen for the length of a sandbox: everything that follows the chain on its own. */
 export const FROZEN_IN_SANDBOX = ["indexer", "notifier", "cranker", "mm-bot", "pricer"];
 /** Extra drill process ports inside the reservation (anvil 8590-8594: 8590 is the node, 8591-8594 are free). */
-export const DRILL_PORTS = { cranker: PORTS.cranker2, mm: 8591 };
+export const DRILL_PORTS = { cranker: PORTS.cranker2, mm: 8591, pricer: 8592 };
 
 /* ---------------------------------------------------------------------------------------------- */
 /*  the sandbox                                                                                    */
@@ -57,7 +58,8 @@ async function pendingTxs() {
 
 /**
  * Run `fn(box)` on an evm_snapshot of the fork with the live stack frozen; always stop the drill's processes, revert and
- * thaw. `box.startCranker({ name, keyRole })` / `box.startMm()` start drill-local bots stopped at the end.
+ * thaw. `box.startCranker({ name, keyRole })` / `box.startMm()` / `box.startPricer()` start drill-local bots stopped at
+ * the end.
  */
 export async function sandbox(id, fn) {
   const S = loadState();
@@ -93,6 +95,12 @@ export async function sandbox(id, fn) {
         started.push(name);
         const r = await startBot(S, secrets, { name, mode: "mm", port, keyRole: "mmQuoter", indexer: false });
         info(`${name}: mm-bot (quoter anvil #10) on ${port}, journal ${path.relative(ROOT, r.db)}`);
+        return { name, db: r.db, port };
+      },
+      async startPricer({ name = `drill-${id}-pricer`, port = DRILL_PORTS.pricer } = {}) {
+        started.push(name);
+        const r = await startBot(S, secrets, { name, mode: "pricer", port, keyRole: "pricer", indexer: false });
+        info(`${name}: pricer (anvil #9 ${accountOf("pricer")}) on ${port}, journal ${path.relative(ROOT, r.db)}, no indexer (StrategySet scan)`);
         return { name, db: r.db, port };
       },
     };
@@ -245,8 +253,35 @@ export async function refreshFeeds(label, maxAgeS = 900) {
 /* ---------------------------------------------------------------------------------------------- */
 
 /**
- * `writer` deposits the collateral of `units` and mints them to `holder` (writer keeps the shorts). createSeries first
- * when the series does not exist yet (it pins the expiry when it is the first). Returns the long id.
+ * INTERFACE_VERSION 8: `Clearinghouse.mint` answers only an allowlisted minter (`isMinter`, set by DeployV8 for the
+ * OrderBook alone), acting for a writer that made it its operator; every production mint happens inside a book fill.
+ * The drills need positions, not fills, so the OrderBook's own address calls mint by impersonation on the fork (fork
+ * control, like the storage writes): the same checks (pause, cutoff, collateral and rent) apply as in a fill; the
+ * book's matching, price and fees do not, and are not what these drills are about. The book's ETH balance, used for the
+ * impersonated call's gas, is put back. `expectRevert` is send()'s; the caller asserts the reason.
+ */
+export async function bookMint({ writer, longId, units, holder, label, expectRevert = false }) {
+  const C = contracts();
+  const who = accountOf(writer);
+  if (!(await ch("isOperator", [who, C.orderBook]))) {
+    await send(who, { address: C.clearinghouse, abi: ABI.clearinghouse, functionName: "setOperator", args: [C.orderBook, true], label: `${writer} setOperator(book)`, action: "setOperator" });
+  }
+  const book = getAddress(C.orderBook);
+  const balance = BigInt(await rpc("eth_getBalance", [book, "latest"]));
+  await rpc("anvil_impersonateAccount", [book]);
+  await rpc("anvil_setBalance", [book, toHex(balance + E18)]);
+  try {
+    return await send(book, { address: C.clearinghouse, abi: ABI.clearinghouse, functionName: "mint", args: [longId, units, who, accountOf(holder)], label, action: "mint", expectRevert });
+  } finally {
+    await rpc("anvil_setBalance", [book, toHex(balance)]);
+    await rpc("anvil_stopImpersonatingAccount", [book]);
+  }
+}
+
+/**
+ * `writer` deposits the collateral of `units` plus the series' collateral rent (`mintFee`, INTERFACE_VERSION 7)
+ * and mints them to `holder` through bookMint (writer keeps the shorts). createSeries first when the series does not
+ * exist yet (it pins the expiry when it is the first). Returns the long id.
  */
 export async function writeTo({ writer, holder, T, isPut = false, strike, expiry, units, label }) {
   const C = contracts();
@@ -259,13 +294,60 @@ export async function writeTo({ writer, holder, T, isPut = false, strike, expiry
     await send(who, { address: C.clearinghouse, abi: ABI.clearinghouse, functionName: "createSeries", args: [M[T].asset, isPut, strike, expiry], label: `${writer} createSeries ${T} ${isPut ? "put" : "call"} ${usd(strike)} ${expiry}`, action: "createSeries" });
   }
   const per = await ch("collateralPerUnit", [longId]);
-  const need = per * units;
+  // mintFee is quoted at the head; the mint lands in a later block with less time to expiry, so it can only be lower.
+  const need = per * units + (await ch("mintFee", [longId, units]));
   const asset = isPut ? S.usdg : M[T].asset;
   await send(who, { address: asset, abi: ABI.erc20, functionName: "approve", args: [C.clearinghouse, need], label: `${writer} approve ${isPut ? "USDG" : T} for ${label}`, action: "approve" });
   await send(who, { address: C.clearinghouse, abi: ABI.clearinghouse, functionName: "deposit", args: [asset, need, who], label: `${writer} deposit for ${label}`, action: "deposit" });
-  const r = await send(who, { address: C.clearinghouse, abi: ABI.clearinghouse, functionName: "mint", args: [longId, units, who, to], label: `${writer} mints ${units} units to ${holder}: ${label}`, action: "mint" });
+  const r = await bookMint({ writer, longId, units, holder, label: `${writer} mints ${units} units to ${holder} (through the book's minter role): ${label}` });
   expect((await ch("balanceOf", [to, longId])) >= units, `${label}: ${holder} holds ${units} units of ${T} ${usd(strike)} ${isPut ? "put" : "call"} ${expiry} written by ${writer} (tx ${r.hash})`);
   return longId;
+}
+
+/* ---------------------------------------------------------------------------------------------- */
+/*  admin calls                                                                                    */
+/* ---------------------------------------------------------------------------------------------- */
+
+/**
+ * INTERFACE_VERSION 8: an admin setter the way the Safe makes it, through the AccessManager (V8Roles).
+ * `canCall(caller, target, selector)` answers (immediate, delay): immediate is a direct call; a delay is
+ * schedule(target, data, 0), a warp of exactly that delay, then execute(target, data) -- the target sees the manager
+ * executing and lets it through. Neither means the caller holds no role that may call it, which fails by name rather
+ * than as a revert to decode. `expectRevert` applies to the call itself (the target's own checks), never to the
+ * scheduling, and its reason is decoded against the target's errors. Returns send()'s answer plus the delay waited.
+ */
+export async function managed(caller, call) {
+  const scheduled = await managedSchedule(caller, call);
+  return managedExecute(caller, call, scheduled);
+}
+
+/**
+ * The first half of managed(): schedule(target, data, when) and the op's ready time. `when` 0 is "as soon as the
+ * delay allows"; a later `when` lets a drill line a second change up behind the first without a second full delay.
+ * An immediate caller schedules nothing (readyAt = now).
+ */
+export async function managedSchedule(caller, { address, abi, functionName, args = [], label, when = 0 }) {
+  const C = contracts();
+  const data = encodeFunctionData({ abi, functionName, args });
+  const [immediate, delay] = await read(C.accessManager, ABI.accessManager, "canCall", [caller, address, data.slice(0, 10)]);
+  if (immediate) return { immediate: true, delay: 0, readyAt: await now() };
+  if (Number(delay) === 0) fail(`${label}: ${caller} holds no AccessManager role that may call ${functionName} on ${address}`);
+  const r = await send(caller, { address: C.accessManager, abi: ABI.accessManager, functionName: "schedule", args: [address, data, BigInt(when)], label: `${label}: AccessManager.schedule (execution delay ${delay} s${when ? `, at ${when}` : ""})`, action: "schedule" });
+  const id = await read(C.accessManager, ABI.accessManager, "hashOperation", [caller, address, data]);
+  const readyAt = Number(await read(C.accessManager, ABI.accessManager, "getSchedule", [id]));
+  if (readyAt === 0) fail(`${label}: AccessManager.schedule left no schedule for the operation (tx ${r.hash})`);
+  return { immediate: false, delay: Number(delay), readyAt, scheduleTx: r.hash };
+}
+
+/** The second half of managed(): warp to the op's ready time if it is still ahead, then execute (or call directly). */
+export async function managedExecute(caller, { address, abi, functionName, args = [], label, action, expectRevert = false }, scheduled) {
+  if (scheduled.immediate) return { ...(await send(caller, { address, abi, functionName, args, label, action, expectRevert })), delay: 0 };
+  const C = contracts();
+  if ((await now()) < scheduled.readyAt) await warpTo(scheduled.readyAt, `${label}: the AccessManager execution delay`);
+  const data = encodeFunctionData({ abi, functionName, args });
+  const known = new Set(ABI.accessManager.filter((x) => x.type === "error").map((x) => x.name));
+  const withTargetErrors = [...ABI.accessManager, ...abi.filter((x) => x.type === "error" && !known.has(x.name))];
+  return { ...(await send(caller, { address: C.accessManager, abi: withTargetErrors, functionName: "execute", args: [address, data], label, action, expectRevert })), delay: scheduled.delay };
 }
 
 /* ---------------------------------------------------------------------------------------------- */
@@ -407,7 +489,9 @@ export async function runMonitor(label, { stateFile, from = null } = {}) {
   if (from !== null && existsSync(from)) copyFileSync(from, state);
   const args = [path.join(ROOT, "ops", "v2", "monitor.mjs"), "--once", "--json", "--rpc", RPC, "--registry", S.registryCopy, "--state", state];
   const { code, out, err } = await new Promise((resolve) => {
-    const child = spawn(process.execPath, args, { cwd: ROOT, env: { PATH: process.env.PATH, HOME: process.env.HOME, ALERT_WEBHOOK: `${RELAY_URL}/alert`, ALERT_WEBHOOK_TOKEN: secrets.relayToken }, stdio: ["ignore", "pipe", "pipe"] });
+    // MONITOR_ALERT_GRACE_S 0: a drill judges ONE pass (expectMonitorSent); the 30 s alert grace would hold
+    // every condition it expects to see paged.
+    const child = spawn(process.execPath, args, { cwd: ROOT, env: { PATH: process.env.PATH, HOME: process.env.HOME, ALERT_WEBHOOK: `${RELAY_URL}/alert`, ALERT_WEBHOOK_TOKEN: secrets.relayToken, MONITOR_ALERT_GRACE_S: "0" }, stdio: ["ignore", "pipe", "pipe"] });
     let o = "";
     let e = "";
     child.stdout.on("data", (d) => (o += d));

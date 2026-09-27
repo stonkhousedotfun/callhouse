@@ -1,10 +1,10 @@
 /* -------------------------------------------------------------------------------------------------
- * The rehearsal's browser flows (Playwright, headless Chromium), with the injected-wallet pieces of codex's W2-14
+ * The rehearsal's browser flows (Playwright, headless Chromium), with the injected-wallet pieces of the web acceptance
  * harness (web/tests/acceptance/v2.acceptance.ts: BrowserWallet, connect): the page's EIP-1193 provider forwards
  * every request to the rehearsal anvil, and only the wallet's own unlocked dev account may sign.
  *
  *   openBrowser()                      one Chromium for the run
- *   writerFlow(b, ctx)                 /earn/nvda: connect, deposit, manual AskWrite, daily auto-roll strategy
+ *   writerFlow(b, ctx)                 /sell/nvda: connect, deposit, manual AskWrite, daily auto-roll strategy
  *   buyerFlow(b, ctx)                  home: connect, "Buy 0.01 shares" card -> ticket -> Buy now
  *   resultsFlow(b, ctx)                /wins, /leaderboard, /pnl/<id>, the PNL image route, a winner's Portfolio
  * Each saves screenshots into out/screenshots and returns the transactions the page sent.
@@ -38,7 +38,7 @@ async function raw(method, params = []) {
   return body.result;
 }
 
-/** W2-14's BrowserWallet: an injected provider (EIP-1193 + EIP-6963 announce) backed by one unlocked dev account. */
+/** The acceptance harness's BrowserWallet: an injected provider (EIP-1193 + EIP-6963 announce) backed by one unlocked dev account. */
 export class BrowserWallet {
   constructor(account, label) {
     this.account = getAddress(account);
@@ -136,20 +136,24 @@ async function shot(page, name) {
   return file;
 }
 
-/** W2-14's connect: header Connect -> Phantom (the injected provider), until the header shows the account. */
+/**
+ * The acceptance harness's connect: header Connect -> Phantom (the injected provider), until the header shows the account. The wallet
+ * picker is a dialog portaled to <body> (web/components/WalletModal.tsx WalletDialog), not a group in
+ * the header, so Phantom is found in the dialog. Its logo is aria-hidden; a "Recent" tag may follow the name.
+ */
 async function connect(page, wallet) {
   await page.locator("header").getByRole("button", { name: "Connect", exact: true }).click();
-  await page.locator("header").getByRole("button", { name: "Phantom", exact: true }).click();
+  await page.getByRole("dialog").getByRole("button", { name: /^Phantom(\s*Recent)?$/ }).click();
   await until(`${wallet.label} wallet connection`, async () => (await page.locator("header").innerText()).toLowerCase().includes(wallet.account.slice(0, 6).toLowerCase()), { timeoutMs: 30_000, intervalMs: 500 });
 }
 
 /**
- * Writer on /earn/nvda: deposit `depositShares` NVDA, a manual AskWrite (`ask`: expiry, longId, shares, price in
+ * Writer on /sell/nvda (was /earn/nvda): deposit `depositShares` NVDA, a manual AskWrite (`ask`: expiry, longId, shares, price in
  * USDG per share), and a DAILY auto-roll strategy (`roll`: otmBps, askBps, maxShares, minAskBps, maxAskBps).
  */
 export async function writerFlow(browser, { wallet, depositShares, ask, roll, settlementOracle, underlying }) {
   const { page, errors } = await newPage(browser, wallet);
-  await page.goto(`${WEB_URL}/earn/nvda`);
+  await page.goto(`${WEB_URL}/sell/nvda`);
   await connect(page, wallet);
   await shot(page, "3-writer-1-earn-connected");
   await page.locator("#writer-deposit").fill(String(depositShares));
@@ -167,7 +171,7 @@ export async function writerFlow(browser, { wallet, depositShares, ask, roll, se
   const place = await wallet.signed("place", n);
   await shot(page, "3-writer-3-manual-ask");
   const r = page.getByRole("region", { name: "Auto-roll strategy" });
-  const action = r.getByRole("button", { name: /Enable auto-roll|Update strategy/ });
+  const action = r.getByRole("button", { name: /Enable auto-roll|Update strategy|Finish setup/ });
   await action.waitFor({ state: "visible", timeout: 60_000 });
   await r.getByLabel("Cycle").selectOption("daily");
   await r.getByLabel("Strike above spot · bps").fill(String(roll.otmBps));
@@ -230,7 +234,7 @@ async function buyFromTicket(page, wallet, stoppedShot, attempts = 3) {
  *
  * The page is opened with the feeds as they stand — on 4663 the round in force is normally hours old — so a card that
  * offers the buy here is evidence that the cards judge a quote against the oracle's spot age. When no card offers it,
- * `onStale()` (the price operator printing a round, W2-14's workaround) runs, the page reloads and the flow records
+ * `onStale()` (the price operator printing a round, a workaround) runs, the page reloads and the flow records
  * what the cards said. Returns { natural, notice, longId, take, calls }.
  */
 export async function buyerFlow(browser, { wallet, onStale }) {

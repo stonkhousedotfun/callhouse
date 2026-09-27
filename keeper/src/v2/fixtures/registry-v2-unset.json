@@ -105,8 +105,8 @@
         }
       },
       "expiriesAhead": {
-        "weekly": 2,
-        "daily": 3
+        "weekly": 0,
+        "daily": 6
       }
     }
   },
@@ -196,7 +196,7 @@
         "sourcify": null,
         "configuredAt": "2026-09-15"
       },
-      "notes": "Live since 2026-09-15 (factory deploy block 64038234). depositCap() is type(uint256).max on chain; policy() (300,1200,40,9500,500,50). Keeper key = mnemonic account 1, the original single-market keeper; it is not moved. The pooled cNVDA vault 0x88a98931\u2026 is closed and is not this market.",
+      "notes": "Live since 2026-09-15 (factory deploy block 64038234). depositCap() is type(uint256).max on chain; policy() (300,1200,40,9500,500,50). The keeper key is the original single-market keeper's; it is not moved. The pooled cNVDA vault 0x88a98931\u2026 is closed and is not this market.",
       "v2": {
         "status": "planned",
         "wave": "canary",

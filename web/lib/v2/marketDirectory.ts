@@ -13,7 +13,7 @@ export type MarketDirectoryAvailability =
 export type MarketDirectoryRegistryRow = {
   ticker: string;
   name: string;
-  /** T-OP-099. In the owner's launch set; the registry projection computes it from `launchSet` (lib/markets.ts). */
+  /** In the launch set; the registry projection computes it from `launchSet` (lib/markets.ts). */
   launch: boolean;
   v2: {
     status: V2MarketStatus;
@@ -40,7 +40,16 @@ export type MarketDirectoryRow = {
   settlement: Market["settlement"];
   puts: boolean | null;
   seriesOpen: number | null;
+  /**
+   * True when the chain says this market's minting is paused while trading is not: no new option
+   * can be written, resale asks and bids still trade. Absent or false otherwise, including when the API is not
+   * current. A TRADING pause is not here: it makes `availability` "paused".
+   */
+  mintPaused?: boolean;
 };
+
+/** The `availabilityDetail` of a market whose OrderBook trading is paused. */
+export const TRADING_PAUSED_DETAIL = "Trading is paused by the guardian: no order can be placed or taken.";
 
 const AVAILABILITY_COPY: Record<MarketDirectoryAvailability, { label: string; detail: string }> = {
   live: { label: "Live", detail: "Listed and enabled for trading." },
@@ -70,9 +79,9 @@ const STATUS_ORDER: Record<MarketDirectoryAvailability, number> = {
 };
 
 function registryAvailability(row: MarketDirectoryRegistryRow): MarketDirectoryAvailability | null {
-  // T-OP-099. THE LAUNCH SET GATES EVERYTHING BELOW. A market outside the owner's launch set is "deferred"
+  // THE LAUNCH SET GATES EVERYTHING BELOW. A market outside the launch set is "deferred"
   // whatever its wave and whatever the chain says about it: before this, `planned` + `wave1` read as
-  // "Coming soon" for eighteen markets the owner had scoped out of the launch, and a market someone
+  // "Coming soon" for eighteen markets scoped out of the launch, and a market someone
   // registered on chain outside the set would have rendered as live with a trade link. `row.launch` is
   // computed by the registry projection from LAUNCH_SET (lib/markets.ts); no ticker is written here.
   if (!row.launch) return "deferred";
@@ -92,7 +101,9 @@ function releasedAvailability(
   if (row.v2.registeredAt === null) return "unavailable";
   if (apiState === "loading") return "checking";
   if (apiState === "error" || api === undefined || api.status === "planned") return "unavailable";
-  return api.status === "live" ? "live" : "paused";
+  // `status` is the market's listing; the OrderBook's trading brake is a separate flag, and a
+  // market whose book is paused takes no order at all, so it is not "Live" whatever its listing says.
+  return api.status === "live" && !api.tradingPaused ? "live" : "paused";
 }
 
 /**
@@ -110,7 +121,7 @@ export function marketDirectoryRows(
   );
 
   return registry.map((row) => {
-    // F-APP-04. The map is keyed on `ticker.trim().toUpperCase()` (just above), so the lookup has to
+    // The map is keyed on `ticker.trim().toUpperCase()` (just above), so the lookup has to
     // normalise identically or the two halves of the same expression can disagree. Latent today —
     // every generated ticker already matches /^[A-Z0-9.]*$/ — and fail-closed if it ever missed, which
     // is why it is folded in here rather than given its own row. Asymmetric key/lookup pairs are worth
@@ -120,19 +131,21 @@ export function marketDirectoryRows(
       ?? releasedAvailability(row, api, apiState.kind);
     const copy = AVAILABILITY_COPY[availability];
     const apiIsCurrent = apiState.kind === "ready";
+    const tradingPaused = apiIsCurrent && api !== undefined && api.tradingPaused && availability === "paused";
     return {
       ticker: row.ticker,
       name: row.name,
       href: `/${row.ticker.toLowerCase()}`,
       availability,
       availabilityLabel: copy.label,
-      availabilityDetail: copy.detail,
+      availabilityDetail: tradingPaused ? TRADING_PAUSED_DETAIL : copy.detail,
       tradeable: availability === "live",
       spot: apiIsCurrent ? api?.spot ?? null : null,
       spotUpdatedAt: apiIsCurrent ? api?.spotUpdatedAt ?? null : null,
       settlement: apiIsCurrent ? api?.settlement : undefined,
       puts: apiIsCurrent && api ? api.puts : null,
       seriesOpen: apiIsCurrent && api ? api.stats.seriesOpen : null,
+      ...(apiIsCurrent && api?.mintPaused && availability === "live" ? { mintPaused: true } : {}),
     };
   }).sort((left, right) =>
     STATUS_ORDER[left.availability] - STATUS_ORDER[right.availability]
@@ -171,9 +184,14 @@ export function settlementModeLabel(settlement: Market["settlement"]): string | 
     : `${sources} · ${wait} fallback wait`;
 }
 
-export function settlementPayoutLabel(settlement: Market["settlement"]): string | null {
+/**
+ * The label names puts only when this market's registry flag enables them (`puts`, read
+ * as `=== true` by the caller). With puts off it speaks about calls alone; with puts on it is the full text.
+ */
+export function settlementPayoutLabel(settlement: Market["settlement"], puts: boolean): string | null {
   if (settlement === undefined) return null;
-  return settlement.route === null
-    ? "Winning calls pay Stock Tokens · puts pay USDG"
-    : "Winning calls try USDG conversion, with Stock Tokens as fallback · puts pay USDG";
+  const calls = settlement.route === null
+    ? "Winning calls pay Stock Tokens"
+    : "Winning calls try USDG conversion, with Stock Tokens as fallback";
+  return puts ? `${calls} · puts pay USDG` : calls;
 }

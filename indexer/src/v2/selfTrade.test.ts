@@ -77,7 +77,7 @@ describe("linked-wallet resale measurement", () => {
     }));
     expect(totalSelfTradeUnits(state)).toBe(0n);
     // Mutation check: lowering the exported band below the one-tick fixture makes the linked case fail.
-    // AND the zero must not read as "clean". This assertion is the point of the row: before it,
+    // AND the zero must not read as "clean". This assertion is the point of the test: before it,
     // this test asserted that a two-tick evasion produces 0 and stopped there, which is the
     // detector's blind spot recorded as though it were a passing property.
     expect(selfTradeCoverage(state).status).toBe("blind");
@@ -178,7 +178,7 @@ describe("linked-wallet resale measurement", () => {
 });
 
 /**
- * D18 left the self-trade loophole open ON CONDITION that the indexer flags the pattern. These
+ * The design left the self-trade loophole open ON CONDITION that the indexer flags the pattern. These
  * cases are about that condition, not about the counted number: each one drives the counted total
  * to exactly 0 and then asserts that 0 is still distinguishable from an honest market.
  */

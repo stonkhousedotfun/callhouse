@@ -27,6 +27,19 @@
   },
   {
     "type": "function",
+    "name": "SPOT_MAX_AGE",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "uint32",
+        "internalType": "uint32"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
     "name": "authority",
     "inputs": [],
     "outputs": [
@@ -56,19 +69,19 @@
     "name": "buyback",
     "inputs": [
       {
-        "name": "minTokenOut",
+        "name": "",
         "type": "uint256",
         "internalType": "uint256"
       }
     ],
     "outputs": [
       {
-        "name": "usdgIn",
+        "name": "",
         "type": "uint256",
         "internalType": "uint256"
       },
       {
-        "name": "burned",
+        "name": "",
         "type": "uint256",
         "internalType": "uint256"
       }
@@ -100,6 +113,61 @@
       }
     ],
     "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "buybackCapCeiling",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "buybackCooldown",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "uint40",
+        "internalType": "uint40"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "buybackWithDeadline",
+    "inputs": [
+      {
+        "name": "minTokenOut",
+        "type": "uint256",
+        "internalType": "uint256"
+      },
+      {
+        "name": "deadline",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ],
+    "outputs": [
+      {
+        "name": "usdgIn",
+        "type": "uint256",
+        "internalType": "uint256"
+      },
+      {
+        "name": "burned",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ],
+    "stateMutability": "nonpayable"
   },
   {
     "type": "function",
@@ -250,6 +318,25 @@
   },
   {
     "type": "function",
+    "name": "recoverUnrouted",
+    "inputs": [
+      {
+        "name": "asset",
+        "type": "address",
+        "internalType": "address"
+      }
+    ],
+    "outputs": [
+      {
+        "name": "amount",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ],
+    "stateMutability": "nonpayable"
+  },
+  {
+    "type": "function",
     "name": "router",
     "inputs": [],
     "outputs": [
@@ -295,6 +382,32 @@
         "name": "perCallUsdg",
         "type": "uint256",
         "internalType": "uint256"
+      }
+    ],
+    "outputs": [],
+    "stateMutability": "nonpayable"
+  },
+  {
+    "type": "function",
+    "name": "setBuybackCapCeiling",
+    "inputs": [
+      {
+        "name": "ceiling",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ],
+    "outputs": [],
+    "stateMutability": "nonpayable"
+  },
+  {
+    "type": "function",
+    "name": "setBuybackCooldown",
+    "inputs": [
+      {
+        "name": "cooldown",
+        "type": "uint40",
+        "internalType": "uint40"
       }
     ],
     "outputs": [],
@@ -503,6 +616,38 @@
   },
   {
     "type": "event",
+    "name": "BuybackBalanceWrittenDown",
+    "inputs": [
+      {
+        "name": "previous",
+        "type": "uint256",
+        "indexed": false,
+        "internalType": "uint256"
+      },
+      {
+        "name": "current",
+        "type": "uint256",
+        "indexed": false,
+        "internalType": "uint256"
+      }
+    ],
+    "anonymous": false
+  },
+  {
+    "type": "event",
+    "name": "BuybackCapCeilingSet",
+    "inputs": [
+      {
+        "name": "ceiling",
+        "type": "uint256",
+        "indexed": false,
+        "internalType": "uint256"
+      }
+    ],
+    "anonymous": false
+  },
+  {
+    "type": "event",
     "name": "BuybackCapSet",
     "inputs": [
       {
@@ -510,6 +655,19 @@
         "type": "uint256",
         "indexed": false,
         "internalType": "uint256"
+      }
+    ],
+    "anonymous": false
+  },
+  {
+    "type": "event",
+    "name": "BuybackCooldownSet",
+    "inputs": [
+      {
+        "name": "cooldown",
+        "type": "uint40",
+        "indexed": false,
+        "internalType": "uint40"
       }
     ],
     "anonymous": false
@@ -707,6 +865,31 @@
     "anonymous": false
   },
   {
+    "type": "event",
+    "name": "UnroutedAssetRecovered",
+    "inputs": [
+      {
+        "name": "asset",
+        "type": "address",
+        "indexed": true,
+        "internalType": "address"
+      },
+      {
+        "name": "treasury",
+        "type": "address",
+        "indexed": true,
+        "internalType": "address"
+      },
+      {
+        "name": "amount",
+        "type": "uint256",
+        "indexed": false,
+        "internalType": "uint256"
+      }
+    ],
+    "anonymous": false
+  },
+  {
     "type": "error",
     "name": "AccessManagedInvalidAuthority",
     "inputs": [
@@ -746,12 +929,28 @@
   },
   {
     "type": "error",
+    "name": "AssetIsRouted",
+    "inputs": [
+      {
+        "name": "asset",
+        "type": "address",
+        "internalType": "address"
+      }
+    ]
+  },
+  {
+    "type": "error",
     "name": "BadPrice",
     "inputs": []
   },
   {
     "type": "error",
     "name": "BadUnits",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "BuybackDeadlineRequired",
     "inputs": []
   },
   {
@@ -769,6 +968,11 @@
         "internalType": "uint40"
       }
     ]
+  },
+  {
+    "type": "error",
+    "name": "DeadlinePassed",
+    "inputs": []
   },
   {
     "type": "error",

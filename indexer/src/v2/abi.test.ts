@@ -3,7 +3,7 @@
  *
  * WHY THIS FILE EXISTS: abis/v2/*.ts and src/v2/seriesId.ts are generated from ops/
  * and committed, because Ponder's type inference needs the `as const` literal
- * at build time. Nothing else notices when a contract lane re-exports ops/abis/v2 and nobody
+ * at build time. Nothing else notices when the contracts repo re-exports ops/abis/v2 and nobody
  * reruns `pnpm gen:abis`; the handlers would keep decoding against the old ABI. So:
  *   1. the drift test runs the generator in `--check` mode, which renders every output in memory
  *      and fails on any drifted, missing or stale file;
@@ -109,7 +109,7 @@ describe("abis/v2/clearinghouse.ts", () => {
 
 describe("v8 unchanged market tuple and event ABI pins", () => {
   it("retains appended series and market rent fields and changed selectors", async () => {
-    const { toFunctionSelector, toEventSelector } = await import("viem");
+    const { getAbiItem, toFunctionSelector, toEventSelector } = await import("viem");
     const market = clearinghouseAbi.find((item) => item.type === "function" && item.name === "market")!;
     const series = clearinghouseAbi.find((item) => item.type === "function" && item.name === "series")!;
     expect(market.outputs[0].components.map((field) => [field.name, field.type])).toEqual([
@@ -119,11 +119,11 @@ describe("v8 unchanged market tuple and event ABI pins", () => {
     expect(series.outputs[0].components.slice(-2).map((field) => [field.name, field.type])).toEqual([
       ["mintFeePpm", "uint32"], ["mintFeesHeld", "uint128"],
     ]);
-    const registerMarket = clearinghouseAbi.find((item) => item.type === "function" &&
+    const registerMarket = clearinghouseAbi.find((item): item is Extract<typeof item, { type: "function" }> => item.type === "function" &&
       item.name === "registerMarket" && item.inputs.map((input) => input.type).join(",") === "address,uint64,bool")!;
     expect(registerMarket.inputs.map((input) => input.type)).toEqual(["address", "uint64", "bool"]);
     expect(toFunctionSelector(registerMarket)).toBe("0x9ae621ee");
-    expect(toFunctionSelector(clearinghouseAbi.find((item) => item.type === "function" && item.name === "mintFee")!)).toBe("0xdb66f63c");
+    expect(toFunctionSelector(getAbiItem({ abi: clearinghouseAbi, name: "mintFee" }))).toBe("0xdb66f63c");
     expect(toEventSelector(clearinghouseAbi.find((item) => item.type === "event" && item.name === "Minted")!)).toBe("0x89b7f2e14bc7bca4f2fd443683827b62e46c6f22ac4145d38f930082a62fcab5");
     expect(toEventSelector(clearinghouseAbi.find((item) => item.type === "event" && item.name === "Closed")!)).toBe("0x895110f6bb596a7019986496b866a4cebf45e0d53ff8946c952974d456540381");
     expect(toEventSelector(clearinghouseAbi.find((item) => item.type === "event" && item.name === "MintFeesAccrued")!)).toBe("0x7370e99169ee22a18273e3ff9c18124c7a0019b6f23db1f73cb86777d2b245fb");
@@ -135,6 +135,8 @@ describe("v8 unchanged market tuple and event ABI pins", () => {
     const { makerVaultAbi } = await import("../../abis/v2/makerVault");
     expect(toFunctionSelector(autoRollerAbi.find((item) => item.type === "function" && item.name === "cancelStale")!)).toBe("0xbd1a6747");
     expect(toEventSelector(autoRollerAbi.find((item) => item.type === "event" && item.name === "StaleAskCancelled")!)).toBe("0xcebe2d1e4742352b05b507fd5e0c0df36f9521884bd871d344cb9969b15ff942");
+    // Mirrored from callhouse-contracts test/v2/InterfaceIds.t.sol test_autoRollerPositionClosedTopic.
+    expect(toEventSelector(autoRollerAbi.find((item) => item.type === "event" && item.name === "PositionClosed")!)).toBe("0x3bf3f9d4146a9a191a964ed4bdfc1b28483cd938ecd90075180932bb0380daa5");
     const limits = makerVaultAbi.find((item) => item.type === "function" && item.name === "limits")!;
     expect(limits.outputs[0].components.at(-1)).toMatchObject({ name: "maxDailyOutflow", type: "uint128" });
     expect(toFunctionSelector(makerVaultAbi.find((item) => item.type === "function" && item.name === "setLimits")!)).toBe("0x6693cc27");

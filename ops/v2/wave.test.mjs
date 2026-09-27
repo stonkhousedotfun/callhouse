@@ -7,7 +7,8 @@
  *   node --test ops/v2/wave.test.mjs
  */
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { execFileSync } from "node:child_process";
+import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { test } from "node:test";
@@ -176,9 +177,10 @@ test("a registry change vs HEAD adds the keeper-image services and the registry 
   assert.equal(report.code, 1);
   const text = lines.join("\n");
   assert.ok(text.includes("  ops/markets/tier1.json"), "the commit set includes the registry file");
-  // Five services run from the image that bakes the registry, the monitor included: it reads the
-  // baked file (ops/deploy.md:2001-2002) and a registry edit that skips it leaves it checking the old one.
-  for (const service of ["pricing", "cranker", "pricer", "mm-bot", "monitor"]) assert.ok(text.includes(`  ${service}`), `keeper-image service ${service} listed`);
+  // Six services run from the image that bakes the registry, the monitor included: it reads the
+  // baked file and a registry edit that skips it leaves it checking the old one.
+  // The guardian reads the baked registry too (ops/v2/env/guardian.env V2_REGISTRY_PATH).
+  for (const service of ["pricing", "cranker", "pricer", "mm-bot", "guardian", "monitor"]) assert.ok(text.includes(`  ${service}\n`) || text.endsWith(`  ${service}`), `keeper-image service ${service} listed:\n${text}`);
   assert.ok(text.includes("  indexer-v2"), "the indexer projection maps to indexer-v2");
   assert.ok(!text.includes("  indexer\n"), "never the v1 indexer name");
 });
@@ -196,7 +198,7 @@ test("a dirty dev registry marks the dev keeper-image services, and not the bots
   for (const service of ["pricing (dev)", "monitor (dev)"]) assert.ok(text.includes(`  ${service}`), `${service} listed:\n${text}`);
   // The stonkhouse-dev project refuses the signing bots (ops/v2/go-live-gating.mjs SIGNING), so naming
   // them here would send an operator at services that do not exist in that project.
-  for (const service of ["cranker (dev)", "pricer (dev)", "mm-bot (dev)"]) {
+  for (const service of ["cranker (dev)", "pricer (dev)", "mm-bot (dev)", "guardian (dev)"]) {
     assert.ok(!text.includes(`  ${service}`), `${service} is refused on stonkhouse-dev and must not be listed:\n${text}`);
   }
   assert.ok(text.includes("  ops/markets/dev.json"), "the commit set includes the dev registry");
@@ -375,4 +377,112 @@ test("the wave step list matches ops/markets/README.md's projection rows one-for
     assert.ok(readme.includes(command), `README documents the ${id} row (${command})`);
     assert.ok(ids.includes(id), `wave has the ${id} step`);
   }
+});
+
+/*//////////////////////////////////////////////////////////////
+              THE FOUR REVIEW FINDINGS
+//////////////////////////////////////////////////////////////*/
+
+/** A git seam whose `status --porcelain` reports `modified` (paths relative to the repo it runs in). */
+function statusGit(modified, dirty = []) {
+  const calls = [];
+  const git = (args, cwd) => {
+    calls.push({ args, cwd });
+    if (args[0] === "diff") return { code: 0, output: dirty.join("\n") };
+    if (args[0] === "status") {
+      const asked = new Set(args.slice(args.indexOf("--") + 1));
+      return { code: 0, output: modified.filter((f) => asked.has(f)).map((f) => ` M ${f}`).join("\n") };
+    }
+    return { code: 0, output: "" };
+  };
+  return { calls, git };
+}
+
+test("write mode takes the commit set from the tree, so projections a previous run left uncommitted are still listed", () => {
+  // The generators are idempotent: this run writes the same bytes an earlier, uncommitted run already wrote, so
+  // nothing changes DURING this run. The tree still differs from HEAD, and that is what has to be committed.
+  const { root, docs } = scratchRoot();
+  const { git } = statusGit(["web/lib/markets.generated.ts", "ops/v2/env/pricer.env"]);
+  const { lines, out } = collect();
+  const report = runWave({ root, docsDir: docs, exec: fakeExec().exec, git, out });
+  assert.equal(report.code, 0, lines.join("\n"));
+  const text = lines.join("\n");
+  assert.ok(text.includes("  web/lib/markets.generated.ts"), text);
+  assert.ok(text.includes("  ops/v2/env/pricer.env"), text);
+  assert.ok(!text.includes("nothing to commit"), `a dirty tree is not "nothing to commit":\n${text}`);
+  assert.ok([...report.services].includes("web") && [...report.services].includes("pricer"), [...report.services].join(","));
+});
+
+test("a registry that fails its validator is INVALID, not a stale projection, and is not put in the commit set", () => {
+  const { root, docs } = scratchRoot();
+  // build-markets --check prints every validation problem under "DRIFT:" (build-markets.mjs, the CHECK_ONLY branch),
+  // e.g. validateV2's "v2 (top level) is missing or not an object". wave never regenerates a registry.
+  const { exec } = fakeExec({
+    "ops/markets/build-markets.mjs --check --registry ops/markets/dev.json": { code: 0, output: "no drift" },
+    "ops/markets/build-markets.mjs --check": { code: 1, output: "DRIFT:\n  v2 (top level) is missing or not an object" },
+  });
+  const { lines, out } = collect();
+  const report = runWave({ root, check: true, docsDir: docs, exec, git: fakeGit().git, out });
+  assert.equal(report.code, 1);
+  const text = lines.join("\n");
+  assert.ok(!report.stale.some((s) => s.step.id === "registry"), "the validator is not a stale projection");
+  assert.ok(report.invalid.some((s) => s.step.id === "registry"), "it is reported invalid");
+  assert.ok(text.includes("INVALID: ops/markets/tier1.json (validator)"), text);
+  assert.ok(!text.includes("STALE: ops/markets/tier1.json"), text);
+  const commitSet = text.slice(text.indexOf("commit set:"), text.indexOf("services to rebuild:"));
+  assert.ok(!commitSet.includes("ops/markets/tier1.json"), `a registry clean against HEAD is not in the commit set:\n${commitSet}`);
+});
+
+test("a step that FAILED (not drift) puts nothing in the commit set and names no service", () => {
+  const { root, docs } = scratchRoot();
+  const { exec } = fakeExec({
+    "web/scripts/gen-markets.mjs --check": { code: 1, output: "Error: Cannot find module 'viem'" },
+    "indexer/scripts/gen-v2-registry.mjs --check": { code: 1, output: "gen-v2-registry --check: lib/v2/marketRegistry.generated.ts differs" },
+  });
+  const { lines, out } = collect();
+  const report = runWave({ root, check: true, docsDir: docs, exec, git: fakeGit().git, out });
+  assert.equal(report.code, 1);
+  const text = lines.join("\n");
+  assert.ok(text.includes("FAILED (not drift): web/lib/markets.generated.ts"), text);
+  const commitSet = text.slice(text.indexOf("commit set:"), text.indexOf("services to rebuild:"));
+  assert.ok(commitSet.includes("indexer/lib/v2/marketRegistry.generated.ts"), `the stale projection is listed:\n${commitSet}`);
+  assert.ok(!commitSet.includes("web/lib/markets.generated.ts"), `a failed step's file is not something to commit:\n${commitSet}`);
+  assert.ok(![...report.services].includes("web"), `no rebuild is implied by a step that did not run: ${[...report.services]}`);
+  assert.ok([...report.services].includes("indexer-v2"));
+});
+
+test("a malformed dev.json is a named refusal, not an exception out of runWave (both modes)", () => {
+  const { root, docs } = scratchRoot();
+  writeFileSync(path.join(root, "ops/markets/dev.json"), "{ not json\n");
+  for (const check of [true, false]) {
+    const { lines, out } = collect();
+    let report;
+    assert.doesNotThrow(() => {
+      report = runWave({ root, check, docsDir: docs, exec: fakeExec().exec, git: fakeGit().git, out });
+    }, `runWave threw (check=${check})`);
+    assert.equal(report.code, 1, lines.join("\n"));
+    const text = lines.join("\n");
+    assert.match(text, /ops\/markets\/dev\.json is not valid JSON/, text);
+    if (check) assert.ok(report.invalid.some((s) => s.step.id === "dev-parity"), "reported invalid, not stale");
+  }
+});
+
+test("write mode with the real git: an uncommitted projection and a new untracked one are both listed from the tree", () => {
+  const { root, docs } = scratchRoot();
+  const GIT = existsSync("/opt/homebrew/bin/git") ? "/opt/homebrew/bin/git" : "git";
+  const g = (...args) => execFileSync(GIT, args, { cwd: root, stdio: ["ignore", "pipe", "pipe"] });
+  g("init", "-q");
+  g("add", "-A");
+  g("-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "base");
+  // An earlier wave run regenerated these and nobody committed them; this run's generators write nothing new.
+  writeFileSync(path.join(root, "web/lib/markets.generated.ts"), "web regenerated earlier\n");
+  writeFileSync(path.join(root, "ops/v2/env/guardian.env"), "GUARDIAN=1\n");
+  const { lines, out } = collect();
+  const report = runWave({ root, docsDir: docs, exec: fakeExec().exec, out }); // git: the real one (defaultGit)
+  assert.equal(report.code, 0, lines.join("\n"));
+  const text = lines.join("\n");
+  assert.ok(text.includes("  web/lib/markets.generated.ts"), text);
+  assert.ok(text.includes("  ops/v2/env/guardian.env"), text);
+  assert.ok(!text.includes("nothing to commit"), text);
+  assert.ok(!text.includes("  ops/v2/env/pricer.env"), `an unchanged projection is not listed:\n${text}`);
 });

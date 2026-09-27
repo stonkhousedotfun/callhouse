@@ -46,7 +46,7 @@ describe("the number, derived once", () => {
 
 describe("it REFUSES rather than emitting a 0", () => {
   // A 0 here is indistinguishable from the owner deliberately turning the notice off, which is the
-  // exact ambiguity OWN8-09 exists to remove. Refusing is the fail-closed answer.
+  // exact ambiguity the audit trigger exists to remove. Refusing is the fail-closed answer.
   test("no shared.usdg is a refusal, and it says why", () => {
     assert.throws(() => deriveTrigger(good({ shared: {} })), TvlThresholdError);
     assert.throws(() => deriveTrigger(good({ shared: { usdg: null } })), /indistinguishable/);
@@ -77,12 +77,35 @@ describe("against the REAL committed registries", () => {
     assert.equal(t.maxAgeS, MAX_TVL_AGE_S);
   });
 
-  test("tier1 and dev REFUSE today, because their v8 contract addresses are still null", () => {
+  // This block used to assert that tier1 and dev REFUSE, while their v8 addresses were still null.
+  // tier1 now carries them, so that premise went stale. The refusal is kept, on a fixture that pins the
+  // pre-deploy shape, and the launch registry is held to the opposite.
+  test("tier1, the launch registry, is ACCEPTED over both holders, read from the file itself", () => {
+    const reg = registry("tier1.json");
+    const t = deriveTrigger(reg);
+    assert.equal(t.auditTriggerUsdg, AUDIT_TRIGGER_USDG6);
+    assert.equal(t.usdg, reg.shared.usdg);
+    assert.deepEqual(t.holders, LOCKED_HOLDERS.map((name) => ({ name, address: reg.v2.contracts[name] })));
+    assert.deepEqual(t.missingHolders, []);
+  });
+
+  test("the pre-deploy shape (every holder null) still REFUSES, on a fixture", () => {
     // Not a bug in this tool and not something to paper over: a registry with no deployed contracts
     // cannot express "value locked in them", and emitting 0 would read as the owner switching it off.
-    for (const name of ["tier1.json", "dev.json"]) {
-      assert.throws(() => deriveTrigger(registry(name)), TvlThresholdError, name);
-    }
+    const fixture = JSON.parse(readFileSync(path.join(HERE, "fixtures/v8-registry-pre-deploy.json"), "utf8"));
+    for (const name of LOCKED_HOLDERS) assert.equal(fixture.v2.contracts[name], null, `fixture ${name} must stay null`);
+    assert.match(fixture.shared.usdg, /^0x[0-9a-fA-F]{40}$/, "only the holders may be missing, or this proves the wrong refusal");
+    assert.throws(() => deriveTrigger(fixture), TvlThresholdError);
+    assert.throws(() => deriveTrigger(fixture), /empty holder set/);
+  });
+
+  test("dev follows its own file: refused while it names no v8 holder, accepted once it does", () => {
+    // dev.json still has null v8 addresses at the time of writing; asserting that as a fact would go stale
+    // exactly the way the tier1 case did.
+    const reg = registry("dev.json");
+    const named = LOCKED_HOLDERS.filter((n) => typeof reg.v2?.contracts?.[n] === "string");
+    if (named.length === 0) assert.throws(() => deriveTrigger(reg), /empty holder set/, "dev.json");
+    else assert.deepEqual(deriveTrigger(reg).holders.map((h) => h.name), named, "dev.json");
   });
 });
 
@@ -118,6 +141,13 @@ describe("the command", () => {
     assert.match(r.out, /auditTriggerUsdg=1000000000000/);
     assert.match(r.out, /MONITOR_THRESHOLDS=/);
     assert.match(r.out, /V3-D33/);
+  });
+
+  test("the pre-deploy fixture exits 1 with the refusal and prints no threshold", () => {
+    const r = run(["--registry", path.join(HERE, "fixtures/v8-registry-pre-deploy.json")]);
+    assert.equal(r.code, 1);
+    assert.match(r.err, /empty holder set/);
+    assert.doesNotMatch(r.out, /auditTriggerUsdg=/);
   });
 
   test("a partial holder set exits NON-ZERO and warns, so a script cannot use it silently", () => {

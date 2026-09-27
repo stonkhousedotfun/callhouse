@@ -12,6 +12,9 @@
  * injected fair value. The steps that set the fair value (0 and A-E) cannot run then — the
  * harness boots the pricer on the real client, ticks once and checks that what the pricer did
  * matches what the service answers for the same series. The default path is unchanged.
+ * devnet-reprice-check.ts judges that tick: a target more than one
+ * step below the live ask is sent as the step floor or the band's ceiling, and a ceiling below
+ * the contract's per-call floor sends nothing ('drop-floor-above-band', paged at warn).
  *
  * WHAT RUNS. ops/devnet/up.sh brings up the seeded devnet: writer `ben` has a weekly NVDA strategy with
  * smart pricing (ask 60 bps of spot, band 30-150 bps) and a live AskWrite from the seed's roll. The
@@ -58,7 +61,8 @@ import type { RunningMode } from '../mode.js';
 import { PricingClient, type FairAnswer, type FairRequest } from './fair-client.js';
 import { accessManagerAbi } from '../abi/accessManager.js';
 import { startPricer } from './main.js';
-import { differsEnough, priceBand, targetPrice } from './planner.js';
+import { REAL_TICK_OUTCOMES, judgeDropFloorAboveBand, judgeRepriced, unexpectedAlerts } from './devnet-reprice-check.js';
+import { differsEnough, planReprice, priceBand, targetPrice } from './planner.js';
 import { GAS_REPRICE } from './pricer.js';
 
 const KEEPER_DIR = fileURLToPath(new URL('../../../', import.meta.url));
@@ -67,7 +71,7 @@ const DEVNET_DIR = join(ROOT, 'ops', 'devnet');
 /**
  * The role table, MIRRORED from its source at runtime rather than retyped. `ops/abis/v2/roles.json` is outside
  * the keeper package's rootDir so it cannot be imported (pricer.ts:266 records the same constraint); reading it
- * here keeps the id and the delay tied to the file every other lane derives them from.
+ * here keeps the id and the delay tied to the file every other consumer derives them from.
  */
 const ROLES = JSON.parse(
   readFileSync(join(ROOT, 'ops', 'abis', 'v2', 'roles.json'), 'utf8'),
@@ -335,25 +339,31 @@ async function main(): Promise<void> {
       const direct = await new PricingClient({ baseUrl: pricingUrl.url, timeoutMs: 1_000 }).fair({ ticker: 'NVDA', strike: series.strike, expiry: Number(series.expiry), type: 'call' });
       say(`  the service answers the rolled series: ${direct.ok ? `fair ${direct.fair} (${direct.source})` : `null (${direct.reason})`}`);
       const pairReal = pairOf(stReal);
-      const known = ['repriced', 'not-due', 'within-threshold', 'in-the-money', 'fair-unavailable', 'fair-stale', 'fair-spot-mismatch', 'asOf-unknown'];
-      check(pairReal !== undefined && known.includes(pairReal.outcome), `/state reports a known outcome for the pair (${pairReal?.outcome})`);
+      check(pairReal !== undefined && REAL_TICK_OUTCOMES.includes(pairReal.outcome), `/state reports a known outcome for the pair (${pairReal?.outcome})`);
       if (!direct.ok) {
         check(pairReal?.outcome === 'fair-unavailable' && (await repricedLogs()).length === 0, `the service's refusal (${direct.reason}) left the ask alone: nothing sent (${pairReal?.outcome})`);
       } else {
+        // The price sent is planReprice's for the seed's ask, which is the target only when it is within one
+        // pricer step of that ask; otherwise the step floor or the band's ceiling, or nothing (drop-floor-above-band).
+        const planReal = async () => planReprice({ fair: direct.fair, spot: await spotNow(), livePrice: o0.price, strategy, edgeBps, thresholdBps: repriceThresholdBps });
         if (pairReal?.outcome === 'repriced') {
           const logsReal = await repricedLogs();
           const argsReal = logsReal.at(-1)?.args as { price: bigint } | undefined;
-          const expectReal = targetPrice({ fair: direct.fair, edgeBps, spot: await spotNow(), minAskBps: strategy.minAskBps, maxAskBps: strategy.maxAskBps });
-          check(expectReal.ok && argsReal?.price === expectReal.price, `the reprice targeted the service's fair ${direct.fair}: ${argsReal?.price} == ${expectReal.ok ? expectReal.price : 'no band'}`);
+          const verdict = judgeRepriced(await planReal(), argsReal?.price, pairReal);
+          check(verdict.ok, `the reprice followed the service's fair ${direct.fair}: ${verdict.what}`);
+        }
+        if (pairReal?.outcome === 'drop-floor-above-band') {
+          const verdict = judgeDropFloorAboveBand(await planReal(), (await repricedLogs()).length, pairReal);
+          check(verdict.ok, `the service's fair ${direct.fair} is below a band the ask cannot reach in one reprice: ${verdict.what}`);
         }
         if (pairReal?.outcome === 'fair-unavailable') say('  (note: the harness read a fair value but the pricer\'s own read refused; see the service log)');
       }
       step('REAL. journal and alerts');
       await running.close();
       const dbReal = new Database(env.KEEPER_DB_PATH, { readonly: true });
-      const alertsReal = dbReal.prepare('SELECT kind, message FROM v2_alerts ORDER BY id').all() as Array<{ kind: string; message: string }>;
-      const badReal = alertsReal.filter((a) => a.kind === 'v2_error' || a.kind.startsWith('v2_pricer_'));
-      check(badReal.length === 0, `no v2_error / v2_pricer_* alert${badReal.map((a) => `\n         ${a.kind}: ${a.message}`).join('')}`);
+      const alertsReal = dbReal.prepare('SELECT kind, severity, message FROM v2_alerts ORDER BY id').all() as Array<{ kind: string; severity: string; message: string }>;
+      const badReal = unexpectedAlerts(pairReal?.outcome, alertsReal);
+      check(badReal.length === 0, `no v2_error / v2_pricer_* alert${pairReal?.outcome === 'drop-floor-above-band' ? " beyond drop-floor-above-band's own v2_pricer_reprice_failed (warn)" : ''}${badReal.map((a) => `\n         ${a.kind}: ${a.message}`).join('')}`);
       dbReal.close();
     } else {
     /* ---------------------------------------------------------------- 0 */
@@ -444,7 +454,7 @@ async function main(): Promise<void> {
     check(oD.units === oA.units && Number(oD.validUntil) === Number(o0.validUntil) && !oD.cancelled && (await order(pA.orderId)).cancelled, `the ceiling ask keeps ${oD.units} units and validUntil; the previous ask is cancelled`);
 
     /* ---------------------------------------------------------------- E */
-    // INTERFACE_VERSION 7 (c16): once the spot reaches the strike, every price the writer's band allows is below
+    // INTERFACE_VERSION 7: once the spot reaches the strike, every price the writer's band allows is below
     // intrinsic value, so `reprice` reverts InTheMoney and the ask is withdrawn by the permissionless
     // AutoRoller.cancelStale (the cranker's stale step) instead. The pricer must stop before it spends a /fair
     // request or a simulation on it, and must not page: this is a normal state, not a failure.

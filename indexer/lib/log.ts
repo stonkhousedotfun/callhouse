@@ -9,7 +9,13 @@
  *
  * bigint is not JSON-serialisable and every figure here is a bigint, so values are
  * stringified on the way out rather than throwing halfway through a log line.
+ *
+ * Every finished line goes through redactUrls (./redact.ts), so a field that carries an RPC URL with its
+ * key in the path or query prints scheme://host/… instead. Ponder's OWN logger is not this module: it serializes
+ * its RPC errors (url included) straight to fd 1 (ponder/src/internal/logger.ts). Covers that in the
+ * image: ./stdio-redact.mjs is PID 1, runs Ponder as its child and redacts every line Ponder writes to fd 1 or 2.
  */
+import { redactUrls } from "./redact";
 
 type Fields = Record<string, unknown>;
 
@@ -20,7 +26,7 @@ function write(level: "info" | "warn", msg: string, fields: Fields): void {
   for (const [k, v] of Object.entries(fields)) {
     out[k] = typeof v === "bigint" ? v.toString() : v;
   }
-  const line = JSON.stringify(out);
+  const line = redactUrls(JSON.stringify(out));
   if (level === "warn") console.warn(line);
   else console.log(line);
 }

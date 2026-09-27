@@ -1,6 +1,7 @@
 import { formatUnits, parseUnits } from "viem";
 
 import { ASSET_DECIMALS, LOT_SIZE, SHARE_DECIMALS, USDG_DECIMALS } from "./contracts";
+import { displayExact, displayMoney, displayPrice, displayQuantity, displayRatioPercent, withDollar } from "./numberFormat";
 
 export const WAD = 10n ** 18n;
 const BPS = 10_000n;
@@ -35,25 +36,60 @@ export function formatAmount(
   return negative ? `-${out}` : out;
 }
 
-/** USDG has 6 decimals. Two shown by default — it is a dollar-like unit. */
-export function fmtUsdg(value: bigint | undefined | null, displayDecimals = 2): string {
-  return formatAmount(value, USDG_DECIMALS, displayDecimals);
+/*
+ * The display formatters below follow lib/numberFormat.ts: no zero tails, compact large values, "<0.01"
+ * for a tiny amount, percentages to one decimal. formatAmount above stays the EXACT fixed-decimal primitive for
+ * inputs, transaction review and tooltips.
+ */
+
+/** USDG (6 decimals) as money: "12", "12.30", "12.5K", "<0.01". `maxDecimals` above 2 is for a per-share figure. */
+export function fmtUsdg(value: bigint | undefined | null, maxDecimals = 2): string {
+  if (value === undefined || value === null) return "—";
+  return displayMoney(value, USDG_DECIMALS, { maxDecimals });
 }
 
-/** Stock Tokens have 18 decimals. Four shown: a lot is 1.0000 and fractions matter. */
-export function fmtAsset(value: bigint | undefined | null, displayDecimals = 4): string {
-  return formatAmount(value, ASSET_DECIMALS, displayDecimals);
+/** USDG as a price beside other prices (ask, bid, cost per share): "12.00", "0.0123". */
+export function fmtUsdgPrice(value: bigint | undefined | null): string {
+  if (value === undefined || value === null) return "—";
+  return displayPrice(value, USDG_DECIMALS);
 }
 
-/** Vault shares (cNVDA) are 18 decimals, same as the asset. */
-export function fmtShares(value: bigint | undefined | null, displayDecimals = 4): string {
-  return formatAmount(value, SHARE_DECIMALS, displayDecimals);
+/** fmtUsdg with a dollar sign in the right place: "$12", "<$0.01", "-$5". */
+export function fmtUsd(value: bigint | undefined | null, maxDecimals = 2): string {
+  return withDollar(fmtUsdg(value, maxDecimals));
 }
 
-/** A WAD (1e18) share as a percentage: 0.25e18 → "25.00%". */
+/** fmtUsdgPrice with a dollar sign: "$12.00", "$0.0123". */
+export function fmtUsdPrice(value: bigint | undefined | null): string {
+  return withDollar(fmtUsdgPrice(value));
+}
+
+/**
+ * A price the book can trade at, at its real precision: every digit of the USDG amount, at least
+ * the cents, nothing rounded or truncated ("$0.3997", "$0.40", "$1.00", "$12.3456"). The book trades in 0.0001 USDG
+ * steps, so two asks within a cent of each other must not print the same, and no ask may read cheaper or dearer than it
+ * is. fmtUsdPrice keeps 3 significant digits under 1 and would show 0.3989 as 0.398, an ask truncated down.
+ */
+export function fmtUsdPriceExact(value: bigint): string {
+  return withDollar(displayExact(value, USDG_DECIMALS, { minDecimals: 2 }));
+}
+
+/** Stock Tokens (18 decimals): at most four decimals, trailing zeros dropped: "1", "2.5", "<0.0001". */
+export function fmtAsset(value: bigint | undefined | null, maxDecimals = 4): string {
+  if (value === undefined || value === null) return "—";
+  return displayQuantity(value, ASSET_DECIMALS, { maxDecimals });
+}
+
+/** Vault shares (cNVDA) are 18 decimals, same as the asset, and shown the same way. */
+export function fmtShares(value: bigint | undefined | null, maxDecimals = 4): string {
+  if (value === undefined || value === null) return "—";
+  return displayQuantity(value, SHARE_DECIMALS, { maxDecimals });
+}
+
+/** A WAD (1e18) share as a percentage: 0.25e18 → "25%", 0.125e18 → "12.5%". */
 export function fmtWadPercent(wad: bigint | undefined | null): string {
   if (wad === undefined || wad === null) return "—";
-  return `${formatAmount(wad * 100n, 18, 2)}%`;
+  return displayRatioPercent(wad, WAD);
 }
 
 /** Parse user input into base units. Returns null on anything that is not a clean number. */
@@ -106,9 +142,9 @@ export function multiplierIsActive(uiMultiplier: bigint | undefined | null): boo
   return uiMultiplier !== undefined && uiMultiplier !== null && uiMultiplier !== WAD;
 }
 
-/** The multiplier itself, as a bare ratio like "1.0000". */
+/** The multiplier itself, as a bare ratio: "1", "1.05", at most four decimals. */
 export function fmtMultiplier(uiMultiplier: bigint | undefined | null): string {
-  return formatAmount(uiMultiplier ?? WAD, 18, 4);
+  return displayQuantity(uiMultiplier ?? WAD, 18, { maxDecimals: 4 });
 }
 
 /* -------------------------------------------------------------------------------------------
@@ -120,7 +156,7 @@ export function fmtMultiplier(uiMultiplier: bigint | undefined | null): string {
  *
  * Neither is ever multiplied by 52. A week with no buyer is 0, and 0 is a result, not a gap.
  *
- * PREMIUM ONLY (W-21). On an assigned week the harvest also sweeps the strike proceeds — the
+ * PREMIUM ONLY. On an assigned week the harvest also sweeps the strike proceeds — the
  * USDG the collateral taken at the strike was sold for. That is returned principal, not yield,
  * and passing it to either function below turned a 43.32 USDG week into a 993.32 USDG one.
  * Pass `CycleRow.premiumNetUsdg`, never `creditedUsdg` or `harvestGrossUsdg`; the strike
@@ -166,15 +202,14 @@ export function tvlUsdg(assets18: bigint | undefined, spotUsdg6: bigint | undefi
 }
 
 /**
- * The realized-week figure: net PREMIUM / TVL in USD at harvest, as a percent string. Strike
- * proceeds are never an input (see the block comment above).
- * Returns "0.000%" for an unfilled week, because that is the honest answer.
+ * The realized-week figure: net PREMIUM / TVL in USD at harvest, as a percent string to one decimal
+ * Strike proceeds are never an input (see the block comment above).
+ * Returns "0%" for an unfilled week, because that is the honest answer, and "<0.1%" for a week that
+ * earned something smaller than a tenth of a percent, so a real result never reads as zero.
  */
 export function fmtRealizedWeek(premiumNetUsdg6: bigint | undefined, tvlUsdg6: bigint | undefined): string {
   if (premiumNetUsdg6 === undefined || tvlUsdg6 === undefined || tvlUsdg6 === 0n) return "—";
-  // 1e5 keeps three decimal places of a percent through integer maths.
-  const bps100k = (premiumNetUsdg6 * 100n * 100000n) / tvlUsdg6;
-  return `${formatAmount(bps100k, 5, 3)}%`;
+  return displayRatioPercent(premiumNetUsdg6, tvlUsdg6);
 }
 
 /* -------------------------------------------------------------------------------------------
@@ -336,7 +371,13 @@ function toSeconds(ts: number | bigint | undefined | null): number | undefined {
   return seconds;
 }
 
-/** "Fri 18 Sep, 8:00pm UTC" */
+/**
+ * "Fri 18 Sep, 8:00pm UTC"
+ *
+ * @deprecated: times are shown in the reader's zone, not UTC. Use `<Time>` from
+ * components/ui/Time.tsx, or lib/v2/time.ts `localStamp`/`marketStamp` with an explicit zone. Kept, unchanged, only
+ * so its existing callers compile until they move.
+ */
 export function fmtUtc(ts: number | bigint | undefined | null): string {
   const seconds = toSeconds(ts);
   if (seconds === undefined) return "—";
@@ -359,7 +400,12 @@ export function fmtEastern(ts: number | bigint | undefined | null): string {
   return formatClock(seconds, "America/New_York", "ET");
 }
 
-/** "18 Sep 2026", UTC calendar date of the instant. */
+/**
+ * "18 Sep 2026", UTC calendar date of the instant.
+ *
+ * @deprecated: use `<Time at={t} dateOnly />` from components/ui/Time.tsx, or lib/v2/time.ts
+ * `localDayStamp` with an explicit zone. Kept, unchanged, only so its existing callers compile until they move.
+ */
 export function fmtUtcDate(ts: number | bigint | undefined | null): string {
   const seconds = toSeconds(ts);
   if (seconds === undefined) return "—";
@@ -402,7 +448,7 @@ export function windowProgress(startSeconds: number, endSeconds: number, nowSeco
  *  - "listed": a call is armed and may be selling. Shares are priced on a NAV that values the
  *              short call at zero, so an assigned week is socialised across every share, a
  *              deposit made now included, and every later fill this week is sized against a
- *              balance that includes it (decision D8: Listed deposits allowed, risk disclosed).
+ *              balance that includes it (deposits stay open while Listed; the risk is disclosed).
  *  - "near":   as "listed", and live spot is already at or above strike × (1 − minOtmBps). That
  *              is the point where the vault would no longer arm this strike, i.e. the call is
  *              close to (or already) in the money.

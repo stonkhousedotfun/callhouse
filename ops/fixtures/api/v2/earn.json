@@ -5,7 +5,7 @@
       "vault": "0x44cA209778e8Efe4973D9DE5e071D8Cd2bc5681d",
       "asset": "0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168",
       "adapter": null,
-      "paused": false,
+      "fundingEnabled": true,
       "sharesSupply": "100000000000000000000",
       "deposited": "1000000000",
       "skimmed": null,
@@ -20,6 +20,288 @@
         "delivered": null,
         "ts": 1789590600,
         "tx": "0x4c9b986695523141168947864942f253d8902993b645ffa4100e412d1e5add0c"
+      },
+      "indicativeAssetsPerShare": "10000000",
+      "indicativeTotalAssets": "1000000000",
+      "hasOpenPosition": false,
+      "apy7d": {
+        "bps": null,
+        "reason": "short-history",
+        "from": null,
+        "to": 1789592400
+      },
+      "apy30d": {
+        "bps": null,
+        "reason": "short-history",
+        "from": null,
+        "to": 1789592400
+      },
+      "totalAssets": "1000000000",
+      "venue": null,
+      "earliestWithdrawal": {
+        "kind": "queued",
+        "at": null,
+        "reason": "queue-ahead",
+        "liquidityCap": null
+      }
+    },
+    {
+      "vault": "0xF03A705563E93cDcD9aF4fBd67f526bd20a632Ab",
+      "asset": "0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168",
+      "adapter": "0x9AC59925d3889F1E4F6A2df3efe915D98e5F94F1",
+      "fundingEnabled": true,
+      "sharesSupply": "200000000000000000000",
+      "deposited": "2000000000",
+      "skimmed": "0",
+      "queue": {
+        "depth": 0,
+        "oldestRequestedAt": null
+      },
+      "lastAdapterMove": null,
+      "indicativeAssetsPerShare": "10020000",
+      "indicativeTotalAssets": "2004000000",
+      "hasOpenPosition": false,
+      "apy7d": {
+        "bps": 954,
+        "reason": null,
+        "from": 1788901200,
+        "to": 1789592400
+      },
+      "apy30d": {
+        "bps": null,
+        "reason": "no-price",
+        "from": 1786910400,
+        "to": 1789592400
+      },
+      "totalAssets": "2004000000",
+      "venue": {
+        "address": "0xb81fb3F9c3e3645Ea68c70fFE2D4C07047e4B353",
+        "name": "Steakhouse USDG",
+        "apy24h": {
+          "bps": 756,
+          "reason": null,
+          "from": 1789506000,
+          "to": 1789592400
+        },
+        "apy7d": {
+          "bps": 659,
+          "reason": null,
+          "from": 1788901200,
+          "to": 1789592400
+        },
+        "withdrawable": "1500000000",
+        "withdrawableSource": "position",
+        "position": "1500000000"
+      },
+      "earliestWithdrawal": {
+        "kind": "now",
+        "at": 1789592400,
+        "reason": "liquid",
+        "liquidityCap": "2004000000"
+      }
+    },
+    {
+      "vault": "0x34754b464215e45e7D84D67e6f552e6e7d4d38eD",
+      "asset": "0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168",
+      "adapter": "0xcE6123dD741bC8478e012D95821F9f0ede24E7c1",
+      "fundingEnabled": true,
+      "sharesSupply": "50000000000000000000",
+      "deposited": "500000000",
+      "skimmed": null,
+      "queue": {
+        "depth": 0,
+        "oldestRequestedAt": null
+      },
+      "lastAdapterMove": null,
+      "indicativeAssetsPerShare": "9600000",
+      "indicativeTotalAssets": "480000000",
+      "hasOpenPosition": true,
+      "apy7d": {
+        "bps": null,
+        "reason": "no-samples",
+        "from": null,
+        "to": null
+      },
+      "apy30d": {
+        "bps": null,
+        "reason": "no-samples",
+        "from": null,
+        "to": null
+      },
+      "totalAssets": null,
+      "venue": {
+        "address": "0x5c6EaaC6d4EFF25f77A7ac7164D65836BBb125f2",
+        "name": "USDG Lending",
+        "apy24h": {
+          "bps": null,
+          "reason": "no-samples",
+          "from": null,
+          "to": null
+        },
+        "apy7d": {
+          "bps": null,
+          "reason": "no-samples",
+          "from": null,
+          "to": null
+        },
+        "withdrawable": "120000000",
+        "withdrawableSource": "maxWithdraw",
+        "position": "300000000"
+      },
+      "earliestWithdrawal": {
+        "kind": "queued",
+        "at": 1789761600,
+        "reason": "open-position",
+        "liquidityCap": null
+      }
+    },
+    {
+      "vault": "0x40B8EFEb3352669F86D9C820E17DC3842B466Edb",
+      "asset": "0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168",
+      "adapter": "0x5afA338D499e164b9999116d43A20360Ac2f0294",
+      "fundingEnabled": true,
+      "sharesSupply": "30000000000000000000",
+      "deposited": "300000000",
+      "skimmed": null,
+      "queue": {
+        "depth": 0,
+        "oldestRequestedAt": null
+      },
+      "lastAdapterMove": null,
+      "indicativeAssetsPerShare": "10000000",
+      "indicativeTotalAssets": "300000000",
+      "hasOpenPosition": false,
+      "apy7d": {
+        "bps": 954,
+        "reason": null,
+        "from": 1788901200,
+        "to": 1789592400
+      },
+      "apy30d": {
+        "bps": null,
+        "reason": "no-price",
+        "from": 1786910400,
+        "to": 1789592400
+      },
+      "totalAssets": "300000000",
+      "venue": {
+        "address": "0x8f71326a9C28B4fc1614930A2521b7B9c793BbD5",
+        "name": "USDG Lending (full)",
+        "apy24h": {
+          "bps": 756,
+          "reason": null,
+          "from": 1789506000,
+          "to": 1789592400
+        },
+        "apy7d": {
+          "bps": 659,
+          "reason": null,
+          "from": 1788901200,
+          "to": 1789592400
+        },
+        "withdrawable": "0",
+        "withdrawableSource": "maxWithdraw",
+        "position": "300000000"
+      },
+      "earliestWithdrawal": {
+        "kind": "queued",
+        "at": null,
+        "reason": "venue-liquidity",
+        "liquidityCap": "0"
+      }
+    },
+    {
+      "vault": "0x07cc65E87F944B1e202C86eA604f2ab6B39D2357",
+      "asset": null,
+      "adapter": "0x0b7DFe36b1a733781E9fe99BB48Bd3cA94Fc0E60",
+      "fundingEnabled": null,
+      "sharesSupply": null,
+      "deposited": null,
+      "skimmed": null,
+      "lastAdapterMove": null,
+      "indicativeAssetsPerShare": null,
+      "indicativeTotalAssets": null,
+      "hasOpenPosition": null,
+      "totalAssets": null,
+      "venue": {
+        "address": null,
+        "name": null,
+        "apy24h": {
+          "bps": null,
+          "reason": "no-samples",
+          "from": null,
+          "to": null
+        },
+        "apy7d": {
+          "bps": null,
+          "reason": "no-samples",
+          "from": null,
+          "to": null
+        },
+        "withdrawable": null,
+        "withdrawableSource": null,
+        "position": null
+      },
+      "earliestWithdrawal": {
+        "kind": "unknown",
+        "at": null,
+        "reason": "not-read",
+        "liquidityCap": null
+      }
+    },
+    {
+      "vault": "0xb8E4809E9b3baeae18D1FCfBc307682DaD3F16F6",
+      "asset": "0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168",
+      "adapter": "0x825bd92e04B3E3Dc512F86788120C3b052006511",
+      "fundingEnabled": true,
+      "sharesSupply": "40000000000000000000",
+      "deposited": "400000000",
+      "skimmed": null,
+      "queue": {
+        "depth": 0,
+        "oldestRequestedAt": null
+      },
+      "lastAdapterMove": null,
+      "indicativeAssetsPerShare": "10000000",
+      "indicativeTotalAssets": "400000000",
+      "hasOpenPosition": false,
+      "apy7d": {
+        "bps": null,
+        "reason": "short-history",
+        "from": null,
+        "to": 1789592400
+      },
+      "apy30d": {
+        "bps": null,
+        "reason": "short-history",
+        "from": null,
+        "to": 1789592400
+      },
+      "totalAssets": "400000000",
+      "venue": {
+        "address": null,
+        "name": null,
+        "apy24h": {
+          "bps": null,
+          "reason": "no-samples",
+          "from": null,
+          "to": null
+        },
+        "apy7d": {
+          "bps": null,
+          "reason": "no-samples",
+          "from": null,
+          "to": null
+        },
+        "withdrawable": null,
+        "withdrawableSource": null,
+        "position": null
+      },
+      "earliestWithdrawal": {
+        "kind": "queued",
+        "at": null,
+        "reason": "venue-unreadable",
+        "liquidityCap": null
       }
     }
   ]

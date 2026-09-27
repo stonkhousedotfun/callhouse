@@ -27,7 +27,7 @@ app.use(honoLogger());
 const PHASE_NAMES = ["Idle", "Listed", "Exercisable", "Settling"] as const;
 
 /**
- * The `?status=` values the list routes accept: exactly the schema's enums (X-2). Exported so
+ * The `?status=` values the list routes accept: exactly the schema's enums. Exported so
  * `src/api/index.test.ts` can pin them to `ponder.schema.ts`; a value added to one side without
  * the other is either unreachable through the API or a 400 for a status the tape really uses.
  */
@@ -46,7 +46,7 @@ export const SETTLEMENT_OUTCOMES = ["unfilled", "assigned", "expired", "unredeem
 const ONE = 10n ** 18n;
 const ZERO_HASH = `0x${"0".repeat(64)}`;
 
-/** X-1: the vault's `listingHash()` is `bytes32(0)` when nothing is live; the wire says null, never a zero hash. */
+/** The vault's `listingHash()` is `bytes32(0)` when nothing is live; the wire says null, never a zero hash. */
 const hashOrNull = (h: `0x${string}` | null | undefined): `0x${string}` | null =>
   h === null || h === undefined || h.toLowerCase() === ZERO_HASH ? null : h;
 
@@ -56,7 +56,7 @@ const hashOrNull = (h: `0x${string}` | null | undefined): `0x${string}` | null =
  * after a redeem; `optionId` is 0 after an unfilled close and after a redeem — and a successful
  * Multicall read of 0 is `0n`, which `??` does not treat as absent. Published as-is that put
  * `"0"` on the wire for most of every week, where every other route says null for none
- * (`cycle.written.claimKey`, GraphQL `vaultState`, X-1's listing hash). Zero is absent: the
+ * (`cycle.written.claimKey`, GraphQL `vaultState`, the listing hash). Zero is absent: the
  * live id if there is one, else the week's own row, else null.
  */
 export function weekOptionIds(
@@ -278,7 +278,7 @@ export function cycleJson(c: CycleRow) {
       bucketAssigned: num(c.bucketAssigned),
       closedAt: iso(c.closedAt),
       txClose: c.txClose,
-      // The stranded close (AF-02): the claim could not be redeemed at `rollClose`. Null on
+      // The stranded close: the claim could not be redeemed at `rollClose`. Null on
       // every week that closed normally; `recoveredAt` null while the claim is still stranded.
       strand:
         c.strandGen === null
@@ -291,7 +291,7 @@ export function cycleJson(c: CycleRow) {
             },
     },
 
-    // Premium and strike proceeds are published SEPARATELY (W-21). On an assigned week the
+    // Premium and strike proceeds are published SEPARATELY. On an assigned week the
     // vault's harvest sweeps both, but the strike proceeds are returned principal — collateral
     // that left at the strike and came back as USDG — and must never be read as yield. Every
     // field named `premium*` is premium only; `creditedUsdg` and `usdgPerShare` are the whole
@@ -649,7 +649,7 @@ app.get("/v1/vault", requireVault, cache15s, async (c) => {
           .then((r) => r[0] ?? null);
 
   // The last terminal harvest: one `rollClose`'s sweep. A checkpoint or a retry is not a
-  // result and must never be shown as one. (X-3: this used to be called `lastWeek`, which it
+  // result and must never be shown as one. (this used to be called `lastWeek`, which it
   // is not when a week was swept in more than one go — the week's total is the cycle row.)
   const lastHarvest = await db
     .select()
@@ -731,7 +731,7 @@ app.get("/v1/vault", requireVault, cache15s, async (c) => {
         maxPriceAgeSeconds: state?.maxPriceAge ?? 0,
       },
 
-      // The stranded-claim state machine (AF-02). While `stranded`, deposits and instant
+      // The stranded-claim state machine. While `stranded`, deposits and instant
       // redemption are shut, `rollOpen` refuses, the queue still settles on the idle balance,
       // and anyone may call `retryStrandedClaim()`.
       stranded: {
@@ -842,13 +842,13 @@ app.get("/v1/vault", requireVault, cache15s, async (c) => {
         // Strike USDG the claims returned, stranded recoveries included.
         assignmentUsdg: usdg(state?.lifetimeAssignmentUsdg ?? 0n),
         protocolFee: usdg(state?.lifetimeProtocolFee ?? 0n),
-        // Premium after the protocol fee. PREMIUM ONLY (W-21).
+        // Premium after the protocol fee. PREMIUM ONLY.
         premiumNet: usdg(state?.lifetimePremiumNet ?? 0n),
         // Strike proceeds swept by harvests: returned principal, not premium.
         strikeProceedsUsdg: usdg(state?.lifetimeStrikeProceeds ?? 0n),
         // premiumNet + strikeProceedsUsdg: everything credited to holders.
         creditedUsdg: usdg(state?.lifetimeCreditedUsdg ?? 0n),
-        // Asset base units settled redeemers were booked and not paid (AF-05 haircuts).
+        // Asset base units settled redeemers were booked and not paid (haircuts).
         haircutAssets: asset(state?.lifetimeHaircutAssets ?? 0n),
       },
 
@@ -1104,11 +1104,11 @@ app.get("/v1/account/:addr", requireVault, cache15s, async (c) => {
         previewAssets: asset(live.previewAssets ?? 0n),
         previewUsdg: usdg(live.previewUsdg ?? 0n),
         epochSettledAt: epoch === null ? null : iso(epoch.settledAt),
-        // USDG booked to this owner that a payout could not move (AF-03). Still owed.
+        // USDG booked to this owner that a payout could not move. Still owed.
         deferredUsdg: usdg(indexed?.deferredUsdg ?? 0n),
       },
 
-      // The owner's pending share of a stranded claim (AF-02), if any: staged against the owner
+      // The owner's pending share of a stranded claim, if any: staged against the owner
       // (`wad`, generation `gen`) or this owner's part of the settled epoch they queued into
       // (`epochWad`, generation `epochGen`), which their entry takes on settlement.
       strand:
@@ -1131,7 +1131,7 @@ app.get("/v1/account/:addr", requireVault, cache15s, async (c) => {
         redeemedAssets: asset(indexed?.redeemedAssets ?? 0n),
         redeemedUsdg: usdg(indexed?.redeemedUsdg ?? 0n),
         claimedUsdg: usdg(indexed?.claimedUsdg ?? 0n),
-        // Booked and not paid because the reserve was unbacked (AF-05). Permanent.
+        // Booked and not paid because the reserve was unbacked. Permanent.
         haircutAssets: asset(indexed?.haircutAssets ?? 0n),
         depositCount: indexed?.depositCount ?? 0,
         firstSeenAt: iso(indexed?.firstSeenAt ?? null),

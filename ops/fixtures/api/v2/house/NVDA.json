@@ -1,6 +1,12 @@
 {
   "market": "NVDA",
   "vault": "0x602CA55061735b596380f1e0f775a9D91966e2cD",
+  "kind": "weekly",
+  "earliestWithdrawal": {
+    "kind": "weekly",
+    "at": 1789761600,
+    "reason": "epoch-boundary"
+  },
   "currentEpoch": {
     "id": "1789156800",
     "start": 1789156800,
@@ -51,10 +57,23 @@
   "queue": [
     {
       "kind": "withdraw",
+      "account": "0x300a7AB2f92B536e3f58422372c964B2Bb535ea2",
+      "assets": null,
+      "shares": "4000000000000000000",
+      "requestedAt": 1788555600,
+      "epochId": "1788552000",
+      "status": "claimable",
+      "maturesAt": 1789156800
+    },
+    {
+      "kind": "withdraw",
       "account": "0xE37876AcBfbA6186E4687f4ef465D9AC21558De3",
       "assets": null,
       "shares": "10000000000000000000",
-      "requestedAt": 1789585200
+      "requestedAt": 1789585200,
+      "epochId": "1789156800",
+      "status": "pending",
+      "maturesAt": 1789761600
     }
   ]
 }

@@ -4,7 +4,7 @@ import { nextExpiry, isWeeklyExpiry } from "../lib/v2/calendar";
 import { V2_REGISTRY } from "../lib/v2/marketRegistry.generated";
 
 /**
- * F1's approved launch set: the existing NVDA canary plus nineteen additions.
+ * The approved launch set: the existing NVDA canary plus nineteen additions.
  * Keep this explicit. Registry order and wave labels also contain deferred markets, and must
  * never turn the optional 34-market stress case into a rollout commitment.
  */
@@ -18,6 +18,34 @@ export const SCALE_HEAD = 1_800_000_000;
 export const SCALE_SPOT = 200_000_000n;
 /** Same order as keeper/src/v2/registry.ts TENORS and stepLadders. */
 export const SCALE_TENORS = ["weekly", "daily"] as const;
+/**
+ * The load this harness measures: two weekly and three daily expiries per market, the registry's earlier shape.
+ * The launch registry lists the next daily close only since 2026-09-23, but the
+ * committed ceilings must keep covering the load a later decision to turn weeklies back on would bring, so the
+ * harness states its own expiry counts instead of reading `defaults.expiriesAhead`. Ladders and strike ticks are still
+ * the generated registry's.
+ */
+export const SCALE_EXPIRIES_AHEAD = { weekly: 2, daily: 3 } as const satisfies Record<"weekly" | "daily", number>;
+
+/**
+ * The launch set is NVDA and SPCX: the
+ * generated registry carries the launch set only, so eighteen of the twenty targets are no longer registry rows. The
+ * harness measures LOAD (twenty markets, 450 series), not those markets, so a target the registry does not carry is
+ * a SYNTHETIC scale market: the registry's default ladder and 0 mint fee, calls only, a deterministic synthetic
+ * underlying, and the strike tick that ticker had in indexer/lib/v2/marketRegistry.generated.ts when the baseline
+ * was captured (copied from that file, not re-chosen), so the measured shape is the one
+ * the committed baseline was captured on. A target the registry does carry (NVDA, SPCX) is read from it as before.
+ */
+export const SCALE_SYNTHETIC_TICKS: Readonly<Record<string, string>> = {
+  SPY: "1000000", MU: "5000000", QQQ: "1000000", SNDK: "10000000", AAPL: "2500000", MSFT: "2500000",
+  INTC: "500000", TSLA: "2500000", META: "2500000", AMD: "2500000", GOOGL: "2500000", AMZN: "2500000",
+  MSTR: "1000000", PLTR: "2500000", DELL: "2500000", ORCL: "1000000", TSM: "2500000", CRWV: "1000000",
+};
+
+/** `0x5ca1e…<index>`: a deterministic address no registry names, one per synthetic target. */
+function syntheticUnderlying(index: number): `0x${string}` {
+  return `0x5ca1e${String(index).padStart(35, "0")}`;
+}
 
 export type ScaleTicker = (typeof SCALE_TICKERS)[number];
 export type ScaleTenor = (typeof SCALE_TENORS)[number];
@@ -67,6 +95,7 @@ export type ScaleShape = {
   calls: number;
   puts: number;
   defaultExpiriesAhead: Readonly<Record<ScaleTenor, number>>;
+  stressExpiriesAhead: Readonly<Record<ScaleTenor, number>>;
   expiries: Readonly<Record<ScaleTenor, readonly number[]>>;
 };
 
@@ -95,11 +124,21 @@ function upcomingExpiries(now: number, weekly: boolean, count: number,
  * keyed create-map deduplication used by stepLadders at the pinned head.
  */
 export function scalePlan(holidays: ReadonlyMap<number, boolean>, now = SCALE_HEAD): ScalePlan {
-  const generated = new Map(V2_REGISTRY.markets.map((market) => [market.ticker, market]));
+  // Keyed by string: the generated ticker type is the launch set only, and most scale targets are not in it.
+  const generated = new Map<string, (typeof V2_REGISTRY.markets)[number]>(V2_REGISTRY.markets.map((market) => [market.ticker, market]));
   const defaults = V2_REGISTRY.defaults;
-  const markets = SCALE_TICKERS.map((ticker): ScaleMarket => {
-    const market = generated.get(ticker);
-    if (!market) throw new Error(`Scale target ${ticker} is absent from the generated indexer registry`);
+  const markets = SCALE_TICKERS.map((ticker, index): ScaleMarket => {
+    const registered = generated.get(ticker);
+    const tick = SCALE_SYNTHETIC_TICKS[ticker];
+    if (!registered && tick === undefined) throw new Error(`Scale target ${ticker} is neither in the generated indexer registry nor a synthetic scale market`);
+    const market = registered ?? {
+      name: `${ticker} (synthetic scale market)`,
+      underlying: syntheticUnderlying(index),
+      strikeTick: tick!,
+      mintFeePpm: 0,
+      puts: false,
+      overrides: {},
+    };
     const overrides = market.overrides as MarketOverrides;
     const strikeTick = BigInt(market.strikeTick);
     const ladder = Object.fromEntries(SCALE_TENORS.map((tenor) => {
@@ -112,8 +151,7 @@ export function scalePlan(holidays: ReadonlyMap<number, boolean>, now = SCALE_HE
     })) as Record<ScaleTenor, ScaleLadder>;
     const expiriesAhead = Object.fromEntries(SCALE_TENORS.map((tenor) => [
       tenor,
-      integer(overrides.expiriesAhead?.[tenor] ?? defaults.expiriesAhead[tenor],
-        `${ticker}.${tenor}.expiriesAhead`, true),
+      integer(SCALE_EXPIRIES_AHEAD[tenor], `${ticker}.${tenor}.expiriesAhead`, true),
     ])) as Record<ScaleTenor, number>;
     const strikes = Object.fromEntries(SCALE_TENORS.map((tenor) => [tenor, {
       calls: ladderStrikes(SCALE_SPOT, ladder[tenor], strikeTick, false),
@@ -181,6 +219,7 @@ export function scalePlan(holidays: ReadonlyMap<number, boolean>, now = SCALE_HE
       calls,
       puts,
       defaultExpiriesAhead: defaults.expiriesAhead,
+      stressExpiriesAhead: SCALE_EXPIRIES_AHEAD,
       expiries,
     },
     series,

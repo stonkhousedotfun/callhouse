@@ -55,7 +55,7 @@ type PolicyParams = import('./policy.js').PolicyParams;
                               FIXTURES
 //////////////////////////////////////////////////////////////*/
 
-/** Policy.launchDefaults(), and README "Policy (launch)". */
+/** Policy.launchDefaults(), the launch policy. */
 const LAUNCH: PolicyParams = {
   minOtmBps: 300n,
   maxOtmBps: 1200n,

@@ -3,6 +3,7 @@ import schema from "ponder:schema";
 import { v2CalendarPonder, v2RewardsPonder } from "../../lib/registry";
 import { clearCalendarCache } from "../../lib/v2/calendarCache";
 import { bountyAmount, rewardTotal } from "../../lib/v2/periphery";
+import { recordCalendarHoliday } from "./calendarMode";
 
 /** Both contracts are optional. Their individual registry aliases are inert when unset. */
 v2CalendarPonder.on("ExpiryCalendar:HolidaySet", async ({ event, context }) => {
@@ -13,6 +14,7 @@ v2CalendarPonder.on("ExpiryCalendar:HolidaySet", async ({ event, context }) => {
     changedBlock: event.block.number, changedTx: event.transaction.hash,
   };
   await context.db.insert(schema.v2CalendarHoliday).values({ dayIndex, ...values }).onConflictDoUpdate(values);
+  await recordCalendarHoliday(context, event, isHoliday);
 });
 
 v2CalendarPonder.on("ExpiryCalendar:SpecialExpirySet", async ({ event, context }) => {

@@ -1,7 +1,7 @@
 /**
  * The lender reward program, verified against the PINNED 18-decimal vector.
  *
- * WHAT CHANGED IN T-113, AND WHY IT MATTERED. The first version of this file (T-133) BUILT its own
+ * WHAT CHANGED IN AND WHY IT MATTERED. The first version of this file BUILT its own
  * two-leaf tree with viem and checked the proof against the root it had just computed. The header
  * argued that deriving beats pasting. That reasoning is right for `makerRewards.test.ts`, which pins
  * an INDEPENDENT OpenZeppelin vector — and wrong here, because the tree and the checker shared one
@@ -11,11 +11,11 @@
  * So this file now asserts against {PINNED_ROOT}, a LITERAL copied from the contracts repo — the same
  * artifact `RewardsDistributor.claim` verifies against on chain, and the same literal declared
  * independently at `indexer/scripts/lender-epoch.test.ts:16`. If our TypeScript mirror of the leaf
- * formula (`rewardClaim.ts`) ever drifts from `RewardsDistributor.sol:199-201`, the proofs in that
+ * formula (`rewardClaim.ts`) ever drifts from `RewardsDistributor.leaf`, the proofs in that
  * vector stop verifying and this goes red. That is the whole point: a user shown an unclaimable
  * reward is the failure, and only an externally-pinned root can catch it.
  *
- * The vector is vendored — see `fixtures/README.md` for its origin SHA and why it is a copy.
+ * The vector is vendored: a copy of the upstream test vector.
  */
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
@@ -48,7 +48,7 @@ import {
 
 /**
  * THE PIN. Copied from `callhouse-contracts` `v8` `test/v2/fixtures/lender-epoch-2960.oz.json`
- * (landed by `c8fb46678dd9da992b0ab34c9e9b414050a7bc53`), NOT computed from the vendored file.
+ * (the contracts repo's committed pin), NOT computed from the vendored file.
  * Writing it out is what makes the vendored copy checkable.
  */
 const PINNED_ROOT = "0x42758658626162126786767f92853840ef916b398e2e936d905f329436abfb44";
@@ -153,7 +153,7 @@ describe("decimals are a parameter, never a constant", () => {
   });
 
   it("RENDERS NOTHING NUMERIC when the token has not resolved — no 18, no 6, no zero", () => {
-    // Spec test 10. The failure mode D6 moves us to is "no number", and the only way that is an
+    // The failure mode a chain-read scale moves us to is "no number", and the only way that is an
     // improvement on "wrong number" is if nothing downstream quietly supplies one.
     const unresolved = lenderProgram(DISTRIBUTOR, null);
     expect(formatRewardAmount(10n ** 18n, unresolved)).toBeNull();
@@ -169,7 +169,7 @@ describe("the reward token is read from the distributor, and a failed read is no
   const TOKEN = "0x00000000000000000000000000000000000000f1" as Address;
 
   it("asks the distributor which token it holds, then asks that token what it is", async () => {
-    // Spec test 9's other half: the 18 that renders the pinned vector comes from decimals(), and
+    // The other half of the decimals check: the 18 that renders the pinned vector comes from decimals(), and
     // agreeing with the vector's own declared "18" is what makes the read checkable.
     readContract.mockReset();
     readContract.mockResolvedValueOnce(TOKEN).mockResolvedValueOnce(18).mockResolvedValueOnce("STONKHOUSE");
@@ -211,7 +211,7 @@ describe("the reward token is read from the distributor, and a failed read is no
 
 describe("address handling is real EIP-55, not an identity function", () => {
   it("checksums a lowercase address to a hardcoded known-good literal", () => {
-    // AC8 / the 2026-09-19 stubbed-viem incident: a stub whose `checksumAddress` was the IDENTITY
+    // The 2026-09-19 stubbed-viem incident: a stub whose `checksumAddress` was the IDENTITY
     // FUNCTION made assertions written against already-checksummed fixtures PASS. The only assertion
     // that catches that is one whose input is lowercase and whose expected value is mixed case, so
     // an identity function returns the input and fails.
@@ -234,7 +234,7 @@ describe("lender program configuration", () => {
   it("has its own path and id, and no literal pins its status", () => {
     expect(LENDER.epochBasePath).not.toContain("maker");
     expect(LENDER.id).toBe("lender");
-    // Spec test 7 / AC9: live is DERIVED from an address plus a resolved token. Each half alone
+    // Live is DERIVED from an address plus a resolved token. Each half alone
     // leaves it planned, which is what a status literal could not have expressed.
     expect(LENDER.status).toBe("live");
     expect(lenderProgram(DISTRIBUTOR, null).status).toBe("planned");
@@ -262,7 +262,7 @@ describe("lender program configuration", () => {
   });
 
   it("keeps the maker program's not-configured sentence byte-identical to what shipped", () => {
-    // T-133 criterion 4. Nothing in this package can render-test it, so it is pinned as a string.
+    // The not-configured sentence. Nothing in this package can render-test it, so it is pinned as a string.
     expect(makerProgram(null).notConfiguredNotice)
       .toBe("Reward claims will open after the RewardsDistributor is deployed.");
   });

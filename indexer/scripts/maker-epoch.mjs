@@ -2,15 +2,13 @@
 import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { encodeAbiParameters, getAddress, keccak256, concatHex } from "viem";
+import { getAddress } from "viem";
+// The leaf, node hash, tree layout and epoch window come from the one shared copy, which lender-epoch.mjs also
+// imports. A second copy here is how the two programs would drift into different roots for the same input.
+import { epochWindow, merkle } from "./lib/epoch-merkle.mjs";
 
-const WEEK_SECONDS = 604_800n;
-const FIRST_MONDAY_SECONDS = 345_600n;
 const SCRIPT_DIR = dirname(fileURLToPath(import.meta.url));
 const DEFAULT_API = process.env.INDEXER_URL ?? "http://localhost:42069";
-const leafTypes = [
-  { type: "uint256" }, { type: "uint256" }, { type: "address" }, { type: "uint256" },
-];
 
 function uint(value, label, allowZero = false) {
   if (typeof value !== "string" || !/^\d+$/.test(value)) throw new Error(`${label} must be a decimal integer`);
@@ -36,8 +34,7 @@ function args(argv) {
   const epoch = uint(positional[0], "epoch", true);
   const budget = uint(positional[1], "budget");
   if (epoch > BigInt(Number.MAX_SAFE_INTEGER)) throw new Error("epoch exceeds JSON safe integer range");
-  const weekStart = FIRST_MONDAY_SECONDS + epoch * WEEK_SECONDS;
-  if ((weekStart - FIRST_MONDAY_SECONDS) / WEEK_SECONDS !== epoch) throw new Error("invalid epoch");
+  epochWindow(epoch); // throws "invalid epoch"
   return { epoch, budget, input, output: output ?? resolve(SCRIPT_DIR, "../../ops/maker-epochs", `${epoch}.json`) };
 }
 
@@ -99,37 +96,6 @@ function allocate(rows, budget) {
     left--;
   }
   return allocations.filter((row) => row.amount > 0n).map((row, index) => ({ ...row, index }));
-}
-
-function leaf(epoch, entry) {
-  const inner = keccak256(encodeAbiParameters(leafTypes, [epoch, BigInt(entry.index), entry.account, entry.amount]));
-  return keccak256(inner);
-}
-
-function pair(left, right) {
-  return keccak256(concatHex(left.toLowerCase() < right.toLowerCase() ? [left, right] : [right, left]));
-}
-
-/** Matches OpenZeppelin StandardMerkleTree: hash-sort leaves, then reverse-fill the complete tree. */
-function merkle(epoch, entries) {
-  const sorted = entries.map((entry) => ({ entry, hash: leaf(epoch, entry) }))
-    .sort((a, b) => a.hash.toLowerCase().localeCompare(b.hash.toLowerCase()));
-  const n = sorted.length;
-  if (n === 0) throw new Error("no allocated entries");
-  const tree = Array(2 * n - 1);
-  for (let i = 0; i < n; i++) tree[tree.length - 1 - i] = sorted[i].hash;
-  for (let i = n - 2; i >= 0; i--) tree[i] = pair(tree[2 * i + 1], tree[2 * i + 2]);
-  const proofs = new Map();
-  for (let i = 0; i < n; i++) {
-    const proof = [];
-    let position = tree.length - 1 - i;
-    while (position > 0) {
-      proof.push(tree[position % 2 === 0 ? position - 1 : position + 1]);
-      position = Math.floor((position - 1) / 2);
-    }
-    proofs.set(sorted[i].entry.index, proof);
-  }
-  return { root: tree[0], proofs };
 }
 
 async function publish(path, value) {

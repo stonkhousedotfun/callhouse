@@ -303,6 +303,19 @@ export const orderBookAbi = [
   },
   {
     "type": "function",
+    "name": "locked",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "bool",
+        "internalType": "bool"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
     "name": "makerOrderCount",
     "inputs": [
       {
@@ -729,7 +742,7 @@ export const orderBookAbi = [
         "internalType": "uint256"
       }
     ],
-    "stateMutability": "view"
+    "stateMutability": "nonpayable"
   },
   {
     "type": "function",
@@ -1471,7 +1484,45 @@ export const orderBookAbi = [
   },
   {
     "type": "event",
+    "name": "OrderPlacedBy",
+    "inputs": [
+      {
+        "name": "orderId",
+        "type": "uint256",
+        "internalType": "uint256",
+        "indexed": true
+      },
+      {
+        "name": "placer",
+        "type": "address",
+        "internalType": "address",
+        "indexed": true
+      }
+    ],
+    "anonymous": false
+  },
+  {
+    "type": "event",
     "name": "OwedClaimed",
+    "inputs": [
+      {
+        "name": "account",
+        "type": "address",
+        "internalType": "address",
+        "indexed": true
+      },
+      {
+        "name": "amount",
+        "type": "uint256",
+        "internalType": "uint256",
+        "indexed": false
+      }
+    ],
+    "anonymous": false
+  },
+  {
+    "type": "event",
+    "name": "OwedCredited",
     "inputs": [
       {
         "name": "account",
@@ -1662,6 +1713,32 @@ export const orderBookAbi = [
   },
   {
     "type": "error",
+    "name": "QuoteLeg",
+    "inputs": [
+      {
+        "name": "unitsFilled",
+        "type": "uint64",
+        "internalType": "uint64"
+      },
+      {
+        "name": "premium",
+        "type": "uint256",
+        "internalType": "uint256"
+      },
+      {
+        "name": "takerFee",
+        "type": "uint256",
+        "internalType": "uint256"
+      },
+      {
+        "name": "sellerFees",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ]
+  },
+  {
+    "type": "error",
     "name": "ReentrancyGuardReentrantCall",
     "inputs": []
   },
@@ -1695,6 +1772,17 @@ export const orderBookAbi = [
     "type": "error",
     "name": "AlreadyFinal",
     "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "AlreadyListed",
+    "inputs": [
+      {
+        "name": "asset",
+        "type": "address",
+        "internalType": "address"
+      }
+    ]
   },
   {
     "type": "error",

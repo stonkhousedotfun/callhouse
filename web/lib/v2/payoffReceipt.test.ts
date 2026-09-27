@@ -6,7 +6,7 @@ import {
   formatUsdgCents, pnlRangeText, scenarioFigures,
 } from "./payoffReceipt";
 
-/** The design example (docs/product/TRADE-PAYOFF-EXPLORER.md §2.5), recomputed in base units by payoff.test.ts:
+/** The design example, recomputed in base units by payoff.test.ts:
  * 300 units at 4.1333 USDG/share, strike 230, exercise fee 25 bps, settlement 240, conversion at the ceiling. */
 const fees = { takerFeeFlat: 100_000n, takerFeeCapBps: 1_000 };
 const quote = costToBuy([{ orderId: "1", price: 4_133_300n, units: 300n }], 300n, fees);

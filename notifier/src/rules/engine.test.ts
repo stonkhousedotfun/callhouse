@@ -21,7 +21,7 @@
  *     produces the v7 auto_roll `withdrawn` message), and price-driven payloads carry the market's
  *     own `spotUpdatedAt`;
  *   - unreadable stored state starts afresh; wallets that leave the watch set lose their holdings;
- *   - the interface-version pin (K8-231): a /v2/config version this build does not implement fails
+ *   - the interface-version pin: a /v2/config version this build does not implement fails
  *     the tick CLOSED - it throws before any other route is read, persists nothing and enqueues
  *     nothing - while an UNREADABLE config stays a warning and the tick continues on stored state;
  *   - migration 002 is idempotent; no log line carries a wallet address.
@@ -83,7 +83,7 @@ class FakeIndexer {
   series: Record<string, unknown> = {};
   /**
    * Values from /v2/config. chainId and deployBlock stay arbitrary — those are runtime identity and
-   * are never hardcoded in production. interfaceVersion is NOT arbitrary any more (K8-231): this
+   * are never hardcoded in production. interfaceVersion is NOT arbitrary any more: this
    * fake stands in for an indexer the build implements, so it serves the pinned version. It is a
    * literal, not `IMPLEMENTED_INTERFACE_VERSION`, on purpose — a fixture that reads the constant it
    * is meant to exercise agrees with any value the constant takes, and raising the pin should make
@@ -733,7 +733,7 @@ test('a failed /v2/config read leaves the cursor and stored anchor', async () =>
   assert.ok(log.lines.some((l) => l.includes('config unavailable')));
 });
 
-/* ------------------------------------------------------------------ K8-231 interface-version pin */
+/* ------------------------------------------------------------------ interface-version pin */
 
 test('a /v2/config interface version this build does not implement fails the tick CLOSED', async () => {
   await subscribe(ALICE);
@@ -764,7 +764,7 @@ test('a /v2/config interface version this build does not implement fails the tic
 });
 
 test('a v7 indexer under the SAME deployment anchor is refused: the anchor cannot see the version', async () => {
-  // The gap this row closes. `deploymentAnchor` concatenates the version, so it changes only when
+  // The gap this test covers. `deploymentAnchor` concatenates the version, so it changes only when
   // the DEPLOYMENT changes; a v7 indexer serving the chain and deploy block this build already
   // recorded produces a different anchor string but no refusal, and before the pin the tick simply
   // decoded v7 payloads with v8 expectations. Here the stored anchor is written by a good tick
@@ -809,7 +809,7 @@ const adminOperation = (id: string, nonce: number, selector: string | null, labe
   status: 'pending',
 });
 
-test('T-435: a page holding one selector-less operation still delivers EVERY operation on it', async () => {
+test('a page holding one selector-less operation still delivers EVERY operation on it', async () => {
   // The wire declares `selector` nullable and the indexer serves a selector-less operation on
   // purpose. The notifier parses the page as one array, so a copy that required a string lost the
   // whole page: 'admin operations unavailable', the stored operations kept, nothing announced - the
@@ -831,4 +831,46 @@ test('T-435: a page holding one selector-less operation still delivers EVERY ope
     'both operations are announced, each under its own key',
   );
   assert.equal(log.lines.some((l) => l.includes('admin operations unavailable')), false, 'the page parsed');
+});
+
+/*//////////////////////////////////////////////////////////////
+  market_live through the tick
+//////////////////////////////////////////////////////////////*/
+
+test('a listing that goes live is announced once to opted-in wallets; a failed markets read in between is not a change', async () => {
+  const markets = (spcx: 'live' | 'paused') => [
+    { ticker: 'NVDA', underlying: NVDA, status: 'live', spot: money('220000000'), spotUpdatedAt: now() },
+    { ticker: 'SPCX', underlying: BOB, status: spcx, spot: null, spotUpdatedAt: null },
+  ];
+  let answer: ((res: ServerResponse) => void) | null = null;
+  fake.override = (path, res) => {
+    if (!path.startsWith('/v2/markets') || answer === null) return false;
+    answer(res);
+    return true;
+  };
+  await subscribe(ALICE, prefsSchema.parse({ marketLive: true }));
+  await subscribe(BOB); // default prefs: marketLive is off
+  fake.positions[ALICE] = positionsBody();
+  fake.positions[BOB] = positionsBody();
+  const liveKeys = async () => (await keys()).filter((k) => k.startsWith('market_live:')).sort();
+
+  answer = (res) => json(res, 200, markets('paused'));
+  await engine().runOnce(); // first boot: records NVDA live, SPCX paused, announces nothing
+  assert.deepEqual(await liveKeys(), []);
+
+  answer = (res) => json(res, 502, { error: { code: 'bad_gateway', message: '' } });
+  clock.advance(30_000);
+  await engine().runOnce(); // an outage is not a delisting: the stored statuses stand
+  assert.deepEqual(await liveKeys(), []);
+
+  answer = (res) => json(res, 200, markets('live'));
+  clock.advance(30_000);
+  await engine().runOnce();
+  assert.deepEqual(await liveKeys(), [`market_live:${ALICE}:SPCX:live`], 'SPCX only, ALICE only (BOB has the default, off)');
+
+  clock.advance(30_000);
+  await engine().runOnce();
+  assert.deepEqual(await liveKeys(), [`market_live:${ALICE}:SPCX:live`], 'still live: nothing new');
+  const { rows } = await db.query<{ value: { marketStatuses?: unknown } }>(`SELECT value FROM notifier.rules_state WHERE name = 'snapshot'`);
+  assert.deepEqual(rows[0]?.value.marketStatuses, { NVDA: 'live', SPCX: 'live' }, 'persisted for the next tick');
 });

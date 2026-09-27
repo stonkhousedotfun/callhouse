@@ -17,6 +17,7 @@ vi.mock("../../lib/env", () => ({
   V2_CLEARINGHOUSE: "0x000000000000000000000000000000000000c011",
 }));
 vi.mock("ponder:schema", () => ({ default: {
+  v2Market: "v2Market",
   v2MakerVaultDeposit: "v2MakerVaultDeposit",
   v2MakerVaultExposure: "v2MakerVaultExposure",
   v2MakerVaultLimits: "v2MakerVaultLimits",
@@ -30,9 +31,10 @@ function memoryDb() {
     if (value === undefined) rows.set(name, value = new Map());
     return value;
   };
-  const rowKey = (row: any) => String(row.id ?? row.longId ?? row.vault);
+  const rowKey = (row: any) => String(row.id ?? row.longId ?? row.vault ?? row.underlying);
   return {
     rows,
+    find: async (name: string, key: any) => table(name).get(rowKey(key)) ?? null,
     insert: (name: string) => ({ values: (row: any) => {
       const key = rowKey(row);
       const previous = table(name).get(key);
@@ -68,6 +70,8 @@ describe("MakerVault transparency reducers", () => {
     const account = "0x0000000000000000000000000000000000000011";
     const db = memoryDb();
     const context = { db };
+    // A deposit is stored only for USDG or a registered market's underlying, so the asset is a market here.
+    db.rows.set("v2Market", new Map([[asset.toLowerCase(), { underlying: asset.toLowerCase(), ticker: "NVDA" }]]));
 
     await handlers.get("MakerVault:Deposited")!({
       event: event(vault, { asset, from: account, amount: 20n }), context,
@@ -106,5 +110,66 @@ describe("MakerVault transparency reducers", () => {
       maxOrderLifetime: 15n,
       maxDailyOutflow: 16n,
     });
+  });
+});
+
+describe(": Deposited is stored only for USDG or a registered market underlying", () => {
+  const vault = "0x0000000000000000000000000000000000005016";
+  const from = "0x0000000000000000000000000000000000000011";
+  const USDG = "0x0000000000000000000000000000000000000001"; // the lib/env mock's USDG
+  // Mixed case, as a log carries it; v2Market is keyed by the lowercased underlying (src/v2/clearinghouse.ts).
+  const NVDA = "0x00000000000000000000000000000000000000aB";
+  const FORGED = "0x000000000000000000000000000000000000F00d";
+
+  function withMarket() {
+    const db = memoryDb();
+    db.rows.set("v2Market", new Map([[NVDA.toLowerCase(), { underlying: NVDA.toLowerCase(), ticker: "NVDA" }]]));
+    return db;
+  }
+  async function deposit(db: ReturnType<typeof memoryDb>, asset: string, amount: bigint) {
+    await handlers.get("MakerVault:Deposited")!({ event: event(vault, { asset, from, amount }), context: { db } });
+  }
+  const deposits = (db: ReturnType<typeof memoryDb>) => [...(db.rows.get("v2MakerVaultDeposit")?.values() ?? [])];
+
+  it("a forged-token deposit leaves no row and logs the refusal, naming the token", async () => {
+    const db = withMarket();
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      await deposit(db, FORGED, 1_000_000n);
+      expect(deposits(db)).toEqual([]);
+      const lines = warn.mock.calls.map((call) => String(call[0]));
+      expect(lines).toHaveLength(1);
+      expect(lines[0]).toContain(`MAKER_VAULT_DEPOSIT_UNLISTED asset=${FORGED.toLowerCase()}`);
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it("a USDG deposit leaves exactly one row", async () => {
+    const db = withMarket();
+    await deposit(db, USDG, 5n);
+    expect(deposits(db)).toHaveLength(1);
+    expect(deposits(db)[0]).toMatchObject({ asset: USDG, from, amount: 5n });
+  });
+
+  it("a registered market's Stock Token deposit leaves exactly one row, whatever the address case", async () => {
+    const db = withMarket();
+    await deposit(db, NVDA, 7n);
+    expect(deposits(db)).toHaveLength(1);
+    expect(deposits(db)[0]).toMatchObject({ asset: NVDA, amount: 7n });
+  });
+
+  it("the allow-set is the v2Market table: the same token is refused before its market is registered", async () => {
+    const db = memoryDb(); // no v2Market row yet
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      await deposit(db, NVDA, 7n);
+      expect(deposits(db)).toEqual([]);
+      db.rows.set("v2Market", new Map([[NVDA.toLowerCase(), { underlying: NVDA.toLowerCase(), ticker: "NVDA" }]]));
+      await deposit(db, NVDA, 7n);
+      expect(deposits(db)).toHaveLength(1);
+    } finally {
+      warn.mockRestore();
+    }
   });
 });

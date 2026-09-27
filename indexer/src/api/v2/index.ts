@@ -10,6 +10,7 @@ import { registerAdminRoutes } from "./admin";
 import { registerFeedRoutes } from "./feed";
 import { registerFlywheelRoutes } from "./flywheel";
 import { registerEarnRoutes } from "./earn";
+import { registerHealthRoutes } from "./health";
 import { registerHouseRoutes } from "./house";
 import { registerRewardRoutes } from "./rewards";
 import { registerServiceRoutes } from "./services";
@@ -27,9 +28,10 @@ v2App.use("*", async (c, next) => {
 
 // /v2/services joins the no-cache list for the reason the route exists: a 15s edge copy would go
 // on reporting a dead pricer as healthy for 15 seconds after it died. services.ts holds its own
-// short cache, which it can invalidate; the edge cannot.
-v2App.use("*", async (c, next) => c.req.path === "/v2/health" || c.req.path === "/v2/config" || c.req.path === "/v2/services"
-  ? next() : cache15s(c, next));
+// short cache, which it can invalidate; the edge cannot. /v2/health/house-registry and
+// /v2/health/registry are alerts, so they are never served from a copy either.
+const NO_CACHE = new Set(["/v2/health", "/v2/health/house-registry", "/v2/health/registry", "/v2/config", "/v2/services"]);
+v2App.use("*", async (c, next) => NO_CACHE.has(c.req.path) ? next() : cache15s(c, next));
 
 /** Keep the producer on the exact strict schema copied from the web consumer. */
 v2App.use("*", async (c, next) => {
@@ -54,7 +56,8 @@ v2App.use("*", async (c, next) => {
 
 v2App.get("/health", async (c) => {
   c.header("cache-control", "no-store");
-  const head = await indexedHead();
+  // A failed checkpoint read (indexedHead throws 503) is as degraded as a missing checkpoint.
+  const head = await indexedHead().catch(() => null);
   const lag = head === null ? null : Math.max(0, Math.floor(Date.now() / 1000) - Number(head.ts));
   const status = lag === null ? "degraded" : lag <= 120 ? "ok" : "lagging";
   return c.json({ status, block: (head?.block ?? 0n).toString(), lagSeconds: lag ?? 0, interfaceVersion: V2_REGISTRY.interfaceVersion },
@@ -69,6 +72,7 @@ registerAdminRoutes(v2App);
 registerFlywheelRoutes(v2App);
 registerEarnRoutes(v2App);
 registerHouseRoutes(v2App);
+registerHealthRoutes(v2App);
 registerRewardRoutes(v2App);
 registerVaultRoutes(v2App);
 registerServiceRoutes(v2App);

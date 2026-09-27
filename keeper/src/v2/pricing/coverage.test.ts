@@ -3,7 +3,7 @@
  * (fixtures/synthetic-chains.ts) through the Cboe adapter and the fake providers. No network, no credential, no
  * provider contact: the Cboe download, the feed reads and the calendar are all injected.
  *
- * What these pin (K3-303 acceptance):
+ * What these pin:
  *   ladder        the rungs are the cranker's own: upcomingLadderExpiries → ladderSlots → planLadder;
  *   methods       exact listed, interpolated (between listed expiries and between listed strikes) and extrapolated;
  *   zero / null   a price of zero is fair "0" and below the floor; a refusal is fair null and floor-unknown;
@@ -27,6 +27,7 @@ import { cboeToNormalized, createCboeProvider } from './cboe.js';
 import type { NormalizedChain, OptionChainProvider } from './chain.js';
 import {
   PROPOSED_HOUSE_FLOOR_USDG6,
+  calendarShortOf,
   localNextExpiry,
   parseEventCalendar,
   quoteReadiness,
@@ -82,7 +83,13 @@ function registryJson(patch: { NVDA?: V2Patch; TSLA?: V2Patch } = {}): object {
   return {
     shared: { chainId: 4663 },
     defaults: { maxPriceAgeS: 345_600, maxSpotDivergenceBps: 300 },
-    v2: { interfaceVersion: INTERFACE_VERSION, contracts: { expiryCalendar: '0x00000000000000000000000000000000c0de0004' } },
+    // Both tenors on: the spec default is 0DTE only since 2026-09-23, and these cases exercise the weekly
+    // ladder beside the daily one, so the fixture states the weekly-on shape rather than inheriting SPEC_DEFAULTS.
+    v2: {
+      interfaceVersion: INTERFACE_VERSION,
+      contracts: { expiryCalendar: '0x00000000000000000000000000000000c0de0004' },
+      defaults: { expiriesAhead: { weekly: 2, daily: 3 } },
+    },
     markets: [
       {
         ticker: 'NVDA',
@@ -146,7 +153,7 @@ async function cover(s: Scenario): Promise<{ report: CoverageReport; service: Pr
     spotReader,
     chains: { provider: s.provider },
     nowMs: () => s.nowMs,
-    // The same calendar the rungs report on is the service's K3-312 event input (single source).
+    // The same calendar the rungs report on is the service's event input (single source).
     ...(s.events == null ? {} : { events: toServiceEventCalendar(s.events) }),
   });
   const report = await runCoverage({
@@ -242,7 +249,7 @@ test("the rungs are the cranker's own ladder: its expiry walk, its slots and pla
   assert.deepEqual(expiries.daily, [sepClose(15), sepClose(16), sepClose(17)]);
   assert.deepEqual(expiries.weekly, [sepClose(18), sepClose(25)]);
   assert.equal(m.spot?.usdg6, 212_210_000n, 'the feed spot, as the pricing service reads it');
-  const want = ladderSlots({ expiriesAhead: m.expiriesAhead }, false, expiries).flatMap((slot) =>
+  const want = ladderSlots({ expiriesAhead: m.expiriesAhead, dailyWeekdays: m.dailyWeekdays }, false, expiries).flatMap((slot) =>
     planLadder({ spot: 212_210_000n, ladder: m.ladder[slot.tenor], strikeTick: 2_500_000n, isPut: slot.isPut, existing: [], anchor: null }).create.map((strike) => `${slot.tenor} ${slot.expiry} ${slot.isPut ? 'P' : 'C'} ${strike}`),
   );
   assert.deepEqual(m.rungs.map((r) => `${r.tenor} ${r.expiry} ${r.side === 'put' ? 'P' : 'C'} ${r.strike.raw}`), want);
@@ -397,14 +404,14 @@ test('a weekly pass never hides a daily failure: each tenor summarised and judge
   assert.equal(f1Inputs(dark.report)[0]!.ladderError?.reason, 'spot-stale', 'the F1 inputs are still emitted');
 });
 
-test('the command: quote-readiness exits 1 and lists only the failing (daily) series; exits 0 when every enabled series is ready; diagnostic always exits 0 with the F1 inputs', async () => {
+test('the command: quote-readiness exits 1 and lists only the failing (daily) series; exits 0 when every enabled series is ready; diagnostic always exits 0 with the registration inputs', async () => {
   const fake = () => createFakeProvider(FAKE_LISTED_PROVIDER, { NVDA: listedTwin(NVDA, NVDA_AS_OF) });
   const failing = await cli(['--mode', 'quote-readiness', '--tickers', 'NVDA', '--calendar', 'local'], { nowMs: NVDA_NOW_MS, provider: fake() });
   assert.equal(failing.code, 1, failing.stderr);
   assert.match(failing.stdout, /MM\/pricer quote readiness: NOT READY/);
   assert.match(failing.stdout, /NVDA: daily not-ready · weekly ready/);
   assert.match(failing.stdout, /failing series \(15\):/);
-  // K3-303 and K3-312 combined: a before-first daily is extrapolated, assumes an unknown event with
+  // Both rules combined: a before-first daily is extrapolated, assumes an unknown event with
   // no event input (event-uncertainty), and is too wide on this flat fixture (model-uncertainty).
   assert.match(failing.stdout, /NVDA daily 2026-09-15 call 215: degraded \(extrapolated, event-uncertainty, model-uncertainty\)/);
   assert.doesNotMatch(failing.stdout, /NVDA weekly 2026-09-18 call [\d.]+: /);
@@ -491,12 +498,51 @@ test('events: a supplied (synthetic) earnings date flags event-uncertainty on ev
   assert.ok(unknown.every((r) => r.events === null));
 });
 
+/**
+ * a break check for the self-counting shape: a coverage report that flagged from what it emits
+ * itself would stay flagged when its input shrinks. Drop one event KIND from the calendar and the flagged set
+ * must fall to exactly the rungs the remaining event reaches; drop the other and each rung loses that label.
+ */
+test('events: dropping one event kind from the calendar un-flags exactly the rungs only it reached', async () => {
+  const both = {
+    NVDA: [
+      { kind: 'earnings', date: '2026-09-16', session: 'after-close', label: 'synthetic earnings' },
+      { kind: 'dividend', date: '2026-09-22', session: 'before-open', label: 'synthetic dividend' },
+    ],
+  };
+  const run = async (calendar: typeof both) => rungsOf((await cover({
+    nowMs: NVDA_NOW_MS, provider: cboeProvider({ NVDA: NVDA_CBOE }), tickers: ['NVDA'], events: parseEventCalendar(calendar),
+  })).report, 'NVDA');
+  const flagged = (rungs: readonly RungRecord[]) => rungs.filter((r) => r.reasons.includes('event-uncertainty'));
+  const labels = (r: RungRecord) => (r.events ?? []).map((e) => e.label).sort();
+
+  const all = await run(both);
+  assert.equal(all.length, 25, 'the NVDA ladder: 15 daily + 10 weekly rungs');
+  assert.equal(flagged(all).length, all.length, 'the earnings date reaches every rung (see the test above)');
+  assert.deepEqual(labels(at(all, 'weekly', '2026-09-25')[0]!), ['synthetic dividend', 'synthetic earnings']);
+
+  // Drop the earnings kind: only the 25 Sep weekly spans 22 Sep, so only its rungs stay flagged.
+  const noEarnings = await run({ NVDA: both.NVDA.filter((e) => e.kind !== 'earnings') });
+  const stillFlagged = flagged(noEarnings);
+  assert.ok(stillFlagged.length > 0 && stillFlagged.length < all.length, `flagged ${stillFlagged.length} of ${all.length}`);
+  assert.deepEqual([...new Set(stillFlagged.map((r) => `${r.tenor} ${r.expiryDay}`))], ['weekly 2026-09-25']);
+  assert.ok(stillFlagged.every((r) => labels(r).join() === 'synthetic dividend'));
+
+  // Drop the dividend kind instead: every rung stays flagged, but the 25 Sep rungs carry one label, not two.
+  const noDividend = await run({ NVDA: both.NVDA.filter((e) => e.kind !== 'dividend') });
+  assert.equal(flagged(noDividend).length, all.length);
+  assert.ok(at(noDividend, 'weekly', '2026-09-25').every((r) => labels(r).join() === 'synthetic earnings'));
+});
+
 test('the event calendar is strict: a date needs a session, one form only, an upper-case ticker; --events feeds it to the command', async () => {
   const cal = parseEventCalendar({ NVDA: [{ kind: 'earnings', date: '2026-09-16', session: 'before-open' }, { at: 1_790_000_000 }] });
-  assert.deepEqual(cal.get('NVDA'), [
-    { kind: 'earnings', at: Date.UTC(2026, 8, 16, 13) / 1000, label: null, date: '2026-09-16', timing: 'bmo' },
-    { kind: 'earnings', at: 1_790_000_000, label: null, date: '2026-09-21', timing: null },
-  ]);
+  assert.deepEqual(cal.get('NVDA'), {
+    events: [
+      { kind: 'earnings', at: Date.UTC(2026, 8, 16, 13) / 1000, label: null, date: '2026-09-16', timing: 'bmo' },
+      { kind: 'earnings', at: 1_790_000_000, label: null, date: '2026-09-21', timing: null },
+    ],
+    through: null,
+  });
   assert.throws(() => parseEventCalendar({ NVDA: [{ date: '2026-09-16' }] }), /either `at`/);
   assert.throws(() => parseEventCalendar({ NVDA: [{ at: 1, date: '2026-09-16', session: 'after-close' }] }), /either `at`/);
   assert.throws(() => parseEventCalendar({ nvda: [] }), /not usable/);
@@ -508,6 +554,106 @@ test('the event calendar is strict: a date needs a session, one form only, an up
   const bad = await cli(['--tickers', 'NVDA', '--calendar', 'local', '--events', '/tmp/bad.json'], { nowMs: NVDA_NOW_MS, provider: cboeProvider({ NVDA: NVDA_CBOE }), files: { '/tmp/bad.json': '{"NVDA":[{"date":"2026-09-16"}]}' } });
   assert.equal(bad.code, 2);
   assert.match(bad.stderr, /--events \/tmp\/bad\.json/);
+});
+
+/**
+ * A calendar known only through a day. The same list with a `through` must reach the pricing service
+ * (toServiceEventCalendar used to send `through: null`, so a CLI calendar could never read `short`), and coverage's
+ * own view must not call a rung clear past that day.
+ */
+test('events: a calendar known only through a day reaches the pricing service as `short` and flags every rung exposed past it', async () => {
+  const LATER = { kind: 'earnings', date: '2026-10-15', session: 'before-open' };
+  const through = (day: string) => parseEventCalendar({ NVDA: { events: [LATER], through: day } });
+  const short = through('2026-09-15');
+  assert.equal(short.get('NVDA')!.through, '2026-09-15');
+  assert.equal(toServiceEventCalendar(short).get('NVDA')!.through, '2026-09-15', 'through is carried, not dropped');
+  assert.equal(toServiceEventCalendar(parseEventCalendar({ NVDA: [LATER] })).get('NVDA')!.through, null, 'the list form states no limit');
+
+  // The 15 Sep daily is a before-first read off the 18 Sep listing: the service marks a list through 15 Sep `short`.
+  const run = async (events: EventCalendar) => {
+    const { report, service } = await cover({ nowMs: NVDA_NOW_MS, provider: cboeProvider({ NVDA: NVDA_CBOE }), tickers: ['NVDA'], events });
+    const rungs = rungsOf(report, 'NVDA');
+    const r = at(rungs, 'daily', '2026-09-15')[0]!;
+    const q = await service.fair({ ticker: 'NVDA', strikeUsdg6: BigInt(r.strike.raw), expiry: r.expiry, type: r.side });
+    assert.ok(q.ok, q.ok ? '' : `${q.reason} ${JSON.stringify(q.detail)}`);
+    return { rungs, q };
+  };
+  const cut = await run(short);
+  assert.equal(cut.q.diagnostics.eventInput, 'short');
+  assert.ok(cut.q.provenance.quality.reasons.includes('event-uncertainty'), 'the service reads a short list as an unknown event');
+  assert.ok(cut.rungs.every((r) => r.reasons.includes('event-uncertainty') && Array.isArray(r.events) && r.events.length === 0), 'every rung is exposed past 15 Sep: flagged, with no known event');
+
+  // Complete through a day after every input: the same list is `supplied` and nothing is flagged (the `later` case above).
+  const whole = await run(through('2026-12-31'));
+  assert.equal(whole.q.diagnostics.eventInput, 'supplied');
+  assert.ok(!whole.q.provenance.quality.reasons.includes('event-uncertainty'));
+  assert.ok(whole.rungs.every((r) => !r.reasons.includes('event-uncertainty')));
+
+  // Through the 18 Sep weekly's own day: rungs whose exposure ends by then stay clear, later weeklies are flagged.
+  const mid = await run(through('2026-09-18'));
+  assert.ok(at(mid.rungs, 'weekly', '2026-09-18').every((r) => !r.reasons.includes('event-uncertainty')), 'a list through a rung\'s own day covers it');
+  assert.ok(at(mid.rungs, 'weekly', '2026-09-25').every((r) => r.reasons.includes('event-uncertainty')));
+});
+
+test('the event calendar\'s through form is strict: a real day, known keys, a list of events; --events takes it', async () => {
+  assert.deepEqual(parseEventCalendar({ NVDA: { events: [], through: '2026-09-15' } }).get('NVDA'), { events: [], through: '2026-09-15' });
+  assert.deepEqual(parseEventCalendar({ NVDA: { events: [] } }).get('NVDA'), { events: [], through: null });
+  assert.throws(() => parseEventCalendar({ NVDA: { events: [], through: '2026-02-30' } }), /through must be a real YYYY-MM-DD day/);
+  assert.throws(() => parseEventCalendar({ NVDA: { events: [], through: '2026-09-15', until: '2026-09-16' } }), /not usable/);
+  assert.throws(() => parseEventCalendar({ NVDA: { through: '2026-09-15' } }), /not usable/);
+  assert.throws(() => parseEventCalendar({ NVDA: { events: [{ date: '2026-09-16' }], through: '2026-09-15' } }), /either `at`/);
+  const file = JSON.stringify({ NVDA: { events: [], through: '2026-09-15' } });
+  const run = await cli(['--tickers', 'NVDA', '--calendar', 'local', '--events', '/tmp/through.json', '--format', 'jsonl'], { nowMs: NVDA_NOW_MS, provider: cboeProvider({ NVDA: NVDA_CBOE }), files: { '/tmp/through.json': file } });
+  assert.equal(run.code, 0, run.stderr);
+  const rungs = jsonl(run.stdout).filter((l) => l.kind === 'rung');
+  assert.ok(rungs.length > 0 && rungs.every((l) => (l.reasons as string[]).includes('event-uncertainty')));
+});
+
+/**
+ * The coverage CLI read a list with rows and no `through` as complete for every expiry (never short), and a
+ * supplied calendar with no entry for the ticker as "no events" (covered). The rule is the one here: no
+ * `through` means complete only through the latest row (short-maturity.ts eventsCompleteThrough), and an absent ticker
+ * is MISSING, unknown, never clear.
+ */
+test('calendarShortOf follows the latest-row rule: a list with rows and no through vouches only through its latest row', () => {
+  const close = (d: number) => Date.UTC(2026, 8, d, 20) / 1000; // 16:00 New York in September
+  const rows = parseEventCalendar({ NVDA: [{ kind: 'earnings', date: '2026-09-16', session: 'after-close' }] }).get('NVDA')!;
+  assert.equal(rows.through, null);
+  assert.equal(calendarShortOf(rows, close(18), []), true, 'an expiry after the latest row is short, not clear');
+  assert.equal(calendarShortOf(rows, close(16), []), false, 'the latest row\'s own day is covered');
+  assert.equal(calendarShortOf(rows, close(16), [close(18)]), true, 'a contributing listed expiry past the row counts');
+  const stated = parseEventCalendar({ NVDA: { events: [{ kind: 'earnings', date: '2026-09-16', session: 'after-close' }], through: '2026-12-31' } }).get('NVDA')!;
+  assert.equal(calendarShortOf(stated, close(18), [close(25)]), false, 'a stated through still wins');
+  const empty = parseEventCalendar({ NVDA: [] }).get('NVDA')!;
+  assert.equal(calendarShortOf(empty, close(25), []), false, 'only an empty list with no through states no limit');
+});
+
+test('a calendar whose rows stop before a rung\'s exposure flags it, and the same rows with a later through do not', async () => {
+  // A (synthetic) row dated BEFORE now: no event is inside any rung, so only the through rule can flag them.
+  const past = [{ kind: 'earnings', date: '2026-09-14', session: 'before-open', label: 'synthetic past event' }];
+  const run = async (calendar: unknown) => rungsOf((await cover({
+    nowMs: NVDA_NOW_MS, provider: cboeProvider({ NVDA: NVDA_CBOE }), tickers: ['NVDA'], events: parseEventCalendar(calendar),
+  })).report, 'NVDA');
+  const rowsOnly = await run({ NVDA: past });
+  assert.ok(rowsOnly.length > 0);
+  assert.ok(rowsOnly.every((r) => Array.isArray(r.events) && r.events.length === 0), 'no event is inside any rung');
+  assert.ok(rowsOnly.every((r) => r.reasons.includes('event-uncertainty')), 'complete only through 14 Sep: every rung is unknown');
+  const vouched = await run({ NVDA: { events: past, through: '2026-12-31' } });
+  assert.ok(vouched.every((r) => !r.reasons.includes('event-uncertainty')), 'the same row with a through past every input is clear');
+});
+
+test('a supplied calendar with no entry for the ticker reads as missing (unknown), never as covered', async () => {
+  const fake = () => createFakeProvider(FAKE_LISTED_PROVIDER, { NVDA: listedTwin(NVDA, NVDA_AS_OF) });
+  const run = async (events: EventCalendar | null) => rungsOf((await cover({ nowMs: NVDA_NOW_MS, provider: fake(), tickers: ['NVDA'], events })).report, 'NVDA');
+  // The control: NVDA's own list, complete past every input, clears the exact listed weekly.
+  const covered = at(await run(parseEventCalendar({ NVDA: { events: [], through: '2026-12-31' } })), 'weekly', '2026-09-18');
+  assert.ok(covered.length > 0 && covered.every((r) => r.readiness === 'ready' && Array.isArray(r.events) && r.events.length === 0));
+  // The same calendar without NVDA (another ticker's entry only): NVDA is missing, so no rung is clear.
+  const missing = await run(parseEventCalendar({ TSLA: { events: [], through: '2026-12-31' } }));
+  assert.ok(missing.length > 0 && missing.every((r) => r.events === null && r.reasons.includes('event-uncertainty')));
+  assert.ok(at(missing, 'weekly', '2026-09-18').every((r) => r.readiness === 'degraded' && r.reasons.join() === 'event-uncertainty'));
+  const emptyCalendar = await run(parseEventCalendar({}));
+  assert.ok(emptyCalendar.every((r) => r.events === null && r.reasons.includes('event-uncertainty')), 'an empty file names no ticker');
 });
 
 /*//////////////////////////////////////////////////////////////

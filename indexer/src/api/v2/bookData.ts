@@ -4,9 +4,9 @@ import { and, asc, desc, eq, exists, gt, inArray } from "ponder";
 import { getAddress, type Address } from "viem";
 
 import registry from "../../../lib/v2/cardRegistry.generated.json";
-import { USDG } from "../../../lib/env";
+import { USDG, V2_ORDER_BOOK } from "../../../lib/env";
 import { V2_REGISTRY } from "../../../lib/v2/marketRegistry.generated";
-import { aggregateBook, makerKey, quoteFromBook, type AggregatedBook, type BookOrder, type BookSeries } from "../../../lib/v2/book";
+import { aggregateBook, makerKey, quoteFromBook, writeGatesFromRows, type AggregatedBook, type BookOrder, type BookSeries } from "../../../lib/v2/book";
 import { buildCardMath, pickHero, type CardFees, type CardMath, type Ladder } from "../../../lib/v2/cards";
 import { effectiveFees, feeStateFromRow, type OrderBookFees } from "../../../lib/v2/fees";
 import { fetchFairResult } from "../../../lib/v2/pricing";
@@ -117,6 +117,27 @@ export type LoadedBook = {
   fees: CardFees;
 };
 
+/**
+ * The write-on-fill gates `_plan` applies and an order's own row does not show (lib/v2/book.ts aggregateBook;
+ * OrderBook.sol:1091 `isMinter(book)`, :1101 `isOperator(writer, book)`), read from indexed state in the same snapshot as
+ * the orders and derived by writeGatesFromRows. With V2_ORDER_BOOK unset the book's address is unknown, so no writer
+ * can be shown usable: every AskWrite is withheld rather than listed on a guess.
+ */
+async function readWriteGateRows(makers: readonly `0x${string}`[]) {
+  if (V2_ORDER_BOOK === undefined) return { minterRows: [], accountRows: [] };
+  const [minterRows, accountRows] = await Promise.all([
+    db.select({ minter: schema.v2Minter.minter, allowed: schema.v2Minter.allowed }).from(schema.v2Minter)
+      .where(eq(schema.v2Minter.minter, V2_ORDER_BOOK.toLowerCase() as `0x${string}`)).limit(1),
+    makers.length === 0 ? [] : db.select({ account: schema.v2Account.account, operators: schema.v2Account.operators })
+      .from(schema.v2Account).where(inArray(schema.v2Account.account, [...makers])),
+  ]);
+  return { minterRows, accountRows };
+}
+
+function writeGates(rows: Awaited<ReturnType<typeof readWriteGateRows>>) {
+  return writeGatesFromRows(V2_ORDER_BOOK, rows.minterRows, rows.accountRows);
+}
+
 export async function loadBook(longId: bigint, now: bigint, depth?: number): Promise<LoadedBook | null> {
   return readIndexedSnapshot((head) => loadBookAt(longId, now, depth, head));
 }
@@ -139,10 +160,14 @@ async function loadBookAt(longId: bigint, now: bigint, depth: number | undefined
   ]);
   const orders = [...bids, ...asks];
   const makers = [...new Set(orders.filter((order) => order.kind === "AskWrite").map((order) => order.maker))];
-  const ledgers = makers.length === 0 ? [] : await db.select().from(schema.v2Ledger)
-    .where(and(inArray(schema.v2Ledger.account, makers), eq(schema.v2Ledger.asset, series.isPut ? USDG : series.underlying)));
+  const [ledgers, gateRows] = await Promise.all([
+    makers.length === 0 ? [] : db.select().from(schema.v2Ledger)
+      .where(and(inArray(schema.v2Ledger.account, makers), eq(schema.v2Ledger.asset, series.isPut ? USDG : series.underlying))),
+    readWriteGateRows(makers),
+  ]);
   const state = stateRows[0] ?? null;
   const freeByMaker = freeBalances(series, ledgers);
+  const gates = writeGates(gateRows);
   return {
     series,
     market,
@@ -150,7 +175,8 @@ async function loadBookAt(longId: bigint, now: bigint, depth: number | undefined
     fees: feesFrom(state, series, head?.ts ?? 0n),
     book: (() => {
       const book = aggregateBook({ series: seriesBook(series), orders: orders.map(orderBook), freeByMaker, now, snapshotTimestamp: head?.ts ?? 0n,
-        marketEnabled: market.enabled, mintPaused: market.mintPaused, tradingPaused: state?.tradingPaused, depth });
+        marketEnabled: market.enabled, mintPaused: market.mintPaused, tradingPaused: state?.tradingPaused, depth,
+        bookIsMinter: gates.bookIsMinter, operators: gates.operators });
       book.updatedBlock = head?.block ?? [book.updatedBlock, series.createdBlock, market.lastBlock].reduce((max, value) => value > max ? value : max);
       return book;
     })(),
@@ -167,6 +193,8 @@ export async function loadQuote(loaded: LoadedBook) {
     bestAsk: quote.bestAsk === null ? null : usdg(quote.bestAsk),
     bidUnits: quote.bidUnits.toString(),
     askUnits: quote.askUnits.toString(),
+    bestBidUnits: quote.bestBidUnits.toString(),
+    bestAskUnits: quote.bestAskUnits.toString(),
     fair: quote.fair === null ? null : usdg(quote.fair),
     iv: quote.iv,
     delta: quote.delta,
@@ -224,7 +252,7 @@ export async function loadCards(now: bigint, filters: { ticker?: string; tenor?:
 
 /** Keep global ranking exact; prune only series that could never form a card. */
 async function loadAllCards(now: bigint): Promise<BuiltCard[]> {
-  const { seriesRows, stateRows, head, marketRows, orderRows, ledgerRows } = await readIndexedSnapshot(async (head) => {
+  const { seriesRows, stateRows, head, marketRows, orderRows, ledgerRows, gateRows } = await readIndexedSnapshot(async (head) => {
     const [seriesRows, stateRows] = await Promise.all([
       db.select().from(schema.v2Series).where(and(
         inArray(schema.v2Series.status, ["open", "cutoff"]),
@@ -240,7 +268,9 @@ async function loadAllCards(now: bigint): Promise<BuiltCard[]> {
       )),
       db.select().from(schema.v2OrderBookState).limit(1),
     ]);
-    if (seriesRows.length === 0) return { seriesRows, stateRows, head, marketRows: [], orderRows: [], ledgerRows: [] };
+    if (seriesRows.length === 0) {
+      return { seriesRows, stateRows, head, marketRows: [], orderRows: [], ledgerRows: [], gateRows: { minterRows: [], accountRows: [] } };
+    }
     const longIds = seriesRows.map((series) => series.longId);
     // Open orders can remain stored after their deadline. The card builder ignores
     // them, so avoid loading them or orders for unrelated/historical series.
@@ -253,10 +283,14 @@ async function loadAllCards(now: bigint): Promise<BuiltCard[]> {
     ]);
     const makers = [...new Set(orderRows.filter((order) => order.kind === "AskWrite").map((order) => order.maker))];
     const assets = [...new Set(seriesRows.map((series) => collateralAsset(series)))];
-    const ledgerRows = makers.length === 0 ? [] : await db.select().from(schema.v2Ledger)
-      .where(and(inArray(schema.v2Ledger.account, makers), inArray(schema.v2Ledger.asset, assets)));
-    return { seriesRows, stateRows, head, marketRows, orderRows, ledgerRows };
+    const [ledgerRows, gateRows] = await Promise.all([
+      makers.length === 0 ? [] : db.select().from(schema.v2Ledger)
+        .where(and(inArray(schema.v2Ledger.account, makers), inArray(schema.v2Ledger.asset, assets))),
+      readWriteGateRows(makers),
+    ]);
+    return { seriesRows, stateRows, head, marketRows, orderRows, ledgerRows, gateRows };
   });
+  const gates = writeGates(gateRows);
   if (seriesRows.length === 0) return [];
   const markets = new Map(marketRows.map((market) => [market.underlying.toLowerCase(), market]));
   const bySeries = new Map<bigint, BookOrder[]>();
@@ -277,7 +311,8 @@ async function loadAllCards(now: bigint): Promise<BuiltCard[]> {
     const spot = spots.get(series.underlying.toLowerCase())?.price ?? null;
     const freeByMaker = freeBalances(series, ledgerRows);
     const book = aggregateBook({ series: seriesBook(series), orders: bySeries.get(series.longId) ?? [], freeByMaker,
-      now, snapshotTimestamp: head?.ts ?? 0n, marketEnabled: market.enabled, mintPaused: market.mintPaused, tradingPaused: state?.tradingPaused });
+      now, snapshotTimestamp: head?.ts ?? 0n, marketEnabled: market.enabled, mintPaused: market.mintPaused, tradingPaused: state?.tradingPaused,
+      bookIsMinter: gates.bookIsMinter, operators: gates.operators });
     const ladder = ladderFor(series.ticker, series.tenor);
     const math = buildCardMath({ book, series: seriesBook(series), freeByMaker, fees: feesFrom(state, series, head?.ts ?? 0n),
       targetBps: ladder.cardTargetBps, strikeTick: market.strikeTick });

@@ -135,7 +135,7 @@ export function weigh(rows, start, end, excluded) {
   if (end <= start) throw new Error("epoch window is empty");
   const byAccount = new Map();
   /**
-   * D28 VALUES STOCK AT THE SETTLEMENT ORACLE SPOT AND CREDITS USD VALUE. THIS PROGRAM READS NO PRICE, so it
+   * THE LENDER-REWARDS RULE VALUES STOCK AT THE SETTLEMENT ORACLE SPOT AND CREDITS USD VALUE. THIS PROGRAM READS NO PRICE, so it
    * can only weigh one asset against itself: `assetsAfter` is in that asset's own base units and a share of
    * one vault's units is not comparable to a share of another's. Summing them would produce a split that is
    * silently wrong per asset - the kind of wrong that looks like a working distribution. So a mixed input is
@@ -267,7 +267,7 @@ export function buildEpoch({ epoch, budget, rows, registry, capBps, exclude = []
 async function main() {
   const { epoch, budget, input, output, registry, capBps, exclude, start, end } = args(process.argv.slice(2));
   /**
-   * THE INPUT SOURCE, NAMED (D28). The sibling `maker-epoch.mjs` reads `INDEXER_URL` and needs no file. This
+   * THE INPUT SOURCE, NAMED. The sibling `maker-epoch.mjs` reads `INDEXER_URL` and needs no file. This
    * program cannot yet, and the reason is specific rather than an omission: it needs per-account Earn-vault
    * BALANCE HISTORY over the epoch window - a row per change with `assetsAfter` and a timestamp - and no
    * route serves that. `src/api/v2/earn.ts` reads the deposit, withdrawal, queue, skim and adapter-move

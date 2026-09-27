@@ -1,8 +1,8 @@
 /**
- * W3-303. The label that renders beside a fair value saying where it came from.
+ * The label that renders beside a fair value saying where it came from.
  *
  * THIS COMPONENT NEVER RENDERS NOTHING. Every path returns visible text, including the one where the
- * provenance is missing entirely — that case is the whole point. X3-302 shipped the provenance
+ * provenance is missing entirely — that case is the whole point. The pricing service shipped the provenance
  * contract and no UI read it, so a fair value has been shown as a bare number since, which reads to
  * a buyer as a live price. While the only source is delayed vendor data, the qualifier is the honest
  * part of the figure, and a label that vanishes exactly when the data is worst would be worse than

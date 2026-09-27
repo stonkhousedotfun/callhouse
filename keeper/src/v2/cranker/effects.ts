@@ -12,7 +12,7 @@
 import type { Abi, Address, PublicClient } from 'viem';
 import { FAILED_DELIVERY_RETRY_MS, type AlertSeverity, type Alerter, type V2AlertKind } from '../alerts.js';
 import type { V2Store } from '../store.js';
-import { simulationReverted, type ExecuteOptions, type TxOutcome, type TxSender, type WriteCall, type WriteFunctionName } from '../tx.js';
+import { GAS_SCALE_PCT_DEFAULT, scaleGas, simulationReverted, type ExecuteOptions, type TxOutcome, type TxSender, type WriteCall, type WriteFunctionName } from '../tx.js';
 
 /*//////////////////////////////////////////////////////////////
                               SENDER
@@ -38,7 +38,7 @@ export function liveSender(sender: TxSender): CrankSender {
 }
 
 /** Simulates as `account` against the public client; never signs. */
-export function drySender(publicClient: Pick<PublicClient, 'simulateContract'>, account: Address): CrankSender {
+export function drySender(publicClient: Pick<PublicClient, 'simulateContract'>, account: Address, gasScalePct: number = GAS_SCALE_PCT_DEFAULT): CrankSender {
   return {
     dryRun: true,
     account,
@@ -46,7 +46,8 @@ export function drySender(publicClient: Pick<PublicClient, 'simulateContract'>, 
       if (options.isAdvanced !== undefined && (await options.isAdvanced())) return { status: 'already-advanced' };
       let result: unknown;
       try {
-        ({ result } = await publicClient.simulateContract({ ...call, account } as never));
+        // Judged at the limit a live send would use (TxSender scales the same way).
+        ({ result } = await publicClient.simulateContract({ ...call, gas: scaleGas(call.gas, gasScalePct), account } as never));
       } catch (error) {
         return simulationReverted(error);
       }

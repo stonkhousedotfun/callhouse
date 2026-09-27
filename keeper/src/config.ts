@@ -170,7 +170,7 @@ const schema = z.object({
    *  so 35 keepers posting to one relay can be told apart. Upper-case ticker, 1..8 of A-Z 0-9 '.',
    *  the registry's `ticker`. Default NVDA. Not read by any pricing decision. */
   KEEPER_MARKET: z.string().regex(/^[A-Z0-9.]{1,8}$/, 'an upper-case ticker, e.g. TSLA').default('NVDA'),
-  /** v1 run-off (ADR-10): this factory is frozen (`writesHalted`, `depositCap` 0) and its listed
+  /** v1 run-off: this factory is frozen (`writesHalted`, `depositCap` 0) and its listed
    *  weeks are left to expire. The solo tick never calls `setWeek` or `listFor`; it still settles
    *  every expired account and raises the health alerts, and says `v1_drained` once when no account
    *  is live or pending. `1`/`true` on, `0`/`false`/unset off, anything else refused at boot, like the

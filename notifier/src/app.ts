@@ -1,7 +1,7 @@
 /**
  * Wiring: config → database (migrated) → channels → delivery worker → Telegram bot → HTTP server.
  *
- * `startNotifier` is what index.ts runs and what N2-02 extends: the returned object carries the
+ * `startNotifier` is what index.ts runs and what the rules engine extends: the returned object carries the
  * DeliveryService, whose `enqueue` is the rules engine's only way to send anything. Every external
  * dependency has a seam in `overrides`, so a test (or a devnet script) can run the whole service
  * against PGlite, a fake Bot API and a fake RPC.
@@ -10,7 +10,7 @@
  * so Railway's /health check passes only once the service can actually do its job.
  */
 import { serve, type ServerType } from '@hono/node-server';
-import { createPublicClient, http } from 'viem';
+import { createPublicClient, fallback, http, type Transport } from 'viem';
 import { createSignatureVerifier, type SignatureVerifier } from './auth.js';
 import { emailChannel, emailLinks, emailTokens, smtpMailer, type Mailer } from './channels/email.js';
 import { createTelegramApi, telegramChannel, TelegramBot, type TelegramApi } from './channels/telegram.js';
@@ -29,6 +29,21 @@ import { appLinks } from './templates.js';
 
 /** The RPC deadline for ERC-1271 / ERC-6492 checks. */
 export const RPC_TIMEOUT_MS = 5_000;
+
+/**
+ * The verifier's RPC transport: RH_RPC alone, or RH_RPC first and RH_RPC_2 when RH_RPC fails.
+ *
+ * Each endpoint keeps its own deadline and one retry. viem's fallback moves to the backup on any
+ * error except a definite answer (a revert, a user rejection: its `shouldThrow`), so a signature
+ * the chain rejects is not asked twice. The fallback itself does not retry (`retryCount: 0`): its
+ * default of 3 would rerun both endpoints three more times, and a Safe owner waiting on a
+ * sign-in should get the 503 in about four deadlines, not sixteen.
+ */
+export function verifierTransport(config: Pick<NotifierConfig, 'rpcUrl' | 'rpcBackupUrl'>): Transport {
+  const endpoint = (url: string) => http(url, { timeout: RPC_TIMEOUT_MS, retryCount: 1 });
+  if (config.rpcBackupUrl === null) return endpoint(config.rpcUrl);
+  return fallback([endpoint(config.rpcUrl), endpoint(config.rpcBackupUrl)], { retryCount: 0 });
+}
 
 export interface StartOverrides {
   logger?: Logger;
@@ -76,7 +91,7 @@ export async function startNotifier(config: NotifierConfig, overrides: StartOver
   const verify =
     overrides.verify ??
     createSignatureVerifier(
-      createPublicClient({ transport: http(config.rpcUrl, { timeout: RPC_TIMEOUT_MS, retryCount: 1 }) }),
+      createPublicClient({ transport: verifierTransport(config) }),
     );
 
   const telegramApi = overrides.telegramApi ?? createTelegramApi(config.telegram);
@@ -107,7 +122,7 @@ export async function startNotifier(config: NotifierConfig, overrides: StartOver
   // With the engine off it stays empty, which means "unknown", so the API refuses nothing.
   const markets = new MarketsCache();
 
-  // N2-02: the rules engine decides what to send; enqueue is its only way to send anything.
+  // The rules engine decides what to send; enqueue is its only way to send anything.
   const rules = config.rules.enabled
     ? new RulesEngine({
         db,

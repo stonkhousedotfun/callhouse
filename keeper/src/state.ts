@@ -30,7 +30,7 @@ import { log } from './logger.js';
  *   open      armed and Listed; `contracts` is what has sold so far (== contractsWritten).
  *   locked    lockBook ran; the exercise window is open.
  *   closed    rollClose ran and the claim (if any) was redeemed.
- *   stranded  rollClose ran but the claim could not be redeemed (AF-02); `strand_gen` is set and
+ *   stranded  rollClose ran but the claim could not be redeemed; `strand_gen` is set and
  *             `retryStrandedClaim` closes it out later, recording `retry_tx`.
  */
 export type CycleStatus = 'open' | 'locked' | 'closed' | 'stranded';

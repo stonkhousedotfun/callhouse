@@ -387,5 +387,16 @@
     "type": "error",
     "name": "ReentrancyGuardReentrantCall",
     "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "WeekendHoliday",
+    "inputs": [
+      {
+        "name": "dayIndex",
+        "type": "uint32",
+        "internalType": "uint32"
+      }
+    ]
   }
 ]

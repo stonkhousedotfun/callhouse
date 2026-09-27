@@ -26,10 +26,13 @@ import {
   marketsResponseSchema,
   pnlResponseSchema,
   positionsResponseSchema,
+  rewardClaimsResponseSchema,
+  rewardEpochsResponseSchema,
   seriesDetailResponseSchema,
   statsResponseSchema,
   strategiesResponseSchema,
   tradesResponseSchema,
+  vaultResponseSchema,
   winsResponseSchema,
 } from "./api-schema";
 import type {
@@ -55,11 +58,14 @@ import type {
   MarketsResponse,
   PnlResponse,
   PositionsResponse,
+  RewardClaimsResponse,
+  RewardEpochsResponse,
   SeriesDetailResponse,
   ServicesResponse,
   StatsResponse,
   StrategiesResponse,
   TradesResponse,
+  VaultResponse,
   WinsResponse,
 } from "./api-types";
 
@@ -144,6 +150,15 @@ function segment(value: string | number): string {
 
 export type PageOptions = { limit?: number; cursor?: string };
 export type MarketSeriesOptions = PageOptions & { expiry?: number; type?: "call" | "put"; status?: string };
+/** /v2/strategies filters. `writer` makes the indexer return only that wallet's rows. */
+export type StrategiesOptions = PageOptions & { active?: boolean; writer?: string };
+/**
+ * One wallet's active strategies, filtered by the indexer. A page of EVERYONE's strategies ordered by id
+ * never reached a writer whose row sorted past it. Without a wallet it is the unfiltered page, as before.
+ */
+export function writerStrategiesOptions(writer?: string): StrategiesOptions {
+  return { active: true, writer: writer || undefined, limit: 200 };
+}
 export type CardsOptions = PageOptions & {
   ticker?: string;
   tenor?: "daily" | "weekly" | "special";
@@ -255,7 +270,7 @@ export class V2ApiClient {
     return this.read("/v2/health", healthResponseSchema, options, true);
   }
   /**
-   * Readiness of the services the indexer does not run (T-424). `noStore` for the same reason
+   * Readiness of the services the indexer does not run. `noStore` for the same reason
    * `getHealth` has it: a cached readiness answer is the same defect as a cached health answer —
    * it reports a dead service as alive for as long as the cache lives.
    */
@@ -274,7 +289,8 @@ export class V2ApiClient {
   getHouse(options?: RequestOptions): Promise<HouseListResponse> {
     return this.read("/v2/house", houseListResponseSchema, options);
   }
-  getHouseMarket(market: string, params: { address?: string } = {}, options?: RequestOptions): Promise<HouseMarketResponse> {
+  /** `vault` opens one exact House vault of the market; without it the indexer picks (daily first). */
+  getHouseMarket(market: string, params: { address?: string; vault?: string } = {}, options?: RequestOptions): Promise<HouseMarketResponse> {
     return this.read(pathWithParams(`/v2/house/${segment(market)}`, params), houseMarketResponseSchema, options);
   }
   getConfig(options?: RequestOptions): Promise<ConfigResponse> {
@@ -372,7 +388,7 @@ export class V2ApiClient {
     const { kinds, ...rest } = params;
     return this.read(pathWithParams("/v2/feed/activity", { ...rest, kinds: typeof kinds === "string" ? kinds : kinds?.join(",") }), activityResponseSchema, options);
   }
-  getStrategies(params: PageOptions & { active?: boolean } = {}, options?: RequestOptions): Promise<StrategiesResponse> {
+  getStrategies(params: StrategiesOptions = {}, options?: RequestOptions): Promise<StrategiesResponse> {
     return this.read(pathWithParams("/v2/strategies", params), strategiesResponseSchema, options);
   }
   getLeaderboard(params: LeaderboardOptions = {}, options?: RequestOptions): Promise<LeaderboardResponse> {
@@ -392,6 +408,17 @@ export class V2ApiClient {
   }
   getFair(longId: string, options?: RequestOptions): Promise<FairResponse> {
     return this.read(`/v2/fair/${segment(longId)}`, fairResponseSchema, options);
+  }
+  /** The protocol MakerVault's balances and limits. */
+  getVault(options?: RequestOptions): Promise<VaultResponse> {
+    return this.read("/v2/vault", vaultResponseSchema, options);
+  }
+  /** A reward program's Merkle epochs; the indexer answers bad_program without `program`. */
+  getRewardEpochs(program: string, params: PageOptions = {}, options?: RequestOptions): Promise<RewardEpochsResponse> {
+    return this.read(pathWithParams("/v2/rewards/epochs", { program, ...params }), rewardEpochsResponseSchema, options);
+  }
+  getRewardClaims(address: string, params: PageOptions = {}, options?: RequestOptions): Promise<RewardClaimsResponse> {
+    return this.read(pathWithParams(`/v2/rewards/${segment(address)}/claims`, params), rewardClaimsResponseSchema, options);
   }
 }
 

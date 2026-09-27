@@ -1,5 +1,5 @@
 /**
- * One pricer tick (K2-05): for every AutoRoller strategy with smartPricing, right after each roll and
+ * One pricer tick: for every AutoRoller strategy with smartPricing, right after each roll and
  * then at most every PRICER_MIN_INTERVAL_S, the target price
  *     clamp(fair × (1 + PRICER_EDGE_BPS), minAskBps · spot, maxAskBps · spot)
  * and AutoRoller.reprice when it differs from the live ask by more than PRICER_REPRICE_THRESHOLD_BPS.
@@ -13,9 +13,9 @@
  *   3. reads pinned to that block: AccessManager.canCall(signer, roller, reprice-selector), strategy() and
  *      position() per pair; then getOrders() for the tracked asks and series() for their strike, expiry and
  *      PINNED ORACLE; then trySpot() once per (series oracle, underlying). The spot that judges an ask comes
- *      from its series' oracle, which is what `reprice` reads on chain (T-310/T-437) - never market(u).oracle;
+ *      from its series' oracle, which is what `reprice` reads on chain - never market(u).oracle;
  *   4. per pair, planner.ts planCheck (live ask, cadence, regular session, spot); only a due pair costs a /fair request;
- *   5. qualifyFair (K3-301): source-age, unknown times, optional provenance readiness/identity,
+ *   5. qualifyFair: source-age, unknown times, optional provenance readiness/identity,
  *      oracle-vs-/fair.spot (PRICER_FAIR_SPOT_TOLERANCE_BPS); then planReprice; a reprice goes through
  *      tx.ts (in flight? → still the same ask? → simulate → send → journal → wait), keyed by the ask
  *      it replaces, with a fixed gas limit.
@@ -32,18 +32,30 @@
  * is repriced either), v2_pricer_strategy_scan (the AutoRoller StrategySet log scan threw: the list falls
  * back to what earlier scans found, so a strategy created since is priced by nobody),
  * v2_pricer_fair_unavailable
- * (no fair value for a live, due ask for PRICER_FAIR_ALERT_S), v2_pricer_reprice_failed (a due
- * reprice was refused by the simulation (warn), reverted on chain or not confirmed (error)),
+ * (no fair value for a live, due ask for PRICER_FAIR_ALERT_S; when the refusal is the event-uncertainty, the
+ * page names the series and that cause instead), v2_pricer_reprice_failed (a due
+ * reprice was refused by the simulation (warn), reverted on chain or not confirmed (error), or cannot be sent at all
+ * because the band's ceiling is below AutoRoller.reprice's per-call drop floor (warn, 'drop-floor-above-band')),
  * v2_pricer_clamped (four consecutive COMPLETED EVALUATIONS landed on the minAsk/maxAsk clamp; reset by
  * any completed evaluation that did not, band-empty included, and not moved at all by a tick that reached
  * a target and then sent nothing).
  *
- * READINESS (T-423, GET /ready via main.ts). /health says the loop is alive; it cannot say the pricer can
+ * READINESS (GET /ready via main.ts). /health says the loop is alive; it cannot say the pricer can
  * price. The tick records the four facts that can: the latest canCall answer (lastRoleRead), the latest
  * qualified fair value (lastQualifiedFairAt), whether the latest tick threw (lastTickFailed) and the
  * latest completed evaluation (lastEvaluationAt); evaluatePricerReadiness judges them, fail-closed.
  *
- * WHY THREE OF THOSE ARE HERE (K8-178). Each of them was already RECORDED truthfully - in `/state`, in
+ * THE READINESS PROBE. Before it, only a smart-pricing strategy's due, live ask ever asked /fair,
+ * so a fresh deployment (zero strategies) never qualified a fair value and /ready answered fair-stale for
+ * ever - and the web offers smart pricing only when /ready is true, so no smart strategy could be made to
+ * break the loop. A fixed-ask strategy does not help: it is never a candidate below. So a tick in which NO
+ * pair asked /fair, in a session the pricer would price in, and with no qualified fair value for
+ * PRICER_MIN_INTERVAL_S, asks /fair about one live registry market as a new series would be listed (see
+ * `probe`) and puts the answer through the same qualifyFair. It sends nothing and moves no evaluation clock.
+ * It only feeds lastQualifiedFairAt, so fair-stale still means exactly "no qualified fair value inside the
+ * bound": a probe the gates refuse leaves the pricer not ready.
+ *
+ * WHY THREE OF THOSE ARE HERE. Each of them was already RECORDED truthfully - in `/state`, in
  * `PricerTickReport` - and read by nobody at the moment it mattered. A failure that is honestly stored and
  * never alerted is indistinguishable, from outside, from a pricer with nothing to do. The rule this file
  * now follows: every branch that can stop a reprice either pages or is one the operator chose
@@ -60,11 +72,13 @@ import type { Alerter, V2AlertKind } from '../alerts.js';
 import { anchorWarning, readDeploymentAnchor } from '../anchor.js';
 import { readHead, type Head } from '../chain.js';
 import type { PricerConfig, PricerTuning } from '../config.js';
+import { REPRICE_PAGE_DROP_BPS } from '../cranker/constants.js';
 import type { IndexerClient } from '../cranker/indexer-client.js';
-import { okResult, readMany, type AnyRead } from '../cranker/reads.js';
+import { ladderSearchStart, roundUpToTick } from '../cranker/planner.js';
+import { marketOracleOf, okResult, readMany, type AnyRead } from '../cranker/reads.js';
 import type { Readiness, ReadyReason } from '../health.js';
 import type { Logger } from '../logger.js';
-import { marketByUnderlying } from '../registry.js';
+import { marketByUnderlying, v2Markets } from '../registry.js';
 import type { V2Store } from '../store.js';
 import type { TxOutcome, TxSender } from '../tx.js';
 import type { FairSource } from './fair-client.js';
@@ -74,8 +88,8 @@ import { listStrategies, type LogClient, type ScanResult, type StrategyIndex, ty
 
 /**
  * @deprecated INTERFACE_VERSION 8. The AutoRoller is `Managed` and has no role storage and no `hasRole`,
- * so nothing in this file reads this any more — authority is now one `AccessManager.canCall`. K8-04 has
- * since rewritten `pricer/devnet-reprice.ts`, which was the last importer, and K8-178 moved the test
+ * so nothing in this file reads this any more — authority is now one `AccessManager.canCall`. A change has
+ * since rewritten `pricer/devnet-reprice.ts`, which was the last importer, and a change moved the test
  * fixture onto `canCall`, so NOTHING in the keeper package imports this today. It is kept only because
  * `V2Constants.PRICER_ROLE` is still a live id in the contracts repo; deleting it is a cleanup task, not
  * this one's.
@@ -112,6 +126,15 @@ const ROLE_UNREAD_TICKS = 3;
 /** Both mark keys fall under strategies.ts rollerMetaPrefixes, so a deployment reset clears them. */
 export const evaluatedMetaKey = (roller: string, pair: StrategyPair) => `pricer:evaluated:${roller.toLowerCase()}:${pair.writer.toLowerCase()}:${pair.underlying.toLowerCase()}`;
 export const fairMissingMetaKey = (roller: string, pair: StrategyPair) => `pricer:fair-missing:${roller.toLowerCase()}:${pair.writer.toLowerCase()}:${pair.underlying.toLowerCase()}`;
+
+/** The series a pair's event-uncertainty pause holds, for a page that names it (noteFairMissing). */
+interface PausedSeries {
+  longId: bigint;
+  orderId: bigint;
+  strike: bigint;
+  expiry: number;
+  type: 'call' | 'put';
+}
 
 export type PricerClient = Pick<PublicClient, 'getBlock' | 'multicall' | 'getBlockNumber' | 'readContract'>;
 export type PricerSender = Pick<TxSender, 'execute' | 'account'>;
@@ -151,9 +174,41 @@ export interface PairReport {
   clamped?: 'floor' | 'ceiling' | null;
   /** Consecutive evaluations whose target sat on the minAsk/maxAsk clamp. */
   clampStreak?: number;
+  /**
+   * The pricer's step floor (planner.ts stepFloor: PRICER_MAX_STEP_DROP_BPS below the live ask, never below
+   * the contract's per-call floor) when it decided the price: the price sent was lifted to it (a step down toward the
+   * target), or it sits above the band's ceiling (then the ceiling was sent, or nothing: see contractFloor).
+   */
+  stepFloor?: bigint;
+  /**
+   * AutoRoller.reprice's per-call drop floor (planner.ts repriceFloor, MAX_REPRICE_DROP_BPS below the live
+   * ask) when it is above the band's ceiling: no price in the band is accepted and nothing is sent.
+   */
+  contractFloor?: bigint;
+  /** The band ceiling was sent because the step floor is above it; this is that step's drop, bps of the live ask. */
+  ceilingStepDropBps?: bigint;
   nextCheckAt?: number;
   tx?: { status: TxOutcome['status']; hash?: string; gasUsed?: bigint; revert?: string | null; error?: string };
   detail?: string;
+}
+
+/**
+ * What the readiness probe did: the market, the series it asked /fair about, and the answer. `outcome`
+ * is 'qualified', a qualifyFair refusal, or why no /fair was asked (market-unread, market-disabled, expiry-unread,
+ * spot-stale).
+ */
+export interface ProbeReport {
+  ticker: string;
+  underlying: Address;
+  /** `market(underlying).oracle`: the oracle a series created now would pin. */
+  oracle: Address | null;
+  spot: bigint | null;
+  strike: bigint | null;
+  expiry: number | null;
+  outcome: string;
+  detail?: string;
+  fair?: bigint;
+  fairSource?: string;
 }
 
 export interface PricerTickReport {
@@ -165,6 +220,8 @@ export interface PricerTickReport {
   scan: ScanResult | { error: string };
   pairs: PairReport[];
   sent: number;
+  /** The readiness probe, or null when this tick did not need one (see `Pricer.probe`). */
+  probe: ProbeReport | null;
 }
 
 interface OrderStruct {
@@ -183,13 +240,13 @@ interface SeriesStruct {
   isPut: boolean;
   expiry: number;
   strike: bigint;
-  /** The oracle createSeries pinned into the series: the one it settles on and AutoRoller.reprice reads (T-310). */
+  /** The oracle createSeries pinned into the series: the one it settles on and AutoRoller.reprice reads. */
   oracle: Address;
 }
 
 const ZERO_ADDRESS = '0x0000000000000000000000000000000000000000';
 
-/** A spot is one oracle's price for one underlying. Two series of one underlying may differ after a migration (T-437). */
+/** A spot is one oracle's price for one underlying. Two series of one underlying may differ after a migration. */
 const spotKey = (oracle: Address, underlying: Address): string => `${oracle.toLowerCase()}:${underlying.toLowerCase()}`;
 
 /**
@@ -223,16 +280,18 @@ export interface PricerReadinessFacts {
  * /health's stale window (evaluateHealth), the slack for the tick that notices the pair is due.
  * Defaults (7,200 s, 1,800 s, 60 s): 7,380 s.
  *
- * NOT READY BY DESIGN once nothing asks /fair for longer than this: no smart-pricing strategy with a
- * live ask, or the market closed with PRICER_REPRICE_OFF_HOURS off. Ready means "can price now", and a
- * pricer that has not obtained a price in that long does not know that it can.
+ * NOT READY BY DESIGN once no fair value has qualified for longer than this: the market closed with
+ * PRICER_REPRICE_OFF_HOURS off (neither a pair nor the probe asks then), or every /fair answer refused.
+ * Ready means "can price now", and a pricer that has not obtained a price in that long does not know that
+ * it can. No smart-pricing strategy is NOT such a case any more: the probe asks every
+ * PRICER_MIN_INTERVAL_S when no pair did, which is inside this bound by at least three poll intervals.
  */
 export function fairReadyBoundMs(tuning: Pick<PricerTuning, 'fairAlertS' | 'minIntervalS'>, pollIntervalMs: number): number {
   return Math.max(tuning.fairAlertS, tuning.minIntervalS) * 1_000 + 3 * pollIntervalMs;
 }
 
 /**
- * The pricer's readiness (T-423). Ready ONLY when all four hold, each read as an explicit fact:
+ * The pricer's readiness. Ready ONLY when all four hold, each read as an explicit fact:
  *   1. the loop is alive by /health's rule                           else loop-wedged
  *   2. a tick has completed, and the latest one did not throw         else no-completed-tick / tick-failed
  *   3. the latest canCall read SUCCEEDED and answered (true, 0)       else role-unread / role-refused / role-delayed
@@ -277,6 +336,10 @@ export class Pricer {
   lastEvaluationAt: number | null = null;
   /** /ready: whether the latest tick threw. False before the first; `ticks === 0` answers that case. */
   lastTickFailed = false;
+  /** The latest readiness probe, for /state; null before the first. */
+  lastProbe: ProbeReport | null = null;
+  /** Which live market the next probe asks about. Moves on after a probe that did not qualify. */
+  private probeCursor = 0;
   /** Consecutive clamped evaluations per writer:underlying. */
   private readonly clampStreaks = new Map<string, number>();
   /** Consecutive ticks whose canCall read failed. Reset by any read that answers, true or false. */
@@ -399,7 +462,7 @@ export class Pricer {
         maxChunks: tuning.logChunksPerTick,
       }),
     );
-    // F-CH1-04 (T-201), fixed by K8-178. strategies.ts catches a throwing getLogs and stores it as
+    // strategies.ts catches a throwing getLogs and stores it as
     // `{ error }`, which is honest and reaches /state — and that was the whole of it. The list then holds
     // only what EARLIER scans found, so a strategy created since this store was last able to scan is
     // repriced by nobody, for as long as the scan keeps failing, and the sole trace is a field nobody is
@@ -463,7 +526,7 @@ export class Pricer {
       this.ctx.alerter.clear('v2_pricer_no_role');
       this.ctx.alerter.clear('v2_pricer_role_unread');
     } else {
-      // K8-178. The read ITSELF failed, so nothing is known about this key's authority — and the
+      // The read ITSELF failed, so nothing is known about this key's authority — and the
       // `hasRole !== true` gate below then refuses every send, silently. Two rules hold here:
       //
       //   this arm must NOT clear v2_pricer_no_role. Clearing would report health about a subject that
@@ -538,7 +601,9 @@ export class Pricer {
       }),
     );
 
-    const report: PricerTickReport = { head, sessionOpen, hasRole, strategies: pairs.length, indexer: list.indexer, scan: list.scan, pairs: [], sent: 0 };
+    const report: PricerTickReport = { head, sessionOpen, hasRole, strategies: pairs.length, indexer: list.indexer, scan: list.scan, pairs: [], sent: 0, probe: null };
+    /** Whether any pair asked /fair this tick, qualified or not. If one did, its answer is the readiness fact. */
+    let fairAsked = false;
 
     for (const [i, pair] of pairs.entries()) {
       const strategy = strategies[i];
@@ -559,7 +624,7 @@ export class Pricer {
 
       // The series is read at the same pinned block as the ask, so `planCheck` can hold the in-the-money refusal
       // (INTERFACE_VERSION 7) before a /fair request is spent on a pair that cannot be repriced. Its PINNED oracle
-      // (T-310/T-437) is the one `reprice` reads on chain and the one the series settles on, so that is where this
+      // is the one `reprice` reads on chain and the one the series settles on, so that is where this
       // ask's spot comes from - never `market(u).oracle`, which a `setMarketOracle` moves away from every series
       // already created, leaving the mirror judging on a price the contract does not use.
       const series = seriesOf.get(position.longId);
@@ -593,6 +658,7 @@ export class Pricer {
         entry.detail = ticker === null ? `underlying ${pair.underlying} is not in the registry: the pricing service prices by ticker` : `series(${position.longId}) could not be read`;
         continue;
       }
+      fairAsked = true;
       const answer = await this.ctx.fair.fair({ ticker, strike: series.strike, expiry: Number(series.expiry), type: series.isPut ? 'put' : 'call' });
       const gated = qualifyFair(answer, {
         now: head.timestamp,
@@ -609,7 +675,10 @@ export class Pricer {
       if (!gated.ok) {
         entry.outcome = gated.reason;
         entry.detail = gated.detail;
-        await this.noteFairMissing(pair, ticker, head.timestamp, gated.detail);
+        const paused: PausedSeries | null = gated.reason === 'event-uncertainty'
+          ? { longId: position.longId, orderId: position.orderId, strike: series.strike, expiry: Number(series.expiry), type: series.isPut ? 'put' : 'call' }
+          : null;
+        await this.noteFairMissing(pair, ticker, head.timestamp, gated.detail, paused);
         continue;
       }
       this.clearFairMissing(pair);
@@ -622,8 +691,21 @@ export class Pricer {
         entry.outcome = plan.reason;
         if (plan.reason === 'within-threshold') {
           Object.assign(entry, { target: plan.target.price, raw: plan.target.raw, band: plan.target.band, clamped: plan.target.clamped });
+        } else if (plan.reason === 'drop-floor-above-band') {
+          Object.assign(entry, { target: plan.target.price, raw: plan.target.raw, band: plan.target.band, clamped: plan.target.clamped, stepFloor: plan.floor, contractFloor: plan.contractFloor });
+          // The ask stays above its band until the spot recovers or it rolls, and nothing the
+          // pricer can send changes that. Before this it wrote no log and raised nothing; now it pages, and the log below
+          // names the outcome. v2_pricer_reprice_failed at warn, as for a refused simulation: this is the refusal the
+          // simulation would give, known before sending. Cleared by the pair's next confirmed reprice.
+          entry.detail = `the band's ceiling ${plan.target.band.max} is below AutoRoller.reprice's per-call floor ${plan.contractFloor} (MAX_REPRICE_DROP_BPS below the live ask ${check.order.price}): no price in the band is accepted`;
+          await this.alert(
+            'v2_pricer_reprice_failed',
+            `pricer: ${ticker} ask ${position.orderId} for ${pair.writer} at ${check.order.price} is above its band ceiling ${plan.target.band.max}, and the ceiling is more than one reprice below it (contract floor ${plan.contractFloor}): nothing can be sent until the spot recovers or the ask rolls`,
+            { writer: pair.writer, underlying: pair.underlying, orderId: position.orderId, live: check.order.price, bandMax: plan.target.band.max, contractFloor: plan.contractFloor, stepFloor: plan.floor, target: plan.target.price },
+            { dedupeKey: `${pair.writer.toLowerCase()}:${pair.underlying.toLowerCase()}`, severity: 'warn' },
+          );
         }
-        // K8-178. Both arms are completed evaluations by this file's own definition (see the header:
+        // Both arms are completed evaluations by this file's own definition (see the header:
         // "left alone because the target is within the threshold OR THE BAND IS EMPTY"), and both save the
         // memory below, so both must move the streak. `band-empty` leaves entry.clamped undefined, which
         // noteClamp reads as not-clamped and resets on — correctly: an empty band is the absence of a
@@ -635,8 +717,15 @@ export class Pricer {
         entry.nextCheckAt = head.timestamp + tuning.minIntervalS;
         continue;
       }
-      Object.assign(entry, { target: plan.price, raw: plan.target.raw, band: plan.target.band, clamped: plan.target.clamped });
-      // K8-178. noteClamp is NOT called here. This point is reached on every tick that got as far as a
+      Object.assign(entry, { target: plan.price, raw: plan.target.raw, band: plan.target.band, clamped: plan.target.clamped, ...(plan.stepFloor === null ? {} : { stepFloor: plan.stepFloor }) });
+      if (plan.ceilingStep !== undefined) {
+        // The step floor is above the band, so the ceiling goes
+        // out, a larger step than the pricer's own. At REPRICE_PAGE_DROP_BPS or more the monitor pages
+        // v2_mon_reprice_floorward for it from the chain; the pricer logs 'pricer band-ceiling-step' either way, below.
+        Object.assign(entry, { stepFloor: plan.ceilingStep.stepFloor, ceilingStepDropBps: plan.ceilingStep.dropBps });
+        entry.detail = `band-ceiling step: the pricer's step floor ${plan.ceilingStep.stepFloor} is above the band's ceiling ${plan.price}, so the ceiling is sent, a ${plan.ceilingStep.dropBps} bps drop from ${check.order.price}${plan.ceilingStep.dropBps >= REPRICE_PAGE_DROP_BPS ? `, at or over the ${REPRICE_PAGE_DROP_BPS} bps line: the monitor pages v2_mon_reprice_floorward for it` : ''}`;
+      }
+      // noteClamp is NOT called here. This point is reached on every tick that got as far as a
       // target, including ones that then send nothing - no-role, role-unread, tick-budget - and none of
       // those move the evaluation clock, so the same pair arrives here again on the very next tick. The
       // streak counted TICKS on those paths: at the 60 s POLL_INTERVAL_MS default a role outage reached
@@ -652,6 +741,14 @@ export class Pricer {
       }
 
       const orderId = position.orderId;
+      if (plan.ceilingStep !== undefined) {
+        // Here, after the role and budget gates, so a tick that sends nothing does not log a step it did not take.
+        const { stepFloor, dropBps } = plan.ceilingStep;
+        this.ctx.log.warn(
+          { writer: pair.writer, ticker, orderId, live: check.order.price, price: plan.price, stepFloor, dropBps, pageBps: REPRICE_PAGE_DROP_BPS, pages: dropBps >= REPRICE_PAGE_DROP_BPS },
+          'pricer band-ceiling-step',
+        );
+      }
       const outcome = await this.ctx.sender.execute(
         { address: roller, abi: autoRollerAbi, functionName: 'reprice', args: [pair.writer, pair.underlying, plan.price], gas: GAS_REPRICE },
         {
@@ -708,12 +805,14 @@ export class Pricer {
       }
     }
 
+    report.probe = await this.probe(head, sessionOpen, fairAsked);
+
     for (const p of report.pairs) this.outcomes[p.outcome] = (this.outcomes[p.outcome] ?? 0) + 1;
     const at = new Date(this.now()).toISOString();
     for (const p of report.pairs) if (p.tx !== undefined) this.recentActions.push({ ...p, at });
     this.recentActions = this.recentActions.slice(-MAX_ACTIONS);
     for (const p of report.pairs) {
-      if (p.tx !== undefined || p.outcome === 'fair-unavailable' || p.outcome === 'fair-stale' || p.outcome === 'fair-spot-mismatch' || p.outcome === 'asOf-unknown' || p.outcome === 'quote-stale' || p.outcome === 'quote-age-unknown' || p.outcome === 'not-ready' || p.outcome === 'identity-mismatch' || p.outcome === 'within-threshold') {
+      if (p.tx !== undefined || p.outcome === 'fair-unavailable' || p.outcome === 'fair-stale' || p.outcome === 'fair-spot-mismatch' || p.outcome === 'asOf-unknown' || p.outcome === 'quote-stale' || p.outcome === 'quote-age-unknown' || p.outcome === 'not-ready' || p.outcome === 'identity-mismatch' || p.outcome === 'event-uncertainty' || p.outcome === 'within-threshold' || p.outcome === 'drop-floor-above-band') {
         this.ctx.log.info({ writer: p.writer, ticker: p.ticker, orderId: p.orderId, live: p.livePrice, target: p.target, fair: p.fair, outcome: p.outcome, tx: p.tx, detail: p.detail }, `pricer ${p.outcome}`);
       }
     }
@@ -724,25 +823,145 @@ export class Pricer {
     return report;
   }
 
+  /**
+   * The readiness probe (header). Runs only when all three hold, else returns null and asks nothing:
+   *   - no pair asked /fair this tick: a pair that did has given /ready its fact, qualified or refused;
+   *   - no fair value has qualified for PRICER_MIN_INTERVAL_S (the evaluation cadence, so a healthy pricer asks
+   *     about as often with no strategy as with one, and inside fairReadyBoundMs by three poll intervals);
+   *   - the session is one the pricer would price in (planCheck's market-closed / session-unavailable rule).
+   *
+   * One live registry market per probe, not all of them: /ready needs one qualified answer, as it does from pairs.
+   * The market is kept while it qualifies and the next one is tried after a probe that did not, so one market the
+   * pricing service cannot price does not hold the pricer unready while another can.
+   *
+   * The series asked about is one the cranker could list now, read at the tick's pinned block:
+   *   oracle  `Clearinghouse.market(u).oracle`, the oracle createSeries would PIN. Reading the market's pointer is
+   *           right HERE and only here: there is no series yet. A live ask is still judged on its series' pinned
+   *           oracle (above);
+   *   expiry  `ExpiryCalendar.nextExpiry(ladderSearchStart(now), weekly)`, the read the cranker's ladder makes;
+   *   strike  the first `market(u).strikeTick` multiple at or above that oracle's spot: a call no further from the
+   *           money than any a covered-call writer could hold, and never in the money.
+   * The spot is required, exactly as planCheck requires it of a pair (spot-stale), so qualifyFair always judges the
+   * oracle-vs-/fair.spot gap.
+   */
+  private async probe(head: Head, sessionOpen: boolean | null, fairAsked: boolean): Promise<ProbeReport | null> {
+    const { config, client } = this.ctx;
+    const tuning = config.tuning;
+    if (fairAsked) return null;
+    if (this.lastQualifiedFairAt !== null && this.now() - this.lastQualifiedFairAt < tuning.minIntervalS * 1_000) return null;
+    if (!tuning.repriceOffHours && sessionOpen !== true) return null;
+    const markets = v2Markets(config.registry, ['live']);
+    if (markets.length === 0) return null;
+    const market = markets[this.probeCursor % markets.length]!;
+    const entry: ProbeReport = { ticker: market.ticker, underlying: market.underlying, oracle: null, spot: null, strike: null, expiry: null, outcome: 'unread' };
+    this.lastProbe = entry;
+    const done = (qualified: boolean): ProbeReport => {
+      if (!qualified) this.probeCursor = (this.probeCursor + 1) % markets.length;
+      this.ctx.log.info({ probe: entry }, `pricer readiness probe ${entry.outcome}`);
+      return entry;
+    };
+
+    const reads = await readMany(
+      client,
+      [
+        { address: config.contracts.clearinghouse, abi: clearinghouseAbi, functionName: 'market', args: [market.underlying] },
+        { address: config.contracts.expiryCalendar, abi: expiryCalendarAbi, functionName: 'nextExpiry', args: [ladderSearchStart(head.timestamp), true] },
+      ],
+      head.blockNumber,
+    );
+    const marketConfig = okResult<{ enabled: boolean; strikeTick: bigint }>(reads[0]);
+    const oracle = marketOracleOf(reads[0]);
+    if (marketConfig === undefined || oracle === null || marketConfig.strikeTick <= 0n) {
+      entry.outcome = 'market-unread';
+      entry.detail = `market(${market.underlying}) could not be read, or has no oracle or strike tick`;
+      return done(false);
+    }
+    entry.oracle = getAddress(oracle);
+    if (!marketConfig.enabled) {
+      entry.outcome = 'market-disabled';
+      return done(false);
+    }
+    const nextExpiry = okResult<number | bigint>(reads[1]);
+    if (nextExpiry === undefined) {
+      entry.outcome = 'expiry-unread';
+      entry.detail = 'ExpiryCalendar.nextExpiry could not be read';
+      return done(false);
+    }
+    entry.expiry = Number(nextExpiry);
+
+    const [spotRead] = await readMany(client, [{ address: entry.oracle, abi: settlementOracleAbi, functionName: 'trySpot', args: [market.underlying] }], head.blockNumber);
+    const spot = okResult<readonly [boolean, bigint, bigint]>(spotRead);
+    if (spot === undefined || !spot[0] || spot[1] <= 0n) {
+      entry.outcome = 'spot-stale';
+      return done(false);
+    }
+    entry.spot = spot[1];
+    entry.strike = roundUpToTick(spot[1], marketConfig.strikeTick);
+
+    const answer = await this.ctx.fair.fair({ ticker: market.ticker, strike: entry.strike, expiry: entry.expiry, type: 'call' });
+    const gated = qualifyFair(answer, {
+      now: head.timestamp,
+      maxAgeS: tuning.fairMaxAgeS,
+      spotToleranceBps: tuning.fairSpotToleranceBps,
+      oracleSpot: entry.spot,
+      ticker: market.ticker,
+      underlying: market.underlying,
+      strike: entry.strike,
+      expiry: entry.expiry,
+      type: 'call',
+      uiMultiplier: null,
+    });
+    if (!gated.ok) {
+      entry.outcome = gated.reason;
+      entry.detail = gated.detail;
+      return done(false);
+    }
+    this.lastQualifiedFairAt = this.now();
+    entry.outcome = 'qualified';
+    entry.fair = gated.fair;
+    entry.fairSource = gated.source;
+    return done(true);
+  }
+
   private clearFairMissing(pair: StrategyPair): void {
     const key = fairMissingMetaKey(this.roller, pair);
     if (this.ctx.store.getMeta(key) !== null) this.ctx.store.db.prepare('DELETE FROM v2_meta WHERE key = ?').run(key);
     this.ctx.alerter.clear('v2_pricer_fair_unavailable', `${pair.writer.toLowerCase()}:${pair.underlying.toLowerCase()}`);
   }
 
-  private async noteFairMissing(pair: StrategyPair, ticker: string, now: number, reason: string): Promise<void> {
+  /**
+   * `paused` is set when the refusal is the event-uncertainty: pricing answered, but flagged event or model
+   * uncertainty (the market maker's halt rule), so the pair is paused, not starved. It shares this timer, because the ask
+   * still keeps a price nothing re-checks and a long pause should page. Only its page text changes: it names
+   * the series and the real cause, so nobody debugs a pricing service that is answering. Every other refusal pages as
+   * before.
+   */
+  private async noteFairMissing(pair: StrategyPair, ticker: string, now: number, reason: string, paused: PausedSeries | null = null): Promise<void> {
     const key = fairMissingMetaKey(this.roller, pair);
     const raw = this.ctx.store.getMeta(key);
     const since = raw === null ? now : Number(raw);
     if (raw === null) this.ctx.store.setMeta(key, String(now));
-    if (now - since >= this.ctx.config.tuning.fairAlertS) {
+    if (now - since < this.ctx.config.tuning.fairAlertS) return;
+    const dedupeKey = `${pair.writer.toLowerCase()}:${pair.underlying.toLowerCase()}`;
+    if (paused !== null) {
+      const series = `${ticker} ${paused.type} strike ${paused.strike} expiry ${paused.expiry} (series ${paused.longId}, ask ${paused.orderId}, writer ${pair.writer})`;
       await this.alert(
         'v2_pricer_fair_unavailable',
-        `pricer: no fair value for ${ticker} (writer ${pair.writer}) for ${now - since} s: ${reason}`,
-        { writer: pair.writer, underlying: pair.underlying, ticker, since, reason },
-        { dedupeKey: `${pair.writer.toLowerCase()}:${pair.underlying.toLowerCase()}` },
+        `pricer: ${series} has not been re-priced for ${now - since} s and is paused now because pricing flagged event/model uncertainty: ${reason}. Not a missing fair value: the pricing service answered, and the market maker halts the same series. The ask keeps its last price until the flag clears`,
+        {
+          writer: pair.writer, underlying: pair.underlying, ticker, since, reason, cause: 'event-uncertainty',
+          longId: paused.longId.toString(), orderId: paused.orderId.toString(), strike: paused.strike.toString(), expiry: paused.expiry, type: paused.type,
+        },
+        { dedupeKey },
       );
+      return;
     }
+    await this.alert(
+      'v2_pricer_fair_unavailable',
+      `pricer: no fair value for ${ticker} (writer ${pair.writer}) for ${now - since} s: ${reason}`,
+      { writer: pair.writer, underlying: pair.underlying, ticker, since, reason },
+      { dedupeKey },
+    );
   }
 
   /** The /state body. */
@@ -766,6 +985,7 @@ export class Pricer {
       scan: r?.scan ?? null,
       scannedTo: this.ctx.strategies.scannedTo(),
       pairs: r?.pairs ?? [],
+      probe: this.lastProbe,
       clampStreaks: Object.fromEntries(this.clampStreaks),
       outcomes: this.outcomes,
       recentActions: this.recentActions,

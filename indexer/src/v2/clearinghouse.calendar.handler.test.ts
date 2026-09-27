@@ -89,6 +89,9 @@ describe("Clearinghouse calendar fallback", () => {
       });
     }
 
+    // The cutoff stored is the Clearinghouse's own mintCutoff(longId) answer (here longId + 1_000), never a
+    // recomputed expiry - SETTLEMENT_WINDOW (1_798_200), so the book's AskWrite deadline is the contract's.
+    expect(db.rows.get("v2Series")?.get("2").mintCutoff).toBe(1_002n);
     expect(db.rows.get("v2Series")?.get("2").tenor).toBe("weekly");
     expect(db.rows.get("v2Series")?.get("4").tenor).toBe("daily");
     expect(calendarReads).toEqual([100n, 201n]);

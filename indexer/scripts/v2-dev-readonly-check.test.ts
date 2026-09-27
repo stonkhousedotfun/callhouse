@@ -7,6 +7,10 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { checkDeployedDev, parseOptions, type Options } from "./v2-dev-readonly-check";
 
 const address = (digit: string) => `0x${digit.repeat(40)}`;
+// Fees and rent are owner settings on chain, so a live-vs-registry mismatch still fails but is worded as
+// registry drift, not a chain fault. These pin the NEW wording (the old one was "<field> differs from registry.").
+const drift = (field: string) => `${field} differs from registry: live on-chain setting differs from the pinned registry ` +
+  "(registry drift, not a chain fault); if the change was intended, re-sync the --registry file.";
 function fixture() {
   const contracts = { clearinghouse: address("1"), orderBook: address("2"), settlementOracle: address("3"),
     expiryCalendar: address("4"), keeperRewards: address("5"), autoRoller: address("6"),
@@ -26,7 +30,10 @@ function fixture() {
     "/v2/health": { status: "ok", block: "110", lagSeconds: 1, interfaceVersion: 8 },
     "/v2/config": { chainId: 4663, interfaceVersion: 8, deployBlock: "100",
       usdg: { address: registry.shared.usdg, symbol: "USDG", decimals: 6 }, contracts: structuredClone(contracts),
-      fees: { ...registry.v2.fees, takerFeeFlat: { raw: registry.v2.fees.takerFeeFlat, decimals: 6, formatted: "0.1" } },
+      // maxPayoutSlippageBps is a required /v2/config fee field (src/api/v2/schema.ts configResponseSchema) that
+      // the registry does not carry; the stub must include it or the stable-field parse rejects the response.
+      fees: { ...registry.v2.fees, takerFeeFlat: { raw: registry.v2.fees.takerFeeFlat, decimals: 6, formatted: "0.1" },
+        maxPayoutSlippageBps: 250 },
       futureField: "Not part of manifest validation" },
     "/v2/markets": [{ ticker: "NVDA", underlying: registry.markets[0]!.asset, status: "live", puts: false, mintFeePpm: 0,
       strikeTick: { raw: "1000000", decimals: 6, formatted: "1" } }],
@@ -145,7 +152,7 @@ describe("read-only deployed-dev manifest checker", () => {
       : Number(registryFee) + 1;
     const report = await checkDeployedDev(options);
     expect(report.status).toBe("failed");
-    expect(report.checks.find((check) => check.name === "/v2/config")?.details).toContain(`fees.${field} differs from registry.`);
+    expect(report.checks.find((check) => check.name === "/v2/config")?.details).toEqual([drift(`fees.${field}`)]);
   });
 
   it("rejects a flat fee with wrong decimals", async () => {
@@ -153,7 +160,8 @@ describe("read-only deployed-dev manifest checker", () => {
     fees.takerFeeFlat.decimals = 18;
     const report = await checkDeployedDev(options);
     expect(report.status).toBe("failed");
-    expect(report.checks.find((check) => check.name === "/v2/config")?.details).toContain("fees.takerFeeFlat differs from registry.");
+    // Decimals are identity, not a setting: reported as an API fault, not as registry drift.
+    expect(report.checks.find((check) => check.name === "/v2/config")?.details).toEqual(["fees.takerFeeFlat is not in USDG's 6 decimals."]);
   });
 
   it.each(["missing", "unexpected-live", "wrong-underlying", "paused", "duplicate"])("rejects %s market selection", async (change) => {
@@ -239,7 +247,7 @@ describe("read-only deployed-dev manifest checker", () => {
     const report = await checkDeployedDev(options);
     expect(report.status).toBe("failed");
     expect(report.checks.find((check) => check.name === "/v2/markets")?.details)
-      .toContain("Market NVDA writer rent differs from registry.");
+      .toEqual([drift("Market NVDA writer rent")]);
   });
 
   it("uses an explicit market override instead of shared rent", async () => {

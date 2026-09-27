@@ -1,9 +1,13 @@
 /**
- * UX review 2026-09-20, item 5 (sections 1 and 2): the app nav is five entries, and /markets -- a
+ * The app nav is five entries, and /markets -- a
  * second door beside Buy into the same room -- became "Market status" under Trust.
  *
- * AUTHORED, NOT RUN (owner directive 2026-09-19; the worktree was not hydrated when this was
- * written).
+ * UPDATED ON PURPOSE. A pre-launch change renamed the fifth entry
+ * from Trust (/trust) to Markets (/trust/markets), made /trust itself redirect to /trust/markets, and replaced the
+ * market picker's search box and its "Browse all markets" link with one button per market. This file was not
+ * updated with it and had six failing cases before this update. The Neon mockups name the fifth tab Markets too. The
+ * expectations below now say Markets; the invariants did not change: five entries, the market status page is the
+ * fifth, /markets is never linked, and wherever the reader is inside the five exactly one entry is lit.
  *
  * The nav is RENDERED here rather than grepped. Which entries exist is a list, but which one is lit
  * is behaviour -- NavLinks decides it from the pathname -- and that half is what a source assertion
@@ -70,45 +74,52 @@ describe("the app nav is five entries", () => {
     expect(entries("/").length).toBeGreaterThan(0);
   });
 
-  it("offers Buy, Portfolio, Vaults, Wins and Trust, in that order, and nothing else", () => {
+  it("offers Options, Portfolio, Vaults, Wins and Markets, in that order, and nothing else", () => {
     expect(entries("/").map(({ label, href }) => [label, href])).toEqual([
-      ["Buy", "/"],
+      ["Options", "/"],
       ["Portfolio", "/portfolio"],
       ["Vaults", "/vaults"],
       ["Wins", "/wins"],
-      ["Trust", "/trust"],
+      ["Markets", "/trust/markets"],
     ]);
   });
 
-  it("no longer offers Markets, the second door beside Buy", () => {
+  it("Markets is the market status page, never the /markets redirect (the second door beside Buy)", () => {
     const all = entries("/");
-    expect(all.map((entry) => entry.label)).not.toContain("Markets");
     expect(all.map((entry) => entry.href)).not.toContain("/markets");
+    expect(all.find((entry) => entry.label === "Markets")?.href).toBe("/trust/markets");
   });
 
-  it("keeps the site link outside the five, as the one link that leaves the app", () => {
+  it("has no link that leaves the app", () => {
     vi.stubEnv("NEXT_PUBLIC_V2", "1");
     const html = renderToStaticMarkup(createElement(NavLinks));
-    expect(html.match(/target="_blank"/g) ?? []).toHaveLength(1);
+    expect(html.match(/target="_blank"/g) ?? []).toHaveLength(0);
+    expect(html).not.toMatch(/href="https?:/);
+    // Buy still points home; the brand logo (components/ui/Brand.tsx) is untouched and also links home.
+    expect(html).toContain('href="/"');
   });
 });
 
 describe("aria-current marks exactly one entry, wherever the reader is", () => {
-  it("lights Trust on Market status, the page /markets became", () => {
-    expect(lit("/trust/markets")).toEqual(["Trust"]);
+  it("lights Markets on Market status, the page /markets became", () => {
+    expect(lit("/trust/markets")).toEqual(["Markets"]);
   });
 
   it.each([
-    ["/", "Buy"],
-    ["/nvda", "Buy"],
+    ["/", "Options"],
+    ["/nvda", "Options"],
     ["/portfolio", "Portfolio"],
     ["/vaults", "Vaults"],
     ["/earn", "Vaults"],
     ["/lend", "Vaults"],
     ["/house", "Vaults"],
+    // Sell options is the market pages' other side, not a vault.
+    ["/sell", "Options"],
+    ["/sell/nvda", "Options"],
     ["/wins", "Wins"],
-    ["/trust", "Trust"],
-    ["/trust/burns", "Trust"],
+    // /trust redirects to /trust/markets; Markets is the nav's only door into the /trust section.
+    ["/trust", "Markets"],
+    ["/trust/burns", "Markets"],
   ])("%s lights %s and nothing else", (pathname, label) => {
     expect(lit(pathname)).toEqual([label]);
   });
@@ -147,10 +158,12 @@ describe("/markets moved to /trust/markets", () => {
     expect(urls).not.toContain(`${APP_URL}/markets`);
   });
 
-  it("the market picker's 'Browse all markets' goes straight there, not through the redirect", () => {
-    // Source assertion: the link only renders while the picker is open, which needs a click.
+  it("the market picker never links the /markets redirect", () => {
+    // Since the rename the picker is one button per market and links nowhere; the old "Browse all markets" link, which
+    // this case used to pin to /trust/markets, is gone. What still matters is that nothing sends a reader through
+    // the redirect.
     const picker = readFileSync(fileURLToPath(new URL("./MarketPicker.tsx", import.meta.url)), "utf8");
-    expect(picker).toContain('<Link href="/trust/markets"');
+    expect(picker, "the picker source was read -- the control").toContain("export function MarketPicker");
     expect(picker).not.toContain('href="/markets"');
   });
 });

@@ -5,7 +5,7 @@ import { buybackExecutorAbi } from "../../abis/v2/buybackExecutor";
  *
  * The generated `buybackExecutorAbi` still comes from the frozen IBuybackExecutor artifact, which
  * declares `execute` but cannot declare implementation events. Keep this additive fragment outside
- * the generated ABI directory until C8-08 exports V4BuybackExecutor.json.
+ * the generated ABI directory until the export includes V4BuybackExecutor.json.
  */
 export const buybackExecutorEventsAbi = [
   {

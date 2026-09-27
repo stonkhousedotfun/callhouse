@@ -1,5 +1,5 @@
 /**
- * The MakerVault's daily outflow cap (INTERFACE_VERSION 7, c21), as the bot models it. Pure: no chain, no clock.
+ * The MakerVault's daily outflow cap (INTERFACE_VERSION 7), as the bot models it. Pure: no chain, no clock.
  *
  * WHAT THE VAULT DOES. `_bookOutflow` measures CASH = `usdg.balanceOf(vault) + orderBook.owed(vault)` immediately
  * before and after every booked call and charges (or credits) the difference to a leaky bucket that refills linearly

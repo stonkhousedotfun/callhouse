@@ -27,7 +27,7 @@ import {
 const URL_VALUE = "http://127.0.0.1:8791/ready";
 const NOW = 1_800_000_000_000; // wall-clock ms; unix seconds are NOW/1000
 
-/** A valid T-423 /ready body. The five keys and nothing else. */
+/** A valid ready body. The five keys and nothing else. */
 function readyBody(over: Partial<Record<string, unknown>> = {}) {
   return {
     ready: true,

@@ -1,8 +1,8 @@
 /**
- * Real-data replay harness for the pricing service (K3-304). No network, no credential, no
+ * Real-data replay harness for the pricing service. No network, no credential, no
  * provider contact: chains come from files, the spot from a synthetic round over the chain's own
  * underlying, and every answer comes from the real PricingService through the provider-neutral
- * seam (K3-311).
+ * seam.
  *
  * Two data paths, kept strictly apart:
  *   private  loadCboeFixtureDir reads real Cboe downloads from a directory OUTSIDE the repo named

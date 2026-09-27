@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import { decodeFunctionResult, encodeAbiParameters, parseAbi, zeroAddress, type PublicClient } from "viem";
 import { payoutAdapterAbi } from "../abi/v2/payoutAdapter";
 import { conversionFloorBps, readConversionFloor, readConversionFloorState } from "./conversion";
+import { advancingHeadClient } from "./testing/advancingHead";
 vi.mock("./config", () => ({ requireV2Address: () => "0x0000000000000000000000000000000000000001" }));
 describe("per-market payout conversion floor", () => {
   it("adds the market route fee, caps it, and clamps the overall bound", () => {
@@ -15,7 +16,7 @@ describe("per-market payout conversion floor", () => {
     // IPayoutRouter.routes(address) and UniV3PayoutAdapter.routes(address) share selector 0xd7409659.
     // The router returns (uint8 venue, uint24 fee, int24 tickSpacing, address v3Pool, uint16 feeBps);
     // the adapter returns (address pool, uint24 fee). Decoding the router bytes with the adapter ABI
-    // reads VENUE-AS-ADDRESS (0x...0001) and does not revert - the silent mis-decode T-69 closes.
+    // reads VENUE-AS-ADDRESS (0x...0001) and does not revert - the silent mis-decode closes.
     const pool = "0x0000000000000000000000000000000000000003";
     const routerData = encodeAbiParameters(
       [{ type: "tuple", name: "", components: [
@@ -52,6 +53,14 @@ describe("per-market payout conversion floor", () => {
     expect(await readConversionFloorState(asset, client)).toEqual({ kind: "routed", floorBps: 9920 });
     expect(readContract).toHaveBeenNthCalledWith(1, expect.objectContaining({ functionName: "routes", args: [asset], blockNumber: 12n }));
     expect(readContract).toHaveBeenNthCalledWith(2, expect.objectContaining({ functionName: "routeFeeBps", args: [asset], blockNumber: 12n }));
+  });
+  it("reads the route at the new head, not viem's 4-second cached block number", async () => {
+    const asset = "0x0000000000000000000000000000000000000002";
+    const multicall = vi.fn(async (_input: { blockNumber: bigint }) => [zeroAddress, 50]);
+    const client = advancingHeadClient(12n, { multicall });
+    await readConversionFloorState(asset, client);
+    await readConversionFloorState(asset, client);
+    expect(multicall.mock.calls.map(([request]) => request.blockNumber)).toEqual([12n, 13n]);
   });
   it("recognises a v4 route even though its v3Pool field is zero", async () => {
     const asset = "0x0000000000000000000000000000000000000002";

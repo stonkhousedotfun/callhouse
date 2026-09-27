@@ -1,6 +1,6 @@
 /**
  * lib/deployment.ts: the vault settings the constructor sets without an event, which the
- * `Vault:setup` handler seeds from views at START_BLOCK. Found by the X-11 fork sync: /v1/vault
+ * `Vault:setup` handler seeds from views at START_BLOCK. Found by the fork sync: /v1/vault
  * published `protocolFeeBps: 0` and `feeRecipient: null` for a vault charging 500 bps to a real
  * recipient, because `PolicyUpdated` / `FeeRecipientUpdated` / `DepositCapUpdated` never fired.
  *

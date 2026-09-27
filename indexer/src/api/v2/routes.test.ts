@@ -3,17 +3,20 @@ import { execFileSync } from "node:child_process";
 import { join, relative } from "node:path";
 
 import { PGlite } from "@electric-sql/pglite";
+import { eq } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/pglite";
 import { getTableConfig } from "drizzle-orm/pg-core";
 import { Hono } from "hono";
-import { getAddress } from "viem";
-import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
+import { ContractFunctionRevertedError, encodeErrorResult, getAddress } from "viem";
+import { type MockInstance, afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 
 import * as schema from "../../../ponder.schema";
+import { earnVaultAbi } from "../../../abis/v2/earnVault";
 import { V2_REGISTRY } from "../../../lib/v2/marketRegistry.generated";
 import { MAKER_BENCHMARK_POLICY } from "../../../lib/v2/makerScoring";
+import { CALENDAR_MODE_ID } from "../../../lib/v2/calendar";
 import { LIVE_RESPONSE_FIXTURES } from "./live-response.fixture";
-import { ROUTES } from "./schema";
+import { ROUTES, configResponseSchema, earnResponseSchema, houseMarketResponseSchema } from "./schema";
 import { teardown } from "./teardown";
 
 const state = vi.hoisted(() => {
@@ -57,7 +60,7 @@ const state = vi.hoisted(() => {
       outflowUsed: 500_000_000n, liveOrderCount: 3, trackedSeries: [2n, 4n],
     } as any,
     fair: null as null | { fair: bigint; spot: bigint; iv: number; delta: number; asOf: number; source: "cboe" | "model" },
-    // T-OP-086: the /earn route's live mark reads through `publicClients[CHAIN_NAME].multicall`. Empty by
+    // The /earn route's live mark reads through `publicClients[CHAIN_NAME].multicall`. Empty by
     // default (no client -> every live field null); a test installs a fake client to drive the other states.
     publicClients: {} as Record<string, { multicall: (args: { contracts: unknown[] }) => Promise<unknown> }> };
 });
@@ -65,9 +68,9 @@ const state = vi.hoisted(() => {
 vi.mock("ponder:api", () => ({ get db() { return state.db; }, get publicClients() { return state.publicClients; } }));
 vi.mock("ponder:schema", () => ({ ...schema, default: schema }));
 vi.mock("../../../lib/v2/pricing", () => ({
-  // X3-302 drives this through state.fairResult; X3-304 drives it through state.fair and the
-  // in-flight counters. Both are kept: the counters always run, and state.fair wins when an
-  // X3-304 test has set it, otherwise the X3-302 result's quote is returned.
+  // Some tests drive this through state.fairResult, others through state.fair and the
+  // in-flight counters. Both are kept: the counters always run, and state.fair wins when a
+  // test has set it, otherwise the result's quote is returned.
   fetchFairQuote: async () => {
     state.fairRequests += 1;
     state.fairInFlight += 1;
@@ -102,6 +105,8 @@ const BUYER = "0x0000000000000000000000000000000000000022" as const;
 const WRITER = "0x0000000000000000000000000000000000000033" as const;
 const RECIPIENT = "0x0000000000000000000000000000000000000044" as const;
 const USDG = "0x0000000000000000000000000000000000000001" as const;
+/** The Clearinghouse the Earn route reads `free(vault, asset)` from, lowercased as the multicall fakes key it. */
+const CLEARINGHOUSE_LEDGER = (process.env.V2_CLEARINGHOUSE as string).toLowerCase();
 const ACCESS_MANAGER = "0x0000000000000000000000000000000000006016" as const;
 const FEE_SPLITTER = "0x0000000000000000000000000000000000007001" as const;
 const FLYWHEEL_TOKEN = "0x0000000000000000000000000000000000007003" as const;
@@ -277,9 +282,14 @@ beforeAll(async () => {
     otmBps: 200, askBps: 300, minAskBps: 100, maxAskBps: 500,
     maxUnits: 100n, currentLongId: 2n, orderId: 1n, expiry: BigInt(state.now + 86_400),
     lastRolledAt: BigInt(state.now - 120), repriceCount: 0, updatedAt: BigInt(state.now - 120) });
+  // The write-on-fill gates a live deployment has. The writer made the book its Clearinghouse operator
+  // (OrderBook.sol:1101) and the book is on the minter allow-list (:1091); without them every AskWrite is skipped.
   await database.insert(schema.v2Account).values({ account: WRITER,
     delegates: JSON.stringify({ [process.env.V2_AUTO_ROLLER!.toLowerCase()]: true }),
+    operators: JSON.stringify({ [process.env.V2_ORDER_BOOK!.toLowerCase()]: true }),
     firstSeen: BigInt(state.now - 120), lastSeen: BigInt(state.now - 120) });
+  await database.insert(schema.v2Minter).values({ minter: process.env.V2_ORDER_BOOK!.toLowerCase() as `0x${string}`,
+    allowed: true, changedAt: BigInt(state.now - 120), changedBlock: 100n, changedTx: TX });
   await database.insert(schema.v2PositionPnl).values({ id: WIN_ID, longId: 2n, holder: BUYER,
     unitsBought: 100n, costUsdg: 3_100_000n, unitsSold: 0n, proceedsUsdg: 0n,
     unitsRedeemed: 100n, payoutUsdgValue: 6_200_000n, realisedUsdg: 3_100_000n,
@@ -293,7 +303,7 @@ beforeAll(async () => {
     wins: 1, losses: 0, bestWinId: WIN_ID, updatedAt: BigInt(state.now) });
   await database.insert(schema.v2MakerEpoch).values({ id: `${WRITER}-${epoch}`, maker: WRITER,
     epoch, tierBps: 50, benchmarkPolicy: MAKER_BENCHMARK_POLICY,
-    // samples is absent + valid; missingReference sits outside it (X8-312).
+    // samples is absent + valid; missingReference sits outside it.
     samples: 10, absentSamples: 4, validSamples: 6, missingReferenceSamples: 2,
     twoSidedSamples: 5, uptimePpm: 500_000n,
     // The band figure is the wider one: the 1000 bps band contains the 100 bps one.
@@ -351,7 +361,7 @@ describe("v2 API with seeded PGlite", () => {
     try {
       await database.insert(schema.v2ProtocolState).values({
         id: "protocol", createPaused: false, defaultExerciseFeeBps: 37, defaultMintFeePpm: 91,
-        // T-OP-120 (G7): PayoutAdapterSet's maxSlippageBps reaches the wire as fees.maxPayoutSlippageBps.
+        // (G7): PayoutAdapterSet's maxSlippageBps reaches the wire as fees.maxPayoutSlippageBps.
         maxSlippageBps: 250,
         updatedAt: BigInt(state.now),
       });
@@ -369,7 +379,8 @@ describe("v2 API with seeded PGlite", () => {
       clearCache();
       const response = await app.request("http://localhost/v2/config?case=indexed-v8-state");
       expect(response.status).toBe(200);
-      const config = ROUTES.find((route) => route.route === "/v2/config")!.schema.parse(await response.json());
+      expect(ROUTES.find((route) => route.route === "/v2/config")!.schema).toBe(configResponseSchema);
+      const config = configResponseSchema.parse(await response.json());
       expect(config).toMatchObject({
         contracts: { accessManager: ACCESS_MANAGER },
         access: { manager: ACCESS_MANAGER },
@@ -423,7 +434,7 @@ describe("v2 API with seeded PGlite", () => {
     }
   });
 
-  // T-434. `id` is AccessManager's operation id and it REPEATS across a reschedule; the ingest row
+  // `id` is AccessManager's operation id and it REPEATS across a reschedule; the ingest row
   // is keyed `operationId:nonce` (accessManager.ts:135-137). Before `key` was published there was
   // nothing on the wire that separated these two rows, so any consumer keying on `id` lost one --
   // and the one it lost is a pending governance operation.
@@ -455,7 +466,7 @@ describe("v2 API with seeded PGlite", () => {
     // OperationScheduled stores null for calldata shorter than a selector. Do not hand-seed a
     // four-byte selector here: that was the route-only shape that hid this production row.
     const operation = { ...accessOperation({ operationId: TX3, nonce: 43, status: "pending", block: 243 }),
-      data: "0x1234", selector: null, targetName: null, functionSignature: null,
+      data: "0x1234" as const, selector: null, targetName: null, functionSignature: null,
       expectedRoleId: null, roleId: 0n, roleName: "ADMIN",
       label: `unknown-target ${ACCESS_MANAGER.toLowerCase()} no-selector` };
     try {
@@ -542,7 +553,7 @@ describe("v2 API with seeded PGlite", () => {
     const recoveredQueueId = `${vault.toLowerCase()}-7`;
     try {
       await database.insert(schema.v2EarnVaultState).values({
-        vault, asset: USDG, adapter: null, skimBps: null, paused: false,
+        vault, asset: USDG, adapter: null, skimBps: null, fundingEnabled: true,
         sharesSupply: 100n, updatedAt: BigInt(state.now - 50), updatedBlock: 400n,
         updatedLogIndex: 1, updatedTx: TX,
       });
@@ -574,10 +585,11 @@ describe("v2 API with seeded PGlite", () => {
         deposited: "1000",
         skimmed: null,
         sharesSupply: "100",
-        paused: false,
+        // No public client here, so the live fundingEnabled() read is null and the indexed flag is served.
+        fundingEnabled: true,
         queue: { depth: 1, oldestRequestedAt: state.now - 30 },
         lastAdapterMove: expect.objectContaining({ delivered: null, requested: "50", direction: "pull" }),
-        // T-OP-086: no public client in this scenario -> the live mark is "not read", null on all three.
+        // No public client in this scenario -> the live mark is "not read", null on all three.
         indicativeAssetsPerShare: null,
         indicativeTotalAssets: null,
         hasOpenPosition: null,
@@ -605,13 +617,216 @@ describe("v2 API with seeded PGlite", () => {
     }
   });
 
+  it("/v2/earn sends each vault's venue write-offs from the event, newest first and bounded, and [] when there is none", async () => {
+    const { clearCache } = await import("../cache");
+    const { EARN_WRITE_OFFS_SENT } = await import("./earn");
+    const database = state.db as ReturnType<typeof drizzle<typeof schema>>;
+    const vault = getAddress(process.env.V2_EARN_VAULT as `0x${string}`);
+    const key = vault.toLowerCase() as `0x${string}`;
+    const OLD = "0x00000000000000000000000000000000000ad0a1";
+    const OLDER = "0x00000000000000000000000000000000000ad0a2";
+    const OTHER_VAULT = "0x00000000000000000000000000000000000000c3";
+    // The route's own schema, typed: the ROUTES entry is a union of every route's.
+    expect(ROUTES.find((item) => item.route === "/v2/earn")!.schema).toBe(earnResponseSchema);
+    const route = { schema: earnResponseSchema };
+    const writeOff = (id: string, onVault: string, adapter: string, lastKnown: bigint, block: bigint, logIndex: number, tx: `0x${string}`) => ({
+      id, vault: onVault as `0x${string}`, adapter: adapter as `0x${string}`, asset: USDG, lastKnown,
+      ts: BigInt(state.now) - (1_000n - block), block, logIndex, tx,
+    });
+    const filler = Array.from({ length: EARN_WRITE_OFFS_SENT }, (_, i) =>
+      writeOff(`writeoff-old-${i}`, key, OLDER, 1n, 300n + BigInt(i), 0, TX));
+    try {
+      await database.insert(schema.v2EarnVaultState).values({
+        vault, asset: USDG, adapter: null, skimBps: null, fundingEnabled: true,
+        sharesSupply: 100n, updatedAt: BigInt(state.now - 50), updatedBlock: 400n,
+        updatedLogIndex: 1, updatedTx: TX,
+      });
+      clearCache();
+      const none = route.schema.parse(await (await app.request("http://localhost/v2/earn")).json());
+      expect(none.vaults?.map((v) => v.venueWriteOffs)).toEqual([[]]);
+
+      await database.insert(schema.v2EarnVaultVenueWriteOff).values([
+        // Same block, two logs: the later log first. A zero write-off is a row like any other.
+        writeOff("writeoff-a", key, OLDER, 0n, 410n, 2, TX2),
+        writeOff("writeoff-b", key, OLD, 12_345_678n, 420n, 0, TX3),
+        writeOff("writeoff-c", key, OLD, 7n, 420n, 1, TX3),
+        // Another vault's write-off is not this vault's, even when it is the newest row in the table.
+        writeOff("writeoff-other", OTHER_VAULT, OLD, 5n, 430n, 0, TX),
+      ]);
+      clearCache();
+      const body = route.schema.parse(await (await app.request("http://localhost/v2/earn")).json());
+      expect(body.vaults?.[0]?.venueWriteOffs).toEqual([
+        { adapter: getAddress(OLD), amount: "7", ts: state.now - 580, tx: TX3 },
+        { adapter: getAddress(OLD), amount: "12345678", ts: state.now - 580, tx: TX3 },
+        { adapter: getAddress(OLDER), amount: "0", ts: state.now - 590, tx: TX2 },
+      ]);
+
+      // Bounded: the newest EARN_WRITE_OFFS_SENT of 3 + EARN_WRITE_OFFS_SENT rows, so the three oldest fillers (blocks
+      // 300-302) are left out and the last one sent is block 303.
+      await database.insert(schema.v2EarnVaultVenueWriteOff).values(filler);
+      clearCache();
+      const many = route.schema.parse(await (await app.request("http://localhost/v2/earn")).json());
+      const sent = many.vaults?.[0]?.venueWriteOffs ?? [];
+      expect(sent).toHaveLength(EARN_WRITE_OFFS_SENT);
+      expect(sent.slice(0, 3).map((w) => w.amount)).toEqual(["7", "12345678", "0"]);
+      expect(sent.at(-1)).toEqual({ adapter: getAddress(OLDER), amount: "1", ts: state.now - 1_000 + 303, tx: TX });
+    } finally {
+      await teardown(pg, [
+        ["DELETE FROM v2_earn_vault_venue_write_off WHERE id LIKE 'writeoff-%'", [], 4 + EARN_WRITE_OFFS_SENT],
+        ["DELETE FROM v2_earn_vault_state WHERE lower(vault) = lower($1)", [vault]],
+      ]);
+      clearCache();
+    }
+  });
+
+  it("lists the caller's queued deposits and withdrawals with queue id, escrow left and FIFO place", async () => {
+    const { clearCache } = await import("../cache");
+    const database = state.db as ReturnType<typeof drizzle<typeof schema>>;
+    const vault = getAddress(process.env.V2_EARN_VAULT as `0x${string}`);
+    const key = vault.toLowerCase();
+    const other = "0x00000000000000000000000000000000000000b2";
+    const otherVault = "0x00000000000000000000000000000000000000c3";
+    const withdrawal = (id: string, account: string, status: string, block: bigint, logIndex: number, onVault = key) => ({
+      id, vault: onVault as `0x${string}`, account: account as `0x${string}`, asset: USDG, status,
+      sharesQueued: 100n, assetsRequested: null, requestedAt: BigInt(state.now - 30), requestedBlock: block,
+      requestedLogIndex: logIndex, requestedTx: TX3, fulfilledAssets: null, fulfilledAt: null, fulfilledBlock: null,
+      fulfilledLogIndex: null, fulfilledTx: null,
+    });
+    const deposit = (id: string, account: string, block: bigint, logIndex: number) => ({
+      id, vault: key as `0x${string}`, account: account as `0x${string}`, receiver: account as `0x${string}`,
+      asset: USDG, status: "queued", assetsQueued: 250n, requestedAt: BigInt(state.now - 20), requestedBlock: block,
+      requestedLogIndex: logIndex, requestedTx: TX3, mintedShares: null, fulfilledAt: null, fulfilledBlock: null,
+      fulfilledLogIndex: null, fulfilledTx: null,
+    });
+    try {
+      await database.insert(schema.v2EarnVaultState).values({
+        vault, asset: USDG, adapter: null, skimBps: null, fundingEnabled: true,
+        sharesSupply: 1_000n, updatedAt: BigInt(state.now - 50), updatedBlock: 499n,
+        updatedLogIndex: 1, updatedTx: TX,
+      });
+      await database.insert(schema.v2EarnVaultWithdrawalQueue).values([
+        // Cancelled before everything: waits for nothing, so it is never counted ahead.
+        withdrawal(`${key}-1`, other, "cancelled", 499n, 1),
+        // Open and earlier: ahead of both of BUYER's requests.
+        withdrawal(`${key}-2`, other, "queued", 500n, 1),
+        // BUYER's partially served redemption at (502, 2).
+        withdrawal(`${key}-5`, BUYER, "queued", 502n, 2),
+        // Another vault's queue is a different FIFO and is never counted, however early.
+        withdrawal(`${otherVault}-1`, other, "queued", 400n, 1, otherVault),
+      ]);
+      await database.insert(schema.v2EarnVaultDepositQueue).values([
+        // A queued DEPOSIT is in the same FIFO as the redemptions around it.
+        deposit(`${key}-3`, other, 501n, 1),
+        // Same block as BUYER's redemption, earlier log: ahead of it. The tie-break is the log index.
+        deposit(`${key}-4`, other, 502n, 1),
+        deposit(`${key}-6`, BUYER, 503n, 1),
+      ]);
+      // A partial service of #5 burned 40 of its 100 shares.
+      await database.insert(schema.v2EarnVaultWithdrawal).values({
+        id: "t-op-239-served", vault: key as `0x${string}`, account: BUYER, asset: USDG, assets: 400n, shares: 40n,
+        queueId: `${key}-5`, ts: BigInt(state.now - 10), block: 504n, logIndex: 1, tx: TX3,
+      });
+      clearCache();
+      const response = await app.request(`http://localhost/v2/earn?address=${BUYER}`);
+      expect(response.status).toBe(200);
+      const body = ROUTES.find((route) => route.route === "/v2/earn")!.schema.parse(await response.json());
+      // Depth is every OPEN entry of this vault in either direction (#2, #3, #4, #5, #6); cancelled #1 and the other
+      // vault's entry are not in it. Earlier it counted withdrawals only and said 2.
+      expect(body.vaults?.[0]?.queue).toEqual({ depth: 5, oldestRequestedAt: state.now - 30 });
+      expect(body.account?.queued).toEqual([
+        {
+          id: `${key}-5`, status: "queued", sharesQueued: "100", assetsRequested: null, fulfilledAssets: null,
+          requestedAt: state.now - 30, vault, queueId: "5", kind: "withdrawal", assetsQueued: null,
+          sharesEscrowed: "60", position: 4,
+        },
+        {
+          id: `${key}-6`, status: "queued", sharesQueued: "0", assetsRequested: null, fulfilledAssets: null,
+          requestedAt: state.now - 20, vault, queueId: "6", kind: "deposit", assetsQueued: "250",
+          sharesEscrowed: "0", position: 5,
+        },
+      ]);
+    } finally {
+      await teardown(pg, [
+        ["DELETE FROM v2_earn_vault_withdrawal WHERE id = 't-op-239-served'"],
+        ["DELETE FROM v2_earn_vault_deposit_queue WHERE id IN ($1, $2, $3)", [`${key}-3`, `${key}-4`, `${key}-6`], 3],
+        ["DELETE FROM v2_earn_vault_withdrawal_queue WHERE id IN ($1, $2, $3, $4)",
+          [`${key}-1`, `${key}-2`, `${key}-5`, `${otherVault}-1`], 4],
+        ["DELETE FROM v2_earn_vault_state WHERE lower(vault) = lower($1)", [vault]],
+      ]);
+      clearCache();
+    }
+  });
+
+  it("serves the caller's held payments (owner or receiver) and the live fundingEnabled flag, never a pause", async () => {
+    const { clearCache } = await import("../cache");
+    const database = state.db as ReturnType<typeof drizzle<typeof schema>>;
+    const vault = getAddress(process.env.V2_EARN_VAULT as `0x${string}`);
+    const key = vault.toLowerCase();
+    const other = "0x00000000000000000000000000000000000000b2";
+    const held = (requestId: bigint, owner: string, receiver: string, assets: bigint) => ({
+      id: `${key}-${requestId}`, vault: key as `0x${string}`, requestId, owner: owner.toLowerCase() as `0x${string}`,
+      receiver: receiver.toLowerCase() as `0x${string}`, asset: USDG, assets, heldTotal: assets === 0n ? 90n : assets,
+      claimedTotal: assets === 0n ? 90n : 0n, updatedAt: BigInt(state.now - Number(requestId)), updatedBlock: 600n + requestId,
+      updatedLogIndex: 1, updatedTx: TX3,
+    });
+    try {
+      // Nothing indexed about the flag: the deploy never emits FundingEnabledSet.
+      await database.insert(schema.v2EarnVaultState).values({
+        vault, asset: USDG, adapter: null, skimBps: null, fundingEnabled: null,
+        sharesSupply: 1_000n, updatedAt: BigInt(state.now - 50), updatedBlock: 499n, updatedLogIndex: 1, updatedTx: TX,
+      });
+      await database.insert(schema.v2EarnVaultHeldPayment).values([
+        held(31n, BUYER, other, 300n), // BUYER owns it
+        held(32n, other, BUYER, 70n), // BUYER is the receiver: claimDeferred lets the receiver pull too
+        held(33n, BUYER, BUYER, 0n), // already pulled: nothing held, not listed
+        held(34n, other, other, 500n), // someone else's
+      ]);
+      clearCache();
+      state.publicClients = { robinhood: { multicall: async ({ contracts }: { contracts: unknown[] }) =>
+        (contracts as Array<{ address: string; functionName: string }>).map(({ address: at, functionName }) =>
+          at.toLowerCase() === key && functionName === "fundingEnabled"
+            ? { status: "success", result: false }
+            : { status: "failure", error: new Error("execution reverted") }) } };
+      const route = ROUTES.find((item) => item.route === "/v2/earn")!;
+      const response = await app.request(`http://localhost/v2/earn?address=${BUYER}`);
+      expect(response.status).toBe(200);
+      const body = route.schema.parse(await response.json());
+      // The contract says false; an indexed-only answer would have been null.
+      expect(body.vaults?.[0]?.fundingEnabled).toBe(false);
+      expect(body.vaults?.[0]).not.toHaveProperty("paused");
+      expect(body.account?.held).toEqual([
+        { vault, queueId: "31", owner: getAddress(BUYER), receiver: getAddress(other), asset: getAddress(USDG), assets: "300", updatedAt: state.now - 31 },
+        { vault, queueId: "32", owner: getAddress(other), receiver: getAddress(BUYER), asset: getAddress(USDG), assets: "70", updatedAt: state.now - 32 },
+      ]);
+
+      // The read fails: the last indexed FundingEnabledSet is served; with none, null (never a guessed false).
+      state.publicClients = {};
+      clearCache();
+      const unread = route.schema.parse(await (await app.request(`http://localhost/v2/earn?address=${other}`)).json());
+      expect(unread.vaults?.[0]?.fundingEnabled).toBeNull();
+      expect(unread.account?.held?.map((item: { queueId: string }) => item.queueId)).toEqual(["31", "32", "34"]);
+      await pg.query("UPDATE v2_earn_vault_state SET funding_enabled = true WHERE lower(vault) = lower($1)", [vault]);
+      clearCache();
+      const indexed = route.schema.parse(await (await app.request("http://localhost/v2/earn")).json());
+      expect(indexed.vaults?.[0]?.fundingEnabled).toBe(true);
+      expect(indexed.account ?? null).toBeNull();
+    } finally {
+      state.publicClients = {};
+      await teardown(pg, [
+        ["DELETE FROM v2_earn_vault_held_payment WHERE id IN ($1, $2, $3, $4)", [`${key}-31`, `${key}-32`, `${key}-33`, `${key}-34`], 4],
+        ["DELETE FROM v2_earn_vault_state WHERE lower(vault) = lower($1)", [vault]],
+      ]);
+      clearCache();
+    }
+  });
+
   it("maps production Earn adapter directions instead of dropping them", async () => {
     const { clearCache } = await import("../cache");
     const database = state.db as ReturnType<typeof drizzle<typeof schema>>;
     const vault = getAddress(process.env.V2_EARN_VAULT as `0x${string}`);
     try {
       await database.insert(schema.v2EarnVaultState).values({
-        vault, asset: USDG, adapter: null, skimBps: null, paused: false,
+        vault, asset: USDG, adapter: null, skimBps: null, fundingEnabled: true,
         sharesSupply: 100n, updatedAt: BigInt(state.now - 30), updatedBlock: 404n,
         updatedLogIndex: 1, updatedTx: TX,
       });
@@ -639,7 +854,7 @@ describe("v2 API with seeded PGlite", () => {
       expect(outBody.vaults[0]?.lastAdapterMove).toEqual(expect.objectContaining({
         direction: "push", requested: "50", delivered: "40",
       }));
-      // T-OP-086: both production sites carry the live fields, null without a client.
+      // Both production sites carry the live fields, null without a client.
       expect(inBody.vaults[0]).toEqual(expect.objectContaining({
         indicativeAssetsPerShare: null, indicativeTotalAssets: null, hasOpenPosition: null,
       }));
@@ -656,52 +871,291 @@ describe("v2 API with seeded PGlite", () => {
   });
 
   /**
-   * T-OP-086 (SEC-19 / T-OP-065). The live mark: read from the vault's own `indicativeAssetsPerShare()` /
+   * The public Earn figures end to end through the route: realised APY from seeded hourly samples (flat
+   * ones only, after the skim), the venue's APY over samples of the SAME venue, venue liquidity that uses the
+   * POSITION on an advisory (Morpho Vault V2-shaped) venue and maxWithdraw on a standard one, and one
+   * earliestWithdrawal per branch of EarnVault.redeem. The fake client answers by address and function, so the
+   * vault's totalAssets() and the adapter's totalAssets() cannot be confused.
+   */
+  it("serves Earn APY, venue liquidity and earliestWithdrawal from samples and live reads", async () => {
+    const { clearCache } = await import("../cache");
+    const database = state.db as ReturnType<typeof drizzle<typeof schema>>;
+    const vault = getAddress(process.env.V2_EARN_VAULT as `0x${string}`);
+    const key = vault.toLowerCase() as `0x${string}`;
+    const ADAPTER = "0x000000000000000000000000000000000000Ad01" as const;
+    const VENUE = "0xBeEff033F34C046626B8D0A041844C5d1A5409dd" as const;
+    const OLD_VENUE = "0x000000000000000000000000000000000000Be01" as const;
+    const route = ROUTES.find((item) => item.route === "/v2/earn")!;
+    const DAY = 86_400;
+    const E18 = 10n ** 18n;
+    // The net-of-mark price sits a fixed 0.01 below the gross one, so a realised APY taken
+    // from netPricePerShare gives a different ratio from every expectation below, which are on the gross price.
+    const sample = (id: string, ts: number, positionOpen: boolean | null, price: bigint,
+      venue: string | null, probe: bigint | null, venueName: string | null = null) => ({
+      id: `${key}-${id}`, vault: key, ts: BigInt(ts), block: BigInt(ts), totalAssets: 1n, totalSupply: 1n,
+      highWaterMark: 0n, skimBps: 0, pricePerShare: price, netPricePerShare: price - E18 / 100n, positionOpen,
+      adapter: ADAPTER.toLowerCase() as `0x${string}`, venue: venue?.toLowerCase() as `0x${string}` | undefined ?? null,
+      venueName, venueProbeAssets: probe,
+    });
+    const now = state.now;
+    const endTs = now - 3_600;
+    const rows = [
+      sample("s30", now - 31 * DAY - 100, false, E18, OLD_VENUE, 500_000_000_000_000n),
+      sample("s7", now - 8 * DAY, false, 1_004n * E18 / 1_000n, VENUE, 999_000_000_000_000n),
+      sample("sv1", endTs - DAY - 60, false, 10_048n * E18 / 10_000n, VENUE, 1_000_000_000_000_000n),
+      // A different venue, NEWER than sv1 inside the 24h start range: chosen only if the same-venue filter is gone.
+      sample("sold", endTs - DAY - 10, false, 10_049n * E18 / 10_000n, OLD_VENUE, 100_000_000_000_000n),
+      sample("send", endTs, false, 1_005n * E18 / 1_000n, VENUE, 1_000_500_000_000_000n, "Steakhouse USDG"),
+      // Newer than send but NOT flat: unread flag, then an open position with the understated floor price.
+      sample("snull", now - 120, null, 2n * E18, null, null),
+      sample("sopen", now - 60, true, E18 / 2n, null, null),
+    ];
+    const base: Record<string, unknown> = {
+      [`${key}:indicativeAssetsPerShare`]: 1_005_000n,
+      [`${key}:indicativeTotalAssets`]: 7_000_000n,
+      [`${key}:hasOpenPosition`]: false,
+      [`${key}:queue`]: [5n, 4n],
+      [`${key}:escrowedAssets`]: 250_000n,
+      [`${key}:deferredAssets`]: 0n,
+      [`${key}:totalAssets`]: 7_000_000n,
+      // The venue probe answers, so the vault prices (its venue can be read).
+      [`${key}:convertToAssets`]: 1n,
+      [`${USDG}:balanceOf`]: 1_250_000n,
+      // The vault's free Clearinghouse ledger, which `_raise` pulls before the venue. Zero in every case below
+      // that does not name it, so those cases keep describing a vault with nothing parked on the ledger.
+      [`${CLEARINGHOUSE_LEDGER}:free`]: 0n,
+      [`${ADAPTER.toLowerCase()}:withdrawable`]: 0n,
+      [`${ADAPTER.toLowerCase()}:totalAssets`]: 5_000_000n,
+      [`${ADAPTER.toLowerCase()}:maxIsAdvisory`]: true,
+      [`${ADAPTER.toLowerCase()}:venue`]: VENUE,
+    };
+    const answer = (over: Record<string, unknown> = {}) => ({ robinhood: { multicall: async ({ contracts }: { contracts: unknown[] }) =>
+      (contracts as Array<{ address: string; functionName: string }>).map(({ address, functionName }) => {
+        const leg = `${address.toLowerCase()}:${functionName}`;
+        const value = leg in over ? over[leg] : base[leg];
+        if (value instanceof Error) return { status: "failure", error: value };
+        return value === undefined ? { status: "failure", error: new Error("execution reverted") }
+          : { status: "success", result: value };
+      }) } });
+    const get = async (tag: string) => route.schema.parse(await (await app.request(`http://localhost/v2/earn?case=${tag}`)).json())
+      .vaults![0]!;
+    const compounded = (ratio: number, span: number) => Math.round((Math.pow(ratio, (365 * DAY) / span) - 1) * 10_000);
+    // Counted, so a failure before case (4) reports ITS assertion rather than a teardown shortfall.
+    let seededBalance = 0;
+    let seededResale = 0;
+    try {
+      await database.insert(schema.v2EarnVaultState).values({
+        vault, asset: USDG, adapter: ADAPTER, skimBps: 1_000, fundingEnabled: true,
+        sharesSupply: 100n, updatedAt: BigInt(now - 30), updatedBlock: 404n, updatedLogIndex: 1, updatedTx: TX,
+      });
+      await database.insert(schema.v2EarnVaultSample).values(rows);
+
+      // (1) Advisory venue, flat, no queue: liquid now, capped by wallet (1.25M - 0.25M escrow) + the POSITION.
+      state.publicClients = answer();
+      clearCache();
+      let body = await get("t234-liquid");
+      expect(body.earliestWithdrawal).toEqual({ kind: "now", at: now, reason: "liquid", liquidityCap: "6000000" });
+      expect(body.totalAssets).toBe("7000000");
+      expect(body.venue).toEqual({
+        address: VENUE,
+        name: "Steakhouse USDG",
+        withdrawable: "5000000",
+        withdrawableSource: "position",
+        position: "5000000",
+        apy24h: { bps: compounded(1.0005, DAY + 60), reason: null, from: endTs - DAY - 60, to: endTs },
+        apy7d: { bps: compounded(1_000_500 / 999_000, endTs - (now - 8 * DAY)), reason: null,
+          from: now - 8 * DAY, to: endTs },
+      });
+      // Realised: flat samples only, so `send` is the end and the unread/open rows after it are ignored.
+      expect(body.apy7d).toEqual({ bps: compounded(1.005 / 1.004, endTs - (now - 8 * DAY)), reason: null,
+        from: now - 8 * DAY, to: endTs });
+      expect(body.apy30d).toEqual({ bps: compounded(1.005, endTs - (now - 31 * DAY - 100)), reason: null,
+        from: now - 31 * DAY - 100, to: endTs });
+      expect(body.apy7d!.bps).toBeGreaterThan(0);
+
+      // (2) The same adapter numbers on a STANDARD venue: maxWithdraw (0) is the bound, so with an empty wallet
+      // the redemption queues for venue liquidity. Identical reads, opposite answer: the advisory flag decides.
+      state.publicClients = answer({ [`${ADAPTER.toLowerCase()}:maxIsAdvisory`]: false, [`${USDG}:balanceOf`]: 250_000n });
+      clearCache();
+      body = await get("t234-standard");
+      expect(body.venue).toEqual(expect.objectContaining({ withdrawable: "0", withdrawableSource: "maxWithdraw" }));
+      expect(body.earliestWithdrawal).toEqual({ kind: "queued", at: null, reason: "venue-liquidity", liquidityCap: "0" });
+
+      // (2a). Payments held for claimDeferred are reserved like escrow (`_deliverable`): the wallet term is
+      // 1.25M - 0.25M escrow - 0.4M deferred, so the advisory-venue cap drops from 6.0M to 5.6M.
+      state.publicClients = answer({ [`${key}:deferredAssets`]: 400_000n });
+      clearCache();
+      body = await get("t467-deferred");
+      expect(body.earliestWithdrawal).toEqual({ kind: "now", at: now, reason: "liquid", liquidityCap: "5600000" });
+
+      // (2b). On a standard venue with nothing to withdraw, the 1.25M wallet minus 0.25M escrow would read
+      // "liquid, 1.0M". With 1.0M held for claimDeferred the contract has nothing to pay from, and redeem queues.
+      state.publicClients = answer({ [`${ADAPTER.toLowerCase()}:maxIsAdvisory`]: false, [`${key}:deferredAssets`]: 1_000_000n });
+      clearCache();
+      body = await get("t467-deferred-all");
+      expect(body.earliestWithdrawal).toEqual({ kind: "queued", at: null, reason: "venue-liquidity", liquidityCap: "0" });
+
+      // (2c). deferredAssets() unread: not-read, never a cap that treats the held payments as 0.
+      state.publicClients = answer({ [`${key}:deferredAssets`]: undefined });
+      clearCache();
+      body = await get("t467-deferred-unread");
+      expect(body.earliestWithdrawal).toEqual({ kind: "unknown", at: null, reason: "not-read", liquidityCap: null });
+
+      // (2d). The standard-venue case of (2) with 0.3M USDG free on the vault's Clearinghouse ledger: `_raise`
+      // pulls it before the venue (EarnVault), so `redeem` pays now up to 0.3M instead of queueing.
+      state.publicClients = answer({ [`${ADAPTER.toLowerCase()}:maxIsAdvisory`]: false, [`${USDG}:balanceOf`]: 250_000n,
+        [`${CLEARINGHOUSE_LEDGER}:free`]: 300_000n });
+      clearCache();
+      body = await get("t797-ledger");
+      expect(body.earliestWithdrawal).toEqual({ kind: "now", at: now, reason: "liquid", liquidityCap: "300000" });
+
+      // (2e). The ledger read fails: not-read, never a cap that treats the ledger as 0.
+      state.publicClients = answer({ [`${CLEARINGHOUSE_LEDGER}:free`]: undefined });
+      clearCache();
+      body = await get("t797-ledger-unread");
+      expect(body.earliestWithdrawal).toEqual({ kind: "unknown", at: null, reason: "not-read", liquidityCap: null });
+
+      // (2f). The vault's convertToAssets reverts VenueUnreadable: nothing is priced and redeem
+      // queues even though the wallet and venue could pay (without the probe this is "liquid, 6000000").
+      const venueUnreadable = new ContractFunctionRevertedError({ abi: earnVaultAbi,
+        data: encodeErrorResult({ abi: earnVaultAbi, errorName: "VenueUnreadable" }), functionName: "convertToAssets" });
+      state.publicClients = answer({ [`${key}:convertToAssets`]: venueUnreadable });
+      clearCache();
+      body = await get("t839-venue-unreadable");
+      expect(body.earliestWithdrawal).toEqual({ kind: "queued", at: null, reason: "venue-unreadable", liquidityCap: null });
+
+      // (2g). A probe that fails for any other reason is not-read, never "liquid".
+      state.publicClients = answer({ [`${key}:convertToAssets`]: undefined });
+      clearCache();
+      body = await get("t839-probe-unread");
+      expect(body.earliestWithdrawal).toEqual({ kind: "unknown", at: null, reason: "not-read", liquidityCap: null });
+
+      // (3) A queue is open (head <= tail): the redemption joins its back.
+      state.publicClients = answer({ [`${key}:queue`]: [4n, 4n] });
+      clearCache();
+      body = await get("t234-queue");
+      expect(body.earliestWithdrawal).toEqual({ kind: "queued", at: null, reason: "queue-ahead", liquidityCap: null });
+
+      // (4) A position is open: queued until the latest expiry the vault still holds (series 4, now + 1 day).
+      await database.insert(schema.v2Balance).values({
+        id: `t234-4-${key}`, tokenId: 4n, holder: key, longId: 4n, side: "short", units: 10n,
+      });
+      seededBalance = 1;
+      state.publicClients = answer({ [`${key}:hasOpenPosition`]: true });
+      clearCache();
+      body = await get("t234-open");
+      expect(body.earliestWithdrawal).toEqual({ kind: "queued", at: now + 86_400, reason: "open-position", liquidityCap: null });
+
+      // (4b). An AskResale the V2Clock marked `expired` but nobody pruned still escrows the vault's longs
+      // (EarnVault `_resaleEscrowOpen`: "live or expired and unpruned"), so its series' later expiry is the earliest.
+      await database.insert(schema.v2Series).values({ longId: 10_797n, underlying: MARKET, ticker: "TEST", isPut: false,
+        strike: 230_000_000n, expiry: BigInt(now + 2 * 86_400), tenor: "daily", mintCutoff: BigInt(now + 2 * 86_400 - 1_800),
+        oracle: MARKET, exerciseFeeBps: 25, mintFeePpm: 0, mintFeesHeld: 0n, mintFeesAccrued: 0n, status: "open",
+        openInterestUnits: 0n, volumeUnits: 0n, volumeUsdg: 0n,
+        createdAt: BigInt(now - 200_000), createdBlock: 80n, createdTx: TX });
+      await database.insert(schema.v2Order).values({ orderId: 797_001n, maker: key, longId: 10_797n,
+        kind: "AskResale", price: 3_000_000n, units: 10n, filled: 0n,
+        validUntil: BigInt(now - 10), status: "expired", placedAt: BigInt(now - 120),
+        placedBlock: 100n, placedTx: TX, updatedAt: BigInt(now - 120) });
+      seededResale = 1;
+      clearCache();
+      body = await get("t797-expired-resale");
+      expect(body.earliestWithdrawal).toEqual({ kind: "queued", at: now + 2 * 86_400, reason: "open-position",
+        liquidityCap: null });
+
+      // (5) The adapter now points at a venue with no samples yet (a swap): the address is the live one, and the
+      // sampled name and APY -- which describe the OTHER venue -- are withheld rather than shown under it.
+      state.publicClients = answer({ [`${ADAPTER.toLowerCase()}:venue`]: getAddress(OLD_VENUE) });
+      clearCache();
+      body = await get("t234-swapped");
+      expect(body.venue).toEqual(expect.objectContaining({
+        address: getAddress(OLD_VENUE), name: null,
+        apy24h: { bps: null, reason: "no-samples", from: null, to: null },
+        apy7d: { bps: null, reason: "no-samples", from: null, to: null },
+      }));
+
+      // (6) Nothing readable: not-read, never a guessed "now".
+      state.publicClients = {};
+      clearCache();
+      body = await get("t234-unread");
+      expect(body.earliestWithdrawal).toEqual({ kind: "unknown", at: null, reason: "not-read", liquidityCap: null });
+      expect(body.venue).toEqual(expect.objectContaining({ address: VENUE, name: "Steakhouse USDG", withdrawable: null,
+        withdrawableSource: null, position: null }));
+    } finally {
+      state.publicClients = {};
+      await teardown(pg, [
+        ["DELETE FROM v2_balance WHERE id = $1", [`t234-4-${key}`], seededBalance],
+        ["DELETE FROM v2_order WHERE order_id = $1", [797_001n], seededResale],
+        ["DELETE FROM v2_series WHERE long_id = $1", [10_797n], seededResale],
+        ["DELETE FROM v2_earn_vault_sample WHERE vault = $1", [key], rows.length],
+        ["DELETE FROM v2_earn_vault_state WHERE lower(vault) = lower($1)", [vault]],
+      ]);
+      clearCache();
+    }
+  });
+
+  /**
+   * The live mark: read from the vault's own `indicativeAssetsPerShare()` /
    * `indicativeTotalAssets()` / `hasOpenPosition()` in ONE multicall with allowFailure, forwarded as strings and
    * a boolean; a reverting or absent view (an older deployment) yields null for that field and only that field;
    * a client that throws yields null for all three -- never a 500, never a fabricated "0". Nothing here reads
    * `convertToShares` / `convertToAssets`: the fake client asserts the function names it was asked for.
+   * A change added a SECOND multicall (liquidity for earliestWithdrawal); the mark's own call is still exactly the
+   * three views above, which is what `calls[0]` pins, and no call of either reads convertTo* from the vault.
    */
   it("reads the indicative mark live with allowFailure and says null, not zero, for what it could not read", async () => {
     const { clearCache } = await import("../cache");
     const database = state.db as ReturnType<typeof drizzle<typeof schema>>;
     const vault = getAddress(process.env.V2_EARN_VAULT as `0x${string}`);
     const route = ROUTES.find((item) => item.route === "/v2/earn")!;
-    const asked: string[] = [];
+    const calls: Array<Array<{ functionName: string; address: string }>> = [];
     try {
       await database.insert(schema.v2EarnVaultState).values({
-        vault, asset: USDG, adapter: null, skimBps: null, paused: false,
+        vault, asset: USDG, adapter: null, skimBps: null, fundingEnabled: true,
         sharesSupply: 100n, updatedAt: BigInt(state.now - 30), updatedBlock: 404n,
         updatedLogIndex: 1, updatedTx: TX,
       });
 
-      // (1) Every view answers: the figures arrive as decimal strings and the flag as a boolean.
-      state.publicClients = { robinhood: { multicall: async ({ contracts }) => {
-        for (const call of contracts as Array<{ functionName: string; address: string }>) {
-          asked.push(call.functionName);
-          expect(call.address.toLowerCase()).toBe(vault.toLowerCase());
-        }
-        return [
-          { status: "success", result: 1_004_000n },
-          { status: "success", result: 10_040_000_000n },
-          { status: "success", result: true },
-        ];
-      } } };
+      // (1) Every view answers: the figures arrive as decimal strings and the flag as a boolean. The mark's
+      // multicall is recognised by its first leg; the liquidity multicall is answered as unread.
+      const markCall = (answers: Array<{ status: string; result?: unknown; error?: Error }>) =>
+        async ({ contracts }: { contracts: unknown[] }) => {
+          const list = contracts as Array<{ functionName: string; address: string }>;
+          calls.push(list.map(({ functionName, address }) => ({ functionName, address })));
+          return list[0]?.functionName === "indicativeAssetsPerShare"
+            ? answers
+            : list.map(() => ({ status: "failure", error: new Error("execution reverted") }));
+        };
+      state.publicClients = { robinhood: { multicall: markCall([
+        { status: "success", result: 1_004_000n },
+        { status: "success", result: 10_040_000_000n },
+        { status: "success", result: true },
+      ]) } };
       clearCache();
       let body = route.schema.parse(await (await app.request("http://localhost/v2/earn?case=live-ok")).json());
       expect(body.vaults[0]).toEqual(expect.objectContaining({
         indicativeAssetsPerShare: "1004000", indicativeTotalAssets: "10040000000", hasOpenPosition: true,
       }));
-      expect(asked).toEqual(["indicativeAssetsPerShare", "indicativeTotalAssets", "hasOpenPosition"]);
-      expect(asked).not.toContain("convertToShares");
-      expect(asked).not.toContain("convertToAssets");
+      expect(calls).toHaveLength(2);
+      expect(calls[0]!.map((call) => call.functionName))
+        // fundingEnabled() rides the same multicall (a fourth leg), so it describes the same block.
+        .toEqual(["indicativeAssetsPerShare", "indicativeTotalAssets", "hasOpenPosition", "fundingEnabled"]);
+      for (const call of calls[0]!) expect(call.address.toLowerCase()).toBe(vault.toLowerCase());
+      const vaultReads = calls.flat().filter((call) => call.address.toLowerCase() === vault.toLowerCase())
+        .map((call) => call.functionName);
+      expect(vaultReads).not.toContain("convertToShares");
+      // A change narrowed this from "never reads convertToAssets": it is now read exactly ONCE, in the
+      // liquidity multicall, only for WHY it fails (VenueUnreadable: nothing is priced). Never in the mark call, and
+      // never as a price: the figures above come from the indicative views alone.
+      expect(calls[0]!.map((call) => call.functionName)).not.toContain("convertToAssets");
+      expect(vaultReads.filter((name) => name === "convertToAssets")).toHaveLength(1);
 
-      // (2) One view reverts (a deployment older than T-OP-065): that field is null, the others survive.
-      state.publicClients = { robinhood: { multicall: async () => [
+      // (2) One view reverts (an older deployment): that field is null, the others survive.
+      state.publicClients = { robinhood: { multicall: markCall([
         { status: "failure", error: new Error("execution reverted") },
         { status: "success", result: 10_000_000_000n },
         { status: "success", result: false },
-      ] } };
+      ]) } };
       clearCache();
       body = route.schema.parse(await (await app.request("http://localhost/v2/earn?case=live-partial")).json());
       expect(body.vaults[0]).toEqual(expect.objectContaining({
@@ -740,7 +1194,7 @@ describe("v2 API with seeded PGlite", () => {
     const underlying = market.underlying.toLowerCase() as `0x${string}`;
     try {
       await database.insert(schema.v2HouseVault).values({
-        vault, underlying, sharesToken: vault, factory: USDG,
+        vault, underlying, sharesToken: vault, factory: USDG, kind: "daily",
         name: `House ${market.ticker}`, symbol: `h${market.ticker}`,
         createdAt: BigInt(state.now - 900), createdBlock: 500n, createdLogIndex: 1, createdTx: TX,
         sharesSupply: 1_000n, quotingPaused: false, performanceFeeBps: 0,
@@ -797,15 +1251,18 @@ describe("v2 API with seeded PGlite", () => {
       expect(listBody.items).toEqual([expect.objectContaining({
         market: market.ticker,
         vault,
+        kind: "daily", // The stored kind reaches the list
         sharesSupply: "1000",
         currentEpoch: expect.objectContaining({ id: "7", start: state.now - 600, end: state.now + 600, nav: null }),
       })]);
 
       const detail = await app.request(`http://localhost/v2/house/${market.ticker}?address=${BUYER}`);
       expect(detail.status).toBe(200);
-      const body = ROUTES.find((route) => route.route === "/v2/house/:market")!.schema.parse(await detail.json());
+      expect(ROUTES.find((route) => route.route === "/v2/house/:market")!.schema).toBe(houseMarketResponseSchema);
+      const body = houseMarketResponseSchema.parse(await detail.json());
       expect(body.market).toBe(market.ticker);
       expect(body.vault).toBe(vault);
+      expect(body.kind).toBe("daily"); // And the market detail
       expect(body.currentEpoch).toEqual(expect.objectContaining({ id: "7", resultUsdg: null, nav: null }));
       // Newest first, and the rolled epoch carries its signed result and its boundary NAV.
       expect(body.epochs.map((epoch) => epoch.id)).toEqual(["7", "6"]);
@@ -825,25 +1282,45 @@ describe("v2 API with seeded PGlite", () => {
         expect.objectContaining({
           kind: "deposit", account: getAddress(BUYER), assets: "500", stockAmount: "0", shares: null,
           requestedAt: state.now - 200,
+          // Queued in the vault's current epoch 7, so not priced yet; it matures at epoch 7's roll.
+          epochId: "7", status: "pending", maturesAt: state.now + 600,
         }),
         expect.objectContaining({
           kind: "deposit", account: getAddress(WRITER), assets: "0", stockAmount: "2000000000000000000", shares: null,
           requestedAt: state.now - 190,
+          epochId: "7", status: "pending", maturesAt: state.now + 600,
         }),
       ]);
-      expect(body.shares?.queued).toEqual([body.queue[0]]);
+      expect(body.shares?.queued).toEqual([body.queue![0]]);
       const stockDetail = await app.request(`http://localhost/v2/house/${market.ticker}?address=${WRITER}`);
       expect(stockDetail.status).toBe(200);
       const stockBody = ROUTES.find((route) => route.route === "/v2/house/:market")!
         .schema.parse(await stockDetail.json());
-      expect(stockBody.shares?.queued).toEqual([body.queue[1]]);
+      expect(stockBody.shares?.queued).toEqual([body.queue![1]]);
+
+      // A withdrawal queued in epoch 6, which has rolled (the vault is in 7): HouseVault.claim retires it
+      // (`w.epochId < epochId`) and cancelWithdrawRequest would revert TooEarly. Still `queued` on the tape until Claimed.
+      await database.insert(schema.v2HouseWithdrawQueue).values({
+        id: `${vault.toLowerCase()}-${WRITER.toLowerCase()}`, vault, account: WRITER, epochId: 6n,
+        shares: 40n, status: "queued",
+        requestedAt: BigInt(state.now - 700), requestedBlock: 500n, requestedLogIndex: 2, requestedTx: TX2,
+        closedAt: null, closedBlock: null, closedLogIndex: null, closedTx: null,
+      });
+      clearCache();
+      const matured = houseMarketResponseSchema.parse(
+        await (await app.request(`http://localhost/v2/house/${market.ticker}?address=${WRITER}`)).json());
+      expect(matured.shares?.queued).toEqual([
+        expect.objectContaining({ kind: "withdraw", shares: "40", epochId: "6", status: "claimable", maturesAt: state.now - 600 }),
+        expect.objectContaining({ kind: "deposit", epochId: "7", status: "pending" }),
+      ]);
     } finally {
       // lower() ON BOTH SIDES, and it is load-bearing. The row is stored with the address the ingest
       // wrote - lowercase - while these seeds hold the CHECKSUMMED form from getAddress(). A plain
       // `vault = $1` deleted 0 rows and reported nothing, so the seed survived its own test and every
       // later test that lists vaults saw it. That is what made three /v2/house cases red at tip.
       await teardown(pg, [
-        ["DELETE FROM v2_house_withdraw_queue WHERE lower(vault) = lower($1)", [vault]],
+        // BUYER's claimed withdrawal and WRITER's matured one.
+        ["DELETE FROM v2_house_withdraw_queue WHERE lower(vault) = lower($1)", [vault], 2],
         ["DELETE FROM v2_house_deposit_queue WHERE lower(vault) = lower($1)", [vault], 2],
         ["DELETE FROM v2_house_share_balance WHERE lower(vault) = lower($1)", [vault]],
         ["DELETE FROM v2_house_nav WHERE lower(vault) = lower($1)", [vault]],
@@ -856,9 +1333,18 @@ describe("v2 API with seeded PGlite", () => {
 
   /**
    * A vault with no epoch row must still be LISTED with a null epoch. Dropping it would be the
-   * failure this row exists to kill: the consumer cannot distinguish "no such vault" from "a
+   * failure this test exists to catch: the consumer cannot distinguish "no such vault" from "a
    * vault whose epoch has not been observed".
    */
+  it("a House request is claimable only once the vault rolled PAST its epoch, as HouseVault.claim decides", async () => {
+    const { houseRequestStatus } = await import("./house");
+    // claim: `r.epochId < epochId`; cancel: TooEarly when `r.epochId != epochId`.
+    expect(houseRequestStatus(6n, 7n)).toBe("claimable");
+    expect(houseRequestStatus(7n, 7n)).toBe("pending"); // same epoch: past epochEnd but not rolled is still pending
+    expect(houseRequestStatus(0n, 1n)).toBe("claimable");
+    expect(houseRequestStatus(7n, null)).toBe("unknown"); // the vault's epoch is not indexed: never guessed
+  });
+
   it("lists a House vault whose epoch has not been observed, with a null epoch", async () => {
     const { clearCache } = await import("../cache");
     const database = state.db as ReturnType<typeof drizzle<typeof schema>>;
@@ -867,7 +1353,7 @@ describe("v2 API with seeded PGlite", () => {
     try {
       await database.insert(schema.v2HouseVault).values({
         vault, underlying: market.underlying.toLowerCase() as `0x${string}`, sharesToken: vault,
-        factory: USDG, name: `House ${market.ticker}`, symbol: `h${market.ticker}`,
+        factory: USDG, kind: "surprise", name: `House ${market.ticker}`, symbol: `h${market.ticker}`,
         createdAt: BigInt(state.now - 100), createdBlock: 600n, createdLogIndex: 1, createdTx: TX,
         sharesSupply: null, quotingPaused: null, performanceFeeBps: null,
         currentEpochId: null, currentEpochEnd: null,
@@ -877,6 +1363,7 @@ describe("v2 API with seeded PGlite", () => {
       const body = ROUTES.find((route) => route.route === "/v2/house")!.schema.parse(await list.json());
       expect(body.items).toEqual([expect.objectContaining({
         market: market.ticker, vault, currentEpoch: null, sharesSupply: null,
+        kind: "unknown", // A stored value this build does not know is served unknown, never weekly
       })]);
     } finally {
       await teardown(pg, [["DELETE FROM v2_house_vault WHERE lower(vault) = lower($1)", [vault]]]);
@@ -892,6 +1379,176 @@ describe("v2 API with seeded PGlite", () => {
     // A real registry ticker whose vault has never been created.
     const market = V2_REGISTRY.markets[0]!;
     expect((await app.request(`http://localhost/v2/house/${market.ticker}`)).status).toBe(404);
+  });
+
+  /**
+   * A market holds two House vaults once the daily ones are live (one weekly, one daily per factory), and
+   * GET /v2/house/:market used to serve `vaults[0]` - whichever row the database returned first - with no way to ask
+   * for the other. `?vault=<address>` now opens one exact vault; with no `vault` a fixed rule picks (daily first).
+   *
+   * The seed is built so that every wrong fix goes red here:
+   *   - the weekly vault is inserted FIRST and has the LOWER createdBlock, so `vaults[0]` would be the weekly one and
+   *     the default-rule assertion can only pass if the rule is applied;
+   *   - every field differs between the two vaults (kind, epochs, NAV, shares, queue, earliest withdrawal), so a
+   *     response for the wrong vault cannot satisfy the other's assertions;
+   *   - NO clearCache between the vault requests, so a cache key that drops `vault` serves the first vault's body to
+   *     the second request;
+   *   - both the CHECKSUMMED and the lowercase form of each address are requested: rows come back lowercase, every
+   *     web link carries the checksummed form, so an exact-string pick 404s the checksummed request only.
+   */
+  it("?vault= serves that exact vault, defaults daily-first, and 404s a vault that is not this market's", async () => {
+    const { clearCache } = await import("../cache");
+    const database = state.db as ReturnType<typeof drizzle<typeof schema>>;
+    const market = V2_REGISTRY.markets[0]!;
+    const other = V2_REGISTRY.markets[1]!;
+    const weekly = getAddress(`0x${"c3".repeat(20)}`);
+    const daily = getAddress(`0x${"d4".repeat(20)}`);
+    const foreign = getAddress(`0x${"e5".repeat(20)}`);
+    const nobody = getAddress(`0x${"f6".repeat(20)}`);
+    // The checksummed forms must differ from the lowercase ones, or the case-insensitivity checks below prove nothing.
+    for (const vault of [weekly, daily]) expect(vault).not.toBe(vault.toLowerCase());
+    /** One letter's case flipped: still mixed case, so viem's strict check reads it as a (wrong) checksum. */
+    const wrongChecksum = (() => {
+      const at = [...daily].findIndex((ch, i) => i > 1 && /[a-f]/i.test(ch));
+      const ch = daily[at]!;
+      return daily.slice(0, at) + (ch === ch.toLowerCase() ? ch.toUpperCase() : ch.toLowerCase()) + daily.slice(at + 1);
+    })();
+    expect(wrongChecksum.toLowerCase()).toBe(daily.toLowerCase());
+    expect(wrongChecksum).not.toBe(wrongChecksum.toLowerCase());
+    const underlying = market.underlying.toLowerCase() as `0x${string}`;
+    const vaultRow = (vault: `0x${string}`, kind: string, createdBlock: bigint, epochId: bigint, end: number,
+      at: `0x${string}` = underlying) => ({
+      vault, underlying: at, sharesToken: vault, factory: USDG, kind,
+      name: `House ${kind}`, symbol: `h${kind}`,
+      createdAt: BigInt(state.now - 5_000), createdBlock, createdLogIndex: 1, createdTx: TX,
+      sharesSupply: createdBlock, quotingPaused: false, performanceFeeBps: 0,
+      currentEpochId: epochId, currentEpochEnd: BigInt(end),
+    });
+    const running = (vault: `0x${string}`, epochId: bigint, end: number) => ({
+      id: `${vault}-${epochId}`, vault, epochId, start: BigInt(state.now - 1_000), end: BigInt(end), status: "running",
+      rolledAt: null, rolledBlock: null, rolledLogIndex: null, rolledTx: null, resultUsdg: null,
+    });
+    const deposit = (vault: `0x${string}`, account: `0x${string}`, epochId: bigint, usdgAmount: bigint, stockAmount: bigint,
+      requestedAt: number) => ({
+      id: `${vault.toLowerCase()}-${account.toLowerCase()}`, vault, account, epochId, usdgAmount, stockAmount,
+      status: "queued", requestedAt: BigInt(requestedAt), requestedBlock: 900n, requestedLogIndex: 1, requestedTx: TX3,
+      closedAt: null, closedBlock: null, closedLogIndex: null, closedTx: null,
+    });
+    const balance = (vault: `0x${string}`, account: `0x${string}`, shares: bigint) => ({
+      id: `${vault}-${account}`, vault, account, shares,
+      updatedAt: BigInt(state.now - 300), updatedBlock: 902n, updatedLogIndex: 1, updatedTx: TX3,
+    });
+    try {
+      // Weekly FIRST, with the lower createdBlock: `vaults[0]` is the weekly vault.
+      await database.insert(schema.v2HouseVault).values(vaultRow(weekly, "weekly", 700n, 3n, state.now + 3_000));
+      await database.insert(schema.v2HouseVault).values(vaultRow(daily, "daily", 800n, 9n, state.now + 500));
+      await database.insert(schema.v2HouseVault).values(
+        vaultRow(foreign, "daily", 900n, 4n, state.now + 400, other.underlying.toLowerCase() as `0x${string}`));
+      await database.insert(schema.v2HouseEpoch).values(running(weekly, 3n, state.now + 3_000));
+      await database.insert(schema.v2HouseEpoch).values({
+        id: `${weekly}-2`, vault: weekly, epochId: 2n,
+        start: BigInt(state.now - 9_000), end: BigInt(state.now - 1_000), status: "rolled",
+        rolledAt: BigInt(state.now - 1_000), rolledBlock: 750n, rolledLogIndex: 1, rolledTx: TX2, resultUsdg: 41n,
+      });
+      await database.insert(schema.v2HouseNav).values({
+        id: `${weekly}-2`, vault: weekly, epochId: 2n, at: BigInt(state.now - 1_000),
+        usdg: null, stockUnits: null, settlementPrice: 190_000_000n, navUsdg: 7_700n,
+        sourceEvent: "EpochRolled", supply: 700n, sharesMinted: 0n, sharesBurned: 0n,
+        performanceFee: 0n, ts: BigInt(state.now - 1_000), block: 750n, logIndex: 1, tx: TX2,
+      });
+      await database.insert(schema.v2HouseEpoch).values(running(daily, 9n, state.now + 500));
+      await database.insert(schema.v2HouseShareBalance).values(balance(weekly, BUYER, 111n));
+      await database.insert(schema.v2HouseShareBalance).values(balance(daily, BUYER, 222n));
+      await database.insert(schema.v2HouseDepositQueue).values(deposit(weekly, BUYER, 3n, 700n, 0n, state.now - 250));
+      await database.insert(schema.v2HouseDepositQueue).values(deposit(daily, BUYER, 9n, 900n, 0n, state.now - 240));
+      await database.insert(schema.v2HouseDepositQueue).values(deposit(daily, WRITER, 9n, 0n, 3n * 10n ** 18n, state.now - 230));
+      clearCache();
+
+      expect(ROUTES.find((row) => row.route === "/v2/house/:market")!.schema).toBe(houseMarketResponseSchema);
+      const detail = async (query: string) => {
+        const response = await app.request(`http://localhost/v2/house/${market.ticker}${query}`);
+        return { status: response.status, cache: response.headers.get("x-cache"), json: await response.json() as unknown };
+      };
+
+      // The lowercase form of each address (what the ingest stores) opens that vault. Asked FIRST, back to back with no
+      // clearCache, so a cache key without `vault` serves the weekly body to the daily request here.
+      for (const [vault, id] of [[weekly, "3"], [daily, "9"]] as const) {
+        const res = await detail(`?vault=${vault.toLowerCase()}`);
+        expect(res.status, `lowercase ${vault}`).toBe(200);
+        const body = houseMarketResponseSchema.parse(res.json);
+        expect(body.vault).toBe(vault);
+        expect(body.currentEpoch?.id).toBe(id);
+      }
+
+      // The CHECKSUMMED form (what every web link carries), again back to back: each vault's own fields.
+      const weeklyRes = await detail(`?vault=${weekly}&address=${BUYER}`);
+      const dailyRes = await detail(`?vault=${daily}&address=${BUYER}`);
+      expect(weeklyRes.status, `checksummed ${weekly}`).toBe(200);
+      expect(dailyRes.status, `checksummed ${daily}`).toBe(200);
+      expect(dailyRes.cache, "the second vault must not be served from the first vault's cache entry").toBe("MISS");
+      const weeklyBody = houseMarketResponseSchema.parse(weeklyRes.json);
+      const dailyBody = houseMarketResponseSchema.parse(dailyRes.json);
+      expect(weeklyBody.vault).toBe(weekly);
+      expect(weeklyBody.kind).toBe("weekly");
+      expect(weeklyBody.currentEpoch).toEqual(expect.objectContaining({ id: "3", end: state.now + 3_000 }));
+      expect(weeklyBody.epochs.map((row) => row.id)).toEqual(["3", "2"]);
+      expect(weeklyBody.epochs[1]!.nav).toEqual(expect.objectContaining({ navUsdg: expect.objectContaining({ raw: "7700" }) }));
+      expect(weeklyBody.shares).toEqual(expect.objectContaining({ shares: "111" }));
+      expect(weeklyBody.queue).toEqual([expect.objectContaining({ account: getAddress(BUYER), assets: "700" })]);
+      expect(weeklyBody.earliestWithdrawal).toEqual({ kind: "weekly", at: state.now + 3_000, reason: "epoch-boundary" });
+      expect(dailyBody.vault).toBe(daily);
+      expect(dailyBody.kind).toBe("daily");
+      expect(dailyBody.currentEpoch).toEqual(expect.objectContaining({ id: "9", end: state.now + 500 }));
+      expect(dailyBody.epochs.map((row) => row.id)).toEqual(["9"]);
+      expect(dailyBody.shares).toEqual(expect.objectContaining({ shares: "222" }));
+      expect(dailyBody.queue).toEqual([
+        expect.objectContaining({ account: getAddress(BUYER), assets: "900" }),
+        expect.objectContaining({ account: getAddress(WRITER), stockAmount: "3000000000000000000" }),
+      ]);
+      // 500s is inside the 1800s settlement window, so the request is already refused.
+      expect(dailyBody.earliestWithdrawal).toEqual({ kind: "daily", at: null, reason: "queue-closed" });
+
+      // No vault named: the daily vault, although vaults[0] is the weekly one.
+      const fallback = houseMarketResponseSchema.parse((await detail("")).json);
+      expect(fallback.vault, "the default is daily first, never database order").toBe(daily);
+      expect(fallback.kind).toBe("daily");
+
+      // `address` still filters inside the SELECTED vault: WRITER queued only in the daily vault.
+      const writerWeekly = houseMarketResponseSchema.parse((await detail(`?vault=${weekly}&address=${WRITER}`)).json);
+      expect(writerWeekly.vault).toBe(weekly);
+      expect(writerWeekly.shares).toEqual({ address: getAddress(WRITER), shares: null, queued: [] });
+      const writerDaily = houseMarketResponseSchema.parse((await detail(`?vault=${daily}&address=${WRITER}`)).json);
+      expect(writerDaily.shares?.queued).toEqual([dailyBody.queue![1]]);
+
+      // A vault that is not this market's is a 404, never the default; a malformed value is a 400.
+      expect((await detail(`?vault=${foreign}`)).status, "another market's vault").toBe(404);
+      expect((await detail(`?vault=${nobody}`)).status, "an address with no vault").toBe(404);
+      expect((await detail("?vault=nope")).status).toBe(400);
+      expect((await detail(`?vault=${wrongChecksum}`)).status, "mixed case with a wrong checksum").toBe(400);
+
+      // The list: every vault, and inside one market daily before weekly.
+      const list = await app.request("http://localhost/v2/house");
+      const listBody = ROUTES.find((row) => row.route === "/v2/house")!.schema.parse(await list.json()) as {
+        items: Array<{ market: string; vault: string | null; kind?: string }>;
+      };
+      expect(listBody.items.filter((item) => item.market === market.ticker).map((item) => [item.vault, item.kind]))
+        .toEqual([[daily, "daily"], [weekly, "weekly"]]);
+      expect(listBody.items.filter((item) => item.market === other.ticker).map((item) => item.vault)).toEqual([foreign]);
+    } finally {
+      await teardown(pg, [
+        ["DELETE FROM v2_house_deposit_queue WHERE lower(vault) = lower($1)", [weekly]],
+        ["DELETE FROM v2_house_deposit_queue WHERE lower(vault) = lower($1)", [daily], 2],
+        ["DELETE FROM v2_house_share_balance WHERE lower(vault) = lower($1)", [weekly]],
+        ["DELETE FROM v2_house_share_balance WHERE lower(vault) = lower($1)", [daily]],
+        ["DELETE FROM v2_house_nav WHERE lower(vault) = lower($1)", [weekly]],
+        ["DELETE FROM v2_house_epoch WHERE lower(vault) = lower($1)", [weekly], 2],
+        ["DELETE FROM v2_house_epoch WHERE lower(vault) = lower($1)", [daily]],
+        ["DELETE FROM v2_house_vault WHERE lower(vault) = lower($1)", [weekly]],
+        ["DELETE FROM v2_house_vault WHERE lower(vault) = lower($1)", [daily]],
+        ["DELETE FROM v2_house_vault WHERE lower(vault) = lower($1)", [foreign]],
+      ]);
+      clearCache();
+    }
   });
 
   it("passes pricing provenance through fair, quotes and position mark sources", async () => {
@@ -937,7 +1594,8 @@ describe("v2 API with seeded PGlite", () => {
         mark: { raw: "2000000" }, markSource: "best-bid",
       });
 
-      await pg.query("UPDATE v2_series SET status = 'cutoff' WHERE long_id = 2");
+      // Past expiry, not `cutoff` -- a cutoff series still trades until expiry and keeps its mark.
+      await pg.query("UPDATE v2_series SET status = 'expired' WHERE long_id = 2");
       clearCache();
       const unavailableMark = positionsSchema.parse(await (await app.request(
         `http://localhost/v2/accounts/${BUYER}/positions?case=null`)).json());
@@ -970,13 +1628,97 @@ describe("v2 API with seeded PGlite", () => {
       const config = await (await app.request("http://localhost/v2/config")).json() as any;
       expect(config).toMatchObject({ interfaceVersion: 8, fees: { premiumFeeBps: 500, mintFeePpm: 0 },
         constants: { mintFeePeriod: 604800, mintFeeCeilPpm: 5000 } });
-      // T-OP-120 (G7): no PayoutAdapterSet indexed in this fixture, so the Clearinghouse slippage bound is null on
+      // (G7): no PayoutAdapterSet indexed in this fixture, so the Clearinghouse slippage bound is null on
       // the wire (the app then prices a call's USDG band at the 300 bps ceiling), and the strict schema admits it.
       expect(config.fees.maxPayoutSlippageBps).toBeNull();
       expect(ROUTES.find((route) => route.route === "/v2/config")!.schema.safeParse(config).success).toBe(true);
     } finally {
       await pg.query("UPDATE v2_series SET mint_fee_ppm = 0, mint_fees_held = 0, mint_fees_accrued = 0 WHERE long_id = 2");
       await pg.query("UPDATE v2_market SET mint_fee_ppm = 0 WHERE underlying = $1", [MARKET]);
+      clearCache();
+    }
+  });
+
+  /*
+   * Every series ref carries the exercise fee the series PINNED at SeriesCreated (v2_series), which is
+   * what redeem charges, not the market's current default (v2_market, moved by MarketConfigSet). Two series of one
+   * market pinned at different fees keep their own, on every route that ships a series ref.
+   */
+  it("series refs carry each series' pinned exercise fee, not the market default", async () => {
+    const { clearCache } = await import("../cache");
+    await pg.query("UPDATE v2_series SET exercise_fee_bps = 40 WHERE long_id = 4");
+    await pg.query("UPDATE v2_market SET exercise_fee_bps = 60 WHERE underlying = $1", [MARKET]);
+    try {
+      clearCache();
+      const two = await (await app.request("http://localhost/v2/series/2")).json() as any;
+      expect(two.series.exerciseFeeBps).toBe(25);
+      expect(two.exerciseFeeBps).toBe(25);
+      const four = await (await app.request("http://localhost/v2/series/4")).json() as any;
+      expect(four.series.exerciseFeeBps).toBe(40);
+      const listed = await (await app.request("http://localhost/v2/markets/TEST/series")).json() as any;
+      const refs = JSON.stringify(listed).match(/"exerciseFeeBps":\d+/g) ?? [];
+      expect(refs.length).toBeGreaterThan(0);
+      expect(refs).not.toContain('"exerciseFeeBps":60');
+      const byId = new Map<string, number>();
+      const walk = (value: unknown): void => {
+        if (Array.isArray(value)) { value.forEach(walk); return; }
+        if (value === null || typeof value !== "object") return;
+        const row = value as Record<string, unknown>;
+        if (typeof row.longId === "string" && typeof row.exerciseFeeBps === "number") byId.set(row.longId, row.exerciseFeeBps);
+        Object.values(row).forEach(walk);
+      };
+      walk(listed);
+      expect(byId.get("2")).toBe(25);
+      expect(byId.get("4")).toBe(40);
+      for (const route of ["/v2/series/:longId", "/v2/markets/:ticker/series"]) {
+        const body = route === "/v2/series/:longId" ? four : listed;
+        expect(ROUTES.find((entry) => entry.route === route)!.schema.safeParse(body).success, route).toBe(true);
+      }
+    } finally {
+      await pg.query("UPDATE v2_series SET exercise_fee_bps = 25 WHERE long_id = 4");
+      await pg.query("UPDATE v2_market SET exercise_fee_bps = 25 WHERE underlying = $1", [MARKET]);
+      clearCache();
+    }
+  });
+
+  /*
+   * The API lists no write ask the take would skip (OrderBook.sol:1091 isMinter(book), :1101 isOperator(writer,
+   * book), callhouse-contracts), read from the same indexed snapshot as the orders; the series quote
+   * carries the units at the best price beside total depth.
+   */
+  it("withholds a write ask whose writer revoked the book or while the book is not a minter; quote carries best-level units", async () => {
+    const { clearCache } = await import("../cache");
+    const orderBook = process.env.V2_ORDER_BOOK!.toLowerCase();
+    const bookAsks = async () => ((await (await app.request("http://localhost/v2/series/2/book")).json()) as any).asks
+      .flatMap((level: any) => level.orders.map((order: any) => order.orderId));
+    const cardIds = async () => ((await (await app.request("http://localhost/v2/cards")).json()) as any).items
+      .map((card: any) => card.series.longId);
+    try {
+      // The control: both gates pass (the base seed), so the write ask is listed and priced.
+      clearCache();
+      expect(await bookAsks()).toEqual(["1"]);
+      expect(await cardIds()).toContain("2");
+      const series = (await (await app.request("http://localhost/v2/series/2")).json()) as any;
+      expect(series.quote).toMatchObject({ bestAsk: { raw: "3000000" }, askUnits: "200", bestAskUnits: "200",
+        bidUnits: "0", bestBidUnits: "0" });
+
+      // The writer revoked the book as its Clearinghouse operator: the take skips the ask, so the API does too.
+      await pg.query("UPDATE v2_account SET operators = $1 WHERE account = $2", [JSON.stringify({ [orderBook]: false }), WRITER]);
+      clearCache();
+      expect(await bookAsks()).toEqual([]);
+      expect(await cardIds()).not.toContain("2");
+      expect(((await (await app.request("http://localhost/v2/series/2")).json()) as any).quote)
+        .toMatchObject({ bestAsk: null, askUnits: "0", bestAskUnits: "0" });
+
+      // Operator restored, the book taken off the minter allow-list: no write ask either.
+      await pg.query("UPDATE v2_account SET operators = $1 WHERE account = $2", [JSON.stringify({ [orderBook]: true }), WRITER]);
+      await pg.query("UPDATE v2_minter SET allowed = false WHERE minter = $1", [orderBook]);
+      clearCache();
+      expect(await bookAsks()).toEqual([]);
+      expect(await cardIds()).not.toContain("2");
+    } finally {
+      await pg.query("UPDATE v2_account SET operators = $1 WHERE account = $2", [JSON.stringify({ [orderBook]: true }), WRITER]);
+      await pg.query("UPDATE v2_minter SET allowed = true WHERE minter = $1", [orderBook]);
       clearCache();
     }
   });
@@ -1178,7 +1920,8 @@ describe("v2 API with seeded PGlite", () => {
     clearCache();
     const response = await app.request("http://localhost/v2/vault");
     expect(response.status).toBe(200);
-    const body = await response.json();
+    // Raw JSON, not vaultResponseSchema.parse: the key-count check below must see keys the schema would strip.
+    const body = await response.json() as { limits: Record<string, unknown> };
     expect(body).toMatchObject({
       vault: MAKER_VAULT,
       protocol: true,
@@ -1216,7 +1959,7 @@ describe("v2 API with seeded PGlite", () => {
     const earnVault = getAddress(process.env.V2_EARN_VAULT as `0x${string}`);
     const operation = {
       ...accessOperation({ operationId: TX3, nonce: 943, status: "pending", block: 743 }),
-      data: "0x1234", selector: null, targetName: null, functionSignature: null,
+      data: "0x1234" as const, selector: null, targetName: null, functionSignature: null,
       expectedRoleId: null, roleId: 0n, roleName: "ADMIN",
       label: `unknown-target ${ACCESS_MANAGER.toLowerCase()} no-selector`,
     };
@@ -1254,7 +1997,7 @@ describe("v2 API with seeded PGlite", () => {
         ts: BigInt(state.now - 50), block: 734n, logIndex: 1, tx: TX3,
       });
       await database.insert(schema.v2EarnVaultState).values({
-        vault: earnVault, asset: USDG, adapter: null, skimBps: null, paused: false,
+        vault: earnVault, asset: USDG, adapter: null, skimBps: null, fundingEnabled: true,
         sharesSupply: 100n, updatedAt: BigInt(state.now - 50), updatedBlock: 740n,
         updatedLogIndex: 1, updatedTx: TX,
       });
@@ -1278,28 +2021,28 @@ describe("v2 API with seeded PGlite", () => {
         ts: BigInt(state.now - 20), block: 743n, logIndex: 2, tx: TX3,
       });
       await database.insert(schema.v2RewardsEpoch).values({
-        id: `${REWARD_DISTRIBUTOR.toLowerCase()}-2958`, distributor: REWARD_DISTRIBUTOR.toLowerCase(),
-        epoch: 2_958n, root: `0x${"a".repeat(64)}`, total: 25_000_000n,
+        id: `${REWARD_DISTRIBUTOR.toLowerCase()}-2958`, distributor: REWARD_DISTRIBUTOR.toLowerCase() as `0x${string}`,
+        epoch: 2_958n, root: `0x${"a".repeat(64)}` as const, total: 25_000_000n,
         setAt: BigInt(state.now - 80), setBlock: 744n, setLogIndex: 1, setTx: TX,
       });
       await database.insert(schema.v2RewardsClaim).values({
-        id: `${REWARD_DISTRIBUTOR.toLowerCase()}-2958-0`, distributor: REWARD_DISTRIBUTOR.toLowerCase(),
+        id: `${REWARD_DISTRIBUTOR.toLowerCase()}-2958-0`, distributor: REWARD_DISTRIBUTOR.toLowerCase() as `0x${string}`,
         epoch: 2_958n, leafIndex: 0n, account: BUYER, amount: 20_000_000n,
         ts: BigInt(state.now - 70), block: 745n, logIndex: 1, tx: TX,
       });
       await database.insert(schema.v2ContractFunding).values({
-        id: "fixture-reward-funding", source: "RewardsDistributor", contract: REWARD_DISTRIBUTOR.toLowerCase(),
+        id: "fixture-reward-funding", source: "RewardsDistributor", contract: REWARD_DISTRIBUTOR.toLowerCase() as `0x${string}`,
         from: BUYER, amount: 100_000_000n, ts: BigInt(state.now - 90),
         block: 743n, logIndex: 3, tx: TX,
       });
       await database.insert(schema.v2TreasuryExit).values({
         id: "fixture-reward-defunding", source: "rewardsDistributor",
-        sourceAddress: REWARD_DISTRIBUTOR.toLowerCase(), eventKind: "defunded", assetKind: "erc20",
+        sourceAddress: REWARD_DISTRIBUTOR.toLowerCase() as `0x${string}`, eventKind: "defunded", assetKind: "erc20",
         asset: USDG, tokenId: null, recipient: WRITER, amount: 5_000_000n,
         ts: BigInt(state.now - 60), block: 746n, logIndex: 1, tx: TX2,
       });
       await database.insert(schema.v2HouseVault).values({
-        vault, underlying, sharesToken: vault, factory: USDG,
+        vault, underlying, sharesToken: vault, factory: USDG, kind: "weekly",
         name: `House ${market.ticker}`, symbol: `h${market.ticker}`,
         createdAt: BigInt(state.now - 900), createdBlock: 700n, createdLogIndex: 1, createdTx: TX,
         sharesSupply: 1_000n, quotingPaused: false, performanceFeeBps: 0,
@@ -1380,12 +2123,15 @@ describe("v2 API with seeded PGlite", () => {
     }
   });
 
-  it("flags launch-set membership from the registry: a registered market outside the launch set is served launch:false (T-OP-099)", async () => {
+  it("flags launch-set membership from the registry: a registered market outside the launch set is served launch:false", async () => {
     const database = state.db as ReturnType<typeof drizzle<typeof schema>>;
     const nvda = V2_REGISTRY.markets.find((market) => market.ticker === "NVDA")!;
-    // A registry market that is NOT in the launch set, registered on chain anyway (what --wave wave1 would do).
-    const offLaunch = V2_REGISTRY.markets.find((market) => !V2_REGISTRY.launchSet.markets.includes(market.ticker as never))!;
-    expect(offLaunch).toBeDefined();
+    // A market registered on chain that is NOT in the launch set (what --wave wave1 would have done). Cutting the
+    // registry to the launch set left no registry row outside it, so a synthetic one is
+    // registered here instead, with a digit-only underlying no registry names.
+    expect(V2_REGISTRY.markets.every((market) => V2_REGISTRY.launchSet.markets.includes(market.ticker as never))).toBe(true);
+    const offLaunch = { ticker: "OFFLAUNCH", underlying: "0x0000000000000000000000000000000000c0ffee" as const };
+    expect(V2_REGISTRY.markets.some((market) => market.ticker === offLaunch.ticker)).toBe(false);
     const [marketSeed] = await database.select().from(schema.v2Market).limit(1);
     await database.insert(schema.v2Market).values({ ...marketSeed!, underlying: nvda.underlying, ticker: nvda.ticker, oracle: nvda.underlying });
     await database.insert(schema.v2Market).values({ ...marketSeed!, underlying: offLaunch.underlying, ticker: offLaunch.ticker, oracle: offLaunch.underlying });
@@ -1408,6 +2154,76 @@ describe("v2 API with seeded PGlite", () => {
       await teardown(pg, [
         ["DELETE FROM v2_market WHERE lower(underlying) = lower($1)", [nvda.underlying]],
         ["DELETE FROM v2_market WHERE lower(underlying) = lower($1)", [offLaunch.underlying]],
+      ]);
+      clearCache();
+    }
+  });
+
+  it("counts open series by status, not by the market's created-minus-settled counter", async () => {
+    // The seed market's `seriesOpen` column says 1 while two of its series are `open`; the counter only
+    // moves at SeriesCreated and settlement, so a series past its mint cutoff, expired or held would still
+    // be in it. The route reads status instead: the two seeded open series, and nothing added below.
+    const database = state.db as ReturnType<typeof drizzle<typeof schema>>;
+    const seed = (await database.select().from(schema.v2Series)).find((row) => row.longId === 2n);
+    await database.insert(schema.v2Series).values([
+      { ...seed!, longId: 483_000n, status: "cutoff" },
+      { ...seed!, longId: 483_002n, status: "expired" },
+      { ...seed!, longId: 483_004n, status: "held" },
+      { ...seed!, longId: 483_006n, status: "settling" },
+    ]);
+    const { clearCache } = await import("../cache");
+    clearCache();
+    try {
+      const markets = await (await app.request("http://localhost/v2/markets")).json() as
+        { ticker: string; stats: { seriesOpen: number } }[];
+      const openSeeded = (await database.select().from(schema.v2Series)).filter((row) =>
+        row.underlying.toLowerCase() === MARKET.toLowerCase() && row.status === "open").length;
+      expect(openSeeded, "fixture: two open series, four past open").toBe(2);
+      expect(markets.find((market) => market.ticker === "TEST")?.stats.seriesOpen).toBe(openSeeded);
+    } finally {
+      await teardown(pg, [["DELETE FROM v2_series WHERE long_id IN (483000, 483002, 483004, 483006)", [], 4]]);
+      clearCache();
+    }
+  });
+
+  it("serves the guardian's trading and mint brakes, and lists cutoff days apart from writable ones",
+    async () => {
+    // Before this the market wire carried neither brake, so a paused book or mint read as "Live".
+    // A day past its mint cutoff still trades resale asks and bids, so it is listed, but never in
+    // `expiries`, which a writer's expiry select reads.
+    const database = state.db as ReturnType<typeof drizzle<typeof schema>>;
+    const bookId = process.env.V2_ORDER_BOOK as `0x${string}`;
+    const seed = (await database.select().from(schema.v2Series)).find((row) => row.longId === 2n);
+    const cutoffExpiry = BigInt(state.now + 3_600);
+    type Wire = { ticker: string; tradingPaused: boolean; mintPaused: boolean; expiries: number[]; cutoffExpiries: number[] };
+    const { clearCache } = await import("../cache");
+    const read = async () => {
+      clearCache();
+      const markets = await (await app.request("http://localhost/v2/markets")).json() as Wire[];
+      return markets.find((market) => market.ticker === "TEST")!;
+    };
+    const before = await read();
+    expect(before.tradingPaused, "no TradingPausedSet row: not paused").toBe(false);
+    expect(before.mintPaused).toBe(false);
+    expect(before.cutoffExpiries).toEqual([]);
+    try {
+      await database.insert(schema.v2OrderBookState).values({ id: bookId, tradingPaused: true, updatedAt: BigInt(state.now) });
+      await pg.query("UPDATE v2_market SET mint_paused = true WHERE lower(underlying) = lower($1)", [MARKET]);
+      await database.insert(schema.v2Series).values([
+        { ...seed!, longId: 483_100n, expiry: cutoffExpiry, mintCutoff: cutoffExpiry - 1_800n, status: "cutoff" },
+        { ...seed!, longId: 483_102n, expiry: cutoffExpiry, mintCutoff: cutoffExpiry - 1_800n, status: "cutoff" },
+      ]);
+      const after = await read();
+      expect(after.tradingPaused).toBe(true);
+      expect(after.mintPaused).toBe(true);
+      expect(after.cutoffExpiries, "the cutoff day, once").toEqual([Number(cutoffExpiry)]);
+      expect(after.expiries, "writable days only").toEqual(before.expiries);
+      expect(after.expiries).not.toContain(Number(cutoffExpiry));
+    } finally {
+      await pg.query("UPDATE v2_market SET mint_paused = false WHERE lower(underlying) = lower($1)", [MARKET]);
+      await teardown(pg, [
+        ["DELETE FROM v2_order_book_state WHERE lower(id) = lower($1)", [bookId]],
+        ["DELETE FROM v2_series WHERE long_id IN (483100, 483102)", [], 2],
       ]);
       clearCache();
     }
@@ -1444,11 +2260,44 @@ describe("v2 API with seeded PGlite", () => {
     }
   });
 
+  it("serves the LIVE settlement settings (MarketConfigured, RouteSet) over the registry's", async () => {
+    const database = state.db as ReturnType<typeof drizzle<typeof schema>>;
+    const registered = V2_REGISTRY.markets.find((market) => market.ticker === "NVDA")!;
+    const [marketSeed] = await database.select().from(schema.v2Market).limit(1);
+    await database.insert(schema.v2Market).values({ ...marketSeed!, underlying: registered.underlying, ticker: registered.ticker,
+      oracle: registered.underlying });
+    // The admin called setMarket (one source, a 12 h wait) and setRouteV3 (fee 500): both differ from the registry.
+    await database.insert(schema.v2OracleMarketConfig).values({ underlying: registered.underlying,
+      sources: ["0x00000000000000000000000000000000000000c1"], maxDeviationBps: 150, uncorroboratedDelayS: 43_200n,
+      spotMaxAgeS: 90_000n, updatedAt: BigInt(state.now), updatedBlock: 1n, updatedLogIndex: 0, updatedTx: TX });
+    await database.insert(schema.v2PayoutRoute).values({ asset: registered.underlying.toLowerCase() as `0x${string}`, active: true,
+      venue: 1, poolId: `0x${"0".repeat(64)}`, fee: 500, tickSpacing: 0, v3Pool: "0x00000000000000000000000000000000000000c2",
+      feeBps: 5, changedAt: BigInt(state.now), changedBlock: 1n, changedTx: TX });
+    const { clearCache } = await import("../cache");
+    clearCache();
+    try {
+      expect(registered.settlement.sourceCount, "the registry differs, or this test proves nothing").not.toBe(1);
+      const markets = await (await app.request("http://localhost/v2/markets")).json() as { ticker: string; settlement?: unknown }[];
+      expect(markets.find((market) => market.ticker === "NVDA")?.settlement).toEqual({
+        sourceCount: 1, uncorroboratedDelayS: 43_200, route: { venue: "v3", fee: 500 },
+      });
+    } finally {
+      await teardown(pg, [
+        ["DELETE FROM v2_oracle_market_config WHERE lower(underlying) = lower($1)", [registered.underlying]],
+        ["DELETE FROM v2_payout_route WHERE lower(asset) = lower($1)", [registered.underlying]],
+        ["DELETE FROM v2_market WHERE lower(underlying) = lower($1)", [registered.underlying]],
+      ]);
+      clearCache();
+    }
+  });
+
   it("aggregates market premiums in SQL by underlying and time window", async () => {
     const database = state.db as ReturnType<typeof drizzle<typeof schema>>;
     const alternate = "0x0000000000000000000000000000000000000055" as const;
     const [marketSeed] = await database.select().from(schema.v2Market).limit(1);
-    const [seriesSeed] = await database.select().from(schema.v2Series).limit(1);
+    // Ordered, so the seed is open series 2 whatever earlier tests' UPDATEs did to the heap order (an unordered
+    // LIMIT 1 returned settled series 6 once another test updated series 4, and ALT then listed no expiry).
+    const [seriesSeed] = await database.select().from(schema.v2Series).orderBy(schema.v2Series.longId).limit(1);
     const [fillSeed] = await database.select().from(schema.v2Fill).limit(1);
     await database.insert(schema.v2Market).values({ ...marketSeed!, underlying: alternate, ticker: "ALT", oracle: alternate });
     await database.insert(schema.v2Series).values({ ...seriesSeed!, longId: 10n, underlying: alternate,
@@ -1891,6 +2740,56 @@ describe("v2 API with seeded PGlite", () => {
     expect(redemption.items[0]!.data.settlementPrice.raw).toBe("250000000");
   });
 
+  // In the fail-closed mode (a calendar constructed with closures) a year with no closure
+  // set has no session days, exactly as ExpiryCalendar._isSessionDay; a seeded year answers as before.
+  // Every request below uses its own range: the route's 15 s cache is keyed by fromDay/toDay.
+  it("closes an unseeded year's weekdays when the calendar fails closed", async () => {
+    const database = state.db as ReturnType<typeof drizzle<typeof schema>>;
+    const days = async (fromDay: number, toDay: number) => {
+      const response = await app.request(`http://localhost/v2/calendar/holidays?fromDay=${fromDay}&toDay=${toDay}`);
+      expect(response.status).toBe(200);
+      return (await response.json() as { items: { dayIndex: number; isHoliday: boolean; isSessionDay: boolean }[] }).items;
+    };
+    const utcDay = (year: number, month: number, date: number) => Date.UTC(year, month - 1, date) / 86_400_000;
+    const weekday = (dayIndex: number) => ![0, 6].includes(new Date(dayIndex * 86_400_000).getUTCDay());
+    const today = Math.floor(state.now / 86_400); // 2027-01-15; the fixture's closure on today + 1 seeds 2027
+    const jan2031 = utcDay(2031, 1, 1);
+    const closure2031 = utcDay(2031, 7, 3); // outside every range requested below
+
+    // No mode row (the switch was not seen): unchanged, 10 weekdays in two weeks.
+    expect((await days(jan2031, jan2031 + 13)).filter((item) => item.isSessionDay)).toHaveLength(10);
+    await database.insert(schema.v2CalendarMode).values({ id: CALENDAR_MODE_ID,
+      contract: "0x00000000000000000000000000000000000000ca", constructionTx: TX, unseededYearsClosed: true });
+    try {
+      const seededYear = await days(today - 3, today + 3);
+      expect(seededYear.filter((item) => item.isSessionDay)).toHaveLength(5);
+      for (const item of seededYear) expect(item.isSessionDay).toBe(weekday(item.dayIndex) && !item.isHoliday);
+
+      const unseeded = await days(jan2031, jan2031 + 12);
+      expect(unseeded.filter((item) => weekday(item.dayIndex))).toHaveLength(9);
+      expect(unseeded.filter((item) => item.isSessionDay)).toEqual([]);
+
+      // One closure anywhere in 2031 seeds it: the route reads the whole year, not only the range.
+      await database.insert(schema.v2CalendarHoliday).values({ dayIndex: closure2031, isHoliday: true,
+        changedAt: BigInt(state.now), changedBlock: 200n, changedTx: TX });
+      const seeded = await days(jan2031, jan2031 + 11);
+      expect(seeded.map((item) => item.isSessionDay)).toEqual(seeded.map((item) => weekday(item.dayIndex)));
+
+      // Across New Year: unseeded 2030 stays closed, seeded 2031 opens.
+      for (const item of await days(utcDay(2030, 12, 26), utcDay(2031, 1, 3))) {
+        expect(item.isSessionDay).toBe(item.dayIndex >= jan2031 && weekday(item.dayIndex));
+      }
+
+      // A cleared closure no longer counts, as `_closuresInYear` is decremented on chain.
+      await database.update(schema.v2CalendarHoliday).set({ isHoliday: false })
+        .where(eq(schema.v2CalendarHoliday.dayIndex, closure2031));
+      expect((await days(jan2031, jan2031 + 10)).filter((item) => item.isSessionDay)).toEqual([]);
+    } finally {
+      await database.delete(schema.v2CalendarMode);
+      await database.delete(schema.v2CalendarHoliday).where(eq(schema.v2CalendarHoliday.dayIndex, closure2031));
+    }
+  });
+
   it("returns session days and retains expired resale orders until cancellation", async () => {
     const day = Math.floor(state.now / 86_400);
     const calendarResponse = await app.request(
@@ -1926,7 +2825,9 @@ describe("v2 API with seeded PGlite", () => {
     expect(strategies.items[0]!.pricing).toEqual({
       currentAsk: { raw: "3000000", decimals: 6, formatted: "3" },
       band: {
-        min: { raw: "2000000", decimals: 6, formatted: "2" },
+        // The spot band's 2.00 is below the 3.00 ask's drop floor, 3.00 x 0.75 = 2.25 (AutoRoller.sol:504
+        // RepriceDropExceeded, MAX_REPRICE_DROP_BPS 2_500); a reprice to 2.00 reverts, so the floor is the min.
+        min: { raw: "2250000", decimals: 6, formatted: "2.25" },
         max: { raw: "10000000", decimals: 6, formatted: "10" },
       },
       lastRepricedAt: null,
@@ -2018,7 +2919,9 @@ describe("v2 API with seeded PGlite", () => {
       kind: "AskWrite", price: 3_183_100n, units: 90n, filled: 0n,
       validUntil: BigInt(state.now + 3600), status: "open", placedAt: BigInt(state.now - 30),
       placedBlock: 104n, placedTx: TX3, updatedAt: BigInt(state.now - 30) });
-    await pg.query(`UPDATE v2_strategy SET order_id = 9, min_ask_bps = 30, max_ask_bps = 150,
+    // Min 50 bps, AutoRoller.MIN_ASK_BPS. A 30 bps floor is one setStrategy refuses, and the
+    // indexer's band replay now refuses it too.
+    await pg.query(`UPDATE v2_strategy SET order_id = 9, min_ask_bps = 50, max_ask_bps = 150,
       ask_bps = 150, last_repriced_at = $1, last_repriced_price = 3183100, reprice_count = 2`, [state.now - 30]);
     state.fair = { fair: 2_345_600n, spot: 212_210_000n, iv: 0.3, delta: 0.2,
       asOf: state.now - 60, source: "cboe" };
@@ -2028,7 +2931,8 @@ describe("v2 API with seeded PGlite", () => {
       expect(strategies.items[0]!.pricing).toEqual({
         currentAsk: { raw: "3183100", decimals: 6, formatted: "3.1831" },
         band: {
-          min: { raw: "600000", decimals: 6, formatted: "0.6" },
+          // The drop floor, 3.1831 x 0.75 = 2.387325 rounded up to the 0.0001 tick (AutoRoller.sol:504).
+          min: { raw: "2387400", decimals: 6, formatted: "2.3874" },
           max: { raw: "3000000", decimals: 6, formatted: "3" },
         },
         lastRepricedAt: state.now - 30,
@@ -2075,7 +2979,8 @@ describe("v2 API with seeded PGlite", () => {
 
       state.spot = 200_000_000n;
       expect((await pricing()).band).toEqual({
-        min: { raw: "2000000", decimals: 6, formatted: "2" },
+        // The 3.00 ask's drop floor (2.25) binds above the spot band's 2.00 (AutoRoller.sol:504).
+        min: { raw: "2250000", decimals: 6, formatted: "2.25" },
         max: { raw: "10000000", decimals: 6, formatted: "10" },
       });
     } finally {
@@ -2210,6 +3115,126 @@ describe("v2 API with seeded PGlite", () => {
     }
   });
 
+  it("filters /v2/strategies by writer, so a writer past the first 200 rows is found", async () => {
+    const database = state.db as ReturnType<typeof drizzle<typeof schema>>;
+    const { clearCache } = await import("../cache");
+    // 205 other writers that sort before the late writer, so one unfiltered 200-row page cannot reach it.
+    const late = "0xffffffffffffffffffffffffffffffffffff0496" as `0x${string}`;
+    const others = Array.from({ length: 205 }, (_, index) =>
+      `0x${(0x1000 + index).toString(16).padStart(40, "0")}` as `0x${string}`);
+    const strategyRow = (writer: `0x${string}`) => ({ id: `${writer}-${MARKET}`, writer, underlying: MARKET,
+      ticker: "TEST", active: true, weekly: true, smartPricing: true, otmBps: 200, askBps: 100, minAskBps: 50,
+      maxAskBps: 200, maxUnits: 100n, currentLongId: null, orderId: null, expiry: null, lastRolledAt: null,
+      repriceCount: 0, updatedAt: BigInt(state.now - 120) });
+    await database.insert(schema.v2Strategy).values([...others, late].map(strategyRow));
+    try {
+      clearCache();
+      const unfiltered = await list(await app.request("http://localhost/v2/strategies?active=1&limit=200"));
+      expect(unfiltered.items).toHaveLength(200);
+      expect(unfiltered.items.some((item) => String(item.writer).toLowerCase() === late)).toBe(false);
+
+      // Lowercase and EIP-55 forms both match the lowercase column.
+      for (const form of [late, getAddress(late)]) {
+        clearCache();
+        const mine = await list(await app.request(`http://localhost/v2/strategies?active=1&limit=200&writer=${form}`));
+        expect(mine.items.map((item) => item.writer), form).toEqual([getAddress(late)]);
+        expect(mine.nextCursor).toBeNull();
+      }
+      clearCache();
+      const seeded = await list(await app.request(`http://localhost/v2/strategies?writer=${WRITER}`));
+      expect(seeded.items.map((item) => item.writer)).toEqual([getAddress(WRITER)]);
+      clearCache();
+      const inactive = await list(await app.request(`http://localhost/v2/strategies?active=0&writer=${late}`));
+      expect(inactive.items).toEqual([]);
+
+      const good = getAddress(late);
+      const flip = good.search(/[a-fA-F]/);
+      const badChecksum = good.slice(0, flip) + (good[flip] === good[flip]!.toUpperCase()
+        ? good[flip]!.toLowerCase() : good[flip]!.toUpperCase()) + good.slice(flip + 1);
+      expect(badChecksum).not.toBe(badChecksum.toLowerCase());
+      for (const bad of ["0x1234", "nope", `${late.slice(0, -1)}g`, badChecksum, ""]) {
+        const response = await app.request(`http://localhost/v2/strategies?writer=${bad}`);
+        expect(response.status, bad).toBe(400);
+        expect(await response.json(), bad).toMatchObject({ error: { code: "bad_writer" } });
+      }
+    } finally {
+      await teardown(pg, [["DELETE FROM v2_strategy WHERE writer <> $1", [WRITER], others.length + 1]]);
+      clearCache();
+    }
+  });
+
+  it("caches /v2/strategies per writer, so one wallet is never served another's page", async () => {
+    // No clearCache() anywhere in this test: the 15 s response cache must itself keep the pages apart.
+    // The test cleared the cache before every request, which is how a writer-blind cache key shipped.
+    // limit=7 keeps these cache keys distinct from every other test's /v2/strategies requests.
+    const database = state.db as ReturnType<typeof drizzle<typeof schema>>;
+    const walletA = `0x${"502a".padStart(40, "0")}` as `0x${string}`;
+    const walletB = `0x${"502b".padStart(40, "0")}` as `0x${string}`;
+    const strategyRow = (writer: `0x${string}`) => ({ id: `${writer}-${MARKET}`, writer, underlying: MARKET,
+      ticker: "TEST", active: true, weekly: true, smartPricing: true, otmBps: 200, askBps: 100, minAskBps: 50,
+      maxAskBps: 200, maxUnits: 100n, currentLongId: null, orderId: null, expiry: null, lastRolledAt: null,
+      repriceCount: 0, updatedAt: BigInt(state.now - 120) });
+    await database.insert(schema.v2Strategy).values([walletA, walletB].map(strategyRow));
+    const page = async (query: string) => {
+      const response = await app.request(`http://localhost/v2/strategies?limit=7${query}`);
+      expect(response.status, query).toBe(200);
+      return (await list(response)).items.map((item) => String(item.writer).toLowerCase());
+    };
+    try {
+      expect(await page(`&writer=${walletA}`)).toEqual([walletA]);
+      // Within the same 15 s window, B must get B's page, not the cached copy of A's.
+      expect(await page(`&writer=${walletB}`)).toEqual([walletB]);
+      // Served from the cache this time: A still gets its own page.
+      expect(await page(`&writer=${walletA}`)).toEqual([walletA]);
+      // The unfiltered page is its own entry too, not either wallet's.
+      const everyone = await page("");
+      expect(everyone).toEqual(expect.arrayContaining([walletA, walletB]));
+    } finally {
+      await teardown(pg, [["DELETE FROM v2_strategy WHERE writer IN ($1, $2)", [walletA, walletB], 2]]);
+    }
+  });
+
+  it("serves a closed AutoRoller position as closed, with what it closed, not as open", async () => {
+    const database = state.db as ReturnType<typeof drizzle<typeof schema>>;
+    const { clearCache } = await import("../cache");
+    const tracked = `0x${"806a".padStart(40, "0")}` as `0x${string}`;
+    const dropped = `0x${"806b".padStart(40, "0")}` as `0x${string}`;
+    const torn = `0x${"806c".padStart(40, "0")}` as `0x${string}`;
+    // What the PositionClosed reducer leaves (lib/v2/autoRoller.ts): no current position, order or expiry.
+    const closedRow = (writer: `0x${string}`, close: { orderId: bigint | null; redeemed: boolean | null }) => ({
+      id: `${writer}-${MARKET}`, writer, underlying: MARKET, ticker: "TEST", active: true, weekly: true,
+      smartPricing: true, otmBps: 200, askBps: 300, minAskBps: 100, maxAskBps: 500, maxUnits: 100n,
+      currentLongId: null, orderId: null, expiry: null, lastRolledAt: BigInt(state.now - 90_000), repriceCount: 0,
+      lastClosedAt: BigInt(state.now - 60), lastClosedLongId: 2n, lastClosedOrderId: close.orderId,
+      lastCloseRedeemed: close.redeemed, updatedAt: BigInt(state.now - 60) });
+    await database.insert(schema.v2Strategy).values([
+      closedRow(tracked, { orderId: 1n, redeemed: true }),
+      closedRow(dropped, { orderId: null, redeemed: false }),
+      // Not a state the reducer writes; the route must not invent `redeemed` for it.
+      closedRow(torn, { orderId: 1n, redeemed: null }),
+    ]);
+    const one = async (writer: `0x${string}`) => {
+      clearCache();
+      const page = await list(await app.request(`http://localhost/v2/strategies?writer=${writer}`));
+      expect(page.items, writer).toHaveLength(1);
+      return page.items[0]!;
+    };
+    try {
+      const closed = await one(tracked);
+      expect(closed).toMatchObject({ currentLongId: null, orderId: null, expiry: null,
+        lastClose: { at: state.now - 60, longId: "2", orderId: "1", redeemed: true } });
+      // Order 1 is still the seeded open AskWrite on series 2: the closed position must not revive it as live.
+      expect(closed.pricing).toMatchObject({ currentAsk: null, band: null });
+      expect((await one(dropped)).lastClose).toEqual({ at: state.now - 60, longId: "2", orderId: null, redeemed: false });
+      expect((await one(torn)).lastClose).toBeNull();
+      // The seeded writer never closed: the field is present and null (the live fixture pins the whole item).
+      expect((await one(WRITER)).lastClose).toBeNull();
+    } finally {
+      await teardown(pg, [["DELETE FROM v2_strategy WHERE writer IN ($1, $2, $3)", [tracked, dropped, torn], 3]]);
+      clearCache();
+    }
+  });
+
   it("shows a delegated take to the recipient and charges the fee to the taker", async () => {
     const recipientHistory = await list(await app.request(`http://localhost/v2/accounts/${RECIPIENT}/history`));
     expect(recipientHistory.items.map((item) => item.id)).toContain("fill-2");
@@ -2218,6 +3243,144 @@ describe("v2 API with seeded PGlite", () => {
     expect(fill.data.fee.raw).toBe("0");
     const payerHistory = await list(await app.request(`http://localhost/v2/accounts/${BUYER}/history`));
     expect(payerHistory.items.find((item) => item.id === "fill-2")!.data.fee.raw).toBe("10000");
+  });
+
+  it("fills a settled long's claimable whatever the payout preference: a put in USDG, a call in the underlying", async () => {
+    const database = state.db as ReturnType<typeof drizzle<typeof schema>>;
+    const holder = "0x0000000000000000000000000000000000d3fa01";
+    const putId = 10_482n;
+    await database.insert(schema.v2Series).values({ longId: putId, underlying: MARKET, ticker: "TEST", isPut: true,
+      strike: 230_000_000n, expiry: BigInt(state.now - 86_400), tenor: "daily", mintCutoff: BigInt(state.now - 88_200),
+      oracle: MARKET, exerciseFeeBps: 25, mintFeePpm: 0, mintFeesHeld: 0n, mintFeesAccrued: 0n, status: "settled",
+      settlementPrice: 225_000_000n, longPayoutPerUnit: 49_875n, feePerUnit: 125n, shortPayoutPerUnit: 2_250_000n,
+      settledAt: BigInt(state.now - 30), settledTx: TX, settledBlock: 101n, settledLogIndex: 4,
+      openInterestUnits: 5n, volumeUnits: 0n, volumeUsdg: 0n,
+      createdAt: BigInt(state.now - 200_000), createdBlock: 80n, createdTx: TX });
+    await database.insert(schema.v2Balance).values([
+      { id: `6-${holder}`, tokenId: 6n, holder, longId: 6n, side: "long", units: 10n },
+      { id: `${putId}-${holder}`, tokenId: putId, holder, longId: putId, side: "long", units: 5n },
+    ]);
+    (await import("../cache")).clearCache();
+    try {
+      // No v2_account row: the holder is on the Clearinghouse defaults (USDG, to the wallet).
+      const body = await (await app.request(`http://localhost/v2/accounts/${holder}/positions`)).json() as {
+        prefs: { inKind: boolean }; longs: { series: { longId: string }; claimable: { raw: string; decimals: number } | null }[] };
+      expect(body.prefs.inKind).toBe(false);
+      // Clearinghouse._redeem: owed = units x longPayoutPerUnit in the collateral asset.
+      expect(body.longs.find((long) => long.series.longId === putId.toString())?.claimable)
+        .toMatchObject({ raw: (5n * 49_875n).toString(), decimals: 6 });
+      expect(body.longs.find((long) => long.series.longId === "6")?.claimable)
+        .toMatchObject({ raw: (10n * 1_596_000_000_000_000n).toString(), decimals: 18 });
+    } finally {
+      await teardown(pg, [
+        ["DELETE FROM v2_balance WHERE holder = $1", [holder], 2],
+        ["DELETE FROM v2_series WHERE long_id = $1", [putId], 1],
+      ]);
+      (await import("../cache")).clearCache();
+    }
+  });
+
+  it("marks a long on a series past its mint cutoff, which still trades until expiry", async () => {
+    const database = state.db as ReturnType<typeof drizzle<typeof schema>>;
+    const holder = "0x0000000000000000000000000000000000d3fa97";
+    const bidder = "0x0000000000000000000000000000000000d3fa98";
+    const longId = 10_798n;
+    // OrderBook._place: Bid and AskResale run to expiry; only AskWrite stops at the mint cutoff.
+    await database.insert(schema.v2Series).values({ longId, underlying: MARKET, ticker: "TEST", isPut: false,
+      strike: 230_000_000n, expiry: BigInt(state.now + 3_600), tenor: "daily", mintCutoff: BigInt(state.now - 60),
+      oracle: MARKET, exerciseFeeBps: 25, mintFeePpm: 0, mintFeesHeld: 0n, mintFeesAccrued: 0n, status: "cutoff",
+      openInterestUnits: 5n, volumeUnits: 0n, volumeUsdg: 0n,
+      createdAt: BigInt(state.now - 200_000), createdBlock: 80n, createdTx: TX });
+    await database.insert(schema.v2Balance).values({ id: `${longId}-${holder}`, tokenId: longId, holder, longId,
+      side: "long", units: 5n });
+    await database.insert(schema.v2Order).values({ orderId: 797_002n, maker: bidder, longId, kind: "Bid",
+      price: 1_000_000n, units: 5n, filled: 0n, validUntil: BigInt(state.now + 1_800), status: "open",
+      placedAt: BigInt(state.now - 120), placedBlock: 100n, placedTx: TX, updatedAt: BigInt(state.now - 120) });
+    (await import("../cache")).clearCache();
+    try {
+      const body = await (await app.request(`http://localhost/v2/accounts/${holder}/positions`)).json() as {
+        longs: { series: { longId: string }; mark: { raw: string } | null; markSource: string | null }[] };
+      const long = body.longs.find((item) => item.series.longId === longId.toString());
+      // No fair quote in this suite (state.fairResult.quote is null), so the mark is the live bid.
+      expect(long).toMatchObject({ mark: { raw: "1000000" }, markSource: "best-bid" });
+    } finally {
+      await teardown(pg, [
+        ["DELETE FROM v2_order WHERE order_id = $1", [797_002n], 1],
+        ["DELETE FROM v2_balance WHERE holder = $1", [holder], 1],
+        ["DELETE FROM v2_series WHERE long_id = $1", [longId], 1],
+      ]);
+      (await import("../cache")).clearCache();
+    }
+  });
+
+  it("serves a settled short's claimable and its locked collateral as the Clearinghouse computes them", async () => {
+    const database = state.db as ReturnType<typeof drizzle<typeof schema>>;
+    const writer = "0x0000000000000000000000000000000000d3fa99";
+    const longId = 10_800n;
+    await database.insert(schema.v2Series).values({ longId, underlying: MARKET, ticker: "TEST", isPut: true,
+      strike: 230_000_000n, expiry: BigInt(state.now - 86_400), tenor: "daily", mintCutoff: BigInt(state.now - 88_200),
+      oracle: MARKET, exerciseFeeBps: 25, mintFeePpm: 0, mintFeesHeld: 0n, mintFeesAccrued: 0n, status: "settled",
+      settlementPrice: 225_000_000n, longPayoutPerUnit: 49_875n, feePerUnit: 125n, shortPayoutPerUnit: 2_250_000n,
+      settledAt: BigInt(state.now - 30), settledTx: TX, settledBlock: 101n, settledLogIndex: 4,
+      openInterestUnits: 4n, volumeUnits: 0n, volumeUsdg: 0n,
+      createdAt: BigInt(state.now - 200_000), createdBlock: 80n, createdTx: TX });
+    await database.insert(schema.v2Balance).values({ id: `${longId + 1n}-${writer}`, tokenId: longId + 1n, holder: writer,
+      longId, side: "short", units: 4n });
+    (await import("../cache")).clearCache();
+    try {
+      const body = await (await app.request(`http://localhost/v2/accounts/${writer}/positions`)).json() as {
+        shorts: { series: { longId: string }; claimable: { raw: string; decimals: number } | null;
+          collateralLocked: { raw: string; decimals: number } }[] };
+      const short = body.shorts.find((item) => item.series.longId === longId.toString());
+      // Clearinghouse._redeem: owed = amount x shortPayoutPerUnit; OptionMath.collateralPerUnit(put) = strike / 100.
+      expect(short).toMatchObject({
+        claimable: { raw: (4n * 2_250_000n).toString(), decimals: 6 },
+        collateralLocked: { raw: (230_000_000n / 100n * 4n).toString(), decimals: 6 },
+      });
+    } finally {
+      await teardown(pg, [
+        ["DELETE FROM v2_balance WHERE holder = $1", [writer], 1],
+        ["DELETE FROM v2_series WHERE long_id = $1", [longId], 1],
+      ]);
+      (await import("../cache")).clearCache();
+    }
+  });
+
+  it("charges each fill's fees to the party that paid them: a bid maker pays none, a selling taker pays both", async () => {
+    const database = state.db as ReturnType<typeof drizzle<typeof schema>>;
+    const bidder = "0x0000000000000000000000000000000000d3fa02";
+    const seller = "0x0000000000000000000000000000000000d3fa03";
+    const bidTx = `0x${"8".repeat(64)}` as `0x${string}`;
+    await database.insert(schema.v2Fill).values({ id: "bid-hit", orderId: 482n, longId: 2n, maker: bidder,
+      taker: seller, recipient: seller, buyer: bidder, seller, units: 10n, price: 500_000n, premium: 50_000n,
+      sellerFee: 2_500n, makerRebate: 500n, primary: true, takerIsBuyer: false,
+      ts: BigInt(state.now - 45), block: 101n, logIndex: 9, tx: bidTx });
+    await database.insert(schema.v2Take).values({ id: "bid-hit-take", taker: seller, longId: 2n, buying: false,
+      units: 10n, premium: 50_000n, takerFee: 2_000n, ts: BigInt(state.now - 45), block: 101n, logIndex: 10, tx: bidTx });
+    (await import("../cache")).clearCache();
+    try {
+      const makerRow = (await list(await app.request(`http://localhost/v2/accounts/${bidder}/history`)))
+        .items.find((item) => item.id === "bid-hit")!;
+      // OrderBook `_credit`: a bid maker is credited the rebate only; the seller fee is the taker's.
+      expect(makerRow.data).toMatchObject({ side: "buy", role: "maker" });
+      expect(makerRow.data.fee.raw).toBe("0");
+      expect(makerRow.data.rebate.raw).toBe("500");
+      const takerRow = (await list(await app.request(`http://localhost/v2/accounts/${seller}/history`)))
+        .items.find((item) => item.id === "bid-hit")!;
+      // OrderBook `take`: a selling taker is paid premium - sellerFees - takerFee.
+      expect(takerRow.data).toMatchObject({ side: "sell", role: "taker" });
+      expect(takerRow.data.fee.raw).toBe("4500");
+      // An ask's maker is the seller and still carries its own seller fee.
+      const askMaker = (await list(await app.request(`http://localhost/v2/accounts/${WRITER}/history`)))
+        .items.find((item) => item.id === "fill-1")!;
+      expect(askMaker.data.fee.raw).toBe("150000");
+    } finally {
+      await teardown(pg, [
+        ["DELETE FROM v2_take WHERE id = $1", ["bid-hit-take"], 1],
+        ["DELETE FROM v2_fill WHERE id = $1", ["bid-hit"], 1],
+      ]);
+      (await import("../cache")).clearCache();
+    }
   });
 
   it("pages the maker snapshot by an explicit epoch id", async () => {
@@ -2302,8 +3465,8 @@ describe("v2 API with seeded PGlite", () => {
     }
   });
 
-  it("X8-312: absence and a measured zero are different in /v2/makers, and every item names its benchmark", async () => {
-    // The defect this row exists to close: a maker that never quoted and a maker that quoted and
+  it("absence and a measured zero are different in /v2/makers, and every item names its benchmark", async () => {
+    // The defect this test exists to catch: a maker that never quoted and a maker that quoted and
     // scored zero collapse into the same score. They must never collapse into the same counts, and
     // a reader must be able to tell which benchmark produced either figure.
     const database = state.db as ReturnType<typeof drizzle<typeof schema>>;
@@ -2763,8 +3926,8 @@ describe("v2 fixture and schema drift", () => {
 });
 
 /**
- * T-188. F-APP-INDEXER-05 (windows anchored to the indexed head) and F-APP-INDEXER-09 (one
- * checkpoint per activity page).
+ * Windows anchored to the indexed head, and one
+ * checkpoint per activity page.
  *
  * WHY EVERY TEST HERE MOVES THE HEAD FIRST. `createTables` writes the checkpoint at `state.now` and
  * `beforeAll` pins the fake clock to the same `state.now`, so in the default fixture the indexed head
@@ -2773,12 +3936,12 @@ describe("v2 fixture and schema drift", () => {
  * uses - it cannot see its own subject. Each test below separates the two before it measures.
  *
  * NOT ASSERTED HERE: an `asOf` field on the response. The v2 bodies are validated against the frozen
- * schema in ./schema.ts, which this task does not own (T-188 acceptance criterion 11) and which
- * T-425-X8-WINDOWED-FIGURES-CARRY-ASOF-IN-THE-JSON-CONTRACT owns. So the anchoring is proven and the
- * wire field is not: a consumer still cannot distinguish a quiet day from indexer lag until T-425
- * lands. That gap is deliberate and is recorded in DEFERRED-VERIFICATION.md.
+ * schema in ./schema.ts, which is versioned apart
+ * from these routes. So the anchoring is proven and the
+ * wire field is not: a consumer still cannot distinguish a quiet day from indexer lag
+ * until that field exists. That gap is deliberate and known.
  */
-describe("T-188 indexed-head windows and snapshot reads", () => {
+describe("indexed-head windows and snapshot reads", () => {
   const CHAIN = "4663".padStart(16, "0");
   const checkpointAt = (ts: bigint, block: bigint) =>
     `${ts.toString().padStart(10, "0")}${CHAIN}${block.toString().padStart(16, "0")}`;
@@ -2837,7 +4000,7 @@ describe("T-188 indexed-head windows and snapshot reads", () => {
       // A wall-clock window leaves both deltas at 0, which is what makes this test able to fail.
       expect(lagging.stats - atHead.stats).toBe(777_000n);
       expect(lagging.markets - atHead.markets).toBe(777_000n);
-      // /v2/stats and /v2/markets must report ONE 24h volume (acceptance criterion 6a).
+      // /v2/stats and /v2/markets must report ONE 24h volume.
       expect(lagging.stats).toBe(lagging.markets);
       expect(atHead.stats).toBe(atHead.markets);
       // The 7d window moved back by the same two days and swept in the nine-day-old fill.
@@ -2932,7 +4095,7 @@ describe("T-188 indexed-head windows and snapshot reads", () => {
     const database = state.db as ReturnType<typeof drizzle<typeof schema>>;
     const ids = (page: { items: { id: string }[] }) => page.items.map((item) => item.id);
     const original = pg.query.bind(pg);
-    let spy: ReturnType<typeof vi.spyOn> | null = null;
+    let spy: MockInstance<typeof pg.query> | null = null;
     try {
       // Ponder commits the projection write and the checkpoint in ONE transaction. Reproduce that:
       // after the route's FIRST fill select returns, land a fill at a block the current safeBlock
@@ -2940,9 +4103,9 @@ describe("T-188 indexed-head windows and snapshot reads", () => {
       // safeBlock is head.block - 3 = 102 here, and the checkpoint's BLOCK is left alone so
       // safeBlock does not move - the only thing that changes is the set of committed rows.
       let landed = false;
-      spy = vi.spyOn(pg, "query").mockImplementation(async (...args: unknown[]) => {
-        const result = await (original as (...a: unknown[]) => Promise<unknown>)(...args);
-        if (!landed && String(args[0]).toLowerCase().includes('from "v2_fill"')) {
+      spy = vi.spyOn(pg, "query").mockImplementation((async (query, params, options) => {
+        const result = await original(query, params, options);
+        if (!landed && query.toLowerCase().includes('from "v2_fill"')) {
           landed = true;   // set BEFORE the writes below so they cannot re-enter this branch
           // Its OWN tx with a matching Taken: matchTakeFees throws "OrderFilled without matching
           // Taken" for a fill whose transaction has no Taken covering its premium, so a fill bolted
@@ -2958,7 +4121,7 @@ describe("T-188 indexed-head windows and snapshot reads", () => {
             [checkpointAt(BigInt(state.now) + 1n, DEFAULT_BLOCK)]);
         }
         return result;
-      });
+      }) as typeof pg.query);
       clearCache();
       const duringResponse = await app.request("http://localhost/v2/feed/activity");
       const duringText = await duringResponse.text();
@@ -2991,20 +4154,20 @@ describe("T-188 indexed-head windows and snapshot reads", () => {
 });
 
 /**
- * T-425. `asOf` in the JSON contract.
+ * `asOf` in the JSON contract.
  *
- * T-188 anchored the trailing windows of /v2/markets and /v2/markets/:ticker/series to the indexed
+ * A change anchored the trailing windows of /v2/markets and /v2/markets/:ticker/series to the indexed
  * head, but the head never reached the wire: the response cache replays body and status only, so the
  * header it first tried would have vanished on every cache HIT, and the frozen schema was owned by
  * another row at the time. Anchoring without publishing leaves a consumer unable to tell a genuine
  * quiet day from indexer lag -- the figures simply differ, with nothing on the response saying why.
  *
- * The same fixture rule as the T-188 block applies and matters more here: `createTables` writes the
+ * The same fixture rule as the block applies and matters more here: `createTables` writes the
  * checkpoint at `state.now` and the fake clock is pinned to the same `state.now`, so an `asOf` taken
  * from the host clock and one taken from the head are IDENTICAL in the stock fixture. A test that
  * does not move them apart first cannot fail, whichever source the route uses.
  */
-describe("T-425 windowed figures carry asOf", () => {
+describe("windowed figures carry asOf", () => {
   const CHAIN = "4663".padStart(16, "0");
   const DEFAULT_BLOCK = 105n;
   const setCheckpoint = async (ts: bigint, block: bigint) =>
@@ -3048,10 +4211,10 @@ describe("T-425 windowed figures carry asOf", () => {
       // DELIBERATELY NOT ASSERTED: that the figures changed when the head moved. They do not here,
       // and that is a property of this fixture rather than of the fix. The 24h window is
       // `ts >= asOf - 86400` with NO UPPER BOUND, so moving the head back only ever WIDENS it, and
-      // every fill in the stock fixture is inside both the level and the lagged window. T-188's
+      // every fill in the stock fixture is inside both the level and the lagged window.
       // `measures the 24h and 7d windows from the indexed head` plants a fill in the gap precisely
       // to create that delta and pins the arithmetic; this test pins the PUBLISHED anchor, which is
-      // all T-425 changes. Asserting a difference here would encode a fixture accident as a rule.
+      // all changes. Asserting a difference here would encode a fixture accident as a rule.
     } finally {
       await setCheckpoint(BigInt(state.now), DEFAULT_BLOCK);
       clearCache();
@@ -3077,7 +4240,7 @@ describe("T-425 windowed figures carry asOf", () => {
 
       // Two days of lag, host clock unmoved. /v2/stats must follow the HEAD, and must agree with
       // /v2/markets: the site renders both, and two different "as of" instants on one page is the
-      // same defect as two different 24h volumes, which is what T-188 criterion 6(a) forbids.
+      // same defect as two different 24h volumes, which is exactly what this test forbids.
       await setCheckpoint(head, DEFAULT_BLOCK);
       const lagging = await read();
       expect(lagging.stats).toBe(Number(head));
@@ -3126,6 +4289,36 @@ describe("T-425 windowed figures carry asOf", () => {
       await pg.query("DELETE FROM _ponder_checkpoint");
       await pg.query("INSERT INTO _ponder_checkpoint VALUES ($1)",
         [`${state.now.toString().padStart(10, "0")}${CHAIN}${DEFAULT_BLOCK.toString().padStart(16, "0")}`]);
+      clearCache();
+    }
+  });
+
+  it("refuses with a 503, never a time-zero answer, when the checkpoint query itself FAILS", async () => {
+    const { clearCache } = await import("../cache");
+    // Every route below reads the indexed head. A MISSING checkpoint (the tests above) measures no
+    // window by design; a query that FAILED must not be read as that. Only the checkpoint table is
+    // hidden, so the head read is the one read that fails: every other select still has its table.
+    const paths = ["/v2/stats", "/v2/markets", "/v2/markets/TEST/series", "/v2/config", "/v2/flywheel",
+      "/v2/admin/operations", "/v2/feed/wins?window=day", "/v2/leaderboard?window=week"];
+    for (const path of paths) {
+      clearCache();
+      expect((await app.request(`http://localhost${path}`)).status, `${path} control`).toBe(200);
+    }
+    try {
+      await pg.query("ALTER TABLE _ponder_checkpoint RENAME TO _ponder_checkpoint_hidden");
+      for (const path of paths) {
+        clearCache();
+        const response = await app.request(`http://localhost${path}`);
+        expect(response.status, path).toBe(503);
+        expect(response.headers.get("cache-control"), path).toBe("no-store");
+        expect((await response.json() as { error: { code: string } }).error.code, path).toBe("head_unavailable");
+      }
+      clearCache();
+      const health = await app.request("http://localhost/v2/health");
+      expect(health.status).toBe(503);
+      expect((await health.json() as { status: string }).status).toBe("degraded");
+    } finally {
+      await pg.query("ALTER TABLE IF EXISTS _ponder_checkpoint_hidden RENAME TO _ponder_checkpoint");
       clearCache();
     }
   });

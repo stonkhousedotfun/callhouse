@@ -11,21 +11,19 @@
  * to a reader who wanted to see what exists.
  *
  * These tiles are NOT buyable and must never read as if they were: no ask price, no payoff multiple, no
- * buy control. They say what the contract is and link to its page. `PayoffCard` is deliberately not
- * reused -- its `Card` type requires a non-null `ask`, and inventing a zero one would render a real
- * looking price and a payoff multiple computed from it.
+ * buy control. They say what the contract is and link to its page. The payoff card (removed as dead code
+ * earlier) was deliberately not reused -- its `Card` type requires a non-null `ask`, and inventing a
+ * zero one would render a real looking price and a payoff multiple computed from it.
  */
 import Link from "next/link";
 
 import { Panel } from "@/components/ui";
+import { Time } from "@/components/ui/Time";
 import { useMarketSeries } from "@/lib/v2/hooks";
 
 /** Enough to show the ladder is real without turning the empty state into a second marketplace. */
 const MAX_SHOWN = 5;
 
-function expiryLabel(expiry: number): string {
-  return new Date(expiry * 1000).toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" });
-}
 
 export function UnquotedSeries({ ticker, type }: { ticker: string | undefined; type: "call" | "put" }) {
   const series = useMarketSeries(ticker, { limit: MAX_SHOWN, type });
@@ -45,7 +43,7 @@ export function UnquotedSeries({ ticker, type }: { ticker: string | undefined; t
           <p className="font-display text-lg font-bold">
             {s.ticker} {s.strike.formatted} {s.isPut ? "put" : "call"}
           </p>
-          <p className="mt-1 text-sm text-ink-2">Expires {expiryLabel(s.expiry)}</p>
+          <p className="mt-1 text-sm text-ink-2">Expires <Time at={s.expiry} market /></p>
           <p className="mt-3 text-sm font-semibold text-ink-3">No ask yet</p>
           <Link href={`/${s.ticker.toLowerCase()}/${s.longId}`}
             className="mt-4 text-sm font-semibold text-accent-text underline">

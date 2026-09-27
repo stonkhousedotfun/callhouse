@@ -1,10 +1,10 @@
 /**
- * The provider-neutral option-chain contract (K3-311): what any data provider's chain becomes before
+ * The provider-neutral option-chain contract: what any data provider's chain becomes before
  * the pricing service reads it, and the pure checks that judge it. Cboe is one adapter (cboe.ts
- * cboeToNormalized); a paid feed (K3-308) or a fake (fake-provider.ts) is another. Past this seam no
+ * cboeToNormalized); a paid feed or a fake (fake-provider.ts) is another. Past this seam no
  * business logic reads a provider's payload type.
  *
- * FOUR THINGS, KEPT APART (F3 D12, 02-interfaces.md §5.1):
+ * FOUR THINGS, KEPT APART:
  *   identity     who the provider says each instrument is: its own instrument id, root, call/put,
  *                strike, expiry day in New York, and the contract multiplier, exercise and
  *                settlement convention AS STATED. `null` means the provider did not say, never
@@ -34,7 +34,7 @@ import { EARLY_CLOSE_TOLERANCE_S, CLOCK_SKEW_TOLERANCE_S, latestSettledSessionCl
                              CONTRACT
 //////////////////////////////////////////////////////////////*/
 
-/** Version of this in-process contract. Wire provenance (02-interfaces §5.1) is `O3-307/1`. */
+/** Version of this in-process contract. Wire provenance is `O3-307/1`. */
 export const CHAIN_CONTRACT = 'K3-311/1' as const;
 
 /** Listed US equity options deliver 100 shares. A provider that states another multiplier (an
@@ -218,7 +218,7 @@ export function listedOptions(chain: NormalizedChain, expectedRoot: string): Lis
                               QUALITY
 //////////////////////////////////////////////////////////////*/
 
-/** Reason codes from 02-interfaces §5.1 used here. Open strings on the wire. */
+/** Reason codes used here. Open strings on the wire. */
 export type QualityReason =
   | 'quote-stale'
   | 'quote-age-unknown'
@@ -347,7 +347,7 @@ export interface IdentityCheck {
  * not map the market to a root or a Stock Token. `identity-mismatch`: another underlying symbol, or
  * an issuer that differs where both sides state one. `multiplier-mismatch`: a row stating a
  * non-standard contract multiplier, or an observed token uiMultiplier (e.g. read on chain) that
- * differs from the registry's. Ticker alone is never an identity (F3 §6): with no root mapping the
+ * differs from the registry's. Ticker alone is never an identity: with no root mapping the
  * chain is unmapped even when the symbol equals the ticker.
  */
 export function checkIdentity(chain: Pick<NormalizedChain, 'underlying' | 'rows'>, canonical: CanonicalIdentity, observedUiMultiplier: string | null = null): IdentityCheck {

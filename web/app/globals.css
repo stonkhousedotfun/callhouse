@@ -1,8 +1,8 @@
-/* Stonkhouse dapp (app.stonkhouse.fun) — the "Daylight" design, shared with stonkhouse.fun.
+/* Stonkhouse dapp (app.stonkhouse.fun) — the "Neon" design, shared with stonkhouse.fun.
 
    Tailwind CSS v4. This file holds four things and nothing else:
-     1. the Daylight tokens as plain CSS variables, light on :root, dark under
-        prefers-color-scheme (there is no theme toggle in the app either);
+     1. the Neon tokens as plain CSS variables, one set per mode: NIGHT (black / neon lime) and DAY (white / forest
+        green);
      2. an @theme inline block that maps those variables onto Tailwind's theme namespaces, so
         `bg-surface`, `text-ink-2`, `rounded-lg`, `shadow-lift`, `font-display` exist as utilities;
      3. a small base layer (body, headings, focus ring, reduced motion) and two utilities;
@@ -12,40 +12,63 @@
    Styling lives in components as Tailwind classes, built on the primitives in components/ui. Do not
    grow this file into a class library.
 
-   TWIN BLOCK. Everything from `@import "tailwindcss"` down to the end of the `link` utility is
-   copied verbatim from stonkhousedotfun/callhouse-site: app/globals.css. The two domains sit one click apart
-   and must not drift: change a token in paired commits to both repos, and diff the two blocks
-   whenever either changes. App-only rules go in the tail at the bottom, never inside the block.
+   MODES. :root[data-theme="night"] and :root[data-theme="day"] carry the tokens. The inline <head> script
+   (lib/theme.ts THEME_INIT_SCRIPT, rendered by app/layout.tsx) sets data-theme before first paint: the stored
+   `stonkhouse-theme` choice, else the system setting. With no attribute at all (script blocked) the
+   prefers-color-scheme fallback below decides: dark -> night, light -> day. The NIGHT values therefore appear twice
+   (the fallback and the explicit selector); lib/theme.test.ts fails if the two copies differ.
+
+   TWIN BLOCK. Everything between the TWIN BLOCK BEGIN and TWIN BLOCK END markers is copied verbatim from / to
+   stonkhousedotfun/callhouse-site: app/globals.css. The two domains sit one click apart and
+   must not drift: change a token in paired commits to both repos, and diff the two blocks whenever either changes.
+   App-only rules go in the tail at the bottom, never inside the block.
 
    TOKEN NAMES ARE DELIBERATELY DIFFERENT FROM THEME KEYS where the two would collide: the raw
    shadow values are --elevation-*, not --shadow-*, because @theme inline would otherwise emit
    `--shadow-lift: var(--shadow-lift)`, a self-reference. Same reason the radii are --r-*.
+   Every existing token name is kept; the Neon values replace the Daylight ones under the same names,
+   so components re-theme with no edits. New in Neon: --field, --danger-text, --danger-soft, --select-bg/ink,
+   --inverse-bg/ink, --curve-fill, --row-selected, --r-pill.
 
    The default Tailwind colour palette is switched off (--color-*: initial). Every colour in this
-   app is a Daylight token; `text-gray-500` or `bg-white` silently compiling to an off-palette
+   app is a Neon token; `text-gray-500` or `bg-white` silently compiling to an off-palette
    value is the drift this prevents. `transparent`, `current` and `inherit` still work, and so does
-   an opacity modifier on a token (`bg-danger/10`), which is how the app tints its danger surfaces:
-   the shared palette has no --danger-soft.
+   an opacity modifier on a token (`bg-danger/10`); new code uses --danger-soft instead.
 
-   CONTRAST: four values differ from the approved mockup, each nudged just enough to reach WCAG AA
-   (4.5:1) for the small text that uses it. Light --ink-3 #7a8a83 -> #627169 (4.57:1 on surface-2),
-   light --warn #a86400 -> #955800 (5.13:1 on warn-soft), light --usdg #2f6bd8 -> #2a62c9 (5.06:1
-   on surface-2), dark --ink-3 #72837b -> #83948c (4.93:1 on surface-2). Check a new value against
-   ground, surface and surface-2 before changing any of them. */
+   CONTRAST (WCAG 2.x, measured by lib/theme.ts contrastRatio and asserted by lib/theme.test.ts for every text token
+   on --ground, --surface, --surface-2 and --field, plus each ink-on-fill pair). Lowest ratios per mode:
+     DAY   accent on field 4.66, accent on surface 4.75, usdg on usdg-soft 4.83, accent on ground / surface-2 5.02.
+     NIGHT danger on surface-2 5.66, danger on field 6.14, ink-3 on surface-2 6.19, danger on surface 6.27.
+   44 pairs per mode (9 text tokens x 4 grounds + 8 ink-on-fill pairs), every one >= 4.5:1, measured 2026-09-23.
+   Small text uses --accent-text, not --accent. Re-run the test after changing any value. */
 
+/* ==== TWIN BLOCK BEGIN ==== */
 @import "tailwindcss";
 
+/* Mode-independent tokens. --curve-fill resolves against whichever mode's --accent is live. */
 :root {
+  --curve-fill: linear-gradient(to bottom, color-mix(in srgb, var(--accent) 34%, transparent), transparent);
+
+  --r-lg: 22px;
+  --r-md: 14px;
+  --r-sm: 10px;
+  --r-pill: 999px;
+}
+
+/* DAY, also the default when nothing chose a mode and the system is light. */
+:root,
+:root[data-theme="day"] {
   color-scheme: light;
 
-  --ground: #f5f8f6;
-  --surface: #ffffff;
-  --surface-2: #edf3ef;
-  --ink: #0c1a15;
-  --ink-2: #47584f;
-  --ink-3: #627169;
-  --line: #e0e8e3;
-  --line-2: #cfdbd4;
+  --ground: #ffffff;
+  --surface: #f7f9f8;
+  --surface-2: #ffffff;
+  --field: #f4f7f5;
+  --ink: #0b0f0d;
+  --ink-2: #3a4741;
+  --ink-3: #5b6660;
+  --line: #e6ece8;
+  --line-2: #d5ddd8;
   --accent: #0a7f55;
   --accent-hover: #086b47;
   --accent-ink: #ffffff;
@@ -55,45 +78,94 @@
   --usdg-soft: #e4edfc;
   --warn: #955800;
   --warn-soft: #fff1d9;
-  --danger: #b93a2b;
+  --danger: #c2362b;
+  --danger-text: #b03025;
+  --danger-soft: #fbe4e1;
+  --select-bg: #0b0f0d;
+  --select-ink: #ffffff;
+  --inverse-bg: #0b0f0d;
+  --inverse-ink: #ffffff;
+  --row-selected: #eef4f0;
 
-  --elevation-lift: 0 1px 2px rgba(12, 26, 21, 0.05), 0 18px 40px -22px rgba(12, 26, 21, 0.28);
-  --elevation-soft: 0 1px 2px rgba(12, 26, 21, 0.04), 0 6px 18px -12px rgba(12, 26, 21, 0.16);
-
-  --r-lg: 22px;
-  --r-md: 14px;
-  --r-sm: 9px;
+  --elevation-lift: 0 1px 2px rgba(11, 15, 13, 0.05), 0 18px 40px -22px rgba(11, 15, 13, 0.28);
+  --elevation-soft: 0 1px 2px rgba(11, 15, 13, 0.04), 0 6px 18px -12px rgba(11, 15, 13, 0.16);
 }
 
+/* NIGHT as the system fallback: only when no mode was chosen (no data-theme="day"). */
 @media (prefers-color-scheme: dark) {
-  :root {
+  :root:not([data-theme="day"]) {
     color-scheme: dark;
 
-    --ground: #0b1511;
-    --surface: #111d18;
-    --surface-2: #172620;
-    --ink: #e8f1ec;
-    --ink-2: #a5b5ad;
-    --ink-3: #83948c;
-    --line: #20302a;
-    --line-2: #2c4038;
-    --accent: #2fbf84;
-    --accent-hover: #4cd198;
-    --accent-ink: #03140c;
-    --accent-soft: #13352a;
-    --accent-text: #6fddae;
+    --ground: #000000;
+    --surface: #0e0e0e;
+    --surface-2: #1a1a1a;
+    --field: #111111;
+    --ink: #ffffff;
+    --ink-2: #bdbdbd;
+    --ink-3: #9a9a9a;
+    --line: #1c1c1c;
+    --line-2: #2a2a2a;
+    --accent: #c8ff2e;
+    --accent-hover: #d6ff5c;
+    --accent-ink: #000000;
+    --accent-soft: #1f2a08;
+    --accent-text: #c8ff2e;
     --usdg: #7ea6f2;
-    --usdg-soft: #18253d;
-    --warn: #e4a94b;
-    --warn-soft: #33260f;
-    --danger: #ee8a7c;
+    --usdg-soft: #101b2e;
+    --warn: #ffb547;
+    --warn-soft: #2a1f0a;
+    --danger: #ff5a4e;
+    --danger-text: #ff8a7e;
+    --danger-soft: #2e1210;
+    --select-bg: #ffffff;
+    --select-ink: #000000;
+    --inverse-bg: #ffffff;
+    --inverse-ink: #000000;
+    --row-selected: #141414;
 
-    --elevation-lift: 0 1px 2px rgba(0, 0, 0, 0.3), 0 20px 44px -24px rgba(0, 0, 0, 0.7);
-    --elevation-soft: 0 1px 2px rgba(0, 0, 0, 0.25), 0 8px 20px -14px rgba(0, 0, 0, 0.6);
+    /* Night has no shadows: borders carry the structure. */
+    --elevation-lift: none;
+    --elevation-soft: none;
   }
 }
 
-/* Breakpoints follow the mockup's two media queries: one column at or below 960px, the tightest
+/* NIGHT chosen explicitly (the toggle, or the pre-paint script resolving the system setting). */
+:root[data-theme="night"] {
+  color-scheme: dark;
+
+  --ground: #000000;
+  --surface: #0e0e0e;
+  --surface-2: #1a1a1a;
+  --field: #111111;
+  --ink: #ffffff;
+  --ink-2: #bdbdbd;
+  --ink-3: #9a9a9a;
+  --line: #1c1c1c;
+  --line-2: #2a2a2a;
+  --accent: #c8ff2e;
+  --accent-hover: #d6ff5c;
+  --accent-ink: #000000;
+  --accent-soft: #1f2a08;
+  --accent-text: #c8ff2e;
+  --usdg: #7ea6f2;
+  --usdg-soft: #101b2e;
+  --warn: #ffb547;
+  --warn-soft: #2a1f0a;
+  --danger: #ff5a4e;
+  --danger-text: #ff8a7e;
+  --danger-soft: #2e1210;
+  --select-bg: #ffffff;
+  --select-ink: #000000;
+  --inverse-bg: #ffffff;
+  --inverse-ink: #000000;
+  --row-selected: #141414;
+
+  /* Night has no shadows: borders carry the structure. */
+  --elevation-lift: none;
+  --elevation-soft: none;
+}
+
+/* Two breakpoints: one column at or below 960px, the tightest
    layouts at or below 560px. `sm` and `lg` are redefined to those widths; md/xl/2xl keep
    Tailwind's defaults. */
 @theme {
@@ -121,18 +193,27 @@
   --color-warn: var(--warn);
   --color-warn-soft: var(--warn-soft);
   --color-danger: var(--danger);
+  --color-field: var(--field);
+  --color-danger-text: var(--danger-text);
+  --color-danger-soft: var(--danger-soft);
+  --color-select-bg: var(--select-bg);
+  --color-select-ink: var(--select-ink);
+  --color-inverse-bg: var(--inverse-bg);
+  --color-inverse-ink: var(--inverse-ink);
+  --color-row-selected: var(--row-selected);
 
-  /* The --font-schibsted-grotesk / --font-figtree / --font-geist-mono variables are set on <html>
-     by next/font in app/layout.tsx. The stacks after them only matter if that class is missing. */
+  /* The --font-plus-jakarta-sans / --font-jetbrains-mono variables are set on <html> by next/font in
+     app/layout.tsx. The stacks after them only matter if that class is missing. */
   --font-display:
-    var(--font-schibsted-grotesk), ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
-  --font-body: var(--font-figtree), ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
-  --font-sans: var(--font-figtree), ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
-  --font-mono: var(--font-geist-mono), ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    var(--font-plus-jakarta-sans), ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  --font-body: var(--font-plus-jakarta-sans), ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  --font-sans: var(--font-plus-jakarta-sans), ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  --font-mono: var(--font-jetbrains-mono), ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
 
   --radius-lg: var(--r-lg);
   --radius-md: var(--r-md);
   --radius-sm: var(--r-sm);
+  --radius-pill: var(--r-pill);
 
   --shadow-lift: var(--elevation-lift);
   --shadow-soft: var(--elevation-soft);
@@ -160,7 +241,7 @@
     text-wrap: balance;
   }
 
-  /* Geist Mono sets visibly larger than Figtree at the same px size. An inline <Num> sitting in running
+  /* JetBrains Mono sets visibly larger than Plus Jakarta Sans at the same px size. An inline <Num> sitting in running
      text (a paragraph, a list item, a table cell) is scaled down so "15 bps" or "Fri 16:00 ET" does
      not jump out mid-sentence. Figure slots set their own sizes and are not matched; a utility size
      on the element still wins, because this is the base layer. */
@@ -196,7 +277,7 @@
   }
 }
 
-/* Every number on the site: Geist Mono, tabular figures, a hair of negative tracking. */
+/* Every number on the site: JetBrains Mono, tabular figures, a hair of negative tracking. */
 @utility num {
   font-family: var(--font-mono);
   font-variant-numeric: tabular-nums;
@@ -214,13 +295,14 @@
     text-decoration-color: currentColor;
   }
 }
+/* ==== TWIN BLOCK END ==== */
 
 /* ------------------------------------------------------------------------------------------------
    APP-ONLY TAIL. Nothing above this line may differ from callhouse-site's app/globals.css.
    ------------------------------------------------------------------------------------------------ */
 
 @layer base {
-  /* Function names, env vars and error names in running text: Geist Mono, a step smaller, on a
+  /* Function names, env vars and error names in running text: JetBrains Mono, a step smaller, on a
      surface-2 tint so `rollOpen` reads as code without shouting. */
   code {
     font-family: var(--font-mono);

@@ -153,7 +153,7 @@ export type LiveVault = {
   cycleStrikeUsdg: bigint | null;
   cycleExerciseTs: bigint | null;
   cycleExpiryTs: bigint | null;
-  /** The stranded-claim state machine (AF-02). */
+  /** The stranded-claim state machine. */
   isStranded: boolean | null;
   strandGen: bigint | null;
   lastResolvedGen: bigint | null;

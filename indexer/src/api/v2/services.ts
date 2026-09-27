@@ -5,8 +5,8 @@
  * only link between the two ran the other way: the pricer optionally posts to the indexer through
  * INDEXER_URL (`keeper/src/v2/pricer/main.ts`). The indexer had no URL for the pricer and `/v2/health`
  * reports indexed-head lag and nothing else, so the web app could not tell "the pricer is down" from
- * "there is no fair value for this series". T-423 gave the pricer a public-safe readiness endpoint;
- * this reads it and republishes it on the frozen v2 wire so T-296 can consume a typed field.
+ * "there is no fair value for this series". A change gave the pricer a public-safe readiness endpoint;
+ * this reads it and republishes it on the frozen v2 wire so the web app can consume a typed field.
  *
  * FAIL CLOSED, AND THE ONE SUBTLETY THAT MATTERS. `healthy` is true ONLY when the pricer answered
  * `ready: true`, named no reason against itself, and did so recently enough. Every other path —
@@ -23,18 +23,18 @@
  *
  * WHAT IS NEVER TOUCHED. The pricer's `/health` body carries the signer and its balance, the RPC
  * origins, the contract addresses and the db path. It is never fetched here and never served. Only
- * `/ready` is read, and only the five keys T-423 froze are read out of it.
+ * `/ready` is read, and only the five frozen keys are read out of it.
  *
- * THE ENV VAR IS READ HERE, NOT IN lib/env.ts. `indexer/lib/env.ts` is fenced by T-295, and this row
- * says so explicitly; `PRICER_READY_URL` is therefore read from `process.env` in this file. It is
+ * THE ENV VAR IS READ HERE, NOT IN lib/env.ts. `indexer/lib/env.ts` is shared startup config, and this module
+ * keeps its own variable; `PRICER_READY_URL` is therefore read from `process.env` in this file. It is
  * also read per call rather than captured at module load, so a test can set it without re-importing
  * the module and so an operator restart is the only thing needed to change it.
  */
 import type { Hono } from "hono";
 
 /**
- * The pricer's closed reason set, MIRRORED from `keeper/src/v2/health.ts` READY_REASONS at base
- * 48f5602604b4dd979a7eba167b9b93063d40c41e — copied, not re-reasoned. A reason outside this set is
+ * The pricer's closed reason set, MIRRORED from `keeper/src/v2/health.ts` READY_REASONS,
+ * copied, not re-reasoned. A reason outside this set is
  * not passed through: the producer already replaces anything unknown with `state-unknown`, and if a
  * value outside the set somehow arrives, the body is not the contract we validated and the answer
  * becomes `malformed_body`.
@@ -59,7 +59,7 @@ export type PricerReadyReason = (typeof PRICER_READY_REASONS)[number];
  *   not_configured  PRICER_READY_URL is unset or blank. NOT an error and NOT healthy
  *   timeout         the request did not answer within PRICER_READY_TIMEOUT_MS
  *   http_error      a non-2xx whose body is NOT a valid readiness answer, or a transport failure
- *   malformed_body  a 2xx or 503 whose body is not the five-key contract T-423 froze
+ *   malformed_body  a 2xx or 503 whose body is not the frozen five-key contract
  *   not_ready       the pricer answered, validly, that it is not ready. `reasons` carries its own
  *   stale           the answer is older than the freshness bound: the last one we hold, or the
  *                   pricer's own checkedAt. An old truth is not a current one
@@ -87,7 +87,7 @@ export const PRICER_CACHE_MS = 10_000;
 /**
  * How old the pricer's OWN `checkedAt` may be and still count as current.
  *
- * This is the bound the row means by "within the freshness bound". It is deliberately larger than
+ * This is the bound "within the freshness bound" means. It is deliberately larger than
  * the cache window: the cache decides when to re-ask, this decides whether the answer we have still
  * describes the present. An answer older than this is `stale` and NOT healthy, even though it says
  * ready — a pricer that died one minute after saying it was fine is not a pricer that is fine.
@@ -104,7 +104,7 @@ function isoToSeconds(raw: unknown): number | null {
 }
 
 /**
- * The five-key body T-423 froze, validated key by key.
+ * The frozen five-key body, validated key by key.
  *
  * Validated rather than trusted because an unknown key here would mean we are reading something
  * other than `/ready` — the pricer's `/health`, a proxy's error page, a different service on a

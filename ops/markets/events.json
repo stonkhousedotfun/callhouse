@@ -1,0 +1,32 @@
+{
+  "_readme": "Event calendar for the pricing service (keeper/src/v2/pricing/events.ts). Rows: { ticker, date (YYYY-MM-DD, New York), kind (short lower-case label, e.g. earnings), timing (bmo | amc | null), source (the https URL the date came from) }. `through` maps a ticker to the last New York day its list is complete through. A ticker with rows but no `through` is complete only through its latest row: an expiry after that row reads `short` (unknown), never clear. `recheckBy` maps a ticker to the New York day by which someone must look for its next announced date: once that day has passed and neither a `through` reaching today nor a row dated today or later covers the ticker, the pricing service's /health marks it overdue and the monitor pages (v2_mon_event_recheck_overdue). After adding a confirmed row, set the next recheckBy for the report after it. A ticker with no row and no `through` has NO input: /fair reports provenance.event.input = missing, which means unknown, not clear. Add a row only from the company's own announcement (its IR newsroom) or an SEC filing; an aggregator's or an exchange vendor's ESTIMATED date is not a source (keeper/src/v2/pricing/events.test.ts enforces the hosts). Still empty as of 2026-09-23: neither NVIDIA nor SpaceX had announced its next report date; `_checked` records what was read, `_recheck` says where to look, and `recheckBy` says when.",
+  "_checked": [
+    {
+      "ticker": "NVDA",
+      "asOf": "2026-09-23",
+      "finding": "Next report (Q3 fiscal 2027) not announced by NVIDIA. Q2 fiscal 2027 (quarter ended 2026-07-26) was reported on 2026-08-26 with a 5 p.m. ET call; that date had been announced on 2026-07-29, four weeks ahead. The Q2 release names the Q3 call only as a future event, with no date. Nasdaq's vendor (Zacks) has no upcoming date.",
+      "sources": [
+        "https://nvidianews.nvidia.com/news/nvidia-announces-financial-results-for-second-quarter-fiscal-2027",
+        "https://www.globenewswire.com/news-release/2026/07/29/3335647/0/en/NVIDIA-Sets-Conference-Call-for-Second-Quarter-Financial-Results.html",
+        "https://api.nasdaq.com/api/analyst/NVDA/earnings-date"
+      ]
+    },
+    {
+      "ticker": "SPCX",
+      "asOf": "2026-09-23",
+      "finding": "SPCX is Space Exploration Technologies Corp. Class A common stock, and it does report quarterly: Q2 2026 results were posted on 2026-08-04 after market close, announced on 2026-07-20. The Q3 2026 date is NOT announced by SpaceX. Nasdaq/Zacks shows only an algorithmic estimate (2026-11-03) and Investing.com shows 2026-11-05; they disagree and neither is the company's, so no row was added.",
+      "sources": [
+        "https://ir.spacex.com/updates/releases-details/2026/SpaceX-to-Post-Second-Quarter-2026-Results-and-Host-Webcast-on-August-4-2026-2026-g8layJlbFm/default.aspx",
+        "https://api.nasdaq.com/api/analyst/SPCX/earnings-date",
+        "https://www.investing.com/equities/spacex-earnings"
+      ]
+    }
+  ],
+  "_recheck": "Both companies announced their last report date two to four weeks ahead (NVIDIA 2026-07-29 for 2026-08-26; SpaceX 2026-07-20 for 2026-08-04). Re-check nvidianews.nvidia.com and ir.spacex.com from 2026-10-15 and add each confirmed date with that release as its source. The machine-readable day is `recheckBy` below; this text is for the reader.",
+  "recheckBy": {
+    "NVDA": "2026-10-15",
+    "SPCX": "2026-10-15"
+  },
+  "through": {},
+  "events": []
+}

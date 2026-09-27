@@ -10,15 +10,15 @@
  *   redemption  selectRedeemable, redeemGasOf, chunkByGas, splitChunk
  *   orders      prunableOrders, isDeadOrder
  *   rolls       planRoll (the open grace of INTERFACE_VERSION 7 included)
- *   stale asks  overtaken, planStale (AutoRoller.cancelStale's own conditions, c16)
+ *   stale asks  overtaken, planStale (AutoRoller.cancelStale's own conditions)
  *   housekeeping sweepDue
  *   time        scheduleWake, selectExpiries
  *
- * UNITS (ADR-04): prices and strikes are USDG base units (6 dp) per whole share, bps of 10_000,
+ * UNITS: prices and strikes are USDG base units (6 dp) per whole share, bps of 10_000,
  * balances and supplies in 0.01-share units, times in unix seconds of the HEAD BLOCK (never the
  * wall clock), gas in gas units.
  */
-import { TENORS, type LadderParams, type MarketParams, type Tenor } from '../registry.js';
+import { listsDailyOn, TENORS, type LadderParams, type MarketParams, type Tenor } from '../registry.js';
 import {
   BPS,
   FINALIZE_DELAY,
@@ -64,7 +64,7 @@ export function isOtm(strike: bigint, spot: bigint, isPut: boolean): boolean {
 //////////////////////////////////////////////////////////////*/
 
 /**
- * The registry ladder around `spot` (K2-03 step 1, registry.ts LadderParams):
+ * The registry ladder around `spot` (step 1, registry.ts LadderParams):
  *   calls  rung 0 = roundUp(spot × (1 + firstOtmBps), strikeTick), each further rung × (1 + stepBps), rounded up;
  *   puts   mirrored below spot: rung 0 = roundDown(spot × (1 − firstOtmBps), strikeTick), × (1 − stepBps), rounded down.
  * The multiplication runs on the exact (unrounded) value, so rounding never compounds. When a coarse
@@ -116,7 +116,7 @@ export interface LadderPlan {
 }
 
 /**
- * K2-03 step 1 for one (underlying, expiry, type, tenor). "Ensure the registry ladder exists" and
+ * Step 1 for one (underlying, expiry, type, tenor). "Ensure the registry ladder exists" and
  * "re-centre when spot has moved so that fewer than two rungs are OTM; add rungs, never delete":
  *   - no anchor: create the ladder at spot (what exists already is not re-created);
  *   - an anchor: the ladder at the anchor is completed (a crash between two creates leaves it
@@ -189,15 +189,19 @@ export interface LadderSlot {
 }
 
 /**
- * Which ladders a market carries (K2-03 step 1): for each tenor, the first `expiriesAhead[tenor]` of that tenor's
+ * Which ladders a market carries (step 1): for each tenor, the first `expiriesAhead[tenor]` of that tenor's
  * upcoming expiries (0 switches the tenor off), calls always and puts only when the market lists puts. In
  * TENORS order, then expiry order, calls before puts. `expiries[tenor]` is the shared upcoming list
  * (upcomingLadderExpiries at the largest `expiriesAhead` of any market).
+ *
+ * Of those daily closes, only the ones on the market's `dailyWeekdays` (NVDA: Mon/Wed/Fri) carry a ladder.
+ * The count still spans the same first `expiriesAhead.daily` closes, so the horizon does not reach further out.
  */
-export function ladderSlots(params: Pick<MarketParams, 'expiriesAhead'>, puts: boolean, expiries: Readonly<Record<Tenor, readonly number[]>>): LadderSlot[] {
+export function ladderSlots(params: Pick<MarketParams, 'expiriesAhead' | 'dailyWeekdays'>, puts: boolean, expiries: Readonly<Record<Tenor, readonly number[]>>): LadderSlot[] {
   const slots: LadderSlot[] = [];
   for (const tenor of TENORS) {
     for (const expiry of expiries[tenor].slice(0, params.expiriesAhead[tenor])) {
+      if (tenor === 'daily' && !listsDailyOn(params, expiry)) continue;
       for (const isPut of puts ? [false, true] : [false]) slots.push({ tenor, expiry, isPut });
     }
   }
@@ -215,6 +219,12 @@ export const pinGroupKey = (oracle: string, underlying: string, expiry: number):
  * The gas a createSeries pays on top of GAS.createSeriesEach when it is the first of its (underlying, expiry) and the
  * expiry is not pinned by this Clearinghouse: the oracle's copy plus each source's pin. An unreadable source count
  * budgets the oracle's maximum.
+ *
+ * STALE SINCE CONTRACTS. createSeries no longer pins: the FIRST MINT of an expiry does
+ * (Clearinghouse.mint -> SettlementOracle.pin), under OrderBook DELIVERY_GAS when the book delivers it. This budget,
+ * and the probe planPinGroup asks for, are kept because unused gas is not charged and the probe still names any other
+ * createSeries refusal with ample gas. The first mint itself is made by the `firstmint` step (firstmint.ts), a one-unit
+ * take into the keeper's own account, so a heavy-hook receiver (the EarnVault) is never the one that pays the pin.
  */
 export function pinGasOf(sources: number | null): bigint {
   const n = sources === null ? MAX_ORACLE_SOURCES : Math.max(1, sources);
@@ -323,6 +333,12 @@ export interface ExpiryView {
   series: readonly SeriesView[];
   /** The cranker called snapshot inside the window (it recorded, or there was nothing to record). */
   snapshotDone: boolean;
+  /**
+   * A House vault prices its epoch boundary on this expiry (HouseVault.rollEpoch reads
+   * settlementPrice(underlying, epochEnd)), so the expiry needs a Finalized price even with no series and no open
+   * interest. Nothing else would finalize it: only Clearinghouse.settle finalizes, and that needs a series. Absent = false.
+   */
+  houseBoundary?: boolean;
 }
 
 export type CrankerAlertKind = 'v2_sources_disagree' | 'v2_settlement_held' | 'v2_snapshot_missed' | 'v2_settle_stuck' | 'v2_redeem_backlog';
@@ -374,19 +390,26 @@ export interface ExpiryThresholds {
 }
 
 /**
- * K2-03 steps 2-4 for one (underlying, expiry) of one oracle.
+ * Steps 2-4 for one (underlying, expiry) of one oracle.
  *
- * ORDER (C2-04): snapshot inside [expiry, expiry + SNAPSHOT_GRACE] BEFORE the first finalize, which
+ * ORDER: snapshot inside [expiry, expiry + SNAPSHOT_GRACE] BEFORE the first finalize, which
  * opens at expiry + FINALIZE_DELAY: the first finalize captures every source, and a pool snapshot
  * taken after it only upgrades the capture (a spurious uncorroborated candidate in between). So
  * finalize waits for the snapshot attempt, or for the window to close.
+ * A finalize inside the grace now runs snapshot's
+ * record loop before it captures, so a finalize (the cranker's, anyone's, or the one inside
+ * Clearinghouse.settle) no longer makes that spurious candidate or costs the pool its vote. The order is
+ * kept: the snapshot attempt is what sets snapshotDone and drives SNAPSHOT_RETRY_S, and a failed pool
+ * record inside a finalize is silent. A pool that never records still leaves windowOk false, which is
+ * what v2_snapshot_missed pages on, whoever tried.
  * FINALIZE is sent only when it would change something, judged from views: nothing captured and some
  * source prices the window; a captured source that was not ok now is (an upgrade can corroborate);
  * or a Pending candidate at/after finalizableAt. `finalize` returns (false, 0) for "not yet", so its
  * return value cannot say whether a call advanced the state.
+ * A HOUSE BOUNDARY (view.houseBoundary) is snapshotted and finalized like an expiry with supply, series or not.
  * SETTLE every series with long supply once Finalized. PRUNE every open order of an expired series,
  * whatever the settlement status: resale asks hand their escrowed longs back, and must before those
- * longs can be redeemed (architecture §3.6). REDEEM settled series with supply left.
+ * longs can be redeemed. REDEEM settled series with supply left.
  */
 export function planExpiry(view: ExpiryView, thresholds: ExpiryThresholds): ExpiryPlan {
   const { underlying, expiry, now, openInterest, status } = view;
@@ -394,7 +417,7 @@ export function planExpiry(view: ExpiryView, thresholds: ExpiryThresholds): Expi
   const plan: ExpiryPlan = { phase: 'open', snapshot: false, finalize: false, settle: [], prune: [], redeem: [], alerts: [], wakeAt: null, done: false };
 
   if (now < expiry) {
-    plan.wakeAt = openInterest > 0n || view.series.some((s) => s.prunableOrders > 0) ? expiry : null;
+    plan.wakeAt = openInterest > 0n || view.houseBoundary === true || view.series.some((s) => s.prunableOrders > 0) ? expiry : null;
     return plan;
   }
 
@@ -408,8 +431,8 @@ export function planExpiry(view: ExpiryView, thresholds: ExpiryThresholds): Expi
     return plan;
   }
 
-  const hasSupply = openInterest > 0n || view.series.some((s) => s.longSupply > 0n || s.shortSupply > 0n);
-  if (!hasSupply) {
+  const needsPrice = view.houseBoundary === true || openInterest > 0n || view.series.some((s) => s.longSupply > 0n || s.shortSupply > 0n);
+  if (!needsPrice) {
     plan.phase = plan.prune.length > 0 ? 'empty' : 'done';
     plan.done = plan.prune.length === 0;
     return plan;
@@ -424,7 +447,7 @@ export function planExpiry(view: ExpiryView, thresholds: ExpiryThresholds): Expi
       kind: 'v2_snapshot_missed',
       dedupeKey: key,
       once: true,
-      message: `no snapshot of ${underlying} expiry ${expiry} inside [expiry, expiry + ${SNAPSHOT_GRACE}]: a source that needed it cannot vote`,
+      message: `${underlying} expiry ${expiry} passed [expiry, expiry + ${SNAPSHOT_GRACE}] with a source that still does not price its window: no snapshot recorded it (none sent, or one that recorded nothing), nor did a finalize or settle inside the grace (SO-01), so it cannot vote`,
       data: { underlying, expiry, windowEnd, sources: view.sources.filter((s) => !s.windowOk).map((s) => s.address) },
     });
   }
@@ -526,6 +549,7 @@ export interface HolderView {
   holder: string;
   /** 0.01-share units of this token id. */
   balance: bigint;
+  /** Clearinghouse._mayRedeem(holder, the cranker): self, third parties allowed, or the cranker is its operator. */
   thirdPartyAllowed: boolean;
   /** payoutPrefs.inKind: an ITM call long that skips the USDG conversion. */
   inKind: boolean;
@@ -539,7 +563,7 @@ export interface RedeemSelection {
 }
 
 /**
- * Which holders of one token id a keeper may and should redeem (K2-03 step 4): a balance, third-party
+ * Which holders of one token id a keeper may and should redeem (step 4): a balance, third-party
  * redemption allowed (redeemBatch would skip them anyway), and a payout above zero unless burning is
  * cheap. Ordered by address so chunks are stable across ticks.
  */
@@ -559,10 +583,25 @@ export function selectRedeemable(holders: readonly HolderView[], options: { perU
   return out;
 }
 
+type RedeemToken = { isLong: boolean; isPut: boolean; perUnitPayout: bigint; adapterSet: boolean };
+
+/** Whether this holder's redemption tries the USDG conversion: an ITM call long, an adapter set, not paid in kind. */
+export function redeemConverts(holder: Pick<HolderView, 'inKind'>, token: RedeemToken): boolean {
+  return token.isLong && !token.isPut && token.perUnitPayout > 0n && token.adapterSet && !holder.inKind;
+}
+
 /** The gas one holder's redemption may take inside redeemBatch: a converted ITM call long budgets a swap. */
-export function redeemGasOf(holder: Pick<HolderView, 'inKind'>, token: { isLong: boolean; isPut: boolean; perUnitPayout: bigint; adapterSet: boolean }): bigint {
-  const converts = token.isLong && !token.isPut && token.perUnitPayout > 0n && token.adapterSet && !holder.inKind;
-  return converts ? GAS.redeemConvertEach : GAS.redeemInKindEach;
+export function redeemGasOf(holder: Pick<HolderView, 'inKind'>, token: RedeemToken): bigint {
+  return redeemConverts(holder, token) ? GAS.redeemConvertEach : GAS.redeemInKindEach;
+}
+
+/**
+ * The fixed part of every redeemBatch of this token: GAS.redeemBase, plus GAS.redeemConvertReserve once when
+ * any of `holders` converts, so each converting holder reaches its conversion above starvedCeiling(CONVERSION_GAS) and
+ * a floor miss pays it in kind rather than being re-thrown and skipped (constants.ts redeemConvertReserve).
+ */
+export function redeemBaseGas(holders: readonly Pick<HolderView, 'inKind'>[], token: RedeemToken): bigint {
+  return holders.some((h) => redeemConverts(h, token)) ? GAS.redeemBase + GAS.redeemConvertReserve : GAS.redeemBase;
 }
 
 export interface GasChunk<T> {
@@ -665,23 +704,31 @@ export interface RollView {
   spotUpdatedAt: number;
   /** ExpiryCalendar.isRegularSession(spotUpdatedAt): was the reading itself taken in a regular session? */
   sessionAtSpotObservation: boolean;
+  /**
+   * AutoRoller.strategy(writer, underlying).weekly, and whether the market's registry row lists dailies
+   * (`params.expiriesAhead.daily > 0`). Absent (undefined) means not known, and nothing is refused on it.
+   * And whether the close a daily roll would create (ExpiryCalendar.nextExpiry(now + DAILY_MIN_LEAD, false),
+   * AutoRoller._plan) is on one of the market's `dailyWeekdays`; a Tue/Thu NVDA roll is 'daily-not-listed'.
+   */
+  weekly?: boolean;
+  dailyListed?: boolean;
 }
 
 export type RollDecision =
   | { roll: true; reason: 'close-out' | 'roll' }
-  | { roll: false; reason: 'rolled-this-period' | 'inactive' | 'session-closed' | 'spot-stale' | 'spot-before-open' };
+  | { roll: false; reason: 'rolled-this-period' | 'inactive' | 'daily-not-listed' | 'session-closed' | 'spot-stale' | 'spot-before-open' };
 
 /** The UTC date of a unix second. Inside a regular session the New York date equals it, which is what the roller uses. */
 const utcDay = (t: number): number => Math.floor(t / 86_400);
 
 /**
- * K2-03 step 5 (AutoRoller.roll, C2-09): a position of this period blocks until its expiry; an
+ * Step 5 (AutoRoller.roll): a position of this period blocks until its expiry; an
  * expired position is closed out whenever it can be (roll returns false until the series settles,
  * which the simulation reports); a new position needs an active strategy, the regular session and a
  * fresh spot. The simulation decides the rest (no free collateral, calendar edge) and a reverting
  * writer (a revoked approval) is skipped by the step.
  *
- * OPEN GRACE (INTERFACE_VERSION 7, v7 design §4.5.3), mirrored from `AutoRoller._plan` so the cranker does not pay
+ * OPEN GRACE (INTERFACE_VERSION 7), mirrored from `AutoRoller._plan` so the cranker does not pay
  * gas for a roll that returns false: inside the first `ROLL_OPEN_GRACE` of a session the roll waits unless the ok
  * reading it holds was itself observed in a regular session on the same date. A feed that has not printed since
  * yesterday's close is still "fresh" under a spotMaxAge of a day, and would otherwise write a strike and an ask
@@ -693,6 +740,12 @@ export function planRoll(view: RollView): RollDecision {
     return { roll: true, reason: 'close-out' };
   }
   if (!view.active) return { roll: false, reason: 'inactive' };
+  // A daily strategy on a market that lists no dailies
+  // (SPCX: Friday closes only) would make AutoRoller.roll create a series at the next Mon-Thu close, a daily the listing
+  // rules out (SPCX has no dailies). The cranker does not send that roll. A close-out (above) still goes: it opens nothing.
+  // AutoRoller.roll is permissionless, so this stops only OUR cranker creating one, not anyone else.
+  // The same for a daily roll whose close falls on a weekday the market does not list (NVDA Tue/Thu).
+  if (view.weekly === false && view.dailyListed === false) return { roll: false, reason: 'daily-not-listed' };
   if (!view.sessionOpen) return { roll: false, reason: 'session-closed' };
   if (!view.spotFresh) return { roll: false, reason: 'spot-stale' };
   if (!view.sessionOpenAtGrace && !(utcDay(view.spotUpdatedAt) === utcDay(view.now) && view.sessionAtSpotObservation)) {
@@ -721,24 +774,37 @@ export interface StaleView {
   order: { units: bigint; filled: bigint; validUntil: number; cancelled: boolean } | null;
   /** Clearinghouse.series(position.longId): the side and strike the spot is compared with. Null when unread. */
   series: { isPut: boolean; strike: bigint } | null;
-  /** SettlementOracle.trySpot(underlying) of the MARKET's oracle: the price when ok and non-zero, else null. */
+  /** SettlementOracle.trySpot(underlying) of the SERIES' pinned oracle: the price when ok and non-zero, else null. */
   spot: bigint | null;
+  /**
+   * The expiry's WITNESS reading, `AutoRoller._tryWitness`: source 1 of the pinned
+   * oracle's `settlementConfig(underlying, series.expiry)`, read through its own `latest`, when the list has a source 1,
+   * the issuer's `oraclePaused()` answers false, and `latest` answers ok with a price in (0, 2^128], an `updatedAt` no
+   * later than the head and at most STALE_WITNESS_MAX_AGE_S old (steps.ts witnessOf). Null otherwise, or unread.
+   */
+  witness: bigint | null;
   /** AutoRoller.minRollUnits: a cancel of less than this pays no CANCEL_STALE bounty. */
   minRollUnits: bigint;
 }
 
 export type StaleDecision =
-  | { cancel: true; remaining: bigint; earnsBounty: boolean }
+  | { cancel: true; remaining: bigint; earnsBounty: boolean; via: 'spot' | 'witness' }
   | { cancel: false; reason: 'no-ask' | 'period-over' | 'order-dead' | 'unread' | 'spot-stale' | 'not-overtaken' };
 
 /**
  * `AutoRoller.cancelStale`'s own conditions, in its order, so a tick only simulates the writers it could withdraw
- * (INTERFACE_VERSION 7, c16). The contract returns **false** rather than reverting for every "nothing to do", so
+ * (INTERFACE_VERSION 7). The contract returns **false** rather than reverting for every "nothing to do", so
  * without this mirror every writer would cost a simulation and a `no-op` per tick.
  *
- * FRESHNESS IS `trySpot` OK AND NOTHING MORE, deliberately (v7 design §4.5.1): source 0's `updatedAt` never goes
+ * FRESHNESS IS `trySpot` OK AND NOTHING MORE, deliberately: source 0's `updatedAt` never goes
  * backwards, so any reading that triggers was observed after the roll, and a session-only bound would refuse to
  * withdraw overnight while the book still trades.
+ *
+ * THE WITNESS. When the spot is not ok, or is ok and short of the strike, the
+ * contract reads the expiry's witness (the pool TWAP on the launch markets) and cancels when THAT is at or past the
+ * strike. This mirror stopped at the spot, so while Chainlink was silent (nights, weekends) and the pool moved through
+ * the strike the cranker never sent the cancel the contract would have made, and the ask stayed live for the first
+ * taker. `spot-stale` now means neither reading is available; one that is available but short is `not-overtaken`.
  */
 export function planStale(view: StaleView): StaleDecision {
   if (view.orderId === 0n) return { cancel: false, reason: 'no-ask' };
@@ -746,16 +812,20 @@ export function planStale(view: StaleView): StaleDecision {
   if (view.order === null || view.series === null) return { cancel: false, reason: 'unread' };
   const remaining = view.order.units > view.order.filled ? view.order.units - view.order.filled : 0n;
   if (view.order.cancelled || remaining === 0n || view.now >= view.order.validUntil) return { cancel: false, reason: 'order-dead' };
-  if (view.spot === null || view.spot <= 0n) return { cancel: false, reason: 'spot-stale' };
-  if (!overtaken(view.series.isPut, view.series.strike, view.spot)) return { cancel: false, reason: 'not-overtaken' };
-  return { cancel: true, remaining, earnsBounty: remaining >= view.minRollUnits };
+  const { isPut, strike } = view.series;
+  const spot = view.spot !== null && view.spot > 0n ? view.spot : null;
+  const witness = view.witness !== null && view.witness > 0n ? view.witness : null;
+  const earnsBounty = remaining >= view.minRollUnits;
+  if (spot !== null && overtaken(isPut, strike, spot)) return { cancel: true, remaining, earnsBounty, via: 'spot' };
+  if (witness !== null && overtaken(isPut, strike, witness)) return { cancel: true, remaining, earnsBounty, via: 'witness' };
+  return { cancel: false, reason: spot === null && witness === null ? 'spot-stale' : 'not-overtaken' };
 }
 
 /*//////////////////////////////////////////////////////////////
                           HOUSEKEEPING
 //////////////////////////////////////////////////////////////*/
 
-/** K2-03 step 6: sweep an asset's accrued exercise fees at most once per interval. */
+/** Step 6: sweep an asset's accrued exercise fees at most once per interval. */
 export function sweepDue(input: { accrued: bigint; lastSweepAt: number | null; now: number; intervalS: number }): boolean {
   if (input.accrued === 0n) return false;
   return input.lastSweepAt === null || input.now - input.lastSweepAt >= input.intervalS;
@@ -773,7 +843,7 @@ export interface WakeSchedule {
 }
 
 /**
- * The precise wake-up (K2-03 step 2: the snapshot window is ten minutes, a poll interval must not
+ * The precise wake-up (step 2: the snapshot window is ten minutes, a poll interval must not
  * decide whether it is hit). The earliest future target, as a delay measured on the head block's
  * clock plus a margin so the head has reached it; null when there is none or the next poll comes
  * first anyway.

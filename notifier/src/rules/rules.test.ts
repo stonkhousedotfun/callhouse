@@ -40,6 +40,7 @@ import {
   expiryCountdowns,
   mergeAdminOperations,
   feeNotices,
+  marketLiveNotices,
   fillReceipts,
   longCost,
   priceAlerts,
@@ -64,7 +65,7 @@ const ALICE = '0xE37876AcBfbA6186E4687f4ef465D9AC21558De3';
 const BOB = '0x4088c59Eb3fB713B124f182E7083AEb3358A030B';
 const CAROL = '0x300a7AB2f92B536e3f58422372c964B2Bb535ea2';
 const TX = `0x${'ab'.repeat(32)}`;
-/** T-434's per-operation `key` for the operation id TX at nonce 1. */
+/** The per-operation `key` for the operation id TX at nonce 1. */
 const KEY = `${TX}:1`;
 
 const money = (raw: string | bigint, decimals = 6) => ({ raw: String(raw), decimals, formatted: formatUnits(BigInt(raw), decimals) });
@@ -132,6 +133,7 @@ function tick(
     pendingFeesEffectiveAt?: Snapshot['pendingFeesEffectiveAt'];
     liveFeesKey?: Snapshot['liveFeesKey'];
     adminOperations?: Snapshot['adminOperations'];
+    marketStatuses?: Snapshot['marketStatuses'];
   },
 ): Snapshot {
   return deriveState(before, {
@@ -147,6 +149,7 @@ function tick(
     pendingFeesEffectiveAt: a.pendingFeesEffectiveAt ?? null,
     liveFeesKey: a.liveFeesKey ?? null,
     adminOperations: a.adminOperations ?? {},
+    marketStatuses: a.marketStatuses ?? {},
   });
 }
 
@@ -215,7 +218,7 @@ function fill(o: Partial<FillItem['data']> & { accounts?: string[]; id?: string 
 
 const payloadOf = (r: EnqueueRequest | undefined) => r?.payload as Record<string, unknown> & { side: string; role: string; total: { raw: string }; fee: { raw: string } };
 
-test('fill_receipt: the taker bought (premium + taker fee), the maker sold (premium − seller fee)', () => {
+test('fill_receipt: the taker bought (premium + taker fee), the maker sold (premium − seller fee + rebate)', () => {
   const [taker, maker, ...rest] = check(fillReceipts(fill()));
   assert.equal(rest.length, 0);
   assert.deepEqual(
@@ -224,8 +227,21 @@ test('fill_receipt: the taker bought (premium + taker fee), the maker sold (prem
   );
   assert.equal(rendered(taker!).body.split('\n')[1], 'Cost: 1.90 USDG, including 0.10 USDG in fees. Max loss: 1.90 USDG.');
   assert.equal(rendered(maker!).title, 'Sold NVDA 221.00 call');
-  assert.equal(rendered(maker!).body.split('\n')[1], 'Received: 1.71 USDG, after 0.09 USDG in fees.');
+  // OrderBook credits the ask-hit maker premium − seller fee + rebate (callhouse-contracts src/v2/OrderBook.sol, the
+  // maker's `_credit` call in `_execute`): 1.80 − 0.09 + 0.05 = 1.76 received; the net fee is 0.09 − 0.05 = 0.04.
+  assert.deepEqual([payloadOf(maker).total.raw, payloadOf(maker).fee.raw], [String(1_800_000 - 90_000 + 50_000), String(90_000 - 50_000)]);
+  assert.equal(rendered(maker!).body.split('\n')[1], 'Received: 1.76 USDG, after 0.04 USDG in fees.');
   assert.match(rendered(maker!).body, /^You wrote and sold 0\.50 shares/);
+});
+
+test('fill_receipt: a maker whose rebate beats its seller fee is told the rebate, ask hit and bid hit', () => {
+  // A resale ask hit: seller fee 0, so the 0.05 rebate is all credit. 1.80 − 0 + 0.05 = 1.85 received, net fee 0.
+  const [, askMaker] = check(fillReceipts(fill({ primary: false, sellerFee: money('0') })));
+  assert.deepEqual([payloadOf(askMaker).role, payloadOf(askMaker).total.raw, payloadOf(askMaker).fee.raw], ['maker', '1850000', '0']);
+  assert.equal(rendered(askMaker!).body.split('\n')[1], 'Received: 1.85 USDG, including a 0.05 USDG maker rebate net of fees.');
+  // A bid hit: the maker bought and was credited the rebate, 1.80 − 0.05 = 1.75.
+  const [, bidMaker] = check(fillReceipts(fill({ takerIsBuyer: false })));
+  assert.equal(rendered(bidMaker!).body.split('\n')[1], 'Cost: 1.75 USDG, after a 0.05 USDG maker rebate. Max loss: 1.75 USDG.');
 });
 
 test('fill_receipt: an ask hit’s recipient that is not the taker gets its own receipt, and the taker’s names it (interface v4)', () => {
@@ -267,7 +283,8 @@ test('fill_receipt: a bid hit the taker is paid for itself (taker sells, maker b
     bid.map((r) => [r.address, payloadOf(r).role, payloadOf(r).side, payloadOf(r).total.raw, payloadOf(r).fee.raw, payloadOf(r).recipient]),
     [
       [BOB, 'taker', 'sell', String(1_800_000 - 90_000 - 100_000), String(90_000 + 100_000), undefined],
-      [CAROL, 'maker', 'buy', '1800000', '0', undefined],
+      // The bid-hit maker is credited the rebate (OrderBook.sol `_execute`), so its cost is premium − rebate.
+      [CAROL, 'maker', 'buy', String(1_800_000 - 50_000), '0', undefined],
     ],
   );
   assert.equal(rendered(bid[0]!).title, 'Sold NVDA 221.00 call');
@@ -285,7 +302,7 @@ test('fill_receipt: a sale into a bid paid to another wallet: the recipient gets
     requests.map((r) => [r.address, r.dedupeKey.split(':').at(-1), payloadOf(r).role, payloadOf(r).side, payloadOf(r).total.raw, payloadOf(r).fee.raw]),
     [
       [BOB, `${TX}-3-taker`, 'taker', 'sell', '1610000', '190000'],
-      [CAROL, `${TX}-3-maker`, 'maker', 'buy', '1800000', '0'],
+      [CAROL, `${TX}-3-maker`, 'maker', 'buy', String(1_800_000 - 50_000), '0'],
       [ALICE, `${TX}-3-recipient`, 'recipient', 'sell', '1610000', '190000'],
     ],
   );
@@ -496,7 +513,7 @@ test('expiry_24h and expiry_1h: fire once when a held series enters its window, 
   assert.deepEqual(expiryCountdowns(emptySnapshot(), at(EXPIRY + 60, emptySnapshot())), []);
 });
 
-test('expiry digest: exactly 3 stay per-position, exactly 4 collapse to one message (N3-404)', () => {
+test('expiry digest: exactly 3 stay per-position, exactly 4 collapse to one message', () => {
   const seriesAt = (n: number) =>
     apiSeries({
       longId: String(10_000 + n),
@@ -521,7 +538,7 @@ test('expiry digest: exactly 3 stay per-position, exactly 4 collapse to one mess
   const four = enter(4);
   assert.equal(four.length, 1, 'exactly 4 positions: one digest');
   assert.equal(four[0]?.kind, 'expiry_24h');
-  // X8-181: the bucket now names WHICH positions the digest carries, so a later batch for the same
+  // The bucket now names WHICH positions the digest carries, so a later batch for the same
   // wallet and expiry no longer collides with this one. The prefix is pinned; the tag is derived.
   assert.match(four[0]!.dedupeKey, new RegExp(`^expiry_24h:${ALICE}:${EXPIRY}:digest-[0-9a-f]{16}$`));
   assert.equal((four[0]?.payload as { positions: unknown[] }).positions.length, 4);
@@ -735,7 +752,7 @@ test('auto_roll: a Rolled event, and a roll still not done 24 h after it was due
     [
       'Auto-roll has not rolled your NVDA position. The roll was due when the session opened Mon 21 Sep, 9:30am EDT, more than 24 hours ago.',
       'Last roll: Mon 14 Sep, 9:35am EDT.',
-      'Nothing new is listed for sale until it rolls. Check the strategy on Earn.',
+      'Nothing new is listed for sale until it rolls. Check the strategy on Sell options.',
     ].join('\n'),
   );
   assert.deepEqual(autoRollSkipped(tuesday, at('2026-09-22T14:00:00Z', tuesday)), [], 'once');
@@ -935,6 +952,50 @@ test('fee_notice fires once per scheduled change across three unchanged ticks', 
   assert.equal(third.length, 0);
 });
 
+/*//////////////////////////////////////////////////////////////
+  market_live, a listing going live
+//////////////////////////////////////////////////////////////*/
+
+test('market_live fans out one request per watched address when a listed market turns live', () => {
+  const before = snap({ marketStatuses: { NVDA: 'live', SPCX: 'paused' } });
+  const after = snap({ at: 2, marketStatuses: { NVDA: 'live', SPCX: 'live' } });
+  const fired = marketLiveNotices(before, after, [ALICE, BOB]);
+  assert.equal(fired.length, 2, 'SPCX only: NVDA was already live');
+  assert.deepEqual(fired.map((r) => r.address).sort(), [ALICE, BOB].sort());
+  assert.ok(fired.every((r) => r.kind === 'market_live' && r.dedupeKey === `market_live:${r.address}:SPCX:live`));
+  assert.ok(fired.every((r) => parsePayload(r.kind, r.payload).ok));
+  assert.deepEqual(fired.map((r) => r.payload), [{ ticker: 'SPCX' }, { ticker: 'SPCX' }]);
+});
+
+test('market_live: a ticker first listed already live is announced; paused or planned is not', () => {
+  const before = snap({ marketStatuses: { NVDA: 'live' } });
+  const after = snap({ at: 2, marketStatuses: { NVDA: 'live', SPCX: 'live', AAPL: 'paused', MSFT: 'planned' } });
+  assert.deepEqual(marketLiveNotices(before, after, [ALICE]).map((r) => r.payload), [{ ticker: 'SPCX' }]);
+});
+
+test('market_live is silent on first boot and with no baseline, so an upgrade does not announce the live markets', () => {
+  const after = snap({ at: 2, marketStatuses: { NVDA: 'live', SPCX: 'live' } });
+  assert.deepEqual(marketLiveNotices(emptySnapshot(), after, [ALICE]), [], 'first boot (at === 0)');
+  assert.deepEqual(marketLiveNotices(snap(), after, [ALICE]), [], 'a snapshot stored before marketStatuses existed');
+});
+
+test('market_live fires on the transition only: unchanged ticks, a pause and a live-to-live tick say nothing', () => {
+  const live = snap({ at: 2, marketStatuses: { SPCX: 'live' } });
+  const paused = snap({ at: 3, marketStatuses: { SPCX: 'paused' } });
+  assert.equal(marketLiveNotices(snap({ marketStatuses: { SPCX: 'paused' } }), live, [ALICE]).length, 1);
+  assert.equal(marketLiveNotices(live, live, [ALICE]).length, 0);
+  assert.equal(marketLiveNotices(live, paused, [ALICE]).length, 0, 'going paused is not announced');
+  // Re-enabled: the rule asks again; the stable dedupe key is what keeps it to one message per market.
+  const again = marketLiveNotices(paused, live, [ALICE]);
+  assert.deepEqual(again.map((r) => r.dedupeKey), [`market_live:${ALICE}:SPCX:live`]);
+});
+
+test('market_live is part of stateRules', () => {
+  const before = snap({ marketStatuses: { SPCX: 'paused' } });
+  const after = snap({ at: 2, marketStatuses: { SPCX: 'live' } });
+  assert.deepEqual(stateRules(before, after, [ALICE]).filter((r) => r.kind === 'market_live').length, 1);
+});
+
 test('admin_operation fans out and ignores first-boot observations', () => {
   const after = snap({ adminOperations: { [KEY]: { id: TX, status: 'pending', label: 'setMarketFees' } } });
   assert.equal(adminOperationNotices(emptySnapshot(), after, [ALICE, BOB]).length, 0);
@@ -944,7 +1005,7 @@ test('admin_operation fans out and ignores first-boot observations', () => {
 });
 
 /*//////////////////////////////////////////////////////////////
-  X8-181: an operation that reaches a terminal state is TOLD, not dropped
+  an operation that reaches a terminal state is TOLD, not dropped
 //////////////////////////////////////////////////////////////*/
 
 type OpStatus = 'pending' | 'executed' | 'canceled';
@@ -968,7 +1029,7 @@ const adminPayloads = (requests: EnqueueRequest[]): AdminRequest['payload'][] =>
   return requests.filter((r): r is AdminRequest => r.kind === 'admin_operation').map((r) => r.payload);
 };
 
-test('X8-181: scheduled then executed fires BOTH notices across two ticks', () => {
+test('scheduled then executed fires BOTH notices across two ticks', () => {
   const label = 'setMarketFees';
 
   // Tick 1: the operation is on the pending page. The subscriber is told it was scheduled.
@@ -976,7 +1037,7 @@ test('X8-181: scheduled then executed fires BOTH notices across two ticks', () =
   const scheduled = adminOperationNotices(snap(), snap({ adminOperations: first }), [ALICE]);
   assert.deepEqual(adminPayloads(scheduled).map((p) => p.status), ['pending']);
 
-  // Tick 2: it has LEFT the pending page and is on the executed page. Before X8-181 the map was
+  // Tick 2: it has LEFT the pending page and is on the executed page. Earlier the map was
   // rebuilt from the pending page alone, so this operation was absent rather than changed and the
   // executed notice - the half that moved protocol state - was never sent.
   const second = opTick(first, [op('executed', label)]);
@@ -993,7 +1054,7 @@ test('X8-181: scheduled then executed fires BOTH notices across two ticks', () =
   assert.deepEqual(adminOperationNotices(snap({ adminOperations: second }), snap({ adminOperations: third }), [ALICE]), []);
 });
 
-test('X8-181: scheduled then canceled fires BOTH notices, and cancel is not executed', () => {
+test('scheduled then canceled fires BOTH notices, and cancel is not executed', () => {
   const label = 'grantRole';
   const first = opTick(emptySnapshot().adminOperations, [op('pending', label)]);
   assert.deepEqual(adminPayloads(adminOperationNotices(snap(), snap({ adminOperations: first }), [ALICE])).map((p) => p.status), ['pending']);
@@ -1007,7 +1068,7 @@ test('X8-181: scheduled then canceled fires BOTH notices, and cancel is not exec
   assert.notEqual(firstCanceled.status, 'executed', 'a cancel is a different notice, not a missing one');
 });
 
-test('X8-181: an operation that EXPIRES off the pending page stays pending and says nothing', () => {
+test('an operation that EXPIRES off the pending page stays pending and says nothing', () => {
   // The route filters the pending page on expiresAt > indexedAt while the stored status stays
   // `pending`, so an expired operation is served on NO page. The fact to protect is that a
   // disappearance is never read as a status: reporting `executed` here would announce a governance
@@ -1018,14 +1079,14 @@ test('X8-181: an operation that EXPIRES off the pending page stays pending and s
   assert.deepEqual(adminOperationNotices(snap({ adminOperations: first }), snap({ adminOperations: second }), [ALICE]), []);
 });
 
-test('X8-181: a read that returns nothing does not erase what earlier ticks learned', () => {
+test('a read that returns nothing does not erase what earlier ticks learned', () => {
   const a = opTick(emptySnapshot().adminOperations, [op('pending', 'setMarketFees')]);
   const b = opTick(a, [op('executed', 'grantRole', 1, `0x${'cd'.repeat(32)}`)]);
   assert.equal(Object.keys(b).length, 2, 'the second read adds to the first rather than replacing it');
   assert.equal(b[KEY]!.status, 'pending');
 });
 
-test('X8-181: the operations map has no prototype, so a `__proto__` key is a key and not a setter', () => {
+test('the operations map has no prototype, so a `__proto__` key is a key and not a setter', () => {
   const merged = mergeAdminOperations(emptySnapshot().adminOperations, [
     { key: '__proto__', id: TX, status: 'pending', label: 'hostile' },
     op('pending', 'setMarketFees'),
@@ -1036,10 +1097,10 @@ test('X8-181: the operations map has no prototype, so a `__proto__` key is a key
 });
 
 /*//////////////////////////////////////////////////////////////
-  T-435: an operation is its `key`; a reschedule reuses the `id`
+  an operation is its `key`; a reschedule reuses the `id`
 //////////////////////////////////////////////////////////////*/
 
-test('T-435: two operations that share an operationId keep two independent notification states', () => {
+test('two operations that share an operationId keep two independent notification states', () => {
   const label = 'setMarketFees';
   const first = opTick(emptySnapshot().adminOperations, [op('pending', label, 1)]);
   const scheduled = adminOperationNotices(snap(), snap({ adminOperations: first }), [ALICE]);
@@ -1066,8 +1127,8 @@ test('T-435: two operations that share an operationId keep two independent notif
   assert.ok([...scheduled, ...rescheduled, ...executed].every((r) => parsePayload(r.kind, r.payload).ok));
 });
 
-test('T-435: a snapshot stored before the upgrade (keyed by bare id) is read once as the previous state', () => {
-  // What a pre-T-435 tick persisted: the operation under its bare id, no `id` field. It must still
+test('a snapshot stored before the upgrade (keyed by bare id) is read once as the previous state', () => {
+  // What an earlier tick persisted: the operation under its bare id, no `id` field. It must still
   // load - an unreadable snapshot restarts the whole rules state (store.ts loadState).
   const legacy = snapshotStateSchema.shape.adminOperations.parse({ [TX]: { status: 'pending', label: 'setMarketFees' } });
   assert.deepEqual(legacy, { [TX]: { status: 'pending', label: 'setMarketFees' } });
@@ -1091,7 +1152,7 @@ test('T-435: a snapshot stored before the upgrade (keyed by bare id) is read onc
   assert.deepEqual(adminPayloads(both).map((p) => p.key).sort(), [`${TX}:1`, `${TX}:2`]);
 });
 
-test('T-435: one selector-less operation no longer costs the notifier every operation on its page', () => {
+test('one selector-less operation no longer costs the notifier every operation on its page', () => {
   // The wire declares `selector` nullable (null when the scheduled calldata is shorter than four
   // bytes) and the indexer serves such a row on purpose. The page is parsed as ONE array, so a copy
   // that required a string failed the whole page and the ordinary operation beside it was lost too.
@@ -1112,7 +1173,7 @@ test('T-435: one selector-less operation no longer costs the notifier every oper
   );
 });
 
-test('X8-181 F-APP-OPS-06: a later batch in the same expiry window is DELIVERED, not swallowed as a duplicate', () => {
+test('a later batch in the same expiry window is DELIVERED, not swallowed as a duplicate', () => {
   // The digest key used to be the constant bucket `digest`, so every batch a wallet formed for one
   // expiry produced the SAME key. expiryCountdowns only groups NEWLY-entering positions, so a second
   // purchase inside the same 24 h window formed a fresh digest with an identical key, delivery's
@@ -1151,7 +1212,7 @@ test('X8-181 F-APP-OPS-06: a later batch in the same expiry window is DELIVERED,
   assert.match(second[0]!.dedupeKey, new RegExp(`^expiry_24h:${ALICE}:${EXPIRY}:digest-[0-9a-f]{16}$`));
 });
 
-test('X8-181: the digest bucket is derived from the batch, so re-evaluating the SAME batch does not re-send', () => {
+test('the digest bucket is derived from the batch, so re-evaluating the SAME batch does not re-send', () => {
   // The other half of the fact, and the reason the bucket is not a timestamp: AC3(d)'s forbidden fix.
   // A clock in the key would make every re-evaluation of one batch a new delivery, which is a worse
   // bug than the one being fixed. Same positions in, same key out.

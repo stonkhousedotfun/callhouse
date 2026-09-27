@@ -3,7 +3,7 @@
  *
  * The engine polls /v2/markets every tick for spot (rules/engine.ts). The API needs the same list
  * for one thing only: refusing a price alert on a ticker that is not a market, so a wallet does not
- * save an alert that can never fire (F4 DEFECT 5). Nothing here fetches: the engine fills the cache
+ * save an alert that can never fire. Nothing here fetches: the engine fills the cache
  * after a successful read, and a read that failed leaves the previous list in place.
  *
  * FAIL OPEN. An empty cache means "not known yet", never "no markets exist": the rules engine is

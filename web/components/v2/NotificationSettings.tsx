@@ -4,7 +4,7 @@ import { useEffect, useRef, useState, useSyncExternalStore } from "react";
 import { useAccount, useWalletClient } from "wagmi";
 
 import { ConnectButton } from "@/components/ConnectButton";
-import { Button, Notice, PageHead, Panel } from "@/components/ui";
+import { Button, Chip, FieldLabel, InfoTip, inputClasses, Notice, PageHead, Panel, Tabs } from "@/components/ui";
 import { useMarkets } from "@/lib/v2/hooks";
 import {
   ALERT_TOGGLES, DEFAULT_ALERT_PREFS, baseUnitsToPrice, createNotifierSession,
@@ -17,9 +17,9 @@ import { ensurePushSubscription, pushGuidance, type PushGuidance } from "@/lib/v
 
 type AlertRow = { ticker: string; direction: "above" | "below"; price: string };
 const CHANNELS: readonly { key: Channel; name: string; detail: string }[] = [
-  { key: "telegram", name: "Telegram", detail: "Receive alerts in a private chat with the Stonkhouse bot." },
-  { key: "webpush", name: "Browser", detail: "Receive alerts on this browser after you allow notifications." },
-  { key: "email", name: "Email", detail: "Receive alerts after confirming the email address." },
+  { key: "telegram", name: "Telegram", detail: "A private chat with the Stonkhouse bot." },
+  { key: "webpush", name: "Browser", detail: "Notifications on this browser." },
+  { key: "email", name: "Email", detail: "Alerts by email, once you confirm it." },
 ];
 function rowsFromPrefs(prefs: AlertPrefs): AlertRow[] {
   return prefs.priceAlerts.flatMap((alert) => [
@@ -31,7 +31,7 @@ function rowsFromPrefs(prefs: AlertPrefs): AlertRow[] {
 function parsedAlerts(rows: AlertRow[], enabledTickers: readonly string[]): PriceAlert[] {
   if (rows.length > 20) throw new Error("Keep at most 20 price alerts for each channel.");
   return rows.map((row) => {
-    if (!enabledTickers.includes(row.ticker)) throw new Error("Choose a live ticker from the available market list.");
+    if (!enabledTickers.includes(row.ticker)) throw new Error("Choose a live ticker.");
     const amount = priceToBaseUnits(row.price);
     if (amount === null) throw new Error("Use a positive USDG price with up to six decimal places.");
     return { ticker: row.ticker, [row.direction]: amount };
@@ -106,7 +106,7 @@ function WalletNotifications({ address }: { address: `0x${string}` | undefined }
     notifierHealth(base).then((state) => {
       if (alive) { setHealth(state); setServiceError(null); }
     }).catch(() => {
-      if (alive) { setHealth(null); setServiceError("Alerts are temporarily unavailable. Trading and portfolio pages still work."); }
+      if (alive) { setHealth(null); setServiceError("Alerts are unavailable right now."); }
     });
     return () => { alive = false; };
   }, [base]);
@@ -220,7 +220,7 @@ function WalletNotifications({ address }: { address: `0x${string}` | undefined }
       if (!base) throw new Error("Alert service is not configured.");
       const next = await telegramLink(base, await getSession());
       setLink(next);
-      return "Open the Telegram link below. Return here and refresh status after starting the bot.";
+      return "Telegram link ready.";
     });
   }
 
@@ -229,91 +229,110 @@ function WalletNotifications({ address }: { address: `0x${string}` | undefined }
   const serviceReady = health?.database === "ok";
   const telegramUnavailable = health?.channels.telegram === "off";
 
+  const channelName = CHANNELS.find((channel) => channel.key === selected)?.name;
+  const selectClasses = `${inputClasses} appearance-none px-3 py-2.5 font-body text-[14px]`;
+  const channelForm = <div className="flex flex-col gap-6">
+    <div className="flex flex-wrap items-center justify-between gap-3">
+      <h2 className="flex items-center gap-1.5 text-[17px] font-bold">{channelName} alerts
+        <InfoTip label="About channel alerts">Each channel keeps its own updates and price alerts. Choose what this channel sends.</InfoTip></h2>
+      <Chip tone={channelStatus(preferredItem(items ?? [], selected)) === "On" ? "accent" : "neutral"} dot>{channelStatus(preferredItem(items ?? [], selected))}</Chip>
+    </div>
+    {channelItems.length ? <ul className="grid gap-2">{channelItems.map((item) => <li key={item.id} className="flex flex-wrap items-center justify-between gap-3 rounded-md border border-line bg-field px-3.5 py-2.5 text-sm">
+      <span className="min-w-0"><span className="font-semibold">{channelStatus(item)}</span>{item.target ? <span className="ml-2 break-all text-ink-2">{item.target}</span> : null}</span>
+      <Button variant="ghost" size="xs" disabled={busy} onClick={() => void remove(item)}>Turn off</Button>
+    </li>)}</ul> : null}
+    {selected === "telegram" ? <div className="flex flex-wrap items-center gap-3 rounded-md border border-line bg-field px-4 py-3.5">
+      <p className="flex min-w-0 flex-1 items-center gap-1.5 text-sm font-semibold">Link a Telegram chat <InfoTip label="About the Telegram link">Link your
+        wallet to a private chat with the Stonkhouse bot. The link lasts 15 minutes. After you start the bot, come back and refresh status.</InfoTip></p>
+      <Button variant="ghost" size="sm" disabled={busy || !serviceReady} onClick={() => void makeTelegramLink()}>Get Telegram link</Button>
+      {link ? <Button href={link.deepLink} size="sm">Open Telegram</Button> : null}
+    </div> : null}
+    {selected === "webpush" ? <div className="flex flex-col gap-3 rounded-md border border-line bg-field px-4 py-3.5">
+      {browserPush === "ios-install" ? <p className="text-sm text-ink-2">On iPhone and iPad, add Stonkhouse to your Home Screen first (in Safari: Share, then Add to Home Screen), open it from there and enable alerts.</p>
+        : browserPush === "mobile-unsupported" ? <p className="text-sm text-ink-2">This mobile browser can&apos;t show alerts.</p>
+          : browserPush === "unsupported" ? <p className="text-sm text-ink-2">This browser can&apos;t show alerts. Try another browser or channel.</p>
+            : <p className="text-sm text-ink-2">Your browser asks for permission when you press Enable.</p>}
+      {browserPush === "ios-install" || browserPush === "mobile-unsupported" ? <Button variant="ghost" size="sm" className="self-start"
+        disabled={busy || telegramUnavailable} onClick={() => selectChannel("telegram")}>{telegramUnavailable ? "Telegram unavailable" : "Set up Telegram instead"}</Button>
+        : <Button variant="ghost" size="sm" className="self-start" disabled={browserPush !== "supported" || busy || !serviceReady || !wallet.data}
+          onClick={() => void enablePush()}>Enable on this browser</Button>}
+    </div> : null}
+    {selected === "email" ? <div className="grid gap-1.5">
+      <FieldLabel htmlFor="alert-email" tip="We email a confirmation link first. Re-enter your address to change its settings.">Email address</FieldLabel>
+      <input id="alert-email" type="email" autoComplete="email" value={email} onChange={(event) => setEmail(event.target.value)} placeholder="you@example.com"
+        className={`${inputClasses} px-3.5 py-3 font-body text-[15px]`} />
+    </div> : null}
+    <section aria-labelledby="alert-updates-title" className="flex flex-col gap-3">
+      <h3 id="alert-updates-title" className="text-[15px] font-bold">Updates</h3>
+      <div className="grid overflow-hidden rounded-md border border-line sm:grid-cols-2">{ALERT_TOGGLES.map((toggle) => <label key={toggle.key}
+        className="flex min-h-11 cursor-pointer items-start gap-3 border-b border-line px-3.5 py-3 last:border-b-0 hover:bg-field sm:[&:nth-last-child(2):nth-child(odd)]:border-b-0 sm:odd:border-r">
+        <input type="checkbox" checked={prefs[toggle.key]} onChange={(event) => setPrefs((before) => ({ ...before, [toggle.key]: event.target.checked }))}
+          className="mt-0.5 size-4 shrink-0 accent-[var(--accent)]" />
+        <span className="min-w-0"><span className="block text-sm font-semibold">{toggle.label}</span><span className="block text-xs text-ink-3">{toggle.detail}</span></span>
+      </label>)}</div>
+    </section>
+    <section aria-labelledby="alert-prices-title" className="flex flex-col gap-3">
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <h3 id="alert-prices-title" className="flex items-center gap-1.5 text-[15px] font-bold">Price alerts
+          <InfoTip label="About price alerts">Alerts use the on-chain price and pause while that price is stale.</InfoTip></h3>
+        <Button size="sm" variant="ghost" disabled={alerts.length >= 20 || enabledTickers.length === 0}
+          onClick={() => setAlerts((before) => [...before, { ticker: enabledTickers[0]!, direction: "above", price: "" }])}>Add alert</Button>
+      </div>
+      {markets.isError ? <p className="text-xs text-ink-3">Couldn&apos;t refresh markets. Showing the app&apos;s built-in list.</p> : null}
+      {enabledTickers.length === 0 ? <p className="text-xs text-ink-3">No live markets for price alerts yet.</p> : null}
+      {alerts.length === 0 ? <p className="rounded-md border border-dashed border-line-2 px-4 py-4 text-center text-sm text-ink-3">No price alerts yet.</p> :
+        <div className="grid gap-2">{alerts.map((row, index) => <div key={index} className="grid min-w-0 grid-cols-2 items-end gap-2 rounded-md border border-line bg-field p-3 sm:grid-cols-[1fr_1fr_1.25fr_auto]">
+          <label className="grid gap-1 text-xs font-semibold text-ink-2">Ticker<select aria-label={`Ticker for alert ${index + 1}`} value={row.ticker} onChange={(event) => setAlerts((before) => before.map((entry, i) => i === index ? { ...entry, ticker: event.target.value } : entry))}
+            className={selectClasses}>{marketOptions.map((option) => <option key={option.ticker} value={option.ticker} disabled={option.disabled}>{option.ticker}{option.note ? ` — ${option.note}` : ""}</option>)}</select></label>
+          <label className="grid gap-1 text-xs font-semibold text-ink-2">Crosses<select aria-label={`Direction for alert ${index + 1}`} value={row.direction} onChange={(event) => setAlerts((before) => before.map((entry, i) => i === index ? { ...entry, direction: event.target.value as AlertRow["direction"] } : entry))}
+            className={selectClasses}><option value="above">Above</option><option value="below">Below</option></select></label>
+          <label className="col-span-2 grid gap-1 text-xs font-semibold text-ink-2 sm:col-span-1">Price in USDG<input aria-label={`Price for alert ${index + 1}`} inputMode="decimal" value={row.price} onChange={(event) => setAlerts((before) => before.map((entry, i) => i === index ? { ...entry, price: event.target.value } : entry))}
+            placeholder="221.50" className={`${inputClasses} px-3 py-2.5 text-[14px]`} /></label>
+          <Button size="sm" variant="ghost" className="col-span-2 sm:col-span-1" onClick={() => setAlerts((before) => before.filter((_, i) => i !== index))} aria-label={`Remove alert ${index + 1}`}>Remove</Button>
+        </div>)}</div>}
+    </section>
+    <Button className="w-full" disabled={busy || !serviceReady || health?.channels[selected] === "off"} onClick={() => void savePrefs()}>{busy ? "Saving…" : `Save ${selected === "webpush" ? "browser" : selected} alerts`}</Button>
+  </div>;
+
   return <>
-    <PageHead eyebrow="Settings" title="Notifications" lede="Choose where to receive fills, price alerts, and settlement updates." />
-    {!configured ? <Notice tone="info" title="Alerts are not configured" role="status">This app has no notifier URL yet. Trading and your portfolio still work.</Notice> : null}
-    {serviceError ? <Notice tone="warn" title="Alert service unavailable" role="status" className="mb-5">{serviceError}
-      <Button variant="ghost" size="xs" className="mt-2" onClick={() => void notifierHealth(base!).then((state) => { setHealth(state); setServiceError(null); }).catch(() => setServiceError("Alerts are still unavailable. Try again later."))}>Try again</Button>
-    </Notice> : null}
-    {health?.status === "degraded" ? <Notice tone="warn" title="Alert service is degraded" className="mb-5">Saved settings may not be available until it recovers.</Notice> : null}
-    {!address ? <Panel><p className="mb-4 text-ink-2">Connect a wallet to manage its alerts.</p><ConnectButton /></Panel> : <>
-      <Panel className="mb-5">
+    <PageHead title="Notifications" lede="Get fills, price alerts and settlement updates." />
+    <div className="flex max-w-[860px] flex-col gap-5 pb-6">
+      {!configured ? <Notice tone="info" role="status">Alerts aren&apos;t available yet.</Notice> : null}
+      {serviceError ? <Notice tone="warn" role="status">{serviceError}
+        <Button variant="ghost" size="xs" className="mt-2" onClick={() => void notifierHealth(base!).then((state) => { setHealth(state); setServiceError(null); }).catch(() => setServiceError("Alerts are still unavailable. Try again later."))}>Try again</Button>
+      </Notice> : null}
+      {health?.status === "degraded" ? <Notice tone="warn">Alerts are partly down. Saved settings may not load.</Notice> : null}
+      {!address ? <Panel as="section" aria-labelledby="alerts-connect-title" className="flex flex-col items-start gap-4">
+        <h2 id="alerts-connect-title" className="text-[20px] font-bold">Connect a wallet to manage its alerts.</h2>
+        <ConnectButton />
+      </Panel> : items === null ? <Panel as="section" aria-labelledby="alerts-load-title" className="flex flex-wrap items-center justify-between gap-4">
+        <div className="min-w-0">
+          <h2 id="alerts-load-title" className="flex items-center gap-1.5 text-[17px] font-bold">Your alert channels
+            <InfoTip label="About loading your settings">Your wallet will ask you to sign a message. One signature lets you edit alerts for 30 minutes.</InfoTip></h2>
+          <p className="mt-1 text-sm text-ink-2">Telegram, this browser or email.</p>
+        </div>
+        <Button disabled={!serviceReady || busy || !wallet.data} onClick={() => void act(refresh)}>Load my settings</Button>
+      </Panel> : <Panel as="section" aria-label={`${selected} alert preferences`} className="flex flex-col gap-5">
         <div className="flex flex-wrap items-center justify-between gap-3">
-          <div><h2 className="font-display text-lg font-bold">Your channels</h2>
-            <p className="mt-1 text-sm text-ink-2">One wallet signature starts a 30-minute settings session. You can review and change alerts until it expires.</p></div>
-          <Button variant="ghost" size="sm" disabled={!serviceReady || busy || !wallet.data} onClick={() => void act(refresh)}>{items ? "Refresh status" : "Load my settings"}</Button>
+          <h2 className="flex items-center gap-1.5 text-[13px] font-semibold text-ink-3">Channel
+            <InfoTip label="About alert channels" align="start">One wallet signature lets you edit alerts for 30 minutes.</InfoTip></h2>
+          <Button variant="ghost" size="sm" disabled={!serviceReady || busy || !wallet.data} onClick={() => void act(refresh)}>Refresh status</Button>
         </div>
-        {items === null ? <p className="mt-4 text-sm text-ink-3">Load your settings to see channel status. Your wallet will ask you to sign a message.</p> :
-          <div className="mt-5 grid gap-3 sm:grid-cols-3">{CHANNELS.map((channel) => {
-            const item = preferredItem(items, channel.key);
-            const off = health?.channels[channel.key] === "off";
-            return <button type="button" key={channel.key} onClick={() => selectChannel(channel.key)} aria-pressed={selected === channel.key}
-              disabled={off} className={`min-w-0 rounded-md border p-4 text-left disabled:opacity-55 ${selected === channel.key ? "border-accent bg-accent-soft" : "border-line-2 bg-surface-2"}`}>
-              <span className="block font-semibold">{channel.name}</span>
-              <span className="mt-1 block text-sm text-ink-2">{channel.detail}</span>
-              <span className="mt-3 block text-xs font-semibold text-accent-text">{off ? "Unavailable" : channelStatus(item)}</span>
-              {item?.target ? <span className="mt-1 block break-all text-xs text-ink-2">{item.target}</span> : null}
-            </button>;
-          })}</div>}
-      </Panel>
-      {items ? <Panel as="section" aria-label={`${selected} alert preferences`}>
-        <div className="flex flex-wrap items-start justify-between gap-3">
-          <div><h2 className="font-display text-xl font-bold">{CHANNELS.find((channel) => channel.key === selected)?.name} alerts</h2>
-            <p className="mt-1 text-sm text-ink-2">Choose what this channel sends. Price alerts are per channel.</p></div>
-        </div>
-        {channelItems.length ? <div className="mt-4 space-y-2">{channelItems.map((item) => <div key={item.id} className="flex flex-wrap items-center justify-between gap-3 rounded-sm border border-line bg-surface-2 px-3 py-2 text-sm">
-          <span><span className="font-semibold">{channelStatus(item)}</span>{item.target ? <span className="ml-2 text-ink-2">{item.target}</span> : null}</span>
-          <Button variant="ghost" size="xs" disabled={busy} onClick={() => void remove(item)}>Turn off</Button>
-        </div>)}</div> : null}
-        {selected === "telegram" ? <div className="mt-5 rounded-md bg-surface-2 p-4">
-          <p className="text-sm text-ink-2">Link your wallet to a Telegram chat. The link expires after 15 minutes.</p>
-          <Button variant="ghost" size="sm" className="mt-3" disabled={busy || !serviceReady} onClick={() => void makeTelegramLink()}>Get Telegram link</Button>
-          {link ? <div className="mt-3"><Button href={link.deepLink} size="sm">Open Telegram</Button><p className="mt-2 text-xs text-ink-3">After you start the bot, return and refresh status.</p></div> : null}
-        </div> : null}
-        {selected === "webpush" ? <div className="mt-5 rounded-md bg-surface-2 p-4">
-          {browserPush === "ios-install" ? <p className="text-sm text-ink-2">On iPhone and iPad, browser push works only from an installed Home Screen app. In Safari, tap Share, choose Add to Home Screen, open Stonkhouse from the new icon, then enable browser alerts here.</p>
-            : browserPush === "mobile-unsupported" ? <p className="text-sm text-ink-2">Browser push is not available in this mobile browser. Telegram is another option when that channel is available; switch to Telegram to link a chat.</p>
-              : browserPush === "unsupported" ? <p className="text-sm text-ink-2">Browser push is not available in this browser. Try a browser with push support or choose another available channel.</p>
-                : <p className="text-sm text-ink-2">Browser alerts work on this device. Your browser asks permission only when you press Enable.</p>}
-          {browserPush === "ios-install" || browserPush === "mobile-unsupported" ? <Button variant="ghost" size="sm" className="mt-3"
-            disabled={busy || telegramUnavailable} onClick={() => selectChannel("telegram")}>{telegramUnavailable ? "Telegram unavailable" : "Set up Telegram instead"}</Button>
-            : <Button variant="ghost" size="sm" className="mt-3" disabled={browserPush !== "supported" || busy || !serviceReady || !wallet.data}
-              onClick={() => void enablePush()}>Enable on this browser</Button>}
-        </div> : null}
-        {selected === "email" ? <div className="mt-5">
-          <label htmlFor="alert-email" className="block text-sm font-semibold">Email address</label>
-          <input id="alert-email" type="email" autoComplete="email" value={email} onChange={(event) => setEmail(event.target.value)} placeholder="you@example.com"
-            className="mt-2 min-h-11 w-full rounded-sm border border-line-2 bg-surface px-3 text-ink" />
-          <p className="mt-1 text-xs text-ink-3">The notifier sends a confirmation link before any alerts arrive. Re-enter your address to change its preferences.</p>
-        </div> : null}
-        <div className="mt-6 border-t border-line pt-5"><h3 className="font-display text-lg font-bold">Updates</h3>
-          <div className="mt-3 grid gap-3 sm:grid-cols-2">{ALERT_TOGGLES.map((toggle) => <label key={toggle.key} className="flex cursor-pointer gap-3 rounded-sm border border-line p-3">
-            <input type="checkbox" checked={prefs[toggle.key]} onChange={(event) => setPrefs((before) => ({ ...before, [toggle.key]: event.target.checked }))} className="mt-1" />
-            <span><span className="block text-sm font-semibold">{toggle.label}</span><span className="block text-xs text-ink-3">{toggle.detail}</span></span>
-          </label>)}</div>
-        </div>
-        <div className="mt-6 border-t border-line pt-5">
-          <div className="flex flex-wrap items-center justify-between gap-3"><div><h3 className="font-display text-lg font-bold">Price alerts</h3>
-            <p className="mt-1 text-sm text-ink-2">Alerts use the on-chain price. That price updates during US market sessions; alerts pause when it is older than 25 h.</p></div>
-            <Button size="sm" variant="ghost" disabled={alerts.length >= 20 || enabledTickers.length === 0}
-              onClick={() => setAlerts((before) => [...before, { ticker: enabledTickers[0]!, direction: "above", price: "" }])}>Add alert</Button></div>
-          {markets.isError ? <p className="mt-2 text-xs text-ink-3">Market availability could not be refreshed. Showing markets marked live in the app registry.</p> : null}
-          {enabledTickers.length === 0 ? <p className="mt-2 text-xs text-ink-3">No live markets are available for new price alerts.</p> : null}
-          {alerts.length === 0 ? <p className="mt-3 text-sm text-ink-3">No price thresholds for this channel.</p> :
-            <div className="mt-4 space-y-3">{alerts.map((row, index) => <div key={index} className="grid min-w-0 gap-2 rounded-sm border border-line p-3 sm:grid-cols-[1fr_1fr_1.25fr_auto]">
-              <label className="text-xs font-semibold text-ink-2">Ticker<select aria-label={`Ticker for alert ${index + 1}`} value={row.ticker} onChange={(event) => setAlerts((before) => before.map((entry, i) => i === index ? { ...entry, ticker: event.target.value } : entry))}
-                className="mt-1 block min-h-10 w-full rounded-sm border border-line-2 bg-surface px-2 text-sm text-ink">{marketOptions.map((option) => <option key={option.ticker} value={option.ticker} disabled={option.disabled}>{option.ticker}{option.note ? ` — ${option.note}` : ""}</option>)}</select></label>
-              <label className="text-xs font-semibold text-ink-2">Crosses<select aria-label={`Direction for alert ${index + 1}`} value={row.direction} onChange={(event) => setAlerts((before) => before.map((entry, i) => i === index ? { ...entry, direction: event.target.value as AlertRow["direction"] } : entry))}
-                className="mt-1 block min-h-10 w-full rounded-sm border border-line-2 bg-surface px-2 text-sm text-ink"><option value="above">Above</option><option value="below">Below</option></select></label>
-              <label className="text-xs font-semibold text-ink-2">Price in USDG<input aria-label={`Price for alert ${index + 1}`} inputMode="decimal" value={row.price} onChange={(event) => setAlerts((before) => before.map((entry, i) => i === index ? { ...entry, price: event.target.value } : entry))}
-                placeholder="221.50" className="num mt-1 block min-h-10 w-full rounded-sm border border-line-2 bg-surface px-2 text-sm text-ink" /></label>
-              <Button size="xs" variant="ghost" className="self-end" onClick={() => setAlerts((before) => before.filter((_, i) => i !== index))} aria-label={`Remove alert ${index + 1}`}>Remove</Button>
-            </div>)}</div>}
-        </div>
-        <div className="mt-6 flex flex-wrap items-center gap-3"><Button disabled={busy || !serviceReady || health?.channels[selected] === "off"} onClick={() => void savePrefs()}>{busy ? "Saving…" : `Save ${selected === "webpush" ? "browser" : selected} alerts`}</Button>
-          <p className="text-xs text-ink-3">Changes apply to this channel after you save.</p></div>
-      </Panel> : null}
-      {message ? <Notice role="status" tone={message.tone} className="mt-5">{message.text}</Notice> : null}
-    </>}
+        <Tabs label="Alert channel" value={selected} onChange={selectChannel} items={CHANNELS.map((channel) => {
+          const off = health?.channels[channel.key] === "off";
+          return {
+            value: channel.key,
+            // A channel the service has switched off says so on its tab, not only greyed out. It sits in the
+            // label, not the badge, because a Tabs badge is hidden below `sm`.
+            label: off ? <>{channel.name} <span data-slot="channel-unavailable" className="block text-[11px] font-medium">Unavailable</span></>
+              : channel.name,
+            badge: off ? undefined : channelStatus(preferredItem(items, channel.key)) === "On" ? "On" : undefined,
+            disabled: off,
+            panel: channel.key === selected ? channelForm : null,
+          };
+        })} />
+      </Panel>}
+      {message ? <Notice role="status" tone={message.tone}>{message.text}</Notice> : null}
+    </div>
   </>;
 }

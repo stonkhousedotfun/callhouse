@@ -120,20 +120,24 @@ describe("maker-scoring block replay", () => {
       uptimePpm: 1_000_000n, depthWithin100bps: 200n })]);
     // The same tick also records the band statistic, and at this fair the 0.02 USDG floor makes the
     // band wide enough to hold the whole quote, so it is at least the 100 bps figure.
-    expect(first[0]?.depthInBand).toBeGreaterThanOrEqual(first[0]?.depthWithin100bps ?? 0n);
+    const inBand = first[0]?.depthInBand;
+    const within100bps = first[0]?.depthWithin100bps;
+    expect(typeof inBand).toBe("bigint");
+    expect(typeof within100bps).toBe("bigint");
+    expect(inBand as bigint).toBeGreaterThanOrEqual(within100bps as bigint);
   });
 
   it("records definite downtime when every quote is withdrawn", async () => {
     const { scoreMakerBlock } = await import("./makerScoring");
     const previous = {
       id: makerEpochId(maker, epoch), maker, epoch, tierBps: 0,
-      // X8-312: a stored row carries the policy it was scored under, and advanceMakerEpoch
+      // A stored row carries the policy it was scored under, and advanceMakerEpoch
       // refuses to average into a row of another policy. Drop this field and the handler throws.
       benchmarkPolicy: MAKER_BENCHMARK_POLICY,
       samples: 1, absentSamples: 0, validSamples: 1, missingReferenceSamples: 0,
       twoSidedSamples: 1, uptimePpm: 1_000_000n, avgSpreadBps: 100n,
       // Both depth columns, because the stored row has both: the 100 bps statistic and the band one
-      // (X3-201). A seed missing depthInBand is a row the schema cannot produce, and leaving it out
+      // A seed missing depthInBand is a row the schema cannot produce, and leaving it out
       // here would only teach the handler to tolerate a column that is NOT NULL in ponder.schema.ts.
       depthWithin100bps: 200n, depthInBand: 320n, fills: 0, volumeUsdg: 0n, rebatesUsdg: 0n,
       scorePpm: 1_000_000n,
@@ -159,4 +163,64 @@ describe("maker-scoring block replay", () => {
     })]);
     expect(runtime.calls).toBe(0);
   });
+
+  // The V2Clock tick passes the open series and orders it already read, after its expiry maintenance.
+  it("scores the same from the clock's rows as from its own selects", async () => {
+    const { scoreMakerBlock } = await import("./makerScoring");
+    runtime.quote = null;
+    const run = async (passRows: boolean) => {
+      const state = memoryDb([
+        [schema.v2Series, [{ ...series }]],
+        [schema.v2Order, [order(1n, "Bid", 9_950n), order(2n, "AskResale", 10_050n)]],
+        [schema.v2Market, [{ ...market }]],
+        [schema.v2OrderBookState, [{ id: "book", tradingPaused: false }]],
+        [schema.v2Fill, [{ ...independentFill }]],
+      ]);
+      const read = tablesRead(state);
+      const open = passRows
+        ? { series: state.rows(schema.v2Series), orders: state.rows(schema.v2Order) } as never
+        : undefined;
+      await scoreMakerBlock({ event: { block: { number: 100n, timestamp: now } }, context: { db: state.db }, open } as never);
+      return { rows: state.rows(schema.v2MakerEpoch), read };
+    };
+    const own = await run(false);
+    const passed = await run(true);
+    expect(passed.rows).toEqual(own.rows);
+    expect(own.rows).toEqual([expect.objectContaining({ maker, samples: 1, twoSidedSamples: 1 })]);
+    expect(own.read).toContain(schema.v2Series);
+    expect(passed.read).not.toContain(schema.v2Series);
+    expect(passed.read).not.toContain(schema.v2Order);
+    expect(passed.read).toContain(schema.v2MakerEpoch);
+  });
+
+  // With no open order and no epoch row up to this epoch there is nothing to score. One read, no write.
+  it("returns after one read when nobody quotes and no epoch row exists", async () => {
+    const { scoreMakerBlock } = await import("./makerScoring");
+    const state = memoryDb([
+      [schema.v2Series, [{ ...series }]],
+      [schema.v2Order, []],
+      [schema.v2Market, [{ ...market }]],
+      [schema.v2OrderBookState, [{ id: "book", tradingPaused: false }]],
+      [schema.v2Fill, [{ ...independentFill }]],
+    ]);
+    const read = tablesRead(state);
+    await scoreMakerBlock({ event: { block: { number: 100n, timestamp: now } }, context: { db: state.db },
+      open: { series: state.rows(schema.v2Series), orders: [] } } as never);
+    expect(read).toEqual([schema.v2MakerEpoch]);
+    expect(state.rows(schema.v2MakerEpoch)).toEqual([]);
+  });
 });
+
+/** Records the table of every `db.sql.select().from(table)` the handler issues. */
+function tablesRead(state: ReturnType<typeof memoryDb>): object[] {
+  const read: object[] = [];
+  const select = state.db.sql.select;
+  state.db.sql.select = () => {
+    const chain = select();
+    return { from: (table: object) => {
+      read.push(table);
+      return chain.from(table);
+    } };
+  };
+  return read;
+}

@@ -1,4 +1,4 @@
--- notifier schema, version 2: rules engine state (N2-02, src/rules/).
+-- notifier schema, version 2: rules engine state (src/rules/).
 --
 -- Applied once by src/db.ts migrate(), like 001. Every statement is IF NOT EXISTS, so the file is
 -- also safe to run twice by hand. Nothing here touches the tables of 001.

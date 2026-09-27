@@ -1,10 +1,11 @@
-import type { Market, StrategiesResponse } from "./api-types";
+import type { Market, StrategiesResponse, StrategyClose } from "./api-types";
 
 const BPS = 10_000n;
 const PRICE_TICK = 100n;
 const USDG_SCALE = 1_000_000n;
 
-export const MIN_ASK_BPS = 5;
+/** AutoRoller.MIN_ASK_BPS: 50, before the v8 deploy. Pinned by ops/v2/contract-mirrors.list.mjs. */
+export const MIN_ASK_BPS = 50;
 export const MAX_ASK_BPS = 1_000;
 export const SMART_PRICING_REVIEW_MS = 60_000;
 export const COMPLETE_CALL_LIST_ERROR = "The complete call list could not be refreshed. Manual asks remain available; retry when market data recovers.";
@@ -12,7 +13,7 @@ export const COMPLETE_CALL_LIST_ERROR = "The complete call list could not be ref
 export type IndexedStrategy = StrategiesResponse["items"][number];
 
 export type PortfolioPricingStatus = {
-  kind: "legacy" | "no-live-order" | "withdrawn" | "price-unavailable" |
+  kind: "legacy" | "closed" | "no-live-order" | "withdrawn" | "price-unavailable" |
     "band-unavailable" | "in-band" | "clamped-minimum" | "clamped-maximum" | "outside-band";
   label: string;
 };
@@ -35,9 +36,19 @@ export function selectPortfolioSmartPricingStrategies(
     marketKeys.has(`${row.ticker.toUpperCase()}:${row.underlying.toLowerCase()}`));
 }
 
+/**
+ * The AutoRoller closed this strategy's last position (IAutoRoller.PositionClosed) and has not rolled a new
+ * one: the close record when there is no current position, otherwise null. A close record beside a current position
+ * describes an earlier period and is not shown as the state of this one.
+ */
+export function closedStrategyPosition(row: Pick<IndexedStrategy, "currentLongId" | "lastClose">): StrategyClose | null {
+  return row.currentLongId === null && row.lastClose ? row.lastClose : null;
+}
+
 /** Describe the indexed order state without collapsing missing legacy data into a zero. */
 export function portfolioPricingStatus(row: IndexedStrategy): PortfolioPricingStatus {
   if (row.pricing === undefined) return { kind: "legacy", label: "Pricing state not reported" };
+  if (closedStrategyPosition(row)) return { kind: "closed", label: "Closed" };
   if (row.orderId === null) return row.lastStaleCancelAt !== null
     ? { kind: "withdrawn", label: "Withdrawn" }
     : { kind: "no-live-order", label: "No live order" };
@@ -53,7 +64,7 @@ export function portfolioPricingStatus(row: IndexedStrategy): PortfolioPricingSt
 }
 
 /*//////////////////////////////////////////////////////////////
-        W3-301: SMART PRICING IS ONLY OFFERED WHEN THE PRICER IS ALIVE
+        SMART PRICING IS ONLY OFFERED WHEN THE PRICER IS ALIVE
 //////////////////////////////////////////////////////////////*/
 
 /**
@@ -70,8 +81,8 @@ export function portfolioPricingStatus(row: IndexedStrategy): PortfolioPricingSt
  *
  * FAIL CLOSED IS THE WHOLE POINT. `offered` is true only when a reading exists AND says
  * `healthy: true`. Nothing else — not a pending query, not a thrown request, not a `healthy` field
- * that arrived as a string, not an unreadable body — can reach true. That is AC4: a control that
- * stays on because the health probe itself broke is the defect class this board has hit repeatedly,
+ * that arrived as a string, not an unreadable body — can reach true. That is the point: a control that
+ * stays on because the health probe itself broke is a defect class that has recurred,
  * a check reading as green because it cannot see its subject.
  */
 export type PricerReading = {
@@ -188,14 +199,17 @@ export type ProposedSmartPricingBand = {
 };
 
 /**
- * Candidate only: reference / 4 through max(3 x reference, reference + 25 bps), capped to
- * AutoRoller's 5..1,000 bps contract range, with the initial ask at the ceiling.
+ * Candidate only: reference / 4 through max(3 x reference, reference + 25 bps), clamped to
+ * AutoRoller's MIN_ASK_BPS..MAX_ASK_BPS (50..1,000 bps) contract range, with the initial ask at the ceiling.
+ * Both ends are clamped: a reference under ~17 bps gives a ceiling below the floor, and a band whose ceiling is
+ * under MIN_ASK_BPS is refused by setStrategy.
  */
 export function proposedSmartPricingBand(spot: bigint, referenceFair: bigint | null): ProposedSmartPricingBand | null {
   if (spot <= 0n || referenceFair === null || referenceFair <= 0n) return null;
   const referenceBps = referenceFair * BPS / spot;
   const proposedMax = referenceBps * 3n > referenceBps + 25n ? referenceBps * 3n : referenceBps + 25n;
-  const maxAskBps = Number(proposedMax > BigInt(MAX_ASK_BPS) ? BigInt(MAX_ASK_BPS) : proposedMax);
+  const cappedMax = proposedMax > BigInt(MAX_ASK_BPS) ? BigInt(MAX_ASK_BPS) : proposedMax;
+  const maxAskBps = Number(cappedMax < BigInt(MIN_ASK_BPS) ? BigInt(MIN_ASK_BPS) : cappedMax);
   const proposedMin = referenceBps / 4n > BigInt(MIN_ASK_BPS) ? referenceBps / 4n : BigInt(MIN_ASK_BPS);
   const minAskBps = Number(proposedMin > BigInt(maxAskBps) ? BigInt(maxAskBps) : proposedMin);
   return {

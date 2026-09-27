@@ -27,7 +27,7 @@ export async function generateMetadata({ params }: { params: Promise<Params> }):
   };
   return {
     title: `${market.ticker} options — StonkHouse`,
-    description: `Explore ${market.ticker} option series and compare maximum loss with possible payouts.`,
+    description: `Buy ${market.ticker} options and see your max loss before you trade.`,
     alternates: { canonical: `/${market.ticker.toLowerCase()}` },
     robots: PUBLIC_V2_ROBOTS,
   };
@@ -39,8 +39,8 @@ export default async function TickerPage({ params }: { params: Promise<Params> }
   if (!market) notFound();
   const registered = market.v2.registeredAt !== null;
   // Registered on chain but not released live (or released but not enabled yet): the page renders LOCKED —
-  // every control faded and disabled, the Safe's schedule counting down on top (LaunchCountdown.tsx).
-  // Unregistered rows keep the plain "not listed" page: there is nothing to count down to.
+  // every control faded and disabled, one static line on top saying trading is not enabled on chain yet
+  // (LaunchCountdown.tsx LockedMarket). Unregistered rows keep the plain "not listed" page.
   if (!isV2Live(market.ticker) && !registered) return <NotListedMarket ticker={market.ticker} />;
   return <MarketAccessGate ticker={market.ticker} registered={registered} releaseStatus={market.v2.status}>
     <MarketPage ticker={market.ticker} />

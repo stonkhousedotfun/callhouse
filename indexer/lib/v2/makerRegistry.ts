@@ -1,7 +1,7 @@
 import type { Address } from "viem";
 import { makerEpochUtc } from "./windows";
 
-/** RewardsDistributor epoch ids use Monday 00:00 UTC (frozen interface §1.9). */
+/** RewardsDistributor epoch ids use Monday 00:00 UTC. */
 export const makerEpoch = makerEpochUtc;
 
 export const makerEpochId = (maker: Address, epoch: bigint): string =>

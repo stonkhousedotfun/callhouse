@@ -13,7 +13,8 @@ export const V2_ACCESS_MANIFEST = {
     "GUARDIAN": 7,
     "PRICER": 8,
     "QUOTER": 9,
-    "BUYBACK": 10
+    "BUYBACK": 10,
+    "NEW_LISTING": 11
   },
   "delaysS": {
     "ADMIN": 172800,
@@ -26,7 +27,8 @@ export const V2_ACCESS_MANIFEST = {
     "GUARDIAN": 0,
     "PRICER": 0,
     "QUOTER": 0,
-    "BUYBACK": 0
+    "BUYBACK": 0,
+    "NEW_LISTING": 0
   },
   "roleAdmin": {
     "GUARDIAN": "OPS_ADMIN",
@@ -49,6 +51,7 @@ export const V2_ACCESS_MANIFEST = {
       "CONFIG_ADMIN",
       "TREASURY_ADMIN",
       "LISTING",
+      "NEW_LISTING",
       "OPS_ADMIN",
       "GUARDIAN",
       "QUOTER"
@@ -66,9 +69,14 @@ export const V2_ACCESS_MANIFEST = {
       "BUYBACK"
     ]
   },
+  "launchOnly": {
+    "guardianKey": [
+      "GUARDIAN"
+    ]
+  },
   "targets": {
     "Clearinghouse": {
-      "registerMarket(address,uint64,bool)": "LISTING",
+      "registerMarket(address,uint64,bool)": "NEW_LISTING",
       "setMarketListing(address,bool,uint64)": "LISTING",
       "setMinRedeemPayout(uint96)": "LISTING",
       "setBaseUri(string)": "LISTING",
@@ -94,18 +102,23 @@ export const V2_ACCESS_MANIFEST = {
     },
     "SettlementOracle": {
       "setMarket(address,address[],uint16,uint32,uint32)": "CONFIG_ADMIN",
+      "listMarket(address,address[],uint16,uint32,uint32)": "NEW_LISTING",
       "setClearinghouse(address)": "CONFIG_ADMIN",
       "setKeeperRewards(address)": "CONFIG_ADMIN",
+      "setHouseVaultFactory(address)": "CONFIG_ADMIN",
       "adminResolve(address,uint40,uint256)": "CONFIG_ADMIN",
       "veto(address,uint40)": "GUARDIAN",
       "unveto(address,uint40)": "GUARDIAN"
     },
     "ChainlinkFeedSource": {
       "setFeed(address,address,uint32,uint16)": "CONFIG_ADMIN",
-      "setOracle(address,bool)": "CONFIG_ADMIN"
+      "setOracle(address,bool)": "CONFIG_ADMIN",
+      "setBand(address,uint128,uint128)": "CONFIG_ADMIN",
+      "listFeed(address,address,uint32,uint16,uint128,uint128)": "NEW_LISTING"
     },
     "UniV3TwapSource": {
       "setPool(address,address,uint128,uint32)": "CONFIG_ADMIN",
+      "listPool(address,address,uint128,uint32)": "NEW_LISTING",
       "setOracle(address,bool)": "CONFIG_ADMIN"
     },
     "DataStreamsSource": {
@@ -119,6 +132,7 @@ export const V2_ACCESS_MANIFEST = {
     "KeeperRewards": {
       "setBounty(bytes32,uint256)": "FEE_MANAGER",
       "setDailyCap(uint256)": "FEE_MANAGER",
+      "setMaxBounty(uint256)": "ADMIN",
       "setCaller(address,bool)": "CONFIG_ADMIN",
       "defund(uint256)": "TREASURY_ADMIN",
       "setTreasury(address)": "TREASURY_ADMIN"
@@ -133,6 +147,8 @@ export const V2_ACCESS_MANIFEST = {
       "setTreasury(address)": "TREASURY_ADMIN",
       "withdraw(address,uint256)": "TREASURY_ADMIN",
       "withdrawPosition(uint256,uint256)": "TREASURY_ADMIN",
+      "setThirdPartyRedeem(bool)": "TREASURY_ADMIN",
+      "setPayoutInKind(bool)": "TREASURY_ADMIN",
       "depositToClearinghouse(address,uint256)": "QUOTER",
       "withdrawFromClearinghouse(address,uint256)": "QUOTER",
       "place(uint256,uint8,uint128,uint64,uint40)": "QUOTER",
@@ -142,7 +158,8 @@ export const V2_ACCESS_MANIFEST = {
       "close(uint256,uint64)": "QUOTER",
       "claimOwed()": "QUOTER",
       "sync(uint256[])": "QUOTER",
-      "refreshApprovals()": "QUOTER"
+      "refreshApprovals()": "QUOTER",
+      "redeem(uint256)": "QUOTER"
     },
     "MakerRegistry": {
       "setTier(address,uint16)": "FEE_MANAGER"
@@ -160,11 +177,15 @@ export const V2_ACCESS_MANIFEST = {
     "PayoutRouter": {
       "setRouteV3(address,uint24)": "CONFIG_ADMIN",
       "setRouteV4(address,uint24,int24)": "CONFIG_ADMIN",
+      "listRouteV3(address,uint24)": "NEW_LISTING",
+      "listRouteV4(address,uint24,int24)": "NEW_LISTING",
       "clearRoute(address)": "GUARDIAN"
     },
     "FeeSplitter": {
       "setBurnBps(uint16)": "FEE_MANAGER",
       "setBuybackCap(uint256)": "FEE_MANAGER",
+      "setBuybackCapCeiling(uint256)": "ADMIN",
+      "setBuybackCooldown(uint40)": "ADMIN",
       "setConversionSlippageBps(uint16)": "FEE_MANAGER",
       "setTreasury(address)": "TREASURY_ADMIN",
       "setOrderBook(address)": "TREASURY_ADMIN",
@@ -172,8 +193,10 @@ export const V2_ACCESS_MANIFEST = {
       "setBuybackExecutor(address)": "TREASURY_ADMIN",
       "setOracle(address)": "TREASURY_ADMIN",
       "setToken(address)": "TREASURY_ADMIN",
+      "recoverUnrouted(address)": "TREASURY_ADMIN",
       "setPaused(bool)": "GUARDIAN",
-      "buyback(uint256)": "BUYBACK"
+      "buyback(uint256)": "BUYBACK",
+      "buybackWithDeadline(uint256,uint256)": "BUYBACK"
     },
     "V4BuybackExecutor": {},
     "HouseVault": {
@@ -187,14 +210,17 @@ export const V2_ACCESS_MANIFEST = {
       "claimOwed()": "QUOTER",
       "sync(uint256[])": "QUOTER",
       "refreshApprovals()": "QUOTER",
-      "setLimits((uint64,uint128,uint16,uint16,uint32,uint128))": "GUARDIAN",
+      "setLimits((uint64,uint128,uint16,uint16,uint32,uint128))": "TREASURY_ADMIN",
+      "tightenLimits((uint64,uint128,uint16,uint16,uint32,uint128))": "GUARDIAN",
       "setPerformanceFeeBps(uint16)": "TREASURY_ADMIN",
+      "setThirdPartyRedeem(bool)": "TREASURY_ADMIN",
+      "setPayoutInKind(bool)": "TREASURY_ADMIN",
       "setProtocolAccount(address,bool)": "CONFIG_ADMIN",
       "setOracle(address)": "CONFIG_ADMIN",
       "setQuotingPaused(bool)": "GUARDIAN"
     },
     "HouseVaultFactory": {
-      "createVault(address,(uint64,uint128,uint16,uint16,uint32,uint128),string,string)": "LISTING"
+      "createVault(address,(uint64,uint128,uint16,uint16,uint32,uint128),string,string,bool)": "NEW_LISTING"
     },
     "Hedger": {
       "setLimits((uint128,uint128,uint16,uint16,uint128))": "TREASURY_ADMIN",
@@ -213,20 +239,23 @@ export const V2_ACCESS_MANIFEST = {
       "setFundingEnabled(bool)": "CONFIG_ADMIN",
       "setBookFunding(bool)": "CONFIG_ADMIN",
       "setAdapter(address)": "TREASURY_ADMIN",
+      "setLimits((uint64,uint128,uint64,uint128,uint128))": "TREASURY_ADMIN",
+      "tightenLimits((uint64,uint128,uint64,uint128,uint128))": "GUARDIAN",
       "sweepToVenue(uint256)": "QUOTER",
       "pullFromVenue(uint256)": "QUOTER",
       "depositToClearinghouse(address,uint256)": "QUOTER",
       "withdrawFromClearinghouse(address,uint256)": "QUOTER",
       "place(uint256,uint8,uint128,uint64,uint40)": "QUOTER",
       "cancel(uint256[])": "QUOTER",
-      "refreshApprovals()": "QUOTER"
+      "refreshApprovals()": "QUOTER",
+      "close(uint256,uint64)": "QUOTER"
     },
     "StockVenueAdapter": {
       "setEnabled(bool)": "CONFIG_ADMIN"
     }
   },
   "unrestricted": {
-    "_comment": "Entry points that LOOK privileged and deliberately carry no manager role. The access-matrix test asserts each of these is NOT restricted, so a later task cannot quietly add a gate (or forget one) without the manifest moving. Source: 03-INTERFACES sections 2.1-2.10 and V8-DESIGN section 2.2.",
+    "_comment": "Entry points that LOOK privileged and deliberately carry no manager role. The access-matrix test asserts each of these is NOT restricted, so a later change cannot quietly add a gate (or forget one) without the manifest moving.",
     "Clearinghouse": {
       "mint(uint256,uint64,address,address)": "in-contract minter allow-list (isMinter) plus the writer-or-operator check, NOT a manager role: the OrderBook's two mint calls sit inside try/gas, so a missing or delayed mapping would turn fills into silent skips that quoteTake had already promised",
       "sweepFees(address)": "anyone; it can only push accrued fees to the fee recipient"
@@ -249,10 +278,14 @@ export const V2_ACCESS_MANIFEST = {
     },
     "FeeSplitter": {
       "claimOrderBookFees()": "anyone; it can only pull the splitter's own owed balance",
-      "distribute(address)": "anyone; the floor is the oracle's ok spot and the split is fixed"
+      "distribute(address)": "anyone; the floor is the oracle's ok spot and the split is fixed",
+      "distributeAmount(address,uint256)": "anyone; the partial form of distribute: it converts at most the splitter's own balance of one Stock Token, the floor is the oracle's ok spot and the split is fixed. Outside the frozen IFeeSplitter, whose ERC-165 id is pinned, so this entry is the manifest's only record that it is ungated by choice. An unrestricted entry also exempts the selector from the AccessMatrix unmapped-restricted walk, so test_feeSplitterPermissionlessRowsReachTheirBodies is what fails if a `restricted` is ever added to it"
     },
     "V4BuybackExecutor": {
-      "execute(uint256,uint256)": "IBuybackExecutor.execute, frozen here: the FeeSplitter only, checked in the contract. The executor has NO privileged function and no admin at all, which is why its targets entry is empty. T-182/F-CP-11 CORRECTS WHAT THIS NOTE USED TO SAY. It said 'C8-08 makes it implement IBuybackExecutor', as future tense, and described buy(uint256,uint256,uint256) as a spike leftover C8-08 would replace. Re-derived from src/v2/periphery/V4BuybackExecutor.sol at this base: it ALREADY implements IBuybackExecutor (:117) and execute (:396) is live. The REPLACEMENT is what did not happen -- buy (:335) is still there and is KEPT DELIBERATELY as the NON-BURN variant: same route with minWethOut exposed, tokens returned to the splitter rather than burned, splitter-only like execute. Two entry points, both ungated by design. DO NOT CITE test/v2/unit/AccessMatrix.t.sol AS EVIDENCE EITHER WAY: it exempts buy(uint256,uint256,uint256) from the unmapped-restricted check by name (:615), so the matrix stays green whether buy exists or not and cannot see this decision at all"
+      "execute(uint256,uint256)": "IBuybackExecutor.execute, frozen here: the FeeSplitter only, checked in the contract. The executor has NO privileged function and no admin at all, which is why its targets entry is empty. V4BuybackExecutor implements IBuybackExecutor and execute is live. buy(uint256,uint256,uint256) is still there too and is KEPT DELIBERATELY as the NON-BURN variant: same route with minWethOut exposed, tokens returned to the splitter rather than burned, splitter-only like execute. Two entry points, both ungated by design. DO NOT CITE test/v2/unit/AccessMatrix.t.sol AS EVIDENCE EITHER WAY: it exempts buy(uint256,uint256,uint256) from the unmapped-restricted check by name, so the matrix stays green whether buy exists or not and cannot see this decision at all"
+    },
+    "SettlementOracle": {
+      "pinBoundary(address,uint40)": "the HouseVaultFactory's vault of that underlying only, checked in the contract; it can only freeze an expiry's configuration as a mint would"
     },
     "KeeperRewards": {
       "fund(uint256)": "anyone; a donation can only pay bounties",
@@ -267,6 +300,7 @@ export const V2_ACCESS_MANIFEST = {
     },
     "HouseVault": {
       "requestDeposit(address,uint256)": "anyone; queues USDG or Stock Token for the next boundary and can only add funds",
+      "depositNow(uint256,uint256)": "anyone; mints a USDG deposit at once only while the vault is empty or holds no option, no live order and no Stock; otherwise it reverts and the caller queues with requestDeposit",
       "requestWithdraw(uint256)": "anyone; queues the caller's shares for the next boundary",
       "cancelDepositRequest(address)": "the requester (or the account named) cancels an unpriced deposit queue",
       "cancelWithdrawRequest()": "the requester cancels an unpriced withdrawal queue",
@@ -274,29 +308,32 @@ export const V2_ACCESS_MANIFEST = {
       "claim()": "anyone with a priced request; pays the already-decided epoch rates"
     },
     "EarnVault": {
-      "cancelQueued(uint256)": "the request owner, checked in-contract at EarnVault.sol:592 (r.owner != msg.sender), NOT a manager role: a queued redemption belongs to whoever queued it and no role should be able to cancel someone else's",
-      "fund(address,uint256)": "the OrderBook only, checked in-contract at EarnVault.sol:702 (msg.sender != address(orderBook)): it is the fill-time funding callback, so a manager role here would let a key impersonate a fill"
+      "cancelQueued(uint256)": "the request owner, checked in-contract in EarnVault.cancelQueued (r.owner != msg.sender), NOT a manager role: a queued redemption belongs to whoever queued it and no role should be able to cancel someone else's",
+      "claimDeferred(uint256,address)": "the request's owner or the receiver it named, checked in-contract in EarnVault.claimDeferred (msg.sender != d.owner && msg.sender != d.receiver), NOT a manager role: a queue payment the asset refused to deliver belongs to those two people and no role should be able to redirect it",
+      "fund(address,uint256)": "the OrderBook only, checked in-contract in EarnVault.fund (msg.sender != address(orderBook)): it is the fill-time funding callback, so a manager role here would let a key impersonate a fill"
     },
     "StockVenueAdapter": {
-      "deposit(uint256)": "the owning vault only, onlyVault at Erc4626VenueAdapter.sol:81. The adapter holds no policy; it moves the vault's assets in and out of the venue on the vault's instruction",
-      "withdraw(uint256,address)": "the owning vault only, onlyVault at Erc4626VenueAdapter.sol:86. This is the selector T-170 F-CP-01 was about: it IS gated on disk and was simply never declared, because nothing walked this contract until T-220"
+      "deposit(uint256)": "the owning vault only, the onlyVault modifier on Erc4626VenueAdapter.deposit. The adapter holds no policy; it moves the vault's assets in and out of the venue on the vault's instruction",
+      "withdraw(uint256,address)": "the owning vault only, the onlyVault modifier on Erc4626VenueAdapter.withdraw. This selector IS gated on disk; it was once missing from this manifest only because nothing walked this contract"
     }
   },
   "unmanagedTargets": {
-    "_comment": "Non-abstract src/v2 contracts that are deliberately NOT manager targets, each with the reason it is gated by something other than the AccessManager. script/v2/check-roles-targets.sh requires every such contract to be either a target or a row here, so the next one cannot drift in silently the way F-CP-01 did on Erc4626VenueAdapter (T-170-SEC-EARN-ADAPTER-AUTH). Same idea as `unrestricted` above, one level up: that section records a deliberately ungated SELECTOR, this one a deliberately unmanaged CONTRACT. A row here is a claim that the contract has NO restricted selector; the checker refuses the row the moment that stops being true.",
-    "Erc4626VenueAdapter": "Gated on an immutable vault, not a role: `onlyVault` tests msg.sender against `address public immutable vault`. T-170-SEC-EARN-ADAPTER-AUTH chose this over a manager role deliberately, because withdraw takes a caller-supplied recipient and every delay-0 role is a hot key, so a role-gated withdraw would still let a role holder pay themselves.",
+    "_comment": "Non-abstract src/v2 contracts that are deliberately NOT manager targets, each with the reason it is gated by something other than the AccessManager. script/v2/check-roles-targets.sh requires every such contract to be either a target or a row here, so the next one cannot drift in silently the way Erc4626VenueAdapter once did. Same idea as `unrestricted` above, one level up: that section records a deliberately ungated SELECTOR, this one a deliberately unmanaged CONTRACT. A row here is a claim that the contract has NO restricted selector; the checker refuses the row the moment that stops being true.",
+    "Erc4626VenueAdapter": "Gated on an immutable vault, not a role: `onlyVault` tests msg.sender against `address public immutable vault`. This was chosen over a manager role deliberately, because withdraw takes a caller-supplied recipient and every delay-0 role is a hot key, so a role-gated withdraw would still let a role holder pay themselves.",
     "StockLoanAdapter": "Gated on an immutable owner, the Hedger, via `onlyOwner`. Its own NatSpec states it: not AccessManaged, no restricted selector. The Hedger is the manager target; this adapter is its arm.",
     "StockZap": "Not gated at all, and correctly so: `writeZap` and `exitZap` move only the caller's own funds (both `safeTransferFrom(msg.sender, ...)`), so there is nothing for a role to protect. Its one privileged-looking entry point, `unlockCallback`, is guarded inside V4UnlockCallback by the pinned immutable poolManager AND a transient in-flight flag.",
     "UniV3PayoutAdapter": "The v7 adapter, still deployed for the payoutAdapter key. It is `AccessControl`, not `Managed`: `setRoute` is `onlyRole(DEFAULT_ADMIN_ROLE)`, so it has no `restricted` selector for the manager to map. PayoutRouter is its v8 replacement and IS a target."
   },
   "notes": {
-    "grantDelays": "Grant delays and target admin delays are deliberately 0: AccessManager's setGrantDelay and setTargetAdminDelay need at least five days (minSetback) to take effect. Role changes are delayed by ADMIN's own 48 h EXECUTION delay instead. T-223/D13 SHARPENS THIS, because the decision text elsewhere says 'lowering a delay is itself delayed' and a reader who takes that as a per-delay setback will size the risk wrongly. There are TWO paths and only one of them is self-delayed. Re-derived from lib/openzeppelin-contracts at this base, not from the decision text: (a) a DIRECT lowering via grantRole on an EXISTING member calls Time.withUpdate(executionDelay, 0) (AccessManager._grantRole), and withUpdate computes setback = max(minSetback, value > newValue ? value - newValue : 0) -- so dropping FEE_MANAGER from 172800 to 0 is itself held for 172800 s, and the minSetback of 0 changes nothing. (b) REVOKE THEN GRANT is NOT self-delayed, and OZ's own comment at _grantRole says so: revoke clears members[account].since, so the following grant takes the newMember branch, assigns delay = executionDelay outright and never reaches withUpdate. Grant delays here are 0, so that path is instant. WHAT ACTUALLY ENFORCES THE 48 h IS THIS FILE'S ADMIN LANE, NOT THE SETBACK: both grantRole and revokeRole are ADMIN-restricted and ADMIN carries delaysS 172800, so each leg waits out the ADMIN execution delay. The property holds; the mechanism in the sentence does not. The four instant lanes are not a hole: GUARDIAN, PRICER, QUOTER and BUYBACK have roleAdmin OPS_ADMIN at delay 0, but all four already carry executionDelay 0, so nothing is ever lowered on them -- that is the intended instant rotation. Every role whose delay is non-zero (FEE_MANAGER, MARKET_FEE_MANAGER, CONFIG_ADMIN, TREASURY_ADMIN) is absent from roleAdmin and therefore admined by ADMIN at 48 h.",
-    "adminHasNoTarget": "No target function is mapped to ADMIN. ADMIN is manager-only. An unmapped restricted selector falls to ADMIN by default, which is exactly the mistake the access-matrix test must catch.",
+    "grantDelays": "Grant delays and target admin delays are deliberately 0: AccessManager's setGrantDelay and setTargetAdminDelay need at least five days (minSetback) to take effect. Role changes are delayed by ADMIN's own 48 h EXECUTION delay instead. THIS NEEDS SHARPENING, because a common summary says 'lowering a delay is itself delayed' and a reader who takes that as a per-delay setback will size the risk wrongly. There are TWO paths and only one of them is self-delayed. Derived from lib/openzeppelin-contracts, not from that summary: (a) a DIRECT lowering via grantRole on an EXISTING member calls Time.withUpdate(executionDelay, 0) (AccessManager._grantRole), and withUpdate computes setback = max(minSetback, value > newValue ? value - newValue : 0) -- so dropping FEE_MANAGER from 172800 to 0 is itself held for 172800 s, and the minSetback of 0 changes nothing. (b) REVOKE THEN GRANT is NOT self-delayed, and OZ's own comment at _grantRole says so: revoke clears members[account].since, so the following grant takes the newMember branch, assigns delay = executionDelay outright and never reaches withUpdate. Grant delays here are 0, so that path is instant. WHAT ACTUALLY ENFORCES THE 48 h IS THIS FILE'S ADMIN LANE, NOT THE SETBACK: both grantRole and revokeRole are ADMIN-restricted and ADMIN carries delaysS 172800, so each leg waits out the ADMIN execution delay. The property holds; the mechanism in the sentence does not. The four instant lanes are not a hole: GUARDIAN, PRICER, QUOTER and BUYBACK have roleAdmin OPS_ADMIN at delay 0, but all four already carry executionDelay 0, so nothing is ever lowered on them -- that is the intended instant rotation. Every role whose delay is non-zero (FEE_MANAGER, MARKET_FEE_MANAGER, CONFIG_ADMIN, TREASURY_ADMIN) is absent from roleAdmin and therefore admined by ADMIN at 48 h.",
+    "adminHasNoTarget": "ADMIN is manager-only EXCEPT for exactly three target functions, mapped to ADMIN on purpose: KeeperRewards.setMaxBounty(uint256), FeeSplitter.setBuybackCapCeiling(uint256) and FeeSplitter.setBuybackCooldown(uint40). Each bounds a lane that holds its own setter, so it must answer to a role above that lane: the max bounty caps what FEE_MANAGER's setBounty can pay, the buyback cap ceiling sits above FEE_MANAGER's own setBuybackCap, and the cooldown paces every buyback the BUYBACK lane runs. After the lock each waits ADMIN's 48 h delay. No other target function is ADMIN's. An UNMAPPED restricted selector also falls to ADMIN by default, so an ADMIN row here is always explicit and the checks tell the two apart by whether the manifest names the selector (VerifyV8 `listed`, not the role id): any ADMIN mapping outside these three is the mistake the access-matrix test must catch. (The key name is kept so the references to it still resolve.)",
     "opsAdmin": "OPS_ADMIN is manager-only too: it is the role admin of GUARDIAN, PRICER, QUOTER and BUYBACK so a compromised hot key can be revoked and rotated with two signatures and no delay.",
-    "deployerRenounces": "The deployer is the manager's initial admin, wires every mapping with no delay, grants the roles with their delays and renounces ADMIN in the same batch. VerifyV8 fails if any EOA holds roles 0-6.",
-    "freezeState": "Written by F8-02 (interface freeze). The Solidity targets still carry their v7 AccessControl gates; C8-01..C8-08 replace each with `restricted` against this file, and the access-matrix test of C8-01 is what starts enforcing it. PayoutRouter, FeeSplitter and V4BuybackExecutor do not exist as contracts yet -- their entries are frozen from 03-INTERFACES sections 2.8-2.10 so the deploy script, the monitor and the indexer can be built against them now.",
-    "houseVaultSetOracle": "T-OP-058 (BUG-02 F6). `HouseVault.setOracle(address)` is CONFIG_ADMIN (delaysS 86400, GUARDIAN-cancellable) because it moves the ONE price source every boundary values depositors on; it was `immutable` before and an oracle migration stranded every live vault on the retired instance, boundary blocked for ever. It refuses zero / code-less / a contract whose SETTLEMENT_WINDOW() is absent or zero (the Clearinghouse.setMarketOracle probe) and refuses while a boundary is pending (block.timestamp >= epochEnd). OPS_ADMIN (delay 0) was the forbidden lane: changing the boundary's price source is a config change with a delay the guardian can cancel, not a rotation. Every factory-created vault needs this selector in its own setTargetFunctionRole batch, like the rest of this block (see houseVaultInstances). HouseVaultFactory keeps its immutable seed: a new vault takes the factory's current oracle at birth and its CONFIG_ADMIN moves it with one call.",
+    "deployerRenounces": "The deployer is the manager's initial admin, wires every mapping with no delay and grants the roles with their delays. A default DeployV8 run then drops its transient grants and renounces ADMIN (steps 8-9). The v9 launch runs DeployV8 with V2_DEFER_HANDBACK=true: steps 8-9 are not sent, so the run ends with the deployer still holding ADMIN and every .targets role at delay 0, and the renounce is a later HandBack.s.sol run. VerifyV8 fails an EOA holding ADMIN or roles 0-6 only for the deployer V2_DEPLOYER names; with V2_DEPLOYER unset its deployer checks report NOT CHECKED, not a failure.",
+    "launchOnly": "A .launchOnly pair is also in .holders and is held ONLY under the launch role profile. The one-transaction lock (script/v2/safe/lockdown-batch.mjs) revokes it, a locked-profile deploy never grants it, and VerifyV8 under the locked profile FAILs while it is held. Today: guardianKey's GUARDIAN, so after the lock only the Admin Safe can pause.",
+    "freezeState": "Written at the v8 interface freeze; now history. The v8 contracts replaced every v7 AccessControl gate with `restricted` against this file and the access-matrix test enforces it. PayoutRouter, FeeSplitter and V4BuybackExecutor are deployed contracts (src/v2/periphery); their entries were frozen from the interface design before the contracts existed.",
+    "houseVaultSetOracle": "`HouseVault.setOracle(address)` is CONFIG_ADMIN (delaysS 86400, GUARDIAN-cancellable) because it moves the ONE price source every boundary values depositors on; it was `immutable` before and an oracle migration stranded every live vault on the retired instance, boundary blocked for ever. It refuses zero / code-less / a contract whose SETTLEMENT_WINDOW() is absent or zero (the Clearinghouse.setMarketOracle probe) and refuses while a boundary is pending (block.timestamp >= epochEnd). OPS_ADMIN (delay 0) was the forbidden lane: changing the boundary's price source is a config change with a delay the guardian can cancel, not a rotation. Every factory-created vault needs this selector in its own setTargetFunctionRole batch, like the rest of this block (see houseVaultInstances). HouseVaultFactory keeps its immutable seed: a new vault takes the factory's current oracle at birth and its CONFIG_ADMIN moves it with one call.",
     "houseVaultInstances": "Every factory-created vault needs its own setTargetFunctionRole batch from the Admin Safe under ADMIN's 48 h execution delay before the bot can quote it. No role is ever granted to a vault or to the factory: a role is (role, member) across ALL targets, so granting TREASURY_ADMIN to a vault would hand it KeeperRewards.defund, RewardsDistributor.setRoot, FeeSplitter.setTreasury and Clearinghouse.setFeeRecipient.",
-    "targetSignatures": "T-539, P8-03's third suspicion, CHECKED AND CORRECT at contracts 6021ee48a26621cb12908acc2bc4b4e952944d63. The suspicion said the Hedger `setLimits` tuple must stay `(uint128,uint128,uint16,uint16,uint128)` or AccessMatrix's dummy calldata will not reach `restricted`. It has not drifted: `IHedger.sol:9-15` declares `Limits { uint128 maxBorrowPerAsset; uint128 maxUsdgCollateral; uint16 healthFactorFloorBps; uint16 slippageBps; uint128 maxDailyNotional; }`, and the SELECTOR WAS RUN rather than reasoned about, both ways: `cast sig` on the string in this file and `forge inspect Hedger methods` on the compiled artifact both give 0x60e6f8bf. WHILE HERE, ALL 115 ROWS OF `.targets` WERE COMPARED AGAINST THE COMPILED ABIs, not just the Hedger one: zero mismatches. Two things that comparison teaches. First, `RewardsDistributorLender` is an INSTANCE name, not a type - it is a second `RewardsDistributor` deployed by `script/v2/DeployLenderRewards.s.sol` - so a checker keyed on file names reports it as a missing contract when it is not. Second, a tuple signature contains nested parentheses, and a regex that stops at the first `)` silently reports EVERY tuple row as a mismatch; that produced eight false positives here before the Hedger selector, already pinned, exposed the parser as the bug. WHAT WAS NOT GUARDED, AND NOW IS (T-569): `script/v2/check-roles-targets.sh` binds this file to the source tree in one direction only - a contract with `restricted` functions must be listed here or in `.unmanagedTargets`. Nothing checked that a signature LISTED here still matches the contract's ABI, which is precisely the drift P8-03 feared, and the 115-row comparison above was one person's hand pass wired into no gate. It is wired now: `test/v2/unit/ManifestResolvers.t.sol::test_everyListedSignatureIsStillOnTheCompiledAbi` compares every signature in `.targets` against the `.methodIdentifiers` of the artifact `VerifyV8._artifactOf` derives for that row. It matches WHOLE STRINGS and parses nothing, so the first-`)` matcher that produced eight false positives here cannot recur, and it asserts a non-zero comparison count per row and overall, so an empty row or an empty ABI cannot let it pass by having nothing to compare. `V4BuybackExecutor` is skipped by name - the one row that is empty on purpose - rather than by a rule that skips anything empty. The one-way property of the shell script is unchanged and is now stated in its own header: it reads source only and never opens `out/`, which is why the second direction had to live in a test."
+    "targetSignatures": "CHECKED AND CORRECT: a review suspected that the Hedger `setLimits` tuple must stay `(uint128,uint128,uint16,uint16,uint128)` or AccessMatrix's dummy calldata will not reach `restricted`. It has not drifted: `IHedger.sol:9-15` declares `Limits { uint128 maxBorrowPerAsset; uint128 maxUsdgCollateral; uint16 healthFactorFloorBps; uint16 slippageBps; uint128 maxDailyNotional; }`, and the SELECTOR WAS RUN rather than reasoned about, both ways: `cast sig` on the string in this file and `forge inspect Hedger methods` on the compiled artifact both give 0x60e6f8bf. WHILE HERE, ALL 115 ROWS OF `.targets` WERE COMPARED AGAINST THE COMPILED ABIs, not just the Hedger one: zero mismatches. Two things that comparison teaches. First, `RewardsDistributorLender` is an INSTANCE name, not a type - it is a second `RewardsDistributor` deployed by `script/v2/DeployLenderRewards.s.sol` - so a checker keyed on file names reports it as a missing contract when it is not. Second, a tuple signature contains nested parentheses, and a regex that stops at the first `)` silently reports EVERY tuple row as a mismatch; that produced eight false positives here before the Hedger selector, already pinned, exposed the parser as the bug. WHAT WAS NOT GUARDED, AND NOW IS: `script/v2/check-roles-targets.sh` binds this file to the source tree in one direction only - a contract with `restricted` functions must be listed here or in `.unmanagedTargets`. Nothing checked that a signature LISTED here still matches the contract's ABI, which is precisely the drift that review feared, and the 115-row comparison above was one person's hand pass wired into no gate. It is wired now: `test/v2/unit/ManifestResolvers.t.sol::test_everyListedSignatureIsStillOnTheCompiledAbi` compares every signature in `.targets` against the `.methodIdentifiers` of the artifact `VerifyV8._artifactOf` derives for that row. It matches WHOLE STRINGS and parses nothing, so the first-`)` matcher that produced eight false positives here cannot recur, and it asserts a non-zero comparison count per row and overall, so an empty row or an empty ABI cannot let it pass by having nothing to compare. `V4BuybackExecutor` is skipped by name - the one row that is empty on purpose - rather than by a rule that skips anything empty. The one-way property of the shell script is unchanged and is now stated in its own header: it reads source only and never opens `out/`, which is why the second direction had to live in a test.",
+    "newListing": "Listing a new market takes no delay. NEW_LISTING (11) is the one zero-delay lane that reaches a market, and it reaches only markets that do not exist yet: registerMarket (refuses a registered underlying), createVault (refuses an existing vault), and the first-time setters listMarket, listFeed, listPool, listRouteV3 and listRouteV4, each of which reverts V2Errors.AlreadyListed for an asset its contract was ever configured for (a permanent everConfigured flag, which the delayed set* setters also write, so emptying a feed, pool or route later never reopens the zero-delay path). Every change to an existing market stays on its delayed lane. It is held by the Admin Safe (and by the deployer at 0 in the launch window, like every role), is admined by ADMIN (48 h: it is absent from roleAdmin on purpose, so no instant role can hand it to a hot key) and has no role guardian (nothing on a zero-delay lane is ever scheduled, so there is nothing to cancel). A new House vault still waits for ADMIN's 48 h selector mapping (HouseVaultFactory.sol NatSpec) before it can quote."
   }
 } as const;

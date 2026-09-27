@@ -1,10 +1,10 @@
 #!/usr/bin/env node
 /* -------------------------------------------------------------------------------------------------
- * O8-05: compare generated v2 env files by assignment lines of selected services.
+ * Compare generated v2 env files by assignment lines of selected services.
  *
  * go-live-v2.sh --apply used to `diff -qr` the whole env directory against the reviewed clone.
  * That refused a production monitor because ops/v2/env/pricer.env differed by one comment line
- * (GO-LIVE-V7-SERVICES §4 row 21). Comment-only drift in an unselected file must not block a
+ * (found during the v7 services go-live). Comment-only drift in an unselected file must not block a
  * selected service. Assignment drift in a selected service still refuses.
  *
  *   node ops/v2/env-equal.mjs --local DIR --clone DIR --services a,b

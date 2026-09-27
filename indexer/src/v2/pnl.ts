@@ -27,6 +27,7 @@ import { consumeFifo, payoutValueUsdg } from "../../lib/v2/fifo";
 import { isOffMarket, nearbyVwap } from "../../lib/v2/integrity";
 import { buyPosition, closePosition, emptyPosition, isExcludedFromLeaderboard, markTransferIn, redeemPosition, sellPosition, transferOutPosition } from "../../lib/v2/pnl";
 import { matchDeliveries, matchTakeFees } from "../../lib/v2/reconcile";
+import { nextOpenLotExpiry, pnlTickIsNoop, recordNextLotExpiry } from "./pnlInput";
 import { indexedSelfTradeLinks, reduceSelfTrade, type SelfTradeEvent,
   type SelfTradeUnseenReason } from "../../lib/v2/selfTrade";
 import { rankTotals, windowStarts } from "../../lib/v2/windows";
@@ -211,8 +212,9 @@ type SelfTradeBlockRows = {
   matchedMints: ReadonlySet<string>;
 };
 
-/** Materialize the measurement beside the PnL cursor without enrolling writers in maker rewards. */
-async function updateSelfTrade(db: DB, block: SelfTradeBlockRows) {
+/** Materialize the measurement beside the PnL cursor without enrolling writers in maker rewards. Returns the
+ * earliest expiry of a lot still open afterwards (src/v2/pnlInput.ts). */
+async function updateSelfTrade(db: DB, block: SelfTradeBlockRows): Promise<bigint | null> {
   const [storedLinks, storedLots, storedMakers, storedUnseen, accounts, cashFlows, series] = await Promise.all([
     db.sql.select().from(schema.v2SelfTradeLink),
     db.sql.select().from(schema.v2SelfTradeLot),
@@ -296,6 +298,7 @@ async function updateSelfTrade(db: DB, block: SelfTradeBlockRows) {
       updatedAt: block.throughTimestamp, updatedBlock: block.through };
     await db.insert(schema.v2SelfTradeUnseen).values({ reason: row.reason, ...values }).onConflictDoUpdate(values);
   }
+  return nextOpenLotExpiry(next.lots, series);
 }
 
 /** Every tick processes complete transactions through its block, once. Ponder's block event
@@ -306,6 +309,13 @@ ponder.on("V2PnlClock:block", async ({ event, context }) => {
   const from = current?.block ?? BigInt(V2_START_BLOCK! - 1);
   const through = event.block.number;
   if (through <= from) return;
+  // Nothing this tick reads was written since the last full tick and no open lot expires by now, so the
+  // reads below would come back empty and the writes would change nothing. Advance the cursor only.
+  const input = await db.find(schema.v2PnlInput, { id: "global" });
+  if (pnlTickIsNoop(input, current?.block ?? null, from, event.block.timestamp)) {
+    await db.insert(schema.v2PnlCursor).values({ id: "global", block: through }).onConflictDoUpdate({ block: through });
+    return;
+  }
   const transfers = await db.sql.select().from(schema.v2Transfer).where(and(gt(schema.v2Transfer.block, from), lte(schema.v2Transfer.block, through)));
   const fills = await db.sql.select().from(schema.v2Fill).where(and(gt(schema.v2Fill.block, from), lte(schema.v2Fill.block, through)));
   const takes = await db.sql.select().from(schema.v2Take).where(and(gt(schema.v2Take.block, from), lte(schema.v2Take.block, through)));
@@ -395,7 +405,7 @@ ponder.on("V2PnlClock:block", async ({ event, context }) => {
       await maybeClose(db, row.longId, row.holder, row.ts, row.tx);
     }
   }
-  await updateSelfTrade(db, { from, through, throughTimestamp: event.block.timestamp,
-    transfers, fills, mints, closes, redemptions, matchedTransfers, matchedMints });
+  await recordNextLotExpiry(db, await updateSelfTrade(db, { from, through, throughTimestamp: event.block.timestamp,
+    transfers, fills, mints, closes, redemptions, matchedTransfers, matchedMints }));
   await db.insert(schema.v2PnlCursor).values({ id: "global", block: through }).onConflictDoUpdate({ block: through });
 });

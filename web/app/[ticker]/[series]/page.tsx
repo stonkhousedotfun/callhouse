@@ -1,9 +1,9 @@
 import type { Metadata } from "next";
-import { notFound, permanentRedirect } from "next/navigation";
+import { notFound, permanentRedirect, redirect } from "next/navigation";
 
 import { MarketAccessGate } from "@/components/v2/MarketAccessGate";
+import { MarketPage } from "@/components/v2/MarketPage";
 import { NotListedMarket } from "@/components/v2/NotListedMarket";
-import { SeriesPage as SeriesView } from "@/components/v2/SeriesPage";
 import { parseV2Series, parseV2Ticker } from "@/app/v2-route-params";
 import { PUBLIC_V2_ROBOTS } from "@/lib/devPreview";
 import { isV2Live } from "@/lib/markets";
@@ -21,7 +21,7 @@ export async function generateMetadata({ params }: { params: Promise<Params> }):
     robots: { index: false, follow: PUBLIC_V2_ROBOTS.follow },
   };
   return {
-    title: `${market.ticker} option ${id} — StonkHouse`,
+    title: `${market.ticker} option — StonkHouse`,
     alternates: { canonical: `/${ticker}/${id}` },
     robots: PUBLIC_V2_ROBOTS,
   };
@@ -34,6 +34,10 @@ export default async function SeriesPage({ params, searchParams }: { params: Pro
   if (!market) notFound();
   const id = parseV2Series(market, series);
   if (!id) notFound();
+  // A market whose registry flag is not `puts: true` shows no put page. A readable put
+  // alias (`p-...`) names its side, so it goes to the market's calls view here. A numeric id is a hash that does not,
+  // so MarketPage's shownRouteId hides that put series once it resolves. Temporary (307): the flag can turn on.
+  if (market.v2.puts !== true && series.startsWith("p-")) redirect(`/${ticker}`);
   const rawShares = typeof query.shares === "string" ? query.shares : undefined;
   const initialShares = rawShares && /^(?:[1-9]\d{0,3}|0)(?:\.\d{1,2})?$/.test(rawShares) && Number(rawShares) > 0 ? rawShares : undefined;
   const suffix = query.buy === "1" ? `?buy=1${initialShares ? `&shares=${encodeURIComponent(initialShares)}` : ""}` : "";
@@ -41,6 +45,7 @@ export default async function SeriesPage({ params, searchParams }: { params: Pro
   const registered = market.v2.registeredAt !== null;
   if (!isV2Live(market.ticker)) return <NotListedMarket ticker={market.ticker} />;
   return <MarketAccessGate ticker={market.ticker} registered={registered} releaseStatus={market.v2.status}>
-    <SeriesView ticker={market.ticker} longId={id} initialShares={initialShares} openTicket={query.buy === "1"} />
+    {/* The Neon market page with this series chosen; `?buy=1` puts the real ticket in its rail. */}
+    <MarketPage ticker={market.ticker} longId={id} initialShares={initialShares} openTicket={query.buy === "1"} />
   </MarketAccessGate>;
 }

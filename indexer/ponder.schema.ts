@@ -145,7 +145,7 @@ export const vaultState = onchainTable("vault_state", (t) => ({
   totalFeeSwept: t.bigint().notNull().default(0n),
   /**
    * Premium after the protocol fee, summed over every `Harvest`: `grossUsdg − strike proceeds −
-   * feeUsdg`. PREMIUM ONLY (W-21). The whole credited figure lives in `lifetimeCreditedUsdg`.
+   * feeUsdg`. PREMIUM ONLY. The whole credited figure lives in `lifetimeCreditedUsdg`.
    */
   lifetimePremiumNet: t.bigint().notNull().default(0n),
   /**
@@ -158,14 +158,14 @@ export const vaultState = onchainTable("vault_state", (t) => ({
   lifetimeStrikeProceeds: t.bigint().notNull().default(0n),
   /** Sum of `Harvest.netUsdg`: everything credited to holders. `lifetimePremiumNet + lifetimeStrikeProceeds`. */
   lifetimeCreditedUsdg: t.bigint().notNull().default(0n),
-  /** Asset base units settled redeemers were booked and NOT paid, across every `ReserveHaircut` (AF-05). */
+  /** Asset base units settled redeemers were booked and NOT paid, across every `ReserveHaircut`. */
   lifetimeHaircutAssets: t.bigint().notNull().default(0n),
   /** Cycles armed (`RollOpen`). Nothing is written at arm, so "armed" is the honest word. */
   cyclesWritten: t.integer().notNull().default(0),
   cyclesFilled: t.integer().notNull().default(0),
   cyclesUnfilled: t.integer().notNull().default(0),
   cyclesAssigned: t.integer().notNull().default(0),
-  /** Cycles whose close stranded the claim (AF-02), recovered or not. */
+  /** Cycles whose close stranded the claim, recovered or not. */
   cyclesStranded: t.integer().notNull().default(0),
 
   /** Governance-visible settings, mirrored from their events (and seeded from the constructor by `Vault:setup`). */
@@ -204,7 +204,7 @@ export const vaultState = onchainTable("vault_state", (t) => ({
    */
   rollCloseTx: t.hex(),
 
-  /*── the stranded-claim state machine (AF-02) ──*/
+  /*── the stranded-claim state machine ──*/
   /** `isStranded()`: Idle with a claim still open. Deposits, instant redemption and `rollOpen` are shut. */
   stranded: t.boolean().notNull().default(false),
   /** `strandGen()`: how many claims have ever stranded. */
@@ -390,7 +390,7 @@ export const cycle = onchainTable(
     closedBlock: t.bigint(),
     txClose: t.hex(),
 
-    /*── the stranded close (AF-02) ──*/
+    /*── the stranded close ──*/
     /** True if this cycle's `rollClose` could not redeem the claim. Stays true as history after recovery. */
     stranded: t.boolean().notNull().default(false),
     /** The strand generation, keyed into `strand`. */
@@ -511,9 +511,9 @@ export const user = onchainTable(
     strandWad: t.bigint().notNull().default(0n),
     /** Which generation that share belongs to (`owedStrandGen`). */
     strandGen: t.bigint(),
-    /** USDG booked to this owner that a `completeRedeem` could not move (`UsdgLegDeferred`, AF-03). Still owed; 0 once paid. */
+    /** USDG booked to this owner that a `completeRedeem` could not move (`UsdgLegDeferred`). Still owed; 0 once paid. */
     deferredUsdg: t.bigint().notNull().default(0n),
-    /** Asset base units booked and not paid because the reserve was unbacked (`ReserveHaircut`, AF-05). Permanent. */
+    /** Asset base units booked and not paid because the reserve was unbacked (`ReserveHaircut`). Permanent. */
     haircutAssets: t.bigint().notNull().default(0n),
 
     depositCount: t.integer().notNull().default(0),
@@ -650,7 +650,7 @@ export const queueEpoch = onchainTable(
 //////////////////////////////////////////////////////////////*/
 
 /**
- * One row per stranded claim (AF-02), keyed by the vault's generation counter.
+ * One row per stranded claim, keyed by the vault's generation counter.
  *
  * A generation opens when `rollClose` cannot redeem the claim (`ClaimStranded`) and closes when
  * `retryStrandedClaim` does (`StrandedClaimRecovered`). Between the two, every epoch the queue
@@ -1162,6 +1162,12 @@ export const v2Order = onchainTable(
     cancelledTx: t.hex(),
     cancelledLogIndex: t.integer(),
     replacedBy: t.bigint(),
+    /**
+     * The delegate that placed this order (`OrderPlacedBy`). Null when the maker placed it:
+     * the book emits `OrderPlacedBy` only for a delegate, including a `replace` that inherits the mark,
+     * and that log names the new order id.
+     */
+    placedBy: t.hex(),
   }),
   (t) => ({
     byMaker: index().on(t.maker),
@@ -1220,9 +1226,9 @@ export const v2AccessOperation = onchainTable("v2_access_operation", (t) => ({
   // AccessManager's operation id (the `operationId` event argument). NAMED `opId`, NOT `operationId`, because
   // ponder 0.17 reserves the snake-cased columns `operation_id`, `operation` and `checkpoint` for its own reorg
   // tables and refuses the schema at build time ("'v2AccessOperation.operationId' is a reserved column name",
-  // node_modules/ponder/dist/esm/build/schema.js) -- the indexer could not boot (T-OP-197). The wire field
+  // node_modules/ponder/dist/esm/build/schema.js) -- the indexer could not boot. The wire field
   // stays `id` (src/api/v2/admin.ts operationWire); only the DB column is renamed. `opId` is the name the
-  // day-zero batch uses for the same value (callhouse-contracts docs/V8-DAY-ZERO-ADMIN-BATCH.md).
+  // day-zero batch uses for the same value.
   opId: t.hex().notNull(),
   nonce: t.bigint().notNull(),
   status: v2AccessOperationStatus("status").notNull(),
@@ -1368,6 +1374,16 @@ export const v2FlywheelBuybackSkip = onchainTable("v2_flywheel_buyback_skip", (t
   ts: t.bigint().notNull(), block: t.bigint().notNull(), logIndex: t.integer().notNull(), tx: t.hex().notNull(),
 }), (t) => ({ byTime: index().on(t.ts) }));
 
+/**
+ * FeeSplitter:BuybackBalanceWrittenDown: a buyback found less USDG in the splitter than its
+ * `buybackBalance` counter and lowered the counter to the balance. `previous - current` of the buyback reserve left by
+ * a path other than a buyback (an issuer burn or seizure) and is gone; the row is the only record of that loss.
+ */
+export const v2FlywheelBuybackWriteDown = onchainTable("v2_flywheel_buyback_write_down", (t) => ({
+  id: t.text().primaryKey(), previous: t.bigint().notNull(), current: t.bigint().notNull(),
+  ts: t.bigint().notNull(), block: t.bigint().notNull(), logIndex: t.integer().notNull(), tx: t.hex().notNull(),
+}), (t) => ({ byTime: index().on(t.ts) }));
+
 /** Concrete V4BuybackExecutor execution detail; FeeSplitter:BoughtBack remains the canonical buy receipt. */
 export const v2FlywheelExecution = onchainTable("v2_flywheel_execution", (t) => ({
   id: t.text().primaryKey(), usdgIn: t.bigint().notNull(), usdgSpent: t.bigint().notNull(),
@@ -1409,6 +1425,22 @@ export const v2CalendarHoliday = onchainTable("v2_calendar_holiday", (t) => ({
   changedAt: t.bigint().notNull(),
   changedBlock: t.bigint().notNull(),
   changedTx: t.hex().notNull(),
+}));
+
+/**
+ * ExpiryCalendar's immutable fail-closed switch (`_unseededYearsClosed`), re-derived from
+ * its construction events. The constructor emits `AuthorityUpdated` (Managed/AccessManaged) and then
+ * one `HolidaySet` per initial closure, all in its creation transaction, and the switch is on exactly
+ * when that list was non-empty. So the row is inserted by the calendar's FIRST `AuthorityUpdated` and
+ * never moved by a later one, and only a `HolidaySet(true)` in that same transaction turns it on. A
+ * later re-point plus `setHolidays` batched in one transaction cannot. Keyed by source name, like
+ * v2ContractAuthority. No row: the switch was not seen, and the API answers as if it were off.
+ */
+export const v2CalendarMode = onchainTable("v2_calendar_mode", (t) => ({
+  id: t.text().primaryKey(),
+  contract: t.hex().notNull(),
+  constructionTx: t.hex().notNull(),
+  unseededYearsClosed: t.boolean().notNull(),
 }));
 
 /** Whitelisted one-off expiries; denied entries remain visible for historical explanation. */
@@ -1548,6 +1580,18 @@ export const v2PnlCursor = onchainTable("v2_pnl_cursor", (t) => ({
   block: t.bigint().notNull(),
 }));
 
+/**
+ * What the PnL clock checks before it reads anything (src/v2/pnlInput.ts): the last block any table it
+ * reads was written at (`block`, set next to every such write) and the earliest expiry of an open self-trade lot
+ * (`nextLotExpiry`, set by the clock; null when no lot is open). An onchain table, so a reorg rewinds it with the
+ * rows it describes. Internal: no API route serves it.
+ */
+export const v2PnlInput = onchainTable("v2_pnl_input", (t) => ({
+  id: t.text().primaryKey(),
+  block: t.bigint().notNull(),
+  nextLotExpiry: t.bigint(),
+}));
+
 /** Durable evidence that two non-protocol wallets have interacted. Links are append-only. */
 export const v2SelfTradeLink = onchainTable(
   "v2_self_trade_link",
@@ -1594,7 +1638,7 @@ export const v2SelfTradeMaker = onchainTable("v2_self_trade_maker", (t) => ({
 /**
  * WHAT THE DETECTOR REFUSED TO COUNT, AND WHY. One row per reason, not per fill.
  *
- * v2SelfTradeMaker alone cannot answer the question D18 actually attached to leaving the
+ * v2SelfTradeMaker alone cannot answer the question actually attached to leaving the
  * self-trade loophole open ("the indexer flags the pattern"), because the attribution fires only
  * on `takerIsBuyer && minimumPrice && linked` (indexer/lib/v2/selfTrade.ts). Both cheap evasions
  * - pricing the primary leg one tick higher, or funding the second wallet off chain so no edge
@@ -1902,6 +1946,12 @@ export const v2Strategy = onchainTable(
     repriceCount: t.integer().notNull().default(0),
     lastStaleCancelAt: t.bigint(),
     staleSpot: t.bigint(),
+    /** The last AutoRoller PositionClosed (the position it closed is gone from currentLongId/orderId). */
+    lastClosedAt: t.bigint(),
+    lastClosedLongId: t.bigint(),
+    /** null when the close-out carried orderId 0 (stop or cancelStale had dropped the ask). */
+    lastClosedOrderId: t.bigint(),
+    lastCloseRedeemed: t.boolean(),
     updatedAt: t.bigint().notNull(),
   }),
   (t) => ({ byWriter: index().on(t.writer), byUnderlyingActive: index().on(t.underlying, t.active) }),
@@ -1955,7 +2005,7 @@ export const v2MakerEpoch = onchainTable(
     avgSpreadBps: t.bigint().notNull().default(0n),
     /**
      * The mean resting units inside 100 bps of fair. Its NAME pins its band, so it keeps that meaning and
-     * never takes the epoch band (02-interfaces.md:870-873).
+     * never takes the epoch band.
      */
     depthWithin100bps: t.bigint().notNull().default(0n),
     /**
@@ -2009,10 +2059,11 @@ export const v2StaleCancel = onchainTable("v2_stale_cancel", (t) => ({
 
 /**
  * The Earn VAULT is the lending surface: depositors supply a Stock Token or USDG, receive shares,
- * and the vault keeps what it does not need right now in a venue adapter (v8-plan/tasks/
- * P-periphery.md:19-30, P8-02). It is NOT `/earn` in the web app, which is the covered-call
- * WRITING surface (web/app/earn/page.tsx). Every table here is prefixed `v2EarnVault` for that
- * reason; the bare word means the writing surface everywhere else in this product.
+ * and the vault keeps what it does not need right now in a venue adapter.
+ * It IS `/earn` in the web app
+ * (web/app/earn/page.tsx); the covered-call WRITING surface moved to `/sell` (web/app/sell/page.tsx).
+ * Every table here is prefixed `v2EarnVault` because, in code, the bare word "earn" still names the
+ * writing surface in many places (earnTx, EarnMarket, /v2/strategies); the table names stay.
  *
  * TWO RULES THIS BLOCK IS BUILT ON.
  *
@@ -2034,7 +2085,7 @@ export const v2StaleCancel = onchainTable("v2_stale_cancel", (t) => ({
 /**
  * One configured Earn vault, keyed by its address so a second instance never overwrites the first.
  * Every configuration column is nullable: the row is created by whichever event is observed first,
- * and a skim of 0 bps or an unpaused vault are real observations that must not be confused with a
+ * and a skim of 0 bps or funding switched off are real observations that must not be confused with a
  * field nothing has reported yet.
  */
 export const v2EarnVaultState = onchainTable("v2_earn_vault_state", (t) => ({
@@ -2045,10 +2096,19 @@ export const v2EarnVaultState = onchainTable("v2_earn_vault_state", (t) => ({
   adapter: t.hex(),
   /** Yield skim to the FeeSplitter. Null means not observed; 0 means observed and skimming nothing. */
   skimBps: t.integer(),
-  /** Null means not observed; false means observed and running. */
-  paused: t.boolean(),
+  /**
+   * EarnVault.fundingEnabled from FundingEnabledSet: the JIT book-funding switch, NOT a pause (EarnVault has
+   * no deposit or withdrawal stop). Null means no FundingEnabledSet observed; the contract's default is false and the
+   * deploy does not emit it, so the API reads the flag live and uses this only as its fallback.
+   */
+  fundingEnabled: t.boolean(),
   /** Running share supply from observed mint/burn events. Null until the first is observed. */
   sharesSupply: t.bigint(),
+  /**
+   * `HighWaterMarkSet.highWaterMark`, assets per whole share (the unit `highWaterMark()`
+   * returns, not the scaled stored mark). Null until that event is observed.
+   */
+  highWaterMark: t.bigint(),
   updatedAt: t.bigint().notNull(),
   updatedBlock: t.bigint().notNull(),
   updatedLogIndex: t.integer().notNull(),
@@ -2115,7 +2175,13 @@ export const v2EarnVaultDepositQueue = onchainTable("v2_earn_vault_deposit_queue
   byStatusRequested: index().on(t.status, t.requestedAt),
 }));
 
-/** One completed withdrawal: shares burned, assets paid out. */
+/**
+ * One completed withdrawal: shares burned and `assets` SERVED. Served is not always delivered: since
+ * a payment the asset refuses (a receiver USDG has frozen) completes the request but is HELD in
+ * the vault for {claimDeferred}. The same transaction then carries EarnVault:PaymentDeferred, and what is
+ * still held for the request is v2EarnVaultHeldPayment (`${vault}-${queue id}`), with each pull in
+ * v2EarnVaultDeferredClaim.
+ */
 export const v2EarnVaultWithdrawal = onchainTable("v2_earn_vault_withdrawal", (t) => ({
   id: t.text().primaryKey(),
   vault: t.hex().notNull(),
@@ -2139,7 +2205,7 @@ export const v2EarnVaultWithdrawal = onchainTable("v2_earn_vault_withdrawal", (t
 }));
 
 /**
- * One queued withdrawal request, from the moment the venue was too illiquid to serve it. P8-02's
+ * One queued withdrawal request, from the moment the venue was too illiquid to serve it.
  * rule is "disclose, do not hide": the request exists as a row the instant it queues, and its
  * fulfilment is a separate, later observation.
  *
@@ -2164,9 +2230,11 @@ export const v2EarnVaultWithdrawalQueue = onchainTable("v2_earn_vault_withdrawal
   requestedLogIndex: t.integer().notNull(),
   requestedTx: t.hex().notNull(),
   /**
-   * What the request actually paid out. NULL MEANS STILL QUEUED OR CANCELLED — NOT A ZERO PAYOUT.
+   * What the request was served. NULL MEANS STILL QUEUED OR CANCELLED — NOT A ZERO PAYOUT.
    * A fulfilment that legitimately delivered nothing is 0. This is the same distinction
    * v2FundingAttempt.delivered draws, and the reason this column has no default.
+   * Served may be HELD rather than delivered: v2EarnVaultHeldPayment, same id, says how
+   * much of it is still waiting in the vault for its owner or receiver to claim.
    */
   fulfilledAssets: t.bigint(),
   /** All null while the request is open; set together when it is fulfilled or cancelled. */
@@ -2181,17 +2249,81 @@ export const v2EarnVaultWithdrawalQueue = onchainTable("v2_earn_vault_withdrawal
 }));
 
 /**
- * One observed yield skim out of the vault. THIS IS THE WHOLE OF WHAT THIS TASK STORES ABOUT
- * YIELD: an amount in base units and the block it happened in. No rate is derived here, and none
- * may be derived into a stored column later — a consumer that wants a period figure sums these
- * rows between two timestamps it chose itself.
+ * A queue payment the asset refused to deliver, held in the vault for its request until
+ * the owner or the receiver pulls it with `claimDeferred(id, to)`. One row per (vault, request id), the same
+ * `${vault}-${id}` key as the two queue tables: deposit and withdrawal ids share one FIFO space, so a
+ * refused withdrawal payment and a refused deposit refund cannot collide.
+ *
+ * `assets` is what is held NOW, mirroring the contract's `deferred(id).assets`: PaymentDeferred adds to it
+ * (one id can be held twice, a partial payment then the rest) and DeferredClaimed zeroes it. The running
+ * totals keep what was ever held and ever pulled; each pull is its own v2EarnVaultDeferredClaim row.
+ *
+ * `owner` is the request's owner, NEVER the receiver: PaymentDeferred carries only the receiver, so the
+ * handler reads the owner off the queue row (or `deferred(id)` when no queue row was indexed).
+ */
+export const v2EarnVaultHeldPayment = onchainTable("v2_earn_vault_held_payment", (t) => ({
+  id: t.text().primaryKey(),
+  vault: t.hex().notNull(),
+  requestId: t.bigint().notNull(),
+  owner: t.hex().notNull(),
+  receiver: t.hex().notNull(),
+  asset: t.hex().notNull(),
+  /** Held right now; 0 once claimed. */
+  assets: t.bigint().notNull(),
+  /** Every amount ever held for this request, summed. */
+  heldTotal: t.bigint().notNull(),
+  /** Every amount ever pulled for this request, summed. */
+  claimedTotal: t.bigint().notNull(),
+  /** The latest PaymentDeferred or DeferredClaimed that touched this row. */
+  updatedAt: t.bigint().notNull(),
+  updatedBlock: t.bigint().notNull(),
+  updatedLogIndex: t.integer().notNull(),
+  updatedTx: t.hex().notNull(),
+}), (t) => ({
+  byOwner: index().on(t.owner, t.updatedAt),
+  byReceiver: index().on(t.receiver, t.updatedAt),
+  byVaultHeld: index().on(t.vault, t.assets),
+}));
+
+/**
+ * One `claimDeferred` pull: who pulled (`claimant`, the owner or the receiver), where it
+ * went (`recipient`) and how much. Keyed by the log, so a claim is never overwritten by a later hold and
+ * claim on the same request id.
+ */
+export const v2EarnVaultDeferredClaim = onchainTable("v2_earn_vault_deferred_claim", (t) => ({
+  id: t.text().primaryKey(),
+  vault: t.hex().notNull(),
+  requestId: t.bigint().notNull(),
+  /** The v2EarnVaultHeldPayment row this pull drew from. */
+  heldId: t.text().notNull(),
+  claimant: t.hex().notNull(),
+  recipient: t.hex().notNull(),
+  assets: t.bigint().notNull(),
+  ts: t.bigint().notNull(),
+  block: t.bigint().notNull(),
+  logIndex: t.integer().notNull(),
+  tx: t.hex().notNull(),
+}), (t) => ({
+  byHeld: index().on(t.heldId, t.ts),
+  byClaimantTime: index().on(t.claimant, t.ts),
+}));
+
+/**
+ * One observed Skimmed log. `amount` is the fee that left the vault: a consumer that wants a period
+ * figure sums these rows between two timestamps it chose itself. `gain` and `kind` say whether a
+ * zero fee was nothing owed or a fee the vault could not take. `kind` is the label
+ * classifySkimmed returns, not a rate.
  */
 export const v2EarnVaultSkim = onchainTable("v2_earn_vault_skim", (t) => ({
   id: t.text().primaryKey(),
   vault: t.hex().notNull(),
   asset: t.hex().notNull(),
-  /** Skimmed amount in the asset's base units. */
+  /** Fee that left the vault, asset base units. Zero is not "nothing was owed". */
   amount: t.bigint().notNull(),
+  /** Skimmed.gain. Zero with a zero fee is a flat period (or a skim the vault refused to run). */
+  gain: t.bigint().notNull(),
+  /** collected | nothing | zero-rate | dust | refused. See classifySkimmed. */
+  kind: t.text().notNull(),
   /**
    * Where the skim went. Null means the log did not name a destination — it is NOT an assertion
    * that the FeeSplitter received it. The splitter's own receipt is indexed on its side.
@@ -2229,6 +2361,12 @@ export const v2EarnVaultAdapterMove = onchainTable("v2_earn_vault_adapter_move",
    */
   delivered: t.bigint(),
   succeeded: t.boolean().notNull(),
+  /**
+   * Which log wrote the row: `SweptToVenue`, `PulledFromVenue`, or `VenuePulledForFunding`.
+   * The funding pull is an `in` move like `PulledFromVenue` but it is not starvation-guarded, so a
+   * reader must not treat it as one. Null on rows indexed before this column existed.
+   */
+  sourceEvent: t.text(),
   ts: t.bigint().notNull(),
   block: t.bigint().notNull(),
   logIndex: t.integer().notNull(),
@@ -2240,16 +2378,76 @@ export const v2EarnVaultAdapterMove = onchainTable("v2_earn_vault_adapter_move",
 }));
 
 /**
+ * One `VenueWrittenOff`: `setAdapter` disconnected `adapter` while its `totalAssets()` could not be read,
+ * and its `lastKnown` value (base units of the vault's asset) left the vault's `totalAssets`. It is a loss the
+ * share price takes at that block, not a move: nothing came back, so it is not a v2EarnVaultAdapterMove row, and
+ * summing moves stays the venue's own flow. `lastKnown` can be 0 (a last known value drained to zero blind).
+ */
+export const v2EarnVaultVenueWriteOff = onchainTable("v2_earn_vault_venue_write_off", (t) => ({
+  /** `${tx}-${logIndex}`. */
+  id: t.text().primaryKey(),
+  vault: t.hex().notNull(),
+  /** The adapter written off, as the log names it (the OLD adapter; AdapterSet in the same call names the new one). */
+  adapter: t.hex().notNull(),
+  asset: t.hex().notNull(),
+  lastKnown: t.bigint().notNull(),
+  ts: t.bigint().notNull(),
+  block: t.bigint().notNull(),
+  logIndex: t.integer().notNull(),
+  tx: t.hex().notNull(),
+}), (t) => ({
+  byVaultTime: index().on(t.vault, t.ts),
+  byAdapterTime: index().on(t.adapter, t.ts),
+}));
+
+/**
+ * One hourly price observation of an Earn vault and its venue, read by eth_call at the block of a V2Clock
+ * tick (indexer/src/v2/earnSample.ts). `${vault}-${hour}`, where hour = floor(ts / 3600): at most one row per vault
+ * per hour, so the sampler costs a handful of calls an hour and nothing per block.
+ *
+ * This is the history the public APY is measured from (api/v2/earn.ts). The rate itself is NOT stored: a consumer
+ * picks two rows and divides, and the rows are the evidence. Every read column is nullable because each read can
+ * fail on its own (an older deployment, a detached adapter, an RPC error), and a failed read is not a zero.
+ */
+export const v2EarnVaultSample = onchainTable("v2_earn_vault_sample", (t) => ({
+  id: t.text().primaryKey(),
+  vault: t.hex().notNull(),
+  ts: t.bigint().notNull(),
+  block: t.bigint().notNull(),
+  /** `totalAssets()` and `totalSupply()` at this block. */
+  totalAssets: t.bigint(),
+  totalSupply: t.bigint(),
+  /** `highWaterMark()` and `skimBps()` at this block: what a `skim()` here would charge above. */
+  highWaterMark: t.bigint(),
+  skimBps: t.integer(),
+  /** totalAssets * 1e18 / totalSupply, EarnVault._pricePerShare. Null when supply is 0 or a read failed. */
+  pricePerShare: t.bigint(),
+  /** `pricePerShare` less the pending skim fee above `highWaterMark`: what a holder keeps. */
+  netPricePerShare: t.bigint(),
+  /** `hasOpenPosition()`. While true, totalAssets is the flat-NAV floor and the price is not a realised one. */
+  positionOpen: t.boolean(),
+  /** The adapter at this block, `adapter()`. Null: none attached, or not read. */
+  adapter: t.hex(),
+  /** The adapter's `venue()` and that venue's ERC-20 `name()`. */
+  venue: t.hex(),
+  venueName: t.text(),
+  /** The venue's `convertToAssets(EARN_VENUE_PROBE_SHARES)`: its own share price, for the venue APY. */
+  venueProbeAssets: t.bigint(),
+}), (t) => ({
+  byVaultTime: index().on(t.vault, t.ts),
+}));
+
+/**
  * One StockZap action. `kind` is `write` (USDG -> Stock Token credited to the Clearinghouse
  * ledger) or `exit` (wallet Stock Token -> USDG), as plain text.
  *
- * Column set mirrored from callhouse-contracts src/v2/interfaces/IStockZap.sol (worktree
- * wt/v8-contracts at b2bf1dbc), whose two events are
+ * Column set mirrored from callhouse-contracts src/v2/interfaces/IStockZap.sol,
+ * whose two events are
  *   WriteZapped(address indexed account, address indexed asset, address caller, uint256 usdgIn,
  *               uint256 assetOut, uint8 venue)
  *   ExitZapped (address indexed account, address indexed asset, address caller, uint256 assetIn,
  *               uint256 usdgOut, uint8 venue)
- * and whose topic0s are pinned in v8-plan/status/INTERFACE-CHANGES-V8.md Entry 4. `amountIn` and
+ * and whose topic0s were derived from the compiled contract. `amountIn` and
  * `amountOut` hold the pair in whichever direction the kind names; `caller` is kept separate from
  * `account` because a zap may be executed for someone else.
  */
@@ -2275,11 +2473,11 @@ export const v2ZapAction = onchainTable("v2_zap_action", (t) => ({
 }));
 
 /*//////////////////////////////////////////////////////////////
-                  P8-06 HOUSE VAULT — USER-FUNDED MM
+                  HOUSE VAULT — USER-FUNDED MM
 //////////////////////////////////////////////////////////////*/
 
 /**
- * House vault tape (P8-06 / X8-07 ingest). Separate source from MakerVault: HouseVault
+ * House vault tape (ingest). Separate source from MakerVault: HouseVault
  * composes the same quoting surface but depositor withdrawals must NEVER land in
  * v2TreasuryExit (src/v2/treasury.ts files MakerVault:Withdrawn as source "makerVault").
  *
@@ -2293,7 +2491,7 @@ export const v2ZapAction = onchainTable("v2_zap_action", (t) => ({
  * performanceFee — HouseVault.sol:231-240). 0 would mean an observed empty book.
  *
  * Event signatures are mirrored from callhouse-contracts src/v2/periphery/house/HouseVault.sol
- * and HouseVaultFactory.sol (wt/v8-contracts). Topic strings are pinned in
+ * and HouseVaultFactory.sol. Topic strings are pinned in
  * test/v2/unit/HouseVaultInterface.t.sol. PERFORMANCE_FEE_CEIL_BPS and MIN_SHARES live on
  * the contract as constants (HouseVault.sol:147-150); they are not retyped into a column.
  */
@@ -2304,6 +2502,12 @@ export const v2HouseVault = onchainTable("v2_house_vault", (t) => ({
   /** The vault IS the ERC-20 share token. */
   sharesToken: t.hex().notNull(),
   factory: t.hex().notNull(),
+  /**
+   * `weekly` | `daily` | `unknown`, from the factory the vault was enumerated from (src/v2/houseVaultKind.ts):
+   * the launch factory's vaults are weekly (they have no weekly() view), a kinded factory's vaults state it, anything else
+   * is unknown and never guessed.
+   */
+  kind: t.text().notNull(),
   name: t.text().notNull(),
   symbol: t.text().notNull(),
   createdAt: t.bigint().notNull(),
@@ -2459,6 +2663,30 @@ export const v2HouseQueueSettlement = onchainTable("v2_house_queue_settlement", 
 }));
 
 /** In-kind payout (and/or shares from a priced deposit) from Claimed. */
+/**
+ * One row per HouseVault.depositNow (instant deposit): `usdgAmount` is the USDG the vault RECEIVED
+ * (balance delta, not the argument) and `shares` what it minted to `account`, during `epochId`. The shares themselves
+ * are NOT booked here: depositNow's `_mint(msg.sender, shares)` emits Transfer(0 -> account) first, and the Transfer
+ * handler already moves v2HouseShareBalance and v2HouseVault.sharesSupply. This row is the deposit FACT (what was
+ * paid, for how many shares, when), which no Transfer carries. Never counted in any EpochRolled (HouseVault.sol
+ * `DepositedNow` NatSpec), so v2HouseQueueSettlement.sharesMinted excludes it by construction.
+ */
+export const v2HouseInstantDeposit = onchainTable("v2_house_instant_deposit", (t) => ({
+  id: t.text().primaryKey(),
+  vault: t.hex().notNull(),
+  account: t.hex().notNull(),
+  usdgAmount: t.bigint().notNull(),
+  shares: t.bigint().notNull(),
+  epochId: t.bigint().notNull(),
+  ts: t.bigint().notNull(),
+  block: t.bigint().notNull(),
+  logIndex: t.integer().notNull(),
+  tx: t.hex().notNull(),
+}), (t) => ({
+  byVaultTime: index().on(t.vault, t.ts),
+  byAccountTime: index().on(t.account, t.ts),
+}));
+
 export const v2HouseClaim = onchainTable("v2_house_claim", (t) => ({
   id: t.text().primaryKey(),
   vault: t.hex().notNull(),
@@ -2475,18 +2703,88 @@ export const v2HouseClaim = onchainTable("v2_house_claim", (t) => ({
   byAccountTime: index().on(t.account, t.ts),
 }));
 
-/** Performance fee paid to the immutable splitter at the boundary. 0 is a real observation. */
+/**
+ * EpochRolled.performanceFee at the boundary. 0 is a real observation.
+ *
+ * WHAT IT MEANS DEPENDS ON THE VAULT'S BUILD. A vault compiled before the charged-fee change (the v8 launch vaults) cut the fee to
+ * the unreserved USDG and emitted what it PAID the immutable splitter. A v9 vault emits the fee CHARGED to the holders
+ * (HouseVault.sol `EpochRolled` NatSpec): what the wallet could not pay stays in `performanceFeeOwed`, excluded from NAV,
+ * and is paid at a later boundary. Logs that payment as `PerformanceFeePaid` (v2HousePerformanceFeePaid);
+ * this row is still the charged amount. So for a v9 vault `amount` is not USDG that reached the
+ * splitter, and summing it is not splitter revenue.
+ *
+ * THE PAID SPLIT. `owedBefore` / `owedAfter` are HouseVault.performanceFeeOwed() read at the block before the
+ * roll and at the roll's block; `paid` = amount + owedBefore - owedAfter is the USDG that reached the splitter at this
+ * boundary (the carried fee changes only inside the roll). Each owed column is NULL when its own read fails, and
+ * `paid` is NULL when either is: always for a v8 vault (no such view, and there `amount` already is what was paid),
+ * and for a v9 vault whose read errored. Null means unknown, never 0.
+ */
 export const v2HousePerformanceFee = onchainTable("v2_house_performance_fee", (t) => ({
   id: t.text().primaryKey(),
   vault: t.hex().notNull(),
   epochId: t.bigint().notNull(),
   amount: t.bigint().notNull(),
+  owedBefore: t.bigint(),
+  owedAfter: t.bigint(),
+  paid: t.bigint(),
   ts: t.bigint().notNull(),
   block: t.bigint().notNull(),
   logIndex: t.integer().notNull(),
   tx: t.hex().notNull(),
 }), (t) => ({
   byVaultEpoch: index().on(t.vault, t.epochId),
+}));
+
+/**
+ * `PerformanceFeePaid`: USDG of the performance fee that reached the splitter (`paid`)
+ * and `performanceFeeOwed` left after (`owed`). Emitted only when either changed. This is the
+ * payment the charged-fee row above does not name.
+ */
+export const v2HousePerformanceFeePaid = onchainTable("v2_house_performance_fee_paid", (t) => ({
+  id: t.text().primaryKey(),
+  vault: t.hex().notNull(),
+  epochId: t.bigint().notNull(),
+  paid: t.bigint().notNull(),
+  owed: t.bigint().notNull(),
+  ts: t.bigint().notNull(),
+  block: t.bigint().notNull(),
+  logIndex: t.integer().notNull(),
+  tx: t.hex().notNull(),
+}), (t) => ({ byVaultEpoch: index().on(t.vault, t.epochId) }));
+
+/**
+ * `EpochBatchesPriced`: the deposit batch's USDG value and whether it was refused, and
+ * the USDG and Stock Tokens reserved for the withdrawal batch, as recorded at the boundary before
+ * claims run the totals down.
+ */
+export const v2HouseEpochBatches = onchainTable("v2_house_epoch_batches", (t) => ({
+  id: t.text().primaryKey(),
+  vault: t.hex().notNull(),
+  epochId: t.bigint().notNull(),
+  depositValue: t.bigint().notNull(),
+  depositRefused: t.boolean().notNull(),
+  withdrawUsdg: t.bigint().notNull(),
+  withdrawStock: t.bigint().notNull(),
+  ts: t.bigint().notNull(),
+  block: t.bigint().notNull(),
+  logIndex: t.integer().notNull(),
+  tx: t.hex().notNull(),
+}), (t) => ({ byVaultEpoch: index().on(t.vault, t.epochId) }));
+
+/**
+ * The latest `EpochOpened` for a vault, keyed by the vault and not by v2HouseVault.
+ * The constructor emits EpochOpened BEFORE the factory's VaultCreated, so a handler that only
+ * updates an existing vault row would drop epoch 0's end. Later rolls overwrite this row; the
+ * closed epoch's end stays on v2HouseEpoch.
+ */
+export const v2HouseEpochOpened = onchainTable("v2_house_epoch_opened", (t) => ({
+  vault: t.hex().primaryKey(),
+  epochId: t.bigint().notNull(),
+  epochEnd: t.bigint().notNull(),
+  ts: t.bigint().notNull(),
+  block: t.bigint().notNull(),
+  logIndex: t.integer().notNull(),
+  tx: t.hex().notNull(),
 }));
 
 /**
@@ -2520,7 +2818,7 @@ export const v2HouseFill = onchainTable("v2_house_fill", (t) => ({
 
 /**
  * Self-dealing refusal. HouseVault.take reverts V2Errors.NotAuthorized with NO LOG
- * (HouseVault.sol:794-799). This table exists so the name is landed for T-X8-07-API; ingest
+ * (HouseVault.sol:794-799). This table exists so the name is landed for ingest
  * never invents a row from Transfer or ProtocolAccountSet. Protocol counterparties are
  * v2HouseProtocolAccount.
  */
@@ -2584,7 +2882,7 @@ export const v2HouseExposure = onchainTable("v2_house_exposure", (t) => ({
 }));
 
 /*//////////////////////////////////////////////////////////////
-       T-295: STATE FACTS THAT HAD NOWHERE TO PERSIST
+       STATE FACTS THAT HAD NOWHERE TO PERSIST
 //////////////////////////////////////////////////////////////*/
 
 /**
@@ -2592,7 +2890,7 @@ export const v2HouseExposure = onchainTable("v2_house_exposure", (t) => ({
  *
  * Every restricted contract emits this on deployment and on any later re-pointing. Until now the
  * indexer read none of them, so the only statement anywhere about who governs a contract was the
- * deploy manifest — a document, not chain state. Read by the /trust page (W8-02a) and by
+ * deploy manifest — a document, not chain state. Read by the /trust page and by
  * /v2/config's `accessManager`: a contract whose authority is NOT the deployed AccessManager is
  * the launch check this table exists to make answerable.
  */
@@ -2678,7 +2976,7 @@ export const v2ContractFunding = onchainTable("v2_contract_funding", (t) => ({
  * One rewards epoch as published on chain, from `RootSet`.
  *
  * The Merkle root and the epoch total are what a claim is checked against, so the claim UI cannot
- * show a claimable amount without them (P8-05 / T-113). Off-chain epoch generation produces the
+ * show a claimable amount without them. Off-chain epoch generation produces the
  * same numbers; this row is the chain's copy, and a disagreement between them is the thing worth
  * seeing.
  */
@@ -2772,9 +3070,8 @@ export const v2MakerVaultLimits = onchainTable("v2_maker_vault_limits", (t) => (
 /**
  * A withdrawal of an owed balance from the OrderBook, from `OwedClaimed`.
  *
- * The book credits `owed` when a transfer to a maker fails, and the maker claims it later. The
- * credit side is already indexed; the claim was not, so an owed balance appeared permanent. Read by
- * the account page's owed line, which must go to zero after a claim.
+ * The book credits `owed` when a transfer fails (`OwedCredited`, v2OwedCredit) and the account
+ * claims it later. Read by the account page's owed line, which must go to zero after a claim.
  */
 export const v2OwedClaim = onchainTable("v2_owed_claim", (t) => ({
   /** `${tx}-${logIndex}`. */
@@ -2788,9 +3085,24 @@ export const v2OwedClaim = onchainTable("v2_owed_claim", (t) => ({
 }), (t) => ({ byAccountTime: index().on(t.account, t.ts) }));
 
 /**
+ * One failed USDG payout the book credited to `owed` instead (`OwedCredited`). The claim
+ * of that balance is v2OwedClaim. Neither row is a running balance: the balance is credits minus claims.
+ */
+export const v2OwedCredit = onchainTable("v2_owed_credit", (t) => ({
+  /** `${tx}-${logIndex}`. */
+  id: t.text().primaryKey(),
+  account: t.hex().notNull(),
+  amount: t.bigint().notNull(),
+  ts: t.bigint().notNull(),
+  block: t.bigint().notNull(),
+  logIndex: t.integer().notNull(),
+  tx: t.hex().notNull(),
+}), (t) => ({ byAccountTime: index().on(t.account, t.ts) }));
+
+/**
  * A market's settlement-oracle configuration, from `MarketConfigured`: the source list in priority
  * order and the three parameters the fallback chain is judged by. Read by /v2/markets' settlement
- * metadata (X3-101) and by the /trust page; a market whose sources changed between two expiries is
+ * metadata and by the /trust page; a market whose sources changed between two expiries is
  * only visible here.
  */
 export const v2OracleMarketConfig = onchainTable("v2_oracle_market_config", (t) => ({
@@ -2825,7 +3137,29 @@ export const v2OracleExpiryConfig = onchainTable("v2_oracle_expiry_config", (t) 
   pinnedBlock: t.bigint().notNull(),
   pinnedLogIndex: t.integer().notNull(),
   pinnedTx: t.hex().notNull(),
+  /**
+   * `SettlementPinConfirmed`: a second Clearinghouse confirmed this pin and `pin` now
+   * records `pinner`. Null until that log. `previousPinner` is the Clearinghouse it superseded.
+   */
+  pinner: t.hex(),
+  previousPinner: t.hex(),
 }), (t) => ({ byUnderlying: index().on(t.underlying) }));
+
+/**
+ * One `SettlementPinConfirmed` log. The expiry-config row above keeps the latest pinner;
+ * this row is the log itself, so a confirm that arrives before the pin row is still stored.
+ */
+export const v2OraclePinConfirm = onchainTable("v2_oracle_pin_confirm", (t) => ({
+  id: t.text().primaryKey(),
+  underlying: t.hex().notNull(),
+  expiry: t.bigint().notNull(),
+  previousPinner: t.hex().notNull(),
+  pinner: t.hex().notNull(),
+  ts: t.bigint().notNull(),
+  block: t.bigint().notNull(),
+  logIndex: t.integer().notNull(),
+  tx: t.hex().notNull(),
+}), (t) => ({ byExpiry: index().on(t.underlying, t.expiry) }));
 
 /**
  * Which contracts KeeperRewards will pay a bounty on behalf of, from `CallerSet`. Not a scalar

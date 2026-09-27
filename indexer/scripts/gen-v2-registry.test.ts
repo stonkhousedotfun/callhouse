@@ -26,7 +26,7 @@ const base = () => ({ shared: { chainId: 4663, safes: {
     ladder: {}, expiriesAhead: { daily: 3, weekly: 2 }, uncorroboratedDelayS: 21_600,
   },
 },
-// T-OP-099. The owner's launch set; required, validated against markets[].
+// The launch set; required, validated against markets[].
 launchSet: { note: "test launch set" as string | null | undefined, markets: ["NVDA"] as unknown[] } as
   { note: string | null | undefined; markets: unknown[] } | null | undefined,
 markets: [{ ticker: "NVDA", name: "NVIDIA", asset: "0x1111111111111111111111111111111111111111",
@@ -68,7 +68,7 @@ describe("v8 consumer registry projection", () => {
       stderr: expect.stringContaining("NVDA.verification.uiMultiplier must be a canonical positive decimal string") });
   });
 
-  it("projects the launch set verbatim and refuses a missing, empty, duplicate or unknown one (T-OP-099)", () => {
+  it("projects the launch set verbatim and refuses a missing, empty, duplicate or unknown one", () => {
     expect(run(base()).data.launchSet).toEqual({ note: "test launch set", markets: ["NVDA"] });
     const missing = base(); missing.launchSet = undefined;
     expect(run(missing)).toMatchObject({ status: 1, stderr: expect.stringContaining("launchSet must be an object of { note, markets }") });
@@ -251,5 +251,92 @@ describe("v8 consumer registry projection", () => {
     const registry = base();
     registry.markets[0]!.v2.univ3Pool = "0xd4eb21209c4d6093f80b5b84f5c45cc093ea14a3";
     expect(run(registry).data.markets[0].settlement).toMatchObject({ sourceCount: 2, route: null });
+  });
+});
+
+describe("the House factories and vaults the indexer's HouseVault source filters on", () => {
+  const FACTORY = "0x5bea4c9887c322d5ec8c7ae547c25091599774d2";
+  const WEEKLY = "0xfb5ccb9cf9249e46d8af0c4f8fe7eaa9bd7bff51";
+  const DAILY = "0x53ef3ff548fe3eaa1a1c0a0e010ed0abb5365201";
+  type House = { factories?: unknown; };
+  const withHouse = (house: House | undefined, v2: { houseVault?: unknown; house?: unknown } = {},
+    contracts: Record<string, unknown> = {}) => {
+    const registry = base();
+    const v2Block = registry.v2 as Record<string, unknown>;
+    if (house !== undefined) v2Block.house = house;
+    Object.assign(registry.v2.contracts, contracts);
+    Object.assign(registry.markets[0]!.v2, v2);
+    return registry;
+  };
+
+  it("projects empty lists for a registry with no house block", () => {
+    expect(run(base()).data.house).toEqual({ factories: [], vaults: [] });
+  });
+
+  it("projects every recorded vault once, checksummed, with the factories and their deploy blocks", () => {
+    const registry = withHouse(
+      { factories: [{ kind: "weekly", address: FACTORY, deployBlock: 69_517_900 }] },
+      { houseVault: WEEKLY, house: { weekly: WEEKLY, daily: DAILY } },
+      { houseVault: WEEKLY, houseVaultFactory: FACTORY },
+    );
+    const result = run(registry);
+    expect(result.status, result.stderr).toBe(0);
+    expect(result.data.house).toEqual({
+      factories: [{ kind: "weekly", address: "0x5BEa4c9887C322d5Ec8C7ae547c25091599774d2", deployBlock: 69_517_900 }],
+      vaults: [
+        { ticker: "NVDA", kind: "weekly", address: "0xfb5CcB9CF9249E46D8Af0C4f8fe7Eaa9bD7BfF51" },
+        { ticker: "NVDA", kind: "daily", address: "0x53eF3ff548Fe3EaA1A1c0a0E010ED0aBB5365201" },
+      ],
+    });
+  });
+
+  // The launch vault carries the launch factory's kind. On v9 the launch factory is the DAILY entry and
+  // build-markets requires houseVault == house.daily; projecting houseVault as weekly first made the dedupe drop the
+  // correct daily entry. The case above is the v8 control (weekly launch factory: weekly, once).
+  it("v9: a daily launch factory's vault is projected once, as daily", () => {
+    const V9_FACTORY = "0x000000000000000000000000000000000000f009";
+    const registry = withHouse(
+      { factories: [{ kind: "daily", address: V9_FACTORY, deployBlock: 70_100_000 }] },
+      { houseVault: DAILY, house: { weekly: null, daily: DAILY } },
+      { houseVault: DAILY, houseVaultFactory: V9_FACTORY },
+    );
+    const result = run(registry);
+    expect(result.status, result.stderr).toBe(0);
+    expect(result.data.house.vaults).toEqual([
+      { ticker: "NVDA", kind: "daily", address: "0x53eF3ff548Fe3EaA1A1c0a0E010ED0aBB5365201" },
+    ]);
+  });
+
+  it("refuses a launch factory recorded under both kinds, which build-markets refuses too", () => {
+    const registry = withHouse(
+      { factories: [{ kind: "weekly", address: FACTORY, deployBlock: 1 }, { kind: "daily", address: FACTORY, deployBlock: 1 }] },
+      { houseVault: WEEKLY },
+      { houseVaultFactory: FACTORY },
+    );
+    const result = run(registry);
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain("as BOTH weekly and daily");
+  });
+
+  it("keeps v2.contracts.houseVault when no market names it, with a null ticker", () => {
+    const registry = withHouse({ factories: [] }, {}, { houseVault: WEEKLY });
+    expect(run(registry).data.house.vaults).toEqual([
+      { ticker: null, kind: "weekly", address: "0xfb5CcB9CF9249E46D8Af0C4f8fe7Eaa9bD7BfF51" },
+    ]);
+  });
+
+  it.each([
+    ["a zero vault", {}, { houseVault: "0x0000000000000000000000000000000000000000" }, "NVDA.v2.houseVault is the zero address"],
+    ["a malformed daily vault", {}, { house: { weekly: null, daily: "0x1234" } }, "NVDA.v2.house.daily must be an address"],
+    ["a malformed factory", { factories: [{ kind: "weekly", address: "nope", deployBlock: 1 }] }, {},
+      "v2.house.factories[0].address must be an address"],
+    ["a factory of unknown kind", { factories: [{ kind: "hourly", address: FACTORY, deployBlock: 1 }] }, {},
+      "v2.house.factories[0].kind must be weekly or daily"],
+    ["a factory with a bad deploy block", { factories: [{ kind: "weekly", address: FACTORY, deployBlock: 0 }] }, {},
+      "v2.house.factories[0].deployBlock must be null or a positive safe integer"],
+  ])("refuses %s", (_label, house, v2, message) => {
+    const result = run(withHouse(house, v2));
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain(message);
   });
 });

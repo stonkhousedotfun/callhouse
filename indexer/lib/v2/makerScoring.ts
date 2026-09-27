@@ -16,7 +16,7 @@ export const FAIR_BAND_BPS = 100n;
 /**
  * Depth is measured in 0.01-share units inside one percent of fair. THIS CONSTANT NEVER MOVES AND NEVER
  * TAKES THE EPOCH BAND: `depthWithin100bps` is the one published field whose NAME pins its band
- * (02-interfaces.md:870-873), so re-pointing it at the policy band would change a published statistic's
+ * so re-pointing it at the policy band would change a published statistic's
  * meaning while leaving its name intact. `depthInBand` is the band-relative twin.
  */
 export const DEPTH_BAND_BPS = 100n;
@@ -30,11 +30,11 @@ export type ScoringBand = { bps: bigint; minUsdg: bigint };
  * epoch object so a consumer can see which policy produced a figure, and changing them later is a data
  * change rather than a code change at a dozen use sites.
  *
- * THESE VALUES ARE OQ-14 PLACEHOLDERS AND ARE NOT APPROVED FOR FUNDED USE
- * (02-interfaces.md:863-866, OWNER-DECISIONS-2026-09-19.md D9). Band 1000 bps with a 0.02 USDG floor and
+ * THESE VALUES ARE PLACEHOLDERS AND ARE NOT APPROVED FOR FUNDED USE
+ * Band 1000 bps with a 0.02 USDG floor and
  * weights 50/30/20/0 are PROPOSALS; a 0.03 USDG floor was also proposed and neither floor is approved.
- * X3-201 confirms them before any funded epoch. D9 also forbids widening the band merely to reward poor
- * quotes, so widening it is an owner decision, not a tuning knob.
+ * They need confirming before any funded epoch. The benchmark rules also forbid widening the band merely to reward poor
+ * quotes, so widening it is a governance decision, not a tuning knob.
  *
  * `minUsdg` is in USDG base units (6 dp), the same unit as an order price: 20_000n is 0.02 USDG.
  * Weights are percentages and MUST sum to 100.
@@ -43,6 +43,11 @@ export const MAKER_SCORING_POLICY = Object.freeze({
   /** Bump whenever the band or the weights change what a score means. */
   version: 1,
   band: Object.freeze({ bps: 1_000n, minUsdg: 20_000n }) as ScoringBand,
+  // `volume` MUST STAY 0n UNTIL A WASH-TRADE FILTER LANDS. Resale premium volume is free to fabricate (a
+  // maker can trade with itself through a second address), so any weight above 0 makes the maker reward farmable.
+  // The v9 pre-deploy verification found this NOT REAL only because the weight is 0 (contracts
+  // OrderBook review). Pinned by
+  // src/v2/makerScoring.test.ts; raising it needs a filter first, then a governance decision, never a tuning change.
   weights: Object.freeze({ uptime: 50n, depth: 30n, spread: 20n, volume: 0n }),
 });
 
@@ -57,9 +62,9 @@ if (WEIGHT_TOTAL !== 100n) {
 /**
  * WHICH BENCHMARK PRODUCED A SCORE. Scores, uptime, spread and depth are comparable ONLY between rows
  * with the same policy; across policies they are different measurements that share a name.
- *   1 - the live /fair pricing estimate (6090d49 until callhouse 109e664b). It was never recorded, so a
+ *   1 - the live /fair pricing estimate (used until policy 2 replaced it). It was never recorded, so a
  *       maker row or API item that carries no policy is a policy-1 figure.
- *   2 - chain only (T-307, callhouse 109e664b): the premium-weighted price of OTHER participants'
+ *   2 - chain only: the premium-weighted price of OTHER participants'
  *       fills on the series in the last hour. Replaying the same blocks gives the same figures.
  * Bump it whenever the benchmark or the sample rules change what a figure means.
  */
@@ -120,7 +125,7 @@ function within(price: bigint, fair: bigint, bandBps: bigint): boolean {
 }
 
 /**
- * The band test, exactly as 02-interfaces.md:895 states it: a price is inside the band when
+ * The band test, exactly: a price is inside the band when
  * `|price - fair| <= max(fair * bps / 10_000, minUsdg)`. The floor is what keeps a cheap series from being
  * scored on rounding: 1000 bps of a 0.05 USDG fair is 0.005 USDG, narrower than one price tick.
  */
@@ -134,7 +139,7 @@ export function withinBand(price: bigint, fair: bigint, band: ScoringBand): bool
 /**
  * Orders have already passed the same expiry and AskWrite collateral checks as /v2/book.
  *
- * `band` decides the two-sided test behind uptime and spread AND `depthInBand` (02-interfaces.md:895-897).
+ * `band` decides the two-sided test behind uptime and spread AND `depthInBand`.
  * `depthWithin100bps` is computed from {@link DEPTH_BAND_BPS} in the same pass and ignores `band` entirely,
  * which is the whole point of keeping both: one field's name pins its band, the other's does not.
  */
@@ -198,7 +203,7 @@ export function emptyMakerEpoch(maker: `0x${string}`, epoch: bigint, tierBps = 0
  */
 export function advanceMakerEpoch(previous: MakerEpochState, samples: readonly MakerSample[], flows: FlowTotals, tierBps: number): MakerEpochState {
   // One epoch row is one definition. Ponder never serves two builds from one schema, so a mismatch here
-  // means a row was written by other code; averaging into it is exactly the silent mix T-312 forbids.
+  // means a row was written by other code; averaging into it is exactly the silent mix the policy check below forbids.
   if (previous.benchmarkPolicy !== MAKER_BENCHMARK_POLICY) {
     throw new RangeError(`maker epoch row is benchmark policy ${previous.benchmarkPolicy}, not ${MAKER_BENCHMARK_POLICY}`);
   }
@@ -247,7 +252,7 @@ function rank(rows: readonly MakerEpochState[], current: MakerEpochState, value:
  * published `band`/policy cannot describe.
  *
  * DEPTH IS RANKED ON `depthInBand`, not on `depthWithin100bps`. The score is defined against the epoch's
- * policy (02-interfaces.md:857-860), and `depthWithin100bps` is a published statistic on a fixed band that
+ * policy, and `depthWithin100bps` is a published statistic on a fixed band that
  * the policy does not control.
  */
 export function scoreMakerEpochs(rows: readonly MakerEpochState[]): MakerEpochState[] {

@@ -28,7 +28,7 @@ export type PricePreset = { key: PresetKey; label: string; price: bigint | null 
 export const CURVE_VIEW = { width: 640, height: 260, left: 24, right: 24, top: 22, bottom: 44 } as const;
 const CENT = 10_000n;
 const RATIO_SCALE = 1_000_000n;
-/** Widest preset, in percent of spot; the range must contain it on both sides (design §2.2). */
+/** Widest preset, in percent of spot; the range must contain it on both sides. */
 const PRESET_REACH_PERCENT = 20n;
 const PRESET_STEPS: { key: PresetKey; label: string; bps: bigint }[] = [
   { key: "-20", label: "−20 %", bps: -2_000n }, { key: "-10", label: "−10 %", bps: -1_000n }, { key: "-5", label: "−5 %", bps: -500n },
@@ -59,7 +59,7 @@ function toCent(raw: bigint): bigint {
   return rounded < CENT ? CENT : rounded;
 }
 
-/** The preset chips (design §2.3), in display order. Percentages are of SPOT and snap to the cent; "At strike"
+/** The preset chips, in display order. Percentages are of SPOT and snap to the cent; "At strike"
  * is the strike itself; "Break-even" is null when the option cannot cover its cost at any price. Callers pass
  * whichever break-even they show as the hero mark (the USDG one for a call). */
 export function presetPrices(spot: bigint, strike: bigint, breakeven: bigint | null): PricePreset[] {
@@ -128,7 +128,7 @@ export function buildPayoffCurve(spot: bigint, position: PayoffPosition, cost: b
   const range = payoffPriceRange(spot, position.strike);
   if (cost < 0n) throw new RangeError("cost must be nonnegative");
   if (breakevenUsdgPrice !== null && breakevenUsdgPrice < 0n) throw new RangeError("breakevenUsdgPrice must be nonnegative");
-  // W2-02 validates units, strike and fee bounds in payoutAt / breakeven.
+  // Units, strike and fee bounds are validated in payoutAt / breakeven.
   const threshold = breakeven(position, cost);
   const prices = new Set<bigint>([range.min, range.max, spot]);
   for (let i = 1n; i < 64n; i++) {

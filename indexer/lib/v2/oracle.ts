@@ -104,3 +104,21 @@ export function oracleSeriesStatus(current: SeriesStatus, settlement: Settlement
   if (settlement === "Pending" || settlement === "Finalized") return "settling";
   return current;
 }
+
+/**
+ * The status a verdict gives a series at time `at`. Before expiry it gives none: SettlementOracle.veto is
+ * "allowed at any time before finalization, including before expiry" and unveto has no time check either, while
+ * OrderBook._place/_plan, Clearinghouse.mint and SettlementOracle.pin read no settlement status. A pre-emptive veto
+ * therefore leaves every series on that expiry minting and trading until its cutoff and expiry; marking it held or
+ * settling hid a live book and dropped the expiry from /markets. The verdict is applied from expiry on, by the oracle
+ * handler for later events and by the V2Clock sweep for a verdict that arrived first.
+ */
+export function seriesStatusOnVerdict(
+  current: SeriesStatus,
+  settlement: SettlementStatus | null,
+  expiry: bigint,
+  at: bigint,
+): SeriesStatus {
+  if (at < expiry && (current === "open" || current === "cutoff")) return current;
+  return settlement === null ? current : oracleSeriesStatus(current, settlement);
+}

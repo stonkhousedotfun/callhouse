@@ -1,5 +1,5 @@
 import { beforeAll, describe, expect, it, vi } from "vitest";
-import { encodeAbiParameters, encodeEventTopics, toEventSelector } from "viem";
+import { type Address, encodeAbiParameters, encodeEventTopics, toEventSelector } from "viem";
 
 import { buybackExecutorAbi } from "../../abis/v2/buybackExecutor";
 import { erc20Abi } from "../../abis/erc20";
@@ -29,6 +29,7 @@ vi.mock("ponder:schema", () => ({ default: {
   v2PayoutRoute: "v2PayoutRoute", v2FlywheelDistribution: "v2FlywheelDistribution",
   v2FlywheelDistributionSkip: "v2FlywheelDistributionSkip", v2FlywheelBuyback: "v2FlywheelBuyback",
   v2FlywheelBurn: "v2FlywheelBurn", v2FlywheelBuybackSkip: "v2FlywheelBuybackSkip",
+  v2FlywheelBuybackWriteDown: "v2FlywheelBuybackWriteDown",
   v2FlywheelExecution: "v2FlywheelExecution", v2FlywheelExecutorBurn: "v2FlywheelExecutorBurn",
   v2TreasuryExit: "v2TreasuryExit", v2FlywheelStrandedFees: "v2FlywheelStrandedFees",
 } }));
@@ -41,8 +42,16 @@ function memoryDb() {
     return value;
   };
   const rowKey = (row: any) => String(row.id ?? row.asset);
+  const lookupKey = (key: any) => String(key.id ?? key.asset);
   return {
     rows,
+    find: async (name: string, key: any) => table(name).get(lookupKey(key)) ?? null,
+    update: (name: string, key: any) => ({ set: async (values: any) => {
+      const id = lookupKey(key);
+      const next = { ...table(name).get(id), ...values };
+      table(name).set(id, next);
+      return next;
+    } }),
     insert: (name: string) => ({ values: (row: any) => {
       const key = rowKey(row);
       const previous = table(name).get(key);
@@ -66,7 +75,7 @@ const event = (args: object, address: string) => ({
   log: { logIndex: nextLog++, address },
 });
 
-const transferLog = (from: string, to: string, value: bigint, logIndex: number) => ({
+const transferLog = (from: Address, to: Address, value: bigint, logIndex: number) => ({
   address: "0x000000000000000000000000000000000000d001",
   topics: encodeEventTopics({ abi: erc20Abi, eventName: "Transfer", args: { from, to } }),
   data: encodeAbiParameters([{ type: "uint256" }], [value]),
@@ -74,7 +83,7 @@ const transferLog = (from: string, to: string, value: bigint, logIndex: number) 
 });
 
 /** An OwedClaimed log as the BOOK emits it: `account` is the claimant, the book is `address`. */
-const owedClaimedLog = (book: string, account: string, amount: bigint, logIndex: number) => ({
+const owedClaimedLog = (book: Address, account: Address, amount: bigint, logIndex: number) => ({
   address: book,
   topics: encodeEventTopics({ abi: orderBookAbi, eventName: "OwedClaimed", args: { account } }),
   data: encodeAbiParameters([{ type: "uint256" }], [amount]),
@@ -82,7 +91,7 @@ const owedClaimedLog = (book: string, account: string, amount: bigint, logIndex:
 });
 
 /** An OrderBookFeesStranded log as the SPLITTER emits it; `orderBook` is the indexed arg. */
-const strandedLog = (splitter: string, book: string, amount: bigint, logIndex: number) => ({
+const strandedLog = (splitter: Address, book: Address, amount: bigint, logIndex: number) => ({
   address: splitter,
   topics: encodeEventTopics({ abi: feeSplitterAbi, eventName: "OrderBookFeesStranded", args: { orderBook: book } }),
   data: encodeAbiParameters([{ type: "uint256" }], [amount]),
@@ -130,6 +139,33 @@ describe("v8 flywheel, router, and treasury exit reducers", () => {
     });
   });
 
+  it("RouteFeeRefreshed updates feeBps and leaves the route identity alone", async () => {
+    const db = memoryDb();
+    const router = "0x000000000000000000000000000000000000a010";
+    const asset = "0x000000000000000000000000000000000000a011";
+    const pool = "0x000000000000000000000000000000000000a012";
+    const context = { db, client: { readContract: async ({ functionName }: any) => {
+      if (functionName === "routes") return { venue: 1, fee: 100, tickSpacing: 0, v3Pool: pool, feeBps: 1 };
+      throw new Error(`unexpected ${functionName}`);
+    } } };
+    await handlers.get("PayoutRouter:RouteSet")!({
+      event: event({ asset, venue: 1, poolId: `0x${"0".repeat(24)}${pool.slice(2)}`, fee: 100, feeBps: 1 }, router),
+      context,
+    });
+    await handlers.get("PayoutRouter:RouteFeeRefreshed")!({
+      event: event({ asset, previousFeeBps: 1, feeBps: 30 }, router),
+      context,
+    });
+    expect(db.rows.get("v2PayoutRoute")?.get(asset)).toMatchObject({
+      active: true, venue: 1, fee: 100, v3Pool: pool, feeBps: 30,
+    });
+    const missing = memoryDb();
+    await expect(handlers.get("PayoutRouter:RouteFeeRefreshed")!({
+      event: event({ asset, previousFeeBps: 1, feeBps: 30 }, router),
+      context: { db: missing, client: context.client },
+    })).rejects.toThrow(/no route row/);
+  });
+
   it("attributes a distribution to its transfer recipient across a same-block treasury rotation", async () => {
     const db = memoryDb();
     const splitter = "0x000000000000000000000000000000000000a020";
@@ -168,6 +204,23 @@ describe("v8 flywheel, router, and treasury exit reducers", () => {
       asset: "0x000000000000000000000000000000000000d001",
       recipient: treasuryAtDistribution, amount: 40n,
     });
+  });
+
+  it("stores a buyback reserve write-down with both counter values", async () => {
+    // The generated ABI carries the event with the topic the contracts pin (FeeSplitter.t.sol,
+    // `cast keccak "BuybackBalanceWrittenDown(uint256,uint256)"`), so the source is subscribed to the real log.
+    const writtenDown = feeSplitterAbi.find((item) => item.type === "event" && item.name === "BuybackBalanceWrittenDown")!;
+    expect(toEventSelector(writtenDown)).toBe("0x77b3db54d02718b51059d369d8dfc3e2dace0d81e9343283d12eb7a03d468ca4");
+    const db = memoryDb();
+    const splitter = "0x000000000000000000000000000000000000a040";
+    const logged = event({ previous: 150_000_000n, current: 40_000_000n }, splitter);
+    await handlers.get("FeeSplitter:BuybackBalanceWrittenDown")!({ event: logged, context: { db } });
+    const rows = [...(db.rows.get("v2FlywheelBuybackWriteDown")?.values() ?? [])];
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({
+      id: `${tx}-${logged.log.logIndex}`, previous: 150_000_000n, current: 40_000_000n, ts: 700n, block: 800n, tx,
+    });
+    expect(db.rows.get("v2FlywheelBuybackSkip"), "a write-down is not a skip").toBeUndefined();
   });
 
   it("keeps executor burn audit separate from the canonical splitter burn", async () => {
@@ -213,11 +266,11 @@ describe("v8 flywheel, router, and treasury exit reducers", () => {
   });
 
   // ---------------------------------------------------------------------------------------------
-  // T-510. FeeSplitter._drainOrderBook emits OrderBookFeesStranded at three sites whose payloads
+  // FeeSplitter._drainOrderBook emits OrderBookFeesStranded at three sites whose payloads
   // (orderBook, amount) cannot be told apart on their own. The handler separates them by whether
   // OrderBook.claimOwed's OwedClaimed log is present in the same transaction: it is emitted BEFORE
   // the transfer, so a revert inside the splitter's try/catch rolls it back with everything else.
-  describe("T-510 stranded fee sweeps", () => {
+  describe("stranded fee sweeps", () => {
     const splitter = "0x000000000000000000000000000000000000a030";
     const bookA = "0x000000000000000000000000000000000000a031";
     const bookB = "0x000000000000000000000000000000000000a032";

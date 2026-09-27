@@ -192,7 +192,7 @@ describe("rehearse.sh", () => {
 
 
 /* ============================================================================================
- * THE TABLE IS BOUND TO THE REGISTRY IT CLAIMS TO DESCRIBE  (O8 registry-table coverage)
+ * THE TABLE IS BOUND TO THE REGISTRY IT CLAIMS TO DESCRIBE
  *
  * Every fixture below is built IN MEMORY. Nothing under ops/markets/ is created, edited or copied,
  * and no deploy path is executed.
@@ -284,7 +284,7 @@ describe("registry -> table coverage (fork-live-lib.mjs)", () => {
  * There is no python test file in this repo. The repo's precedent for asserting a fact about
  * dev_deploy.py from a .mjs test is ops/runbooks.test.mjs:271 and ops/runbooks-v8-launch.test.mjs:76,
  * both of which PARSE the file as text. Parsing proves a guard is WRITTEN; it cannot prove the guard
- * WORKS, and "a check that passes because it never reached its subject" is the exact defect this row
+ * WORKS, and "a check that passes because it never reached its subject" is the exact defect this test
  * exists to close. So the parse is kept for drift, and the guard itself is INVOKED.
  *
  * dev_deploy.py is stdlib-only and import-safe: every module-level statement is an assignment, a def,
@@ -366,7 +366,7 @@ describe("registry -> table coverage (dev_deploy.py, invoked)", () => {
   });
 
   test("the COMMITTED ops/markets/dev.json is refused by this v7-pinned tool", () => {
-    // Not hypothetical, and the reason this row exists: dev.json is interfaceVersion 8 and declares
+    // Not hypothetical, and the reason this test exists: dev.json is interfaceVersion 8 and declares
     // accessManager, while dev_deploy.py is pinned to 7 and does not enumerate it. Before the guard
     // this combination produced a run that reported every address present having never read the
     // contract that decides whether any restricted call is allowed.

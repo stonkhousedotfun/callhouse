@@ -1,11 +1,11 @@
 /**
- * K3-312: event-aware short maturities, the expiry clock through the service, and parity.
+ * event-aware short maturities, the expiry clock through the service, and parity.
  *
  * WHY THIS FILE EXISTS: a daily before the first listed expiry is priced at the first listing's vol,
  * which cannot tell an earnings jump from ordinary variance. The tests pin, on the committed synthetic
  * NVDA/TSLA chains through the real PricingService:
  *   - PARITY: with no event input every fair, iv, delta, source, method and asOf equals the base
- *     service's (fixtures/pricing-parity.ts, captured before K3-312), and event input never changes
+ *     service's (fixtures/pricing-parity.ts, captured before event input existed), and event input never changes
  *     them either: it changes only bounds, reasons and readiness. The legacy /fair body is identical;
  *   - an event included in the window widens the bound up, an excluded one down, an unknown timing both;
  *   - the first listed expiry identifies what lies before it; missing or short event input is
@@ -31,7 +31,15 @@ import { PricingService, type FairOutcome, type FairQuote, type FairRequest, typ
 import type { PricingMarket } from './markets.js';
 import { chainSpotReader } from './replay.js';
 import { createPricingApp, fairResponse, money } from './server.js';
-import { DEFAULT_SHORT_MATURITY_POLICY, eventCalendar, eventWindow, type EventCalendar, type ShortMaturityPolicy } from './short-maturity.js';
+import {
+  DEFAULT_SHORT_MATURITY_POLICY,
+  eventCalendar,
+  eventWindow,
+  eventsCompleteThrough,
+  eventsInWindow,
+  type EventCalendar,
+  type ShortMaturityPolicy,
+} from './short-maturity.js';
 import type { FeedRound } from './spot.js';
 
 /*//////////////////////////////////////////////////////////////
@@ -160,6 +168,13 @@ const round6 = (x: number) => {
   return Object.is(r, -0) ? 0 : r;
 };
 
+/** The legacy /fair keys, in order, then the ones the service appends (quality and event are the only ones
+ *  event input may change; the rest is the point and must not move). */
+const LEGACY_KEYS = ['fair', 'iv', 'delta', 'source', 'spot', 'asOf'];
+const POINT_KEYS = [...LEGACY_KEYS, 'gamma', 'vega', 'askIv', 'realizedVol'];
+const BODY_KEYS = [...POINT_KEYS, 'quality', 'event'];
+const pick = (body: Record<string, unknown>, keys: readonly string[]) => Object.fromEntries(keys.map((k) => [k, body[k]]));
+
 test('parity: with no event input every pinned base answer is reproduced exactly, and the legacy /fair body with it', async () => {
   assert.equal(PRICING_PARITY_CASES.length, 284);
   const methods = new Set(PRICING_PARITY_CASES.map((c) => c[9]));
@@ -174,8 +189,11 @@ test('parity: with no event input every pinned base answer is reproduced exactly
     assert.deepEqual([q.source, q.method, q.asOf], [source, method, asOf], what);
     const spot = ticker === 'NVDA' ? 212_210_000n : 360_200_000n;
     const body = fairResponse(q).body;
-    assert.deepEqual(Object.keys(body), ['fair', 'iv', 'delta', 'source', 'spot', 'asOf'], `${what}: legacy keys only`);
-    assert.deepEqual(body, { fair: money(BigInt(fair)), iv: round6(iv), delta: round6(delta), source, spot: money(spot), asOf }, what);
+    assert.deepEqual(Object.keys(body), BODY_KEYS, `${what}: the legacy keys first and unchanged, then only the T-OP-221 additions`);
+    assert.deepEqual(pick(body, LEGACY_KEYS), { fair: money(BigInt(fair)), iv: round6(iv), delta: round6(delta), source, spot: money(spot), asOf }, what);
+    assert.deepEqual(pick(body, ['gamma', 'vega', 'askIv']), { gamma: round6(q.gamma), vega: round6(q.vega), askIv: round6(q.askIv) }, `${what}: greeks and askIv`);
+    assert.ok(q.askIv >= q.iv, `${what}: askIv ${q.askIv} is below iv ${q.iv}`);
+    assert.equal('provenance' in body, false, `${what}: never a provenance key (the indexer would discard the quote)`);
     assertInvariants(q, what);
   }
 });
@@ -193,7 +211,8 @@ test('parity: event input and a tighter policy change bounds, reasons and readin
       const q = priced(outcome);
       const p = priced(plain[i]![1]);
       assert.deepEqual([q.fairUsdg6, q.iv, q.delta, q.source, q.method, q.asOf, q.spotUsdg6], [p.fairUsdg6, p.iv, p.delta, p.source, p.method, p.asOf, p.spotUsdg6], what);
-      assert.deepEqual(fairResponse(q).body, fairResponse(p).body, `${what}: the /fair body is byte-for-byte the same`);
+      // The point (legacy fields, greeks, askIv) is byte-for-byte the same; only quality and event may move.
+      assert.equal(JSON.stringify(pick(fairResponse(q).body, POINT_KEYS)), JSON.stringify(pick(fairResponse(p).body, POINT_KEYS)), `${what}: the /fair point is byte-for-byte the same`);
       if (JSON.stringify(reasons(q)) !== JSON.stringify(reasons(p))) changed += 1;
       assertInvariants(q, what);
     });
@@ -201,16 +220,23 @@ test('parity: event input and a tighter policy change bounds, reasons and readin
   }
 });
 
-test('parity over HTTP: a before-first /fair body is the same text with or without event input; provenance is not serialized', async () => {
+test('parity over HTTP: a before-first /fair point is the same text with or without event input; quality and event carry the difference; provenance is not serialized', async () => {
   const path = `/fair?ticker=NVDA&strike=215000000&expiry=${closeOf(16)}&type=call`;
   const a = await createPricingApp(service({ nowMs: NVDA_AM })).request(path);
   const b = await createPricingApp(service({ nowMs: NVDA_AM, events: PARITY_EVENTS })).request(path);
   const text = await a.text();
   assert.equal(a.status, 200);
-  assert.equal(await b.text(), text);
-  const body = JSON.parse(text) as Record<string, unknown>;
-  assert.deepEqual(Object.keys(body), ['fair', 'iv', 'delta', 'source', 'spot', 'asOf']);
-  assert.ok(!/provenance|uncertainty|diagnostics|event/.test(text));
+  const bodyA = JSON.parse(text) as Record<string, unknown>;
+  const bodyB = JSON.parse(await b.text()) as Record<string, unknown>;
+  assert.deepEqual(Object.keys(bodyA), BODY_KEYS);
+  assert.deepEqual(Object.keys(bodyB), BODY_KEYS);
+  assert.equal(JSON.stringify(pick(bodyB, POINT_KEYS)), JSON.stringify(pick(bodyA, POINT_KEYS)));
+  // No calendar is "missing" (unknown); the injected one is "supplied" and tightens the bounds only.
+  assert.deepEqual(bodyA.event, { input: 'missing', inWindow: false });
+  assert.deepEqual(bodyB.event, { input: 'supplied', inWindow: false });
+  assert.notDeepEqual((bodyB.quality as { uncertainty: unknown }).uncertainty, (bodyA.quality as { uncertainty: unknown }).uncertainty);
+  // The internal provenance and diagnostics stay internal; `provenance` as a key would blank the indexer's quote.
+  assert.ok(!/provenance|diagnostics|components|segment/.test(text));
 });
 
 /*//////////////////////////////////////////////////////////////
@@ -219,9 +245,11 @@ test('parity over HTTP: a before-first /fair body is the same text with or witho
 
 test('earnings included vs excluded: the bound moves up for an included event, down for an excluded one, both for an unknown timing', async () => {
   // NVDA at 04:30 Tuesday 15 Sep; its first listing is Friday 18 Sep. Supplied input with no event
-  // leaves only the gap and term-structure allowance.
+  // leaves only the gap and term-structure allowance. The one-row inputs state `through` the first listing so the
+  // row is the only difference: without it the list is complete only through its row.
   const none = service({ nowMs: NVDA_AM, events: eventCalendar({ NVDA: [] }) });
-  const at = (timing: 'bmo' | 'amc' | null, date = '2026-09-16') => service({ nowMs: NVDA_AM, events: eventCalendar({ NVDA: [{ date, kind: 'earnings', timing }] }) });
+  const at = (timing: 'bmo' | 'amc' | null, date = '2026-09-16') =>
+    service({ nowMs: NVDA_AM, events: eventCalendar({ NVDA: { events: [{ date, kind: 'earnings', timing }], through: '2026-09-18' } }) });
   for (const type of ['call', 'put'] as const) {
     // After the close on the 16th: excluded from the 16th's expiry, included in the 17th's.
     const base16 = priced(await none.fair(request('NVDA', 215, 16, type)));
@@ -331,6 +359,10 @@ test('missing event input: absent, for another ticker only, or stopping short of
     ['through the 16th', eventCalendar({ NVDA: { events: [], through: '2026-09-16' } }), 'short'],
     ['through the 18th', eventCalendar({ NVDA: { events: [], through: '2026-09-18' } }), 'supplied'],
     ['no stated limit', eventCalendar({ NVDA: [] }), 'supplied'],
+    // Rows with no `through` vouch only through the last row. A past row outside the segment adds no
+    // event term of its own, so the uncertainty here is the missing input's alone.
+    ['a past row, no through', eventCalendar({ NVDA: [{ date: '2026-09-10', kind: 'earnings', timing: 'amc' }] }), 'short'],
+    ['a row on the first listing after its close, no through', eventCalendar({ NVDA: [{ date: '2026-09-18', kind: 'earnings', timing: 'amc' }] }), 'supplied'],
   ];
   for (const [what, events, input] of cases) {
     const q = priced(await service({ nowMs: NVDA_AM, ...(events === undefined ? {} : { events }) }).fair(req));
@@ -629,4 +661,24 @@ test('eventCalendar: validated, copied and sorted; every problem named', () => {
       /AMD: through is not/.test(e.message),
   );
   assert.throws(() => eventCalendar([]), /not an object of tickers/);
+});
+
+test('rows with no `through` are complete only through the latest row, so a later expiry reads short, not supplied', () => {
+  const row = (date: string) => ({ date, kind: 'earnings', timing: 'amc' as const });
+  const now = nyMs(15, 10) / 1000;
+  const rowsOnly = eventCalendar({ NVDA: [row('2026-09-17')] }).get('NVDA')!;
+  assert.equal(eventsCompleteThrough(rowsOnly), '2026-09-17');
+  // Up to the listed event's own day the list answers; past it, it says nothing, and the next report is unknown.
+  assert.equal(eventsInWindow(rowsOnly, now, closeOf(17)).input, 'supplied');
+  const after = eventsInWindow(rowsOnly, now, closeOf(18));
+  assert.deepEqual([after.input, after.inWindow], ['short', true], 'the listed event is still reported, and the input is short past it');
+  assert.equal(eventsInWindow(rowsOnly, now, Date.UTC(2027, 1, 26, 21) / 1000).input, 'short', 'a far expiry is not cleared by the one report listed');
+  // A stated `through` wins, later or earlier than the rows.
+  assert.equal(eventsInWindow(eventCalendar({ NVDA: { events: [row('2026-09-17')], through: '2026-09-30' } }).get('NVDA')!, now, closeOf(18)).input, 'supplied');
+  assert.equal(eventsInWindow(eventCalendar({ NVDA: { events: [row('2026-09-17')], through: '2026-09-16' } }).get('NVDA')!, now, closeOf(17)).input, 'short');
+  // The latest row, not the last one listed: an input built by hand need not be sorted.
+  assert.equal(eventsCompleteThrough({ events: [row('2026-09-22'), row('2026-09-16')], through: null }), '2026-09-22');
+  // The in-memory empty list with no `through` still states no limit (events.ts never builds it: such a ticker is absent).
+  assert.equal(eventsCompleteThrough({ events: [], through: null }), null);
+  assert.equal(eventsInWindow(eventCalendar({ NVDA: [] }).get('NVDA')!, now, closeOf(18)).input, 'supplied');
 });

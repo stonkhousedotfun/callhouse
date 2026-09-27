@@ -1,122 +1,138 @@
 "use client";
 
-import { useInfiniteQuery } from "@tanstack/react-query";
+import { useInfiniteQuery, useQuery } from "@tanstack/react-query";
+import Link from "next/link";
 import { useState } from "react";
 import { useAccount } from "wagmi";
 
-import { Button, Notice, PageHead, Panel, Segments } from "@/components/ui";
+import { Button, InfoIcon, InfoTip, Notice, Panel, RailLayout, SegmentedControl, Segments } from "@/components/ui";
+import { cn } from "@/lib/cn";
+import { shortAddress } from "@/lib/format";
 import { v2Api } from "@/lib/v2/api";
-import type { LeaderboardResponse, Win } from "@/lib/v2/api-types";
-import { useStats } from "@/lib/v2/hooks";
+import type { LeaderboardResponse } from "@/lib/v2/api-types";
 
-type WinWindow = "day" | "week" | "all";
+import { imageMoney } from "./PnlText";
+import { Avatar, fmtMultiple, usdgValue, WinsFeed, WINS_ONLY_NOTE } from "./WinsFeed";
+
+/**
+ * The leaderboard, Neon screen "A · Wins".
+ *
+ * Two layouts of one list:
+ *   - the RAIL beside the /wins feed: "Leaderboard · This week" (the Monday reset and exclusion rules in its "?"), the
+ *     Multiple / Biggest win / Streak chips, the top five, and "Full leaderboard →";
+ *   - /leaderboard: the same list full width, paged, with the period switch the rail leaves out.
+ *
+ * Every row is a real /v2/leaderboard row; the mockup's five wallets are illustrative. An empty
+ * board says so rather than drawing placeholder ranks.
+ */
+
 type LeaderWindow = "week" | "month" | "all";
 type Metric = "multiple" | "absolute" | "streak";
+type LeaderRow = LeaderboardResponse["items"][number];
 
-const winWindows: readonly { value: WinWindow; label: string }[] = [
-  { value: "day", label: "Today" }, { value: "week", label: "This week" }, { value: "all", label: "All time" },
-];
 const leaderWindows: readonly { value: LeaderWindow; label: string }[] = [
   { value: "week", label: "This week" }, { value: "month", label: "This month" }, { value: "all", label: "All time" },
 ];
+// The mockup's chip labels. "Biggest win" ranks by absolute USDG value, "Streak" by consecutive wins.
 const metrics: readonly { value: Metric; label: string }[] = [
-  { value: "multiple", label: "Biggest multiple" },
+  { value: "multiple", label: "Multiple" },
   { value: "absolute", label: "Biggest win" },
-  { value: "streak", label: "Win streak" },
+  { value: "streak", label: "Streak" },
 ];
-// Results can include Stock Tokens paid in kind, valued at settlement price.
-const money = (formatted: string) => `${formatted} USDG value`;
-const shortAddress = (value: string) => `${value.slice(0, 6)}…${value.slice(-4)}`;
-const date = (unix: number) => new Intl.DateTimeFormat("en-US", {
-  month: "short", day: "numeric", year: "numeric", timeZone: "UTC",
-}).format(new Date(unix * 1000));
 
-// `Segments` moved to components/ui (UX review item 7). This file was its original home and is
-// now just another caller, which is the point: one control, one appearance, one keyboard contract.
+/** The rail shows the top five, as drawn. */
+export const RAIL_ROWS = 5;
 
-export function WinTile({ win }: { win: Win }) {
-  return <Panel as="article" className="flex h-full flex-col">
-    <div className="flex flex-wrap items-start justify-between gap-3">
-      <div>
-        <p className="text-xs font-semibold uppercase tracking-wider text-ink-2">{win.ticker} · {date(win.settledAt)}</p>
-        <h2 className="mt-2 font-display text-xl font-bold">
-          {win.ticker} ${win.series.strike.formatted} {win.series.isPut ? "put" : "call"}
-        </h2>
-      </div>
-      <span className="num rounded-lg bg-accent/15 px-3 py-1.5 text-xl font-extrabold text-accent-text">
-        {win.multiple.toFixed(2)}×
-      </span>
-    </div>
-    <p className="num mt-5 text-lg font-semibold">{win.cost.formatted} → {money(win.payout.formatted)}</p>
-    <p className="mt-1 text-sm text-ink-2">Entry cost → total proceeds and payout</p>
-    <div className="mt-auto flex flex-wrap items-end justify-between gap-3 pt-6">
-      <span className="num text-xs text-ink-2" title={win.holder}>{shortAddress(win.holder)}</span>
-      <Button href={`/pnl/${encodeURIComponent(win.id)}`} size="sm" variant="ghost">View receipt</Button>
-    </div>
-  </Panel>;
+/**
+ * The reset and exclusion rules, stated once for both layouts, measured against the indexer rather than copied:
+ *   - the week window starts Monday 00:00 America/New_York (indexer/lib/v2/windows.ts `windowStarts`); month and
+ *     all-time do not reset weekly, so the sentence names the weekly ranking;
+ *   - ineligible POSITIONS are dropped, not whole accounts (indexer/src/api/v2/feed.ts `eligible`: self-fills,
+ *     tokens transferred in or out, off-market fills, below-minimum cost). The pre-Neon copy said "accounts with
+ *     flagged or gifted positions are excluded", which overstated it; the mockup's wording is the accurate one.
+ */
+export const LEADERBOARD_RULES = "Weekly rankings reset Monday 00:00 New York. Flagged or gifted positions are excluded.";
+
+export function leaderValue(row: LeaderRow, metric: Metric): string {
+  // A realised amount rounds down to the cent, the receipt's rule.
+  if (metric === "absolute" && typeof row.value !== "number") return usdgValue(imageMoney(row.value, "down"));
+  if (metric === "streak" && typeof row.value === "number") return `${row.value} ${row.value === 1 ? "win" : "wins"}`;
+  return typeof row.value === "number" ? fmtMultiple(row.value) : usdgValue(imageMoney(row.value, "down"));
+}
+
+/** "01" … "99": the rank as the mockup prints it, two digits in mono. Ranks past 99 print as they are. */
+export const rankLabel = (rank: number) => String(rank).padStart(2, "0");
+
+/** One wallet per rank. A holder can appear on two pages while the board moves; keep the first. */
+export function uniqueHolders(rows: readonly LeaderRow[]): LeaderRow[] {
+  return [...new Map(rows.map((row) => [row.holder.toLowerCase(), row] as const)).values()];
 }
 
 function QueryNotice({ error, retry }: { error?: Error | null; retry: () => void }) {
-  return <Notice tone="warn" role="status" title="Live results are unavailable.">
-    <p>The latest recorded results will return when the indexer recovers.</p>
-    {error ? <p className="mt-1 text-xs">{error.message}</p> : null}
+  return <Notice tone="warn" role="status" title="Results are unavailable.">
+    {error ? <p className="text-xs">{error.message}</p> : null}
     <Button variant="ghost" size="sm" className="mt-3" onClick={retry}>Try again</Button>
   </Notice>;
 }
 
-export function WinsFeed() {
-  const [window, setWindow] = useState<WinWindow>("week");
-  const stats = useStats();
-  const feed = useInfiniteQuery({
-    queryKey: ["v2", "winsInfinite", window],
-    queryFn: ({ pageParam, signal }) => v2Api.getWins({ window, limit: 20, cursor: pageParam }, { signal }),
-    initialPageParam: undefined as string | undefined,
-    getNextPageParam: (last) => last.nextCursor ?? undefined,
+/** One ranked wallet. `compact` is the rail's row (rank, wallet, value); the full row adds record and receipt. */
+export function LeaderRowView({ row, metric, own, compact = false }: { row: LeaderRow; metric: Metric; own: boolean; compact?: boolean }) {
+  const rankTone = row.rank === 1 ? "text-accent-text" : "text-ink-3";
+  if (compact) {
+    return <div data-slot="leader-row" className="flex items-center gap-3 border-t border-line py-2.5">
+      <span className={cn("num w-6 text-[13px] font-semibold", rankTone)}>{rankLabel(row.rank)}</span>
+      <span className="num min-w-0 flex-1 truncate text-[13px]" title={row.holder}>
+        {shortAddress(row.holder)}{own ? <span className="ml-2 font-body text-xs font-semibold text-accent-text">You</span> : null}
+      </span>
+      <span className="text-base font-extrabold">{leaderValue(row, metric)}</span>
+    </div>;
+  }
+  return <article data-slot="leader-row"
+    className={cn("flex flex-wrap items-center gap-3 px-4 py-3.5 sm:gap-4 sm:px-5", own && "bg-row-selected")}>
+    <span className={cn("num w-8 text-[15px] font-semibold", rankTone)}>{rankLabel(row.rank)}</span>
+    <Avatar holder={row.holder} className="max-sm:hidden" />
+    <div className="grid min-w-0 flex-1 gap-0.5">
+      <p className="num truncate text-[15px] font-semibold" title={row.holder}>
+        {shortAddress(row.holder)}{own ? <span className="ml-2 font-body text-xs font-semibold text-accent-text">You</span> : null}
+      </p>
+      <p className="text-xs text-ink-3">{row.wins} {row.wins === 1 ? "win" : "wins"} · {row.losses} {row.losses === 1 ? "loss" : "losses"}</p>
+    </div>
+    <span className="num text-[18px] font-bold tracking-[-0.02em] text-accent-text sm:text-[20px]">{leaderValue(row, metric)}</span>
+    <Button href={`/pnl/${encodeURIComponent(row.best.id)}`} variant="secondary" size="sm" className="max-sm:ml-11">Best receipt · {row.best.ticker}</Button>
+  </article>;
+}
+
+/** The rail card beside the wins feed: this week's top five by the chosen measure. */
+export function LeaderboardRail() {
+  const [metric, setMetric] = useState<Metric>("multiple");
+  const { address } = useAccount();
+  const board = useQuery({
+    queryKey: ["v2", "leaderboardRail", metric],
+    queryFn: ({ signal }) => v2Api.getLeaderboard({ metric, window: "week", limit: RAIL_ROWS }, { signal }),
     staleTime: 15_000,
     refetchInterval: 15_000,
   });
-  // A new win can shift page boundaries while paging; keep each receipt once.
-  const wins = [...new Map((feed.data?.pages.flatMap((page) => page.items) ?? []).map((win) => [win.id, win])).values()];
-  const emptyHeadline = !stats.data
-    ? stats.isPending ? "Loading recorded wins…" : "Results unavailable"
-    : stats.isError ? "No recorded win in saved results" : "No recorded win yet";
+  const rows = uniqueHolders((board.data?.items ?? []) as LeaderRow[]).slice(0, RAIL_ROWS);
 
-  return <>
-    <PageHead eyebrow="Community" title="The wins feed" lede="Closed positions with a recorded cost and realised return. A win can come from a sale before expiry or a redemption. Open a receipt to inspect the result."
-      aside={<Button href="/leaderboard" variant="ghost">See leaderboard</Button>} />
-    <div className="mb-6 grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
-      <Panel pad="sm"><p className="text-sm text-ink-2">Contracts filled</p><p className="num mt-2 text-2xl font-bold">{stats.data ? new Intl.NumberFormat("en-US").format(BigInt(stats.data.contractsFilled)) : "—"}</p></Panel>
-      <Panel pad="sm"><p className="text-sm text-ink-2">Volume, 24h</p><p className="num mt-2 text-2xl font-bold">{stats.data ? stats.data.volume24h.formatted : "—"}<span className="ml-1 text-sm font-normal text-ink-2">USDG</span></p></Panel>
-      <Panel pad="sm"><p className="text-sm text-ink-2">Biggest win today</p>{stats.data?.biggestWinDay
-        ? <Button href={`/pnl/${encodeURIComponent(stats.data.biggestWinDay.id)}`} variant="ghost" size="sm" className="mt-2">{stats.data.biggestWinDay.multiple.toFixed(2)}× · {stats.data.biggestWinDay.ticker}</Button>
-        : <p className="mt-2 text-sm text-ink-2">{emptyHeadline}</p>}</Panel>
-      <Panel pad="sm"><p className="text-sm text-ink-2">Biggest win this week</p>{stats.data?.biggestWinWeek
-        ? <Button href={`/pnl/${encodeURIComponent(stats.data.biggestWinWeek.id)}`} variant="ghost" size="sm" className="mt-2">{stats.data.biggestWinWeek.multiple.toFixed(2)}× · {stats.data.biggestWinWeek.ticker}</Button>
-        : <p className="mt-2 text-sm text-ink-2">{emptyHeadline}</p>}</Panel>
+  return <Panel as="section" pad="none" aria-labelledby="leaderboard-rail-title" className="grid gap-3.5 p-5">
+    <div className="flex items-center justify-between gap-3">
+      <div className="flex items-center gap-1.5"><h2 id="leaderboard-rail-title" className="text-[17px] font-bold">Leaderboard</h2>
+        <InfoTip label="About the leaderboard">{LEADERBOARD_RULES}</InfoTip></div>
+      <span className="text-xs font-medium text-ink-3">This week</span>
     </div>
-    {stats.isError ? <Notice tone="warn" className="mb-4">{stats.data
-      ? "Live headline updates are unavailable. Showing saved totals."
-      : "Headline totals are temporarily unavailable."}</Notice> : null}
-    <Notice tone="info" className="mb-6">Most options expire worthless; the feed shows wins only.</Notice>
-    <div className="mb-5"><Segments label="Wins period" options={winWindows} selected={window} onSelect={setWindow} /></div>
-    {feed.isPending ? <Panel role="status">Loading recorded wins…</Panel> : !feed.data
-      ? <QueryNotice error={feed.error} retry={() => void feed.refetch()} />
-      : <>
-        {feed.isError ? <Notice tone="warn" className="mb-4">Showing saved results while live updates recover.</Notice> : null}
-        {wins.length === 0 ? <Panel><p className="text-ink-2">No recorded wins for this period yet.</p></Panel>
-          : <ul className="grid gap-4 md:grid-cols-2">{wins.map((win) => <li key={win.id}><WinTile win={win} /></li>)}</ul>}
-        {feed.hasNextPage ? <div className="mt-6 text-center"><Button variant="ghost" disabled={feed.isFetchingNextPage}
-          onClick={() => void feed.fetchNextPage()}>{feed.isFetchingNextPage ? "Loading…" : "Load more wins"}</Button></div> : null}
-      </>}
-  </>;
+    <Segments label="Ranking measure" options={metrics} selected={metric} onSelect={setMetric} />
+    {board.isPending ? <p role="status" className="text-sm text-ink-3">Loading leaderboard…</p> : !board.data
+      ? <QueryNotice error={board.error} retry={() => void board.refetch()} />
+      : rows.length === 0
+        ? <p data-slot="leaderboard-empty" className="border-t border-line pt-3 text-sm text-ink-2">No ranked wins this week yet.</p>
+        : <ol className="grid">{rows.map((row) => <li key={row.holder}>
+          <LeaderRowView row={row} metric={metric} own={address?.toLowerCase() === row.holder.toLowerCase()} compact />
+        </li>)}</ol>}
+    <Link href="/leaderboard" className="w-fit text-[13px] font-bold text-accent-text hover:underline">Full leaderboard →</Link>
+  </Panel>;
 }
 
-export function leaderValue(row: LeaderboardResponse["items"][number], metric: Metric): string {
-  if (metric === "absolute" && typeof row.value !== "number") return money(row.value.formatted);
-  if (metric === "streak" && typeof row.value === "number") return `${row.value} ${row.value === 1 ? "win" : "wins"}`;
-  return typeof row.value === "number" ? `${row.value.toFixed(2)}×` : money(row.value.formatted);
-}
-
+/** /leaderboard: the same list full width, paged, with the period switch. */
 export function Leaderboard() {
   const [metric, setMetric] = useState<Metric>("multiple");
   const [window, setWindow] = useState<LeaderWindow>("week");
@@ -129,76 +145,62 @@ export function Leaderboard() {
     staleTime: 15_000,
     refetchInterval: 15_000,
   });
-  const allRows = board.data?.pages.flatMap((page) => page.items as LeaderboardResponse["items"][number][]) ?? [];
-  const rows = [...new Map(allRows.map((row) => [row.holder.toLowerCase(), row])).values()];
+  const rows = uniqueHolders(board.data?.pages.flatMap((page) => page.items as LeaderRow[]) ?? []);
 
-  return <>
-    <PageHead eyebrow="Community" title="Leaderboard" lede="Recorded outcomes, ranked by the measure and period you choose."
-      aside={<Button href="/wins" variant="ghost">See wins feed</Button>} />
-    <Notice tone="info" className="mb-6">Most options expire worthless; the feed shows wins only.</Notice>
-    <div className="mb-6 flex flex-wrap gap-x-8 gap-y-4">
-      <Segments label="Ranking measure" options={metrics} selected={metric} onSelect={setMetric} />
-      <Segments label="Ranking period" options={leaderWindows} selected={window} onSelect={setWindow} />
+  return <section aria-labelledby="leaderboard-title" className="grid gap-5 pt-6 lg:pt-10">
+    <div className="flex flex-wrap items-center justify-between gap-4">
+      <div className="flex items-center gap-2"><h1 id="leaderboard-title" className="text-[length:clamp(32px,4vw,44px)] font-extrabold leading-none tracking-[-0.035em]">Leaderboard</h1>
+        <InfoTip label="About the leaderboard">{LEADERBOARD_RULES}</InfoTip></div>
+      <Button href="/wins" variant="ghost" size="sm">See wins feed</Button>
     </div>
-    {board.isPending ? <Panel role="status">Loading leaderboard…</Panel> : !board.data
+    <div className="flex flex-wrap items-center justify-between gap-3">
+      <Segments label="Ranking measure" options={metrics} selected={metric} onSelect={setMetric} />
+      <SegmentedControl label="Ranking period" options={leaderWindows} selected={window} onSelect={setWindow} />
+    </div>
+    {board.isPending ? <Panel role="status" className="text-sm text-ink-2">Loading leaderboard…</Panel> : !board.data
       ? <QueryNotice error={board.error} retry={() => void board.refetch()} />
-      : <>
-        {board.isError ? <Notice tone="warn" className="mb-4">Showing saved rankings while live updates recover.</Notice> : null}
-        {rows.length === 0 ? <Panel><p className="text-ink-2">No ranked outcomes for this period yet.</p></Panel>
-          : <ol className="grid gap-3">{rows.map((row) => {
-            const own = address?.toLowerCase() === row.holder.toLowerCase();
-            return <li key={row.holder}><Panel as="article" className={own ? "border-accent" : undefined}>
-              <div className="flex flex-wrap items-center justify-between gap-3">
-                <div className="flex min-w-0 items-center gap-4">
-                  <span className="num text-xl font-bold text-ink-2">#{row.rank}</span>
-                  <div><p className="num font-bold" title={row.holder}>{shortAddress(row.holder)}{own ? <span className="ml-2 text-xs text-accent-text">You</span> : null}</p>
-                    <p className="mt-1 text-sm text-ink-2">{row.wins} {row.wins === 1 ? "win" : "wins"} · {row.losses} {row.losses === 1 ? "loss" : "losses"}</p></div>
-                </div>
-                <div className="text-right"><p className="num text-xl font-bold text-accent-text">{leaderValue(row, metric)}</p>
-                  <Button href={`/pnl/${encodeURIComponent(row.best.id)}`} variant="ghost" size="xs" className="mt-2">Best receipt · {row.best.ticker}</Button></div>
-              </div>
-            </Panel></li>;
-          })}</ol>}
-        {board.hasNextPage ? <div className="mt-6 text-center"><Button variant="ghost" disabled={board.isFetchingNextPage}
+      : <div className="grid gap-4">
+        {board.isError ? <Notice tone="warn">Showing saved rankings.</Notice> : null}
+        <Panel as="section" pad="none" aria-label="Rankings" className="overflow-hidden">
+          <p className="flex items-center gap-2 border-b border-line px-4 py-3 text-[13px] text-ink-3 sm:px-5"><InfoIcon className="shrink-0 text-usdg" />{WINS_ONLY_NOTE}</p>
+          {rows.length === 0
+            ? <div data-slot="leaderboard-empty" className="grid justify-items-center gap-1.5 px-4 py-12 text-center">
+              <h2 className="text-lg font-extrabold">First ranked win lands here</h2>
+              <p className="text-sm text-ink-2">No wallet has a recorded win for this period yet.</p>
+            </div>
+            : <ol className="divide-y divide-line">{rows.map((row) => <li key={row.holder}>
+              <LeaderRowView row={row} metric={metric} own={address?.toLowerCase() === row.holder.toLowerCase()} />
+            </li>)}</ol>}
+        </Panel>
+        {board.hasNextPage ? <div className="text-center"><Button variant="ghost" disabled={board.isFetchingNextPage}
           onClick={() => void board.fetchNextPage()}>{board.isFetchingNextPage ? "Loading…" : "Load more ranks"}</Button></div> : null}
-      </>}
-    <p className="mt-6 text-xs text-ink-2">Weekly rankings reset Monday at midnight New York time. Accounts with flagged or gifted positions are excluded from ranking.</p>
-  </>;
+      </div>}
+  </section>;
 }
 
 /*//////////////////////////////////////////////////////////////
-          ONE PAGE, TWO TABS — UX review item 4 (section 3)
+                ONE COMPONENT, TWO ROUTES
 //////////////////////////////////////////////////////////////*/
 
 export type WinsTab = "wins" | "leaderboard";
 
-/** The tab a `?tab=` value selects. Anything else is the default rather than an error page. */
+/** The view a `?tab=` value selects. Anything else is the default rather than an error page. */
 export function winsTabFromParam(raw: string | null | undefined): WinsTab {
   return raw === "leaderboard" ? "leaderboard" : "wins";
 }
 
 /**
- * `/wins` and `/leaderboard` as one tabbed page.
+ * `/wins` and `/leaderboard`, one component.
  *
- * WHY THIS EXISTS: `/leaderboard` was a real page — three windows by three metrics — that NOTHING
- * LINKED TO. Only `/wins` was in the nav, so the leaderboard could be reached solely by typing the
- * URL. A page nobody can navigate to is not a feature, and adding a ninth nav destination to fix
- * it would have worsened the review's item 1 (eight top-level destinations, four of which take
- * your money).
+ * WHY THIS STILL EXISTS (UX review item 3): `/leaderboard` was a real page that nothing linked to. Before Neon the
+ * fix was a tab on /wins. The Neon design fixes it better: the leaderboard is ALWAYS on /wins, as the rail beside
+ * the feed, with "Full leaderboard →" to the full-width list. So the tab switch is gone, and each route renders its
+ * own layout of the same data.
  *
- * `/leaderboard` IS NOT DELETED. It still renders, now as this page with the leaderboard tab
- * selected, so an existing link, bookmark or share keeps working and lands where the reader
- * expected. Removing the route would have turned every such link into a 404 to fix a discovery
- * problem, which trades one silent failure for a louder one.
- *
- * The tab idiom is `Segments`, the same control the rest of the app now uses (item 1), so this
- * page did not invent a third toggle appearance while the row was busy removing the second.
+ * `/leaderboard` IS NOT DELETED, for the same reason as before: bookmarks and shared links to it exist, and removing
+ * the route would turn each of them into a 404 to fix a discovery problem.
  */
 export function WinsAndLeaderboard({ initialTab = "wins" }: { initialTab?: WinsTab }) {
-  const [tab, setTab] = useState<WinsTab>(initialTab);
-  return <>
-    <Segments className="mb-6" label="Wins or leaderboard" selected={tab} onSelect={setTab}
-      options={[{ value: "wins", label: "Recent wins" }, { value: "leaderboard", label: "Leaderboard" }] as const} />
-    {tab === "wins" ? <WinsFeed /> : <Leaderboard />}
-  </>;
+  if (initialTab === "leaderboard") return <Leaderboard />;
+  return <RailLayout main={<WinsFeed />} rail={<LeaderboardRail />} railLabel="Leaderboard" className="pt-6 lg:pt-10" />;
 }

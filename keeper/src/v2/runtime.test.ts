@@ -2,22 +2,24 @@
  * A signing mode booted end to end on the scaffold: config from a fixture registry, the runtime,
  * the health server on a real socket, the loop, and shutdown.
  *
- * WHY THIS FILE EXISTS: K2-03/K2-04/K2-05 each hand a `tick` to runSigningMode and inherit
+ * WHY THIS FILE EXISTS: the cranker, mm and pricer modes each hand a `tick` to runSigningMode and inherit
  * everything else. Pinned here, before any of them exists: the wiring check refuses to boot a mixed
  * deployment, the chain probe feeds /health and the gas and lag alerts, a failing tick is alerted
  * and the loop carries on, a tick can send through the runtime's TxSender, and close() waits for
  * the in-flight tick.
  *
  * DELIBERATELY ABSENT: any RPC. The probe, the wiring check and the TxChain are seams; the health
- * server binds port 0 on the default interface and is read over 127.0.0.1.
+ * server binds port 0 on 127.0.0.1 and is read there (on macOS a no-host bind for port 0 can
+ * be given a port another process holds on 127.0.0.1, which then answers the reads).
  */
 import assert from 'node:assert/strict';
+import { createServer } from 'node:net';
 import { test } from 'node:test';
 import { fileURLToPath } from 'node:url';
 import { pino } from 'pino';
 import type { Hash } from 'viem';
 import { loadV2Config, type CrankerConfig } from './config.js';
-import type { ChainProbe } from './health.js';
+import { evaluateHealth, type ChainProbe } from './health.js';
 import { silentLogger } from './logger.js';
 import { createModeRuntime, runSigningMode, type RuntimeSeams } from './runtime.js';
 import type { TxChain } from './tx.js';
@@ -67,7 +69,16 @@ const fakeTxChain = (account: `0x${string}`): TxChain => ({
 });
 
 function seams(extra: Partial<RuntimeSeams> = {}): RuntimeSeams {
-  return { log: silentLogger(), checkWiring: async () => [], probe: probeOf(), ...extra };
+  return { log: silentLogger(), checkWiring: async () => [], probe: probeOf(), hostname: '127.0.0.1', ...extra };
+}
+
+/** Binds 127.0.0.1:`port` and lets go at once; rejects (EADDRINUSE) when something already holds it there. */
+function bindAndRelease(port: number): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const probe = createServer();
+    probe.once('error', reject);
+    probe.listen(port, '127.0.0.1', () => probe.close(() => resolve()));
+  });
 }
 
 test('createModeRuntime: typed handles for the required contracts, a signer from the mode\'s key, nothing dialled', () => {
@@ -108,28 +119,37 @@ test('runSigningMode: boot alert, ticks with a heartbeat, /health and /state on 
       bound.loop = loop;
     },
   });
-  assert.ok(bound.loop !== null && typeof running.wake === 'function', 'the mode got the loop (its precise wake-ups) and the running mode exposes wake');
-  assert.equal(running.mode, 'cranker');
-  assert.ok(running.port !== null && running.port > 0);
+  // A failed assertion must not leave the mode running: the file would never exit and the whole suite would hang.
+  let closed = false;
+  try {
+    assert.ok(bound.loop !== null && typeof running.wake === 'function', 'the mode got the loop (its precise wake-ups) and the running mode exposes wake');
+    assert.equal(running.mode, 'cranker');
+    assert.ok(running.port !== null && running.port > 0);
+    // The port is this server's on 127.0.0.1, so no other listener can take it there and answer the reads below.
+    await assert.rejects(bindAndRelease(running.port), /EADDRINUSE/, 'another listener could bind 127.0.0.1 on the health port');
 
-  await until(() => ticks >= 1 && runtime.health.ticks >= 1, 'the first tick');
-  const health = await fetch(`http://127.0.0.1:${running.port}/health`);
-  assert.equal(health.status, 200);
-  const body = (await health.json()) as Record<string, any>;
-  assert.equal(body.status, 'ok');
-  assert.equal(body.mode, 'cranker');
-  assert.equal(body.chain.headBlock, '65000000');
-  assert.equal(body.contracts.clearinghouse, config.contracts.clearinghouse);
-  assert.equal(body.db.rows.v2_txs, 1, 'the tick\'s transaction is in the journal');
-  assert.deepEqual(await (await fetch(`http://127.0.0.1:${running.port}/state`)).json(), { ticks: 1 });
-  const alerts = runtime.store.db.prepare('SELECT kind FROM v2_alerts').all() as Array<{ kind: string }>;
-  assert.deepEqual(alerts.map((a) => a.kind), ['v2_boot']);
+    await until(() => ticks >= 1 && runtime.health.ticks >= 1, 'the first tick');
+    const health = await fetch(`http://127.0.0.1:${running.port}/health`);
+    assert.equal(health.status, 200);
+    const body = (await health.json()) as Record<string, any>;
+    assert.equal(body.status, 'ok');
+    assert.equal(body.mode, 'cranker');
+    assert.equal(body.chain.headBlock, '65000000');
+    assert.equal(body.contracts.clearinghouse, config.contracts.clearinghouse);
+    assert.equal(body.db.rows.v2_txs, 1, 'the tick\'s transaction is in the journal');
+    assert.deepEqual(await (await fetch(`http://127.0.0.1:${running.port}/state`)).json(), { ticks: 1 });
+    const alerts = runtime.store.db.prepare('SELECT kind FROM v2_alerts').all() as Array<{ kind: string }>;
+    assert.deepEqual(alerts.map((a) => a.kind), ['v2_boot']);
 
-  // The second tick starts POLL_INTERVAL_MS (1 s) after the first; close() mid-tick waits for it.
-  await until(() => inSecondTick, 'the second tick', 3_000);
-  await running.close();
-  assert.equal(inSecondTick, false, 'close resolved after the in-flight tick finished');
-  await assert.rejects(fetch(`http://127.0.0.1:${running.port}/health`), 'the server is closed');
+    // The second tick starts POLL_INTERVAL_MS (1 s) after the first; close() mid-tick waits for it.
+    await until(() => inSecondTick, 'the second tick', 3_000);
+    await running.close();
+    closed = true;
+    assert.equal(inSecondTick, false, 'close resolved after the in-flight tick finished');
+    await assert.rejects(fetch(`http://127.0.0.1:${running.port}/health`), 'the server is closed');
+  } finally {
+    if (!closed) await running.close();
+  }
 });
 
 test('runSigningMode: a failing probe or tick is alerted and recorded, the loop goes on; low gas alerts once', async () => {
@@ -159,6 +179,34 @@ test('runSigningMode: a failing probe or tick is alerted and recorded, the loop 
   assert.deepEqual(kinds, ['v2_boot', 'v2_rpc_lag', 'v2_error', 'v2_low_gas']);
   assert.equal(runtime.health.lastChain?.balanceWei, 1n);
   await running.close();
+});
+
+test('runSigningMode: a probe that fails after a good one is recorded, so /health stops passing the lag and gas checks until one answers', async () => {
+  let probes = 0;
+  const config = crankerConfig();
+  const runtime = createModeRuntime(
+    config,
+    seams({
+      probe: async () => {
+        probes += 1;
+        if (probes === 2) throw new Error('HTTP request failed: 429 Too Many Requests');
+        return probeOf()();
+      },
+    }),
+  );
+  const running = await runSigningMode(runtime, { tick: async () => undefined });
+  // close() in finally: a failed assertion must fail the test, not leave the loop running and the runner hung.
+  try {
+    await until(() => runtime.health.lastChainError !== null, 'the failed second probe', 4_000);
+    assert.match(runtime.health.lastChainError!.message, /429/);
+    assert.notEqual(runtime.health.lastChain, null, 'the first probe answered');
+    const limits = { pollIntervalMs: config.pollIntervalMs, txTimeoutMs: config.txTimeoutMs, rpcLagAlertMs: config.rpcLagAlertMs, minGasWei: config.minGasWei };
+    const checks = evaluateHealth(runtime.health, limits, Date.now()).checks;
+    assert.deepEqual([checks.rpcLag, checks.gas], [false, false], 'the first probe\'s reading does not stand in for the failed one');
+    await until(() => probes >= 3 && runtime.health.lastChainError === null, 'the third probe answering', 4_000);
+  } finally {
+    await running.close();
+  }
 });
 
 test('runSigningMode: wiring that does not belong together refuses to boot: no tick, the store closed', async () => {
@@ -240,6 +288,7 @@ test('runSigningMode: the chain unreachable at boot is retried with the health s
   const runtime = createModeRuntime(config, {
     log,
     probe: probeOf(),
+    hostname: '127.0.0.1',
     bootRetryDelayMs: 20,
     checkWiring: async () => {
       checks += 1;

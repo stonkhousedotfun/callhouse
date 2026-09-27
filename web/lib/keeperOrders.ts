@@ -63,8 +63,9 @@ export { componentsStruct, seaportOrderHash, type OrderComponentsStruct } from "
  *
  * The chain state (the vault's slot, counters, statuses) is read in ONE eth_call, so one block;
  * Seaport's getOrderHash, a pure function, is a second. The route bounds both with a deadline.
- * The page runs checkListingIsOurs again on what it receives, and simulates the fill before
- * enabling the button, so a bug here still does not produce a live fill button on its own.
+ * No page fills these rows since the fill card (components/OrderPayload.tsx) was deleted in
+ * so this route's checkListingIsOurs is the only one; the one reader left,
+ * components/VaultOverview.tsx, only counts the contracts left from them (lib/orderFillable.ts).
  *
  * DELIBERATELY ABSENT: any URL from the request, any header or field the keeper sent beyond the
  * parameters, a redirect follower, a clock (`nowSeconds` is passed in), React.

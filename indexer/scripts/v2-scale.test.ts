@@ -1,10 +1,11 @@
+import { readFileSync } from "node:fs";
 import { performance } from "node:perf_hooks";
 import { cpus } from "node:os";
 
 import { PGlite } from "@electric-sql/pglite";
-import { and, eq } from "drizzle-orm";
+import { and, eq, is } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/pglite";
-import { getTableConfig, type PgTable } from "drizzle-orm/pg-core";
+import { getTableConfig, isPgEnum, PgTable } from "drizzle-orm/pg-core";
 import { Hono } from "hono";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 
@@ -82,25 +83,69 @@ type ScaleFixture = {
   series: readonly ScaleSeries[];
   firstByTicker: Map<string, bigint>;
   handlerReplayMs: number;
+  /** The calibration measured immediately around the replay (mean of before and after). */
+  handlerReplayCalibrationMs: number;
   eventCounts: { marketRegistered: number; seriesCreated: number };
 };
+
+/**
+ * THE CEILINGS ARE RATIOS, NOT MILLISECONDS. A fixed ms budget cannot tell "the code got slower" from "the
+ * machine is busy": at load average 75-100 (30 parallel compiles) the replay measured 8104 ms against a 6000 ms ceiling
+ * with no code change, and passed on a rerun. So each metric is divided by a CALIBRATION measured in the same process,
+ * on the same PGlite instance, immediately before and after it: a fixed workload of the same kind (single-row PGlite
+ * writes and point reads plus one scan and a JSON round trip, the operations the handlers and the routes are made of).
+ * A busy machine slows both, and the ratio holds; a code regression slows only the metric, and the ratio grows.
+ * Each calibration is the median of CALIBRATION_REPEATS runs, so one scheduler stall does not set the scale.
+ */
+const CALIBRATION_ROWS = 200;
+const CALIBRATION_REPEATS = 3;
+
+async function calibrationOnce(client: PGlite): Promise<number> {
+  await client.exec("CREATE TEMP TABLE IF NOT EXISTS _scale_calibration (id integer PRIMARY KEY, body text NOT NULL)");
+  await client.exec("TRUNCATE _scale_calibration");
+  const started = performance.now();
+  for (let i = 0; i < CALIBRATION_ROWS; i++) {
+    await client.query("INSERT INTO _scale_calibration VALUES ($1, $2)", [i, `calibration-row-${i}`]);
+  }
+  let found = 0;
+  for (let i = 0; i < CALIBRATION_ROWS; i++) {
+    found += (await client.query("SELECT body FROM _scale_calibration WHERE id = $1", [i])).rows.length;
+  }
+  const scanned = (await client.query("SELECT id, body FROM _scale_calibration ORDER BY id")).rows;
+  const roundTrip = JSON.parse(JSON.stringify(scanned)) as unknown[];
+  const elapsed = performance.now() - started;
+  if (found !== CALIBRATION_ROWS || roundTrip.length !== CALIBRATION_ROWS) throw new Error("calibration workload did not run");
+  return elapsed;
+}
+
+async function calibrationMs(client: PGlite): Promise<number> {
+  const runs: number[] = [];
+  for (let i = 0; i < CALIBRATION_REPEATS; i++) runs.push(await calibrationOnce(client));
+  return runs.sort((a, b) => a - b)[Math.floor(runs.length / 2)]!;
+}
+
+/** A metric measured between two calibrations: its ms, the calibration mean, and the ratio the ceiling judges. */
+type Normalized = { ms: number; calibrationMs: number; ratio: number };
+const normalized = (ms: number, calibration: number): Normalized => ({ ms, calibrationMs: calibration, ratio: ms / calibration });
 
 let pg: PGlite;
 let app: Hono;
 let fixture: ScaleFixture;
 let restoreDateNow: (() => void) | undefined;
 
-const tables = [
-  schema.v2Market,
-  schema.v2Series,
-  schema.v2Order,
-  schema.v2OrderBookState,
-  schema.v2Ledger,
-  schema.v2Fill,
-  schema.v2Settlement,
-  schema.v2CalendarHoliday,
-  schema.v2SpecialExpiry,
-] as const;
+/**
+ * EVERY table and enum `ponder.schema.ts` exports, read off the module the production indexer builds its
+ * database from, never a hand list. The hand list this replaced lacked `v2_oracle_market_config` once a route began
+ * reading it, so the route answered 500 (PGlite 42P01) and the harness failed on a missing table rather than on
+ * anything it measures. `schemaDrift` below proves the database the harness built matches this list, table by table.
+ */
+const schemaExports: unknown[] = Object.values(schema);
+const tables = schemaExports.filter((value): value is PgTable => is(value, PgTable));
+const enums = schemaExports.filter(isPgEnum);
+/** `export const x = onchainTable(` in the source: the count the module's tables must reach (a filter that matched
+ *  nothing would otherwise build an empty database and fail somewhere unrelated). */
+const SOURCE_TABLE_COUNT = readFileSync(new URL("../ponder.schema.ts", import.meta.url), "utf8")
+  .match(/^export const \w+ = onchainTable\(/gm)?.length ?? 0;
 
 function quoted(name: string): string {
   return `"${name.replaceAll('"', '""')}"`;
@@ -113,13 +158,16 @@ function defaultSql(value: unknown): string {
   throw new Error(`Scale schema cannot reproduce non-literal default ${String(value)}`);
 }
 
-/** Reproduce the relevant committed Ponder columns, defaults, constraints and indexes. */
+/** Reproduce every committed Ponder enum, column, default, constraint and index (all of them). */
 async function createScaleSchema(client: PGlite) {
+  for (const e of enums) {
+    await client.exec(`CREATE TYPE ${quoted(e.enumName)} AS ENUM (${e.enumValues.map(defaultSql).join(", ")})`);
+  }
   for (const table of tables) {
-    const config = getTableConfig(table as PgTable);
+    const config = getTableConfig(table);
+    if (config.primaryKeys.length !== 0) throw new Error(`Scale harness cannot reproduce the composite key of ${config.name}`);
     const columns = config.columns.map((column) => {
-      const rawType = column.getSQLType();
-      const sqlType = rawType.startsWith("v2_") ? "text" : rawType;
+      const sqlType = column.getSQLType();
       const constraint = column.primary ? " PRIMARY KEY" : column.notNull ? " NOT NULL" : "";
       const fallback = column.default === undefined ? "" : ` DEFAULT ${defaultSql(column.default)}`;
       return `${quoted(column.name)} ${sqlType}${constraint}${fallback}`;
@@ -136,6 +184,34 @@ async function createScaleSchema(client: PGlite) {
     }
   }
   await client.exec("CREATE TABLE _ponder_checkpoint (latest_checkpoint text)");
+}
+
+/**
+ * Every schema table the built database lacks, or whose columns differ from `ponder.schema.ts`, by name.
+ * Empty means the harness database is the production schema's table set.
+ */
+async function schemaDrift(client: PGlite): Promise<string[]> {
+  const rows = (await client.query<{ table_name: string; column_name: string }>(
+    "SELECT table_name, column_name FROM information_schema.columns WHERE table_schema = 'public'",
+  )).rows;
+  const built = new Map<string, Set<string>>();
+  for (const row of rows) (built.get(row.table_name) ?? built.set(row.table_name, new Set()).get(row.table_name)!).add(row.column_name);
+  const drift: string[] = [];
+  for (const table of tables) {
+    const config = getTableConfig(table);
+    const have = built.get(config.name);
+    if (have === undefined) {
+      drift.push(`${config.name}: missing from the harness database`);
+      continue;
+    }
+    const want = config.columns.map((column) => column.name);
+    const missing = want.filter((name) => !have.has(name));
+    const extra = [...have].filter((name) => !want.includes(name));
+    if (missing.length !== 0 || extra.length !== 0) {
+      drift.push(`${config.name}: columns missing [${missing.join(", ")}] extra [${extra.join(", ")}]`);
+    }
+  }
+  return drift;
 }
 
 function where(table: any, key: Record<string, unknown>) {
@@ -205,6 +281,7 @@ async function replaySelectedLadder(database: ReturnType<typeof drizzle<typeof s
     } });
   };
 
+  const calibrationBefore = await calibrationMs(pg);
   const started = performance.now();
   for (const market of shape.markets) await send("MarketRegistered", {
     underlying: market.underlying,
@@ -222,16 +299,18 @@ async function replaySelectedLadder(database: ReturnType<typeof drizzle<typeof s
     mintFeePpm: item.market.mintFeePpm,
   });
   const handlerReplayMs = performance.now() - started;
+  const handlerReplayCalibrationMs = (calibrationBefore + await calibrationMs(pg)) / 2;
   return {
     series,
     firstByTicker: new Map(shape.markets.map((market) => [market.ticker,
       series.find((item) => item.market.ticker === market.ticker)!.longId])),
     handlerReplayMs,
+    handlerReplayCalibrationMs,
     eventCounts: { marketRegistered: shape.marketCount, seriesCreated: series.length },
   };
 }
 
-/** Orders, balances and fills are API load only. Their handlers are outside X3-102 and untimed. */
+/** Orders, balances and fills are API load only. Their handlers are outside this measurement and untimed. */
 async function seedApiActivity(database: ReturnType<typeof drizzle<typeof schema>>, series: readonly ScaleSeries[]) {
   const orders: (typeof schema.v2Order.$inferInsert)[] = [];
   const fills: (typeof schema.v2Fill.$inferInsert)[] = [];
@@ -257,18 +336,27 @@ async function seedApiActivity(database: ReturnType<typeof drizzle<typeof schema
       ts: BigInt(state.now - 900), block: 30_000n + orderId, logIndex: Number(orderId), tx,
     });
   }
+  // As deployed, the book is on the Clearinghouse minter allow-list and every writer made it its operator;
+  // without both the take skips every write ask, and so does the API.
+  const orderBook = process.env.V2_ORDER_BOOK!.toLowerCase() as `0x${string}`;
+  const writers = [...new Set(orders.map((order) => order.maker))];
   await database.transaction(async (tx) => {
+    await tx.insert(schema.v2Minter).values({ minter: orderBook, allowed: true, changedAt: BigInt(state.now - 3_600),
+      changedBlock: 1n, changedTx: TX(1) });
+    await tx.insert(schema.v2Account).values(writers.map((account) => ({ account,
+      operators: JSON.stringify({ [orderBook]: true }), firstSeen: BigInt(state.now - 3_600), lastSeen: BigInt(state.now - 3_600) })));
     await tx.insert(schema.v2Order).values(orders);
     await tx.insert(schema.v2Ledger).values([...ledgers.values()]);
     await tx.insert(schema.v2Fill).values(fills);
   });
 }
 
-type RouteSample = { p95: number; minimum: number; maximum: number };
+type RouteSample = { p95: number; minimum: number; maximum: number; calibrationMs: number };
 
 async function sampleRoute(path: string, validate: (body: unknown) => void): Promise<RouteSample> {
   const { clearCache } = await import("../src/api/cache");
   const elapsed: number[] = [];
+  const calibrationBefore = await calibrationMs(pg);
   for (let attempt = 0; attempt < SAMPLE_COUNT + 2; attempt++) {
     clearCache();
     const started = performance.now();
@@ -283,6 +371,7 @@ async function sampleRoute(path: string, validate: (body: unknown) => void): Pro
     p95: percentile95(elapsed),
     minimum: Math.min(...elapsed),
     maximum: Math.max(...elapsed),
+    calibrationMs: (calibrationBefore + await calibrationMs(pg)) / 2,
   };
 }
 
@@ -315,6 +404,14 @@ afterAll(async () => {
 });
 
 describe("v2 selected-20 scale harness", () => {
+  it("builds every table ponder.schema.ts exports, so a table a route starts reading cannot go missing", async () => {
+    expect(tables.length, "tables read off ponder.schema").toBe(SOURCE_TABLE_COUNT);
+    expect(SOURCE_TABLE_COUNT).toBeGreaterThan(100);
+    expect(enums.length).toBeGreaterThan(0);
+    expect(await schemaDrift(pg)).toEqual([]);
+    expect(tables.map((table) => getTableConfig(table).name)).toContain("v2_oracle_market_config");
+  });
+
   it("replays the approved generated ladder through real Clearinghouse handlers in event order", async () => {
     expect(shape).toMatchObject({
       marketCount: 20,
@@ -324,7 +421,10 @@ describe("v2 selected-20 scale harness", () => {
       seriesCount: 450,
       calls: 450,
       puts: 0,
-      defaultExpiriesAhead: { daily: 3, weekly: 2 },
+      // The registry lists six dailies and no weekly; the harness measures its own weekly-on stress
+      // shape (SCALE_EXPIRIES_AHEAD), so the committed ceilings keep covering that load.
+      defaultExpiriesAhead: { daily: 6, weekly: 0 },
+      stressExpiriesAhead: { daily: 3, weekly: 2 },
       expiries: {
         daily: [1_800_046_800, 1_800_392_400, 1_800_478_800],
         weekly: [1_800_046_800, 1_800_651_600],
@@ -343,7 +443,8 @@ describe("v2 selected-20 scale harness", () => {
     expect((await pg.query<{ count: string }>("SELECT count(*)::text AS count FROM v2_order")).rows[0]?.count).toBe("450");
     expect((await pg.query<{ count: string }>("SELECT count(*)::text AS count FROM v2_calendar_holiday")).rows[0]?.count)
       .toBe(String(HOLIDAY_ROWS.length));
-    expect(fixture.handlerReplayMs).toBeLessThan(baseline.ceilingsMs.handlerReplay);
+    expect(fixture.handlerReplayMs / fixture.handlerReplayCalibrationMs, "handlerReplay per calibration")
+      .toBeLessThan(baseline.ceilingsPerCalibration.handlerReplay);
 
     const { clearCache } = await import("../src/api/cache");
     clearCache();
@@ -369,7 +470,7 @@ describe("v2 selected-20 scale harness", () => {
   });
 
   it("pins measured provenance and keeps every ceiling below a ten-times regression", () => {
-    expect(baseline.baseCommit).toBe("2454c8744c445c3f3673ad353169021e21cbcf22");
+    expect(baseline.baseCommit).toBe("the pre-launch indexer tree measured on 2026-09-24");
     expect(baseline.registryProjectionSha256).toBe(cardRegistry.projectionSha256);
     expect(baseline.shape).toEqual({
       markets: 20,
@@ -380,11 +481,13 @@ describe("v2 selected-20 scale harness", () => {
       calls: 450,
       puts: 0,
     });
+    // The ceilings are on metric / same-run calibration (see CALIBRATION_ROWS), with the same 4x-10x rule.
+    expect(baseline.calibration).toMatchObject({ rows: CALIBRATION_ROWS, repeats: CALIBRATION_REPEATS });
     for (const key of METRIC_KEYS) {
-      expect(baseline.ceilingsMs[key], `${key} ceiling must leave at least 4x baseline headroom`)
-        .toBeGreaterThanOrEqual(baseline.metricsMs[key] * 4);
-      expect(baseline.ceilingsMs[key], `${key} ceiling must fail a 10x baseline regression`)
-        .toBeLessThan(baseline.metricsMs[key] * 10);
+      expect(baseline.ceilingsPerCalibration[key], `${key} ceiling must leave at least 4x baseline headroom`)
+        .toBeGreaterThanOrEqual(baseline.metricsPerCalibration[key] * 4);
+      expect(baseline.ceilingsPerCalibration[key], `${key} ceiling must fail a 10x baseline regression`)
+        .toBeLessThan(baseline.metricsPerCalibration[key] * 10);
     }
   });
 
@@ -410,12 +513,12 @@ describe("v2 selected-20 scale harness", () => {
     expect((await (await app.request(`http://localhost/v2/series/${nvdaId}`)).json()))
       .toMatchObject({ series: { ticker: "NVDA" } });
 
-    const measured: Record<MetricKey, number> = {
-      handlerReplay: fixture.handlerReplayMs,
-      marketsP95: markets.p95,
-      cardsP95: cards.p95,
-      marketSeriesP95: marketSeries.p95,
-      seriesDetailP95: seriesDetail.p95,
+    const measured: Record<MetricKey, Normalized> = {
+      handlerReplay: normalized(fixture.handlerReplayMs, fixture.handlerReplayCalibrationMs),
+      marketsP95: normalized(markets.p95, markets.calibrationMs),
+      cardsP95: normalized(cards.p95, cards.calibrationMs),
+      marketSeriesP95: normalized(marketSeries.p95, marketSeries.calibrationMs),
+      seriesDetailP95: normalized(seriesDetail.p95, seriesDetail.calibrationMs),
     };
     const report = {
       provenance: baseline.provenance,
@@ -439,10 +542,15 @@ describe("v2 selected-20 scale harness", () => {
         marketSeries: [roundedMs(marketSeries.minimum), roundedMs(marketSeries.maximum)],
         seriesDetail: [roundedMs(seriesDetail.minimum), roundedMs(seriesDetail.maximum)],
       },
-      baselineMs: baseline.metricsMs,
-      ceilingsMs: baseline.ceilingsMs,
+      calibrationMs: Object.fromEntries(METRIC_KEYS.map((key) => [key, roundedMs(measured[key].calibrationMs)])),
+      perCalibration: Object.fromEntries(METRIC_KEYS.map((key) => [key, Math.round(measured[key].ratio * 10_000) / 10_000])),
+      baselinePerCalibration: baseline.metricsPerCalibration,
+      ceilingsPerCalibration: baseline.ceilingsPerCalibration,
     };
     console.info(`[v2-scale] ${JSON.stringify(report)}`);
-    for (const key of METRIC_KEYS) expect(measured[key], key).toBeLessThan(baseline.ceilingsMs[key]);
+    for (const key of METRIC_KEYS) {
+      expect(measured[key].ratio, `${key}: ${roundedMs(measured[key].ms)} ms / ${roundedMs(measured[key].calibrationMs)} ms calibration`)
+        .toBeLessThan(baseline.ceilingsPerCalibration[key]);
+    }
   }, 120_000);
 });

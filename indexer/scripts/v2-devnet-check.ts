@@ -101,8 +101,8 @@ async function main(): Promise<void> {
   const chain = createPublicClient({ transport: http(devnet.rpc), chain: { id: 4663, name: "Devnet",
     nativeCurrency: { name: "ETH", symbol: "ETH", decimals: 18 }, rpcUrls: { default: { http: [devnet.rpc] } } } });
   equal(await chain.getChainId(), 4663, "chain id");
-  // Source: callhouse-contracts leekzor/v8, test/v2/InterfaceIds.t.sol:1134
-  // (the task snapshot cited :1075 before later interface pins moved the assertion).
+  // Source: callhouse-contracts, test/v2/InterfaceIds.t.sol (the IClearinghouse interface-id pin)
+  // (named, not numbered: the line moves as later interface pins are added).
   equal(await chain.readContract({ address: devnet.contracts.clearinghouse, abi: clearinghouseAbi,
     functionName: "supportsInterface", args: ["0x9b75eeed"] }), true, "v8 Clearinghouse interface ID");
   // The PnL reconciler samples every 30 blocks. Give it a full tick after the final redemption.

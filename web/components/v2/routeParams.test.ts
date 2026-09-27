@@ -9,8 +9,8 @@ describe("v2 route params", () => {
 
   it("accepts canonical registry ticker slugs only", () => {
     expect(parseV2Ticker("nvda")?.ticker).toBe("NVDA");
-    const planned = v2Markets().find((row) => row.v2.status !== "live")!;
-    expect(parseV2Ticker(planned.ticker.toLowerCase())).toBe(planned);
+    // The compiled registry is the launch set only (no planned row is left to resolve); every row resolves.
+    for (const row of v2Markets()) expect(parseV2Ticker(row.ticker.toLowerCase())).toBe(row);
     expect(parseV2Ticker("NVDA")).toBeUndefined();
     expect(parseV2Ticker("unknown")).toBeUndefined();
   });

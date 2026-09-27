@@ -1,5 +1,5 @@
 /* -------------------------------------------------------------------------------------------------
- * Pure helpers for ops/v2/rehearse.sh --fork-live (O3-005). No anvil, no network.
+ * Pure helpers for ops/v2/rehearse.sh --fork-live. No anvil, no network.
  *
  * The live-set fork reads the committed registry's v2.contracts addresses (EXPECTED_ADDRESS_COUNT of them), impersonates on the
  * fork only, and never reads ~/.callhouse-keys. Numeric service env is rendered here so tests can

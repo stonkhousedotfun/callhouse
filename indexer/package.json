@@ -8,6 +8,8 @@
     "start": "ponder start",
     "serve": "ponder serve",
     "codegen": "ponder codegen",
+    "check:schema": "node --experimental-strip-types scripts/check-schema.mjs",
+    "test:check-schema": "node --test scripts/check-schema.test.mjs",
     "gen:abis": "node scripts/gen-abis.mjs",
     "gen:card-registry": "node scripts/gen-card-registry.mjs",
     "check:card-registry": "node scripts/gen-card-registry.mjs --check",

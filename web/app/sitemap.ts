@@ -7,6 +7,6 @@ import { DEV_PREVIEW } from "@/lib/devPreview";
 
 export default function sitemap(): MetadataRoute.Sitemap {
   if (process.env.NEXT_PUBLIC_V2 !== "1" || DEV_PREVIEW) notFound();
-  const publicPaths = ["/", "/trust/markets", "/wins", "/leaderboard", ...liveV2Markets().map((market) => `/${market.ticker.toLowerCase()}`)];
+  const publicPaths = ["/", "/earn", "/trust/markets", "/wins", "/leaderboard", ...liveV2Markets().map((market) => `/${market.ticker.toLowerCase()}`)];
   return publicPaths.map((path) => ({ url: `${APP_URL}${path}`, changeFrequency: "daily", priority: path === "/" ? 1 : 0.7 }));
 }

@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # ---------------------------------------------------------------------------------------------
-# ops/v1-runoff-rehearse.sh — the v1 run-off (ops/runbooks/v1-runoff.md) end to end on an anvil
+# ops/v1-runoff-rehearse.sh — the v1 run-off end to end on an anvil
 # fork of Robinhood Chain 4663. Nothing here touches mainnet state, Railway, the real registry or
-# any key under ~/.callhouse-keys: every write goes to the local fork.
+# any real key file: every write goes to the local fork.
 #
 #   ops/v1-runoff-rehearse.sh                        # full rehearsal, log to ops/runbooks/rehearsals/
 #   ops/v1-runoff-rehearse.sh --contracts ../callhouse-contracts --port 8547
@@ -344,10 +344,10 @@ pass "keeper-env.sh --check on the real registry"
 
 note "\$ node ops/markets/render-docs.mjs --out <tmp>/markets.md      (on the copy)"
 node "$C/ops/markets/render-docs.mjs" --out "$TMP/markets.md" | scrub
-ROW=$(grep -F "| **$TICKER** | [\`$F\`]" "$TMP/markets.md" || true)
-note "legacy row: $ROW"
-DAY=$(iso "$V1_FROZEN_AT" | cut -c1-10)
-case "$ROW" in *"Running off: frozen on $DAY"*) pass "docs legacy row says 'Running off: frozen on $DAY'" ;; *) die "docs legacy row does not say 'Running off: frozen on $DAY': $ROW" ;; esac
+# The docs are v9-only, so the page has no v1 factory table any more. The render must still
+# accept the run-off registry, and the frozen factory must not appear on the page at all.
+ROW=$(grep -F "$F" "$TMP/markets.md" || true)
+[ -z "$ROW" ] && pass "docs page renders the run-off registry and names no v1 factory" || die "docs page still names the v1 factory $F (v9-only since T-OP-685): $ROW"
 
 note "\$ node web/scripts/gen-markets.mjs      (on the copy)"
 node "$C/web/scripts/gen-markets.mjs" 2>&1 | scrub

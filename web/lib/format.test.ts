@@ -5,6 +5,7 @@ import {
   capacityContracts,
   depositsClosedReason,
   fmtEastern,
+  fmtUsdPriceExact,
   fmtUtc,
   fmtWadPercent,
   listedDepositRisk,
@@ -65,9 +66,10 @@ describe("policy maths mirror contracts/src/Policy.sol", () => {
   });
 
   it("fmtWadPercent renders a WAD share as a percentage", () => {
-    expect(fmtWadPercent(E18)).toBe("100.00%");
-    expect(fmtWadPercent(E18 / 4n)).toBe("25.00%");
-    expect(fmtWadPercent(0n)).toBe("0.00%");
+    expect(fmtWadPercent(E18)).toBe("100%"); // At most one decimal, none when whole
+    expect(fmtWadPercent(E18 / 4n)).toBe("25%");
+    expect(fmtWadPercent(E18 / 8n)).toBe("12.5%");
+    expect(fmtWadPercent(0n)).toBe("0%");
     expect(fmtWadPercent(undefined)).toBe("—");
   });
 });
@@ -113,7 +115,7 @@ describe("depositsClosedReason mirrors Vault._depositRefused", () => {
     expect(depositsClosedReason({ ...open, phase: 3 }, NOW)).toBe("phase");
   });
 
-  it("closes at the exercise time in Listed whether or not lockBook ran (W-2), never before the clock starts", () => {
+  it("closes at the exercise time in Listed whether or not lockBook ran, never before the clock starts", () => {
     expect(depositsClosedReason({ ...open, cycleExerciseTs: NOW }, NOW)).toBe("window");
     expect(depositsClosedReason({ ...open, cycleExerciseTs: NOW + 1 }, NOW)).toBeUndefined();
     expect(depositsClosedReason({ ...open, cycleExerciseTs: NOW - 1 }, 0)).toBeUndefined();
@@ -122,7 +124,7 @@ describe("depositsClosedReason mirrors Vault._depositRefused", () => {
   it("names a stranded claim, an unredeemed assignment, and an unbacked reserve", () => {
     expect(depositsClosedReason({ ...open, phase: 0, claimKey: 7n }, NOW)).toBe("stranded");
     expect(depositsClosedReason({ ...open, claimKey: 7n, contractsAssigned: 2n }, NOW)).toBe("assignmentPending");
-    // Listed with a claim and nothing assigned: deposits are open (D8).
+    // Listed with a claim and nothing assigned: deposits are open (Listed deposits are allowed).
     expect(depositsClosedReason({ ...open, claimKey: 7n }, NOW)).toBeUndefined();
     expect(depositsClosedReason({ ...open, assetHeld: 1n * E18, reservedAssets: 2n * E18 }, NOW)).toBe("reserveUnbacked");
   });
@@ -167,5 +169,21 @@ describe("fmtEastern renders the chain's timestamp on the NYSE clock, beside the
     expect(fmtEastern(null)).toBe("—");
     expect(fmtEastern(0)).toBe("—");
     expect(fmtEastern(1789761600n)).toBe("Fri 18 Sep, 4:00pm EDT");
+  });
+});
+
+describe("fmtUsdPriceExact: a book price at its 0.0001 precision", () => {
+  it("shows every digit and at least the cents, never rounded or truncated", () => {
+    expect(fmtUsdPriceExact(398_900n)).toBe("$0.3989");
+    expect(fmtUsdPriceExact(399_700n)).toBe("$0.3997");
+    expect(fmtUsdPriceExact(400_000n)).toBe("$0.40");
+    expect(fmtUsdPriceExact(1_000_000n)).toBe("$1.00");
+    expect(fmtUsdPriceExact(12_345_600n)).toBe("$12.3456");
+    expect(fmtUsdPriceExact(399_999n)).toBe("$0.399999");
+    expect(fmtUsdPriceExact(1_234_567_890n)).toBe("$1,234.56789");
+  });
+
+  it("two asks within a cent of each other never print the same", () => {
+    expect(fmtUsdPriceExact(398_900n)).not.toBe(fmtUsdPriceExact(399_700n));
   });
 });

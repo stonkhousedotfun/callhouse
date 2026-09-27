@@ -1,7 +1,7 @@
 /**
  * The Stock Token's spot, from the market's Chainlink push feed, for the pricing service.
  *
- * WHY THE FEED AND NOT CBOE'S PRICE. Series strikes and premiums are USDG per TOKEN (ADR-04), and
+ * WHY THE FEED AND NOT CBOE'S PRICE. Series strikes and premiums are USDG per TOKEN, and
  * the token is not quite a share: its feed answer already includes `uiMultiplier()` (~1.0008 for
  * NVDA), and it prints around the clock on weekdays while Cboe's file stops at the close. The feed
  * is also what the settlement oracle reads, so the fair value of a series and its payoff are

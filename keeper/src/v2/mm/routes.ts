@@ -14,7 +14,7 @@
  *   anything else on those paths, or a missing / wrong token → 401 { error: "unauthorized" } (the same
  *                  body whatever was wrong; the token is never echoed or logged). GET → 405.
  *
- * PRIVATE NETWORK ONLY. mm-bot never gets a public domain (ops/deploy.md §15): the token is the second
+ * PRIVATE NETWORK ONLY. mm-bot never gets a public domain: the token is the second
  * lock, not the first. The comparison is constant-time over SHA-256 digests, so neither the token's
  * length nor a matching prefix shows in the response time.
  */
@@ -49,7 +49,7 @@ export interface KillSwitch {
   kill(reason: string, vault?: string): Promise<KillOutcome>;
   /**
    * Releases a kill and reports the scope's REAL state afterwards: `killed: true` with `stillKilled` when a
-   * wider kill is still engaged (F-DAPP-08). It used to answer a flat false without asking.
+   * wider kill is still engaged. It used to answer a flat false without asking.
    */
   resume(vault?: string): { killed: boolean; at: number; stillKilled?: { at: number; reason: string } };
 }

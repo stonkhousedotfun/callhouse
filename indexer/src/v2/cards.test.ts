@@ -41,7 +41,8 @@ describe("v2 card maths", () => {
     const book = aggregateBook({ series, now: 100n, freeByMaker: free, orders: [
       order(1n, 1_000_000n, 60n, "AskWrite"), order(2n, 1_200_000n, 60n, "AskWrite"),
     ] });
-    expect(book.asks.reduce((n, level) => n + level.units, 0n)).toBe(120n);
+    // The 80-unit balance backs the two asks once (60 + 20), not 60 + 60 (OrderBook._reserveCollateral).
+    expect(book.asks.reduce((n, level) => n + level.units, 0n)).toBe(80n);
     const share = walkAsks(book, 100n, series, free, fees);
     expect(share.filled).toBe(60n);
     expect(share.fills.map((fill) => fill.units)).toEqual([60n]);

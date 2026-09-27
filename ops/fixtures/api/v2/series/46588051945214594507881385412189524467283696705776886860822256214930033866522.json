@@ -13,6 +13,7 @@
     "expiry": 1789761600,
     "tenor": "weekly",
     "mintCutoff": 1789759800,
+    "exerciseFeeBps": 25,
     "mintFeePpm": 0,
     "mintFeesHeld": {
       "raw": "0",
@@ -39,6 +40,8 @@
     },
     "bidUnits": "100",
     "askUnits": "90",
+    "bestBidUnits": "100",
+    "bestAskUnits": "90",
     "fair": {
       "raw": "1358913",
       "decimals": 6,

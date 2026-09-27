@@ -1,10 +1,11 @@
 "use client";
 
+import { InfoTip } from "@/components/ui";
 import { cn } from "@/lib/cn";
 import { fmtAsset } from "@/lib/format";
 
 /** `color` is a Tailwind background token class: the bar and the legend swatch share it. */
-type Segment = { label: string; value: bigint; color: string; hint?: string };
+type Segment = { label: string; value: bigint; color: string; hint: string };
 
 /**
  * Where the vault's Stock Tokens are right now.
@@ -30,9 +31,9 @@ export function PositionSplit({
   assigned?: bigint;
 }) {
   const segments: Segment[] = [
-    { label: "Idle", value: idle ?? 0n, color: "bg-accent", hint: "free collateral" },
-    { label: "Sold", value: sold ?? 0n, color: "bg-warn", hint: "written at its fill, can be assigned" },
-    { label: "Assigned", value: assigned ?? 0n, color: "bg-danger", hint: "taken at the strike" },
+    { label: "Free", value: idle ?? 0n, color: "bg-accent", hint: "not backing any call" },
+    { label: "Sold", value: sold ?? 0n, color: "bg-warn", hint: "backs a call a buyer owns, so it can be assigned" },
+    { label: "Assigned", value: assigned ?? 0n, color: "bg-danger", hint: "already taken at the strike" },
   ];
 
   const total = segments.reduce((acc, s) => acc + (s.value > 0n ? s.value : 0n), 0n);
@@ -55,12 +56,16 @@ export function PositionSplit({
       </div>
       <div className="mt-3 flex flex-wrap gap-x-6 gap-y-2 text-[13.5px]">
         {segments.map((s) => (
-          <span key={s.label} className="inline-flex items-center gap-2" title={s.hint}>
+          <span key={s.label} className="inline-flex items-center gap-2">
             <span aria-hidden="true" className={cn("size-2.5 shrink-0 rounded-[3px]", s.color)} />
             <span className="text-ink-2">{s.label}</span>
             <span className="num font-medium text-ink">{fmtAsset(s.value)}</span>
           </span>
         ))}
+        {/* The legend's hints were `title`s, invisible to touch; one "?" holds all three now. */}
+        <InfoTip label="About the split">
+          {segments.map((s) => `${s.label}: ${s.hint}.`).join(" ")}
+        </InfoTip>
       </div>
     </div>
   );

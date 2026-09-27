@@ -5,7 +5,7 @@
  * BEFORE it creates the type, and arms the vault on that id. A derivation off by a byte order
  * (the top 20 bytes of the hash, not the low 20) would create a type, read `None` for the wrong
  * id, try to create it again and revert `OptionsTypeExists` every week. The five ids below were
- * emitted by the real Clear for Overcall's cycle 1 (ops/recon/R4-valorem-abi.md).
+ * emitted by the real Clear for Overcall's cycle 1.
  */
 import assert from 'node:assert/strict';
 import { mkdtempSync } from 'node:fs';
@@ -44,7 +44,7 @@ test('optionIdFor reproduces the five real NVDA ids: top 20 bytes of the tuple h
     assert.equal(optionIdFor(tuple), id, `strike ${strike}`);
     assert.equal(id & ((1n << 96n) - 1n), 0n, 'an option id has a zero claim key');
   }
-  // Hex form of the 226 rung, as R4 prints it.
+  // Hex form of the 226 rung.
   assert.equal(`0x${optionIdFor(weeklyTuple(NVDA, USDG, 226_000_000n, 1789761600, 1789848000)).toString(16)}`, '0xf9e23d199282d4611ff78a93abe9f31de2d43398000000000000000000000000');
 });
 

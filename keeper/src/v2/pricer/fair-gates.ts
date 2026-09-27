@@ -1,9 +1,11 @@
 /**
- * Whether a /fair answer is usable for a reprice (K3-301).
+ * Whether a /fair answer is usable for a reprice.
  *
- * TODAY the pricing service serializes only the legacy body (server.ts): fair, source, spot, asOf
- * where asOf is the Cboe underlying last-trade time, not an option quote time. Gate on that.
- * When an additive `provenance` object is present (02-interfaces.md §5.1, consumer-first), use it
+ * The pricing service serializes the legacy body (server.ts): fair, source, spot, asOf where asOf is the Cboe
+ * underlying last-trade time, not an option quote time; gate freshness on that. Beside it, top-level `quality` and
+ * `event`: an answer the market maker would not quote (mm/engine.ts eventUncertaintyOf: an event inside the
+ * series window, or event/model uncertainty) is not re-priced either, and nothing else in them refuses.
+ * When an additive `provenance` object is present (consumer-first), use it
  * and never require it: quote age comes only from quoteObservedAt; a refetch does not refresh an
  * old observation; unknown reason codes are not ready; zero fair is a number, not unavailable.
  *
@@ -11,9 +13,10 @@
  */
 import { getAddress } from 'viem';
 import { BPS } from '../cranker/constants.js';
+import { eventUncertaintyOf } from '../mm/engine.js';
 import type { FairAnswer } from './fair-client.js';
 
-/** §5.1 initial reason codes, plus the internal codes provenance.ts already emits. */
+/** The /fair initial reason codes, plus the internal codes provenance.ts already emits. */
 export const KNOWN_PROVENANCE_REASONS = new Set([
   'quote-stale',
   'quote-age-unknown',
@@ -161,6 +164,12 @@ function qualifySpot(answer: Extract<FairAnswer, { ok: true }>, ctx: FairGateCon
  */
 export function qualifyFair(answer: FairAnswer, ctx: FairGateContext): FairGate {
   if (!answer.ok) return { ok: false, reason: 'fair-unavailable', detail: answer.reason };
+
+  // The market maker's own rule (P9), so the two bots agree on an event-day or model-uncertain
+  // price. Only its halt reasons and event.inWindow refuse; extrapolated, one-sided or a missing event calendar alone
+  // do not (they are common, and the MM quotes through them).
+  const uncertain = answer.quality === undefined ? null : eventUncertaintyOf({ quality: answer.quality });
+  if (uncertain !== null) return { ok: false, reason: 'event-uncertainty', detail: uncertain };
 
   const fromProvenance = qualifyProvenance(answer, ctx);
   if (fromProvenance !== null && !fromProvenance.ok) return fromProvenance;

@@ -13,6 +13,7 @@ import { CycleTapeInline } from "@/components/CycleTape";
 import { GuardBadges, VaultPhaseBadge } from "@/components/PhaseBadge";
 import { PositionSplit } from "@/components/PositionSplit";
 import { Card, CardHead, CardTitle, Row, Rows, Stat, Unit } from "@/components/ui";
+import { Time } from "@/components/ui/Time";
 import { MARKET, MAX_LISTINGS_PER_CYCLE, SHARE_TICKER, VAULT } from "@/lib/contracts";
 import { hasOnChainListing, shouldAskFeed, windowClosed, type CycleListingState } from "@/lib/cycleNotices";
 import { CYCLE_TERMS_LABELS, cycleTerms } from "@/lib/cycleTerms";
@@ -134,7 +135,7 @@ export function VaultOverview() {
                     </span>
                     {terms !== null ? (
                       <span data-slot="strike-expiry" className="block">
-                        {CYCLE_TERMS_LABELS.expiry} {terms.expiryEastern}
+                        {CYCLE_TERMS_LABELS.expiry} <Time at={terms.expiryTs} market />
                       </span>
                     ) : null}
                   </>
@@ -179,20 +180,14 @@ export function VaultOverview() {
                       title="The option's exercise time, snapshotted by the vault when the cycle was armed: the week's NYSE close. The vault refuses every fill from this moment."
                       k={CYCLE_TERMS_LABELS.exercise}
                       v={
-                        <>
-                          <span className="whitespace-nowrap">{terms.exerciseUtc}</span> ·{" "}
-                          <span className="whitespace-nowrap">{terms.exerciseEastern}</span>
-                        </>
+                        <span className="whitespace-nowrap"><Time at={terms.exerciseTs} market /></span>
                       }
                     />
                     <Row
                       title="The option's expiry, 24 hours after the exercise time, from the vault's snapshot."
                       k={CYCLE_TERMS_LABELS.expiry}
                       v={
-                        <>
-                          <span className="whitespace-nowrap">{terms.expiryUtc}</span> ·{" "}
-                          <span className="whitespace-nowrap">{terms.expiryEastern}</span>
-                        </>
+                        <span className="whitespace-nowrap"><Time at={terms.expiryTs} market /></span>
                       }
                     />
                     {liveListing && terms.unitPrice6 !== undefined ? (

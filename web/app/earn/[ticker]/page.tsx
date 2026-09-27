@@ -1,24 +1,24 @@
-import type { Metadata } from "next";
-import { notFound } from "next/navigation";
+import { notFound, permanentRedirect } from "next/navigation";
 
-import { EarnMarket } from "@/components/v2/EarnMarket";
-import { MarketAccessGate } from "@/components/v2/MarketAccessGate";
-import { NotListedMarket } from "@/components/v2/NotListedMarket";
-import { isV2Live, v2Markets } from "@/lib/markets";
-import { parseV2Ticker } from "@/app/v2-route-params";
+import { v2Markets } from "@/lib/markets";
+import { parseV2Ticker, sellHref } from "@/app/v2-route-params";
 
+/**
+ * /earn/<ticker> was the per-market writer page until "Earn" went to the lending vault.
+ * That page is /sell/<ticker> now; old links and bookmarks land there with their query string (Portfolio
+ * used to link /earn/<ticker>?edit=smart-pricing#auto-roll; the browser keeps the #fragment across a redirect itself).
+ * A ticker outside the launch set still 404s, as it did before the move (app/stale-market-routes.test.ts).
+ */
 type Params = { ticker: string };
 export const dynamicParams = false;
 export function generateStaticParams(): Params[] { return v2Markets().map((market) => ({ ticker: market.ticker.toLowerCase() })); }
-export const metadata: Metadata = { title: "Earn by market — StonkHouse", robots: { index: false, follow: true } };
 
-export default async function EarnMarketPage({ params }: { params: Promise<Params> }) {
+export default async function EarnTickerRedirect({ params, searchParams }: {
+  params: Promise<Params>;
+  searchParams?: Promise<Record<string, string | string[] | undefined>>;
+}) {
   if (process.env.NEXT_PUBLIC_V2 !== "1") notFound();
   const market = parseV2Ticker((await params).ticker);
   if (!market) notFound();
-  const registered = market.v2.registeredAt !== null;
-  if (!isV2Live(market.ticker)) return <NotListedMarket ticker={market.ticker} />;
-  return <MarketAccessGate ticker={market.ticker} registered={registered} releaseStatus={market.v2.status}>
-    <EarnMarket ticker={market.ticker} />
-  </MarketAccessGate>;
+  permanentRedirect(sellHref(market.ticker, (await searchParams) ?? {}));
 }

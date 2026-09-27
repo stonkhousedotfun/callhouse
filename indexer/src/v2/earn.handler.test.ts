@@ -4,8 +4,8 @@
  * WHY THIS FILE DOES NOT USE THE `handlers.get("Contract:Event")` SHAPE that
  * flywheel.handler.test.ts:170 uses. That shape works by mocking ../../lib/registry so every
  * `.on(name, fn)` lands in a Map the test can call. src/v2/earn.ts registers nothing yet: neither
- * ops/abis/v2/EarnVault.json (the contract is unwritten, P8-02) nor ops/abis/v2/IStockZap.json
- * (landed but not in script/v2/abi-manifest.txt, T-78) exists, so neither contract can be a source
+ * ops/abis/v2/EarnVault.json (the contract is unwritten) nor ops/abis/v2/IStockZap.json
+ * (landed but not in script/v2/abi-manifest.txt) exists, so neither contract can be a source
  * in ponder.config.ts and a registration would break the ponder:registry types package-wide. There
  * is nothing to capture. What is testable now is the row building the registrations will call, and
  * the event signatures they will be registered against.
@@ -13,19 +13,35 @@
  * The signature assertions are the valuable half. A wrong event signature does not revert — it
  * silently decodes nothing, or worse, decodes the wrong field into the right-looking column. These
  * derive topic0 from the signature string this indexer coded against and compare it with the pin
- * published in v8-plan/status/INTERFACE-CHANGES-V8.md Entry 4, which was produced by a `forge test`
+ * published with the interface change, which was produced by a `forge test`
  * run against the compiled contract. Two independent derivations agreeing is the only reason the
  * v8 interface freeze's two wrong selector pins were ever caught.
  *
- * NOT RUN in this submission: the package has no node_modules in this worktree, so vitest and viem
- * cannot be resolved here. Authored, not executed (owner directive 2026-09-19).
+ * It needs the package's own dependencies (vitest and viem) and
+ * runs in the package's suite.
  */
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { toEventSelector } from "viem";
 
-import { meta, zapActionRow } from "./earn";
+// earn.ts now registers its handlers (the ABIs landed), so importing it pulls in lib/registry and the
+// ponder:schema virtual module, which only a Ponder process provides. This file tests the row builder
+// and the signatures, not the registrations, so the registrars are inert and the schema is the real one.
+// The handler-capturing tests live in earn.test.ts.
+vi.mock("../../lib/registry", () => ({
+  v2EarnVaultPonder: { on: () => undefined },
+  v2ZapPonder: { on: () => undefined },
+}));
+vi.mock("ponder:schema", async () => {
+  const real = await import("../../ponder.schema");
+  return { ...real, default: real };
+});
 
-/** Pinned in v8-plan/status/INTERFACE-CHANGES-V8.md Entry 4; derived there by forge from the contract. */
+import { meta, zapActionRow } from "./earn";
+// A JSON import, not readFileSync(new URL(..., import.meta.url)): with vi.mock in the file, vitest's mock hoisting
+// leaves `import.meta` unparseable ("Unexpected token `.`. Expected meta") and the whole file fails to load.
+import exportedEarnVault from "../../../ops/abis/v2/EarnVault.json";
+
+/** The pins, derived by forge from the compiled contract. */
 const PINNED_TOPIC0 = {
   WriteZapped: "0x1ae8864a999d8eea7c577cc18ede6b54ec495033e500d35c7d0bf7983d8f5b8b",
   ExitZapped: "0x23fdd2820484cbab406be2291fedb6a8a27d14e277812685619e9bbfad0620a1",
@@ -124,5 +140,28 @@ describe("zapActionRow", () => {
       event({ account: ACCOUNT, asset: ASSET, caller: CALLER, usdgIn: 1n, assetOut: 2n, venue: 0 }, 4),
     );
     expect(row.venue).toBe(0);
+  });
+});
+
+/**
+ * The two events, declared exactly as callhouse-contracts src/v2/periphery/earn/EarnVault.sol
+ * declares them (PaymentDeferred ~:639, DeferredClaimed ~:642). The topic0 derived from that Solidity string must
+ * equal the topic0 of the entry export-abis.sh wrote into ops/abis/v2/EarnVault.json: a handler keyed on a
+ * signature the exported ABI does not carry would decode nothing and fail no other test.
+ */
+describe("EarnVault held-payment event signatures", () => {
+  const HELD_EVENTS = {
+    PaymentDeferred: "event PaymentDeferred(uint256 indexed id, address indexed receiver, uint256 assets)",
+    DeferredClaimed: "event DeferredClaimed(uint256 indexed id, address indexed by, address to, uint256 assets)",
+  } as const;
+
+  it("match the topic0s of the exported ops/abis/v2/EarnVault.json entries", () => {
+    const exported = exportedEarnVault as ReadonlyArray<{ type: string; name?: string }>;
+    for (const [name, signature] of Object.entries(HELD_EVENTS)) {
+      const entry = exported.find((item) => item.type === "event" && item.name === name);
+      expect(entry, `${name} is not in ops/abis/v2/EarnVault.json`).toBeDefined();
+      expect(toEventSelector(signature), name).toBe(toEventSelector(entry as never));
+    }
+    expect(toEventSelector(HELD_EVENTS.PaymentDeferred)).not.toBe(toEventSelector(HELD_EVENTS.DeferredClaimed));
   });
 });

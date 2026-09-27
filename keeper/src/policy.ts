@@ -166,7 +166,7 @@ export function engineFeeAsset(n: bigint, feesEnabled: boolean, feeBps: number |
  *   floorUsdg = Policy.minPremium(spot, n) + engineFee(n) × spot / LOT
  *
  * The engine fee is asset base units valued at spot, added on top of the premium floor when the
- * switch is on (AUDIT-FINDINGS F-04): the buyer's USDG must cover it or the depositors are
+ * switch is on (an audit finding): the buyer's USDG must cover it or the depositors are
  * paying to sell. Off, the second term is zero and this equals the approval-time floor.
  */
 export function fillFloorUsdg6(spotUsdg6: bigint, n: bigint, p: PolicyParams, feesEnabled: boolean, feeBps: number | bigint): bigint {
@@ -617,7 +617,7 @@ export type PriceResult =
  *          data (a reprice on a dark feed) the fair value is the previous listing's (or the
  *          arm's), so a reprice never drops below the last market-based ask; with neither, the
  *          named `vol-*` reason. Fresh data must also pass checkQuoteWindow at the price bracket.
- *          A manual override can only RAISE this ask: it never undercuts the owner's rule, and
+ *          A manual override can only RAISE this ask: it never undercuts the policy's rule, and
  *          it never lists without a market-based fair value. (To sell below the market, switch
  *          KEEPER_PRICING_MODE to fixed.)
  *   fixed  a manual override replaces the price, lifted to the bare fill floor.

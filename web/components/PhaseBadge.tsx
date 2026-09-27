@@ -7,8 +7,9 @@
  * by the option type the vault armed (its exercise and expiry timestamps), never by the
  * browser's wall clock. A visitor in any timezone sees the same week in the same state.
  */
-import { Chip, type ChipTone } from "@/components/ui";
+import { Chip, InfoTip, type ChipTone } from "@/components/ui";
 import { phaseLabel } from "@/lib/hooks";
+import { displayQuantity } from "@/lib/numberFormat";
 import { deriveFillState, FILL_STATE_COPY, vaultGuards, type FillState } from "@/lib/vaultStatus";
 
 type Tone = "good" | "warn" | "bad" | "info" | "neutral";
@@ -79,7 +80,7 @@ export function PhaseBadge({
 }) {
   const label =
     (fillState === "selling" || fillState === "filled" || fillState === "locked" || fillState === "assigned") && sold !== undefined
-      ? `${FILL_STATE_COPY[fillState]} · ${sold.toString()} sold`
+      ? `${FILL_STATE_COPY[fillState]} · ${displayQuantity(sold, 0)} sold`
       : FILL_STATE_COPY[fillState];
   return (
     <span className="inline-flex max-w-full flex-wrap items-center gap-1.5">
@@ -109,16 +110,20 @@ export function VaultPhaseBadge({
   );
 }
 
-/** Conditions that stop the vault selling at all. Shown only when they are true. */
+/**
+ * Conditions that stop the vault selling at all. Shown only when they are true. Each chip's explanation sits behind
+ * a "?" InfoTip, not a `title`, which touch and keyboard readers never see. The words are lib/vaultStatus.ts's.
+ */
 export function GuardBadges({ snapshot }: { snapshot: Parameters<typeof vaultGuards>[0] }) {
   const guards = vaultGuards(snapshot);
   if (guards.length === 0) return null;
   return (
     <span className="inline-flex max-w-full flex-wrap items-center gap-1.5">
       {guards.map((g) => (
-        <Badge key={g.key} tone={GUARD_TONE[g.tone]} title={g.title}>
-          {g.label}
-        </Badge>
+        <span key={g.key} className="inline-flex items-center gap-1">
+          <Badge tone={GUARD_TONE[g.tone]}>{g.label}</Badge>
+          <InfoTip label={`About ${g.label}`} text={g.title} />
+        </span>
       ))}
     </span>
   );

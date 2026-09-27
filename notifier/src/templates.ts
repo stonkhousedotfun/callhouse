@@ -5,7 +5,7 @@
  *                          webpush.ts, email.ts): the title as a first line, a push title or a
  *                          subject; the url as a link; a settings footer.
  *
- * COPY RULES (plan README "Copy rules"; copy-lint held these until it was removed on 2026-09-21), pinned by templates.test.ts:
+ * COPY RULES (copy-lint held these until it was removed on 2026-09-21), pinned by templates.test.ts:
  *   - "Stock Tokens", never any other name for them.
  *   - Every message about a long position (a payoff the holder paid for) states its cost and its
  *     max loss, which for a long is the cost. Costs and max losses round UP to the cent.
@@ -17,10 +17,13 @@
  *     payload carries `spotUpdatedAt`, and says nothing about the time when it does not. No
  *     template ever substitutes a clock for a missing observation time.
  *   - Every message links to the app page where the thing it describes can be seen or acted on:
- *     a series page, Portfolio, Earn for a writer, or the market page for a price alert.
+ *     a series page, Portfolio, Sell options for a writer, or the market page for a price alert.
  *
- * App routes (plan W2): /[ticker]/[longId], /[ticker], /portfolio, /earn/[ticker],
- * /settings/notifications. Tickers are upper case, as in the indexer API.
+ * App routes (plan W2): /[ticker]/[longId], /[ticker], /portfolio, /sell/[ticker] (the writer page; it was
+ * /earn/[ticker] until a change gave /earn to the lending vault, and the old address redirects),
+ * /settings/notifications. Tickers are upper case in the payloads, as in the indexer API, and in the copy. In a
+ * LINK they are lower case: the web ticker routes serve only the lower-case static params
+ * (web/app/[ticker]/page.tsx dynamicParams = false; web/app/v2-route-params.ts parseV2Ticker), so /NVDA is a 404.
  */
 import type { EventPayloads, Money, ParsedEvent, SeriesLite } from './events.js';
 import { fmtAsset, fmtEastern, fmtMultiple, fmtShares, fmtUsdg, fmtUsdgUp, shortAddress } from './format.js';
@@ -81,20 +84,45 @@ export interface Links {
 
 export function appLinks(appUrl: string): Links {
   const base = appUrl.replace(/\/+$/, '');
+  // The route segment is the lower-case ticker; `/NVDA` 404s on the web app.
+  const seg = (ticker: string): string => encodeURIComponent(ticker.toLowerCase());
   return {
-    series: (s) => `${base}/${encodeURIComponent(s.ticker)}/${s.longId}`,
-    market: (ticker) => `${base}/${encodeURIComponent(ticker)}`,
+    series: (s) => `${base}/${seg(s.ticker)}/${s.longId}`,
+    market: (ticker) => `${base}/${seg(ticker)}`,
     portfolio: () => `${base}/portfolio`,
-    earn: (ticker) => `${base}/earn/${encodeURIComponent(ticker)}`,
+    earn: (ticker) => `${base}/sell/${seg(ticker)}`,
     settings: () => `${base}/settings/notifications`,
   };
 }
 
 /* --------------------------------------------------------------------------------- per kind */
 
+/**
+ * What a maker's rebate paid beyond its fees, in USDG base units; 0 for anyone else.
+ *
+ * OrderBook credits an ask-hit maker premium − seller fee + rebate and a bid-hit maker the rebate
+ * (callhouse-contracts src/v2/OrderBook.sol, the maker's `_credit` call in `_execute`). The payload's
+ * `fee` is the seller fee net of the rebate, floored at 0 (rules.ts), so when the rebate is the larger
+ * of the two the fee reads 0 and the credit shows only as a total above (sale) or below (buy) the
+ * premium. The premium is price × units / 100 exactly (prices sit on OrderBook's PRICE_TICK grid, so
+ * the division never rounds), which recovers the credit from the payload as it is: the line can then
+ * say where the money came from instead of printing "0.00 USDG in fees" beside a total that does not
+ * reconcile with the price. A price × units off that grid cannot come from OrderBook, so it is not
+ * guessed at: no credit, and the plain fee line.
+ */
+function makerCredit(p: EventPayloads['fill_receipt']): bigint {
+  if (p.role !== 'maker') return 0n;
+  const gross = raw(p.price) * BigInt(p.units);
+  if (gross % 100n !== 0n) return 0n;
+  const premium = gross / 100n;
+  const credit = p.side === 'sell' ? raw(p.total) + raw(p.fee) - premium : premium + raw(p.fee) - raw(p.total);
+  return credit > 0n ? credit : 0n;
+}
+
 function fillReceipt(p: EventPayloads['fill_receipt'], links: Links): Rendered {
   const name = optionName(p.series);
   const when = fmtEastern(p.series.expiry);
+  const credit = makerCredit(p);
   if (p.role === 'recipient' && p.side === 'sell' && p.seller !== undefined) {
     // Interface v4, bid hit: another wallet sold and had the USDG paid here. No position is held.
     const seller = shortAddress(p.seller);
@@ -136,7 +164,9 @@ function fillReceipt(p: EventPayloads['fill_receipt'], links: Links): Rendered {
       title: `Bought ${name}`,
       body: [
         `You bought ${shares(p.units)} of the ${name} expiring ${when}, at ${usdg(p.price)} per share.`,
-        `Cost: ${usdgCost(p.total)}, including ${usdg(p.fee)} in fees. Max loss: ${usdgCost(p.total)}.`,
+        credit > 0n
+          ? `Cost: ${usdgCost(p.total)}, after a ${fmtUsdg(credit)} USDG maker rebate. Max loss: ${usdgCost(p.total)}.`
+          : `Cost: ${usdgCost(p.total)}, including ${usdg(p.fee)} in fees. Max loss: ${usdgCost(p.total)}.`,
         `It pays out only if ${paysIf(p.series)} at expiry.`,
       ].join('\n'),
       url: links.series(p.series),
@@ -149,9 +179,11 @@ function fillReceipt(p: EventPayloads['fill_receipt'], links: Links): Rendered {
       p.primary
         ? `You wrote and sold ${shares(p.units)} of the ${name} expiring ${when}, at ${usdg(p.price)} per share.`
         : `You sold ${shares(p.units)} of the ${name} expiring ${when}, at ${usdg(p.price)} per share.`,
-      to === null
-        ? `Received: ${usdg(p.total)}, after ${usdg(p.fee)} in fees.`
-        : `Proceeds: ${usdg(p.total)}, after ${usdg(p.fee)} in fees, paid to wallet ${to}.`,
+      credit > 0n
+        ? `Received: ${usdg(p.total)}, including a ${fmtUsdg(credit)} USDG maker rebate net of fees.`
+        : to === null
+          ? `Received: ${usdg(p.total)}, after ${usdg(p.fee)} in fees.`
+          : `Proceeds: ${usdg(p.total)}, after ${usdg(p.fee)} in fees, paid to wallet ${to}.`,
       ...(p.primary
         ? [`Your collateral backs these options until they settle. If ${paysIf(p.series)}, holders are paid from it.`]
         : []),
@@ -295,7 +327,7 @@ function writerItmWarning(p: EventPayloads['writer_itm_warning'], links: Links):
     body: [
       `${p.series.ticker} is at ${usdg(p.spot)}${asOf(p.spotUpdatedAt)}, ${side} the ${usdg(p.series.strike)} strike of the ${name} you wrote (${shares(p.units)}), which expires ${fmtEastern(p.series.expiry)}.`,
       `If ${paysIf(p.series)}, holders are paid from your ${assetAmount(p.collateralLocked, p.series.ticker)} of collateral and you get back the rest. You keep the premium either way.`,
-      'You can buy back and close the position before expiry from Earn.',
+      'You can buy back and close the position before expiry from Sell options.',
     ].join('\n'),
     url: links.earn(p.series.ticker),
   };
@@ -336,7 +368,7 @@ function autoRoll(p: EventPayloads['auto_roll'], links: Links): Rendered {
             `Auto-roll has not rolled your ${p.ticker} position. The roll was due when the session opened ${fmtEastern(p.dueAt)}, more than 24 hours ago.`,
             ...(last === null ? [] : [`Last roll: ${last}.`]),
           ]),
-      'Nothing new is listed for sale until it rolls. Check the strategy on Earn.',
+      'Nothing new is listed for sale until it rolls. Check the strategy on Sell options.',
     ].join('\n'),
     url: links.earn(p.ticker),
   };
@@ -380,6 +412,16 @@ function adminOperation(p: EventPayloads['admin_operation'], links: Links): Rend
   };
 }
 
+function marketLive(p: EventPayloads['market_live'], links: Links): Rendered {
+  return {
+    title: `${p.ticker} options are live`,
+    // Only what the trigger proves: the listing is enabled. Minting has its own pause and series are listed
+    // separately, so the message does not promise that anything can be bought or written yet.
+    body: `The ${p.ticker} market's listing is now enabled on Stonkhouse. Open the market to see its option series.`,
+    url: links.market(p.ticker),
+  };
+}
+
 /** Render a validated event (events.ts parsePayload). Pure. */
 export function render(event: ParsedEvent, links: Links): Rendered {
   switch (event.kind) {
@@ -405,5 +447,7 @@ export function render(event: ParsedEvent, links: Links): Rendered {
       return feeNotice(event.payload, links);
     case 'admin_operation':
       return adminOperation(event.payload, links);
+    case 'market_live':
+      return marketLive(event.payload, links);
   }
 }

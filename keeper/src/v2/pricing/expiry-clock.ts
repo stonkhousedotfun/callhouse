@@ -1,5 +1,5 @@
 /**
- * The expiry clock of one price (K3-312): which clocks feed its time to expiry, and the check that
+ * The expiry clock of one price: which clocks feed its time to expiry, and the check that
  * refuses or flags an expiry the trading clock cannot price honestly.
  *
  * TWO CLOCKS, ONE BASIS. Both are trading time (bs.ts: regular-session seconds, 09:30-16:00 New York
@@ -40,7 +40,7 @@ import { failure, type PricingFailure } from './cboe.js';
 /** The NYSE's early close, New York local hour. */
 export const EARLY_CLOSE_HOUR_ET = 13;
 
-/** Reason code for an early close inside the window (an open code, 02-interfaces §5.1). */
+/** Reason code for an early close inside the window (an open code). */
 export const CLOCK_EARLY_CLOSE = 'clock-early-close';
 
 export interface ExpiryClockInput {

@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 /**
  * serve-v2 — the indexer API v2 as static files, for building the dapp and the site before the
- * devnet (F2-04) exists.
+ * devnet exists.
  *
  *   node ops/fixtures/serve-v2.mjs                 # http://localhost:42070/v2/health
  *   node ops/fixtures/serve-v2.mjs --port 4000     # or PORT=4000; --port 0 picks a free port
@@ -22,7 +22,7 @@
  *
  * DELIBERATELY ABSENT: dependencies (node:http only, runnable before `pnpm install`), exports,
  * routing tables (the directory layout IS the route table; web/lib/v2/api-schema.test.ts proves
- * every file maps to a §4 route) and any serving outside ops/fixtures/api/v2.
+ * every file maps to a v2 route) and any serving outside ops/fixtures/api/v2.
  */
 import { readdirSync, readFileSync, statSync } from "node:fs";
 import { createServer } from "node:http";

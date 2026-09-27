@@ -4,8 +4,14 @@ import { describe, expect, it } from "vitest";
 import { StandardMerkleTree } from "@openzeppelin/merkle-tree";
 import { buildEpoch, weigh, allocate, exclusions } from "./lender-epoch.mjs";
 import { epochWindow, merkle } from "./lib/epoch-merkle.mjs";
+import { validateEpoch } from "./post-maker-epoch.mjs";
 
 const TYPES = ["uint256", "uint256", "address", "uint256"];
+
+// lender-epoch.mjs is untyped JavaScript, so its return shapes reach this file as `any`. These name the
+// shapes the tests read: allocate() rows and buildEpoch() file entries (amounts are decimal strings there).
+type Allocation = { account: string; amount: bigint; index: number };
+type EpochEntry = { index: number; account: string; amount: string; proof: string[] };
 
 /**
  * THE PINNED ROOT. `test/v2/fixtures/lender-epoch-2960.oz.json` in the CONTRACTS repo is the artifact the
@@ -68,7 +74,7 @@ describe("the pinned lender vector", () => {
     const values = PINNED_ENTRIES.map((e, i) => [String(PINNED_EPOCH), String(i), e.account, e.amount]);
     const real = StandardMerkleTree.of(values, TYPES);
     for (let i = 0; i < values.length; i++) {
-      expect(StandardMerkleTree.verify(real.root, TYPES, values[i], proofs.get(i)!)).toBe(true);
+      expect(StandardMerkleTree.verify(real.root, TYPES, values[i]!, proofs.get(i)!)).toBe(true);
     }
   });
 
@@ -97,15 +103,16 @@ describe("time-weighted credit", () => {
     expect(bySteady.weight).toBeGreaterThan(byLate.weight);
 
     const allocated = allocate(weights, 1_000n * 10n ** 18n, 10_000n);
-    const steadyAmount = BigInt(allocated.find((a) => a.account === steady)!.amount);
-    const lateAmount = BigInt(allocated.find((a) => a.account === late)!.amount);
+    const steadyAmount = BigInt(allocated.find((a: Allocation) => a.account === steady)!.amount);
+    const lateAmount = BigInt(allocated.find((a: Allocation) => a.account === late)!.amount);
     expect(steadyAmount).toBeGreaterThan(lateAmount);
   });
 
   it("a balance carried into the window is credited from the window start, not from its row", () => {
     const account = "0x1111111111111111111111111111111111111111";
     const [only] = weigh([row(account, start - 30n * DAY, 10n ** 18n)], start, end, new Set());
-    expect(only.weight).toBe(10n ** 18n * (end - start));
+    expect(only).toBeDefined();
+    expect(only!.weight).toBe(10n ** 18n * (end - start));
   });
 
   it("a row at or after the window end is ignored", () => {
@@ -135,9 +142,9 @@ describe("18-decimal amounts", () => {
       row("0x2222222222222222222222222222222222222222", start - DAY, 10n ** 18n),
     ];
     const file = buildEpoch({ epoch: PINNED_EPOCH, budget: 200n * 10n ** 18n, rows, registry: registry(), capBps: 10_000n, start, end });
-    const big = file.entries.filter((e) => BigInt(e.amount) > 18_446_744_073_709_551_615n);
+    const big = file.entries.filter((e: EpochEntry) => BigInt(e.amount) > 18_446_744_073_709_551_615n);
     expect(big.length).toBeGreaterThan(0);
-    expect(file.entries.every((e) => typeof e.amount === "string")).toBe(true);
+    expect(file.entries.every((e: EpochEntry) => typeof e.amount === "string")).toBe(true);
   });
 
   it("the entry sum equals the total exactly, with dust and a cap in play", () => {
@@ -145,7 +152,7 @@ describe("18-decimal amounts", () => {
       row(`0x${String(i).repeat(40)}`.slice(0, 42), start - DAY, BigInt(i) * 10n ** 18n));
     const budget = 1_000_000_000_000_000_000_007n; // prime-ish, so integer division leaves dust
     const file = buildEpoch({ epoch: PINNED_EPOCH, budget, rows, registry: registry(), capBps: 3000n, start, end });
-    const sum = file.entries.reduce((total, e) => total + BigInt(e.amount), 0n);
+    const sum = file.entries.reduce((total: bigint, e: EpochEntry) => total + BigInt(e.amount), 0n);
     expect(sum).toBe(budget);
     expect(file.total).toBe(String(budget));
   });
@@ -178,7 +185,7 @@ describe("registry-driven exclusions", () => {
   });
 
   /**
-   * T-232, AND IT IS THE WHOLE ROW. The guard above tested the block's PRESENCE. Every value in
+   * AND IT IS THE WHOLE ROW. The guard above tested the block's PRESENCE. Every value in
    * `v2.protocolAddresses` is null until a deployment fills it, so on the COMMITTED registry the walk found
    * no address, returned an EMPTY SET, and the refusal whose stated purpose is "no exclusion list" did not
    * fire. Every protocol-owned balance would have been paid out of the lender budget, the run would have
@@ -212,7 +219,7 @@ describe("registry-driven exclusions", () => {
 
 describe("one asset per epoch", () => {
   /**
-   * D28 values stock at the settlement oracle spot and credits USD value; this program reads NO price. A
+   * The lender-rewards rule values stock at the settlement oracle spot and credits USD value; this program reads NO price. A
    * share of one vault's base units is not comparable to a share of another's, so a mixed input is refused
    * rather than weighted into a split that is silently wrong per asset.
    */
@@ -247,7 +254,40 @@ describe("address handling is not a stubbed identity function", () => {
     const lower = "0x5aaeb6053f3e94c9b9a09f33669435e7ef1beaed";
     const checksummed = "0x5aAeb6053F3E94C9b9A09f33669435E7Ef1BeAed";
     const [only] = weigh([row(lower, start - DAY, 10n ** 18n)], start, end, new Set());
-    expect(only.account).toBe(checksummed);
-    expect(only.account).not.toBe(lower);
+    expect(only).toBeDefined();
+    expect(only!.account).toBe(checksummed);
+    expect(only!.account).not.toBe(lower);
+  });
+});
+
+/**
+ * (poster side). RewardsDistributor keys its claim bitmap by the leaf's index, so two leaves with
+ * one index collide and one can never be claimed; only the off-chain poster can keep indices unique. The lender
+ * program is POSTED by post-maker-epoch.mjs --program lender, and its `validateEpoch` (run in main before any chain
+ * read, for every program) requires entries[i].index === i. These cases pin that for a file this generator wrote.
+ */
+describe("the lender poster refuses a duplicate or out-of-range index", () => {
+  const lenderFile = () => buildEpoch({ epoch: PINNED_EPOCH, budget: 3n * 10n ** 18n, rows: [
+    row("0x1111111111111111111111111111111111111111", start - DAY, 10n ** 18n),
+    row("0x2222222222222222222222222222222222222222", start - DAY, 2n * 10n ** 18n),
+    row("0x3333333333333333333333333333333333333333", start - DAY, 3n * 10n ** 18n),
+  ], registry: registry(), capBps: 10_000n, start, end });
+
+  it("accepts the generator's own lender file, so the refusals below are about the index alone", () => {
+    const file = lenderFile();
+    expect(file.entries.map((e: EpochEntry) => e.index)).toEqual([0, 1, 2]);
+    expect(validateEpoch(file)).toMatchObject({ epoch: PINNED_EPOCH, makers: 3, root: file.root });
+  });
+
+  it("refuses a duplicate index before posting", () => {
+    const file = lenderFile();
+    file.entries[2].index = 1;
+    expect(() => validateEpoch(file)).toThrow(/entry 2 has wrong index/);
+  });
+
+  it("refuses an out-of-range index before posting", () => {
+    const file = lenderFile();
+    file.entries[0].index = file.entries.length;
+    expect(() => validateEpoch(file)).toThrow(/entry 0 has wrong index/);
   });
 });

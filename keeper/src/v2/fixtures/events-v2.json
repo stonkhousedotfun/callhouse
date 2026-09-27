@@ -1,0 +1,8 @@
+{
+  "_readme": "Test fixture, not calendar data. The event calendar index.test.ts hands the pricing boot through PRICING_EVENTS_PATH, so the test never reads the live ops/markets/events.json. Every ticker here is in fixtures/registry-v2.json (AAPL, NVDA, SGOV, TSLA): pricing/events.ts refuses a ticker the registry does not list, and the live file's SPCX would make the boot tests red. recheckBy is far in the future so /health never reads it as overdue.",
+  "recheckBy": {
+    "NVDA": "2099-12-31"
+  },
+  "through": {},
+  "events": []
+}

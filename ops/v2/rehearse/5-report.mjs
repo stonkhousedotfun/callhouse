@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /* -------------------------------------------------------------------------------------------------
- * Step 5 of the O2-03 rehearsal: the report (plan tasks/O-ops-launch.md O2-03 step 5 and its gate: each step with tx
+ * Step 5 of the v7 rehearsal: the report (and its gate: each step with tx
  * hashes on the fork and the web flows' screenshots), generated from what steps 1-4 recorded:
  *
  *   ## Result           per step and per drill
@@ -24,22 +24,23 @@ import { bountyRows, journal } from "./drill-kit.mjs";
 setStage("5-report");
 const PUBLISH = process.argv.includes("--publish");
 
-/** Deviations from the plan's O2-03 text, kept with the harness that makes them. */
+/** Deviations from the plan's rehearsal text, kept with the harness that makes them. */
 export const DEVIATIONS = [
   "Chainlink feeds: the live RHxxx/USD proxies print only on a 0.5 % move or a 24 h heartbeat and accept only signed OCR reports, so nothing on a fork can print after a warp. MockRoundFeed's runtime is etched over each proxy address the registry names (anvil_setCode), its storage continuing the proxy's real phase, round number and last 12 rounds; a rehearsal-only price operator (anvil #17) prints the rounds (market open, the settlement windows, freshness).",
   "The price operator prints a round at the answer in force before every phase that reads spot and whose last round is older than 15-25 minutes, so a warped fork never meets a spot older than the oracle's spotMaxAge. On mainnet at the fork block NVDA's round was hours old (the feeds print on a 0.5 % move or their 24 h heartbeat).",
-  "Pricing: a stand-in /fair and /surface (ops/v2/rehearse/pricing-standin.mjs) prices with keeper/src/v2/pricing/bs.ts at the fork oracle's spot and fixed vols (NVDA 55 %, TSLA 65 %, META 45 %), asOf = head block time. The real pricing service needs the live Cboe chain, which cannot follow a warped clock.",
+  "Pricing: a stand-in /fair and /surface (ops/v2/rehearse/pricing-standin.mjs) prices with keeper/src/v2/pricing/bs.ts at the fork oracle's spot and fixed vols (NVDA 55 %, SPCX 60 %; any other ticker 50 %), asOf = head block time. The real pricing service needs the live Cboe chain, which cannot follow a warped clock.",
   "Detached node: the public RPC serves state only ~15 minutes behind its head, so after the deploy, funding and a warm-up transaction the fork is dumped and restarted without a fork (ops/devnet/up.sh's method); untouched slots read as zero from then on. Three empty blocks are mined before the deploy so Ponder can read V2_START_BLOCK's parent.",
-  "Markets: NVDA (Chainlink + 0.05 % pool), TSLA (Chainlink + its registry 0.30 % pool, as wave1 will ship) and META (wave1, no pool in the recon: Chainlink only, no payout route). The plan's 'single-source delay on the others' is observed on META; TSLA has a pool in the registry and corroborates like NVDA (its 0.30 % route also exercises the 60 bps conversion floor).",
-  "Prices: NVDA and TSLA open 3 % below their pool's price and the settlement window prints the pool's TWAP (a +3.1 % close), so the first two daily rungs finish in the money and both sources agree; META settles +3 % on Chainlink alone. The pools are not traded between the warm-up swaps and the settlements.",
-  "Time: the story runs in the fork's current regular session when there is room before the first daily expiry's cutoff, otherwise it warps to 10:00 New York of the next session day; every expiry, delay (META's 6 h, the veto's 48 h, the fee change's 24 h, the pin recheck's 900 s) is reached by warp. The browser pages run on a fixed clock at the chain's time.",
-  "Operator steps rehearsed by script from impersonated accounts: v2.status live in the rehearsal registry copy (DEPLOY-V2.md step 5), KeeperRewards and MakerVault funding (step 6), and in the drills the guardian's veto and mint pause, the admin's adminResolve, setFeeParams and the Chainlink source's setOracle. Wallets are funded by storage writes (fork control), not transfers.",
+  "Markets (INTERFACE_VERSION 8): the registry's launch set (launchSet.markets: NVDA and SPCX), both dual-source in ops/markets/tier1.json. ops/markets/tier1.json records the live v8 set, so step 1 hands the batch a fresh INPUT copy (out/tier1.input.json: the recorded deployment nulled) in which the single-source market's pool, pool floor and payout route are ALSO nulled, exactly as ops/devnet does for its single-source market. The dual market (NVDA) settles on Chainlink + its pool and pays through its payout route (the registry's v2.payoutRoute, v3 or v4; v9: v3 fee 500); the single market (SPCX on the copy) carries the beats META carried under v7: the single-source candidate and its 6 h delay, the in-kind fallback, feed-paused's no-source half and the guardian veto. tier1.json and dev.json are never written. The v7 story's second pooled market (TSLA, 0.30 % v3 route, 60 bps floor) has no launch-set counterpart: see Not covered.",
+  "Prices: the dual market opens 280 bps below its pool's price and the settlement window prints the pool's TWAP (a +2.9 % close), so r0 finishes in the money (2a asserts it on the fork's prices) and both sources agree; the single market settles +3 % on Chainlink alone. The pool is not traded between the warm-up swaps and the settlements. The open is outside the mm-bot's pool corroboration on purpose (T-OP-503): MM_FAIR_SPOT_TOLERANCE_BPS ships at 50 bps, and with NVDA's firstOtmBps 100 no open within 50 bps of the pool leaves r0 in the money, so the feed heartbeat below, not the pool, keeps the dual market's spot clock fresh. The bot runs the shipped tolerance.",
+  "Feed heartbeat: from 3c to 3g every market's feed reprints its answer once its round is 60 s old (story.feedHeartbeat), because the MM halts spot-age 120 s after a print: nothing corroborates the single source's print, and the dual market opened outside the 50 bps pool corroboration (T-OP-503). See Not covered for what that hides.",
+  "Time: the story runs in the fork's current regular session when there is room before the first daily expiry's cutoff, otherwise it warps to 10:00 New York of the next session day; every expiry, delay (the single-source market's 6 h, the veto's 48 h, the AccessManager execution delays of the admin's calls (24 h CONFIG_ADMIN, 48 h FEE_MANAGER), the book's 48 h fee window, the pin recheck's 900 s) is reached by warp. The browser pages run on a fixed clock at the chain's time.",
+  "Operator steps rehearsed by script from impersonated accounts: v2.status live in the rehearsal registry copy (DEPLOY-V2.md step 5), KeeperRewards and MakerVault funding (step 6), and in the drills the guardian's veto and mint pause (GUARDIAN, no delay: sent directly), the admin's adminResolve, setFeeParams and the Chainlink source's setOracle. INTERFACE_VERSION 8 restricts every admin setter through one AccessManager (V8Roles), so the admin's calls are made as the Admin Safe makes them: AccessManager.schedule, a warp of the role's execution delay (canCall read on chain, never assumed), then execute. Wallets are funded by storage writes (fork control), not transfers.",
   "Notifier and relay: both talk to a Telegram Bot API stand-in (fake-telegram.mjs); Postgres is a throwaway local cluster. Wallets link chats through the real challenge/session/subscription/deep-link flow with /start sent through the stand-in.",
   "Web: built with NEXT_PUBLIC_V2=1 against the rehearsal registry copy (gen:markets, restored after the build), next start on 127.0.0.1:3190; the injected wallet is W2-14's BrowserWallet (anvil dev accounts only).",
   "Warps and the mm-bot: a tick planned just before a multi-hour warp simulates its places after it and refuses them (v2_mm_tx_rejected DeadlinePassed / PastCutoff warnings in the mm journal). The bot sent nothing that reverted; a real chain does not jump hours inside one tick.",
-  "Drill isolation: Ponder's finality depth on chain 4663 is 30 blocks, so reverting the fork under the running indexer by more than that is unrecoverable. Drills that need only the chain, the relay and a cranker (feed-paused, sources-disagree, guardian-veto, cranker-killed, mint-paused, fee-change, pin-refused) therefore run in a sandbox: the live indexer, notifier, cranker, mm-bot and pricer are frozen with SIGSTOP, evm_snapshot, the drill starts its own cranker (anvil #8, or #11 for the second cranker; fresh SQLite journal, no INDEXER_URL, so it runs on its log index) and where needed its own MM bot (port 8591), then everything it started is stopped, evm_revert restores the fork (the block at the snapshot height is checked) and the stack is thawed. Their transaction hashes and bounties are recorded before the revert and no longer exist on the fork. The indexer-down and usdg-paused drills need the live indexer, notifier or web and run forward on the real timeline, putting back what they changed.",
+  "Drill isolation: Ponder's finality depth on chain 4663 is 30 blocks, so reverting the fork under the running indexer by more than that is unrecoverable. Drills that need only the chain, the relay and a cranker (feed-paused, sources-disagree, guardian-veto, cranker-killed, mint-paused, fee-change, pin-refused, reprice) therefore run in a sandbox: the live indexer, notifier, cranker, mm-bot and pricer are frozen with SIGSTOP, evm_snapshot, the drill starts its own cranker (anvil #8, or #11 for the second cranker; fresh SQLite journal, no INDEXER_URL, so it runs on its log index) and where needed its own MM bot (port 8591) or pricer (anvil #9, port 8592), then everything it started is stopped, evm_revert restores the fork (the block at the snapshot height is checked) and the stack is thawed. Their transaction hashes and bounties are recorded before the revert and no longer exist on the fork. The indexer-down and usdg-paused drills need the live indexer, notifier or web and run forward on the real timeline, putting back what they changed.",
   "Drill flags: a Stock Token's oraclePaused() and USDG's paused() are issuer flags nobody on a fork can call; the drills locate each in storage by flipping the bits of the slots the view reads (ops/v2/monitor-devnet.mjs's probe) and set and clear it with anvil_setStorageAt.",
-  "Drill positions: writers mint to holders directly (Clearinghouse.mint from the writer) rather than through the book, except where the book is the subject (mint-paused, fee-change, cranker-killed's resale ask).",
+  "Drill positions: INTERFACE_VERSION 8 mints only for an allowlisted minter (Clearinghouse.isMinter: the OrderBook alone), acting for a writer that made it its operator. Where the book is not the subject, a drill's writer deposits the collateral plus the series' collateral rent (mintFee) and the OrderBook's own address calls mint(longId, units, writer, holder) by impersonation (fork control; its ETH balance is put back), so the pause, cutoff, collateral and rent checks are the production ones and the book's matching and fees are skipped. Where the book is the subject (mint-paused's orders, fee-change, cranker-killed's resale ask) it is used as is.",
   "pin-refused: the cranker's ladder horizon is now + 65 min, so the drill warps to 64 min before today's close to bring a daily expiry nobody pinned into it; the recovery waits out the cranker's compiled PIN_REFUSED_RECHECK_S (900 s) by warp.",
   "monitor: ops/v2/monitor.mjs --once runs against the fork with the rehearsal registry copy and its alerts go through the real relay. A baseline run adopts the history of steps 1-3; each sandbox drill runs it on a copy of that forward state before its revert; the usdg-paused drill and a final run use the forward state. Its feeds check skips the proxy and Safe checks (the etched mocks have no aggregator()).",
 ];
@@ -56,7 +57,7 @@ function runDeviations(S, drills) {
   }
   const cards = S.story?.cards;
   if (cards && cards.natural === false) {
-    out.push(`Web cards: with NVDA's round ${Math.round(Number(cards.roundAgeS) / 60)} min old the home page offered no "Buy 0.01 share" card (“${cards.notice}”). The story printed a round, waited for the indexer and reloaded (W2-14's workaround) before the browser buyer. The feeds print on a 0.5 % move or their 24 h heartbeat, so mainnet cards would be unbuyable most of the day.`);
+    out.push(`Web cards: with ${S.roles?.dual ?? "NVDA"}'s round ${Math.round(Number(cards.roundAgeS) / 60)} min old the home page offered no "Buy 0.01 share" card (“${cards.notice}”). The story printed a round, waited for the indexer and reloaded (W2-14's workaround) before the browser buyer. The feeds print on a 0.5 % move or their 24 h heartbeat, so mainnet cards would be unbuyable most of the day.`);
   }
   const down = drills["indexer-down"];
   if (down && down.natural === false) {
@@ -67,7 +68,7 @@ function runDeviations(S, drills) {
 
 /** Not covered by this rehearsal, whatever the run. */
 const NOT_COVERED = [
-  "The real pricing service (Cboe chain, the model fallback) and the notifier's Web Push and email channels.",
+  "The real pricing service (Massive's live option chain since T-OP-706, and its model interpolation) and the notifier's Web Push and email channels.",
   "Data Streams as a third source (registered with no feed ids), puts through the cranker's ladders (the registry lists none; the usdg-paused drill writes one by script).",
   "Railway, the go-live scripts, real keys and Safes; the monitor's Chainlink proxy owner / aggregator / Safe checks (etched mocks).",
   "Indexer and notifier behaviour inside the sandbox drills (frozen there): the indexer's settling -> held -> settled statuses of those expiries, fill and settlement receipts for them.",
@@ -152,9 +153,10 @@ async function main() {
   p();
   p(`- fork block **${S.forkBlock ?? "?"}** (${S.forkTs ? ny(S.forkTs) : "?"}), public RPC read once; detached after ${S.forkSeconds ?? "?"} s of the ~900 s window; deploy block ${S.deployBlock ?? "?"}`);
   p(`- callhouse-contracts \`${S.contractsHead ?? "?"}\` at \`${rel(S.contractsDir)}\`; registry \`ops/markets/tier1.json\` sha256 \`${S.registrySha ?? "?"}\` (unchanged; the batch wrote back to \`out/tier1.rehearsal.json\`)`);
-  p(`- VerifyV2: **${S.verifyChecks ?? "?"} checks passed** (--expect-fresh true); info lines: ${(S.verifyInfo ?? []).map((l) => `\`${l.replace(/^info\s+/, "")}\``).join("; ") || "none"}`);
+  p(`- interfaceVersion **${S.interfaceVersion ?? "?"}**; launch set ${(S.launchSet ?? []).join(", ") || "?"} (registry launchSet.markets); dual-source ${S.roles?.dual ?? "?"}, single-source ${S.roles?.single ?? "?"} (nulled on the input copy \`${rel(S.inputCopy ?? "")}\`: ${(S.nulled?.fields ?? []).join(", ")}); not deployed by this run: ${(S.undeployed ?? []).join(", ") || "none"}`);
+  p(`- VerifyV8: **${S.verifyChecks ?? "?"} checks passed** (--expect-fresh true); info lines: ${(S.verifyInfo ?? []).map((l) => `\`${l.replace(/^info\s+/, "")}\``).join("; ") || "none"}`);
   if (S.contracts) p(`- contracts: ${Object.entries(S.contracts).filter(([k]) => k !== "sources").map(([k, v]) => `${k} \`${v}\``).join(", ")}; sources ${Object.entries(S.contracts.sources).map(([k, v]) => `${k} \`${v}\``).join(", ")}`);
-  if (S.markets) for (const m of Object.values(S.markets)) p(`- ${m.ticker}: asset \`${m.asset}\`, feed \`${m.feed}\`, pool ${m.pool ? `\`${m.pool}\` (fee ${m.poolFee})` : "none"}, registerTx \`${m.registerTx}\``);
+  if (S.markets) for (const m of Object.values(S.markets)) p(`- ${m.ticker}: asset \`${m.asset}\`, feed \`${m.feed}\`, pool ${m.pool ? `\`${m.pool}\` (fee ${m.poolFee})` : "none"}, payout route ${m.routeOnChain ? `${m.routeOnChain.venue}${m.routeOnChain.venue === "None" ? " (paid in kind)" : ` fee ${m.routeOnChain.fee}${m.routeOnChain.venue === "V4" ? ` tickSpacing ${m.routeOnChain.tickSpacing}` : m.routeOnChain.v3Pool ? ` pool \`${m.routeOnChain.v3Pool}\`` : ""}`}` : "?"}, registerTx \`${m.registerTx}\``);
   if (S.admin) p(`- impersonated on the fork: admin \`${S.admin}\`, guardian \`${S.guardian}\`; bots anvil #8 cranker, #9 pricer, #10 MM quoter, #11 second cranker (drill)`);
 
   /* ---------------------------------------------------------------- steps 1-3 */
@@ -173,7 +175,7 @@ async function main() {
   p();
   p("## Step 4: failure drills");
   p();
-  p("`sandbox` drills run on an evm_snapshot of the post-story fork with the live indexer, notifier, cranker, mm-bot and pricer frozen, their own cranker (and MM bot) started for the drill, then the fork is reverted and the stack thawed, so each starts from the same state. `forward` drills run on the real timeline with the live stack. See Deviations for why.");
+  p("`sandbox` drills run on an evm_snapshot of the post-story fork with the live indexer, notifier, cranker, mm-bot and pricer frozen, their own cranker (and MM bot or pricer) started for the drill, then the fork is reverted and the stack thawed, so each starts from the same state. `forward` drills run on the real timeline with the live stack. See Deviations for why.");
   const base = stageChecks("4-drills/monitor").filter((x) => /baseline/.test(x.message));
   if (base.length) {
     p();
@@ -372,6 +374,7 @@ async function main() {
   p("## Not covered");
   p();
   for (const n of NOT_COVERED) p(`- ${n}`);
+  for (const n of S.story?.notCovered ?? []) p(`- story: ${esc(n)}`);
   for (const id of drillIds) {
     const d = drills[id];
     if (d.status === "skipped") p(`- drill ${id}: skipped (${(d.notes ?? []).join("; ")})`);

@@ -26,6 +26,11 @@
         "name": "splitter_",
         "type": "address",
         "internalType": "address"
+      },
+      {
+        "name": "legacyFactory_",
+        "type": "address",
+        "internalType": "contract ILegacyHouseVaultFactory"
       }
     ],
     "stateMutability": "nonpayable"
@@ -111,6 +116,11 @@
         "name": "symbol",
         "type": "string",
         "internalType": "string"
+      },
+      {
+        "name": "weekly",
+        "type": "bool",
+        "internalType": "bool"
       }
     ],
     "outputs": [
@@ -131,6 +141,19 @@
         "name": "",
         "type": "bytes4",
         "internalType": "bytes4"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "legacyFactory",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "address",
+        "internalType": "contract ILegacyHouseVaultFactory"
       }
     ],
     "stateMutability": "view"
@@ -195,6 +218,11 @@
         "name": "underlying",
         "type": "address",
         "internalType": "address"
+      },
+      {
+        "name": "weekly",
+        "type": "bool",
+        "internalType": "bool"
       }
     ],
     "outputs": [
@@ -259,6 +287,12 @@
         "type": "string",
         "indexed": false,
         "internalType": "string"
+      },
+      {
+        "name": "weekly",
+        "type": "bool",
+        "indexed": false,
+        "internalType": "bool"
       }
     ],
     "anonymous": false
@@ -303,6 +337,17 @@
   },
   {
     "type": "error",
+    "name": "MarketNotConfigured",
+    "inputs": [
+      {
+        "name": "underlying",
+        "type": "address",
+        "internalType": "address"
+      }
+    ]
+  },
+  {
+    "type": "error",
     "name": "NoSource",
     "inputs": []
   },
@@ -320,5 +365,21 @@
     "type": "error",
     "name": "UnsupportedAsset",
     "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "WeeklyVaultInLegacyFactory",
+    "inputs": [
+      {
+        "name": "underlying",
+        "type": "address",
+        "internalType": "address"
+      },
+      {
+        "name": "vault",
+        "type": "address",
+        "internalType": "address"
+      }
+    ]
   }
 ]

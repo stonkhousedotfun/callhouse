@@ -1,18 +1,23 @@
 /**
  * Subscription preferences and which event kinds they let through.
  *
- *   { strikeCross, expiry24h, expiry1h, settlement, fills, writerItmWarning, autoRoll: boolean,
+ *   { strikeCross, expiry24h, expiry1h, settlement, fills, writerItmWarning, autoRoll,
+ *     feeNotice, adminOperation, marketLive: boolean,
  *     priceAlerts: [{ ticker, above?: string, below?: string }] }
  *
- * DECISIONS WHERE §6 IS SILENT:
- *   - Every key is optional on input. A missing toggle defaults to ON (someone subscribing wants
- *     alerts) and priceAlerts to []. Unknown keys are refused (400), so a misspelt toggle is an
- *     error in the dapp, not a switch that silently does nothing.
+ * DECISIONS MADE HERE:
+ *   - Every key is optional on input. A missing toggle for the subscriber's own positions and fills
+ *     (the first seven above) defaults to ON (someone subscribing wants alerts); a missing
+ *     protocol-wide toggle defaults to OFF (see below); priceAlerts defaults to []. Unknown keys are
+ *     refused (400), so a misspelt toggle is an error in the dapp, not a switch that silently does
+ *     nothing.
  *   - `above` / `below` are USDG base units per whole share as an integer string, the unit of
  *     every price in the protocol and of Money.raw (221.50 USDG = "221500000"). A decimal like
  *     "221.5" is refused with that explanation rather than guessed at.
  *   - At most 20 price alerts per subscription.
  *   - `payout_failed_to_ledger` follows `settlement`: it is news about a payout.
+ *   - The protocol-wide kinds (`feeNotice`, `adminOperation`, `marketLive`) default to OFF: they go to
+ *     every watched wallet, so a subscriber opts in rather than being opted into broadcasts.
  *   - `price_alert` is delivered only to a subscription holding an alert with the same ticker,
  *     direction and threshold, because prefs are per subscription (per channel) and a wallet's
  *     Telegram and browser may carry different alerts.
@@ -44,6 +49,7 @@ export const prefsSchema = z
     autoRoll: z.boolean().default(true),
     feeNotice: z.boolean().default(false),
     adminOperation: z.boolean().default(false),
+    marketLive: z.boolean().default(false),
     priceAlerts: z.array(priceAlertSchema).max(20).default([]),
   })
   .strict();
@@ -65,6 +71,7 @@ export const KIND_TOGGLE: Record<Exclude<EventKind, 'price_alert'>, Toggle> = {
   auto_roll: 'autoRoll',
   fee_notice: 'feeNotice',
   admin_operation: 'adminOperation',
+  market_live: 'marketLive',
 };
 
 /** Stored prefs back to Prefs. A row that no longer parses lets nothing through. */

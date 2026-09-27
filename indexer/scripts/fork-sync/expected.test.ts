@@ -433,7 +433,7 @@ describe("buildExpectations on the dry run's three weeks", () => {
     expect(expectedAt(built, r, "strands.length")).toBe(0);
   });
 
-  it("publishes the assigned week from two fills and two harvests: written == sold per fill, premium and strike proceeds apart (W-21)", () => {
+  it("publishes the assigned week from two fills and two harvests: written == sold per fill, premium and strike proceeds apart", () => {
     const { run, chain } = fixture();
     const built = buildExpectations(run, chain);
     const r = "GET /v1/cycles/2";
@@ -576,7 +576,7 @@ describe("buildExpectations on the dry run's three weeks", () => {
     expect(expectedAt(built, v, "week.listing.hash")).toBeNull();
     // 14.1333 NVDA at 95% = 13.43 lots → 13 contracts, nothing written.
     expect(expectedAt(built, v, "week.assignmentLive.capacity")).toBe("13");
-    // X-3: the last TERMINAL harvest is cycle 3's close, not the retry that came after it.
+    // The last TERMINAL harvest is cycle 3's close, not the retry that came after it.
     expect(expectedAt(built, v, "lastHarvest.origin")).toBe("rollClose");
     expect(expectedAt(built, v, "lastHarvest.txHash")).toBe(hash(147));
     expect(expectedAt(built, v, "lastHarvest.grossUsdg.raw")).toBe("3492768");

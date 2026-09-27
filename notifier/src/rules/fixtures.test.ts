@@ -1,5 +1,5 @@
 /**
- * End to end, standing in for the plan's devnet gate until F2-04 exists: the whole notifier
+ * End to end, standing in for a devnet gate until one exists: the whole notifier
  * (startNotifier, listening, every loop running) polls ops/fixtures/serve-v2.mjs, the static
  * indexer API v2 fixture server, spawned on a free port, and delivers to a fake Telegram Bot API
  * (TELEGRAM_API_BASE override).
@@ -200,13 +200,41 @@ test('the notifier polls the v2 fixture server and delivers fill and settlement 
 
   const fill = roller().find((m) => m.startsWith('Sold NVDA 227.00 call'));
   assert.match(fill ?? '', /You wrote and sold 0\.60 shares of the NVDA 227\.00 call expiring Fri 18 Sep, 4:00pm EDT, at 0\.26 USDG per share\./);
-  // INTERFACE_VERSION 7: premiumFeeBps is 0, so the maker keeps the whole premium (60 units at
-  // 0.2601 = 0.15606 USDG) and the seller fee line reads 0.00 because there is no seller fee at all.
+  // INTERFACE_VERSION 8: fixture fill 1010 is an ask hit on the roller's primary sale. OrderBook credits
+  // the maker premium - sellerFee + rebate (callhouse-contracts src/v2/OrderBook.sol, the maker's `_credit` call in
+  // `_execute`): 60 units at 0.2601 = 0.15606, less the 0.007803 seller fee, plus the 0.007803 maker rebate = 0.15606
+  // received; the net fee is 0.007803 - 0.007803 = 0. Both truncate to the cent (format.ts).
+  // Those three fees are re-derived from the fixture's fee config (config.json .fees) the way OrderBook computes a
+  // one-fill take with no discount and no maker registry: sellerFee = premium x premiumFeeBps / 1e4 (`_plan`), takerFee
+  // = min(premium x takerFeeCapBps / 1e4, takerFeeFlat) (`_takerFee`), rebate = min(takerFee x makerRebateBps / 1e4,
+  // takerFee) (`_execute`, capped by the fee room left), so the expected line below follows from the config, not from
+  // copied numbers.
+  const fees = fixture('config.json').fees;
+  const f1010 = fixture('feed/activity.json').items.find((i: any) => i.kind === 'fill' && i.data.orderId === '1010')?.data;
+  const bps = 10_000n;
+  const premium = BigInt(f1010.premium.raw);
+  const byCap = (premium * BigInt(fees.takerFeeCapBps)) / bps;
+  const takerFee = byCap < BigInt(fees.takerFeeFlat.raw) ? byCap : BigInt(fees.takerFeeFlat.raw);
+  const sellerFee = (premium * BigInt(fees.premiumFeeBps)) / bps;
+  const byRebate = (takerFee * BigInt(fees.makerRebateBps)) / bps;
+  const rebate = byRebate < takerFee ? byRebate : takerFee;
+  assert.deepEqual(
+    [f1010.primary, f1010.takerIsBuyer, f1010.sellerFee.raw, f1010.takerFee.raw, f1010.makerRebate.raw],
+    [true, true, String(sellerFee), String(takerFee), String(rebate)],
+  );
+  assert.equal(premium - sellerFee + rebate, 156_060n);
   assert.match(fill ?? '', /Received: 0\.15 USDG, after 0\.00 USDG in fees\./);
 
   const settlement = roller().find((m) => m.startsWith('The NVDA 216.00 call you wrote settled'));
   assert.match(settlement ?? '', /settled at 219\.40 USDG\./);
-  assert.match(settlement ?? '', /Returned to you: 1\.9690 NVDA Stock Tokens of collateral, held in your Stonkhouse balance\./);
+  // The interface v8 fixture rebaseline made the roller's 216 short 150 units, redeemed in kind
+  // for 150 x 216 / 219.40 / 100 = 1.47675 NVDA (feed/activity.json, the roller's redemption). The old 1.9690 was the
+  // same arithmetic on the pre-v8 200 units. The message shows the fixture's own amount, truncated to 4 places.
+  const redemption = fixture('feed/activity.json').items.find(
+    (i: any) => i.kind === 'redemption' && i.data.holder === ROLLER && i.data.side === 'short' && i.series.strike.raw === '216000000',
+  );
+  assert.deepEqual([redemption?.data.units, redemption?.data.amount.raw], ['150', '1476754785779398500']);
+  assert.match(settlement ?? '', /Returned to you: 1\.4767 NVDA Stock Tokens of collateral, held in your Stonkhouse balance\./);
 
   assert.deepEqual(
     roller().map((m) => m.split('\n')[0]).sort(),
@@ -218,8 +246,11 @@ test('the notifier polls the v2 fixture server and delivers fill and settlement 
     [
       'Received sale proceeds: NVDA 216.00 call',
       'Wallet 0x7055…3Ff9 sold 0.50 shares of the NVDA 216.00 call expiring Thu 17 Sep, 4:00pm EDT, at 1.60 USDG per share, and the proceeds were paid to your wallet.',
-      // v7: premium 0.8006 less the 0.08006 taker fee only; the seller fee is 0.
-      'Received: 0.72 USDG, after 0.08 USDG in fees.',
+      // INTERFACE_VERSION 8: fixture fill 1023 is a bid hit, so the taker is the seller and its
+      // recipient is paid premium - sellerFee - takerFee (OrderBook.sol `take`, the bid-hit `_payOrOwe` to p.recipient):
+      // 0.8006 - 0.04003 - 0.08006 = 0.68051, after 0.04003 + 0.08006 = 0.12009 in fees; both truncate to the cent.
+      // (v7 had no seller fee: 0.72 after 0.08.)
+      'Received: 0.68 USDG, after 0.12 USDG in fees.',
     ].join('\n'),
   ]);
 

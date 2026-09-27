@@ -230,6 +230,25 @@
   },
   {
     "type": "function",
+    "name": "everConfigured",
+    "inputs": [
+      {
+        "name": "underlying",
+        "type": "address",
+        "internalType": "address"
+      }
+    ],
+    "outputs": [
+      {
+        "name": "",
+        "type": "bool",
+        "internalType": "bool"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
     "name": "finalize",
     "inputs": [
       {
@@ -259,6 +278,19 @@
   },
   {
     "type": "function",
+    "name": "houseVaultFactory",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "address",
+        "internalType": "address"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
     "name": "isConsumingScheduledOp",
     "inputs": [],
     "outputs": [
@@ -282,6 +314,39 @@
       }
     ],
     "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "listMarket",
+    "inputs": [
+      {
+        "name": "underlying",
+        "type": "address",
+        "internalType": "address"
+      },
+      {
+        "name": "sources",
+        "type": "address[]",
+        "internalType": "address[]"
+      },
+      {
+        "name": "maxDeviationBps",
+        "type": "uint16",
+        "internalType": "uint16"
+      },
+      {
+        "name": "uncorroboratedDelay",
+        "type": "uint32",
+        "internalType": "uint32"
+      },
+      {
+        "name": "spotMaxAge",
+        "type": "uint32",
+        "internalType": "uint32"
+      }
+    ],
+    "outputs": [],
+    "stateMutability": "nonpayable"
   },
   {
     "type": "function",
@@ -320,6 +385,24 @@
   {
     "type": "function",
     "name": "pin",
+    "inputs": [
+      {
+        "name": "underlying",
+        "type": "address",
+        "internalType": "address"
+      },
+      {
+        "name": "expiry",
+        "type": "uint40",
+        "internalType": "uint40"
+      }
+    ],
+    "outputs": [],
+    "stateMutability": "nonpayable"
+  },
+  {
+    "type": "function",
+    "name": "pinBoundary",
     "inputs": [
       {
         "name": "underlying",
@@ -451,6 +534,19 @@
     "inputs": [
       {
         "name": "clearinghouse_",
+        "type": "address",
+        "internalType": "address"
+      }
+    ],
+    "outputs": [],
+    "stateMutability": "nonpayable"
+  },
+  {
+    "type": "function",
+    "name": "setHouseVaultFactory",
+    "inputs": [
+      {
+        "name": "houseVaultFactory_",
         "type": "address",
         "internalType": "address"
       }
@@ -767,6 +863,19 @@
   },
   {
     "type": "event",
+    "name": "HouseVaultFactorySet",
+    "inputs": [
+      {
+        "name": "houseVaultFactory",
+        "type": "address",
+        "indexed": true,
+        "internalType": "address"
+      }
+    ],
+    "anonymous": false
+  },
+  {
+    "type": "event",
     "name": "KeeperRewardsSet",
     "inputs": [
       {
@@ -947,6 +1056,37 @@
   },
   {
     "type": "event",
+    "name": "SettlementPinConfirmed",
+    "inputs": [
+      {
+        "name": "underlying",
+        "type": "address",
+        "indexed": true,
+        "internalType": "address"
+      },
+      {
+        "name": "expiry",
+        "type": "uint40",
+        "indexed": true,
+        "internalType": "uint40"
+      },
+      {
+        "name": "previousPinner",
+        "type": "address",
+        "indexed": true,
+        "internalType": "address"
+      },
+      {
+        "name": "pinner",
+        "type": "address",
+        "indexed": false,
+        "internalType": "address"
+      }
+    ],
+    "anonymous": false
+  },
+  {
+    "type": "event",
     "name": "SettlementResolved",
     "inputs": [
       {
@@ -1093,6 +1233,17 @@
     "type": "error",
     "name": "AlreadyFinal",
     "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "AlreadyListed",
+    "inputs": [
+      {
+        "name": "asset",
+        "type": "address",
+        "internalType": "address"
+      }
+    ]
   },
   {
     "type": "error",

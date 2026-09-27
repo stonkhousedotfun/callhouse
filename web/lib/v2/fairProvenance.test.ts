@@ -1,9 +1,9 @@
 /**
- * W3-303. The protected fact is: A FAIR VALUE IS NEVER SHOWN WITHOUT A SOURCE QUALIFIER, and the
+ * The protected fact is: A FAIR VALUE IS NEVER SHOWN WITHOUT A SOURCE QUALIFIER, and the
  * qualifier never overstates the source.
  *
- * That is the fact worth breaking, not "the function returns a string". The failure this row exists
- * to close is a label that goes quiet — X3-302's provenance contract was asserted by schema twins
+ * That is the fact worth breaking, not "the function returns a string". The failure this test exists
+ * to close is a label that goes quiet — provenance contract was asserted by schema twins
  * and type tests while NO component read it, so the assertions passed on a field nobody rendered.
  * A test that only checks the happy branch would rebuild exactly that shape one layer up.
  */
@@ -43,7 +43,7 @@ describe("absence is never real-time", () => {
   });
 
   it("ALWAYS returns non-empty text and detail, on every input", () => {
-    // The label going quiet is the regression this row closes. There is no input that produces
+    // The label going quiet is the regression this closes. There is no input that produces
     // nothing to render.
     const inputs = [undefined, null, {}, provenance(), provenance({ cls: "real-time" }),
       provenance({ cls: "end-of-day" }), provenance({ cls: "indicative" }), provenance({ cls: "unknown" }),

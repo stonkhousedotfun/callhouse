@@ -2,12 +2,12 @@
 /**
  * Render the public "Markets" docs page from the market registry.
  *
- *   ops/markets/tier1.json (+ v2-sources.json + v7-legacy.json)
+ *   ops/markets/tier1.json (+ v2-sources.json)
  *     -> callhouse-docs/product/markets.md (and its GitBook mirror)
  *
  * WHY A RENDERER AND NOT A HAND-WRITTEN PAGE
  *   The docs promise "trust only the addresses on this page". With 35 markets that is 70 token and
- *   feed addresses, the configured Uniswap v3 pools, the v2 contracts and the v1 factory; a hand-copied table is
+ *   feed addresses, the configured Uniswap v3 pools and the v2 contracts; a hand-copied table is
  *   the one place a wrong address could slip in unnoticed. So the page is GENERATED from the
  *   registry, whose token and feed addresses were read on chain at `verifiedAtBlock` and whose v2
  *   blocks `build-markets.mjs --check` validates (pools included, on chain), and `--check` here is
@@ -16,7 +16,7 @@
  *   carry are compiled constants of the v2 contracts (the 30-minute settlement window, the
  *   10-minute snapshot grace; V2Constants.sol), stated as such.
  *
- * WHAT IT RENDERS (the v2 markets page, D2-04)
+ * WHAT IT RENDERS (the v2 markets page)
  *   - what a market is on v2 (one Stock Token on the shared contracts), the standing v2 disclosure
  *     and the address warning;
  *   - status and waves: what planned / live / paused mean, and which tickers are in which wave;
@@ -28,27 +28,24 @@
  *         strikes, first distance, step) from `v2.defaults` with the market's `v2.overrides` merged;
  *   - the v2 contracts (`v2.contracts`), flywheel contracts (`v2.flywheel`), Admin and Treasury
  *     Safes (`shared.safes`), their deploy blocks, and the third-party contracts v2 relies on;
- *   - the interface-7 contract set and its registered markets from the frozen `v7-legacy.json` input;
- *   - legacy: the v1 factories that exist (live or paused rows; NVDA today) with their run-off state
- *     (`v1RunOff`, with the freeze date when `v1FrozenAt` is set), and the count of per-market
- *     factories that were never built (superseded-by-v2);
+ *   - NO legacy sections. The docs are v9-only: the interface-7 set
+ *     (`v7-legacy.json`) and the v1 factories are not rendered, and `v7-legacy.json` is not read.
  *   - provenance: the registry's verifiedAtBlock and generatedAt and the recon's observedBlock and
  *     checkedAt. The page carries those timestamps, never `Date.now()`, so a re-render of an
  *     unchanged registry is byte-identical and `--check` is meaningful.
  *
  * WHAT IT REFUSES (throws, so the gate goes red instead of the page going wrong)
- *   - an unknown v1 status or v2 status / wave; a v1 `planned` row (ADR-02 cancelled that rollout:
- *     the page has nothing true to say about a planned v1 factory);
+ *   - an unknown v1 status or v2 status / wave; a v1 `planned` row (that rollout was cancelled);
  *   - a live or paused v1 row without a factory, a superseded row with one; a `v1FrozenAt` that is not
- *     unix seconds on a factory with `v1RunOff: true`;
+ *     unix seconds on a factory with `v1RunOff: true`. The page no longer shows v1, but these are
+ *     registry integrity (build-markets.mjs holds the same rules), so a broken v1 block still stops it;
  *   - a registered (live / paused) v2 market without registeredAt + registerTx, a live v2 market
  *     while the Clearinghouse address is null;
  *   - a `v2.contracts`, `v2.contracts.sources`, `v2.flywheel`, `shared.safes` or `v2.defaults` key it
  *     does not know, or an override outside `v2.defaults`: a schema change must reach this page;
- *   - a missing or non-interface-7 `v7-legacy.json`, or one without its `_legacy` marker;
  *   - a `v2.interfaceVersion` other than RENDERS_INTERFACE_VERSION. Registry schema v2 has no
  *     "Data Streams enabled for this market" field (`dataStreamsFeedId` is the recon's stream id,
- *     set for all 35 whether or not access exists), and C2-12 registers the source for no market, so
+ *     set for all 35 whether or not access exists), and the launch registers the source for no market, so
  *     the page says Data Streams settles no market. The interface revision that adds that switch
  *     must bump the version, and this renderer with it.
  *
@@ -74,8 +71,8 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
-// T-OP-138. The six external contracts' KEY LIST comes from the builder, never from a second hand-written
-// copy: `build-markets.mjs` is where T-OP-114 defined it, and a list re-typed here would agree with it right
+// The six external contracts' KEY LIST comes from the builder, never from a second hand-written
+// copy: `build-markets.mjs` is where it is defined, and a list re-typed here would agree with it right
 // up to the day one of them changed. Importing the module runs no build (its `main()` is guarded by
 // `isMain`); it reads only node built-ins.
 import { V2_EXTERNAL_CONTRACT_NAMES } from "./build-markets.mjs";
@@ -84,12 +81,10 @@ const here = path.dirname(fileURLToPath(import.meta.url));
 const appRoot = path.resolve(here, "..", "..");
 const REGISTRY = path.join(here, "tier1.json");
 const RECON = path.join(here, "v2-sources.json");
-const LEGACY = path.join(here, "v7-legacy.json");
 const EXPLORER = "https://robinhoodchain.blockscout.com";
 
 /** The registry interface version this page is written for (see WHAT IT REFUSES). */
 const RENDERS_INTERFACE_VERSION = 8; // `dataStreamsFeedId` still does not say whether Data Streams is enabled for a market, so the configured-source refusal remains version-pinned instead of being inferred.
-const LEGACY_INTERFACE_VERSION = 7;
 // Mirrored from contracts/src/v2/interfaces/V2Constants.sol:44,48,95 at the v8 contract source:
 // the settlement window, v3 snapshot grace, and largest accepted payout-route fee tier.
 const SETTLEMENT_WINDOW_S = 1800;
@@ -123,16 +118,18 @@ const V2_SOURCES = [
   ["dataStreams", "DataStreamsSource", "Settlement source: Chainlink Data Streams (enabled for no market)"],
 ];
 /**
- * The six EXTERNAL v2 contracts (T-OP-114): `v2.contracts` keys the deploy wrapper reads and T-OP-116's
- * externals step writes back, but which DeployV8 does not create. ACCEPTED WHEN PRESENT, never required:
- * the committed registry does not carry them until the first write-back, and `checkKeys` below refuses
- * any name outside core ∪ externals exactly as before. What each one does, looked up BY THE IMPORTED
+ * The EXTERNAL v2 contracts: `v2.contracts` keys that DeployV8 does not create. Six are keys the
+ * deploy wrapper reads and the externals step writes back; the seventh, `stockZap`, is
+ * created by DeployEarnVault.s.sol beside the EarnVault and read only by the app, never by the wrapper.
+ * ACCEPTED WHEN PRESENT, never required, and `checkKeys` below refuses any name outside core ∪ externals
+ * exactly as before. What each one does, looked up BY THE IMPORTED
  * LIST — the page order and the key set are the builder's; only the prose lives here, and a key the
  * builder knows that this table cannot describe throws at load (`describeExternals`), so the list and
  * the prose cannot drift apart silently.
  */
-// Prose mirrors each contract's @notice at callhouse-contracts leekzor/v8 (HouseVault.sol:22, HouseVaultFactory.sol:13,
-// Hedger.sol:19, RewardsDistributor via DeployLenderRewards.s.sol, EarnVault.sol:25, StockVenueAdapter.sol:7).
+// Prose mirrors each contract's @notice in callhouse-contracts (HouseVault.sol, HouseVaultFactory.sol,
+// Hedger.sol, RewardsDistributor via DeployLenderRewards.s.sol, EarnVault.sol, StockVenueAdapter.sol,
+// StockZap.sol, as deployed).
 const V2_EXTERNAL_DESCRIPTIONS = {
   houseVault: ["HouseVault", "The user-funded market maker: one instance per market; depositors fund it with USDG and Stock Tokens"],
   houseVaultFactory: ["HouseVaultFactory", "Deploys one HouseVault per market and keeps the index of them (created by LISTING)"],
@@ -140,6 +137,7 @@ const V2_EXTERNAL_DESCRIPTIONS = {
   rewardsDistributorLender: ["RewardsDistributor (lender)", "The second RewardsDistributor instance: lender reward claims per epoch, paid in the $STONKHOUSE token"],
   earnVault: ["EarnVault", "The Earn vault: depositors pay one ERC-20 in and get shares"],
   stockVenueAdapter: ["StockVenueAdapter", "The Earn vault's stock-side venue adapter (shipped disabled)"],
+  stockZap: ["StockZap", "Stateless, role-less helpers over the PayoutRouter's pinned routes: buy a Stock Token with USDG into the Clearinghouse, or sell it back to USDG"],
 };
 /** `[key, name, what]` for every external, in the builder's order; throws if the two disagree. */
 function describeExternals() {
@@ -161,33 +159,32 @@ const SHARED_SAFES = [
   ["admin", "Admin Safe", "2-of-3 owner Safe for delayed administration"],
   ["treasury", "Treasury Safe", "2-of-3 Safe that holds protocol treasury assets"],
 ];
-/** The archived interface-7 set has the pre-v8 `v2.contracts` shape. */
-const LEGACY_V2_CONTRACTS = [
-  ["clearinghouse", "Clearinghouse", "Markets, series, collateral, settlement and redemption"],
-  ["orderBook", "OrderBook", "Bids, resale asks and write-on-fill asks"],
-  ["settlementOracle", "SettlementOracle", "The settlement price of each market and expiry"],
-  ["expiryCalendar", "ExpiryCalendar", "Which timestamps are valid daily and weekly expiries"],
-  ["keeperRewards", "KeeperRewards", "Small USDG bounties for permissionless lifecycle calls"],
-  ["autoRoller", "AutoRoller", "Writers' auto-roll strategies"],
-  ["payoutAdapter", "UniV3PayoutAdapter", "Attempts eligible winning-call conversion over Uniswap v3"],
-  ["makerVault", "MakerVault", "The protocol's market-making vault"],
-  ["makerRegistry", "MakerRegistry", "Market maker rebate tiers"],
-  ["rewardsDistributor", "RewardsDistributor", "Market maker reward claims per epoch"],
-];
 // IPayoutRouter.sol:41-45 names None, V3 and V4. The registry mirrors None as null and the other
 // two as lower-case `venue` values, matching ops/v2/monitor.mjs's existing vocabulary.
 const PAYOUT_ROUTE_KEYS = {
   v3: ["venue", "fee"],
   v4: ["venue", "fee", "tickSpacing", "poolId"],
 };
+/** `dailyWeekdays` values, in order, and how the page names them. Mirrors keeper/src/v2/registry.ts WEEKDAYS. */
+const WEEKDAYS = ["mon", "tue", "wed", "thu", "fri"];
+const WEEKDAY_NAME = { mon: "Mon", tue: "Tue", wed: "Wed", thu: "Thu", fri: "Fri" };
 /** The shape of `v2.defaults` this page renders; a market's `v2.overrides` may name any subset. */
 const LADDER_SHAPE = { rungs: 0, firstOtmBps: 0, stepBps: 0, cardTargetBps: 0 };
 const DEFAULTS_SHAPE = {
   maxDeviationBps: 0,
   uncorroboratedDelayS: 0,
   spotMaxAgeS: 0,
+  // Deploy knobs the registry now owns (V2_MAX_FEED_AGE_S and the per-market oracle source tuning
+  // RegisterMarkets sends). Known here so the shape check passes; deliberately NOT rendered: they tune how a source
+  // reads its price, not what a market is, and the product page states the settlement rule, not source internals.
+  maxFeedAgeS: 0,
+  chainlinkMaxStaleS: 0,
+  chainlinkMaxRoundJumpBps: 0,
+  univ3WindowS: 0,
   ladder: { weekly: LADDER_SHAPE, daily: LADDER_SHAPE },
   expiriesAhead: { weekly: 0, daily: 0 },
+  // The weekdays a daily close may list on (a list, not an integer; checkShape knows it by this marker).
+  dailyWeekdays: WEEKDAYS,
 };
 
 const args = process.argv.slice(2);
@@ -245,7 +242,12 @@ function checkShape(obj, shape, where, { subset }) {
       throw new Error(`${where}.${k} is missing`);
     }
     if (isObject(v)) checkShape(obj[k], v, `${where}.${k}`, { subset });
-    else if (!Number.isSafeInteger(obj[k]) || obj[k] < 0) throw new Error(`${where}.${k} must be a non-negative integer`);
+    else if (Array.isArray(v)) {
+      const days = obj[k];
+      if (!Array.isArray(days) || days.length === 0 || !days.every((d) => WEEKDAYS.includes(d)) || new Set(days).size !== days.length) {
+        throw new Error(`${where}.${k} must be a non-empty list of distinct weekdays (${WEEKDAYS.join(", ")})`);
+      }
+    } else if (!Number.isSafeInteger(obj[k]) || obj[k] < 0) throw new Error(`${where}.${k} must be a non-negative integer`);
   }
 }
 
@@ -259,16 +261,22 @@ function withOverrides(defaults, overrides) {
   return out;
 }
 
-/** One tenor's ladder: "2 expiries, 5 strikes from +2% in 2% steps", or "none". */
+/** One tenor's ladder: "2 expiries, 5 strikes from +2% in 2% steps", or "none". A daily ladder limited to
+ *  some weekdays says which ("Mon, Wed and Fri closes only"). */
 function ladderCell(eff, def, tenor) {
   const l = eff.ladder[tenor];
   const d = def.ladder[tenor];
   const n = eff.expiriesAhead[tenor];
-  const own = n !== def.expiriesAhead[tenor] || l.rungs !== d.rungs || l.firstOtmBps !== d.firstOtmBps || l.stepBps !== d.stepBps;
+  const days = tenor === "daily" && eff.dailyWeekdays.length < WEEKDAYS.length ? eff.dailyWeekdays : null;
+  const own = n !== def.expiriesAhead[tenor] || l.rungs !== d.rungs || l.firstOtmBps !== d.firstOtmBps || l.stepBps !== d.stepBps ||
+    (tenor === "daily" && eff.dailyWeekdays.join() !== def.dailyWeekdays.join());
+  const expiries = days === null
+    ? `${n} ${n === 1 ? "expiry" : "expiries"}`
+    : `the ${list(days.map((day) => WEEKDAY_NAME[day]))} ones of the next ${n} ${n === 1 ? "close" : "closes"}`;
   const text =
     n === 0 || l.rungs === 0
       ? "none"
-      : `${n} ${n === 1 ? "expiry" : "expiries"}, ${l.rungs} ${l.rungs === 1 ? "strike" : "strikes"} from +${pct(l.firstOtmBps)}${l.rungs === 1 ? "" : ` in ${pct(l.stepBps)} steps`}`;
+      : `${expiries}, ${l.rungs} ${l.rungs === 1 ? "strike" : "strikes"} from +${pct(l.firstOtmBps)}${l.rungs === 1 ? "" : ` in ${pct(l.stepBps)} steps`}`;
   return own ? `${text} (market setting)` : text;
 }
 
@@ -317,7 +325,7 @@ function validate(reg, recon) {
   if (v2.interfaceVersion !== RENDERS_INTERFACE_VERSION) {
     throw new Error(`v2.interfaceVersion is ${JSON.stringify(v2.interfaceVersion)}; this page is written for ${RENDERS_INTERFACE_VERSION} (re-check the Data Streams rule, then bump RENDERS_INTERFACE_VERSION)`);
   }
-  // T-OP-138: the core set and `sources` are exact; an external key is known only when present (the
+  // The core set and `sources` are exact; an external key is known only when present (the
   // builder's rule, build-markets.mjs validateV2Top). Any other name still throws.
   const present = V2_EXTERNAL_CONTRACT_NAMES.filter((k) => k in v2.contracts);
   const contractKeys = [...V2_CONTRACTS.map(([k]) => k), ...present, "sources"];
@@ -327,7 +335,9 @@ function validate(reg, recon) {
     if (a !== null && !(typeof a === "string" && /^0x[0-9a-fA-F]{40}$/.test(a))) throw new Error(`v2.contracts.${k} is neither null nor an address`);
   }
   checkKeys(v2.contracts.sources, V2_SOURCES.map(([k]) => k), "v2.contracts.sources");
-  checkKeys(v2.flywheel, [...V2_FLYWHEEL.map(([k]) => k), "deployBlock"], "v2.flywheel");
+  // `config` is the flywheel's deploy knobs (burn share, slippage bounds, buyback cap), known and not
+  // rendered: this page names the flywheel contracts, and the knobs live in the registry and on chain.
+  checkKeys(v2.flywheel, [...V2_FLYWHEEL.map(([k]) => k), "deployBlock", "config"], "v2.flywheel");
   checkKeys(reg.shared?.safes, SHARED_SAFES.map(([k]) => k), "shared.safes");
   checkShape(v2.defaults, DEFAULTS_SHAPE, "v2.defaults", { subset: false });
   if (!recon || !Number.isSafeInteger(recon.observedBlock) || typeof recon.checkedAt !== "string") {
@@ -397,44 +407,51 @@ function validate(reg, recon) {
   }
 }
 
-/** Validate only the archived fields this page reads; do not run the interface-8 validator on v7. */
-function validateLegacy(legacy) {
-  const rel = path.relative(appRoot, LEGACY);
-  if (!legacy) throw new Error(`${rel} is missing; the interface-7 contract set cannot be omitted from this page`);
-  if (typeof legacy._legacy !== "string" || legacy._legacy.trim() === "") {
-    throw new Error(`${rel} has no _legacy marker; refusing to republish a current registry as the interface-7 set`);
-  }
-  if (!isObject(legacy.v2) || legacy.v2.interfaceVersion !== LEGACY_INTERFACE_VERSION) {
-    throw new Error(`${rel} must record v2.interfaceVersion ${LEGACY_INTERFACE_VERSION}; refusing to label another interface as the legacy set`);
-  }
-  if (!Number.isSafeInteger(legacy.v2.deployBlock) || legacy.v2.deployBlock <= 0) {
-    throw new Error(`${rel} has no positive v2.deployBlock`);
-  }
-  const contractKeys = [...LEGACY_V2_CONTRACTS.map(([k]) => k), "sources"];
-  checkKeys(legacy.v2.contracts, contractKeys, "v7-legacy.v2.contracts");
-  checkKeys(legacy.v2.contracts.sources, V2_SOURCES.map(([k]) => k), "v7-legacy.v2.contracts.sources");
-  if (!Array.isArray(legacy.markets)) throw new Error(`${rel} has no markets array`);
-  for (const market of legacy.markets) {
-    const status = market.v2?.status;
-    if (status !== "live" && status !== "paused") continue;
-    if (!Number.isSafeInteger(market.v2.registeredAt) || typeof market.v2.registerTx !== "string") {
-      throw new Error(`${rel}: ${market.ticker} is ${status} but has no registeredAt / registerTx`);
-    }
-  }
-}
-
 function checkKeys(obj, keys, where) {
   if (!isObject(obj)) throw new Error(`${where} must be an object`);
   for (const k of keys) if (!(k in obj)) throw new Error(`${where}.${k} is missing`);
   for (const k of Object.keys(obj)) if (!keys.includes(k)) throw new Error(`${where}.${k} is not a key this page renders: update render-docs.mjs`);
 }
 
+/** "A", "A and B", "A, B and C". */
+const listJoin = (xs) => (xs.length <= 1 ? xs.join("") : `${xs.slice(0, -1).join(", ")} and ${xs[xs.length - 1]}`);
+
+/**
+ * The waves paragraph, from the registry instead of a fixed plan. When every market the registry lists is
+ * live, the page says so and names the launch set (`launchSet.markets`, when the registry records one); the wave
+ * plan is then about markets that are not in the registry yet. While any market is still planned, the plan sentence
+ * is the one the page always had.
+ */
+function wavesProse(markets, planned, launchSet) {
+  const plan = `A wave starts only after the previous one has run cleanly, so the order is a plan, not a schedule.`;
+  // Only a registry whose markets are ALL live may say so; a planned or a paused market keeps the plan sentence.
+  if (planned.length > 0 || markets.some((m) => m.v2.status !== "live")) return `Markets go live in waves: the canary first, then wave 1, then wave 2. ${plan}`;
+  const launch = Array.isArray(launchSet?.markets) ? launchSet.markets.filter((t) => markets.some((m) => m.ticker === t)) : [];
+  const every = `Every market in this registry is \`live\`${launch.length ? `: the launch set, ${listJoin(launch)}` : ""}.`;
+  return `${every} Further markets are added to the registry as \`planned\` and go live in waves: the canary first, then wave 1, then wave 2. ${plan}`;
+}
+
+/**
+ * Say which expiries are actually listed. A tenor whose default `expiriesAhead` is 0 lists no series by
+ * default (0DTE-only registry: weekly 0, daily > 0); the ladder table still shows its shape, which reads as if it
+ * were in use.
+ */
+function tenorsProse(def) {
+  const on = TENORS.filter((t) => def.expiriesAhead[t] > 0);
+  const off = TENORS.filter((t) => def.expiriesAhead[t] === 0);
+  if (off.length === 0 || on.length === 0) return [];
+  const name = (t) => (t === "weekly" ? "weekly" : "daily");
+  return [
+    `By default only ${listJoin(on.map(name))} expiries are listed: the registry sets ${listJoin(off.map(name))} expiries ahead to 0, so the ${listJoin(off.map(name))} ladder below is a shape no market uses unless its own row sets it.${on.length === 1 && on[0] === "daily" ? ` A daily expiry is a trading session's close; the ladder lists the next ${def.expiriesAhead.daily} ${def.expiriesAhead.daily === 1 ? "session" : "sessions"}.` : ""}`,
+    ``,
+  ];
+}
+
 // ---------------------------------------------------------------------------------------------
 // The page.
 // ---------------------------------------------------------------------------------------------
-function render(reg, recon, legacy) {
+function render(reg, recon) {
   validate(reg, recon);
-  validateLegacy(legacy);
   const v2 = reg.v2;
   const def = v2.defaults;
   const rank = (m) => [V2_STATUS_ORDER.indexOf(m.v2.status), V2_WAVE_ORDER.indexOf(m.v2.wave)];
@@ -449,9 +466,6 @@ function render(reg, recon, legacy) {
   const pausedv2 = byStatus("paused");
   const plannedv2 = byStatus("planned");
   const pooled = markets.filter((m) => m.v2.univ3Pool);
-  const v1Factories = reg.markets.filter((m) => m.status === "live" || m.status === "paused").sort((a, b) => a.ticker.localeCompare(b.ticker));
-  const v1Live = v1Factories.filter((m) => m.status === "live" && m.v1RunOff !== true);
-  const superseded = reg.markets.filter((m) => m.status === "superseded-by-v2");
   const contracts = [
     ...V2_CONTRACTS.map(([k]) => v2.contracts[k]),
     ...V2_EXTERNALS.map(([k]) => v2.contracts[k] ?? null),
@@ -460,9 +474,6 @@ function render(reg, recon, legacy) {
     ...SHARED_SAFES.map(([k]) => reg.shared.safes[k]),
   ];
   const anyDeployed = contracts.some(Boolean) || v2.deployBlock !== null || v2.flywheel.deployBlock !== null;
-  const legacyRegistered = legacy.markets
-    .filter((m) => m.v2?.status === "live" || m.v2?.status === "paused")
-    .sort((a, b) => a.ticker.localeCompare(b.ticker));
   const reconDate = recon.checkedAt.slice(0, 10);
 
   const L = [];
@@ -486,7 +497,7 @@ function render(reg, recon, legacy) {
   if (livev2.length === 0 && pausedv2.length === 0) {
     L.push(
       ``,
-      `**No v2 market is marked live in this registry.** Every market below is \`planned\`; none of these entries authorises trading.${v1Live.length ? ` The v1 ${list(v1Live.map((m) => m.ticker))} ${v1Live.length === 1 ? "factory" : "factories"} at the end of this page ${v1Live.length === 1 ? "is" : "are"} still live.` : ""}`,
+      `**No v2 market is marked live in this registry.** Every market below is \`planned\`; none of these entries authorises trading.`,
     );
   }
 
@@ -499,7 +510,7 @@ function render(reg, recon, legacy) {
     `* **\`live\`**: registered on the live v2 contracts. Buying and writing require an open series, usable orders and active launch controls; this status alone does not mean an automated strike ladder is running.`,
     `* **\`paused\`**: registered, but new risk is stopped: no new series and no new contracts written. Contracts already written still settle and pay out; closing, redeeming, withdrawing and cancelling orders cannot be paused.`,
     ``,
-    `Markets go live in waves: the canary first, then wave 1, then wave 2. A wave starts only after the previous one has run cleanly, so the order is a plan, not a schedule.`,
+    wavesProse(markets, plannedv2, reg.launchSet),
   );
   if (plannedv2.length) {
     L.push(``, `Do not buy, write or deposit through a flow that presents a market listed here as \`planned\` as live. Verify the contract addresses and market status on chain.`);
@@ -543,6 +554,7 @@ function render(reg, recon, legacy) {
     ``,
     `The **ladder** settings below describe target strikes for weekly and daily expiries; they do not prove that any series has been created or that a cranker is running. When ladder automation is enabled for a live market, its lowest call strike is the first distance above spot, rounded up to the tick; each further strike is about one step higher. If spot rises until fewer than two strikes remain above it, the cranker adds strikes but never removes one. A market with puts on uses the same ladder mirrored below spot, and put writers post USDG instead of the Stock Token ([Cash-secured puts](../writing/cash-secured-puts.md)). Anyone can create a series at another valid strike.`,
     ``,
+    ...tenorsProse(def),
     `The registry's default ladder, which a market uses unless its row says "market setting":`,
     ``,
     `| Tenor | Expiries ahead | Strikes per expiry | First strike above spot | Step |`,
@@ -591,7 +603,7 @@ function render(reg, recon, legacy) {
     L.push(``, `The flywheel contracts were deployed from block **${block(v2.flywheel.deployBlock)}**.`);
   }
 
-  // External v2 contracts (T-OP-114 / T-OP-138): deployed by their own steps after the core set, so each
+  // External v2 contracts: deployed by their own steps after the core set, so each
   // carries its own start block. A key the registry does not carry yet renders exactly like a null one.
   const notDeployed = "not deployed";
   L.push(
@@ -620,48 +632,6 @@ function render(reg, recon, legacy) {
     `| Uniswap \`QuoterV2\` | ${addr(v2.uniswapV3.quoterV2)} |`,
   );
 
-  // Archived interface-7 set. This is intentionally separate from the v8 markets and wave tables.
-  L.push(
-    ``,
-    `## Legacy interface-7 contract set`,
-    ``,
-    `The archived \`ops/markets/v7-legacy.json\` registry records the earlier **interface 7** deployment from block **${block(legacy.v2.deployBlock)}**. These addresses belong to that contract set, not to the interface-8 deployment above.`,
-    ``,
-    `The owner-controlled run-off procedure, if applied, stops new series and new units from being written. Closing, redeeming, withdrawing, cancelling an order and selling an existing long on the order book remain available. The registry does not record whether that procedure has been applied.`,
-    ``,
-    `| Interface-7 contract | What it does | Address |`,
-    `|---|---|---|`,
-  );
-  for (const [k, name, what] of LEGACY_V2_CONTRACTS) {
-    L.push(`| \`${name}\` | ${what} | ${addr(legacy.v2.contracts[k])} |`);
-  }
-  for (const [k, name, what] of V2_SOURCES) {
-    L.push(`| \`${name}\` | ${what} | ${addr(legacy.v2.contracts.sources[k])} |`);
-  }
-  L.push(``, `Markets registered on the interface-7 set:`, ``, `| Ticker | Interface-7 status |`, `|---|---|`);
-  for (const market of legacyRegistered) {
-    L.push(`| **${market.ticker}** | ${statusCell(market.v2)} |`);
-  }
-
-  // Legacy v1 factories.
-  L.push(``, `## Legacy v1 factories`, ``);
-  const built = v1Factories.length;
-  L.push(
-    `Before v2, each market was to get its own account factory. ${built === 0 ? "None is running." : `${built === 1 ? "One was built" : `${built} were built`} and ${built === 1 ? "is" : "are"} listed below.`}${superseded.length ? ` The factories planned for the other ${superseded.length} markets were never built.` : ""} A v1 factory is separate from v2: its positions do not move to v2, and its Stock Tokens have to be withdrawn and deposited again. [Moving from v1](../legacy/moving-from-v1.md) has the steps; [v1 reference](../legacy/v1-reference.md) explains how a v1 factory works.`,
-  );
-  if (built) {
-    L.push(``, `| Ticker | Factory | Deployed at block | State |`, `|---|---|---|---|`);
-    for (const m of v1Factories) {
-      const state =
-        m.v1RunOff === true
-          ? `Running off: frozen${m.v1FrozenAt ? ` on ${day(m.v1FrozenAt)}` : ""}, so no new writes and no deposits. Listed weeks still settle, and withdrawals and USDG claims keep working.`
-          : m.status === "live"
-            ? "Live: takes deposits, and its keeper sets a new week of calls."
-            : "Paused: its keeper is stopped, so no new week is set. Deposits, withdrawals, settlement and USDG claims keep working.";
-      L.push(`| **${m.ticker}** | ${addr(m.deployment.factory)} | ${block(m.deployment.deployBlock)} | ${state} |`);
-    }
-  }
-
   // Provenance.
   L.push(
     ``,
@@ -669,7 +639,7 @@ function render(reg, recon, legacy) {
     ``,
     `This page is rendered from the operations registry (\`ops/markets/tier1.json\` in the app repository) by \`ops/markets/render-docs.mjs\`. Every Stock Token and Chainlink feed address in the registry was read on chain at block **${block(reg.verifiedAtBlock)}** on \`${reg.rpc}\`; the registry was generated at **${reg.generatedAt}**. The feed list is Chainlink's \`us_equities_24/5\` directory for chain 4663 (${reg.feedsSource.equity} equity feeds of ${reg.feedsSource.total}); the token list is the issuer's ${reg.tokensSource.total} Stock Tokens. A feed that later disappears from Chainlink's directory fails the registry check rather than silently dropping a market.`,
     ``,
-    `The v2 settings (status, wave, strike tick, settlement-source pool, payout route, puts, ladders and contract addresses) are kept by hand in the registry and validated by \`ops/markets/build-markets.mjs --check\`. The Uniswap v3 settlement pools come from the source recon (\`ops/markets/v2-sources.json\`) at block **${block(recon.observedBlock)}** (${recon.checkedAt}); every registry check confirms on chain that each pool holds the market's Stock Token and USDG and is the pool the Uniswap v3 factory returns. Payout routes are separate hand-kept values; the same check recomputes every v4 pool id from its hookless PoolKey. The interface-7 addresses and registrations come only from \`ops/markets/v7-legacy.json\`. v1 factory addresses and deploy blocks are written back by their deploy script. The ${duration(SETTLEMENT_WINDOW_S)} settlement window and the ${duration(SNAPSHOT_GRACE_S)} snapshot grace are compiled constants of the v2 contracts. Where the prose and the code disagree, the code is the specification.`,
+    `The v2 settings (status, wave, strike tick, settlement-source pool, payout route, puts, ladders and contract addresses) are kept by hand in the registry and validated by \`ops/markets/build-markets.mjs --check\`. The Uniswap v3 settlement pools come from the source recon (\`ops/markets/v2-sources.json\`) at block **${block(recon.observedBlock)}** (${recon.checkedAt}); every registry check confirms on chain that each pool holds the market's Stock Token and USDG and is the pool the Uniswap v3 factory returns. Payout routes are separate hand-kept values; the same check recomputes every v4 pool id from its hookless PoolKey. The ${duration(SETTLEMENT_WINDOW_S)} settlement window and the ${duration(SNAPSHOT_GRACE_S)} snapshot grace are compiled constants of the v2 contracts. Where the prose and the code disagree, the code is the specification.`,
     ``,
     `## Related`,
     ``,
@@ -677,7 +647,6 @@ function render(reg, recon, legacy) {
     `* [Sizes and expiries](../buying/sizes-and-expiries.md): contract sizes, daily and weekly expiries.`,
     `* [Fees](fees.md): what a contract costs on top of its price.`,
     `* [Addresses](../protocol/addresses.md): the v2 contracts and roles in full.`,
-    `* [Moving from v1](../legacy/moving-from-v1.md): leaving a v1 factory.`,
     `* [Risks](../resources/risks.md): what one issuer, one feed family and a single-source settlement mean for you.`,
     ``,
   );
@@ -689,8 +658,7 @@ function render(reg, recon, legacy) {
 // ---------------------------------------------------------------------------------------------
 const reg = JSON.parse(readFileSync(REGISTRY, "utf8"));
 const recon = existsSync(RECON) ? JSON.parse(readFileSync(RECON, "utf8")) : null;
-const legacy = existsSync(LEGACY) ? JSON.parse(readFileSync(LEGACY, "utf8")) : null;
-const page = render(reg, recon, legacy);
+const page = render(reg, recon);
 
 /** Default targets: the root page and the GitBook mirror, when that checkout has one. */
 function targets() {

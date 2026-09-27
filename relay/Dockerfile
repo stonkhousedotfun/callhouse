@@ -4,12 +4,12 @@
 # WHY THIS FILE EXISTS: the keeper POSTs its own JSON shape to ALERT_WEBHOOK, and neither Discord
 # nor Telegram accepts that shape — a raw Discord webhook URL answers 400 to every alert, forever,
 # and nobody sees anything. This service is the translation, with a shared token in front of it.
-# ops/alerts.md "Transport" is the contract; relay/README.md is the package.
+# The keeper's alert payload (src/payload.ts) is the contract.
 #
 # Railway builds it with the REPO ROOT as the build context, like every image in this repository:
 # pnpm-lock.yaml and pnpm-workspace.yaml live at the root and the install must be workspace-aware.
 # `dockerfilePath` in relay/railway.json therefore reads `relay/Dockerfile`, relative to a service
-# Root Directory of the repo root. ops/deploy.md ("relay") documents the Railway side.
+# Root Directory of the repo root, which the Railway service sets.
 #
 # THE LAYERING IS THE POINT: manifests → install → sources → build → prune.
 #

@@ -3,12 +3,15 @@
  * The rehearsal's stand-in pricing service (keeper/src/v2/pricing/server.ts shapes), the method of keeper/src/v2/mm/devnet-mm.ts:
  * GET /fair prices a series with the pricing service's own Black-Scholes (keeper/src/v2/pricing/bs.ts, trading-time
  * years) at the fork oracle's spot (SettlementOracle.trySpot) and a fixed vol per market; asOf = the head block's time.
- * The real service needs the live Cboe chain, which cannot follow a warped clock (a recorded deviation).
+ * The real service needs the live option chain (Massive), which cannot follow a warped clock (a recorded deviation).
  *
  *   GET /fair?ticker&strike&expiry&type   { fair: Money, iv, delta, source: "model", spot: Money, asOf }
  *                                         { fair: null, reason, detail } when spot is not ok or the series expired
  *   GET /surface/:ticker                  { ticker, root, asOf, chainTimestamp, spot: Money, expiries: [] }
  *   GET /health                           { status: "ok", service, markets }
+ *   POST /_control/fair-scale             { ticker, bps } scales that ticker's /fair by bps / 10_000 (10_000 = off), the
+ *                                         reprice drill's lever (4-drills.mjs): a moved fair value is how the
+ *                                         real service tells the pricer to reprice; answers { ticker, bps }
  *
  * Runs under the keeper's tsx (it imports bs.ts):
  *   PORT=42191 RH_RPC=http://127.0.0.1:8590 V2_REGISTRY_PATH=<rehearsal copy> keeper/node_modules/.bin/tsx ops/v2/rehearse/pricing-standin.mjs
@@ -26,14 +29,25 @@ const { createPublicClient, formatUnits, getAddress, http, parseAbi } = createRe
 const port = Number(process.env.PORT ?? 42191);
 const rpc = process.env.RH_RPC ?? "http://127.0.0.1:8590";
 const registry = JSON.parse(readFileSync(process.env.V2_REGISTRY_PATH ?? "", "utf8"));
-/** Fixed vols of the stand-in (trading clock). */
-const IV = { NVDA: 0.55, TSLA: 0.65, META: 0.45 };
+/**
+ * Fixed vols of the stand-in (trading clock), for the launch set the rehearsal deploys (NVDA and SPCX).
+ * Stand-in numbers, not a market view: any other ticker prices at 0.5.
+ */
+const IV = { NVDA: 0.55, SPCX: 0.6 };
 const oracle = getAddress(registry.v2.contracts.settlementOracle);
 const markets = new Map(registry.markets.filter((m) => m.v2?.status === "live").map((m) => [m.ticker, getAddress(m.asset)]));
 const client = createPublicClient({ transport: http(rpc, { timeout: 10_000 }) });
 const oracleAbi = parseAbi(["function trySpot(address underlying) view returns (bool ok, uint256 price, uint256 updatedAt)"]);
 const money = (raw) => ({ raw: raw.toString(), decimals: 6, formatted: formatUnits(raw, 6) });
 const head = async () => Number((await client.getBlock({ blockTag: "latest" })).timestamp);
+/** POST /_control/fair-scale: per-ticker multiplier on /fair, in bps (absent = 10_000). */
+const fairScaleBps = new Map();
+const readBody = (req) => new Promise((resolve, reject) => {
+  let text = "";
+  req.on("data", (chunk) => { text += chunk; });
+  req.on("end", () => resolve(text));
+  req.on("error", reject);
+});
 
 createServer((req, res) => {
   (async () => {
@@ -43,6 +57,15 @@ createServer((req, res) => {
       res.end(JSON.stringify(body));
     };
     if (url.pathname === "/health") return send(200, { status: "ok", service: "callhouse-pricing-standin", markets: markets.size });
+    if (url.pathname === "/_control/fair-scale" && req.method === "POST") {
+      const body = JSON.parse((await readBody(req)) || "{}");
+      const ticker = String(body.ticker ?? "").toUpperCase();
+      const bps = Number(body.bps);
+      if (!markets.has(ticker) || !Number.isInteger(bps) || bps <= 0) return send(400, { reason: "bad-request", detail: { ticker, bps } });
+      if (bps === 10_000) fairScaleBps.delete(ticker);
+      else fairScaleBps.set(ticker, bps);
+      return send(200, { ticker, bps });
+    }
     const surface = /^\/surface\/([A-Za-z0-9.]+)$/.exec(url.pathname);
     if (surface) {
       const ticker = surface[1].toUpperCase();
@@ -66,7 +89,7 @@ createServer((req, res) => {
     const [ok, spotRaw] = await client.readContract({ address: oracle, abi: oracleAbi, functionName: "trySpot", args: [asset] });
     if (!ok) return send(200, { fair: null, reason: "spot-stale", detail: { oracle: "trySpot not ok" } });
     const input = { type, spot: Number(spotRaw) / 1e6, strike: Number(strikeRaw) / 1e6, vol: IV[ticker] ?? 0.5, t: tradingYears(asOf, expiry) };
-    const fair = BigInt(Math.round(bsPrice(input) * 1e6));
+    const fair = (BigInt(Math.round(bsPrice(input) * 1e6)) * BigInt(fairScaleBps.get(ticker) ?? 10_000)) / 10_000n;
     return send(200, { fair: money(fair), iv: input.vol, delta: Math.round(bsDelta(input) * 1e6) / 1e6, source: "model", spot: money(spotRaw), asOf });
   })().catch((error) => {
     res.writeHead(500, { "content-type": "application/json" });

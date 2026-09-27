@@ -26,7 +26,11 @@ describe("market directory cards", () => {
     expect(html).toContain('href="/nvda"');
     expect(html).toContain("2 sources · 6 hours fallback wait");
     expect(html).toContain("try USDG conversion, with Stock Tokens as fallback");
-    expect(html).toContain("puts pay USDG");
+    // This row has puts: false, so its payout rule names calls only. This used to
+    // expect "puts pay USDG" here, the copy the rule removes; the puts:true case below keeps that expectation.
+    expect(html).not.toContain("puts pay USDG");
+    const withPuts = renderToStaticMarkup(createElement(MarketDirectoryCard, { market: { ...base, puts: true } }));
+    expect(withPuts).toContain("puts pay USDG");
   });
 
   it("keeps a planned row non-tradeable and does not invent absent settlement metadata", () => {
@@ -46,14 +50,16 @@ describe("market directory cards", () => {
     expect(html).not.toContain('href="/aapl"');
     expect(html).toContain("Trading unavailable");
     expect(html).toContain("Details unavailable");
-    expect(html).toContain("No source count, wait, or payout route is inferred");
+    // The explanatory line under the chip was dropped; what matters is still that nothing is inferred.
+    expect(html).not.toMatch(/\d+ sources?</);
+    expect(html).not.toMatch(/(fallback|uncorroborated) wait/);
   });
 });
 
 /**
- * T-431: "Feed observed" uses the shared `stamp()`, not the local SPOT_TIME formatter it replaced.
+ * "Feed observed" uses the shared `stamp()`, not the local SPOT_TIME formatter it replaced.
  * The one visible change is the YEAR: SPOT_TIME printed "Sep 21, 4:00 PM EDT" and stamp() prints
- * "Sep 21, 2026, 4:00 PM EDT" (coordinator ruling M-778d94690c34464b, item 4). Same New York
+ * "Sep 21, 2026, 4:00 PM EDT". Same New York
  * wall-clock time on each side of the daylight-saving change, so the zone name has to follow the
  * date rather than being a fixed suffix.
  */
@@ -64,7 +70,7 @@ describe("market directory spot time", () => {
   it("renders the feed time in New York, naming EDT or EST by the date", () => {
     const summer = renderToStaticMarkup(createElement(MarketDirectoryCard, { market: { ...base, spotUpdatedAt: SUMMER } }));
     const winter = renderToStaticMarkup(createElement(MarketDirectoryCard, { market: { ...base, spotUpdatedAt: WINTER } }));
-    expect(summer).toContain("Sep 21, 2026, 4:00 PM EDT");
-    expect(winter).toContain("Jan 21, 2026, 4:00 PM EST");
+    expect(summer).toContain("Sep 21, 4:00 PM EDT"); // server render (and hydration) shows New York, zone named; the browser switches to the reader's zone.
+    expect(winter).toContain("Jan 21, 4:00 PM EST");
   });
 });

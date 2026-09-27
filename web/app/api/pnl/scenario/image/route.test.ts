@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 /**
- * T-OP-120 (design §2.8). The scenario image route: a PNG at the share sizes for a valid query, the neutral brand
+ * The scenario image route: a PNG at the share sizes for a valid query, the neutral brand
  * card for a malformed one, and never a 500 for a query that passes the shape check but not the arithmetic.
  * Fonts are stubbed out (the renderer falls back to sans-serif), so the bytes prove layout, not typography.
  */

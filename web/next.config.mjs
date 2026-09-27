@@ -4,8 +4,10 @@ import path from "node:path";
  * Browser response policy, shipped report-only until launch verification exercises every route.
  *
  * The network origin classes are deliberately documented here beside `connect-src`:
- * - Wallet providers come from the MetaMask SDK fallback or injected extensions
- *   (`web/lib/wagmi.ts:11-18,21-39`); the SDK may negotiate over HTTPS/WSS.
+ * - Wallet providers are injected browser extensions only: EIP-6963 discovery, MetaMask and
+ *   Phantom (`web/lib/wagmi.ts`, `export const wagmiConfig`). No WalletConnect relay and no
+ *   MetaMask SDK (its optional `@metamask/connect-evm` peer is not installed), so no wallet
+ *   origin needs a connect-src entry. Wallet icons are EIP-6963 `data:` URIs (img-src data:).
  * - Chain reads use the two build-time RPC origins (`web/lib/chain.ts:19-20,31-52`). They are
  *   HTTP transports at this base; local rehearsals may use loopback HTTP.
  * - The browser indexer client reads NEXT_PUBLIC_API_URL (`web/lib/v2/api.ts:66,129-154`).
@@ -16,10 +18,19 @@ import path from "node:path";
  * disabling wallet or read traffic. `unsafe-inline` reflects Next's current bootstrap/style
  * output; moving to nonces requires separately scoped request middleware.
  *
- * HSTS intentionally omits `preload`. Preloading is an owner decision and a one-way door whose
+ * Violations are reported to this app's own /api/csp-report (app/api/csp-report/route.ts), which
+ * logs one redacted line per report. `report-uri` reaches browsers that only speak the CSP2 format;
+ * `report-to csp` plus the `Reporting-Endpoints` header reaches the Reporting API. Both name the
+ * same relative path, so the preview and production apps each report to themselves.
+ * lib/cspReportHeaders.test.ts pins the three together with the route.
+ *
+ * HSTS intentionally omits `preload`. Preloading is a deliberate decision and a one-way door whose
  * removal takes months; a parent-domain `includeSubDomains` commitment also binds `app.` and
  * `dev.`. The reversible response header ships now, without enrolling the domain in preload.
  */
+const CSP_REPORT_PATH = "/api/csp-report";
+const CSP_REPORT_GROUP = "csp";
+
 const SECURITY_HEADERS = [
   {
     key: "Content-Security-Policy-Report-Only",
@@ -36,8 +47,11 @@ const SECURITY_HEADERS = [
       "script-src 'self' 'unsafe-inline'",
       "style-src 'self' 'unsafe-inline'",
       "worker-src 'self' blob:",
+      `report-uri ${CSP_REPORT_PATH}`,
+      `report-to ${CSP_REPORT_GROUP}`,
     ].join("; "),
   },
+  { key: "Reporting-Endpoints", value: `${CSP_REPORT_GROUP}="${CSP_REPORT_PATH}"` },
   { key: "X-Content-Type-Options", value: "nosniff" },
   { key: "Referrer-Policy", value: "strict-origin-when-cross-origin" },
   { key: "X-Frame-Options", value: "DENY" },
@@ -50,8 +64,9 @@ const SECURITY_HEADERS = [
  *
  * The scaffold carried a `webpack()` block that marked `pino-pretty`, `lokijs` and
  * `encoding` as externals — those are WalletConnect's optional transitive deps. This app
- * uses no WalletConnect connector (connectkit / @walletconnect are deliberately NOT
- * installed), so nothing pulls them in and the externals list has no job. Keeping a
+ * uses no WalletConnect connector (injected wallets only; connectkit /
+ * @walletconnect / Reown are deliberately NOT installed), so nothing pulls them in and the
+ * externals list has no job. Keeping a
  * `webpack` key with no matching `turbopack` key is a hard build error on Next 16, so the
  * block is gone and an empty `turbopack` config states the intent explicitly.
  *

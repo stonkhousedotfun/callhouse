@@ -16,7 +16,7 @@ import {
 } from "./CyclePricingWords";
 
 /**
- * The words around the keeper's pricing report. Records are built from the keeper/README.md sample
+ * The words around the keeper's pricing report. Records are built from the keeper's documented sample
  * (as lib/cycleTerms.test.ts uses it) and parsed by the real keeperPricingFigures, so each case is
  * one the page can actually receive.
  */
@@ -70,7 +70,7 @@ describe("CyclePricingWords: reason codes are never echoed", () => {
   });
 
   it.each([
-    // Assembled at runtime, a habit from when copy-lint scanned this file (removed 2026-09-21).
+    // Assembled at runtime, a habit from when copy-lint scanned this file (since removed).
     ["an unknown code", ["guar" + "anteed", "40", "a" + "py", "yield"].join("-")],
     ["an Object.prototype key", "constructor"],
   ])("%s is dropped", (_name, code) => {
@@ -134,12 +134,13 @@ describe("CyclePricingWords: what set the ask", () => {
 describe("CyclePricingWords: the unavailable line says why", () => {
   it.each([
     ["loading", "Reading the keeper's pricing report…"],
-    ["order-finished", "Seaport reports this order sold out or cancelled, so the order feed is not read and there is no pricing report to show."],
-    ["unread", "The order feed could not be read, so the keeper's pricing report is not shown."],
-    ["not-served", "The order feed is not serving the vault's order, so there is no pricing report to show."],
+    // shorter, and no "Seaport" (a name the reader does not need); each line still says why.
+    ["order-finished", "This order is sold out or cancelled, so there is no pricing report."],
+    ["unread", "The order feed could not be read, so there is no pricing report."],
+    ["not-served", "The order feed is not showing this vault's order, so there is no pricing report."],
   ] as const)("%s", (feed: CyclePricingFeed, line) => {
     expect(unavailableWords(false, feed)).toBe(line);
-    expect(unavailableWords(true, feed)).toBe("The keeper sent no pricing report with this order that could be read.");
+    expect(unavailableWords(true, feed)).toBe("No readable pricing report came with this order.");
   });
 });
 

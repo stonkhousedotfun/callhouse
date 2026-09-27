@@ -395,7 +395,13 @@
         "internalType": "address"
       }
     ],
-    "outputs": [],
+    "outputs": [
+      {
+        "name": "received",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ],
     "stateMutability": "nonpayable"
   },
   {
@@ -830,6 +836,50 @@
   },
   {
     "type": "function",
+    "name": "previewRedeem",
+    "inputs": [
+      {
+        "name": "tokenId",
+        "type": "uint256",
+        "internalType": "uint256"
+      },
+      {
+        "name": "holder",
+        "type": "address",
+        "internalType": "address"
+      },
+      {
+        "name": "caller",
+        "type": "address",
+        "internalType": "address"
+      }
+    ],
+    "outputs": [
+      {
+        "name": "units",
+        "type": "uint256",
+        "internalType": "uint256"
+      },
+      {
+        "name": "asset",
+        "type": "address",
+        "internalType": "address"
+      },
+      {
+        "name": "owed",
+        "type": "uint256",
+        "internalType": "uint256"
+      },
+      {
+        "name": "minUsdgOut",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
     "name": "previewSettlement",
     "inputs": [
       {
@@ -909,6 +959,16 @@
     "outputs": [
       {
         "name": "redeemed",
+        "type": "uint256",
+        "internalType": "uint256"
+      },
+      {
+        "name": "paidUsdg",
+        "type": "uint256",
+        "internalType": "uint256"
+      },
+      {
+        "name": "paidInKind",
         "type": "uint256",
         "internalType": "uint256"
       }

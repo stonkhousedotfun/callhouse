@@ -270,6 +270,13 @@ test('rolls: a roll refused by its new series\' pin pages v2_pin_refused; a roll
       isRegularSession: true,
       strategy: { active: true, weekly: false, smartPricing: false },
       position: [0n, 0n, 0],
+      // stepRolls FAILS CLOSED on an unread minRollUnits()
+      // -- no roll is planned against a minimum of 0. This harness predates that read and never answered it, so the
+      // step skipped before any send and this test read 0 rolls. 100 is the value steps.test.ts answers.
+      minRollUnits: 100n,
+      // Likewise free(writer, u). An unread free() now refuses a new roll (`free-unread`) instead of counting it
+      // bounty-paying, so a harness that never answered it read 0 rolls. 10^22 is the value steps.test.ts answers.
+      free: 10n ** 22n,
     };
     const base = (await views(x)) as Array<{ status: string }>;
     return x.contracts.map((c, i) => (c.functionName in extra ? { status: 'success', result: extra[c.functionName] } : base[i]));
@@ -289,14 +296,37 @@ test('rolls: a roll refused by its new series\' pin pages v2_pin_refused; a roll
   assert.equal(h.alerts.filter((a) => a.kind === 'v2_pin_refused').length, 1, 'a revoked operator approval is the writer\'s, not a pin');
 });
 
+/**
+ * Inside [expiry, expiry + SNAPSHOT_GRACE] finalize
+ * (and so a settle that finalizes internally) first runs snapshot's record loop, so with no snapshot before it the pool
+ * record is paid inside the finalize. SNAPSHOT and FINALIZE value the open interest before the bounty (the
+ * snapshot's +73,195 is its spot valuation). The fixed limits must still cover each with a 96-read Chainlink walk
+ * (test_fork_96ReadWalkGas, 661k): starved, the raw record and bounty calls fail silently inside a successful receipt.
+ */
+const SO01_POOL_RECORD = 386_705n - 299_309n;
+const WALK_96 = 661_000n;
+
 test('GAS.roll covers the first roll into an expiry (pin included) and a close-out in one call, with headroom', () => {
   // AutoRollerCycleTest.test_gas_rollAndCloseOut on the v6 contracts: first roll 718,819; close-out 437,284.
   const firstRoll = 718_819n;
   const closeOut = 437_284n;
   // A close-out whose settle finalizes over a 96-read Chainlink walk (+170k settle, +661k walk, less the 133k of a settle of a final expiry), then a first roll on three sources.
-  const worst = closeOut - 133_000n + 170_000n + 661_000n + firstRoll + GAS.createSeriesPinPerSource;
+  // A settle that finalizes inside the grace before any snapshot also records the pool, +87,396
+  // (the contracts' gas table: 386,705 for that finalize, 299,309 for one after a snapshot).
+  const worst = closeOut - 133_000n + 170_000n + 661_000n + SO01_POOL_RECORD + firstRoll + GAS.createSeriesPinPerSource;
   assert.ok(GAS.roll * 100n >= worst * 110n, `${GAS.roll} leaves 10 % over ${worst}`);
   assert.ok(GAS.roll > firstRoll * 3n);
+});
+
+test('GAS.snapshot, GAS.finalize and GAS.settle cover the in-grace pool record and the bounty valuation, over a 96-read walk, with headroom', () => {
+  const snapshot = 264_257n; // pool source records the window, + SNAPSHOT bounty (spot valuation included)
+  const finalizeInGrace = 386_705n; // records the pool itself, captures both, corroborated, + FINALIZE bounty
+  const settleFinalizing = 173_138n; // settle finalizes a due candidate inside, + SETTLE bounty
+  const worstFinalize = finalizeInGrace + WALK_96;
+  const worstSettle = settleFinalizing + WALK_96 + SO01_POOL_RECORD;
+  assert.ok(GAS.snapshot * 100n >= snapshot * 150n, `${GAS.snapshot} leaves 50 % over ${snapshot}`);
+  assert.ok(GAS.finalize * 100n >= worstFinalize * 125n, `${GAS.finalize} leaves 25 % over ${worstFinalize}`);
+  assert.ok(GAS.settle * 100n >= worstSettle * 125n, `${GAS.settle} leaves 25 % over ${worstSettle}`);
 });
 
 test('the survey reads the expiry\'s settlement configuration (pinned), never the market\'s current sources', async () => {

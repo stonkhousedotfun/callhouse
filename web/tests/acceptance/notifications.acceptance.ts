@@ -1,5 +1,5 @@
 /**
- * W3-402: notification settings in a real browser against the already-running LOCAL rehearsal.
+ * notification settings in a real browser against the already-running LOCAL rehearsal.
  *
  * This file deliberately does not start the rehearsal, provision Postgres, or contact Telegram.
  * Its three service origins must be supplied explicitly and must resolve to loopback hosts:
@@ -46,8 +46,14 @@ function requiredLoopbackOrigin(name: string): string {
 const WEB_ORIGIN = requiredLoopbackOrigin("NOTIFICATIONS_ACCEPTANCE_WEB_URL");
 const NOTIFIER_ORIGIN = requiredLoopbackOrigin("NOTIFICATIONS_ACCEPTANCE_NOTIFIER_URL");
 const TELEGRAM_CONTROL_ORIGIN = requiredLoopbackOrigin("NOTIFICATIONS_ACCEPTANCE_TELEGRAM_CONTROL_URL");
-const TELEGRAM_BOT_TOKEN = process.env.NOTIFICATIONS_ACCEPTANCE_TELEGRAM_BOT_TOKEN?.trim();
-assert(TELEGRAM_BOT_TOKEN, "NOTIFICATIONS_ACCEPTANCE_TELEGRAM_BOT_TOKEN is required for the local fake Bot API");
+// Typed `string` through a function return: a top-level `assert` narrows the const only in straight-line
+// code, not inside the async test callbacks that read it (TS18048 at the `.split` below).
+function requiredBotToken(): string {
+  const token = process.env.NOTIFICATIONS_ACCEPTANCE_TELEGRAM_BOT_TOKEN?.trim();
+  assert(token, "NOTIFICATIONS_ACCEPTANCE_TELEGRAM_BOT_TOKEN is required for the local fake Bot API");
+  return token;
+}
+const TELEGRAM_BOT_TOKEN = requiredBotToken();
 
 function isLoopbackRequest(raw: string): boolean {
   const url = new URL(raw);
@@ -198,6 +204,9 @@ type AlertPrefs = {
   fills: boolean;
   writerItmWarning: boolean;
   autoRoll: boolean;
+  feeNotice: boolean;
+  adminOperation: boolean;
+  marketLive: boolean;
   priceAlerts: Array<{ ticker: string; above?: string; below?: string }>;
 };
 type Subscription = { id: string; channel: string; status: string; prefs: AlertPrefs };

@@ -1,5 +1,6 @@
 import schema from "ponder:schema";
 
+import { USDG } from "../../lib/env";
 import {
   v2MakerVaultPonder,
   v2Ponder,
@@ -8,7 +9,7 @@ import {
 } from "../../lib/registry";
 
 /**
- * T-295: the value-bearing events that had no column to land in.
+ * The value-bearing events that had no column to land in.
  *
  * These are not configuration. Each one moves money, publishes a commitment, or records an exposure,
  * and each was read by the indexer and dropped because ponder.schema.ts had nowhere to put it. They
@@ -54,7 +55,7 @@ v2RewardsPonder.on("KeeperRewards:Funded", async ({ event, context }) => {
 /** The same fact for the lender-rewards distributor: an epoch root is only claimable if funded. */
 v2RewardsDistributorPonder.on("RewardsDistributor:Funded", async ({ event, context }) => {
   await context.db.insert(schema.v2ContractFunding).values({
-    id: logId(event), source: "RewardsDistributor", contract: event.log.address.toLowerCase(),
+    id: logId(event), source: "RewardsDistributor", contract: event.log.address.toLowerCase() as `0x${string}`,
     from: event.args.from, amount: event.args.amount, ...stamp(event),
   });
 });
@@ -81,7 +82,7 @@ v2RewardsPonder.on("KeeperRewards:CallerSet", async ({ event, context }) => {
  * the generator's root and this one is exactly the thing that must be visible before a claim opens.
  */
 v2RewardsDistributorPonder.on("RewardsDistributor:RootSet", async ({ event, context }) => {
-  const distributor = event.log.address.toLowerCase();
+  const distributor = event.log.address.toLowerCase() as `0x${string}`;
   const values = {
     distributor, epoch: event.args.epoch,
     root: event.args.root, total: event.args.total,
@@ -100,7 +101,7 @@ v2RewardsDistributorPonder.on("RewardsDistributor:RootSet", async ({ event, cont
  */
 v2RewardsDistributorPonder.on("RewardsDistributor:Claimed", async ({ event, context }) => {
   const { epoch, index, account, amount } = event.args;
-  const distributor = event.log.address.toLowerCase();
+  const distributor = event.log.address.toLowerCase() as `0x${string}`;
   await context.db.insert(schema.v2RewardsClaim).values({
     id: `${distributor}-${epoch}-${index}`, distributor,
     epoch, leafIndex: index, account, amount, ...stamp(event),
@@ -109,8 +110,28 @@ v2RewardsDistributorPonder.on("RewardsDistributor:Claimed", async ({ event, cont
 
 /* -------------------------------------------------------- treasury MakerVault */
 
+/**
+ * (MakerVault). `Deposited` fires for whatever token a caller transfers in, so a worthless token minted
+ * for the purpose lands a row that the treasury panel's funded-versus-withdrawn line would count as capital. Only the
+ * vault's real assets are stored: USDG, and a Stock Token that is a registered market's underlying, read from the
+ * indexed v2Market table (keyed by the lowercased underlying, src/v2/clearinghouse.ts), never from a typed list.
+ * Anything else is dropped with a log line naming it, so the refusal is visible rather than silent.
+ */
+async function isMakerVaultAsset(db: Context["db"], asset: string): Promise<boolean> {
+  const lower = asset.toLowerCase();
+  if (lower === USDG.toLowerCase()) return true;
+  return (await db.find(schema.v2Market, { underlying: lower })) !== null;
+}
+
 /** Capital in. The out side is v2TreasuryExit (src/v2/treasury.ts, source "makerVault"). */
 v2MakerVaultPonder.on("MakerVault:Deposited", async ({ event, context }) => {
+  if (!(await isMakerVaultAsset(context.db, event.args.asset))) {
+    console.warn(
+      `[callhouse/indexer] MAKER_VAULT_DEPOSIT_UNLISTED asset=${event.args.asset.toLowerCase()} from=${event.args.from.toLowerCase()} ` +
+        `amount=${event.args.amount} tx=${event.transaction.hash}: not USDG or a registered market underlying; not stored`,
+    );
+    return;
+  }
   await context.db.insert(schema.v2MakerVaultDeposit).values({
     id: logId(event), asset: event.args.asset, from: event.args.from,
     amount: event.args.amount, ...stamp(event),
@@ -155,9 +176,17 @@ v2MakerVaultPonder.on("MakerVault:LimitsSet", async ({ event, context }) => {
 /* ------------------------------------------------------------------ OrderBook */
 
 /**
- * An owed balance withdrawn. The book credits `owed` when a payout to a maker fails; that credit is
- * indexed and the withdrawal was not, so an owed balance looked permanent once it appeared.
+ * A USDG payout failed and the book credited `amount` to `account`'s owed balance.
+ * This is the credit. OwedClaimed below is the withdrawal. The comment that used to sit on
+ * OwedClaimed said the credit was already indexed; it was not.
  */
+v2Ponder.on("OrderBook:OwedCredited", async ({ event, context }) => {
+  await context.db.insert(schema.v2OwedCredit).values({
+    id: logId(event), account: event.args.account, amount: event.args.amount, ...stamp(event),
+  });
+});
+
+/** An owed balance withdrawn (`claimOwed`). The credit is OwedCredited. */
 v2Ponder.on("OrderBook:OwedClaimed", async ({ event, context }) => {
   await context.db.insert(schema.v2OwedClaim).values({
     id: logId(event), account: event.args.account, amount: event.args.amount, ...stamp(event),
@@ -199,4 +228,25 @@ v2Ponder.on("SettlementOracle:SettlementConfigPinned", async ({ event, context }
   await context.db.insert(schema.v2OracleExpiryConfig)
     .values({ id: `${underlying.toLowerCase()}-${expiry}`, ...values })
     .onConflictDoUpdate(values);
+});
+
+/**
+ * A second Clearinghouse confirmed the pin. `pinner` is who `pin` records now;
+ * `previousPinner` is who it superseded. The confirm row is stored even when the pin row is
+ * missing (the indexer started between the two logs). The pin row, when present, keeps the latest.
+ */
+v2Ponder.on("SettlementOracle:SettlementPinConfirmed", async ({ event, context }) => {
+  const hex = (value: string) => value.toLowerCase() as `0x${string}`;
+  const underlying = hex(event.args.underlying);
+  const expiry = BigInt(event.args.expiry);
+  const previousPinner = hex(event.args.previousPinner);
+  const pinner = hex(event.args.pinner);
+  await context.db.insert(schema.v2OraclePinConfirm).values({
+    id: logId(event), underlying, expiry, previousPinner, pinner, ...stamp(event),
+  });
+  const id = `${underlying}-${expiry}`;
+  const pinned = await context.db.find(schema.v2OracleExpiryConfig, { id });
+  if (pinned !== null) {
+    await context.db.update(schema.v2OracleExpiryConfig, { id }).set({ pinner, previousPinner });
+  }
 });

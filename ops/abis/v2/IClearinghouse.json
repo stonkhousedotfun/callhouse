@@ -244,7 +244,13 @@
         "internalType": "address"
       }
     ],
-    "outputs": [],
+    "outputs": [
+      {
+        "name": "received",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ],
     "stateMutability": "nonpayable"
   },
   {
@@ -650,6 +656,16 @@
     "outputs": [
       {
         "name": "redeemed",
+        "type": "uint256",
+        "internalType": "uint256"
+      },
+      {
+        "name": "paidUsdg",
+        "type": "uint256",
+        "internalType": "uint256"
+      },
+      {
+        "name": "paidInKind",
         "type": "uint256",
         "internalType": "uint256"
       }

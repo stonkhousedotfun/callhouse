@@ -5,6 +5,7 @@ import { describe, expect, it } from "vitest";
 
 import { cardsResponseSchema, marketsResponseSchema } from "./api-schema";
 import { marketQuoteAsOf, selectTradeSpot } from "./marketSpot";
+import { resetDisplayCache, resolveDisplaySpot } from "./displaySpot";
 import { payoffCardView } from "./payoffCard";
 
 const fixture = fileURLToPath(new URL("../../../ops/fixtures/api/v2/markets.json", import.meta.url));
@@ -47,5 +48,27 @@ describe("partial market spot availability", () => {
     expect(marketsResponseSchema.safeParse([{ ...healthy, spot: null, spotUpdatedAt: null }]).success).toBe(true);
     expect(marketsResponseSchema.safeParse([{ ...healthy, spot: null }]).success).toBe(false);
     expect(marketsResponseSchema.safeParse([{ ...healthy, spotUpdatedAt: null }]).success).toBe(false);
+  });
+});
+
+/*
+ * The DISPLAY fallback (lib/v2/displaySpot.ts) must never reach a trade: with a display price in hand and no
+ * strict live spot, selectTradeSpot still says null, so every ticket, quote and trade button stays shut.
+ */
+describe("the display fallback never reaches selectTradeSpot", () => {
+  it("returns null when only the display fallback has a price", async () => {
+    resetDisplayCache();
+    const now = 1_790_223_000;
+    const display = await resolveDisplaySpot("NVDA", null, {
+      chainlink: async () => ({ raw: 225_549_701n, updatedAt: now - 39_600 }),
+      pool: async () => null,
+      now: () => now,
+    }, { NVDA: { feed: "0x379EC4f7C378F34a1B47E4F3cbeBCbAC3E8E9F15", pool: null, stockIsToken0: false } });
+    expect(display?.raw, "fixture: the display fallback has a price").toBe(225_549_701n);
+    // API up but without a spot (the oracle refused an old print): no trade spot.
+    expect(selectTradeSpot(null, false, 0, undefined, 0, true, now * 1000)).toBeNull();
+    // API down and the direct oracle read failed: no trade spot either.
+    expect(selectTradeSpot(null, true, now * 1000 - 1_000, undefined, 0, true, now * 1000)).toBeNull();
+    resetDisplayCache();
   });
 });

@@ -3,7 +3,7 @@
  *
  * WHY THIS FILE EXISTS: v2 has no hand-written ABIs in the keeper. src/v2/abi/*.ts and
  * src/v2/seriesId.ts are generated from ops/ by scripts/gen-abis.mjs
- * and committed. Nothing else notices when a contract lane re-exports ops/abis/v2 and nobody reruns
+ * and committed. Nothing else notices when the contracts repo re-exports ops/abis/v2 and nobody reruns
  * `pnpm gen:abis`: the cranker would send calls against the old ABI and log a new revert as a bare
  * selector. So:
  *   1. the drift test runs the generator in `--check` mode, which renders every output in memory
@@ -22,9 +22,16 @@ import { spawnSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { test } from 'node:test';
 import { fileURLToPath } from 'node:url';
+import { decodeErrorResult, encodeErrorResult } from 'viem';
 import type { Address, ContractErrorName, ContractEventName, ContractFunctionName } from 'viem';
 
+import { chainlinkFeedSourceAbi } from './abi/chainlinkFeedSource.js';
 import { clearinghouseAbi } from './abi/clearinghouse.js';
+import { houseVaultFactoryAbi } from './abi/houseVaultFactory.js';
+import { payoutAdapterAbi } from './abi/payoutAdapter.js';
+import { settlementOracleAbi } from './abi/settlementOracle.js';
+import { uniV3TwapSourceAbi } from './abi/uniV3TwapSource.js';
+import { v2ErrorsAbi } from './abi/v2Errors.js';
 import { isShortId, longIdOf, shortIdOf } from './seriesId.js';
 
 const pkgRoot = fileURLToPath(new URL('../..', import.meta.url));
@@ -113,4 +120,33 @@ test('src/v2/abi/clearinghouse.ts carries the functions, events and V2Errors err
   for (const name of errors) assert.ok(names('error').has(name), `error ${name}`);
   assert.equal(names('function').has(notAFunction), false);
   assert.equal(names('error').has(notAnError), false);
+});
+
+/*//////////////////////////////////////////////////////////////
+               FIRST-LISTING SURFACE
+//////////////////////////////////////////////////////////////*/
+
+// The zero-delay NEW_LISTING setters revert V2Errors.AlreadyListed(asset) for an asset their contract was ever
+// configured for. A keeper decoding a revert through any v2 module must name it, not print a bare 0x19cd4595.
+const listedSurface = [
+  ['settlementOracle', settlementOracleAbi, ['listMarket', 'everConfigured']],
+  ['chainlinkFeedSource', chainlinkFeedSourceAbi, ['listFeed', 'everConfigured']],
+  ['uniV3TwapSource', uniV3TwapSourceAbi, ['listPool', 'everConfigured']],
+  ['payoutAdapter', payoutAdapterAbi, ['listRouteV3', 'listRouteV4', 'everConfigured']],
+  ['clearinghouse', clearinghouseAbi, ['registerMarket']],
+  ['houseVaultFactory', houseVaultFactoryAbi, ['createVault']],
+] as const;
+
+test('AlreadyListed (0x19cd4595) decodes by name through every module a first listing goes through', () => {
+  const asset = '0x00000000000000000000000000000000000000a1';
+  const data = encodeErrorResult({ abi: v2ErrorsAbi, errorName: 'AlreadyListed', args: [asset] });
+  // Pinned against the selector cast-derived (contracts test/v2/InterfaceIds.t.sol), not re-reasoned.
+  assert.equal(data.slice(0, 10), '0x19cd4595');
+  for (const [name, abi, fns] of listedSurface) {
+    const decoded = decodeErrorResult({ abi, data });
+    assert.equal(decoded.errorName, 'AlreadyListed', name);
+    assert.equal(String(decoded.args?.[0]).toLowerCase(), asset, name);
+    const have = new Set(abi.flatMap((item) => (item.type === 'function' ? [item.name] : [])));
+    for (const fn of fns) assert.ok(have.has(fn), `${name}.${fn}`);
+  }
 });

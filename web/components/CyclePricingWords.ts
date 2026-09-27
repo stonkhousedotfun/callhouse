@@ -8,7 +8,7 @@ import type { KeeperPricingFigures } from "@/lib/cycleTerms";
  *   1. NO KEEPER FREE TEXT. The report's reason code for unusable market data is matched against
  *      the keeper's known codes (keeper/src/vol.ts, keeper/src/policy.ts) and printed in this
  *      file's words; an unknown code is dropped, never echoed, because runtime data does not pass
- *      copy-lint, until it was removed on 2026-09-21.
+ *      copy-lint, until it was removed.
  *   2. NAME A SOURCE ONLY WHEN THE REPORT SAYS SO. Cboe is named only for source "cboe-delayed",
  *      and a fair value carried over from the previous listing is never called a market figure.
  */
@@ -75,16 +75,16 @@ export function askWords(f: KeeperPricingFigures): string {
 
 /** The muted line when no report is shown. `served`: the feed has a row for the vault's hash. */
 export function unavailableWords(served: boolean, feed: CyclePricingFeed): string {
-  if (served) return "The keeper sent no pricing report with this order that could be read.";
+  if (served) return "No readable pricing report came with this order.";
   switch (feed) {
     case "loading":
       return "Reading the keeper's pricing report…";
     case "order-finished":
-      return "Seaport reports this order sold out or cancelled, so the order feed is not read and there is no pricing report to show.";
+      return "This order is sold out or cancelled, so there is no pricing report.";
     case "unread":
-      return "The order feed could not be read, so the keeper's pricing report is not shown.";
+      return "The order feed could not be read, so there is no pricing report.";
     case "not-served":
-      return "The order feed is not serving the vault's order, so there is no pricing report to show.";
+      return "The order feed is not showing this vault's order, so there is no pricing report.";
   }
 }
 

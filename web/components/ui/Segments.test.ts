@@ -11,7 +11,7 @@ import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
 
-import { Segments } from "./Segments";
+import { SegmentedControl, Segments } from "./Segments";
 
 const options = [
   { value: "all", label: "All expiries" },
@@ -61,5 +61,35 @@ describe("Segments", () => {
     const html = render({ selected: "all", disabled: true });
     expect(html.match(/ disabled=""/g)?.length).toBe(options.length);
     expect(render({ selected: "all" }).match(/ disabled=""/g)).toBeNull();
+  });
+
+  it("presses in the inverted --select-bg look, the rest are --surface-2 chips (Neon)", () => {
+    const html = render({ selected: "daily" });
+    const pressed = html.slice(html.lastIndexOf("<button", html.indexOf('aria-pressed="true"')));
+    expect(pressed.slice(0, pressed.indexOf(">"))).toContain("bg-select-bg");
+    expect(html.match(/bg-surface-2/g)?.length).toBe(2);
+  });
+});
+
+describe("SegmentedControl", () => {
+  const html = renderToStaticMarkup(createElement(SegmentedControl as never, {
+    label: "Option type",
+    options: [{ value: "all", label: "All" }, { value: "calls", label: "Calls" }, { value: "puts", label: "Puts" }],
+    selected: "calls",
+    onSelect: () => undefined,
+  }));
+
+  it("keeps the Segments contract: a labelled group, exactly one pressed", () => {
+    expect(html).toContain('role="group"');
+    expect(html).toContain('aria-label="Option type"');
+    expect(html.match(/aria-pressed="true"/g)?.length).toBe(1);
+  });
+
+  it("sits in one --field track, unselected options borderless --ink-3", () => {
+    expect(html).toContain('data-slot="segmented-control"');
+    expect(html).toContain("bg-field");
+    expect(html.match(/text-ink-3/g)?.length).toBe(2);
+    // The chip look is not the track look -- the control for the two assertions above.
+    expect(render({ selected: "all" })).not.toContain("bg-field");
   });
 });

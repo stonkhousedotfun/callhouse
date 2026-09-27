@@ -114,7 +114,7 @@ export function preflightAllowsFill(verdict: PreflightVerdict | undefined): bool
 }
 
 /**
- * Gas a fill needs, as a whole transaction. The keeper's fork dry run (keeper/DRYRUN.md) sent real
+ * Gas a fill needs, as a whole transaction. The keeper's fork dry run sent real
  * Seaport 1.6 fills of the vault's order through the real Clear on a 4663 fork and kept the
  * receipts: first fills (the vault opens the cycle's Valorem claim inside the hook) used 445,577,
  * 450,181, 462,677 and 462,701 gas, and 476,071 with Valorem's engine fee on; top-ups used 276,627,

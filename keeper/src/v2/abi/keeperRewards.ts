@@ -133,6 +133,19 @@ export const keeperRewardsAbi = [
   },
   {
     "type": "function",
+    "name": "maxBounty",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
     "name": "reward",
     "inputs": [
       {
@@ -207,6 +220,19 @@ export const keeperRewardsAbi = [
   {
     "type": "function",
     "name": "setDailyCap",
+    "inputs": [
+      {
+        "name": "amount",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ],
+    "outputs": [],
+    "stateMutability": "nonpayable"
+  },
+  {
+    "type": "function",
+    "name": "setMaxBounty",
     "inputs": [
       {
         "name": "amount",
@@ -391,6 +417,19 @@ export const keeperRewardsAbi = [
   },
   {
     "type": "event",
+    "name": "MaxBountySet",
+    "inputs": [
+      {
+        "name": "amount",
+        "type": "uint256",
+        "internalType": "uint256",
+        "indexed": false
+      }
+    ],
+    "anonymous": false
+  },
+  {
+    "type": "event",
     "name": "Rewarded",
     "inputs": [
       {
@@ -505,6 +544,17 @@ export const keeperRewardsAbi = [
     "type": "error",
     "name": "AlreadyFinal",
     "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "AlreadyListed",
+    "inputs": [
+      {
+        "name": "asset",
+        "type": "address",
+        "internalType": "address"
+      }
+    ]
   },
   {
     "type": "error",

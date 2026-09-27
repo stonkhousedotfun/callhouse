@@ -12,7 +12,7 @@
  *                poll intervals before any chain read.
  *   GET /state   the mode's own view (the cranker's per-step metrics, the MM bot's net delta), 503
  *                until the mode has one.
- *   GET /ready   a mode that mounts readyRoute (the pricer, T-423): READINESS, not liveness, in a body
+ *   GET /ready   a mode that mounts readyRoute (the pricer): READINESS, not liveness, in a body
  *                that is safe to proxy to a public API. See readyBody.
  *   GET /        service, mode and endpoints.
  *
@@ -44,6 +44,11 @@ export class ModeHealth {
   lastBeat: number | null = null;
   tickStartedAt: number | null = null;
   lastChain: ChainProbe | null = null;
+  /**
+   * The latest chain probe FAILED (every RPC), null once one succeeds again. While set, `lastChain` is the
+   * last probe that answered, not the chain now: the lag and gas checks do not pass on it.
+   */
+  lastChainError: { at: number; message: string } | null = null;
   lastTickError: { at: number; message: string } | null = null;
   /** The latest webhook delivery (alerts.ts), or null before any page was sent. */
   lastAlertDelivery: { at: number; ok: boolean; error: string | null } | null = null;
@@ -66,6 +71,12 @@ export class ModeHealth {
 
   recordChain(probe: ChainProbe): void {
     this.lastChain = probe;
+    this.lastChainError = null;
+  }
+
+  /** The probe got no answer; the chain checks are unknown until the next one answers. */
+  recordChainFailure(at: number, message: string): void {
+    this.lastChainError = { at, message };
   }
 
   recordTickError(at: number, message: string): void {
@@ -101,8 +112,10 @@ export function evaluateHealth(health: ModeHealth, limits: HealthLimits, now: nu
   const heartbeat =
     tickActive || (health.lastBeat === null ? now - health.startedAt < staleAfterMs : now - health.lastBeat < staleAfterMs);
   const chain = health.lastChain;
-  const rpcLag = chain !== null && chain.rpcLagSeconds * 1000 <= limits.rpcLagAlertMs;
-  const gas = chain !== null && chain.balanceWei >= limits.minGasWei;
+  // A probe that failed after this one answered leaves both checks unknown, never passed on the old reading.
+  const current = chain !== null && health.lastChainError === null;
+  const rpcLag = current && chain.rpcLagSeconds * 1000 <= limits.rpcLagAlertMs;
+  const gas = current && chain.balanceWei >= limits.minGasWei;
   // A relay that refuses every page (a rotated token, a dead Discord target) is otherwise visible only in the logs.
   const alerting = health.lastAlertDelivery === null || health.lastAlertDelivery.ok;
   // No chain read yet inside the grace window is "starting": a 503 here would restart the process
@@ -168,6 +181,8 @@ export function createModeHealthApp(options: HealthAppOptions): Hono {
         chain: {
           chainId: options.chainId,
           rpc,
+          // Set while the latest probe failed; the fields below are then the last probe that answered.
+          probeError: h.lastChainError === null ? null : { at: new Date(h.lastChainError.at).toISOString(), message: h.lastChainError.message },
           headBlock: h.lastChain?.headBlock ?? null,
           headTimestamp: h.lastChain?.headTimestamp ?? null,
           rpcLagSeconds: h.lastChain?.rpcLagSeconds ?? null,
@@ -198,8 +213,8 @@ export function createModeHealthApp(options: HealthAppOptions): Hono {
 //////////////////////////////////////////////////////////////*/
 
 /**
- * Why a mode is not ready (T-423). A CLOSED set: readyBody replaces anything outside it with
- * `state-unknown`, so a consumer (the indexer, T-424) can switch over it exhaustively and never has to
+ * Why a mode is not ready. A CLOSED set: readyBody replaces anything outside it with
+ * `state-unknown`, so a consumer (the indexer) can switch over it exhaustively and never has to
  * guess what a new string means. The pricer's four conditions (pricer.ts evaluatePricerReadiness) map
  * onto it as: loop alive -> loop-wedged; a tick completed -> no-completed-tick, tick-failed; the reprice
  * authority -> role-unread, role-refused, role-delayed; a qualified fair value -> fair-stale.
@@ -313,10 +328,14 @@ export interface RunningServer {
   close(): Promise<void>;
 }
 
-/** Listen on `port` (no host: see the header) and resolve once bound. */
-export async function serveApp(app: Hono, port: number): Promise<RunningServer> {
+/**
+ * Listen on `port` (no host: see the header) and resolve once bound. `hostname` is a test seam: a test that
+ * reads the server over 127.0.0.1 binds 127.0.0.1, because on macOS a no-host bind for port 0 can be given a port
+ * another process already holds on 127.0.0.1, and 127.0.0.1 then reaches that process.
+ */
+export async function serveApp(app: Hono, port: number, hostname?: string): Promise<RunningServer> {
   const server = await new Promise<ServerType>((resolveServer, reject) => {
-    const s = serve({ fetch: app.fetch, port }, () => resolveServer(s));
+    const s = serve({ fetch: app.fetch, port, ...(hostname === undefined ? {} : { hostname }) }, () => resolveServer(s));
     s.once('error', reject);
   });
   const address = server.address();

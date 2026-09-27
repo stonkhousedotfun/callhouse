@@ -28,7 +28,7 @@
  *   - `v2.flywheel.deployBlock` is NOT the anchor. The FeeSplitter is deployed BEFORE the core set, so it has its own,
  *     lower block; the anchor stays `v2.deployBlock`, the block the core deployment exists from. A store anchored on
  *     the splitter's block would compare equal across a core redeploy that reused the splitter.
- *   - Until the O8 write-back fills it, `v2.deployBlock` is null in ops/markets/tier1.json. Every mode therefore boots
+ *   - Until the deploy write-back fills it, `v2.deployBlock` is null in ops/markets/tier1.json. Every mode therefore boots
  *     `unanchored` today: it keeps whatever it has, warns that it cannot tell a redeploy at the same addresses, and
  *     every log scan falls back to block 0. That is a pre-deploy state, not a v8 one, and it ends when the write-back
  *     lands.

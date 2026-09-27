@@ -148,16 +148,16 @@ const operationKey = z.string().regex(/^0x[0-9a-f]{64}:(0|[1-9]\d{0,9})$/, 'expe
 
 export const adminOperationSchema = z.object({
   /**
-   * T-435. THE PER-OPERATION IDENTITY, and the only thing this package keys an operation on. `id` is
+   * THE PER-OPERATION IDENTITY, and the only thing this package keys an operation on. `id` is
    * AccessManager's operation id and it REPEATS: rescheduling the same call reuses it, so two live
-   * operations can share one `id` and only `key` (T-434) tells them apart.
+   * operations can share one `id` and only `key` tells them apart.
    */
   key: operationKey,
   id: z.string().min(1),
   role: z.string().min(1),
   target: address,
   /**
-   * T-435. NULLABLE, as the contract declares it: null when the scheduled calldata is shorter than a
+   * NULLABLE, as the contract declares it: null when the scheduled calldata is shorter than a
    * four-byte selector, a case the indexer serves on purpose (indexer/src/api/v2/routes.test.ts,
    * 'keeps a scheduled selector-less operation visible in both public views'). This copy used to
    * require a string, and because the page is parsed as one array a single selector-less operation
@@ -178,7 +178,7 @@ export const adminOperationsPageSchema = z.object({
 });
 
 /**
- * X8-181. The three statuses `/v2/admin/operations` serves, asked for one at a time because the route
+ * The three statuses `/v2/admin/operations` serves, asked for one at a time because the route
  * takes exactly one (`indexer/src/api/v2/admin.ts:92-95`: `status` defaults to `pending` and anything
  * outside this set is a `bad_status` error). Asking for only `pending`, which is what the default did,
  * means the notifier never sees an operation reach a terminal state — and `executed` and `canceled` are
@@ -198,7 +198,7 @@ const ADMIN_OPERATIONS_PAGE = 200;
  *
  * Reaching it THROWS rather than returning a short list. A truncated read looks exactly like a complete
  * one to every caller, and the engine's catch already does the right thing with a failure: it keeps the
- * operations it had and logs. Returning the first 5,000 silently would be the same defect this task
+ * operations it had and logs. Returning the first 5,000 silently would be the same defect this pagination
  * exists to fix, one layer down.
  */
 export const ADMIN_OPERATIONS_MAX_PAGES = 25;
@@ -278,7 +278,7 @@ export const activityItemSchema = z.discriminatedUnion('kind', [
     data: z.object({ writer: address, orderId: uintString, price: apiMoneySchema, units: uintString, tx: txHash }),
   }),
   /**
-   * INTERFACE_VERSION 7 (c16): `AutoRoller.cancelStale` withdrew a roll ask the spot had overtaken.
+   * INTERFACE_VERSION 7: `AutoRoller.cancelStale` withdrew a roll ask the spot had overtaken.
    * `OrderCancelled` comes first in the same transaction, so the order row is already cancelled; this
    * item is the deliberate withdrawal, not a failed roll. `nextRollAfter` is the cancelled series'
    * expiry: the strategy rolls again after it.
@@ -299,7 +299,7 @@ export const activityItemSchema = z.discriminatedUnion('kind', [
 export type ActivityItem = z.infer<typeof activityItemSchema>;
 
 /**
- * The `kinds` GET /v2/feed/activity is asked for (F4 D4). Explicit rather than omitted, because the
+ * The `kinds` GET /v2/feed/activity is asked for. Explicit rather than omitted, because the
  * union above has no catch-all: one kind the notifier cannot parse fails the whole page, so the
  * indexer must stay free to ship a new feed kind before the notifier knows it. The price of that is
  * this list — a kind added to the union and forgotten here is never read, which is exactly how the

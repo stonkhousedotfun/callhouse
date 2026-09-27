@@ -1,6 +1,6 @@
 /**
- * The collateral rent a mint charges (INTERFACE_VERSION 7, c05), restated exactly as the contracts compute it
- * (callhouse-contracts `src/v2/lib/OptionMath.sol` mintFee / mintFeeRefund, v7 design §4.2). Pure; no chain, no clock.
+ * The collateral rent a mint charges (INTERFACE_VERSION 7), restated exactly as the contracts compute it
+ * (callhouse-contracts `src/v2/lib/OptionMath.sol` mintFee / mintFeeRefund). Pure; no chain, no clock.
  *
  * WHY THE KEEPER NEEDS IT. `Clearinghouse.mint` takes `units x collateralPerUnit` PLUS
  * `ceil(collateral x mintFeePpm x (expiry - now) / (1e6 x 7 days))` out of the writer's FREE collateral, and

@@ -1,0 +1,88 @@
+{
+  "_readme": "Recorded fixture for pool-spot.test.ts. One block of chain 4663, read over the public RPC host named in rpcHost (no key): each launch market's registry v3 pool observe([windowS, 0]), token0/token1, the asset's decimals, the Chainlink feed's latestRoundData, and, as the independent answer, the deployed UniV3TwapSource (registry v2.contracts.sources.univ3) observeWindow(asset, blockTimestamp - windowS, blockTimestamp) and pools(asset) at the SAME block. The settlement source computes the same window from the same cumulatives, so its price, meanTick and harmonicLiquidity are what pool-spot.ts must reproduce. Recorded 2026-09-23; addresses copied from ops/markets/tier1.json, never typed.",
+  "rpcHost": "rpc.mainnet.chain.robinhood.com",
+  "chainId": 4663,
+  "blockNumber": "70176851",
+  "blockTimestamp": 1790132583,
+  "windowS": 90,
+  "univ3TwapSource": "0x48B8d36bA9BB66A033094a84d52c95D20964C666",
+  "usdg": "0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168",
+  "markets": {
+    "NVDA": {
+      "asset": "0xd0601CE157Db5bdC3162BbaC2a2C8aF5320D9EEC",
+      "pool": "0xd4EB21209C4D6093f80B5b84f5C45cc093EA14a3",
+      "minLiquidity": "1700000000000000000",
+      "feed": "0x379EC4f7C378F34a1B47E4F3cbeBCbAC3E8E9F15",
+      "observe": {
+        "tickCumulatives": [
+          "1224061357793",
+          "1224081338513"
+        ],
+        "secondsPerLiquidityCumulativeX128s": [
+          "17363207000544325059550165232",
+          "17363210531249393787546229623"
+        ]
+      },
+      "token0": "0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168",
+      "token1": "0xd0601CE157Db5bdC3162BbaC2a2C8aF5320D9EEC",
+      "assetDecimals": 18,
+      "sourceConfig": {
+        "pool": "0xd4EB21209C4D6093f80B5b84f5C45cc093EA14a3",
+        "usdgIsToken0": true,
+        "assetDecimals": 18,
+        "window": 300,
+        "minLiquidity": "1700000000000000000"
+      },
+      "sourceObserveWindow": {
+        "ok": true,
+        "price": "228453132",
+        "meanTick": 222008,
+        "harmonicLiquidity": "8674021881390917673"
+      },
+      "chainlink": {
+        "roundId": "18446744073709552699",
+        "answer": "22902739517",
+        "updatedAt": "1790089676",
+        "decimals": 8
+      }
+    },
+    "SPCX": {
+      "asset": "0x4a0E65A3EcceC6dBe60AE065F2e7bb85Fae35eEa",
+      "pool": "0xc61284332117c3FB23A2A56cceFFD07F7aF60029",
+      "minLiquidity": "1300000000000000000",
+      "feed": "0xB265810950ba6c5C0Ff821c9963014a56fD8Bffb",
+      "observe": {
+        "tickCumulatives": [
+          "-1210010723063",
+          "-1210031058383"
+        ],
+        "secondsPerLiquidityCumulativeX128s": [
+          "18660404437210435594380807318658288454279300",
+          "18660404437210435594386429598668984207669360"
+        ]
+      },
+      "token0": "0x4a0E65A3EcceC6dBe60AE065F2e7bb85Fae35eEa",
+      "token1": "0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168",
+      "assetDecimals": 18,
+      "sourceConfig": {
+        "pool": "0xc61284332117c3FB23A2A56cceFFD07F7aF60029",
+        "usdgIsToken0": false,
+        "assetDecimals": 18,
+        "window": 300,
+        "minLiquidity": "1300000000000000000"
+      },
+      "sourceObserveWindow": {
+        "ok": true,
+        "price": "154061331",
+        "meanTick": -225948,
+        "harmonicLiquidity": "5447151860921737929"
+      },
+      "chainlink": {
+        "roundId": "18446744073709554934",
+        "answer": "15468965000",
+        "updatedAt": "1790106931",
+        "decimals": 8
+      }
+    }
+  }
+}

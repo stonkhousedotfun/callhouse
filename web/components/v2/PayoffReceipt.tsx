@@ -1,11 +1,11 @@
 "use client";
 
-import { useEffect, useId, useState } from "react";
+import { useId, useState, useSyncExternalStore } from "react";
 
 import { buildPayoffReceipt, type PayoffReceipt as Receipt, type PayoffReceiptInput, type ReceiptLine } from "@/lib/v2/payoffReceipt";
 
 /** One line of the receipt: the label, the figure, how it was reached, and the rule behind it behind an
- * info toggle (§2.5: the copy is written from the contract rule, never the file path). */
+ * info toggle (the copy is written from the contract rule, never the file path). */
 function Line({ line, emphasis = false }: { line: ReceiptLine; emphasis?: boolean }) {
   const [showRule, setShowRule] = useState(false);
   const ruleId = useId();
@@ -24,18 +24,24 @@ function Line({ line, emphasis = false }: { line: ReceiptLine; emphasis?: boolea
   </li>;
 }
 
-/** "What you pay, and what you can get" (design §2.5): expandable, open on desktop, collapsed on mobile with the
+const NO_SUBSCRIBE = () => () => {};
+/** A desktop viewport (the receipt's open-by-default breakpoint). False where the browser cannot tell. */
+function wideViewport(): boolean {
+  if (typeof window === "undefined" || typeof window.matchMedia !== "function") return false;
+  return window.matchMedia("(min-width: 640px)").matches;
+}
+
+/** "What you pay, and what you can get": expandable, open on desktop, collapsed on mobile with the
  * total in the summary line. Pure input, pure output: every figure comes from {buildPayoffReceipt}. */
 export function PayoffReceipt({ input, className = "" }: { input: PayoffReceiptInput; className?: string }) {
   const receipt: Receipt = buildPayoffReceipt(input);
-  // Open by default on desktop only. Server markup renders collapsed; the effect opens it once the
-  // viewport is known, so the summary total is what a phone sees first (§2.7).
-  const [open, setOpen] = useState(false);
-  useEffect(() => {
-    if (typeof window === "undefined" || typeof window.matchMedia !== "function") return;
-    if (window.matchMedia("(min-width: 640px)").matches) setOpen(true);
-  }, []);
-  return <details open={open} onToggle={(event) => setOpen(event.currentTarget.open)}
+  // Open by default on desktop only. Server markup (and the hydrating render) is collapsed; after hydration the
+  // default follows the viewport, so the summary total is what a phone sees first. Once the reader toggles it,
+  // their choice wins.
+  const wide = useSyncExternalStore(NO_SUBSCRIBE, wideViewport, () => false);
+  const [chosen, setChosen] = useState<boolean | null>(null);
+  const open = chosen ?? wide;
+  return <details open={open} onToggle={(event) => setChosen(event.currentTarget.open)}
     className={`rounded-md border border-line bg-surface ${className}`} data-testid="payoff-receipt">
     <summary className="cursor-pointer list-none px-4 py-3 text-sm font-semibold text-ink [&::-webkit-details-marker]:hidden">
       <span className="mr-2 inline-block w-3 text-ink-3" aria-hidden="true">{open ? "▾" : "▸"}</span>

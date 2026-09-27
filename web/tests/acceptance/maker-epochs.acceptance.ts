@@ -23,7 +23,9 @@ function command(
   options: SpawnSyncOptionsWithStringEncoding & { allowFailure?: boolean } = { encoding: "utf8" },
 ) {
   const { allowFailure = false, ...spawnOptions } = options;
-  const result = spawnSync(executable, args, { encoding: "utf8", ...spawnOptions });
+  // `encoding` is required by the options type and every caller passes "utf8", so the spread carries
+  // it. A literal `encoding: "utf8"` before the spread was always overwritten (TS2783).
+  const result = spawnSync(executable, args, spawnOptions);
   if (!allowFailure && result.status !== 0) {
     throw new Error(
       `${executable} ${args.join(" ")} failed (${result.status ?? result.signal ?? "unknown"})\n`

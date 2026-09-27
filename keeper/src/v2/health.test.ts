@@ -6,7 +6,7 @@
  * crash loop that also kills in-flight transactions. The loop must never overlap two ticks, survive
  * a tick that throws, and let the in-flight tick finish on stop.
  *
- * GET /ready (T-423) is readiness, not liveness, and public-safe: five keys, a closed set of reasons, and
+ * GET /ready is readiness, not liveness, and public-safe: five keys, a closed set of reasons, and
  * no path from "unknown" to ready. The pricer's own rule is pinned in pricer/pricer.test.ts.
  *
  * DELIBERATELY ABSENT: sockets. The app is driven with `app.request`; runtime.test.ts binds a port.
@@ -307,4 +307,19 @@ test('GET /ready on the mode app: 200 ready / 503 not, no private field, /health
   }
   assert.deepEqual(await (await withReady.request('/')).json(), { service: 'callhouse-pricer', mode: 'pricer', endpoints: ['/health', '/state', '/ready'] });
   store.close();
+});
+
+test('evaluateHealth: a probe that FAILED after a good one does not keep the lag and gas checks passing on the old reading; the next good probe restores them', () => {
+  const h = healthAt((x) => {
+    x.recordChain(GOOD_CHAIN);
+    x.beat(T0);
+  });
+  assert.deepEqual(evaluateHealth(h, LIMITS, T0 + 1_000).checks, { heartbeat: true, rpcLag: true, gas: true, alerting: true }, 'control: a good probe passes');
+  h.recordChainFailure(T0 + 2_000, 'HTTP request failed: 429');
+  const failed = evaluateHealth(h, LIMITS, T0 + 2_000);
+  assert.deepEqual(failed.checks, { heartbeat: true, rpcLag: false, gas: false, alerting: true }, 'unknown, not passed');
+  assert.equal(failed.status, 'degraded');
+  assert.equal(failed.alive, true, 'a failed probe is not a wedged loop: no restart');
+  h.recordChain(GOOD_CHAIN);
+  assert.equal(evaluateHealth(h, LIMITS, T0 + 3_000).status, 'ok');
 });

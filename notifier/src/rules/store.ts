@@ -117,7 +117,7 @@ export interface RulesStats {
   watchSet: number;
   /**
    * Seconds since the OLDEST holdings refresh the engine has on record, i.e. how far behind the
-   * slowest watched wallet's positions are (F4 D17: the monitor warns before it hurts). null when
+   * slowest watched wallet's positions are (the monitor warns before it hurts). null when
    * no wallet has been read yet — a watched wallet with no row at all is not an age.
    */
   oldestRefreshAgeS: number | null;

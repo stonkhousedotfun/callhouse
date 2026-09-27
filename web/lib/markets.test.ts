@@ -88,7 +88,7 @@ type RegistryMarket = {
     payoutRoute: null | { venue: "v3"; fee: number } |
       { venue: "v4"; fee: number; tickSpacing: number; poolId: `0x${string}` };
     overrides: Record<string, unknown>;
-    /** T-OP-156: this market's HouseVault, null until the externals stage writes it back (launch set only). */
+    /** This market's HouseVault, null until the externals stage writes it back (launch set only). */
     houseVault: string | null;
     registeredAt: number | null;
     registerTx: string | null;
@@ -155,7 +155,7 @@ withRegistry("lib/markets.generated.ts is in sync with ops/markets/tier1.json", 
     });
   });
 
-  it("carries the registry's launchSet verbatim, and every row's `launch` is membership in it (T-OP-099)", () => {
+  it("carries the registry's launchSet verbatim, and every row's `launch` is membership in it", () => {
     // The generated literal is the registry block, field for field: no ticker was typed anywhere in the app.
     expect(GENERATED_LAUNCH_SET).toEqual(registry.launchSet);
     expect(LAUNCH_SET).toEqual(registry.launchSet);
@@ -165,12 +165,9 @@ withRegistry("lib/markets.generated.ts is in sync with ops/markets/tier1.json", 
     for (const market of v2Markets()) expect(market.launch).toBe(registry.launchSet.markets.includes(market.ticker));
     const inLaunch = v2Markets().filter((market) => market.launch).map((market) => market.ticker).sort();
     expect(inLaunch).toEqual([...registry.launchSet.markets].sort());
-    // Membership is NOT wave and NOT status: a launch set derived from either would be a different set today.
-    const byWave = (wave: string) => v2Markets().filter((market) => market.v2.wave === wave).map((market) => market.ticker).sort();
-    const byStatus = (status: string) => v2Markets().filter((market) => market.v2.status === status).map((market) => market.ticker).sort();
-    for (const candidate of [byWave("canary"), byWave("wave1"), byWave("wave2"), byStatus("live"), byStatus("planned")]) {
-      expect(candidate).not.toEqual(inLaunch);
-    }
+    // Membership is NOT wave and NOT status. That is proven by the constructed-registry case below, not by comparing
+    // today's buckets: in the two-market registry both launch markets are v2 `live`, so a status bucket
+    // equals the launch set by coincidence of the data, not because the code reads status.
     // isLaunch is case-insensitive and false for unknown, empty and null.
     for (const ticker of registry.launchSet.markets) {
       expect(isLaunch(ticker)).toBe(true);
@@ -183,12 +180,73 @@ withRegistry("lib/markets.generated.ts is in sync with ops/markets/tier1.json", 
     expect(isLaunch(undefined)).toBe(false);
   });
 
-  it("carries markets[].v2.houseVault on every row: null or an address, and an address only on a launch-set market (T-OP-156)", () => {
+  it("decides launch membership from launchSet alone: rewriting every v2 status and wave, or narrowing the set, moves only what the set says", async () => {
+    // Constructed generated modules, so the property holds whatever today's buckets happen to be. Each mock changes
+    // exactly one input; the module under test is re-imported fresh against it.
+    const launch = [...registry.launchSet.markets].sort();
+    const nextStatus: Record<string, string> = { live: "paused", paused: "planned", planned: "live" };
+    const nextWave: Record<string, string> = { canary: "wave1", wave1: "wave2", wave2: "canary" };
+    type Row = { ticker: string; v2: { status: string; wave: string } };
+
+    // (1) Every row's v2 status and wave rewritten to a different value; launchSet untouched.
+    vi.resetModules();
+    vi.doMock("./markets.generated", async (importOriginal) => {
+      const real = await importOriginal<{ GENERATED_MARKETS: ReadonlyArray<Row> }>();
+      return {
+        ...real,
+        GENERATED_MARKETS: real.GENERATED_MARKETS.map((m) => ({
+          ...m,
+          v2: { ...m.v2, status: nextStatus[m.v2.status], wave: nextWave[m.v2.wave] },
+        })),
+      };
+    });
+    try {
+      const rotated = await import("./markets");
+      for (const market of rotated.v2Markets()) {
+        const real = GENERATED_MARKETS.find((m) => m.ticker === market.ticker)!;
+        // The mock took: every field this case is about differs from the committed row.
+        expect(market.v2.status, market.ticker).not.toBe(real.v2.status);
+        expect(market.v2.wave, market.ticker).not.toBe(real.v2.wave);
+      }
+      expect(rotated.v2Markets().map((m) => m.ticker).sort()).toEqual(launch);
+      expect(rotated.v2Markets().filter((m) => m.launch).map((m) => m.ticker).sort()).toEqual(launch);
+      for (const row of GENERATED_MARKETS) expect(rotated.isLaunch(row.ticker), row.ticker).toBe(launch.includes(row.ticker));
+    } finally {
+      vi.doUnmock("./markets.generated");
+      vi.resetModules();
+    }
+
+    // (2) launchSet narrowed to its first ticker; every row untouched. The dropped tickers keep their status and wave,
+    // so a status- or wave-derived membership would keep them; launchSet-derived membership drops them.
+    const [kept, ...dropped] = registry.launchSet.markets;
+    expect(dropped.length, "this case needs a launch set of at least two markets to narrow").toBeGreaterThan(0);
+    vi.resetModules();
+    vi.doMock("./markets.generated", async (importOriginal) => {
+      const real = await importOriginal<{ LAUNCH_SET: { note: string; markets: readonly string[] } }>();
+      return { ...real, LAUNCH_SET: { ...real.LAUNCH_SET, markets: [kept] } };
+    });
+    try {
+      const narrowed = await import("./markets");
+      expect(narrowed.v2Markets().map((m) => m.ticker)).toEqual([kept]);
+      expect(narrowed.isLaunch(kept)).toBe(true);
+      for (const ticker of dropped) {
+        expect(narrowed.isLaunch(ticker), ticker).toBe(false);
+        expect(narrowed.getV2Market(ticker), ticker).toBeUndefined();
+      }
+    } finally {
+      vi.doUnmock("./markets.generated");
+      vi.resetModules();
+    }
+    // The committed module, imported before either mock, is untouched.
+    expect(v2Markets().map((m) => m.ticker).sort()).toEqual(launch);
+  });
+
+  it("carries markets[].v2.houseVault on every row: null or an address, and an address only on a launch-set market", () => {
     // The field-for-field case above already holds the generated `v2` block equal to the registry's; this one
-    // pins the KEY by name so a generator that dropped it (the pre-T-OP-156 V2_MARKET_NAMES copy threw on it)
+    // pins the KEY by name so a generator that dropped it (the earlier V2_MARKET_NAMES copy threw on it)
     // fails here with the key's name, not as a deep-equal diff of a 13-key object. The rule is the builder's
     // (build-markets.mjs validateMarket: null | address, refused by name outside launchSet.markets); the app
-    // copies what --check accepted and never decides membership itself (LAUNCH_SET, T-OP-099).
+    // copies what --check accepted and never decides membership itself (LAUNCH_SET).
     expect(GENERATED_MARKETS).toHaveLength(registry.markets.length);
     for (const gen of GENERATED_MARKETS) {
       expect(Object.hasOwn(gen.v2, "houseVault"), `${gen.ticker}: v2.houseVault is a required key`).toBe(true);

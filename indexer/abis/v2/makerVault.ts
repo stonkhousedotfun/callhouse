@@ -74,6 +74,19 @@ export const makerVaultAbi = [
   },
   {
     "type": "function",
+    "name": "MIN_ASK_BPS_OF_SPOT",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "uint16",
+        "internalType": "uint16"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
     "name": "OUTFLOW_WINDOW",
     "inputs": [],
     "outputs": [
@@ -377,22 +390,22 @@ export const makerVaultAbi = [
     "name": "onERC1155BatchReceived",
     "inputs": [
       {
-        "name": "",
+        "name": "operator",
         "type": "address",
         "internalType": "address"
       },
       {
-        "name": "",
+        "name": "from",
         "type": "address",
         "internalType": "address"
       },
       {
-        "name": "",
+        "name": "ids",
         "type": "uint256[]",
         "internalType": "uint256[]"
       },
       {
-        "name": "",
+        "name": "values",
         "type": "uint256[]",
         "internalType": "uint256[]"
       },
@@ -409,29 +422,29 @@ export const makerVaultAbi = [
         "internalType": "bytes4"
       }
     ],
-    "stateMutability": "view"
+    "stateMutability": "nonpayable"
   },
   {
     "type": "function",
     "name": "onERC1155Received",
     "inputs": [
       {
-        "name": "",
+        "name": "operator",
         "type": "address",
         "internalType": "address"
       },
       {
-        "name": "",
+        "name": "from",
         "type": "address",
         "internalType": "address"
       },
       {
-        "name": "",
+        "name": "id",
         "type": "uint256",
         "internalType": "uint256"
       },
       {
-        "name": "",
+        "name": "value",
         "type": "uint256",
         "internalType": "uint256"
       },
@@ -448,7 +461,7 @@ export const makerVaultAbi = [
         "internalType": "bytes4"
       }
     ],
-    "stateMutability": "view"
+    "stateMutability": "nonpayable"
   },
   {
     "type": "function",
@@ -535,6 +548,30 @@ export const makerVaultAbi = [
         "name": "orderId",
         "type": "uint256",
         "internalType": "uint256"
+      }
+    ],
+    "stateMutability": "nonpayable"
+  },
+  {
+    "type": "function",
+    "name": "redeem",
+    "inputs": [
+      {
+        "name": "tokenId",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ],
+    "outputs": [
+      {
+        "name": "paid",
+        "type": "uint256",
+        "internalType": "uint256"
+      },
+      {
+        "name": "inUsdg",
+        "type": "bool",
+        "internalType": "bool"
       }
     ],
     "stateMutability": "nonpayable"
@@ -647,6 +684,32 @@ export const makerVaultAbi = [
             "internalType": "uint128"
           }
         ]
+      }
+    ],
+    "outputs": [],
+    "stateMutability": "nonpayable"
+  },
+  {
+    "type": "function",
+    "name": "setPayoutInKind",
+    "inputs": [
+      {
+        "name": "inKind",
+        "type": "bool",
+        "internalType": "bool"
+      }
+    ],
+    "outputs": [],
+    "stateMutability": "nonpayable"
+  },
+  {
+    "type": "function",
+    "name": "setThirdPartyRedeem",
+    "inputs": [
+      {
+        "name": "allowed",
+        "type": "bool",
+        "internalType": "bool"
       }
     ],
     "outputs": [],
@@ -1176,6 +1239,17 @@ export const makerVaultAbi = [
     "type": "error",
     "name": "AlreadyFinal",
     "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "AlreadyListed",
+    "inputs": [
+      {
+        "name": "asset",
+        "type": "address",
+        "internalType": "address"
+      }
+    ]
   },
   {
     "type": "error",

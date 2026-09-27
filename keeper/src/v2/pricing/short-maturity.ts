@@ -1,5 +1,5 @@
 /**
- * Event-aware short maturities (K3-312, F3 D7): how uncertain a price read off the surface is where
+ * Event-aware short maturities: how uncertain a price read off the surface is where
  * the listed market does not identify it, as explicit bounds and reason codes around the unchanged
  * point estimate.
  *
@@ -13,6 +13,7 @@
  *
  * EVENT INPUT (injectable, EventCalendar): per registry ticker, a list of { date (New York),
  * kind, timing: 'bmo' | 'amc' | null } and optionally the last day the list is complete through.
+ * With no such day, a list with rows is complete only through its latest row (eventsCompleteThrough).
  * Nothing here knows a real date. The service's default is NO_EVENT_INPUT (no input for any ticker), so
  * every short-maturity read is `event-uncertainty` under the proposal policy until one is injected. Every kind counts as a
  * possible jump. The jump of an event lands in:
@@ -44,7 +45,7 @@
  * around σ; fairLow and fairHigh are Black-Scholes at those vols with the price's own spot, strike
  * and T, so ivLow ≤ iv ≤ ivHigh and fairLow ≤ fair ≤ fairHigh always hold.
  *
- * REASONS (02-interfaces §5.1): `event-uncertainty` for any event or missing-input term above;
+ * REASONS: `event-uncertainty` for any event or missing-input term above;
  * `clock-early-close` for an early close; `model-uncertainty` when (ivHigh − ivLow) / iv exceeds
  * maxRelativeIvWidth. `extrapolated` is provenance.ts's, from the method. Then the policy either keeps
  * the point with its bounds (`bound`) or refuses it (`refuse`: fair.ts answers `model-uncertainty`).
@@ -54,7 +55,7 @@
  *
  * Pure.
  */
-import { newYorkTimeToUnix } from '../../calendar.js';
+import { newYorkParts, newYorkTimeToUnix } from '../../calendar.js';
 import { TRADING_YEAR_SECONDS, bsPrice, tradingYears, type OptionKind } from './bs.js';
 import type { ExpiryClock } from './expiry-clock.js';
 import type { FairMethod } from './fair.js';
@@ -77,7 +78,7 @@ export interface MarketEvent {
 
 export interface TickerEventInput {
   events: readonly MarketEvent[];
-  /** The last New York day the list is complete through; null when the input states no limit. */
+  /** The last New York day the list is complete through; null when the input states none (eventsCompleteThrough). */
   through: string | null;
 }
 
@@ -89,7 +90,8 @@ export const NO_EVENT_INPUT: EventCalendar = new Map();
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 const KIND_RE = /^[a-z0-9][a-z0-9-]{0,31}$/;
 
-function isDay(value: unknown): value is string {
+/** A real YYYY-MM-DD calendar day. */
+export function isDay(value: unknown): value is string {
   if (typeof value !== 'string' || !DATE_RE.test(value)) return false;
   const [y, m, d] = value.split('-').map(Number) as [number, number, number];
   const date = new Date(Date.UTC(y, m - 1, d));
@@ -134,6 +136,19 @@ export function eventCalendar(raw: unknown): EventCalendar {
   return out;
 }
 
+/**
+ * The last New York day an input vouches for: its `through` when stated, else its latest row's day. A
+ * list with rows and no `through` says nothing past its latest row, so an expiry after it reads `short`, never
+ * `supplied`: a calendar holding only the next report must not clear the report after it. null only for an empty
+ * list with no `through`, the in-memory "no events" input (events.ts never builds one: a file ticker with neither
+ * is absent).
+ */
+export function eventsCompleteThrough(input: TickerEventInput): string | null {
+  if (input.through !== null) return input.through;
+  // The latest row, not the last: an input built outside eventCalendar need not be sorted.
+  return input.events.reduce<string | null>((last, e) => (last === null || e.date > last ? e.date : last), null);
+}
+
 /** The instants an event's jump may land in, (from, to], unix seconds. See the header. */
 export function eventWindow(event: MarketEvent): { from: number; to: number } {
   const [y, m, d] = event.date.split('-').map(Number) as [number, number, number];
@@ -143,6 +158,25 @@ export function eventWindow(event: MarketEvent): { from: number; to: number } {
   if (event.timing === 'bmo') return { from: midnight, to: newYorkTimeToUnix(y, m, d, 9) + 1_800 };
   if (event.timing === 'amc') return { from: newYorkTimeToUnix(y, m, d, 16), to: nextMidnight };
   return { from: midnight, to: nextMidnight };
+}
+
+/**
+ * The event flag /fair serializes: whether a listed event's jump may land in
+ * (now, expiry], independent of whether the listings already identify it (the bounds above only cover
+ * reads the listings do not). `input` is 'missing' when the calendar has no entry for the ticker (not "no
+ * events"), 'short' when the day it is complete through (eventsCompleteThrough) is before the expiry's New York
+ * day, else 'supplied'. A consumer that must avoid event days treats 'missing' and 'short' as unknown, never as clear.
+ */
+export function eventsInWindow(input: TickerEventInput | null, nowSeconds: number, expiry: number): { input: 'supplied' | 'missing' | 'short'; inWindow: boolean; events: MarketEvent[] } {
+  if (input === null) return { input: 'missing', inWindow: false, events: [] };
+  const p = newYorkParts(expiry);
+  const expiryDay = `${p.year}-${String(p.month).padStart(2, '0')}-${String(p.day).padStart(2, '0')}`;
+  const events = input.events.filter((e) => {
+    const w = eventWindow(e);
+    return w.to > nowSeconds && w.from < expiry;
+  });
+  const through = eventsCompleteThrough(input);
+  return { input: through !== null && through < expiryDay ? 'short' : 'supplied', inWindow: events.length > 0, events };
 }
 
 /*//////////////////////////////////////////////////////////////
@@ -169,9 +203,9 @@ export interface ShortMaturityPolicy {
 }
 
 /**
- * PROPOSAL values (F3 OQ-15: event-uncertainty limits are an operating-policy decision, not approved
- * here). `bound` keeps every price this service gave before K3-312 and leaves quoting to the
- * consumer's readiness policy (K3-306); `refuse` is the stricter setting an approval may choose.
+ * PROPOSAL values (event-uncertainty limits are an operating-policy decision, not approved
+ * here). `bound` keeps every price this service gave before the event input existed and leaves quoting to the
+ * consumer's readiness policy; `refuse` is the stricter setting an approval may choose.
  */
 export const DEFAULT_SHORT_MATURITY_POLICY: ShortMaturityPolicy = {
   maxEventVariance: 0.0144,
@@ -308,8 +342,8 @@ export function assessShortMaturity(input: ShortMaturityInput): ShortMaturityAss
     }
     events.push({ ...event, placement });
   }
-  // Input "through" a day before the first listing's day cannot vouch for the whole segment.
-  const through = input.events?.through ?? null;
+  // Input complete through a day before the first listing's day cannot vouch for the whole segment.
+  const through = input.events === null ? null : eventsCompleteThrough(input.events);
   const eventInput: ShortMaturityDiagnostics['eventInput'] = input.events === null ? 'missing' : beforeFirst && through !== null && priced.days[0]! > through ? 'short' : 'supplied';
   if (beforeFirst && policy.requireEventInput && eventInput !== 'supplied') {
     upW += cap * (1 - f);

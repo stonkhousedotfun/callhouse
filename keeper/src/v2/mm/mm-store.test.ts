@@ -6,7 +6,7 @@
  * the rows of a previous devnet, whose contracts had the same addresses. Pinned: one deployment per file, told apart by
  * addresses and by the deployment anchor (a file reopened under another anchor is reset, under the same one keeps its
  * state), adopted orders never counted as fills, fill and progress written together and idempotently, the killed state
- * and the sync time surviving a reopen, and the series scan's cursor, reorg overlap and range halving. Since T-OP-132
+ * and the sync time surviving a reopen, and the series scan's cursor, reorg overlap and range halving. And
  * also: the pre-vault-column attribution is idempotent per ROW and probed at every bind - a legacy-shaped row that
  * appears after the `legacyVault` key is set (a rolled-back binary, a restored backup) is still the treasury's and is
  * attributed at the next boot, a row that carries a vault is never touched, and the key is only a fast path.
@@ -45,7 +45,7 @@ test('bind: one deployment per file; another CORE wipes the rows but not the kil
   const vaultB = '0x00000000000000000000000000000000000000fb';
   assert.equal(mm.bind({ ...DEPLOYMENT, vaults: [DEPLOYMENT.vault, vaultB] }), false, 'adding vault B does not wipe A');
   assert.deepEqual(mm.counts(), { series: 1, orders: 1, openOrders: 1, ledger: 0 });
-  // The rebind attributed the vault-less writes to the treasury (T-OP-132): read back where the quoter reads them.
+  // The rebind attributed the vault-less writes to the treasury: read back where the quoter reads them.
   assert.equal(mm.makerIndex(DEPLOYMENT.vault), 1n);
   assert.equal(mm.lastSync(DEPLOYMENT.vault), 7);
   assert.equal(mm.makerIndex(), null, 'the global key is moved, not copied');
@@ -115,7 +115,7 @@ test("legacy rows are attributed to the treasury ONCE, and a second vault never 
   assert.equal(mm.lastSync(house), null);
   assert.equal(store.getMeta(MM_META.makerIndex), null, "the global key is moved, not copied");
 
-  // Idempotent PER ROW (T-OP-132): a later bind never touches a row that carries a vault - the House vault's order
+  // Idempotent PER ROW: a later bind never touches a row that carries a vault - the House vault's order
   // stays the House vault's - and the treasury's rows are not attributed twice. This block used to force a House
   // row to `''` and pin that the flag alone stopped its re-attribution; under the row-shape rule a `''` row can only
   // have been written by the pre-column binary or the vault-less form, so it IS the treasury's and the next bind says
@@ -128,11 +128,11 @@ test("legacy rows are attributed to the treasury ONCE, and a second vault never 
 });
 
 /*//////////////////////////////////////////////////////////////
-       migrateLegacy IS IDEMPOTENT PER ROW (T-OP-132, K8-05 suspicion 2)
+       migrateLegacy IS IDEMPOTENT PER ROW
 //////////////////////////////////////////////////////////////*/
 
-// The three cases the row names, at the shape a live treasury store can actually have. TODAY'S BEHAVIOUR before this
-// change, measured at callhouse 0e7bdcca with a scratch script: (a) the meta key was the only guard and a bind to the
+// The three cases that matter, at the shape a live treasury store can actually have. TODAY'S BEHAVIOUR before this
+// change, measured with a scratch script: (a) the meta key was the only guard and a bind to the
 // same set returned before reaching the migration, so the rows a rolled-back binary left (`vault = ''`, `settle:<id>`,
 // the un-suffixed makerIndex) stayed invisible to every strict read on both the same-set and the new-set rebind - order
 // 2 and its fill were NEVER counted (`ledger(treasury)` 1, `openOrders(treasury)` [1n], `makerIndex(treasury)` 1n);
@@ -232,7 +232,7 @@ test('migrateLegacy (c): the normal path - a pre-column file bound once to the v
   assert.deepEqual(mm.ledger(THIRD), []);
 });
 
-test('TWO VAULTS SETTLE THE SAME SERIES and both are recorded (F-DAPP-01)', () => {
+test('TWO VAULTS SETTLE THE SAME SERIES and both are recorded', () => {
   const store = new V2Store(':memory:');
   const treasury = DEPLOYMENT.vault;
   const house = '0x00000000000000000000000000000000000000fb';
@@ -348,7 +348,7 @@ test('bindAnchor: a file reopened under another deployment anchor is reset (kill
   assert.equal(same.bind(DEPLOYMENT), false);
   assert.equal(same.bindAnchor(A), 'same');
   assert.deepEqual(same.counts(), { series: 1, orders: 1, openOrders: 1, ledger: 1 });
-  // The restart's bind attributed the vault-less writes to the treasury (T-OP-132): read under its key.
+  // The restart's bind attributed the vault-less writes to the treasury: read under its key.
   assert.equal(same.makerIndex(DEPLOYMENT.vault), 1n);
   assert.equal(same.scannedTo(), 100n);
   assert.equal(same.lastSync(DEPLOYMENT.vault), 7);
@@ -485,19 +485,19 @@ test('a settlement row keeps its series\' exercise fee across a reopen (the loss
 });
 
 /*
- * T-OP-092. The census said the F-DAPP-01 guard was KEYED but never EXECUTED end to end: the test above pins that two
+ * The guard was KEYED but never EXECUTED end to end: the test above pins that two
  * settlements are both recorded, not that two LEDGERS both close. This one drives the shape `MmBot.ledgerStop`
  * (quoter.ts) runs per vault - open positions from the ledger, `expired` filtered with the PER-VAULT `hasSettlement`,
  * `recordSettlement` per vault, `replayLedger` again - over TWO vaults holding ONE expired series, without the chain
  * read in the middle (the settlement values are the ones `readSettlements` would have returned). Both positions must
  * end at zero units.
  *
- * PROVE-BY-BREAKING (authored; scratch only, mm-store.ts is outside this row's fence): make `settlementUniq` in
+ * BREAK CHECK (in a scratch copy of mm-store.ts): make `settlementUniq` in
  * mm-store.ts drop the vault again (`settle:<longId>` for every caller) and this test goes red at the second vault -
  * its `INSERT OR IGNORE` matches the first vault's row, `hasSettlement(9n, house)` still answers true (the uniq
  * exists), so `expired` filters the series out, nothing is recorded for it, and its position stays at -100 units.
  */
-test('TWO VAULTS holding ONE expired series: ledgerStop-shaped settlement closes BOTH ledgers, not just the first (F-DAPP-01 executed)', () => {
+test('TWO VAULTS holding ONE expired series: ledgerStop-shaped settlement closes BOTH ledgers, not just the first', () => {
   const store = new V2Store(':memory:');
   const mm = new MmStore(store);
   const treasury = '0x00000000000000000000000000000000000000a1';
@@ -535,4 +535,25 @@ test('TWO VAULTS holding ONE expired series: ledgerStop-shaped settlement closes
   }
   // A third pass records nothing: both are settled, `expired` is empty for both.
   assert.equal(settleFor(treasury) + settleFor(house), 0);
+});
+
+test('a stored kill record that does not parse, or is not a kill, stays KILLED until /resume writes null', () => {
+  const vault = '0x00000000000000000000000000000000000000a1';
+  for (const raw of ['{"at":', '{"reason":"no time"}', '42']) {
+    const mm = new MmStore(new V2Store(':memory:'));
+    mm.store.setMeta(MM_META.killed, raw);
+    assert.notEqual(mm.killed(), null, `${raw}: an unreadable process-wide kill is not "not killed"`);
+    assert.notEqual(mm.killedFor(vault), null);
+    mm.setKilled(null);
+    assert.equal(mm.killed(), null, 'resume clears it');
+  }
+  const scoped = new MmStore(new V2Store(':memory:'));
+  scoped.store.setMeta(`${MM_META.killedVault}${vault}`, 'not json');
+  assert.match(scoped.killedFor(vault)!.reason, /unreadable/);
+  // Control: a good kill and a resumed one read as before.
+  const ok = new MmStore(new V2Store(':memory:'));
+  ok.setKilled({ at: 5, reason: 'test' });
+  assert.deepEqual(ok.killed(), { at: 5, reason: 'test' });
+  ok.setKilled(null);
+  assert.equal(ok.killed(), null);
 });

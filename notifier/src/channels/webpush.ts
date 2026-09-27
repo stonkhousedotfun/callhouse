@@ -12,7 +12,7 @@
  * unsubscribed or the subscription expired, so the subscription is disabled (`gone`); 429 and 5xx
  * are transient; anything else is permanent for this message.
  *
- * PAYLOAD, for the service worker (W2-10 public/sw.js):
+ * PAYLOAD, for the service worker (public/sw.js):
  *   { title, body, url, kind }   JSON; show `title` / `body`, open `url` on click.
  * Push services cap the encrypted body near 4 KB, so the body is trimmed to 1 KB of text.
  *

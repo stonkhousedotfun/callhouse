@@ -57,7 +57,7 @@
  */
 import { EnqueueError, type EnqueueResult } from '../delivery.js';
 import type { Db } from '../db.js';
-import type { EventKind } from '../events.js';
+import { tickerSchema, type EventKind } from '../events.js';
 import { errorCode, type Logger } from '../log.js';
 import type { MarketsCache } from '../markets.js';
 import { dayIndexOf, SESSION_SCAN_DAYS } from './calendar.js';
@@ -210,13 +210,13 @@ export class RulesEngine {
     } catch (error) {
       logger.warn({ code: codeOf(error) }, 'config unavailable; leaving cursor and stored anchor');
     }
-    // K8-231. THE VERSION CHECK IS DELIBERATELY OUTSIDE THE CATCH ABOVE.
+    // THE VERSION CHECK IS DELIBERATELY OUTSIDE THE CATCH ABOVE.
     //
     // An UNREADABLE config is a transient failure and the tick continues on stored state; an
     // interface this build does not implement is neither transient nor recoverable, and the two must
     // not share a handler. Put `assertInterfaceVersion` inside that `try` and the catch swallows it
     // into 'config unavailable', the tick runs on, and the pin silently becomes a log line - a check
-    // that cannot fail, which is the defect this row exists to close, one layer down.
+    // that cannot fail, which is the defect this check exists to catch, one layer down.
     //
     // It throws before the admin-operations read and before any rule runs, so a tick that saw a
     // foreign interface reads nothing further, persists nothing and enqueues nothing.
@@ -228,7 +228,7 @@ export class RulesEngine {
     }
     try {
       const ops = await indexer.adminOperations();
-      // X8-181, F-APP-OPS-02. MERGE BY KEY (T-435: `key`, not `id`, which a reschedule reuses); do
+      // MERGE BY KEY (`key`, not `id`, which a reschedule reuses); do
       // not rebuild. `adminOperations = {}` threw the previous
       // tick's map away, so an operation that had left the page it was last seen on was ABSENT rather
       // than CHANGED - and the rule below only fires on a status that differs from a remembered one
@@ -264,8 +264,16 @@ export class RulesEngine {
     // 2. spot
     const spots: Record<string, string> = {};
     const spotTimes: Record<string, number> = {};
+    // (market_live). A failed read keeps the previous statuses: an outage is not a delisting,
+    // and the tick after it must compare against what was last actually seen.
+    let marketStatuses: Snapshot['marketStatuses'] = before.marketStatuses;
     try {
       const markets = await indexer.markets();
+      const statuses = Object.create(null) as Snapshot['marketStatuses'];
+      // Only tickers the market_live payload accepts; a ticker is server-supplied, and the null
+      // prototype keeps a key like `__proto__` a plain entry rather than a prototype write.
+      for (const market of markets) if (tickerSchema.safeParse(market.ticker).success) statuses[market.ticker] = market.status;
+      marketStatuses = statuses;
       for (const market of markets) {
         if (market.spot === null || market.spot.decimals !== 6) continue;
         spots[market.ticker] = market.spot.raw;
@@ -454,6 +462,7 @@ export class RulesEngine {
     const after = deriveState(before, {
       at: now, spots, spotTimes, alerts: watch.alerts, settlements, holdings,
       sessionDays: calendar.sessionDays, pendingFeesEffectiveAt, liveFeesKey: liveKey, adminOperations,
+      marketStatuses,
     });
     const requests: EnqueueRequest[] = [];
     for (const item of fresh) requests.push(...eventRules(item, before, after));
@@ -507,6 +516,9 @@ export class RulesEngine {
       pendingFeesEffectiveAt: after.pendingFeesEffectiveAt,
       liveFeesKey: after.liveFeesKey,
       adminOperations: after.adminOperations,
+      // market_live fires on a status that differs from this map; persisting it is what stops a restart
+      // from announcing every live market again.
+      marketStatuses: after.marketStatuses,
     };
     await saveState(db, {
       cursor: { since, seen, resume },

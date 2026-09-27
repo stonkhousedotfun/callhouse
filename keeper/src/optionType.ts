@@ -2,7 +2,7 @@
  * The week's Valorem option type: which tuple, and what its id will be before it exists.
  *
  * Valorem's `newOptionType` is permissionless and the id is a pure function of the six-field
- * tuple (ops/recon/R4-valorem-abi.md §"optionId derivation", reproduced here byte for byte):
+ * tuple (the Valorem optionId derivation, reproduced here byte for byte):
  *
  *   optionKey = uint160(bytes20(keccak256(abi.encode(
  *                 underlyingAsset, underlyingAmount, exerciseAsset, exerciseAmount,

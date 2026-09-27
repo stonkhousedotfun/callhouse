@@ -5,8 +5,8 @@
  * surface — web/app/earn/page.tsx, web/components/v2/EarnMarket.tsx, web/lib/v2/earnTx.ts are all
  * about writing calls against stock you hold. THIS FILE IS THE LENDING VAULT: you supply a Stock
  * Token or USDG, you receive shares, the vault rests orders and parks the rest in a venue adapter
- * (v8-plan/tasks/P-periphery.md:19-30). The two are different products that share a word. The
- * route name `/v2/earn` for the lending vault is pinned by v8-plan/03-INTERFACES.md:220 and is not
+ * The two are different products that share a word. The
+ * route name `/v2/earn` for the lending vault is part of the published API and is not
  * renamed here, so everything else is prefixed instead: v2EarnVault* tables, V2_EARN_VAULT,
  * v2EarnVaultPonder.
  *
@@ -16,14 +16,14 @@
  * for every source, which comes from abis/v2/*.ts, which scripts/gen-abis.mjs renders from
  * ops/abis/v2/*.json. At this commit neither artefact exists in ops/abis/v2:
  *
- *   - EarnVault.json  — the contract itself is unwritten (P8-02 is in flight). Its event names and
+ *   - EarnVault.json  — the contract itself is not yet written. Its event names and
  *                       argument shapes are therefore unknown, and guessing them would produce
  *                       handlers that decode nothing and tests that prove they decode nothing.
  *   - IStockZap.json  — the contract IS landed (callhouse-contracts src/v2/periphery/StockZap.sol)
- *                       but P8-01 deliberately did not add it to script/v2/abi-manifest.txt, and
- *                       export-abis.sh copies only what the manifest names. That is T-78.
+ *                       but the export deliberately left it out of script/v2/abi-manifest.txt, and
+ *                       export-abis.sh copies only what the manifest names. That is tracked separately.
  *
- * X8-06 LANDED. This file used to carry its registrations as PROSE, because registering a handler
+ * LANDED. This file used to carry its registrations as PROSE, because registering a handler
  * for a contract ponder.config.ts does not have breaks the virtual `ponder:registry` types for every
  * handler file in the package, and the generated ABI modules did not exist. They exist now
  * (abis/v2/earnVault.ts, abis/v2/stockZap.ts, both emitted by scripts/gen-abis.mjs from
@@ -34,15 +34,24 @@
  * THE EVENT NAMES ARE READ OFF THE GENERATED ABI, NOT OFF THE PLAN. The plan wrote them as
  * placeholders - deposit, withdraw, queued, fulfilled, skim, adapter move, config - on purpose. The
  * contract's actual events are Deposited, DepositQueued, DepositServed, DepositCancelled, Redeemed,
- * WithdrawalQueued, WithdrawalServed, WithdrawalCancelled, Skimmed, SweptToVenue, PulledFromVenue,
- * AdapterSet, SkimBpsSet and FundingEnabledSet; the two adapter moves are SweptToVenue and PulledFromVenue, and the single
- * "config" placeholder is three separate setters.
+ * WithdrawalQueued, WithdrawalServed, WithdrawalCancelled, PaymentDeferred, DeferredClaimed, Skimmed,
+ * SweptToVenue, PulledFromVenue, AdapterSet, SkimBpsSet and FundingEnabledSet; the two adapter moves are
+ * SweptToVenue and PulledFromVenue. A change adds HighWaterMarkSet (the mark, per whole share) and
+ * VenuePulledForFunding (fund()'s venue top-up, an `in` move that is not a PulledFromVenue). A change adds
+ * VenueWrittenOff (an unreadable venue's last known value written off; v2EarnVaultVenueWriteOff, not a move).
  *
- * DEPOSIT QUEUE (T-184 / T-421). A deposit that arrives while the vault is not at its flat boundary
+ * SERVED IS NOT ALWAYS DELIVERED. processQueue no longer reverts on a payment the asset
+ * refuses (a receiver USDG has frozen): the request completes, and the money is HELD in the vault against the
+ * request id until its owner or receiver pulls it with claimDeferred. The log order in that transaction is
+ * PaymentDeferred FIRST, then WithdrawalServed (or DepositCancelled, for a refused deposit refund). So a
+ * WithdrawalServed row's `assets` is what was served; v2EarnVaultHeldPayment (same `${vault}-${id}` key) says
+ * how much of it is still held, and v2EarnVaultDeferredClaim records every pull.
+ *
+ * DEPOSIT QUEUE. A deposit that arrives while the vault is not at its flat boundary
  * emits DepositQueued and later DepositServed or DepositCancelled; it NEVER emits Deposited. The
  * queue handlers below preserve the owner and receiver separately, and only DepositServed creates a
  * completed v2EarnVaultDeposit row. On both paths `account` is the asset owner (Deposited.caller,
- * DepositQueued.owner) and `receiver` holds the shares; before T-421 an immediate row stored the
+ * DepositQueued.owner) and `receiver` holds the shares; previously an immediate row stored the
  * receiver as `account`. Deposit and withdrawal requests share one FIFO id space in EarnVault
  * (`_requests`, `_tail`), so a `${vault}-${id}` key names at most one row across the two queue
  * tables. Share supply remains folded from Transfer, not these events.
@@ -62,6 +71,7 @@ import type { Address, Hex } from "viem";
 
 import { earnVaultAbi } from "../../abis/v2/earnVault";
 import { v2EarnVaultPonder, v2ZapPonder } from "../../lib/registry";
+import { classifySkimmed } from "./earnYield";
 
 /** Just the parts of the Ponder context these handlers use. */
 type EarnContext = { db: any; client: { readContract: (args: any) => Promise<unknown> } };
@@ -91,8 +101,8 @@ export function meta(event: {
 
 /**
  * The two StockZap events, as the contract declares them. Mirrored from callhouse-contracts
- * src/v2/interfaces/IStockZap.sol (worktree wt/v8-contracts at b2bf1dbc); the signatures and their
- * topic0s are pinned in v8-plan/status/INTERFACE-CHANGES-V8.md Entry 4:
+ * src/v2/interfaces/IStockZap.sol; the signatures and their
+ * topic0s, derived by forge from the compiled contract:
  *
  *   WriteZapped(address,address,address,uint256,uint256,uint8)
  *     0x1ae8864a999d8eea7c577cc18ede6b54ec495033e500d35c7d0bf7983d8f5b8b
@@ -191,7 +201,7 @@ async function upsertState(
   };
   await context.db
     .insert(schema.v2EarnVaultState)
-    .values({ vault, asset: null, adapter: null, skimBps: null, paused: null, sharesSupply: null, ...values, ...touched })
+    .values({ vault, asset: null, adapter: null, skimBps: null, fundingEnabled: null, sharesSupply: null, highWaterMark: null, ...values, ...touched })
     .onConflictDoUpdate({ ...values, ...touched });
 }
 
@@ -387,20 +397,121 @@ v2EarnVaultPonder.on("EarnVault:WithdrawalCancelled", async ({ event, context })
 });
 
 /**
- * The skim row is base units and a block, and deliberately nothing else. `gain` is what the venue
- * produced and `fee` is what left the vault; the row stores the FEE, because that is the amount
- * that actually moved. highWaterMark is not stored: it is a contract-side accounting cursor, not an
- * observation about this log.
+ * Who a held payment belongs to. PaymentDeferred names only the receiver, and the owner is a different person
+ * whenever the request named another receiver, so it is resolved and never guessed:
+ *   1. an existing held row (the contract keeps the first owner on a second hold, EarnVault._payOrDefer);
+ *   2. the queue row with this id, withdrawal or deposit (one FIFO id space, so at most one exists);
+ *   3. the contract's own `deferred(id)`, read at this log's block, when indexing began after the request.
+ * A failed read rejects the handler so Ponder retries it; storing the receiver as the owner would name the
+ * wrong person as the one the vault owes.
+ */
+async function heldPaymentOwner(context: EarnContext, vault: string, id: bigint, key: string): Promise<Address> {
+  const held = await context.db.find(schema.v2EarnVaultHeldPayment, { id: key });
+  if (held !== null) return held.owner;
+  const withdrawal = await context.db.find(schema.v2EarnVaultWithdrawalQueue, { id: key });
+  if (withdrawal !== null) return withdrawal.account;
+  const deposit = await context.db.find(schema.v2EarnVaultDepositQueue, { id: key });
+  if (deposit !== null) return deposit.account;
+  const [owner] = (await context.client.readContract({
+    abi: earnVaultAbi,
+    address: vault as Address,
+    functionName: "deferred",
+    args: [id],
+  })) as readonly [Address, Address, bigint];
+  return lower(owner);
+}
+
+/**
+ * A payment the asset refused, held for the request. It arrives BEFORE the WithdrawalServed or
+ * DepositCancelled of the same transaction, so it depends on neither, and it never returns early for want of a
+ * queue row: the money is owed either way. One id can be held twice (a partial payment, then the rest), so the
+ * amount accumulates exactly as `d.assets += assets` does on chain.
+ */
+v2EarnVaultPonder.on("EarnVault:PaymentDeferred", async ({ event, context }) => {
+  const m = meta(event);
+  const vault = m.sourceAddress;
+  const key = queueRowId(vault, event.args.id);
+  const owner = await heldPaymentOwner(context, vault, event.args.id, key);
+  const asset = await earnAsset(context, vault, m);
+  const previous = await context.db.find(schema.v2EarnVaultHeldPayment, { id: key });
+  const touched = { updatedAt: m.ts, updatedBlock: m.block, updatedLogIndex: m.logIndex, updatedTx: m.tx };
+  if (previous === null) {
+    await context.db.insert(schema.v2EarnVaultHeldPayment).values({
+      id: key,
+      vault,
+      requestId: event.args.id,
+      owner,
+      receiver: lower(event.args.receiver),
+      asset,
+      assets: event.args.assets,
+      heldTotal: event.args.assets,
+      claimedTotal: 0n,
+      ...touched,
+    });
+    return;
+  }
+  await context.db.update(schema.v2EarnVaultHeldPayment, { id: key }).set({
+    assets: previous.assets + event.args.assets,
+    heldTotal: previous.heldTotal + event.args.assets,
+    ...touched,
+  });
+});
+
+/**
+ * A held payment was pulled. Recorded as its own fact, keyed by the log, so a later hold and claim on the same
+ * id never overwrites it; the held amount goes to zero, as claimDeferred zeroes `_deferred[id].assets`.
+ */
+v2EarnVaultPonder.on("EarnVault:DeferredClaimed", async ({ event, context }) => {
+  const m = meta(event);
+  const vault = m.sourceAddress;
+  const key = queueRowId(vault, event.args.id);
+  await context.db.insert(schema.v2EarnVaultDeferredClaim).values({
+    id: m.id,
+    vault,
+    requestId: event.args.id,
+    heldId: key,
+    claimant: lower(event.args.by),
+    recipient: lower(event.args.to),
+    assets: event.args.assets,
+    ts: m.ts,
+    block: m.block,
+    logIndex: m.logIndex,
+    tx: m.tx,
+  });
+  const previous = await context.db.find(schema.v2EarnVaultHeldPayment, { id: key });
+  if (previous === null) return; // the hold predates the indexed range; the claim row above still records the pull
+  await context.db.update(schema.v2EarnVaultHeldPayment, { id: key }).set({
+    assets: 0n,
+    claimedTotal: previous.claimedTotal + event.args.assets,
+    updatedAt: m.ts,
+    updatedBlock: m.block,
+    updatedLogIndex: m.logIndex,
+    updatedTx: m.tx,
+  });
+});
+
+/**
+ * One Skimmed log. `amount` is the fee that left the vault (what a sum of rows may call "skimmed").
+ * `gain` is what the log named, and `kind` is {classifySkimmed}: a zero fee is not "nothing owed"
+ * when the gain is positive and the rate is not zero. Deposits call the same skim before
+ * they mint, so this handler runs on those transactions too, and so does a processQueue that drains the queue
+ * one row per log, keyed by the log, beside the DepositServed rows of the same transaction.
+ * The row does not store the log's `highWaterMark`: the vault's mark is HighWaterMarkSet (assets per
+ * whole share), kept on the vault state row.
  */
 v2EarnVaultPonder.on("EarnVault:Skimmed", async ({ event, context }) => {
   const m = meta(event);
   const vault = m.sourceAddress;
   const asset = await earnAsset(context, vault, m);
+  const state = await context.db.find(schema.v2EarnVaultState, { vault });
+  const skimBps = state === null || state.skimBps == null ? null : Number(state.skimBps);
   await context.db.insert(schema.v2EarnVaultSkim).values({
     id: m.id,
     vault,
     asset,
     amount: event.args.fee,
+    gain: event.args.gain,
+    kind: classifySkimmed(event.args.gain, event.args.fee, skimBps),
     recipient: null,
     ts: m.ts,
     block: m.block,
@@ -411,12 +522,49 @@ v2EarnVaultPonder.on("EarnVault:Skimmed", async ({ event, context }) => {
 
 /** Out to the venue. `deposited` is what the venue took, which can be less than `offered`. */
 v2EarnVaultPonder.on("EarnVault:SweptToVenue", async ({ event, context }) => {
-  await adapterMove(context, meta(event), "out", event.args.offered, event.args.deposited);
+  await adapterMove(context, meta(event), "out", event.args.offered, event.args.deposited, "SweptToVenue");
 });
 
 /** Back from the venue. `withdrawn` can be less than `requested` when the venue is illiquid. */
 v2EarnVaultPonder.on("EarnVault:PulledFromVenue", async ({ event, context }) => {
-  await adapterMove(context, meta(event), "in", event.args.requested, event.args.withdrawn);
+  await adapterMove(context, meta(event), "in", event.args.requested, event.args.withdrawn, "PulledFromVenue");
+});
+
+/**
+ * fund()'s venue top-up. Same shape as PulledFromVenue (assets came back in) and a
+ * different log: this pull is not starvation-guarded, so a short `withdrawn` can be the gas cap.
+ * The book emits it only when the pull moved assets.
+ */
+v2EarnVaultPonder.on("EarnVault:VenuePulledForFunding", async ({ event, context }) => {
+  await adapterMove(context, meta(event), "in", event.args.requested, event.args.withdrawn, "VenuePulledForFunding");
+});
+
+/**
+ * setAdapter disconnected an unreadable venue and wrote its last known value off `totalAssets`. A loss
+ * at that block, not a move, so it gets its own row rather than an adapter move. The adapter is the log's (the OLD
+ * one); the AdapterSet later in the same call updates the state row's current adapter.
+ */
+v2EarnVaultPonder.on("EarnVault:VenueWrittenOff", async ({ event, context }) => {
+  const m = meta(event);
+  const vault = m.sourceAddress;
+  const asset = await earnAsset(context, vault, m);
+  await context.db.insert(schema.v2EarnVaultVenueWriteOff).values({
+    id: m.id,
+    vault,
+    adapter: lower(event.args.adapter),
+    asset,
+    lastKnown: event.args.lastKnown,
+    ts: m.ts,
+    block: m.block,
+    logIndex: m.logIndex,
+    tx: m.tx,
+  });
+});
+
+/** The mark, in assets per whole share. Stored as the event reports it. */
+v2EarnVaultPonder.on("EarnVault:HighWaterMarkSet", async ({ event, context }) => {
+  const m = meta(event);
+  await upsertState(context, m.sourceAddress, m, { highWaterMark: event.args.highWaterMark });
 });
 
 async function adapterMove(
@@ -425,6 +573,7 @@ async function adapterMove(
   direction: "in" | "out",
   requested: bigint,
   delivered: bigint,
+  sourceEvent: string,
 ) {
   const vault = m.sourceAddress;
   const asset = await earnAsset(context, vault, m);
@@ -437,6 +586,7 @@ async function adapterMove(
     direction,
     requested,
     delivered,
+    sourceEvent,
     // A move that delivered less than it asked for still SUCCEEDED; the venue simply gave less.
     // Failure would be a revert, which produces no log at all.
     succeeded: true,
@@ -457,10 +607,10 @@ v2EarnVaultPonder.on("EarnVault:SkimBpsSet", async ({ event, context }) => {
   await upsertState(context, m.sourceAddress, m, { skimBps: Number(event.args.bps) });
 });
 
-/** `paused` is the inverse of funding being enabled: on means running, so paused is !on. */
+/** Stored as the contract holds it. It switches JIT book funding; it was stored inverted as `paused`. */
 v2EarnVaultPonder.on("EarnVault:FundingEnabledSet", async ({ event, context }) => {
   const m = meta(event);
-  await upsertState(context, m.sourceAddress, m, { paused: !event.args.on });
+  await upsertState(context, m.sourceAddress, m, { fundingEnabled: event.args.on });
 });
 
 /** ERC20 transfers between holders do not change supply; only mint/burn logs do. */

@@ -7,8 +7,9 @@ import { componentsHash } from "./seaportOrder";
  * Guards for a listing's JSON, and the check that a listing is OURS before a buyer's USDG goes
  * anywhere near it.
  *
- * WHY: the only venue for the vault's calls is this app's own fill page, fed by the keeper's
- * GET /orders through app/api/keeper/orders. The keeper is our process, but it is a hot-key host
+ * WHY: the vault's calls were sold only through this app's own fill page (components/OrderPayload.tsx,
+ * since retired and deleted), fed by the keeper's GET /orders through app/api/keeper/orders,
+ * which still runs this check on every row it serves. The keeper is our process, but it is a hot-key host
  * on a network, and every field it serves (the offerer, the zone, the recipient, the token, the
  * amounts) is a row in its database until the chain has confirmed it. Until this file existed,
  * OrderPayload copied those fields straight into fulfillAdvancedOrder right after

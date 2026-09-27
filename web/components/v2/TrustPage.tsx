@@ -4,24 +4,15 @@ import Link from "next/link";
 import type { ReactNode } from "react";
 import { getAddress } from "viem";
 
-import { Button, ExternalLink, Notice, PageHead, Panel, Table } from "@/components/ui";
+import { Button, ExternalLink, InfoTip, Notice, PageHead, Panel, Table } from "@/components/ui";
 import { TableOrCards } from "@/components/v2/RecordCards";
 import { addressUrl } from "@/lib/chain";
-import { STATUS } from "@/lib/site";
+import { adminSafeActsImmediately, formatDelay, roleScopeNote } from "@/lib/v2/adminDelays";
 import type { ConfigResponse, PendingAdminOperation } from "@/lib/v2/api-types";
 import { useConfig } from "@/lib/v2/hooks";
-import { stamp } from "@/lib/v2/time";
+import { Time } from "@/components/ui/Time";
 
 type TrustConfig = Pick<ConfigResponse, "contracts" | "safes" | "access" | "pendingOperations">;
-
-function formatDelay(seconds: number): string {
-  if (seconds === 0) return "No delay";
-  const hours = seconds / (60 * 60);
-  const days = hours / 24;
-  if (Number.isInteger(days)) return `${days} ${days === 1 ? "day" : "days"}`;
-  if (Number.isInteger(hours)) return `${hours} ${hours === 1 ? "hour" : "hours"}`;
-  return `${seconds} ${seconds === 1 ? "second" : "seconds"}`;
-}
 
 function displayName(key: string): string {
   const words = key.replace(/([a-z0-9])([A-Z])/g, "$1 $2");
@@ -39,7 +30,7 @@ function TrustIntro() {
   return <PageHead
     eyebrow="Trust"
     title="Protocol control, in public."
-    lede="Current control addresses, delayed roles, and scheduled operations reported by the v8 indexer."
+    lede="Control addresses, role delays and scheduled operations."
     aside={<div className="flex flex-wrap gap-x-4 gap-y-1">
       <Link href="/trust/markets" className="link font-semibold">Market status</Link>
       <Link href="/trust/burns" className="link font-semibold">Token burns</Link>
@@ -47,30 +38,38 @@ function TrustIntro() {
   />;
 }
 
-function TrustFacts() {
-  return <>
-    <Notice tone="warn" title={STATUS.audit}>
-      {STATUS.auditLine}
-    </Notice>
+/**
+ * At a zero-delay launch the Admin Safe's calls execute directly: AccessManager schedules nothing at a delay
+ * of 0, so there is no scheduled operation for the guardian to cancel until the admin's lock transaction raises the
+ * delays. The guardian sentence stays (it is true again after the lock); this line says what is true now, and only when
+ * the Safe's holder delay reads 0 on every one of role ids 0-5 (adminDelays.adminSafeActsImmediately).
+ */
+export const ADMIN_SAFE_IMMEDIATE =
+  "The Admin Safe's changes currently take effect immediately, with no scheduled notice.";
 
-    <Panel as="section" className="mt-6">
-      <h2 className="font-display text-xl font-bold">Guardian powers and limits</h2>
-      {/* Source: v8-plan/V8-DESIGN.md:52,62. */}
-      <p className="mt-2 text-sm text-ink-2">
-        The guardian can pause minting and series creation, pause trading, veto or unveto a settlement,
-        clear a payout route, and cancel scheduled fee, market-fee, configuration, treasury, and listing operations.
-      </p>
+function TrustFacts({ data }: { data?: Pick<ConfigResponse, "access" | "safes"> }) {
+  return <>
+    <Panel as="section">
+      {/* Source: callhouse-contracts src/v2/access/V8Roles.sol. */}
+      <h2 className="flex items-center gap-2 font-display text-xl font-bold">
+        Guardian powers and limits
+        <InfoTip label="About the guardian">
+          The guardian can pause minting and series creation, pause trading, veto or unveto a settlement,
+          clear a payout route, and cancel scheduled fee, market-fee, configuration, treasury, and listing operations.
+        </InfoTip>
+      </h2>
       <p className="mt-2 text-sm font-semibold text-ink">
         The guardian cannot cancel ADMIN-lane operations, including role grants and selector mappings.
       </p>
+      {adminSafeActsImmediately(data) ? <p className="mt-2 text-sm text-ink" data-slot="admin-immediate">{ADMIN_SAFE_IMMEDIATE}</p> : null}
     </Panel>
   </>;
 }
 
-function TrustShell({ children }: { children: ReactNode }) {
+function TrustShell({ children, data }: { children: ReactNode; data?: Pick<ConfigResponse, "access" | "safes"> }) {
   return <>
     <TrustIntro />
-    <TrustFacts />
+    <TrustFacts data={data} />
     {children}
   </>;
 }
@@ -108,6 +107,8 @@ function AccessRoles({ access }: { access: TrustConfig["access"] }) {
             // All four columns. The holder list is `wide` because it is a list, not a figure.
             fields: [
               { label: "Role delay", value: formatDelay(role.delayS) },
+              // NEW_LISTING's "No delay" is the design, and what it cannot do is the point.
+              ...(roleScopeNote(role.id) === null ? [] : [{ label: "Scope", wide: true, value: <span data-slot="role-scope">{roleScopeNote(role.id)}</span> }]),
               { label: "Holders", wide: true, value: role.holders.length === 0
                 ? <span className="text-ink-2">No holders published.</span>
                 : <ul className="space-y-2 font-sans font-normal">{role.holders.map((holder, index) =>
@@ -120,7 +121,11 @@ function AccessRoles({ access }: { access: TrustConfig["access"] }) {
           <Table label="Protocol access roles and holders" minWidth={760}>
           <thead><tr><th scope="col">Role</th><th scope="col">ID</th><th scope="col">Role delay</th><th scope="col">Holders</th></tr></thead>
           <tbody>{access.roles.map((role) => <tr key={`${role.id}-${role.name}`}>
-            <td className="font-sans font-semibold">{role.name}</td>
+            <td className="!whitespace-normal font-sans font-semibold">
+              {role.name}
+              {roleScopeNote(role.id) === null ? null :
+                <p className="mt-1 text-xs font-normal text-ink-2" data-slot="role-scope">{roleScopeNote(role.id)}</p>}
+            </td>
             <td>{role.id}</td>
             <td>{formatDelay(role.delayS)}</td>
             <td className="!whitespace-normal text-left">
@@ -149,11 +154,10 @@ function PendingOperations({ operations }: { operations: TrustConfig["pendingOpe
       operations.length === 0 ?
         <p className="mt-2 text-sm text-ink-2">No pending administrative operations are scheduled.</p> :
         <ul className="mt-4 space-y-3 text-sm">{operations.map((operation) => {
-          const ready = new Date(operation.readyAt * 1000);
           return <li key={operation.key} className="border-t border-line pt-3 first:border-0 first:pt-0">
             <strong>{operationLabel(operation)}</strong>
             <span className="text-ink-2"> — ready no earlier than </span>
-            <time dateTime={ready.toISOString()}>{stamp(operation.readyAt)}</time>
+            <Time at={operation.readyAt} />
           </li>;
         })}</ul>}
   </Panel>;
@@ -180,9 +184,9 @@ function ContractAddresses({ contracts }: { contracts: ConfigResponse["contracts
 }
 
 export function TrustPageView({ data, stale = false }: { data: TrustConfig; stale?: boolean }) {
-  return <TrustShell>
+  return <TrustShell data={data}>
     {stale ? <Notice tone="warn" role="status" className="mt-6">
-      Showing the latest available trust data while live updates recover.
+      Showing saved data while live updates reconnect.
     </Notice> : null}
     <SafeAddresses safes={data.safes} />
     <AccessRoles access={data.access} />
@@ -202,7 +206,6 @@ export function TrustPage() {
       <div className="mt-4 h-4 w-full rounded bg-surface-2" />
       <span className="sr-only">Loading trust data</span>
     </Panel> : <Notice tone="warn" role="status" title="Trust data is unavailable." className="mt-6">
-      <p>The indexer could not publish current control addresses and roles.</p>
       <Button size="xs" variant="ghost" className="mt-3" onClick={() => void config.refetch()}>Try again</Button>
     </Notice>}
   </TrustShell>;

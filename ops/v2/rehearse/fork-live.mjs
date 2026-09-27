@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /* -------------------------------------------------------------------------------------------------
- * O3-005 live-set fork: anvil --fork-url of chain 4663 at head, no fresh deploy.
+ * Live-set fork: anvil --fork-url of chain 4663 at head, no fresh deploy.
  *
  *   node ops/v2/rehearse/fork-live.mjs --services cranker,indexer
  *   node ops/v2/rehearse/fork-live.mjs --check --services cranker,indexer

@@ -205,7 +205,9 @@ export function AccountView({ market }: { market: LegacyMarket }) {
   if (!isConnected) {
     return (
       <EmptyCard title="Account">
-        <p className="mt-1 mb-4 text-[13px] text-ink-2">Connect to deposit {market.ticker}.</p>
+        <p className="mt-1 mb-4 text-[13px] text-ink-2">
+          {runoff ? `Connect to see your ${market.ticker} v1 account.` : `Connect to deposit ${market.ticker}.`}
+        </p>
         <div className="flex justify-center">
           <ConnectButton />
         </div>
@@ -242,7 +244,7 @@ export function AccountView({ market }: { market: LegacyMarket }) {
   if (!hasAccount) {
     if (runoff) return <EmptyCard title="No v1 account">
       <p className="mt-1 mb-4 text-[13px] text-ink-2">New writer accounts have moved to v2.</p>
-      <Button size="sm" href={`/earn/${market.ticker.toLowerCase()}`}>Explore v2 Earn</Button>
+      <Button size="sm" href={`/sell/${market.ticker.toLowerCase()}`}>Explore Sell options</Button>
     </EmptyCard>;
     return (
       <EmptyCard title="Open an account">

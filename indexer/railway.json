@@ -7,13 +7,16 @@
       "indexer/**",
       "package.json",
       "pnpm-lock.yaml",
-      "pnpm-workspace.yaml"
+      "pnpm-workspace.yaml",
+      "keeper/package.json",
+      "web/package.json",
+      "relay/package.json"
     ]
   },
   "deploy": {
     "numReplicas": 1,
     "healthcheckPath": "/ready",
-    "healthcheckTimeout": 3600,
+    "healthcheckTimeout": 10800,
     "restartPolicyType": "ON_FAILURE",
     "restartPolicyMaxRetries": 10
   }

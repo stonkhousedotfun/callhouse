@@ -2,22 +2,22 @@
 
 /**
  * Lender rewards: Earn-vault suppliers are paid in $STONKHOUSE from the lender program's own
- * `RewardsDistributor` instance (P8-05).
+ * `RewardsDistributor` instance.
  *
  * WHAT THIS PAGE SHOWS, AND THE ONE THING IT WILL NOT. It shows PUBLISHED-EPOCH FACTS: the pool for
  * an epoch (the epoch file's `total`, which the parser has already cross-checked against the sum of
  * every entry — `rewardClaim.ts` parse step) and this wallet's share of it. It shows NO rate, no
- * per-week figure, no average across epochs and no projection. the forbidden-copy rules banned (copy-lint removed 2026-09-21, so nothing bans them now) the
+ * per-week figure, no average across epochs and no projection. The forbidden-copy rules banned (nothing bans them automatically now) the
  * vocabulary, but nothing bans arithmetic, so there is none: every figure here is a number read out
  * of a signed, root-checked file.
  *
  * DEFERRED ON PURPOSE (task criterion 9): the mid-epoch, time-weighted RUNNING share. Credit is
  * "assets held multiplied by seconds held across the epoch window, not the closing balance"
- * (`ops/runbooks/lender-rewards-epoch.md`, Generate), which needs a per-account Earn-vault balance
+ * (the epoch runbook), which needs a per-account Earn-vault balance
  * SERIES over the window. That route does not exist — the runbook says so itself, and it is why the
  * generator's `--input` is a hand-made file rather than an indexer read. Showing a running share
  * without it would mean inventing one from a closing balance, which would be wrong for exactly the
- * wallets the time-weighting exists to treat fairly. Recorded in the ledger.
+ * wallets the time-weighting exists to treat fairly. A known gap.
  *
  * NO EPOCH INDEX EXISTS EITHER, which is why the reader names the epoch. The maker page can list
  * epochs because `useMaker(address)` returns them; there is no lender equivalent. Rather than
@@ -28,7 +28,7 @@ import { useState } from "react";
 
 import { useAccount } from "wagmi";
 
-import { Button, Notice, PageHead, Panel } from "@/components/ui";
+import { Button, FieldLabel, InfoTip, inputClasses, Notice, PageHead, Panel, Row, Rows } from "@/components/ui";
 import { RewardClaims } from "@/components/v2/RewardClaims";
 import { lenderDistributorAddress, lenderRewardProgram, parseLenderEpochFile } from "@/lib/v2/lenderRewards";
 import { rewardAmountText, resolveRewardToken, rewardProgramConfigured, rewardTokenQueryKey,
@@ -64,18 +64,28 @@ function EpochPool({ epoch, program }: { epoch: number; program: RewardProgram }
     if (!response.ok) throw new Error("Reward file could not be loaded.");
     return parseLenderEpochFile(await response.json(), epoch);
   }, staleTime: 60_000, retry: 0 });
-  if (file.isPending) return <p className="mt-3 text-sm text-ink-2">Epoch {epoch}: checking published rewards…</p>;
-  if (file.isError) return <Notice tone="warn" role="status" className="mt-3">Epoch {epoch}: {file.error.message}</Notice>;
-  if (!file.data) return <p className="mt-3 text-sm text-ink-2">Epoch {epoch}: no reward file published yet.</p>;
+  if (file.isPending) return <p role="status" className="text-sm text-ink-2">Week {epoch}: checking published rewards…</p>;
+  if (file.isError) return <Notice tone="warn" role="status">Week {epoch}: {file.error.message}</Notice>;
+  if (!file.data) return <p role="status" className="text-sm text-ink-2">Week {epoch}: no rewards published yet.</p>;
   // A zero-amount entry is in the PINNED vector on purpose (index 3), and the contract's claim
   // transfers only `if (amount != 0)` while still marking the index claimed. So a wallet can be in a
   // published epoch and be owed nothing; that has to read as a fact, not as a failed lookup.
   const paid = file.data.entries.filter((entry) => BigInt(entry.amount) > 0n).length;
-  return <p className="mt-3 text-sm text-ink-2">
-    Epoch {epoch} pool: <span className="num font-semibold">{rewardAmountText(BigInt(file.data.total), program)}</span>,
-    shared by {paid} of {file.data.entries.length} {file.data.entries.length === 1 ? "wallet" : "wallets"} in the file.
-  </p>;
+  return <Rows className="rounded-md border border-line bg-field px-3.5">
+    <Row k={`Week ${epoch} pool`} v={rewardAmountText(BigInt(file.data.total), program)} />
+    <Row k="Shared by" mono={false}
+      v={`${paid} of ${file.data.entries.length} ${file.data.entries.length === 1 ? "wallet" : "wallets"} in the file`} />
+  </Rows>;
 }
+
+const LOOKUP_TIP = "Enter a week number to see the pool published for it. What you see is what was published for that week, not what a future week will pay.";
+/**
+ * Stated unconditionally, not only when the program is unconfigured: the contract verifies a Merkle proof and does not
+ * ask who is calling, so this page cannot grant or withhold a claim. Saying so matters because a page that looks like a
+ * gate invites people to believe it is one.
+ */
+const CLAIM_LEDE = "Anyone can claim. We check your proof against the on-chain root before your wallet claims.";
+const CLAIM_TIP = "The reward contract checks your proof on chain. This page only helps you find your entry; it doesn't decide who can claim.";
 
 export function LenderRewardsPage() {
   const { address } = useAccount();
@@ -83,52 +93,39 @@ export function LenderRewardsPage() {
   const [input, setInput] = useState("");
   const [epoch, setEpoch] = useState<number | null>(null);
   const parsed = /^\d{1,9}$/.test(input.trim()) ? Number(input.trim()) : null;
+  const invalid = input.trim() !== "" && parsed === null;
 
   return <>
-    <PageHead eyebrow="Lending" title="Lender rewards."
-      lede="Earn-vault suppliers are paid in STONKHOUSE for a bootstrap period, on top of whatever interest the venue pays." />
-
-    <Notice tone="warn" className="mb-5">
-      Supplied stock earns nothing until borrowers exist. These rewards are a fixed pool for a finished
-      week, shared by time-weighted deposits — what you see below is what was published for that week,
-      not what any future week will pay.
-    </Notice>
-
-    {/*
-      Stated unconditionally, not only when the program is unconfigured: the contract verifies a
-      Merkle proof and does not ask who is calling, so this page cannot grant or withhold a claim.
-      Saying so matters because a page that looks like a gate invites people to believe it is one.
-    */}
-    <p className="mb-5 text-sm text-ink-2">
-      Claiming is permissionless. The distributor checks your Merkle proof on chain, so this page is a
-      convenience for finding your entry — it is never an eligibility gate, and it decides nothing.
-    </p>
+    <PageHead eyebrow="Earn" title="Lender rewards."
+      lede="STONKHOUSE for Earn lenders, paid per week once that week's rewards are published." />
 
     {!rewardProgramConfigured(program)
-      ? <Notice tone="info" className="mb-5">{program.notConfiguredNotice}</Notice>
+      ? <Notice tone="info" className="mb-6">{program.notConfiguredNotice}</Notice>
       : null}
 
-    <Panel as="section" aria-label="Choose an epoch">
-      <h2 className="font-display text-xl font-bold">Look up a published week</h2>
-      <p className="mt-2 text-sm text-ink-2">
-        Enter the epoch number. There is no index of lender epochs yet, so the week has to be named.
-      </p>
-      <div className="mt-4 flex flex-wrap items-center gap-3">
-        <label htmlFor="lender-epoch" className="text-sm font-semibold">Epoch</label>
-        <input id="lender-epoch" inputMode="numeric" value={input} onChange={(event) => setInput(event.target.value)}
-          placeholder="2958" className="num min-h-11 w-32 rounded-sm border border-line-2 bg-surface px-3 text-ink" />
-        <Button size="sm" disabled={parsed === null} onClick={() => setEpoch(parsed)}>Look up</Button>
-      </div>
-      {input.trim() !== "" && parsed === null
-        ? <p className="mt-3 text-sm text-ink-2">Enter a whole epoch number.</p> : null}
-      {epoch !== null ? <EpochPool epoch={epoch} program={program} /> : null}
-    </Panel>
+    <div className="grid items-start gap-6 lg:grid-cols-2">
+      <Panel as="section" aria-label="Choose a week" className="grid gap-5">
+        <h2 className="flex items-center gap-1.5 font-display text-xl font-bold">Look up a published week
+          <InfoTip label="About published weeks" align="start" text={LOOKUP_TIP} /></h2>
+        <form className="grid gap-1.5" onSubmit={(event) => { event.preventDefault(); if (parsed !== null) setEpoch(parsed); }}>
+          <FieldLabel htmlFor="lender-epoch">Week</FieldLabel>
+          <div className="flex items-stretch gap-3">
+            <input id="lender-epoch" inputMode="numeric" placeholder="2958" autoComplete="off" aria-invalid={invalid || undefined}
+              value={input} onChange={(event) => setInput(event.target.value)} className={`${inputClasses} flex-1 px-3.5 py-3 text-[17px]`} />
+            <Button type="submit" className="shrink-0" disabled={parsed === null}>Look up</Button>
+          </div>
+        </form>
+        {invalid ? <p role="status" className="-mt-2 text-[13px] font-medium text-danger-text">Enter a whole week number.</p> : null}
+        {epoch !== null ? <EpochPool epoch={epoch} program={program} /> : null}
+      </Panel>
 
-    <RewardClaims program={program} address={address} epochs={epoch === null ? [] : [epoch]}
-      heading="Claim epoch rewards"
-      lede="The operator publishes a reward file after an epoch and posts its root on chain. The app checks your proof against that root before asking your wallet to claim."
-      notice={epoch === null
-        ? <p className="mt-2 text-sm text-ink-2">Look up a week above to see whether it holds a reward for this wallet.</p>
-        : null} />
+      <div className="min-w-0 [&>section]:mt-0">
+        <RewardClaims program={program} address={address} epochs={epoch === null ? [] : [epoch]}
+          heading="Claim weekly rewards" lede={CLAIM_LEDE} tip={CLAIM_TIP}
+          notice={epoch === null
+            ? <p className="mt-2 text-sm text-ink-3">Look up a week first to see whether it holds a reward for this wallet.</p>
+            : null} />
+      </div>
+    </div>
   </>;
 }

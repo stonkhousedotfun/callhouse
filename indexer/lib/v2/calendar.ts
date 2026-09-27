@@ -1,6 +1,8 @@
 /** Pure mirrors of ExpiryCalendar's post-2007 New York close grid. */
 export const CALENDAR_DAY_S = 86_400;
 export const NEXT_EXPIRY_SEARCH_S = 14 * CALENDAR_DAY_S;
+/** v2CalendarMode's one row, keyed by source name like v2ContractAuthority. */
+export const CALENDAR_MODE_ID = "expirycalendar";
 
 function dstDays(year: number): readonly [number, number] {
   const march1 = Date.UTC(year, 2, 1) / (CALENDAR_DAY_S * 1_000);
@@ -44,4 +46,43 @@ export function nextExpiry(afterTs: number, weekly: boolean, holidays: ReadonlyM
     if (close > afterTs && (weekly ? weeklyDay(day, holidays) : sessionDay(day, holidays))) return close;
   }
   throw new Error(`ExpiryCalendar.nextExpiry found no ${weekly ? "weekly" : "daily"} close after ${afterTs}`);
+}
+
+/**
+ * ExpiryCalendar._yearOf, line for line (Hinnant's civil_from_days for day >= 0): the calendar year
+ * of day index `day`. Integer arithmetic, not Date, so it holds past Date's range.
+ */
+export function yearOfDay(day: number): number {
+  const z = day + 719_468;
+  const era = Math.floor(z / 146_097);
+  const doe = z - era * 146_097;
+  const yoe = Math.floor((doe - Math.floor(doe / 1_460) + Math.floor(doe / 36_524) - Math.floor(doe / 146_096)) / 365);
+  const doy = doe - (365 * yoe + Math.floor(yoe / 4) - Math.floor(yoe / 100));
+  const mp = Math.floor((5 * doy + 2) / 153);
+  return yoe + era * 400 + (mp >= 10 ? 1 : 0);
+}
+
+/** ExpiryCalendar._daysFromCivil(year, 1, 1): the day index of January 1 of `year` (>= 1970). */
+function januaryFirst(year: number): number {
+  const y = year - 1; // January belongs to the previous March-based year
+  const era = Math.floor(y / 400);
+  const yoe = y - era * 400;
+  const doe = yoe * 365 + Math.floor(yoe / 4) - Math.floor(yoe / 100) + 306; // doy of January 1 is 306
+  return era * 146_097 + doe - 719_468;
+}
+
+/** First and last day index of `year`, inclusive. */
+export function yearDays(year: number): readonly [number, number] {
+  return [januaryFirst(year), januaryFirst(year + 1) - 1];
+}
+
+/**
+ * ExpiryCalendar._isSessionDay: Monday-Friday, not a holiday and, when the calendar fails closed
+ * (`unseededYearsClosed`, set by a constructor given at least one closure), in a year with at least
+ * one closure currently set (`_isSeededYear`). `seededYears` holds the years whose count of set
+ * closures is non-zero; a closure on any day counts, exactly as `_closuresInYear` does.
+ */
+export function isCalendarSessionDay(day: number, holidays: ReadonlyMap<number, boolean>,
+  unseededYearsClosed: boolean, seededYears: ReadonlySet<number>): boolean {
+  return sessionDay(day, holidays) && (!unseededYearsClosed || seededYears.has(yearOfDay(day)));
 }

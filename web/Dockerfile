@@ -5,7 +5,7 @@
 # web/. pnpm-lock.yaml and pnpm-workspace.yaml live at the root and the install must be
 # workspace-aware, so a Dockerfile that could only see web/ would have nothing correct to install
 # from. `dockerfilePath` in web/railway.json therefore reads `web/Dockerfile`, relative to a
-# service Root Directory of the repo root. ops/deploy.md documents every Railway-side setting this
+# service Root Directory of the repo root. The deploy runbook documents every Railway-side setting this
 # file assumes; if you change one, change it there too.
 #
 # THE LAYERING IS THE POINT: manifests → install → sources → build. Copy the sources before the
@@ -130,9 +130,6 @@ ENV NEXT_PUBLIC_API_URL=$NEXT_PUBLIC_API_URL
 # Blank follows NEXT_PUBLIC_API_URL for existing deployments.
 ARG NEXT_PUBLIC_V1_API_URL=""
 ENV NEXT_PUBLIC_V1_API_URL=$NEXT_PUBLIC_V1_API_URL
-# Dedicated frozen-v7 run-off indexer. Blank disables /v7; it never falls back to API_URL.
-ARG NEXT_PUBLIC_V7_API_URL=""
-ENV NEXT_PUBLIC_V7_API_URL=$NEXT_PUBLIC_V7_API_URL
 
 # v2 routing, alerts, and wallet connection are client bundle settings.
 ARG NEXT_PUBLIC_V2="0"
@@ -161,7 +158,7 @@ ENV NEXT_PUBLIC_SEAPORT=$NEXT_PUBLIC_SEAPORT
 
 # ---- v8 OVERRIDE-ONLY CONTRACT ADDRESSES. Blank is SAFE and is the intended default: blank means
 #      the feature reads as unconfigured, which is the correct rendering for a contract that is not
-#      deployed. These three have NO key in the generated registry (design B: no new
+#      deployed. These three have NO key in the generated registry (by design: no new
 #      `v2.contracts` keys), so an override is the ONLY way an address reaches the client for them,
 #      and lib/v2/config.ts validates each one through the same getAddress() path as a registry
 #      address — a malformed value becomes null rather than reaching simulateContract.
@@ -252,7 +249,7 @@ ENV PORT=3000
 # It has no default: unset, the order feed answers 503 "not configured", the cycle page says the
 # feed is not wired, and nothing can be bought through the app. The fill page is the only venue
 # for the vault's calls, so a deployment without it sells nothing. On Railway it is
-# http://keeper.railway.internal:8787/orders (ops/deploy.md §3).
+# http://keeper.railway.internal:8787/orders.
 
 RUN addgroup -g 1001 -S nodejs && adduser -u 1001 -S nextjs -G nodejs
 

@@ -1,19 +1,24 @@
 #!/usr/bin/env node
 /* -------------------------------------------------------------------------------------------------
- * Step 1 of the O2-03 rehearsal: one anvil fork of chain 4663 -> the PRODUCTION deploy path -> a detached node.
+ * Step 1 of the v7 rehearsal: one anvil fork of chain 4663 -> the PRODUCTION deploy path -> a detached node.
  *
  *   a. anvil --fork-url <public RPC> (the fork block anvil pins is recorded) with --code-size-limit 98304
- *   b. callhouse-contracts script/v2/DeployV2Batch.sh --rehearse --registry ops/markets/tier1.json (the real file,
- *      never written: the batch writes back to out/tier1.rehearsal.json) --tickers NVDA,TSLA,META
- *        NVDA  Chainlink + its 0.05 % Uniswap pool (TWAP source and payout route)       registry canary
- *        TSLA  Chainlink + its 0.30 % pool, as the registry lists it                       registry wave1
- *        META  Chainlink only, no pool in the recon, so no payout route (paid in kind)    registry wave1
- *      then DeployV2Batch.sh --verify --expect-fresh true against the copy: VERIFY PASSED required
+ *   b. INTERFACE_VERSION 8. The tickers are the registry's launchSet.markets (launch-set.mjs; NVDA and SPCX
+ *      only), never a literal. ops/markets/tier1.json records the LIVE v8 set, so the
+ *      batch is handed a fresh INPUT copy (out/tier1.input.json, launch-set.mjs freshInput): every recorded
+ *      deployment field nulled, and the single-source market's pool and payout route nulled, exactly as ops/devnet
+ *      does and as callhouse-contracts rehearse-v2.sh CHAINLINK_ONLY does:
+ *        dual    (NVDA)  Chainlink + its Uniswap v3 pool (TWAP source), paid out through its payout route canary
+ *                        (the registry's v2.payoutRoute, v3 or v4; v9: v3 fee 500)
+ *        single  (SPCX)  Chainlink only on this copy, no route (paid in kind): the old META beats        launch set
+ *      callhouse-contracts script/v2/DeployV2Batch.sh --rehearse --registry <input copy> --tickers <launch set>
+ *      (DeployV8, the externals, RegisterMarkets DIRECT per market, HandBack, VerifyV8; the write-back goes to
+ *      out/tier1.rehearsal.json), then DeployV2Batch.sh --verify --expect-fresh true against the copy
  *   c. the ledger gets every deploy and registration transaction with its gas (the batch's forge records)
- *   d. the rehearsal copy: v2.status live for the three markets (DEPLOY-V2.md step 5, a hand step)
+ *   d. the rehearsal copy: v2.status live for the three markets (a hand step)
  *   e. FEEDS: the last real rounds of each market's Chainlink proxy are read, then MockRoundFeed is etched over the
  *      proxy address and continues that history (lib.mjs etchFeed); a fresh round is printed at the real answer
- *   f. owner funding rehearsed (DEPLOY-V2.md step 6: KeeperRewards 1,000 USDG, the MakerVault's USDG and Stock
+ *   f. owner funding rehearsed (KeeperRewards 1,000 USDG, the MakerVault's USDG and Stock
  *      Tokens, the quoter's depositToClearinghouse), gas for the bots
  *   g. WARM-UP, then DETACH. The public RPC serves state only ~15 minutes behind its head and a fork reads every
  *      unseen slot at the fork block, so every token path the story needs is touched by a transaction now (deposit
@@ -31,11 +36,15 @@ import { gunzipSync } from "node:zlib";
 import {
   ABI, ANVIL_ACCOUNTS, CONTRACTS_DIR, LOGS, OUT, PORTS, PUBLIC_RPC, REGISTRY, ROLE_INDEX, RPC, SOURCES, RehearsalError, accountOf, deal, devKey,
   encodeFunctionData, etchFeed, expect, fail, getAddress, impersonate, info, ledgerAppend, loadServices, now, patchState, portFree, pub, pushRound,
-  read, readJson, rpc, saveState, say, send, setStage, sleep, startService, step, stopService, toHex, until, usd, writeJson, nyTime,
+  read, readJson, rpc, saveState, say, send, setStage, sleep, startService, step, stopService, toHex, until, usd, viem, writeJson, nyTime,
 } from "./lib.mjs";
+import { NULLED_DEPLOYMENT_FIELDS, NULLED_SINGLE_FIELDS, ROUTE_VENUES, freshInput, payoutRouteIssues, rehearsalRoles } from "./launch-set.mjs";
+import { applyHouseRecord } from "../../markets/write-back-v8.mjs";
 
 setStage("1-fork");
-const TICKERS = ["NVDA", "TSLA", "META"];
+const ROLES = rehearsalRoles(readJson(REGISTRY));
+const TICKERS = ROLES.tickers;
+const INPUT = path.join(OUT, "tier1.input.json");
 const COPY = path.join(OUT, "tier1.rehearsal.json");
 const STATE_DIR = path.join(OUT, "state");
 const HISTORY_ROUNDS = 12;
@@ -54,6 +63,15 @@ function run(label, cmd, args, { cwd, env = {} } = {}) {
 
 async function main() {
   const t0 = Date.now();
+  // The build below and DeployV2Batch.sh compile [profile.default] only. The batch refuses any other
+  // FOUNDRY_PROFILE itself (contracts script/v2/lib/default-profile.sh), but only after this build, with the
+  // fork's clock already running. Refused here instead, by name, before anything runs: the same rule as stonkctl's
+  // rehearsal build, where a set FOUNDRY_PROFILE, even empty, passes only as exactly "default". Never
+  // deleted from the environment: a profile set on purpose is the caller's to drop.
+  const profile = process.env.FOUNDRY_PROFILE;
+  if (profile !== undefined && profile !== "default") {
+    fail(`FOUNDRY_PROFILE=${profile} is set in your shell. The rehearsal builds and deploys the contracts with [profile.default] only; unset it (or set FOUNDRY_PROFILE=default) and rerun`);
+  }
   step("1a. preconditions and the fork");
   for (const f of [path.join(CONTRACTS_DIR, "script/v2/DeployV2Batch.sh"), path.join(CONTRACTS_DIR, "out/MockRoundFeed.sol/MockRoundFeed.json"), REGISTRY, SOURCES]) {
     if (!existsSync(f)) fail(`missing ${f} (CONTRACTS_DIR=${CONTRACTS_DIR}: a built callhouse-contracts checkout on v2)`);
@@ -61,14 +79,22 @@ async function main() {
   if (loadServices().anvil) fail("a rehearsal anvil is recorded in out/services.json: stop it first (node ops/v2/rehearse/stop.mjs)");
   if (!(await portFree(PORTS.anvil))) fail(`port ${PORTS.anvil} is busy`);
   rmSync(COPY, { force: true });
+  rmSync(INPUT, { force: true });
   rmSync(STATE_DIR, { recursive: true, force: true });
   mkdirSync(STATE_DIR, { recursive: true });
   const contractsHead = (await run("1-contracts-head", "/opt/homebrew/bin/git", ["-C", CONTRACTS_DIR, "rev-parse", "HEAD"])).text.trim();
   const registrySha = (await run("1-registry-sha", "shasum", ["-a", "256", REGISTRY])).text.split(" ")[0];
   info(`contracts ${CONTRACTS_DIR} @ ${contractsHead}; registry sha256 ${registrySha}`);
+  const source = readJson(REGISTRY);
+  expect(source.v2.interfaceVersion === 8, `registry ${path.relative(process.cwd(), REGISTRY)} says v2.interfaceVersion ${source.v2.interfaceVersion} (8 required)`);
+  writeJson(INPUT, freshInput(source, ROLES));
+  info(`launch set ${TICKERS.join(", ")} (registry launchSet.markets): dual-source ${ROLES.dual}, single-source ${ROLES.single} (its ${NULLED_SINGLE_FIELDS.join(", ")} nulled in the input copy)`);
+  info(`input copy ${INPUT}: nulled ${NULLED_DEPLOYMENT_FIELDS.join("; ")}`);
 
-  // Build first: the fork's 15-minute clock starts with anvil.
-  const build = await run("1-forge-build", "forge", ["build"], { cwd: CONTRACTS_DIR });
+  // Build first: the fork's 15-minute clock starts with anvil. `--skip test`: every forge step the batch runs is a
+  // script over src/ + script/; a full build recompiles
+  // every test unit (measured there: 17 min against 0.7 s).
+  const build = await run("1-forge-build", "forge", ["build", "--skip", "test"], { cwd: CONTRACTS_DIR });
   if (build.code !== 0) fail(`forge build failed (log ${build.log})`);
   const forkBlockArg = process.env.REHEARSE_FORK_BLOCK;
   const anvilArgs = ["--fork-url", PUBLIC_RPC, "--chain-id", "4663", "--port", String(PORTS.anvil), "--code-size-limit", "98304",
@@ -99,17 +125,17 @@ async function main() {
   // reads the parent of V2_START_BLOCK (the deploy block), which must therefore not be the fork block itself.
   for (let i = 0; i < 3; i += 1) await rpc("evm_mine");
 
-  step("1c. DeployV2Batch.sh --rehearse (production scripts: DeployV2, RegisterMarkets per market, VerifyV2)");
-  const batch = await run("1-batch", "bash", [path.join(CONTRACTS_DIR, "script/v2/DeployV2Batch.sh"), "--rehearse", "--rpc", RPC, "--registry", REGISTRY, "--sources", SOURCES, "--tickers", TICKERS.join(","), "--out", COPY], { cwd: CONTRACTS_DIR });
+  step("1c. DeployV2Batch.sh --rehearse (production scripts: DeployV8, externals, RegisterMarkets DIRECT per market, HandBack, VerifyV8)");
+  const batch = await run("1-batch", "bash", [path.join(CONTRACTS_DIR, "script/v2/DeployV2Batch.sh"), "--rehearse", "--rpc", RPC, "--registry", INPUT, "--sources", SOURCES, "--tickers", TICKERS.join(","), "--out", COPY], { cwd: CONTRACTS_DIR });
   for (const line of batch.text.split("\n").filter((l) => /BATCH (PASSED|FAILED)|VERIFY PASSED|recorded: |DEPLOY DONE|REGISTER DONE|rehearsal record|source registry untouched|log directory/.test(l))) info(line.trim());
   expect(batch.code === 0 && /BATCH PASSED \(rehearse\)/.test(batch.text), `DeployV2Batch.sh --rehearse passed for ${TICKERS.join(", ")} (log ${batch.log})`);
   const logDir = /log directory: (\S+)/.exec(batch.text)?.[1];
   if (!logDir) fail("the batch printed no log directory");
 
-  step("1d. VerifyV2 alone against the copy (--verify --expect-fresh true)");
+  step("1d. VerifyV8 alone against the copy (--verify --expect-fresh true)");
   const verify = await run("1-verify", "bash", [path.join(CONTRACTS_DIR, "script/v2/DeployV2Batch.sh"), "--verify", "--rpc", RPC, "--registry", COPY, "--sources", SOURCES, "--expect-fresh", "true"], { cwd: CONTRACTS_DIR });
   const checks = /VERIFY PASSED: (\d+) checks/.exec(verify.text)?.[1];
-  expect(verify.code === 0 && checks !== undefined && !/^\s+FAIL/m.test(verify.text), `VerifyV2 clean: VERIFY PASSED ${checks} checks, no FAIL line (log ${verify.log})`);
+  expect(verify.code === 0 && checks !== undefined && !/^\s+FAIL/m.test(verify.text), `VerifyV8 clean: VERIFY PASSED ${checks} checks, no FAIL line (log ${verify.log})`);
   const infoLines = verify.text.split("\n").filter((l) => /^\s+info/.test(l)).map((l) => l.trim());
   for (const l of infoLines) info(l);
 
@@ -137,7 +163,42 @@ async function main() {
 
   step("1f. the rehearsal registry copy: markets live (DEPLOY-V2.md step 5)");
   const reg = readJson(COPY);
-  reg._readme = "O2-03 REHEARSAL COPY of ops/markets/tier1.json written by DeployV2Batch.sh --rehearse on an anvil fork (ops/v2/rehearse). Never commit, never deploy from it.";
+  reg._readme = `O2-03 REHEARSAL COPY of ops/markets/tier1.json written by DeployV2Batch.sh --rehearse on an anvil fork (ops/v2/rehearse), from the fresh input copy (${ROLES.single}'s pool and route nulled). Never commit, never deploy from it.`;
+  expect(reg.v2.interfaceVersion === 8, "the write-back copy says v2.interfaceVersion 8");
+  // DeployV2Batch.sh ends with "NEXT STEP, MANDATORY, NOT RUN BY THIS SCRIPT": record flywheel.deployBlock (and the
+  // record's wallets) from DeployV8's deploy-record.json, or the keeper refuses the copy ("v2.flywheel.feeSplitter is
+  // set but v2.flywheel.deployBlock is null"). The launch tool for that, ops/markets/write-back-v8.mjs, refuses THIS
+  // copy by design: its completeness rule requires a payout route on every launch market, and the rehearsal nulls
+  // the single market's route on purpose. So the same three slots it writes (write-back-v8.mjs put(): flywheel
+  // .deployBlock, shared.feeRecipient = the splitter, v2.bots.guardian = wallets.guardian) are copied here, each
+  // only into a null slot or one that already agrees. v2.deployBlock stays the batch's (the core's first block).
+  const record = readJson(path.join(logDir, "deploy-record.json"));
+  const fill = (label, obj, key, value) => {
+    if (value === undefined || value === null) fail(`deploy-record.json has no ${label}`);
+    if (obj[key] !== null && obj[key] !== undefined && String(obj[key]).toLowerCase() !== String(value).toLowerCase()) fail(`${label}: the copy holds ${obj[key]}, the deploy record ${value}`);
+    obj[key] = value;
+  };
+  expect(getAddress(record.flywheel.feeSplitter) === getAddress(reg.v2.flywheel.feeSplitter), `deploy-record.json names the copy's FeeSplitter ${reg.v2.flywheel.feeSplitter}`);
+  fill("flywheel.deployBlock", reg.v2.flywheel, "deployBlock", record.flywheel.deployBlock);
+  fill("shared.feeRecipient", reg.shared, "feeRecipient", record.flywheel.feeSplitter);
+  fill("wallets.guardian", reg.v2.bots, "guardian", record.wallets?.guardian);
+  info(`from deploy-record.json: v2.flywheel.deployBlock ${reg.v2.flywheel.deployBlock}, shared.feeRecipient ${reg.shared.feeRecipient}, v2.bots.guardian ${reg.v2.bots.guardian}`);
+  // The House factory list and each launch market's weekly vault. The launch tool writes
+  // them from DeployHouseVault's JSON out (write-back-v8.mjs --house-deployment <file> --house-kind weekly) and refuses
+  // this copy for the reason above; its applyHouseRecord is the same mapping without that completeness gate. Pass A
+  // deployed the launch factory, pass B created the launch vaults: applied in that order, as the operator would.
+  // Without them the copy names House vaults beside an EMPTY factory list (freshInput's fresh shape), and the cranker
+  // refuses to boot: house-factory-missing (keeper/src/v2/config.ts houseFactoryBootProblem).
+  for (const pass of ["A", "B"]) {
+    const house = applyHouseRecord(reg, readJson(path.join(logDir, `externals-house-${pass}.json`)), { kind: "weekly" });
+    if (house.conflicts.length) fail(`externals-house-${pass}.json does not apply to the copy: ${house.conflicts.join("; ")}`);
+    if (house.pending.length) fail(`externals-house-${pass}.json printed createVault for the Safe instead of sending it: ${house.pending.join(", ")}`);
+    info(`from externals-house-${pass}.json (write-back-v8.mjs applyHouseRecord, weekly): ${house.changed.join(", ") || "nothing new"}`);
+  }
+  const weeklyFactory = reg.v2.house.factories.find((f) => f.kind === "weekly");
+  const weeklyVaults = TICKERS.map((T) => reg.markets.find((x) => x.ticker === T).v2);
+  expect(weeklyFactory !== undefined && getAddress(weeklyFactory.address) === getAddress(reg.v2.contracts.houseVaultFactory) && weeklyVaults.every((v) => v.house.weekly !== null && getAddress(v.house.weekly) === getAddress(v.houseVault)),
+    `v2.house: the weekly factory is v2.contracts.houseVaultFactory ${weeklyFactory?.address} (block ${weeklyFactory?.deployBlock}); each launch market's weekly vault is its houseVault`);
   const C = reg.v2.contracts;
   const sources = readJson(SOURCES);
   const markets = {};
@@ -146,16 +207,38 @@ async function main() {
     expect(m.v2.registeredAt !== null && m.v2.registerTx !== null, `${T} registered: registerTx ${m.v2.registerTx}`);
     m.v2.status = "live";
     const poolFee = m.v2.univ3Pool ? sources.markets.find((x) => x.ticker === T)?.pools?.find((p) => p.address.toLowerCase() === m.v2.univ3Pool.toLowerCase())?.fee ?? null : null;
-    markets[T] = { ticker: T, asset: getAddress(m.asset), feed: getAddress(m.feed), pool: m.v2.univ3Pool ? getAddress(m.v2.univ3Pool) : null, poolFee, strikeTick: m.v2.strikeTick, registerTx: m.v2.registerTx, registeredAt: m.v2.registeredAt };
+    markets[T] = { ticker: T, asset: getAddress(m.asset), feed: getAddress(m.feed), pool: m.v2.univ3Pool ? getAddress(m.v2.univ3Pool) : null, poolFee, payoutRoute: m.v2.payoutRoute ?? null, strikeTick: m.v2.strikeTick, registerTx: m.v2.registerTx, registeredAt: m.v2.registeredAt };
   }
   writeJson(COPY, reg);
-  const contracts = { ...Object.fromEntries(Object.entries(C).filter(([k]) => k !== "sources").map(([k, v]) => [k, getAddress(v)])), sources: Object.fromEntries(Object.entries(C.sources).map(([k, v]) => [k, getAddress(v)])) };
+  // A null key is a contract this run does not deploy (the owner's externals window: hedger, rewardsDistributorLender,
+  // stockVenueAdapter). It is kept out of `contracts` and listed, never checksummed as an address.
+  const undeployed = Object.entries(C).filter(([k, v]) => k !== "sources" && v === null).map(([k]) => k);
+  const contracts = { ...Object.fromEntries(Object.entries(C).filter(([k, v]) => k !== "sources" && v !== null).map(([k, v]) => [k, getAddress(v)])), sources: Object.fromEntries(Object.entries(C.sources).map(([k, v]) => [k, getAddress(v)])) };
+  info(`not deployed by this run: ${undeployed.join(", ") || "none"}`);
   const admin = getAddress(reg.shared.admin);
   const guardian = getAddress(reg.shared.guardian);
   const usdg = getAddress(reg.shared.usdg);
-  const bots = { cranker: getAddress(reg.v2.bots.cranker), pricer: getAddress(reg.v2.bots.pricer), mmQuoter: getAddress(reg.v2.bots.mmQuoter) };
+  // INTERFACE_VERSION 8 renamed the quoter key (v2.bots.quoter; DeployV2Batch.sh reads `bot quoter`). The rehearsal's
+  // role name stays mmQuoter (anvil #10).
+  const bots = { cranker: getAddress(reg.v2.bots.cranker), pricer: getAddress(reg.v2.bots.pricer), mmQuoter: getAddress(reg.v2.bots.quoter) };
   expect(bots.cranker === accountOf("cranker") && bots.pricer === accountOf("pricer") && bots.mmQuoter === accountOf("mmQuoter"), "the batch's bot stand-ins are anvil #8/#9/#10 (cranker, pricer, mmQuoter)");
-  patchState({ registryCopy: COPY, deployBlock: reg.v2.deployBlock, contracts, markets, admin, guardian, usdg, bots, batchLogDir: logDir, verifyChecks: Number(checks), verifyInfo: infoLines,
+  step("1f'. payout routes on chain: the dual market's route = the registry's payoutRoute (v3 or v4), none on the single-source market");
+  for (const T of TICKERS) {
+    const r = await read(contracts.payoutAdapter, ABI.payoutAdapter, "routes", [markets[T].asset]);
+    const want = markets[T].payoutRoute;
+    const venue = ROUTE_VENUES[Number(r.venue)] ?? String(r.venue);
+    // A v3 route is checked by venue and fee (setRouteV3 stores tickSpacing 0), a v4 one also by tickSpacing and poolId.
+    const issues = payoutRouteIssues(want, r, { asset: markets[T].asset, usdg });
+    const seen = venue === "V4" ? ` tickSpacing ${r.tickSpacing}` : venue === "V3" ? ` pool ${r.v3Pool}` : "";
+    if (want) {
+      expect(issues.length === 0, `${T} PayoutRouter route ${venue} fee ${r.fee}${seen} = the registry's payoutRoute (${JSON.stringify(want)})${issues.length ? `: ${issues.join("; ")}` : ""}`);
+    } else {
+      expect(issues.length === 0, `${T} has no PayoutRouter route (venue ${venue}): its ITM longs are paid in kind`);
+    }
+    markets[T].routeOnChain = { venue, fee: Number(r.fee), tickSpacing: Number(r.tickSpacing), v3Pool: venue === "V3" ? getAddress(r.v3Pool) : null };
+  }
+  patchState({ registryCopy: COPY, inputCopy: INPUT, roles: { dual: ROLES.dual, single: ROLES.single }, launchSet: TICKERS, nulled: { single: ROLES.single, fields: [...NULLED_SINGLE_FIELDS], deployment: [...NULLED_DEPLOYMENT_FIELDS] },
+    interfaceVersion: reg.v2.interfaceVersion, undeployed, deployBlock: reg.v2.deployBlock, contracts, markets, admin, guardian, usdg, bots, batchLogDir: logDir, verifyChecks: Number(checks), verifyInfo: infoLines,
     accounts: Object.fromEntries(Object.keys(ROLE_INDEX).map((r) => [r, accountOf(r)])) });
   for (const [k, v] of Object.entries(contracts)) if (k !== "sources") info(`${k.padEnd(18)} ${v}`);
   info(`sources            chainlink ${contracts.sources.chainlink} univ3 ${contracts.sources.univ3} dataStreams ${contracts.sources.dataStreams}`);
@@ -206,7 +289,7 @@ async function main() {
   await send(admin, { address: usdg, abi: ABI.erc20, functionName: "approve", args: [contracts.keeperRewards, KEEPER_FUND], label: "admin USDG approve KeeperRewards", action: "owner-fund" });
   await send(admin, { address: contracts.keeperRewards, abi: ABI.keeperRewards, functionName: "fund", args: [KEEPER_FUND], label: "KeeperRewards.fund 1,000 USDG", action: "owner-fund" });
   expect((await bal(usdg, contracts.keeperRewards)) === KEEPER_FUND, "KeeperRewards holds 1,000 USDG of bounties");
-  const VAULT = { USDG: 100_000n * E6, NVDA: 100n * E18, TSLA: 100n * E18, META: 50n * E18 };
+  const VAULT = { USDG: 100_000n * E6, [ROLES.dual]: 100n * E18, [ROLES.single]: 50n * E18 };
   for (const [name, amount] of Object.entries(VAULT)) {
     const token = name === "USDG" ? usdg : markets[name].asset;
     await send(admin, { address: token, abi: ABI.erc20, functionName: "approve", args: [contracts.makerVault, amount], label: `admin ${name} approve MakerVault`, action: "owner-fund" });
@@ -266,6 +349,15 @@ async function main() {
     add(contracts.sources.chainlink, ABI.chainlink, "latest", [markets[T].asset]);
     add(contracts.settlementOracle, ABI.oracle, "trySpot", [markets[T].asset]);
   }
+  // The registry's Safes (shared.safes.*), for ops/v2/monitor.mjs's safes check (getCode, nonce, getThreshold,
+  // getOwners). Nothing else reads them before the detach, so on the detached node the Admin Safe's proxy answered
+  // nothing (its singleton slot read zero), the Treasury Safe had no code, and step 4's monitor baseline exited 3 with
+  // `safes` incomplete. A call through each proxy fetches its code, its singleton's code and the slots those views read.
+  const SAFE_VIEWS = viem.parseAbi(["function nonce() view returns (uint256)", "function getThreshold() view returns (uint256)", "function getOwners() view returns (address[])"]);
+  // Not `.map(getAddress)`: map passes the index as viem's chainId argument, so every Safe after the first got an
+  // EIP-1191 chain-specific checksum that encodeFunctionData then refused as an invalid address.
+  const safes = Object.values(reg.shared.safes ?? {}).filter(Boolean).map((a) => getAddress(a));
+  for (const safe of safes) for (const fn of ["nonce", "getThreshold", "getOwners"]) add(safe, SAFE_VIEWS, fn);
   const { result } = await send(admin, { address: reg.shared.multicall3, abi: ABI.multicall3, functionName: "aggregate3", args: [calls], label: "warm-up multicall", action: "warm-up" });
   info(`warm-up multicall: ${calls.length} reads, ${result.filter((r) => r.success).length} answered`);
   const forkSeconds = Math.round((Date.now() - forkStartedAt) / 1000);
@@ -298,8 +390,12 @@ async function main() {
     expect(ok, `${T} spot still readable on the detached node (${usd(spot)} USDG)`);
   }
   expect((await read(contracts.clearinghouse, ABI.clearinghouse, "free", [contracts.makerVault, markets.NVDA.asset])) === VAULT.NVDA, "Clearinghouse state survived the detach (vault NVDA ledger)");
+  for (const safe of safes) {
+    const threshold = await read(safe, SAFE_VIEWS, "getThreshold").catch(() => null);
+    expect(threshold !== null && threshold > 0n, `Safe ${safe} survived the detach: getThreshold ${threshold} (ops/v2/monitor.mjs's safes check reads it)`);
+  }
   patchState({ detached: true, dumpFile, detachedAt: await now(), forkSeconds, step1Seconds: Math.round((Date.now() - t0) / 1000) });
-  say(`\nSTEP 1 PASSED: fork block ${forkBlock}, ${TICKERS.join(" + ")} registered by DeployV2Batch.sh --rehearse, VerifyV2 ${checks} checks clean, feeds etched, funded, detached (${Math.round((Date.now() - t0) / 1000)} s)`);
+  say(`\nSTEP 1 PASSED: fork block ${forkBlock}, ${TICKERS.join(" + ")} registered by DeployV2Batch.sh --rehearse (v8), VerifyV8 ${checks} checks clean, feeds etched, funded, detached (${Math.round((Date.now() - t0) / 1000)} s)`);
 }
 
 try {

@@ -185,6 +185,17 @@ export const makerRegistryAbi = [
   },
   {
     "type": "error",
+    "name": "AlreadyListed",
+    "inputs": [
+      {
+        "name": "asset",
+        "type": "address",
+        "internalType": "address"
+      }
+    ]
+  },
+  {
+    "type": "error",
     "name": "AlreadySettled",
     "inputs": []
   },

@@ -2,8 +2,9 @@
  * The cranker's pure decisions (planner.ts).
  *
  * WHY THIS FILE EXISTS: every rule here fails quietly on chain. A ladder that compounds its rounding
- * drifts a strike; a finalize sent before the snapshot turns a corroborated NVDA settlement into a
- * six-hour candidate; a redeem pushed before the resale asks are pruned skips the escrowed longs; a
+ * drifts a strike; a finalize sent before the snapshot turned a corroborated NVDA settlement into a
+ * six-hour candidate (a finalize inside the grace now records the pool itself;
+ * the snapshot-first order stays for its mark and retries); a redeem pushed before the resale asks are pruned skips the escrowed longs; a
  * batch sized by eth_estimateGas redeems nobody under a swallowed out-of-gas; a wake-up measured on
  * the wall clock misses a ten-minute snapshot window on a lagging RPC. Each is pinned below with the
  * numbers worked by hand in the comments.
@@ -45,6 +46,10 @@ import {
   type OrderView,
   type SeriesView,
 } from './planner.js';
+import { fileURLToPath } from 'node:url';
+import { loadV2Registry, marketByTicker, TENORS, WEEKDAYS, type Tenor } from '../registry.js';
+import { localNextExpiry, newYorkDay } from '../pricing/coverage.js';
+import { epochSelectable } from '../mm/epoch.js';
 
 const M = 1_000_000n; // 1 USDG
 const WEEKLY = { rungs: 5, firstOtmBps: 200, stepBps: 200 };
@@ -177,11 +182,98 @@ test('upcomingLadderExpiries: nextExpiry from ladderSearchStart, each after the 
 test('ladderSlots: the first expiriesAhead expiries of each tenor, weekly then daily; puts only for a market with puts; 0 switches a tenor off', () => {
   const expiries = { weekly: [700, 1_400, 2_100], daily: [100, 200, 300, 400] };
   const slots = (weekly: number, daily: number, puts: boolean) =>
-    ladderSlots({ expiriesAhead: { weekly, daily } }, puts, expiries).map((s) => `${s.tenor}:${s.expiry}:${s.isPut ? 'P' : 'C'}`);
+    ladderSlots({ expiriesAhead: { weekly, daily }, dailyWeekdays: WEEKDAYS }, puts, expiries).map((s) => `${s.tenor}:${s.expiry}:${s.isPut ? 'P' : 'C'}`);
   assert.deepEqual(slots(2, 3, false), ['weekly:700:C', 'weekly:1400:C', 'daily:100:C', 'daily:200:C', 'daily:300:C']);
   assert.deepEqual(slots(1, 1, true), ['weekly:700:C', 'weekly:700:P', 'daily:100:C', 'daily:100:P']);
   assert.deepEqual(slots(2, 0, false), ['weekly:700:C', 'weekly:1400:C'], 'no dailies when the registry turns them off');
   assert.deepEqual(slots(5, 9, false).length, 7, 'never more than the calendar gave');
+});
+
+/*
+ * SPCX options are listed for Fridays only (Massive, one root SPCX26;
+ * Cboe weeklys FRI), so the COMMITTED registry turns SPCX's daily tenor off and lists its weekly (Friday) closes; NVDA
+ * keeps the registry default, six daily closes. Read from ops/markets/tier1.json and dev.json, not a fixture, so
+ * restoring SPCX dailies in either file turns this red. The House vault stays daily: its cash cycle does not need a
+ * series at every close (steps.ts houseBoundaryKeys finalizes a boundary with none).
+ */
+test('the committed registries list SPCX Friday expiries only and leave NVDA on six daily closes', async () => {
+  const next = localNextExpiry([]);
+  // Monday 2026-09-28 10:00 New York (14:00 UTC): a full week of sessions ahead, no holiday in range.
+  const now = Date.UTC(2026, 8, 28, 14, 0, 0) / 1_000;
+  const expiries = {} as Record<Tenor, number[]>;
+  for (const tenor of TENORS) expiries[tenor] = await upcomingLadderExpiries(now, tenor === 'weekly', 6, next);
+  for (const file of ['tier1.json', 'dev.json']) {
+    const registry = loadV2Registry(fileURLToPath(new URL(`../../../../ops/markets/${file}`, import.meta.url)));
+    const params = (ticker: string) => {
+      const p = marketByTicker(registry, ticker)?.v2?.params;
+      assert.ok(p !== undefined, `${file}: ${ticker} has a v2 block`);
+      return p;
+    };
+    const days = (ticker: string) => ladderSlots(params(ticker), false, expiries).map((s) => `${s.tenor}:${newYorkDay(s.expiry).weekday}`);
+    assert.equal(params('SPCX').expiriesAhead.daily, 0, `${file}: SPCX lists no dailies`);
+    assert.deepEqual(days('SPCX'), ['weekly:Fri', 'weekly:Fri'], `${file}: SPCX lists its next two Friday closes and nothing Monday to Thursday`);
+    assert.deepEqual(params('NVDA').expiriesAhead, { weekly: 0, daily: 6 }, `${file}: NVDA keeps its six-close horizon`);
+    // Of those six closes NVDA lists its Mon/Wed/Fri ones.
+    assert.deepEqual(days('NVDA'), ['daily:Mon', 'daily:Wed', 'daily:Fri', 'daily:Mon'], `${file}: NVDA lists the Mon/Wed/Fri closes of its six`);
+  }
+  // The SPCX DAILY House vault (epoch = one session, mm/epoch.ts): Monday to Thursday no listed series ends inside the
+  // epoch, so it quotes nothing and only rolls its cash; in the Thursday-close-to-Friday-close epoch the Friday series is
+  // selectable. Same wind-down lead for both so only the epoch decides.
+  const spcx = ladderSlots(marketByTicker(loadV2Registry(fileURLToPath(new URL('../../../../ops/markets/tier1.json', import.meta.url))), 'SPCX')!.v2!.params, false, expiries);
+  const daily = expiries.daily; // Mon..Fri closes of the week of `now`, then the next Monday
+  const epoch = (end: number) => ({ epochEnd: end, index: 1, rollDue: false, kind: 'daily' as const, windDownS: 900 });
+  for (const [i, name] of ['Mon', 'Tue', 'Wed', 'Thu'].entries()) {
+    assert.equal(newYorkDay(daily[i]!).weekday, name);
+    assert.deepEqual(spcx.map((s) => epochSelectable(s, epoch(daily[i]!), daily[i]! - 3_600, 900)), ['epoch-outside', 'epoch-outside'], `the ${name} epoch has no SPCX series to quote`);
+  }
+  assert.equal(newYorkDay(daily[4]!).weekday, 'Fri');
+  assert.deepEqual(spcx.map((s) => epochSelectable(s, epoch(daily[4]!), daily[3]! + 3_600, 900)), ['ok', 'epoch-outside'], 'the Thursday-close-to-Friday-close epoch quotes this Friday\'s series (next Friday is outside it)');
+});
+
+/*
+ * Mon/Wed/Fri only. NVDA's listed options expire Mondays, Wednesdays and
+ * Fridays, so a Tue/Thu series could only be priced by extrapolation, and the market maker halted it. The COMMITTED
+ * registries restrict NVDA's daily ladder to those weekdays (`v2.overrides.dailyWeekdays`); SPCX stays Friday-only.
+ * The NVDA House vault stays daily: in an epoch ending on a Tuesday or Thursday close no series is selectable, so it
+ * quotes nothing and only rolls its cash.
+ */
+test('over two weeks NVDA lists Mon/Wed/Fri dailies and no Tue/Thu; SPCX is unchanged; a listed-day holiday lists nothing that day', async () => {
+  // Monday 2026-09-28 10:00 New York: two full weeks of sessions, no holiday in range.
+  const now = Date.UTC(2026, 8, 28, 14, 0, 0) / 1_000;
+  const next = localNextExpiry([]);
+  const twoWeeks = { weekly: await upcomingLadderExpiries(now, true, 2, next), daily: await upcomingLadderExpiries(now, false, 10, next) };
+  assert.deepEqual(twoWeeks.daily.map((e) => newYorkDay(e).weekday), ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri']);
+  for (const file of ['tier1.json', 'dev.json']) {
+    const registry = loadV2Registry(fileURLToPath(new URL(`../../../../ops/markets/${file}`, import.meta.url)));
+    const nvda = marketByTicker(registry, 'NVDA')!.v2!.params;
+    const spcx = marketByTicker(registry, 'SPCX')!.v2!.params;
+    assert.deepEqual(nvda.dailyWeekdays, ['mon', 'wed', 'fri'], `${file}: NVDA dailyWeekdays`);
+    assert.deepEqual(spcx.dailyWeekdays, WEEKDAYS, `${file}: SPCX keeps the default (it lists no dailies anyway)`);
+    // The two-week horizon, as a market with a ten-close horizon would see it.
+    const nvda10 = ladderSlots({ ...nvda, expiriesAhead: { weekly: 0, daily: 10 } }, false, twoWeeks);
+    assert.deepEqual(nvda10.map((s) => `${newYorkDay(s.expiry).day} ${newYorkDay(s.expiry).weekday}`), [
+      '2026-09-28 Mon', '2026-09-30 Wed', '2026-10-02 Fri', '2026-10-05 Mon', '2026-10-07 Wed', '2026-10-09 Fri',
+    ], `${file}: NVDA Mon/Wed/Fri over two weeks, nothing on a Tuesday or Thursday`);
+    assert.deepEqual(ladderSlots(spcx, false, twoWeeks).map((s) => `${s.tenor}:${newYorkDay(s.expiry).day}`),
+      ['weekly:2026-10-02', 'weekly:2026-10-09'], `${file}: SPCX lists its two Friday closes, as T-OP-702 left it`);
+    // The NVDA DAILY House vault: every session is an epoch; only a Mon/Wed/Fri epoch has a live series to quote. `at` is
+    // an hour into the epoch (after the previous close), and only series still live then count, as the maker's view has.
+    const shipped = ladderSlots(nvda, false, twoWeeks);
+    const epoch = (end: number) => ({ epochEnd: end, index: 1, rollDue: false, kind: 'daily' as const, windDownS: 900 });
+    for (const [i, close] of twoWeeks.daily.slice(0, 6).entries()) {
+      const at = i === 0 ? now : twoWeeks.daily[i - 1]! + 3_600;
+      const selectable = shipped.filter((s) => s.expiry > at && epochSelectable(s, epoch(close), at, 900) === 'ok');
+      const weekday = newYorkDay(close).weekday;
+      if (weekday === 'Tue' || weekday === 'Thu') assert.equal(selectable.length, 0, `${file}: the ${weekday} ${newYorkDay(close).day} epoch holds cash`);
+      else assert.deepEqual(selectable.map((s) => s.expiry), [close], `${file}: the ${weekday} ${newYorkDay(close).day} epoch quotes that close's series`);
+    }
+  }
+  // A holiday on a listed day behaves as before: that day has no close, and nothing moves to the unlisted day beside it.
+  // Christmas 2026 is a Friday: the week of 2026-12-21 lists Monday and Wednesday only (Thursday 12-24 stays unlisted).
+  const christmasWeek = { weekly: [], daily: await upcomingLadderExpiries(Date.UTC(2026, 11, 21, 14, 0, 0) / 1_000, false, 5, localNextExpiry(['2026-12-25'])) };
+  const nvda = marketByTicker(loadV2Registry(fileURLToPath(new URL('../../../../ops/markets/tier1.json', import.meta.url))), 'NVDA')!.v2!.params;
+  assert.deepEqual(ladderSlots({ ...nvda, expiriesAhead: { weekly: 0, daily: 4 } }, false, christmasWeek).map((s) => newYorkDay(s.expiry).day),
+    ['2026-12-21', '2026-12-23'], 'Christmas week: Mon and Wed; no Friday close exists and Thursday is not listed');
 });
 
 /*//////////////////////////////////////////////////////////////
@@ -189,7 +281,7 @@ test('ladderSlots: the first expiriesAhead expiries of each tenor, weekly then d
 //////////////////////////////////////////////////////////////*/
 
 // INTERFACE_VERSION 6: the first series of an expiry pins the oracle's copy and each source. callhouse-contracts
-// docs/V2-GAS.md (mock fixture): 343,875 on two sources, 162,168 for the next series. The devnet (v2:devnet-cycle,
+// gas table (mock fixture): 343,875 on two sources, 162,168 for the next series. The devnet (v2:devnet-cycle,
 // eth_estimateGas on the real feed and pool): NVDA (two sources) 352,638 and 170,919; TSLA (one source) 269,965.
 const FIRST_SERIES_TWO_SOURCES = 352_638n;
 const FIRST_SERIES_ONE_SOURCE = 269_965n;
@@ -300,7 +392,7 @@ test('planExpiry in [expiry, expiry + 120): snapshot now, wake for the first fin
   assert.equal(p.wakeAt, E + 120);
 });
 
-test('planExpiry at expiry + 120 without the snapshot: the snapshot first, finalize waits (C2-04 order)', () => {
+test('planExpiry at expiry + 120 without the snapshot: the snapshot first, finalize waits', () => {
   const p = planExpiry(view({ now: E + 125 }), T);
   assert.equal(p.snapshot, true);
   assert.equal(p.finalize, false);
@@ -512,6 +604,18 @@ test('planRoll: one position per period; an expired one is closed out any time; 
   assert.deepEqual(planRoll({ ...base, spotFresh: false }), { roll: false, reason: 'spot-stale' });
 });
 
+test('planRoll: a daily strategy on a market that lists no dailies is not rolled; its close-out, a weekly strategy and an unknown listing are', () => {
+  const base = { active: true, positionLongId: 0n, positionExpiry: 0, now: E - 7_200, sessionOpen: true, spotFresh: true, sessionOpenAtGrace: true, spotUpdatedAt: E - 7_260, sessionAtSpotObservation: true };
+  assert.deepEqual(planRoll({ ...base, weekly: false, dailyListed: false }), { roll: false, reason: 'daily-not-listed' });
+  assert.deepEqual(planRoll({ ...base, weekly: true, dailyListed: false }), { roll: true, reason: 'roll' });
+  assert.deepEqual(planRoll({ ...base, weekly: false, dailyListed: true }), { roll: true, reason: 'roll' });
+  // Not known (a market the registry does not carry): nothing is refused on it.
+  assert.deepEqual(planRoll({ ...base, weekly: false }), { roll: true, reason: 'roll' });
+  assert.deepEqual(planRoll({ ...base, weekly: false, dailyListed: false, positionLongId: 1n, positionExpiry: E, now: E }), { roll: true, reason: 'close-out' });
+  // Inactive is reported as inactive, not as the listing.
+  assert.deepEqual(planRoll({ ...base, active: false, weekly: false, dailyListed: false }), { roll: false, reason: 'inactive' });
+});
+
 test('planRoll: the open grace of INTERFACE_VERSION 7 — inside the first 30 min of a session, a spot observed before the open waits', () => {
   // 09:35 New York on the session day: the session is open, but it was not open a ROLL_OPEN_GRACE ago.
   const open = E - 6 * 3_600 - 25 * 60;
@@ -547,11 +651,12 @@ test('planStale: cancelStale\'s own conditions, in its order, so only a withdraw
     order: ask,
     series: { isPut: false, strike: 220_000_000n },
     spot: 225_000_000n,
+    witness: null,
     minRollUnits: 100n,
   };
-  assert.deepEqual(planStale(base), { cancel: true, remaining: 500n, earnsBounty: true });
+  assert.deepEqual(planStale(base), { cancel: true, remaining: 500n, earnsBounty: true, via: 'spot' });
   // The bounty gate is the same as the ROLL bounty's: dust withdrawals are not worth a keeper's gas first.
-  assert.deepEqual(planStale({ ...base, order: { ...ask, filled: 450n } }), { cancel: true, remaining: 50n, earnsBounty: false });
+  assert.deepEqual(planStale({ ...base, order: { ...ask, filled: 450n } }), { cancel: true, remaining: 50n, earnsBounty: false, via: 'spot' });
 
   assert.deepEqual(planStale({ ...base, orderId: 0n }), { cancel: false, reason: 'no-ask' });
   assert.deepEqual(planStale({ ...base, now: E }), { cancel: false, reason: 'period-over' });
@@ -563,11 +668,35 @@ test('planStale: cancelStale\'s own conditions, in its order, so only a withdraw
   assert.deepEqual(planStale({ ...base, spot: null }), { cancel: false, reason: 'spot-stale' }, 'no fresh spot, no withdrawal: the price must be the oracle\'s');
   assert.deepEqual(planStale({ ...base, spot: 0n }), { cancel: false, reason: 'spot-stale' });
   assert.deepEqual(planStale({ ...base, spot: 219_999_999n }), { cancel: false, reason: 'not-overtaken' }, 'one base unit short of the strike is still a live quote');
-  assert.deepEqual(planStale({ ...base, spot: 220_000_000n }), { cancel: true, remaining: 500n, earnsBounty: true });
+  assert.deepEqual(planStale({ ...base, spot: 220_000_000n }), { cancel: true, remaining: 500n, earnsBounty: true, via: 'spot' });
   // A put is overtaken downwards.
   const put = { ...base, series: { isPut: true, strike: 180_000_000n } };
   assert.deepEqual(planStale({ ...put, spot: 180_000_001n }), { cancel: false, reason: 'not-overtaken' });
-  assert.deepEqual(planStale({ ...put, spot: 179_000_000n }), { cancel: true, remaining: 500n, earnsBounty: true });
+  assert.deepEqual(planStale({ ...put, spot: 179_000_000n }), { cancel: true, remaining: 500n, earnsBounty: true, via: 'spot' });
+});
+
+test('planStale: the WITNESS path cancels when the spot is silent or short and the witness is overtaken', () => {
+  // AutoRoller.cancelStale reads the expiry's witness (source 1, the pool TWAP on the launch markets) whenever
+  // the spot path declines: spot not ok, or ok and short of the strike. The mirror used to stop at the spot, so while
+  // Chainlink was silent and the pool moved through the strike the cranker never sent the cancel the contract makes.
+  const now = E - 3 * 86_400;
+  const ask = { units: 500n, filled: 0n, validUntil: now + 3_600, cancelled: false };
+  const base = { orderId: 31n, positionExpiry: E, now, order: ask, series: { isPut: false, strike: 220_000_000n }, spot: null, witness: null, minRollUnits: 100n };
+  assert.deepEqual(planStale({ ...base, witness: 221_000_000n }), { cancel: true, remaining: 500n, earnsBounty: true, via: 'witness' }, 'Chainlink silent, pool TWAP past the strike: cancelStale cancels on the witness');
+  assert.deepEqual(planStale({ ...base, spot: 219_000_000n, witness: 220_000_000n }), { cancel: true, remaining: 500n, earnsBounty: true, via: 'witness' }, 'spot ok but short: the witness is still read, and exactly at the strike counts');
+  assert.deepEqual(planStale({ ...base, spot: 0n, witness: 225_000_000n }), { cancel: true, remaining: 500n, earnsBounty: true, via: 'witness' }, 'a zero spot is not ok (_trySpot): the witness decides');
+  assert.deepEqual(planStale({ ...base, spot: 225_000_000n, witness: 100_000_000n }), { cancel: true, remaining: 500n, earnsBounty: true, via: 'spot' }, 'the spot path wins first, as in the contract; a short witness does not stop it');
+  assert.deepEqual(planStale({ ...base, witness: 219_999_999n }), { cancel: false, reason: 'not-overtaken' }, 'a witness one unit short is a live quote');
+  assert.deepEqual(planStale({ ...base, spot: 219_000_000n, witness: null }), { cancel: false, reason: 'not-overtaken' });
+  assert.deepEqual(planStale({ ...base, witness: 0n }), { cancel: false, reason: 'spot-stale' }, 'neither reading usable: spot-stale');
+  assert.deepEqual(planStale({ ...base, order: { ...ask, filled: 450n }, witness: 221_000_000n }), { cancel: true, remaining: 50n, earnsBounty: false, via: 'witness' }, 'the same CANCEL_STALE bounty gate on the witness path');
+  // The order gates still come first: a witness never revives a dead or expired ask.
+  assert.deepEqual(planStale({ ...base, order: { ...ask, cancelled: true }, witness: 221_000_000n }), { cancel: false, reason: 'order-dead' });
+  assert.deepEqual(planStale({ ...base, now: E, witness: 221_000_000n }), { cancel: false, reason: 'period-over' });
+  // A put is overtaken downwards on the witness too.
+  const put = { ...base, series: { isPut: true, strike: 180_000_000n } };
+  assert.deepEqual(planStale({ ...put, witness: 180_000_000n }), { cancel: true, remaining: 500n, earnsBounty: true, via: 'witness' });
+  assert.deepEqual(planStale({ ...put, witness: 180_000_001n }), { cancel: false, reason: 'not-overtaken' });
 });
 
 test('sweepDue: accrued fees, first time or once per interval', () => {
@@ -631,4 +760,21 @@ test('planLadder: strikes far beyond this ladder\'s span (two far-OTM createSeri
   // Puts mirror it: far below the span does not count.
   const puts = planLadder({ spot: 90n * M, ladder: DAILY, strikeTick: M, isPut: true, existing: [...ladderStrikes(100n * M, DAILY, M, true), 46n * M, 50n * M], anchor: 100n * M });
   assert.equal(puts.reason, 'recentre');
+});
+
+test('planExpiry: a House boundary with no series and no open interest is snapshotted, then finalized; unmarked it is done at once', () => {
+  const empty = { openInterest: 0n, series: [] as SeriesView[] };
+  // Control, the earlier behaviour: with nothing held nothing is planned, so no one would ever finalize it.
+  assert.equal(planExpiry(view({ ...empty, now: E - 30 }), T).wakeAt, null);
+  const unmarked = planExpiry(view({ ...empty, now: E + 130, snapshotDone: true }), T);
+  assert.deepEqual({ finalize: unmarked.finalize, done: unmarked.done }, { finalize: false, done: true });
+
+  const boundary = { ...empty, houseBoundary: true };
+  assert.equal(planExpiry(view({ ...boundary, now: E - 30 }), T).wakeAt, E, 'wakes at the boundary');
+  const inWindow = planExpiry(view({ ...boundary, now: E + 1 }), T);
+  assert.deepEqual({ snapshot: inWindow.snapshot, finalize: inWindow.finalize, phase: inWindow.phase }, { snapshot: true, finalize: false, phase: 'snapshot-window' });
+  const finalizing = planExpiry(view({ ...boundary, now: E + 130, snapshotDone: true }), T);
+  assert.deepEqual({ finalize: finalizing.finalize, phase: finalizing.phase, done: finalizing.done }, { finalize: true, phase: 'finalizing', done: false });
+  const finalized = planExpiry(view({ ...boundary, now: E + 200, status: 'Finalized', captured: true }), T);
+  assert.deepEqual({ finalize: finalized.finalize, done: finalized.done }, { finalize: false, done: true }, 'nothing left once Finalized: the House step rolls it');
 });

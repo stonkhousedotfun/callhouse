@@ -35,7 +35,7 @@
  *
  * render-docs never touches ../callhouse-docs from here: it renders to `--docs-out DIR` (default: a
  * fresh directory under the system temp dir) and the path is printed; publishing the docs repo stays
- * owner-gated. If the sibling docs checkout exists, a read-only `diff --stat` against it is printed.
+ * a separate step. If the sibling docs checkout exists, a read-only `diff --stat` against it is printed.
  *
  *   node ops/v2/post-broadcast-regen.mjs [--registry FILE] [--docs-out DIR] [--docs-dir DIR] [--check]
  *                                        [--no-registry-check] [--only gen1,gen2] [--list]
@@ -165,6 +165,17 @@ export const RECIPES = {
     write: ["node", "ops/fixtures/api/v2/gen.mjs"],
     check: ["node", "ops/fixtures/api/v2/gen.mjs", "--check"],
     note: "API wire fixtures; its registry values are copied into the scenario by hand, so a write-back does not move them — re-run so the --check proves nothing else drifted",
+  },
+  // The app-mirror guard. Its output, ops/v2/contract-mirrors.fixture.json, is regenerated from a
+  // CONTRACTS checkout (`--regen <contracts-dir>`), not from the registry, so nothing here writes it: a contracts tip
+  // that moves is a `--regen` by the change that moves it. The check re-runs the guard itself, which reads that fixture,
+  // ops/abis/v2/roles.json and the app code, so an app copy of a contract number that no longer matches fails here.
+  // No `registryFlag`: it never reads the registry, so a rehearsal runs it too.
+  "ops/v2/contract-mirrors.mjs": {
+    input: "ops/v2/contract-mirrors.fixture.json (from a contracts checkout) + ops/abis/v2/roles.json + app code",
+    cwd: ".",
+    check: ["node", "ops/v2/contract-mirrors.mjs"],
+    note: "check only: the fixture is regenerated with --regen <contracts-dir>, never from the registry",
   },
   // Known, never re-run. Each is still an entry so the enumeration can say "accounted for".
   "ops/recon/r13-probe.mjs": { skip: "one-shot recon probe (network); its output ops/markets/v2-sources.json is an input, re-probed per wave, not regenerated here" },

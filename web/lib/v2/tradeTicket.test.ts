@@ -15,7 +15,8 @@ vi.mock("@tanstack/react-query", () => ({ useQuery: vi.fn(), useQueryClient: vi.
 vi.mock("wagmi", () => ({ useAccount: vi.fn(), useWalletClient: vi.fn() }));
 vi.mock("@/components/ConnectButton", () => ({ ConnectButton: () => createElement("button", null, "Connect wallet") }));
 vi.mock("@/components/TxToast", () => ({ useNotice: vi.fn(), useV2ReceiptNotice: vi.fn() }));
-vi.mock("@/lib/v2/hooks", () => ({ useConfig: vi.fn(), v2Keys: { all: ["v2"] } }));
+// The ticket's PayoffExplainers reads the markets to learn whether a live market enables puts. Unread here.
+vi.mock("@/lib/v2/hooks", () => ({ useConfig: vi.fn(), useMarkets: vi.fn(() => ({ data: undefined, isError: false })), v2Keys: { all: ["v2"] } }));
 
 const fixtures = fileURLToPath(new URL("../../../ops/fixtures/api/v2/", import.meta.url));
 const read = <T>(path: string): T => JSON.parse(readFileSync(`${fixtures}/${path}`, "utf8")) as T;
@@ -49,32 +50,34 @@ function render(overrides: Partial<ComponentProps<typeof TradeTicket>> = {}): st
 }
 
 describe("Polymarket-style trade ticket", () => {
-  it("starts dollar-first, promotes outcome and max loss, and renders the payoff before input", () => {
+  it("opens as a limit order at the best ask for 0.10 share, with the estimated cost, the outcome and the payoff explorer", () => {
     const html = render();
-    expect(html).toContain("Amount to spend");
-    expect(html).toContain("$10");
-    expect(html).toContain("$50");
-    expect(html).toContain("$200");
-    expect(html).toContain("Max");
-    expect(html).toContain("Estimated settlement value if TSLA reaches $400");
-    expect(html).toContain("Pay · max loss");
-    expect(html.indexOf("Estimated settlement value")).toBeLessThan(html.indexOf("Pay · max loss"));
+    expect(html).toContain('for="ticket-bid-price"');
+    expect(html).toMatch(/id="ticket-bid-price"[^>]*value="0.3989"/);
+    expect(html).toMatch(/id="ticket-shares"[^>]*value="0.10"/);
+    expect(html).toContain(">Bid<");
+    expect(html).toContain(">Mark<");
+    expect(html).toContain(">Ask<");
+    expect(html).toContain("Estimated cost");
+    expect(html).toContain('data-slot="max-loss"');
+    expect(html).toContain(">If TSLA reaches $400");
+    expect(html).toContain("Buys now");
     expect(html).toContain("USDG conversion may deliver less or fall back to tokens");
     expect(html).toContain("Explore the payoff");
     expect(html).toContain("<summary");
-    expect(html).toContain("Advanced</summary>");
+    expect(html).toMatch(/<summary[^>]*>.*Advanced<\/span>/);
     expect(html).not.toContain("<details open");
   });
 
   it("honours the W4 discriminated prefill contract and the legacy shares route", () => {
     const prefilled = render({ initialPrefill: { kind: "shares", shares: "0.1" } });
-    expect(prefilled).toContain("Quantity in shares");
-    expect(prefilled).toContain('id="ticket-shares"');
-    expect(prefilled).toContain('value="0.1"');
-    expect(prefilled).not.toContain("Amount to spend");
+    expect(prefilled).toContain('for="ticket-shares" class="text-[13px] font-semibold text-ink-2">Shares</label>');
+    expect(prefilled).toMatch(/id="ticket-shares"[^>]*value="0.1"/);
 
     const legacy = render({ initialShares: "1" });
-    expect(legacy).toContain('value="1"');
-    expect(legacy).not.toContain("Amount to spend");
+    expect(legacy).toMatch(/id="ticket-shares"[^>]*value="1"/);
+
+    const budget = render({ initialPrefill: { kind: "budget", amountUsdg: "50" } });
+    expect(budget).toMatch(/id="ticket-shares"[^>]*value="0.10"/);
   });
 });

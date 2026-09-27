@@ -1,7 +1,7 @@
 /**
  * node --test ops/v2/env-equal.test.mjs
  *
- * O8-05. The historic production-monitor refuse was one comment line in pricer.env when
+ * The historic production-monitor refuse was one comment line in pricer.env when
  * go-live-v2.sh diff'd the whole env directory. These fail if that comparison comes back.
  */
 import assert from "node:assert/strict";

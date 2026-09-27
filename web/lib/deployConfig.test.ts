@@ -11,15 +11,15 @@ type NextConfigUnderTest = {
 
 async function loadNextConfig(): Promise<NextConfigUnderTest> {
   const configUrl = new URL("../next.config.mjs", import.meta.url).href;
-  const module = await import(configUrl) as { default: NextConfigUnderTest };
-  return module.default;
+  const loaded = await import(configUrl) as { default: NextConfigUnderTest };
+  return loaded.default;
 }
 
 const docker = readFileSync(new URL("../Dockerfile", import.meta.url), "utf8");
 const env = readFileSync(new URL("../.env.example", import.meta.url), "utf8");
 
 describe("v2 browser configuration reaches a Docker build", () => {
-  it.each(["NEXT_PUBLIC_API_URL", "NEXT_PUBLIC_V1_API_URL", "NEXT_PUBLIC_V7_API_URL", "NEXT_PUBLIC_V2",
+  it.each(["NEXT_PUBLIC_API_URL", "NEXT_PUBLIC_V1_API_URL", "NEXT_PUBLIC_V2",
     "NEXT_PUBLIC_NOTIFIER_URL", "NEXT_PUBLIC_WC_PROJECT_ID"])("passes %s into next build", (key) => {
     expect(docker).toMatch(new RegExp(`^ARG ${key}=`, "m"));
     expect(docker).toMatch(new RegExp(`^ENV ${key}=\\$${key}$`, "m"));

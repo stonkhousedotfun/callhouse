@@ -110,6 +110,18 @@ describe("public response cache keys", () => {
       .not.toBe(responseCacheKey("http://localhost/v2/cards?type=put&nonce=2"));
   });
 
+  // /v2/house/:market?vault= picks one of a market's vaults. A key that dropped `vault` would serve the
+  // first vault's body to a request for the second for 15 seconds.
+  it("keys the House market route by vault as well as address", () => {
+    const weekly = responseCacheKey(`http://localhost/v2/house/NVDA?vault=${ALICE}&nonce=1`);
+    const daily = responseCacheKey(`http://localhost/v2/house/NVDA?vault=${BOB}&nonce=1`);
+    expect(weekly).toBe(`http://localhost/v2/house/NVDA?vault=${ALICE}`);
+    expect(weekly).not.toBe(daily);
+    expect(weekly).not.toBe(responseCacheKey("http://localhost/v2/house/NVDA"));
+    expect(responseCacheKey(`http://localhost/v2/house/NVDA?address=${ALICE}&vault=${BOB}`))
+      .not.toBe(responseCacheKey(`http://localhost/v2/house/NVDA?address=${ALICE}&vault=${ALICE}`));
+  });
+
   it("separates admin-operation pages by status and cursor while ignoring unknown keys", () => {
     const pending = responseCacheKey("http://localhost/v2/admin/operations?status=pending&cursor=one&limit=20&nonce=1");
     expect(pending).toBe("http://localhost/v2/admin/operations?status=pending&cursor=one&limit=20");

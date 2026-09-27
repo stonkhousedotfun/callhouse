@@ -147,7 +147,10 @@ async function cannedChain(registry, src) {
   return { rpc, calls, poolId };
 }
 
-/** T-OP-131's state: the three lowercase Uniswap v3 constants in canonical form, in both files. */
+/**
+ * Both registries with their Uniswap v3 constants in canonical form. The files are canonical now, so
+ * today this changes nothing; it keeps every test's input canonical whatever the files on disk hold.
+ */
 async function checksummed() {
   const r = clone(tier1);
   const s = clone(sources);
@@ -212,14 +215,45 @@ test("one address lowercased: (6) red naming it, canonical form shown", async ()
 });
 
 test("all-lowercase is refused, which viem's strict isAddress would NOT do: the rule is the preflight's", async () => {
-  // The base registries carry three lowercase Uniswap v3 constants (T-OP-131's subject); under this
-  // guard they are failures, under viem's strict mode they would pass. Both files, both names.
-  const chain = await cannedChain(tier1, sources);
-  const { lines } = await runChecks({ registry: tier1, sources, rpc: chain.rpc, block: "latest" });
-  const f = fails(lines);
-  for (const name of ["eip55 registry v2.uniswapV3.factory", "eip55 registry v2.uniswapV3.swapRouter02", "eip55 v2-sources contracts.factory.address", "eip55 v2-sources contracts.router.address"]) {
-    assert.ok(f.includes(name), `${name} should be refused while lowercase; got ${f.join(", ")}`);
+  // This test used to read the real registries, which carried lowercase Uniswap v3 constants until
+  // they were made canonical; from then on it asserted refusals of values that were no longer there
+  // and failed. The lowercase input is now built HERE, from scratch copies of the canonical
+  // registries, so the refusal is exercised whatever the files on disk hold. Under this guard an
+  // all-lowercase address is a failure; under viem's strict mode it would pass.
+  const { r, s } = await checksummed();
+  const low = { r: clone(r), s: clone(s) };
+  // Every address (6) consumes, except poolKey.currency0: native ETH is the zero address, which has no
+  // letters, so its lowercase form IS its canonical form and there is nothing to refuse.
+  const subjects = [
+    ["registry shared.usdg", low.r.shared, "usdg"],
+    ["registry shared.token.address", low.r.shared.token, "address"],
+    ["registry shared.token.poolKey.currency1", low.r.shared.token.poolKey, "currency1"],
+    ["registry shared.token.poolKey.hooks", low.r.shared.token.poolKey, "hooks"],
+    ["registry v2.uniswapV3.factory", low.r.v2.uniswapV3, "factory"],
+    ["registry v2.uniswapV3.swapRouter02", low.r.v2.uniswapV3, "swapRouter02"],
+    ...["weth", "usdgWethV3Pool", "v4StateView", "v4PoolManager", "factory", "router"]
+      .map((k) => [`v2-sources contracts.${k}.address`, low.s.contracts[k], "address"]),
+  ];
+  for (const [name, holder, key] of subjects) {
+    assert.notEqual(lower(holder[key]), holder[key], `${name}: the canonical input must have letters to lowercase`);
+    holder[key] = lower(holder[key]);
   }
+  const chain = await cannedChain(r, s);
+
+  // Control: the same registries in canonical form raise no eip55 line, so the reds below are the case's.
+  const canonical = fails((await runChecks({ registry: r, sources: s, rpc: chain.rpc, block: "latest" })).lines);
+  assert.deepEqual(canonical.filter((f) => f.startsWith("eip55 ")), [], canonical.join(", "));
+
+  const f = fails((await runChecks({ registry: low.r, sources: low.s, rpc: chain.rpc, block: "latest" })).lines);
+  // The four by name (both files, both names), then every other lowercased address.
+  for (const name of ["registry v2.uniswapV3.factory", "registry v2.uniswapV3.swapRouter02", "v2-sources contracts.factory.address", "v2-sources contracts.router.address"]) {
+    assert.ok(f.includes(`eip55 ${name}`), `eip55 ${name} should be refused while lowercase; got ${f.join(", ")}`);
+  }
+  assert.deepEqual(
+    f.filter((x) => x.startsWith("eip55 ")).sort(),
+    subjects.map(([name]) => `eip55 ${name}`).sort(),
+    "every lowercased address, and only those, is refused",
+  );
 });
 
 test("wrong hooks (a contract with code that is not the launch hook), poolId recomputed to match: (3) and (4) red", async () => {

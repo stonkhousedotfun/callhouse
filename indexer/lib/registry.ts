@@ -7,6 +7,7 @@ import {
   V2_CLEARINGHOUSE,
   V2_EARN_VAULT,
   V2_EXPIRY_CALENDAR,
+  V2_HOUSE_START_BLOCK,
   V2_HOUSE_VAULT_FACTORY,
   V2_FEE_SPLITTER,
   V2_KEEPER_REWARDS,
@@ -16,6 +17,8 @@ import {
   V2_ZAP_HELPER,
   VAULT,
 } from "./env";
+import { houseSourceAnchor, v2KindedHouseFactorySources } from "../src/v2/houseVaultKind";
+import { v2PriceSources } from "../src/v2/priceSourceRegistry";
 
 /**
  * The three source groups, each either the real registry or a no-op.
@@ -71,7 +74,29 @@ export const v2EarnVaultPonder: typeof ponder = V2_EARN_VAULT === undefined ? in
 export const v2ZapPonder: typeof ponder = V2_ZAP_HELPER === undefined ? inert : ponder;
 
 /**
- * P8-06 House vaults. Inert until V2_HOUSE_VAULT_FACTORY is set so a deployment without
- * the factory still builds. Do not reuse v2MakerVaultPonder.
+ * House vaults. Do not reuse v2MakerVaultPonder. Three gates, because ponder.config.ts registers three
+ * House sources independently, and a handler whose source is absent fails the build:
+ *
+ *   v2HouseVaultPonder               `HouseVaultFactory:*`, the LAUNCH factory: live when V2_HOUSE_VAULT_FACTORY is set.
+ *   v2HouseVaultKindedFactoryPonder  `HouseVaultFactoryKinded:*`, the (daily) factories from the registry, and
+ *                                    V2_HOUSE_VAULT_FACTORY when the registry names no such factory.
+ *   v2HouseVaultEventsPonder         `HouseVault:*`: live when either factory anchors the HouseVault source.
+ *
+ * A daily-only registry (`v2.contracts.houseVaultFactory` null) leaves the first inert and the other two live, so its
+ * vaults are indexed. Each gate is computed by the same functions ponder.config.ts calls (src/v2/houseVaultKind.ts).
  */
+const kindedHouse = v2KindedHouseFactorySources(V2_CLEARINGHOUSE, V2_HOUSE_START_BLOCK, V2_HOUSE_VAULT_FACTORY);
 export const v2HouseVaultPonder: typeof ponder = V2_HOUSE_VAULT_FACTORY === undefined ? inert : ponder;
+export const v2HouseVaultKindedFactoryPonder: typeof ponder = kindedHouse === undefined ? inert : ponder;
+export const v2HouseVaultEventsPonder: typeof ponder =
+  houseSourceAnchor(V2_HOUSE_VAULT_FACTORY, V2_HOUSE_START_BLOCK, kindedHouse) === undefined ? inert : ponder;
+
+/**
+ * A change shared price sources. Registered from the registry, not env, and only when V2_CLEARINGHOUSE
+ * is the registry's own clearinghouse: see src/v2/priceSourceRegistry.ts, which ponder.config.ts
+ * calls with the same value, so a handler is live exactly when its source is configured.
+ */
+const priceSources = v2PriceSources(V2_CLEARINGHOUSE)?.addresses;
+export const v2ChainlinkSourcePonder: typeof ponder = priceSources?.ChainlinkFeedSource === undefined ? inert : ponder;
+export const v2UniV3SourcePonder: typeof ponder = priceSources?.UniV3TwapSource === undefined ? inert : ponder;
+export const v2DataStreamsSourcePonder: typeof ponder = priceSources?.DataStreamsSource === undefined ? inert : ponder;

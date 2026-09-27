@@ -1,7 +1,8 @@
 "use client";
 
-import { Card, CardHead, CardMeta, CardTitle, Row, Stat } from "@/components/ui";
-import { fmtCountdown, fmtEastern, fmtUtc, windowProgress } from "@/lib/format";
+import { Card, CardHead, CardMeta, CardTitle, InfoTip, Row, Stat } from "@/components/ui";
+import { Time } from "@/components/ui/Time";
+import { fmtCountdown, windowProgress } from "@/lib/format";
 import { useNow, type VaultSnapshot } from "@/lib/hooks";
 
 /**
@@ -13,9 +14,8 @@ import { useNow, type VaultSnapshot } from "@/lib/hooks";
  * vault's hooks enforce. NOTHING here is derived from a calendar: the keeper chooses the type,
  * the vault records it, and a hardcoded weekday would keep counting down to a deadline the vault
  * never had. The keeper's own rule is the NYSE close, 16:00 America/New_York on the cycle's
- * Friday (Thursday before a Friday market holiday), with expiry 24 hours later; that is 20:00 UTC
- * in daylight time and 21:00 UTC from November, so each deadline is printed in UTC AND on the
- * Eastern clock (fmtEastern) to make the same instant readable both ways.
+ * Friday (Thursday before a Friday market holiday), with expiry 24 hours later. Each deadline is
+ * printed on the reader's clock with the New York time beside it (<Time market>).
  *
  * Likewise the open/closed state is the vault's `phase` against its own clock, not a comparison
  * this component invents: a fill goes through only while Listed and before `cycleExerciseTs`
@@ -35,13 +35,13 @@ export function CycleTape({ snapshot }: { snapshot: VaultSnapshot }) {
       : snapshot.isStranded
         ? "claim stranded"
         : snapshot.phase === 0
-          ? "no cycle armed"
+          ? "not started"
           : snapshot.phase === 1
             ? now > 0 && exerciseTs !== undefined && now >= exerciseTs
               ? "sale window closed"
               : "selling"
             : snapshot.phase === 2
-              ? "exercisable"
+              ? "can be exercised"
               : "settling";
 
   // The rail runs from "one week before the sale window closes" to expiry. It is a visual aid
@@ -55,7 +55,7 @@ export function CycleTape({ snapshot }: { snapshot: VaultSnapshot }) {
   return (
     <Card>
       <CardHead>
-        <CardTitle>Cycle tape</CardTitle>
+        <CardTitle>This week</CardTitle>
         <CardMeta>
           cycle #{cycleNumber ?? "—"} · {state}
         </CardMeta>
@@ -65,13 +65,13 @@ export function CycleTape({ snapshot }: { snapshot: VaultSnapshot }) {
         <Stat
           label="Sale window closes in"
           value={now === 0 || !armed ? "—" : fmtCountdown(exerciseTs, now)}
-          sub={armed ? `${fmtUtc(exerciseTs)} · ${fmtEastern(exerciseTs)}` : "nothing armed"}
+          sub={armed ? <Time at={exerciseTs} market /> : "not started"}
           className="rounded-md bg-surface-2 p-4 sm:p-5"
         />
         <Stat
           label="Expiry in"
           value={now === 0 || !armed ? "—" : fmtCountdown(expiryTs, now)}
-          sub={armed ? `${fmtUtc(expiryTs)} · ${fmtEastern(expiryTs)}` : "nothing armed"}
+          sub={!armed ? "not started" : expiryTs ? <Time at={expiryTs} market /> : "—"}
           className="rounded-md bg-surface-2 p-4 sm:p-5"
         />
       </div>
@@ -84,11 +84,14 @@ export function CycleTape({ snapshot }: { snapshot: VaultSnapshot }) {
           />
         </div>
         <div className="mt-3 max-w-[60em] text-[12.5px] leading-[1.55] text-ink-3">
-          The sale window closes at the option&apos;s exercise time: the last moment a fill can write a call. The keeper
-          creates each week&apos;s type to open its exercise window at the NYSE close (4:00pm New York, so the UTC hour
-          moves with daylight time) and to expire a day later; the times shown are the chain&apos;s, not a
-          calendar&apos;s. Between exercise and expiry the calls sold are exercisable, so assignment happens in that
-          window. After expiry the keeper reclaims, harvests and settles the queue.
+          Calls can be bought until the sale window closes, and exercised from then until expiry.{" "}
+          <InfoTip label="About these times">
+            The sale window closes at the option&apos;s exercise time, the last moment a buyer can fill. The keeper sets
+            each week to open exercise at the NYSE close (4:00pm New York, so the UTC hour moves with daylight time) and
+            to expire a day later. The times shown are the chain&apos;s, not a calendar&apos;s. Assignment happens between
+            exercise and expiry. After expiry the keeper collects the collateral and premium and settles queued
+            withdrawals.
+          </InfoTip>
         </div>
       </div>
     </Card>

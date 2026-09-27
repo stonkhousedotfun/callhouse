@@ -14,10 +14,13 @@
  * fetch gates are exercised, vol.ts fetchCboeChain runs against an injected fetchImpl.
  */
 import assert from 'node:assert/strict';
+import { createServer, type AddressInfo } from 'node:net';
 import { test } from 'node:test';
 import * as vol from '../../vol.js';
 import { syntheticNvdaChain, syntheticTslaChain, syntheticTslaPayload } from '../../fixtures/synthetic-chains.js';
-import { ChainCache, PRICING_MIN_REFETCH_MS, DEFAULT_CHAIN_MAX_BYTES, cboeToNormalized, checkChain, checkQuoteWindow, filterQuotes, isUsableQuote } from './cboe.js';
+import { startPricingService } from './main.js';
+import { MASSIVE_PROVIDER } from './massive.js';
+import { ChainCache, PRICING_MIN_REFETCH_MS, DEFAULT_CHAIN_MAX_BYTES, cboeToNormalized, checkChain, checkQuoteWindow, filterQuotes, isUsableQuote, warmChains } from './cboe.js';
 import type { ChainEntry } from './cboe.js';
 
 /** A Cboe file as the service sees it (the Cboe adapter's normalized chain). */
@@ -260,4 +263,138 @@ test('ChainCache: one failed refetch keeps serving the last good chain (its own 
   assert.equal(back.chain?.clocks.receivedAt, Math.floor(clock / 1000), 'a successful refetch advances receivedAt only');
   assert.equal(back.chain?.clocks.publishedAt, first.chain?.clocks.publishedAt, 'the file time is the file\'s');
   assert.equal(back.chain?.underlying.observedAt, first.chain?.underlying.observedAt, 'and the last trade is the file\'s');
+});
+
+test('warmChains: every ticker once, one after another, through the given loader', async () => {
+  const order: string[] = [];
+  let inFlight = 0;
+  let maxInFlight = 0;
+  const results = await warmChains(['NVDA', 'SPCX'], async (ticker) => {
+    inFlight += 1;
+    maxInFlight = Math.max(maxInFlight, inFlight);
+    order.push(ticker);
+    await new Promise((r) => setTimeout(r, 5));
+    inFlight -= 1;
+    return { ok: true };
+  });
+  assert.deepEqual(order, ['NVDA', 'SPCX'], 'each ticker exactly once, in registry order');
+  assert.equal(maxInFlight, 1, 'sequential: a boot must not burst the free feed');
+  assert.deepEqual(results, [
+    { ticker: 'NVDA', ok: true, reason: null },
+    { ticker: 'SPCX', ok: true, reason: null },
+  ]);
+});
+
+test('warmChains never rejects: a refusal and a throw are results, and the next ticker still warms', async () => {
+  const seen: string[] = [];
+  const results = await warmChains(['NVDA', 'SPCX', 'TSLA'], async (ticker) => {
+    seen.push(ticker);
+    if (ticker === 'NVDA') return { ok: false, reason: 'chain-unavailable' };
+    if (ticker === 'SPCX') throw new Error('socket hang up');
+    return { ok: true };
+  });
+  assert.deepEqual(seen, ['NVDA', 'SPCX', 'TSLA']);
+  assert.deepEqual(results, [
+    { ticker: 'NVDA', ok: false, reason: 'chain-unavailable' },
+    { ticker: 'SPCX', ok: false, reason: 'socket hang up' },
+    { ticker: 'TSLA', ok: true, reason: null },
+  ]);
+});
+
+test('a warmed chain is the cached one: the first real read after warm-up downloads nothing', async () => {
+  let calls = 0;
+  const clock = 1_000_000;
+  const cache = new ChainCache({ fetchChain: async () => { calls += 1; return NVDA; }, nowMs: () => clock });
+  await warmChains(['NVDA'], async (ticker) => {
+    const entry = await cache.get(ticker, URL_NVDA);
+    return entry.error === null ? { ok: true } : { ok: false, reason: entry.error };
+  });
+  assert.equal(calls, 1, 'the warm-up downloaded once');
+  const first = await cache.get('NVDA', URL_NVDA);
+  assert.equal(calls, 1, 'and the first read reuses it inside the refetch floor');
+  assert.ok(holds(first, NVDA));
+});
+
+/** startPricingService with every download recorded and refused, and its warm-up knob as given. */
+// The service boots on Massive (the default; production refuses Cboe), so the recording seam is the
+// provider, with a synthetic key. warmChains itself is provider-neutral.
+// Bound to 127.0.0.1, the address every read below uses; the test after the next one says why.
+async function bootRecording(warmUp: string | undefined) {
+  const fetched: string[] = [];
+  const running = await startPricingService({
+    env: { RH_RPC: 'http://127.0.0.1:9', PRICING_PORT: '0', KEEPER_LOG_LEVEL: 'silent', MASSIVE_API_KEY: 'SYNTHETIC0000000000000000000000000', ...(warmUp === undefined ? {} : { PRICING_CHAIN_WARM_UP: warmUp }) },
+    hostname: '127.0.0.1',
+    spotReader: async () => { throw new Error('no spot in tests'); },
+    provider: {
+      descriptor: MASSIVE_PROVIDER,
+      fetch: async (source) => {
+        fetched.push(source.url);
+        throw new Error('network: offline in tests');
+      },
+    },
+  });
+  return { running, fetched };
+}
+
+test('startPricingService: PRICING_CHAIN_WARM_UP=1 downloads every registry market once with no /fair; unset downloads nothing', async () => {
+  const on = await bootRecording('1');
+  try {
+    const markets = (await (await fetch(`http://127.0.0.1:${on.running.port}/health`)).json()) as { markets: number };
+    for (let i = 0; i < 200 && on.fetched.length < markets.markets; i += 1) await new Promise((r) => setTimeout(r, 5));
+    assert.equal(on.fetched.length, markets.markets, 'one download per market');
+    assert.equal(new Set(on.fetched).size, on.fetched.length, 'each market once');
+    assert.ok(on.fetched.every((u) => u.startsWith('https://cdn.cboe.com/')), 'through the service\'s own chain path');
+  } finally {
+    await on.running.close();
+  }
+  for (const knob of [undefined, '0']) {
+    const off = await bootRecording(knob);
+    try {
+      await fetch(`http://127.0.0.1:${off.running.port}/health`);
+      await new Promise((r) => setTimeout(r, 50));
+      assert.deepEqual(off.fetched, [], `PRICING_CHAIN_WARM_UP=${knob ?? 'unset'}: no download before a /fair asks`);
+    } finally {
+      await off.running.close();
+    }
+  }
+});
+
+/** Binds 127.0.0.1:`port` and lets go at once; rejects (EADDRINUSE) when something already holds it there. As runtime.test.ts. */
+function bindAndRelease(port: number): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const probe = createServer();
+    probe.once('error', reject);
+    probe.listen(port, '127.0.0.1', () => probe.close(() => resolve()));
+  });
+}
+
+// Why the /health read above failed under full-suite load with "Unexpected end of JSON input". On macOS a
+// no-host (`::`) listener does not own its port on 127.0.0.1: another process can hold the same port there (the port-0
+// counter even hands a no-host bind a port already held on 127.0.0.1), and a read of 127.0.0.1 then reaches that other
+// listener, which answered an empty body. A 127.0.0.1 bind owns the port there, which is why bootRecording passes one.
+// Proven on the booted port itself, one extra port for a few milliseconds. The first version held 30
+// ports just ahead of the box-wide port-0 counter, where other processes' no-host binds could be handed them.
+test('bootRecording: its port is the pricing service\'s on 127.0.0.1, so no other listener can take it there and answer /health', async () => {
+  // Positive control, macOS (where the hazard was measured, 20 of 20 on this box): a no-host listener DOES share its
+  // port with a later 127.0.0.1 bind, so the refusal asserted below is the 127.0.0.1 bind's doing, not the OS's.
+  if (process.platform === 'darwin') {
+    const noHost = createServer();
+    await new Promise<void>((resolve, reject) => {
+      noHost.once('error', reject);
+      noHost.listen(0, () => resolve());
+    });
+    try {
+      await bindAndRelease((noHost.address() as AddressInfo).port);
+    } finally {
+      await new Promise((done) => noHost.close(done));
+    }
+  }
+  const boot = await bootRecording(undefined);
+  try {
+    await assert.rejects(bindAndRelease(boot.running.port), /EADDRINUSE/, 'another listener could bind 127.0.0.1 on the pricing port');
+    const body = await (await fetch(`http://127.0.0.1:${boot.running.port}/health`)).text();
+    assert.match(body, /"service":"callhouse-pricing"/, `port ${boot.running.port}: /health was answered by another listener: ${JSON.stringify(body)}`);
+  } finally {
+    await boot.running.close();
+  }
 });

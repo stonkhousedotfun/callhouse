@@ -105,6 +105,49 @@ export const chainlinkFeedSourceAbi = [
   },
   {
     "type": "function",
+    "name": "bands",
+    "inputs": [
+      {
+        "name": "underlying",
+        "type": "address",
+        "internalType": "address"
+      }
+    ],
+    "outputs": [
+      {
+        "name": "minPrice",
+        "type": "uint128",
+        "internalType": "uint128"
+      },
+      {
+        "name": "maxPrice",
+        "type": "uint128",
+        "internalType": "uint128"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "everConfigured",
+    "inputs": [
+      {
+        "name": "underlying",
+        "type": "address",
+        "internalType": "address"
+      }
+    ],
+    "outputs": [
+      {
+        "name": "",
+        "type": "bool",
+        "internalType": "bool"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
     "name": "feeds",
     "inputs": [
       {
@@ -195,6 +238,44 @@ export const chainlinkFeedSourceAbi = [
   },
   {
     "type": "function",
+    "name": "listFeed",
+    "inputs": [
+      {
+        "name": "underlying",
+        "type": "address",
+        "internalType": "address"
+      },
+      {
+        "name": "feed",
+        "type": "address",
+        "internalType": "address"
+      },
+      {
+        "name": "maxStale",
+        "type": "uint32",
+        "internalType": "uint32"
+      },
+      {
+        "name": "maxRoundJumpBps",
+        "type": "uint16",
+        "internalType": "uint16"
+      },
+      {
+        "name": "minPrice",
+        "type": "uint128",
+        "internalType": "uint128"
+      },
+      {
+        "name": "maxPrice",
+        "type": "uint128",
+        "internalType": "uint128"
+      }
+    ],
+    "outputs": [],
+    "stateMutability": "nonpayable"
+  },
+  {
+    "type": "function",
     "name": "pin",
     "inputs": [
       {
@@ -216,6 +297,35 @@ export const chainlinkFeedSourceAbi = [
       }
     ],
     "stateMutability": "nonpayable"
+  },
+  {
+    "type": "function",
+    "name": "pinnedBands",
+    "inputs": [
+      {
+        "name": "underlying",
+        "type": "address",
+        "internalType": "address"
+      },
+      {
+        "name": "expiry",
+        "type": "uint40",
+        "internalType": "uint40"
+      }
+    ],
+    "outputs": [
+      {
+        "name": "minPrice",
+        "type": "uint128",
+        "internalType": "uint128"
+      },
+      {
+        "name": "maxPrice",
+        "type": "uint128",
+        "internalType": "uint128"
+      }
+    ],
+    "stateMutability": "view"
   },
   {
     "type": "function",
@@ -288,6 +398,29 @@ export const chainlinkFeedSourceAbi = [
         "name": "newAuthority",
         "type": "address",
         "internalType": "address"
+      }
+    ],
+    "outputs": [],
+    "stateMutability": "nonpayable"
+  },
+  {
+    "type": "function",
+    "name": "setBand",
+    "inputs": [
+      {
+        "name": "underlying",
+        "type": "address",
+        "internalType": "address"
+      },
+      {
+        "name": "minPrice",
+        "type": "uint128",
+        "internalType": "uint128"
+      },
+      {
+        "name": "maxPrice",
+        "type": "uint128",
+        "internalType": "uint128"
       }
     ],
     "outputs": [],
@@ -381,6 +514,62 @@ export const chainlinkFeedSourceAbi = [
         "name": "authority",
         "type": "address",
         "internalType": "address",
+        "indexed": false
+      }
+    ],
+    "anonymous": false
+  },
+  {
+    "type": "event",
+    "name": "BandPinned",
+    "inputs": [
+      {
+        "name": "underlying",
+        "type": "address",
+        "internalType": "address",
+        "indexed": true
+      },
+      {
+        "name": "expiry",
+        "type": "uint40",
+        "internalType": "uint40",
+        "indexed": true
+      },
+      {
+        "name": "minPrice",
+        "type": "uint128",
+        "internalType": "uint128",
+        "indexed": false
+      },
+      {
+        "name": "maxPrice",
+        "type": "uint128",
+        "internalType": "uint128",
+        "indexed": false
+      }
+    ],
+    "anonymous": false
+  },
+  {
+    "type": "event",
+    "name": "BandSet",
+    "inputs": [
+      {
+        "name": "underlying",
+        "type": "address",
+        "internalType": "address",
+        "indexed": true
+      },
+      {
+        "name": "minPrice",
+        "type": "uint128",
+        "internalType": "uint128",
+        "indexed": false
+      },
+      {
+        "name": "maxPrice",
+        "type": "uint128",
+        "internalType": "uint128",
         "indexed": false
       }
     ],
@@ -506,6 +695,17 @@ export const chainlinkFeedSourceAbi = [
     "inputs": [
       {
         "name": "caller",
+        "type": "address",
+        "internalType": "address"
+      }
+    ]
+  },
+  {
+    "type": "error",
+    "name": "AlreadyListed",
+    "inputs": [
+      {
+        "name": "asset",
         "type": "address",
         "internalType": "address"
       }

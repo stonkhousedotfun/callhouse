@@ -11,7 +11,7 @@
  * Units, as everywhere in v2: Money.raw is a base-unit integer string (USDG 6 dp, Stock Tokens
  * 18 dp); every price is USDG per WHOLE share; every `units` is 0.01-share units; timestamps are
  * unix seconds; ids and block numbers are decimal strings; addresses are checksummed.
- * The per-field meaning lives on the schemas and in ops/fixtures/api/v2/README.md.
+ * The per-field meaning lives on the schemas.
  */
 import type { z } from "zod";
 
@@ -33,12 +33,16 @@ import type {
   flywheelAssetSchema,
   flywheelDistributionSchema,
   flywheelResponseSchema,
+  earliestWithdrawalSchema,
   earnAccountSchema,
   earnAdapterMoveSchema,
+  earnApySchema,
+  earnHeldPaymentSchema,
   earnQueuedRequestSchema,
   earnQueueSchema,
   earnResponseSchema,
   earnVaultSchema,
+  earnVenueSchema,
   houseEpochSchema,
   houseListResponseSchema,
   houseMarketResponseSchema,
@@ -189,6 +193,8 @@ export type SeriesRef = {
   expiry: number;
   tenor: "daily" | "weekly" | "special";
   mintCutoff: number;
+  /** The series' pinned exercise fee. Absent on earlier wires: unknown, never the market default. */
+  exerciseFeeBps?: number;
   mintFeePpm: number;
   mintFeesHeld: Money;
   mintFeesAccrued: Money;
@@ -198,8 +204,12 @@ export type SeriesRef = {
 export type Quote = {
   bestBid: Money | null;
   bestAsk: Money | null;
+  /** Total depth on each side, every level. */
   bidUnits: string;
   askUnits: string;
+  /** Units at the best price only; absent from an API before it, which a consumer reads as unknown. */
+  bestBidUnits?: string;
+  bestAskUnits?: string;
   fair: Money | null;
   iv: number | null;
   delta: number | null;
@@ -300,12 +310,34 @@ export type EarnQueuedRequest = {
   assetsRequested: string | null;
   fulfilledAssets: string | null;
   requestedAt: number;
+  /** The vault it waits in, its contract queue id (null: none on the row), and its direction. */
+  vault: string;
+  queueId: string | null;
+  kind: "withdrawal" | "deposit";
+  /** Deposit escrow, asset base units; null for a withdrawal. */
+  assetsQueued: string | null;
+  /** Shares still escrowed after partial services; "0" for a deposit. */
+  sharesEscrowed: string;
+  /** 1-based place among the vault's open entries of both directions. */
+  position: number;
+};
+
+/** A payment the vault holds for `claimDeferred(queueId, to)`, by its owner or receiver. */
+export type EarnHeldPayment = {
+  vault: string;
+  queueId: string;
+  owner: string;
+  receiver: string;
+  asset: string;
+  assets: string;
+  updatedAt: number;
 };
 
 export type EarnAccount = {
   address: string;
   shares: string | null;
   queued?: EarnQueuedRequest[];
+  held?: EarnHeldPayment[];
 };
 
 export type EarnAdapterMove = {
@@ -317,25 +349,86 @@ export type EarnAdapterMove = {
   tx: string;
 };
 
+/** One VenueWrittenOff. `amount` is the event's lastKnown (asset base units), never a share-price change. */
+export type EarnVenueWriteOff = {
+  adapter: string;
+  amount: string;
+  ts: number;
+  tx: string;
+};
+
 export type EarnQueue = {
   depth: number;
   oldestRequestedAt: number | null;
+};
+
+/**
+ * A measured trailing-window yield in signed bps, compounded to a year; null `bps` always names a reason.
+ * `from` / `to` are the two observed samples; the span is at least the window, never shorter.
+ */
+export type EarnApy = {
+  bps: number | null;
+  reason: "no-samples" | "short-history" | "no-price" | "out-of-range" | null;
+  from: number | null;
+  to: number | null;
+};
+
+/** The adapter's ERC-4626 venue, read on chain (the registry has no venue slot). */
+export type EarnVenue = {
+  address: string | null;
+  name: string | null;
+  apy24h: EarnApy;
+  apy7d: EarnApy;
+  /** What the vault can take from the venue now; on an advisory venue this is the position, not `withdrawable()`. */
+  withdrawable: string | null;
+  withdrawableSource: "maxWithdraw" | "position" | null;
+  position: string | null;
+};
+
+/** When a withdrawal asked for now would pay, from the contract rules (see `earliestWithdrawalSchema`). */
+export type EarliestWithdrawal = {
+  kind: "now" | "queued" | "weekly" | "daily" | "unknown";
+  at: number | null;
+  reason:
+    | "liquid"
+    | "open-position"
+    | "queue-ahead"
+    | "venue-liquidity"
+    | "venue-unreadable"
+    | "epoch-boundary"
+    | "boundary-pending"
+    | "queue-closed"
+    | "not-read";
+  /** Earn only: unescrowed wallet plus venue liquidity, asset base units. */
+  liquidityCap?: string | null;
 };
 
 export type EarnVault = {
   vault: string;
   asset: string | null;
   adapter: string | null;
-  paused: boolean | null;
+  /** EarnVault.fundingEnabled() (JIT book funding on/off), not a pause; EarnVault has none. */
+  fundingEnabled: boolean | null;
   sharesSupply: string | null;
   deposited: string | null;
   skimmed: string | null;
   queue?: EarnQueue;
   lastAdapterMove?: EarnAdapterMove | null;
-  /** T-OP-086: display-only mark per 1e18 shares; null when not read. */
-  indicativeAssetsPerShare?: string | null;
-  indicativeTotalAssets?: string | null;
-  hasOpenPosition?: boolean | null;
+  /** newest first, at most 20; [] is observed none. Optional so an older producer still parses. */
+  venueWriteOffs?: EarnVenueWriteOff[];
+  /** Display-only mark per 1e18 shares; null when not read. Always present on the wire. */
+  indicativeAssetsPerShare: string | null;
+  indicativeTotalAssets: string | null;
+  hasOpenPosition: boolean | null;
+  /** signed realised result in asset base units; null when not computable. */
+  realisedSinceInception?: SignedMoney | null;
+  /** realised, after the skim; optional so an older producer still parses. */
+  apy7d?: EarnApy;
+  apy30d?: EarnApy;
+  totalAssets?: string | null;
+  /** Null: no adapter attached. */
+  venue?: EarnVenue | null;
+  earliestWithdrawal?: EarliestWithdrawal;
 };
 
 export type EarnResponse = {
@@ -353,6 +446,12 @@ export type HouseNav = {
   stockUnits: string | null;
   settlementPrice: Money;
   navUsdg: Money;
+  /** optional until the indexer sends them; absent is "not sent", never 0. */
+  supply?: string;
+  sharesMinted?: string;
+  sharesBurned?: string;
+  performanceFee?: Money;
+  tx?: string;
 };
 
 export type HouseEpoch = {
@@ -371,6 +470,10 @@ export type HouseQueueItem = {
   stockAmount?: string | null;
   shares: string | null;
   requestedAt: number;
+  /** The request's epoch; claimable once the vault rolled past it (HouseVault.claim), with that epoch's end. */
+  epochId?: string;
+  status?: "pending" | "claimable" | "unknown";
+  maturesAt?: number | null;
 };
 
 export type HouseShares = {
@@ -379,12 +482,18 @@ export type HouseShares = {
   queued?: HouseQueueItem[];
 };
 
+/** A House vault's epoch kind (absent from an older producer: read as `unknown`). */
+export type HouseVaultKind = "weekly" | "daily" | "unknown";
+
 export type HouseVault = {
   market: string;
   vault: string | null;
+  kind?: HouseVaultKind;
   /** Null: no epoch row observed. The vault is still listed. */
   currentEpoch: HouseEpoch | null;
   sharesSupply: string | null;
+  /** The current epoch's end. */
+  earliestWithdrawal?: EarliestWithdrawal;
 };
 
 export type HouseListResponse = {
@@ -398,11 +507,14 @@ export type HouseResponse = HouseListResponse;
 export type HouseMarketResponse = {
   market: string;
   vault: string | null;
+  kind?: HouseVaultKind;
   /** Null: no epoch row observed. */
   currentEpoch: HouseEpoch | null;
   epochs: HouseEpoch[];
   shares?: HouseShares | null;
   queue?: HouseQueueItem[];
+  /** The current epoch's end. */
+  earliestWithdrawal?: EarliestWithdrawal;
 };
 
 // ---------------------------------------------------------------------------------------------
@@ -410,7 +522,7 @@ export type HouseMarketResponse = {
 // ---------------------------------------------------------------------------------------------
 
 /**
- * /v2/services — readiness of the services the indexer does not run (T-424).
+ * /v2/services — readiness of the services the indexer does not run.
  *
  * `healthy` is true only when `reason` is `"ready"`, so a consumer can branch on `healthy` alone
  * and still be fail-closed, and read `reason` only to say why. `reasons` is the pricer's own closed
@@ -481,7 +593,7 @@ export type ConfigResponse = {
     makerRebateBps: number;
     exerciseFeeBps: number;
     mintFeePpm: number;
-    /** T-OP-120 (G7): Clearinghouse `maxPayoutSlippageBps`, null until a payout adapter has been set. */
+    /** (G7): Clearinghouse `maxPayoutSlippageBps`, null until a payout adapter has been set. */
     maxPayoutSlippageBps: number | null;
   };
   pendingFees: {
@@ -514,16 +626,22 @@ export type Market = {
   name: string;
   underlying: string;
   status: "planned" | "live" | "paused";
-  /** T-OP-099. In the owner's launch set (registry `launchSet`); `status` is the chain's word, this is the registry's. */
+  /** In the launch set (registry `launchSet`); `status` is the chain's word, this is the registry's. */
   launch: boolean;
+  /** The OrderBook's trading brake and this market's mint brake; `status` reflects neither. */
+  tradingPaused: boolean;
+  mintPaused: boolean;
   spot: Money | null;
   spotUpdatedAt: number | null;
   strikeTick: Money;
   puts: boolean;
   mintFeePpm: number;
   settlement?: { sourceCount: number; uncorroboratedDelayS: number; route: PayoutRoute | null };
+  /** Expiries still open for writing. */
   expiries: number[];
-  /** `asOf` is the indexed head both windows end at, 0 when no checkpoint was readable (T-425). */
+  /** Past the mint cutoff, not yet expired: resale asks and bids only. Never in `expiries`. */
+  cutoffExpiries: number[];
+  /** `asOf` is the indexed head both windows end at, 0 when no checkpoint was readable. */
   stats: { volume24h: Money; premium7d: Money; asOf: number; openInterestUnits: string; seriesOpen: number };
 };
 
@@ -535,7 +653,7 @@ export type MarketsResponse = Market[];
 
 export type MarketSeriesResponse = {
   items: { series: SeriesRef; quote: Quote; openInterestUnits: string; volume24h: Money }[];
-  /** The indexed head each item's `volume24h` window ends at (T-425). */
+  /** The indexed head each item's `volume24h` window ends at. */
   asOf: number;
   nextCursor: string | null;
 };
@@ -761,6 +879,16 @@ export type StrategyPricingState = {
   fair: UsdgPrice | null;
 };
 
+/** The strategy's last AutoRoller PositionClosed; that position is no longer current. */
+export type StrategyClose = {
+  at: number;
+  longId: string;
+  /** null when the close-out carried 0: stop or cancelStale had already dropped the ask. */
+  orderId: string | null;
+  /** Whether this close-out redeemed the writer's shorts. False does not mean collateral is still locked. */
+  redeemed: boolean;
+};
+
 export type StrategiesResponse = {
   items: {
     writer: string;
@@ -772,6 +900,7 @@ export type StrategiesResponse = {
     expiry: number | null;
     lastRolledAt: number | null; lastStaleCancelAt: number | null; staleSpot: Money | null;
     pricing?: StrategyPricingState;
+    lastClose?: StrategyClose | null;
   }[];
   nextCursor: string | null;
 };
@@ -805,7 +934,7 @@ export type SelfTradeCoverage = {
 };
 
 export type StatsResponse = {
-  /** The indexed head every windowed figure below ends at, 0 with no checkpoint (T-425). */
+  /** The indexed head every windowed figure below ends at, 0 with no checkpoint. */
   asOf: number;
   volume24h: Money;
   volumeAll: Money;
@@ -826,7 +955,7 @@ export type StatsResponse = {
 /**
  * The scoring policy the epoch's figures were produced under. Additive and optional: an absent `band`
  * means the producer does not publish its policy, and a consumer must not infer one. The values are
- * OQ-14 placeholders and are not approved for funded use.
+ * placeholders and are not approved for funded use.
  */
 export type MakerBand = { bps: number; minUsdg: Money };
 
@@ -959,9 +1088,13 @@ export type ApiTypeAssertions = [
   Assert<Equals<FlywheelDistribution, Wire<typeof flywheelDistributionSchema>>>,
   Assert<Equals<FlywheelResponse, Wire<typeof flywheelResponseSchema>>>,
   Assert<Equals<EarnQueuedRequest, Wire<typeof earnQueuedRequestSchema>>>,
+  Assert<Equals<EarnHeldPayment, Wire<typeof earnHeldPaymentSchema>>>,
   Assert<Equals<EarnAccount, Wire<typeof earnAccountSchema>>>,
   Assert<Equals<EarnAdapterMove, Wire<typeof earnAdapterMoveSchema>>>,
   Assert<Equals<EarnQueue, Wire<typeof earnQueueSchema>>>,
+  Assert<Equals<EarnApy, Wire<typeof earnApySchema>>>,
+  Assert<Equals<EarnVenue, Wire<typeof earnVenueSchema>>>,
+  Assert<Equals<EarliestWithdrawal, Wire<typeof earliestWithdrawalSchema>>>,
   Assert<Equals<EarnVault, Wire<typeof earnVaultSchema>>>,
   Assert<Equals<EarnResponse, Wire<typeof earnResponseSchema>>>,
   Assert<Equals<HouseNav, Wire<typeof houseNavSchema>>>,

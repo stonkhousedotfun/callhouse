@@ -6,7 +6,9 @@ import { seaportAbi } from "./abi/seaport";
 import { accountFactoryAbi } from "./abi/accountFactory";
 import { vaultAbi } from "./abi/vault";
 import { writerAccountAbi } from "./abi/writerAccount";
-import { fmtEastern, fmtUsdg, fmtUtc } from "./format";
+import { USDG_DECIMALS } from "./contracts";
+import { fmtEastern, fmtUtc } from "./format";
+import { displayExact } from "./numberFormat";
 
 /**
  * Turn a revert into a sentence a human can act on.
@@ -69,7 +71,8 @@ const SOURCES: ReadonlyArray<readonly [RevertSource, Abi]> = [
 ];
 
 const big = (v: unknown): bigint | undefined => (typeof v === "bigint" ? v : typeof v === "number" ? BigInt(v) : undefined);
-const usdg = (v: unknown): string => fmtUsdg(big(v), 6);
+// Exact (an error quotes the amounts the transaction would have moved), without zero tails.
+const usdg = (v: unknown): string => { const b = big(v); return b === undefined ? "—" : displayExact(b, USDG_DECIMALS); };
 const count = (v: unknown): string => String(big(v) ?? "?");
 
 /**

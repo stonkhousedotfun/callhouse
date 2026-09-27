@@ -1,7 +1,7 @@
 /**
- * K3-312 parity pins: the pricing service's answers on the committed synthetic NVDA/TSLA chains
- * (synthetic-chains.ts), captured from the BASE PricingService at callhouse
- * 65623e6cc03101512ab0bb96875d01abc0a540e2 before any K3-312 change, over a grid of exact listed,
+ * Parity pins: the pricing service's answers on the committed synthetic NVDA/TSLA chains
+ * (synthetic-chains.ts), captured from the baseline PricingService
+ * before any change, over a grid of exact listed,
  * interpolated (strike and total-variance), before-first, after-last and wing requests.
  *
  * Each case is [scenario, ticker, strike USD per token, September 2026 day (16:00 New York), type,

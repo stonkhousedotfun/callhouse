@@ -65,7 +65,7 @@ export function fillLogStart(checkpointBlock: bigint | null, head: bigint, deplo
 /** Re-read every open vault order at `head`; record fills (each sale at its real seller fee) and closes; checkpoint. */
 export async function trackVaultOrders(deps: TrackDeps, fees: FeeRegime, head: Head): Promise<TrackResult> {
   const result: TrackResult = { chain: [], fills: [], sales: { exact: 0, conservative: 0, logError: null } };
-  // Per vault (F-DAPP-02): a shared checkpoint made every vault after the first resume from another
+  // Per vault: a shared checkpoint made every vault after the first resume from another
   // vault's block and book its sales against whatever fee regime that window happened to carry.
   const checkpoint = deps.mm.fillCheckpoint(deps.vault);
   const open = deps.mm.openOrders(deps.vault);

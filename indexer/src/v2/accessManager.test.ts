@@ -1,7 +1,7 @@
 /**
  * The two desync guards in src/v2/accessManager.ts, one per direction.
  *
- * T-501: only the addressByName -> manifest direction existed, so a manifest target with NO entry
+ * Only the addressByName -> manifest direction existed, so a manifest target with NO entry
  * here passed in silence — `targetAddresses` maps it to null through `?? null`, and a null is
  * indistinguishable from a deliberate "no address source exists". EarnVault sat unlabelled for a
  * whole interface version behind an assertion that reads as if it covered exactly that case, and
@@ -62,7 +62,7 @@ describe("accessManager address/manifest desync guards", () => {
     await expect(import(MODULE)).resolves.toBeDefined();
   });
 
-  it("throws when the manifest carries a target this file does not list — the T-501 direction", async () => {
+  it("throws when the manifest carries a target this file does not list — the added-target direction", async () => {
     withTargets({ ...REAL.targets, NewlyAddedVault: {} });
     await expect(import(MODULE)).rejects.toThrow(/no entry for role-manifest targets: NewlyAddedVault/);
   });

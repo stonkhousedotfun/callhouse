@@ -3,7 +3,7 @@
  * every transient outcome counts (delivery.ts:296-299). Web Push endpoints are user input on any
  * public-looking name, so a free wallet with 5 endpoints that answer 500 (or do not resolve) opens
  * the webpush breaker, and every other user's Web Push is postponed, then dropped as stale after
- * 6 h. The 10-endpoint cap on codex/v2-integration (b0acd9a) does not help: wallets are free.
+ * 6 h. The 10-endpoint cap does not help: wallets are free.
  * Expected after the fix: an attacker's endpoints cannot delay another user's push.
  */
 import assert from 'node:assert/strict';

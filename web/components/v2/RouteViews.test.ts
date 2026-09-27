@@ -12,8 +12,8 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { useAccount } from "wagmi";
-import { useConfig, usePositions } from "@/lib/v2/hooks";
-import { NotificationsShell, PortfolioShell } from "./RouteViews";
+import { useConfig, useMarketSeries, usePositions } from "@/lib/v2/hooks";
+import { EarnMarketShell, NotificationsShell, PortfolioShell } from "./RouteViews";
 
 vi.mock("wagmi", () => ({ useAccount: vi.fn() }));
 vi.mock("@/components/ConnectButton", () => ({
@@ -51,5 +51,26 @@ describe("the disconnected views are no longer dead ends", () => {
     vi.mocked(useAccount).mockReturnValue({ address: "0x0000000000000000000000000000000000000001" } as unknown as ReturnType<typeof useAccount>);
     const html = renderToStaticMarkup(createElement(PortfolioShell));
     expect(html).not.toContain("Connect a wallet to see your positions.");
+  });
+});
+
+/*
+ * The Earn shell counts series "available to review" and says "No series are open for writing" when
+ * empty, so it must ask for OPEN series: the default page was the oldest 50 of every status. A full page says "+".
+ * PROVE BY BREAKING: drop `status: "open"` from the shell's useMarketSeries call and the first test goes red.
+ */
+describe("the Earn shell counts open series only", () => {
+  const row = { series: { longId: "1" } };
+  it("asks the indexer for open series, a page of 200", () => {
+    vi.mocked(useMarketSeries).mockReturnValue({ ...emptyQuery, data: { items: [row, row], nextCursor: null, asOf: 0 } } as unknown as ReturnType<typeof useMarketSeries>);
+    const html = renderToStaticMarkup(createElement(EarnMarketShell, { ticker: "NVDA" }));
+    expect(vi.mocked(useMarketSeries)).toHaveBeenCalledWith("NVDA", { status: "open", limit: 200 });
+    expect(html).toContain("2 series available to review.");
+  });
+
+  it("a page that has more after it says so instead of stating a capped count", () => {
+    vi.mocked(useMarketSeries).mockReturnValue({ ...emptyQuery, data: { items: [row, row], nextCursor: "next", asOf: 0 } } as unknown as ReturnType<typeof useMarketSeries>);
+    const html = renderToStaticMarkup(createElement(EarnMarketShell, { ticker: "NVDA" }));
+    expect(html).toContain("2+ series available to review.");
   });
 });

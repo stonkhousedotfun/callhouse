@@ -1,5 +1,5 @@
 /**
- * SWEEP relay-14. ops/alerts.md Routing: `error` = webhook, unmuted; `info` = webhook, log only,
+ * SWEEP relay-14. Alert routing: `error` = webhook, unmuted; `info` = webhook, log only,
  * who: Nobody. formatTelegram (format.ts:99-107) never sets `disable_notification`, so every info
  * alert (v2_boot x3 per deploy, v2_mon_resolved, v2_mon_safe_nonce_changed) rings phones exactly
  * like an error page.

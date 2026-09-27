@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { autoRollTargetStrike, fixedAskBpsFromReference, formatUsdgTick, parseUsdgTick,
+import { autoRollTargetStrike, closedStrategyPosition, fixedAskBpsFromReference, formatUsdgTick, parseUsdgTick,
   portfolioPricingStatus, pricingRequestIsCurrent, pricingWriteState, proposedSmartPricingBand,
   refreshSmartPricingRows, selectPortfolioSmartPricingStrategies, selectSmartPricingReference,
   PRICER_READING_MAX_AGE_SECONDS, SMART_PRICING_PRICER_DOWN, SMART_PRICING_PRICER_UNKNOWN,
@@ -48,6 +48,21 @@ describe("Portfolio smart-pricing identity and state", () => {
       .toBe("no-live-order");
     expect(portfolioPricingStatus(indexedStrategy({ pricing: undefined })).kind).toBe("legacy");
   });
+
+  it("a position the AutoRoller closed reads Closed, not No live order; an older close under a new roll does not", () => {
+    const lastClose = { at: 1_800_090_000, longId: "1", orderId: "9", redeemed: true };
+    const closed = indexedStrategy({ currentLongId: null, orderId: null, expiry: null, lastClose,
+      pricing: { ...indexedStrategy().pricing!, currentAsk: null, band: null } });
+    expect(closedStrategyPosition(closed)).toEqual(lastClose);
+    expect(portfolioPricingStatus(closed)).toEqual({ kind: "closed", label: "Closed" });
+    // The same row without the close record is the state an indexer before serves.
+    expect(portfolioPricingStatus({ ...closed, lastClose: null }).kind).toBe("no-live-order");
+    expect(portfolioPricingStatus({ ...closed, lastClose: undefined }).kind).toBe("no-live-order");
+    // Rolled again after the close: the record describes the earlier period, so the live ask decides.
+    const rolledAgain = indexedStrategy({ currentLongId: "3", lastClose });
+    expect(closedStrategyPosition(rolledAgain)).toBeNull();
+    expect(portfolioPricingStatus(rolledAgain).kind).toBe("in-band");
+  });
 });
 
 describe("smart-pricing writer band", () => {
@@ -80,10 +95,12 @@ describe("smart-pricing writer band", () => {
 
   it("builds the proposed wider band and starts at its ceiling", () => {
     expect(proposedSmartPricingBand(200_000_000n, 2_000_000n)).toEqual({
-      referenceBps: 100, minAskBps: 25, maxAskBps: 300, askBps: 300,
+      referenceBps: 100, minAskBps: 50, maxAskBps: 300, askBps: 300,
     });
+    // AutoRoller.MIN_ASK_BPS is 50. A 4 bps reference proposes a ceiling of 29, under the floor,
+    // so both ends clamp to 50: the narrowest band setStrategy accepts.
     expect(proposedSmartPricingBand(200_000_000n, 80_000n)).toEqual({
-      referenceBps: 4, minAskBps: 5, maxAskBps: 29, askBps: 29,
+      referenceBps: 4, minAskBps: 50, maxAskBps: 50, askBps: 50,
     });
     expect(proposedSmartPricingBand(200_000_000n, 50_000_000n)).toEqual({
       referenceBps: 2_500, minAskBps: 625, maxAskBps: 1_000, askBps: 1_000,
@@ -92,10 +109,12 @@ describe("smart-pricing writer band", () => {
   });
 
   it("shows exact USDG tick limits accepted by the pricer policy", () => {
-    expect(smartPricingPrices(212_210_000n, { askBps: 150, minAskBps: 30, maxAskBps: 150 })).toEqual({
-      start: 3_183_200n, min: 636_700n, max: 3_183_100n,
+    expect(smartPricingPrices(212_210_000n, { askBps: 150, minAskBps: 50, maxAskBps: 150 })).toEqual({
+      start: 3_183_200n, min: 1_061_100n, max: 3_183_100n,
     });
-    expect(smartPricingPrices(1_000_100n, { askBps: 5, minAskBps: 5, maxAskBps: 5 })).toBeNull();
+    // Under the contract floor (AutoRoller.MIN_ASK_BPS = 50) there is no band at all.
+    expect(smartPricingPrices(212_210_000n, { askBps: 150, minAskBps: 49, maxAskBps: 150 })).toBeNull();
+    expect(smartPricingPrices(1_000_100n, { askBps: 50, minAskBps: 50, maxAskBps: 50 })).toBeNull();
   });
 
   it("matches AutoRoller's ceil-then-strike-tick rounding, including coarse ticks", () => {
@@ -142,7 +161,7 @@ describe("smart-pricing writer band", () => {
 
     const proposal = proposedSmartPricingBand(200_000_000n, 2_000_000n)!;
     expect(smartPricingDraft(200_000_000n, { askBps: 100, minAskBps: 0, maxAskBps: 0 }, proposal))
-      .toEqual({ askBps: 300, minAskBps: 25, maxAskBps: 300 });
+      .toEqual({ askBps: 300, minAskBps: 50, maxAskBps: 300 });
   });
 
   it("rejects an async pricing result after any form or market input changes", () => {
@@ -190,7 +209,7 @@ describe("smart-pricing writer band", () => {
 });
 
 /**
- * W3-301: the smart-pricing control is offered only when the pricer is known-healthy.
+ * The smart-pricing control is offered only when the pricer is known-healthy.
  *
  * THE ASSERTION THAT MATTERS is not "healthy true means offered" — that one would pass under any
  * implementation, including one that returns `true` unconditionally. It is the ENUMERATION below:
@@ -244,7 +263,7 @@ describe("smart pricing is offered only when the pricer is alive", () => {
   });
 
   it("both notes tell the user what still works, because the standing order is unaffected", () => {
-    // AC5: this row gates the OFFER, not the live ask. Saying so in the note is the whole reason
+    // This gates the OFFER, not the live ask. Saying so in the note is the whole reason
     // the sentence is not just "unavailable".
     for (const note of [SMART_PRICING_PRICER_DOWN, SMART_PRICING_PRICER_UNKNOWN]) {
       expect(note).toContain("fixed ask");

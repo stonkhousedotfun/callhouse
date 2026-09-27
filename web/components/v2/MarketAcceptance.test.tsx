@@ -21,9 +21,11 @@ const marketsFixture = fileURLToPath(new URL("../../../ops/fixtures/api/v2/marke
 const registryFixture = fileURLToPath(new URL("../../../ops/markets/tier1.json", import.meta.url));
 
 const fixtureMarkets = JSON.parse(readFileSync(marketsFixture, "utf8")) as Market[];
-const registry = JSON.parse(readFileSync(registryFixture, "utf8")) as {
-  markets: Array<{ ticker: string; v2: { status: string; strikeTick: string } }>;
-};
+const registry = JSON.parse(readFileSync(registryFixture, "utf8")) as { markets: Array<{ ticker: string }> };
+
+/** A 10 USDG strike tick: coarser than either launch market's. It used to be read off SNDK's registry row
+ * removed SNDK with the other non-launch markets, so the synthetic row states its own tick. */
+const COARSE_TICK = "10000000";
 
 function fixtureMarket(ticker: string): Market {
   const market = fixtureMarkets.find((item) => item.ticker === ticker);
@@ -35,7 +37,7 @@ function enabledRegistryRow(market: Market): MarketDirectoryRegistryRow {
   return {
     ticker: market.ticker,
     name: market.name,
-    launch: true, // T-OP-099: an enabled row here is a launch-set row; membership is data on the row.
+    launch: true, // An enabled row here is a launch-set row; membership is data on the row.
     v2: { status: "live", wave: "canary", registeredAt: 1 },
   };
 }
@@ -64,16 +66,13 @@ describe("three-market presentation acceptance", () => {
     const pooledRouted = fixtureMarket("NVDA");
     const singleSourceUnrouted = fixtureMarket("TSLA");
 
-    // SNDK remains planned in the real registry. Only its configured 10 USDG strike tick is reused
-    // to construct a third, explicitly synthetic enabled API input; this test does not call SNDK live.
-    const coarseSource = registry.markets.find((market) => market.ticker === "SNDK");
-    expect(coarseSource?.v2.status).toBe("planned");
-    expect(coarseSource?.v2.strikeTick).toBe("10000000");
+    // A third, explicitly synthetic enabled API input with a coarse tick. It is not a registry market.
+    expect(registry.markets.some((market) => market.ticker === "SYNTH-COARSE")).toBe(false);
     const syntheticCoarse: Market = {
       ...singleSourceUnrouted,
       ticker: "SYNTH-COARSE",
       name: "Synthetic coarse-tick acceptance market",
-      strikeTick: { raw: coarseSource!.v2.strikeTick, decimals: 6, formatted: "10" },
+      strikeTick: { raw: COARSE_TICK, decimals: 6, formatted: "10" },
     };
 
     const inputs = [pooledRouted, singleSourceUnrouted, syntheticCoarse];
@@ -92,18 +91,19 @@ describe("three-market presentation acceptance", () => {
 
     expect(pooled.directory).toContain("2 sources · 6 hours fallback wait");
     expect(pooled.directory).toContain("try USDG conversion, with Stock Tokens as fallback");
-    expect(pooled.disclosure).toContain("Market configuration lists 2 price sources");
-    expect(pooled.disclosure).toContain("wait about 6 hours");
-    expect(pooled.disclosure).toContain("Uniswap v3 fee-tier route that can attempt USDG conversion");
-    expect(pooled.conversion).toContain("current conversion floor is 99.20%");
+    // SettlementDisclosure's copy in plain words (the settlement timing sits in its "?").
+    expect(pooled.disclosure).toContain("This market has 2 price sources");
+    expect(pooled.disclosure).toContain("waits about 6 hours");
+    expect(pooled.disclosure).toContain("a listed Uniswap v3 route tries to convert them to USDG");
+    expect(pooled.conversion).toContain("USDG conversion pays at least 99.2%"); // plain copy, no zero tail
 
     expect(unrouted.directory).toContain("1 source · 1 hour uncorroborated wait");
     expect(unrouted.directory).toContain("Winning calls pay Stock Tokens");
-    expect(unrouted.disclosure).toContain("Market configuration lists one price source");
-    expect(unrouted.disclosure).toContain("wait about 1 hour");
+    expect(unrouted.disclosure).toContain("This market has one price source");
+    expect(unrouted.disclosure).toContain("waits about 1 hour");
     expect(unrouted.disclosure).toContain("no USDG conversion route configured");
     expect(unrouted.conversion).toContain("Winning calls are paid in Stock Tokens");
-    expect(unrouted.conversion).not.toContain("conversion floor is");
+    expect(unrouted.conversion).not.toContain("pays at least");
 
     expect(coarse.directory).toContain("Synthetic coarse-tick acceptance market");
     expect(coarse.directory).not.toContain("SNDK");

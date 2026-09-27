@@ -7,6 +7,7 @@ import {
   marketDirectoryRows,
   settlementModeLabel,
   settlementPayoutLabel,
+  TRADING_PAUSED_DETAIL,
   type MarketDirectoryRegistryRow,
 } from "./marketDirectory";
 
@@ -17,7 +18,7 @@ function registry(
   status: MarketDirectoryRegistryRow["v2"]["status"],
   wave: MarketDirectoryRegistryRow["v2"]["wave"],
   registeredAt: number | null,
-  // T-OP-099. Launch-set membership is data on the row (lib/markets.ts computes it from the registry's
+  // Launch-set membership is data on the row (lib/markets.ts computes it from the registry's
   // launchSet). The cases below that are about status/wave/API use launch rows; the launch-set cases set it.
   launch = true,
 ): MarketDirectoryRegistryRow {
@@ -30,13 +31,16 @@ function api(ticker: string, overrides: Partial<Market> = {}): Market {
     name: `${ticker} Company • Robinhood Token`,
     underlying: "0x0000000000000000000000000000000000000001",
     status: "live",
-    launch: true, // T-OP-099: the wire's launch flag; the directory decides from the registry row, not from this.
+    launch: true, // The wire's launch flag; the directory decides from the registry row, not from this.
+    tradingPaused: false,
+    mintPaused: false,
     spot: money(),
     spotUpdatedAt: 1_000,
     strikeTick: money("1000000")!,
     puts: false,
     mintFeePpm: 80,
     expiries: [2_000],
+    cutoffExpiries: [],
     stats: {
       volume24h: money("0")!, premium7d: money("0")!, asOf: 1_000, openInterestUnits: "0", seriesOpen: 1,
     },
@@ -57,8 +61,8 @@ describe("market directory registry/API merge", () => {
     expect(rows.find((row) => row.ticker === "PAUSED")).toMatchObject({ availability: "paused", tradeable: false });
   });
 
-  it("derives coming-soon and deferred copy from launch-set membership, not from waves (T-OP-099)", () => {
-    // Before T-OP-099 `wave` decided: planned+wave1 read as "Coming soon" and wave2 as "Deferred". Now
+  it("derives coming-soon and deferred copy from launch-set membership, not from waves", () => {
+    // Before `wave` decided: planned+wave1 read as "Coming soon" and wave2 as "Deferred". Now
     // membership decides and the wave is irrelevant: a planned LAUNCH market is coming soon whatever its
     // wave, and a NON-launch market is deferred whatever its wave -- including wave1 and canary.
     const rows = marketDirectoryRows([
@@ -78,8 +82,8 @@ describe("market directory registry/API merge", () => {
     expect(rows.find((row) => row.ticker === "OUT1")?.availabilityDetail).toContain("no launch timing is promised");
   });
 
-  it("never offers a trade on a market outside the launch set, even one the chain registered live (T-OP-099)", () => {
-    // What `--wave wave1` at broadcast would produce: registered and live on chain, not in the owner's set.
+  it("never offers a trade on a market outside the launch set, even one the chain registered live", () => {
+    // What `--wave wave1` at broadcast would produce: registered and live on chain, not in the launch set.
     const rows = marketDirectoryRows([
       registry("NVDA", "live", "canary", 10, true),
       registry("OFF", "live", "wave1", 11, false),
@@ -132,7 +136,8 @@ describe("market directory registry/API merge", () => {
 describe("market settlement badges", () => {
   it("keeps absent optional metadata unknown instead of inferring a source or payout", () => {
     expect(settlementModeLabel(undefined)).toBeNull();
-    expect(settlementPayoutLabel(undefined)).toBeNull();
+    expect(settlementPayoutLabel(undefined, true)).toBeNull();
+    expect(settlementPayoutLabel(undefined, false)).toBeNull();
   });
 
   it("describes the configured delay without promising a settlement time", () => {
@@ -144,10 +149,52 @@ describe("market settlement badges", () => {
   });
 
   it("distinguishes in-kind calls from a conversion attempt and keeps puts in USDG", () => {
-    expect(settlementPayoutLabel({ sourceCount: 1, uncorroboratedDelayS: 3_600, route: null }))
+    expect(settlementPayoutLabel({ sourceCount: 1, uncorroboratedDelayS: 3_600, route: null }, true))
       .toBe("Winning calls pay Stock Tokens · puts pay USDG");
     expect(settlementPayoutLabel({
       sourceCount: 2, uncorroboratedDelayS: 21_600, route: { venue: "v3", fee: 500 },
-    })).toBe("Winning calls try USDG conversion, with Stock Tokens as fallback · puts pay USDG");
+    }, true)).toBe("Winning calls try USDG conversion, with Stock Tokens as fallback · puts pay USDG");
+  });
+
+  it("with the market's puts flag off, the label speaks about calls only", () => {
+    expect(settlementPayoutLabel({ sourceCount: 1, uncorroboratedDelayS: 3_600, route: null }, false))
+      .toBe("Winning calls pay Stock Tokens");
+    expect(settlementPayoutLabel({
+      sourceCount: 2, uncorroboratedDelayS: 21_600, route: { venue: "v3", fee: 500 },
+    }, false)).toBe("Winning calls try USDG conversion, with Stock Tokens as fallback");
+  });
+});
+
+describe("the guardian's brakes in the directory", () => {
+  it("a paused OrderBook makes a listed live market Paused and untradeable, with its own reason", () => {
+    const [row] = marketDirectoryRows([registry("LIVE", "live", "canary", 10)],
+      { kind: "ready", markets: [api("LIVE", { tradingPaused: true })] });
+    expect(row).toMatchObject({
+      availability: "paused", availabilityLabel: "Paused", availabilityDetail: TRADING_PAUSED_DETAIL, tradeable: false,
+    });
+    expect(row!.mintPaused).toBeUndefined();
+  });
+
+  it("a mint pause alone keeps the market live for resale and bids, and flags it", () => {
+    const [row] = marketDirectoryRows([registry("LIVE", "live", "canary", 10)],
+      { kind: "ready", markets: [api("LIVE", { mintPaused: true })] });
+    expect(row).toMatchObject({ availability: "live", tradeable: true, mintPaused: true });
+  });
+
+  it("an unpaused market carries neither, and a stale API claims nothing", () => {
+    const [clear] = marketDirectoryRows([registry("LIVE", "live", "canary", 10)],
+      { kind: "ready", markets: [api("LIVE")] });
+    expect(clear).toMatchObject({ availability: "live", tradeable: true });
+    expect(clear!.mintPaused).toBeUndefined();
+    const [loading] = marketDirectoryRows([registry("LIVE", "live", "canary", 10)], { kind: "loading" });
+    expect(loading).toMatchObject({ availability: "checking", tradeable: false });
+    expect(loading!.mintPaused).toBeUndefined();
+  });
+
+  it("a delisted market stays Paused with the listing copy, not the trading-pause copy", () => {
+    const [row] = marketDirectoryRows([registry("LIVE", "live", "canary", 10)],
+      { kind: "ready", markets: [api("LIVE", { status: "paused", mintPaused: true })] });
+    expect(row).toMatchObject({ availability: "paused", availabilityDetail: "Not open for new trades.", tradeable: false });
+    expect(row!.mintPaused).toBeUndefined();
   });
 });

@@ -2,7 +2,7 @@
  * The cranker's own index of the v2 deployment, in the mode's SQLite file (store.ts's database,
  * tables `v2_cranker_*`), fed by scanner.ts from the contracts' logs.
  *
- * WHY THE CRANKER KEEPS ONE. The indexer is optional for this mode (K2-03: "fall back to log scans
+ * WHY THE CRANKER KEEPS ONE. The indexer is optional for this mode ("fall back to log scans
  * when the indexer is down"), and three questions have no on-chain enumeration:
  *   series      which series exist for an (underlying, expiry): SeriesCreated;
  *   holders     who may hold a token id: every TransferSingle / TransferBatch recipient (candidates

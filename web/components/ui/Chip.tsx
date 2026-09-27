@@ -8,7 +8,10 @@ import { cn } from "@/lib/cn";
  * `wrap` lets a long chip break across lines instead of running past a 390px screen.
  *
  * The app adds one tone, `danger`, for the states that stop the vault (a stranded claim, writes
- * halted). The shared palette has no --danger-soft, so its ground is the danger token at 10%.
+ * halted). Neon gives it the palette's own pair, --danger-soft ground and --danger-text ink, in place of
+ * the old `bg-danger/10`, which the Neon theme retires: the mixed tint missed the contrast floor in day mode.
+ *
+ * StatusPill and OptionTag are the two fixed-vocabulary chips built on this one.
  */
 export type ChipTone = "neutral" | "accent" | "warn" | "usdg" | "danger";
 
@@ -24,14 +27,14 @@ const TONE: Record<ChipTone, string> = {
   accent: "bg-accent-soft text-accent-text",
   warn: "bg-warn-soft text-warn",
   usdg: "bg-usdg-soft text-usdg",
-  danger: "bg-danger/10 text-danger",
+  danger: "bg-danger-soft text-danger-text",
 };
 
 export function Chip({ tone = "neutral", dot = false, wrap = false, className, children, ...rest }: ChipProps) {
   return (
     <span
       className={cn(
-        "inline-flex max-w-full items-center gap-[7px] rounded-full px-2.5 py-1.5 font-body text-[12.5px] font-semibold",
+        "inline-flex max-w-full items-center gap-[7px] rounded-pill px-2.5 py-1.5 font-body text-[12.5px] font-semibold",
         wrap ? "leading-tight" : "whitespace-nowrap leading-none",
         TONE[tone],
         className,

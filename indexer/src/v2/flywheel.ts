@@ -54,6 +54,22 @@ v2PayoutRouterPonder.on("PayoutRouter:RouteSet", async ({ event, context }) => {
   await context.db.insert(schema.v2PayoutRoute).values({ asset, ...values }).onConflictDoUpdate(values);
 });
 
+/**
+ * refreshRouteFee moved the cached fee and nothing else. The route row's feeBps would
+ * stay at whatever routes() returned on RouteSet. A refresh with no row means RouteSet was missed.
+ */
+v2PayoutRouterPonder.on("PayoutRouter:RouteFeeRefreshed", async ({ event, context }) => {
+  const asset = lower(event.args.asset);
+  const current = await context.db.find(schema.v2PayoutRoute, { asset });
+  if (current === null) throw new Error(`RouteFeeRefreshed ${asset}: no route row`);
+  await context.db.update(schema.v2PayoutRoute, { asset }).set({
+    feeBps: Number(event.args.feeBps),
+    changedAt: event.block.timestamp,
+    changedBlock: event.block.number,
+    changedTx: event.transaction.hash,
+  });
+});
+
 v2PayoutRouterPonder.on("PayoutRouter:RouteCleared", async ({ event, context }) => {
   const asset = lower(event.args.asset);
   const values = {
@@ -150,8 +166,15 @@ v2FeeSplitterPonder.on("FeeSplitter:BuybackSkipped", async ({ event, context }) 
   });
 });
 
+/** The buyback reserve counter was lowered to the USDG the splitter really holds (see the table). */
+v2FeeSplitterPonder.on("FeeSplitter:BuybackBalanceWrittenDown", async ({ event, context }) => {
+  await context.db.insert(schema.v2FlywheelBuybackWriteDown).values({
+    ...provenance(event), previous: event.args.previous, current: event.args.current,
+  });
+});
+
 /**
- * A fee sweep that could not collect what the book owes (T-510). FeeSplitter._drainOrderBook emits
+ * A fee sweep that could not collect what the book owes. FeeSplitter._drainOrderBook emits
  * this at three sites with three different meanings, and the payload — (orderBook, amount) — cannot
  * tell them apart on its own. Until now the event was decodable and deliberately unhandled, so a
  * stranded sweep was invisible off chain.
@@ -210,6 +233,26 @@ v2FeeSplitterPonder.on("FeeSplitter:OrderBookFeesStranded", async ({ event, cont
   }
   await context.db.insert(schema.v2FlywheelStrandedFees).values({
     ...provenance(event), orderBook, kind, amount,
+  });
+});
+
+/**
+ * v9 FeeSplitter.recoverUnrouted (FeeSplitter.sol, TREASURY_ADMIN) sends the WHOLE balance of a
+ * non-USDG ERC-20 with no payout route to the treasury and emits UnroutedAssetRecovered(asset, treasury, amount). The
+ * recipient is in the event, so no receipt lookup is needed (unlike Distributed). One v2TreasuryExit row per recovery,
+ * beside the Defunded exits.
+ */
+v2FeeSplitterPonder.on("FeeSplitter:UnroutedAssetRecovered", async ({ event, context }) => {
+  await context.db.insert(schema.v2TreasuryExit).values({
+    ...provenance(event),
+    source: "feeSplitter",
+    sourceAddress: lower(event.log.address),
+    eventKind: "unroutedAssetRecovered",
+    assetKind: "erc20",
+    asset: lower(event.args.asset),
+    tokenId: null,
+    recipient: lower(event.args.treasury),
+    amount: event.args.amount,
   });
 });
 

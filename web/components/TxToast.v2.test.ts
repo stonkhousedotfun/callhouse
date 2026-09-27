@@ -27,7 +27,8 @@ describe("v2 receipt status notice", () => {
       "The buyback confirmed.", unknownClose);
     const notice = v2ReceiptNotice(wrapped);
     expect(notice).toMatchObject({ tone: "unknown", hash });
-    expect(notice?.body).toMatch(/^The buyback confirmed\. A wallet transaction was submitted/);
+    // The unknown-receipt body was trimmed; the confirmed step still leads it.
+    expect(notice?.body).toMatch(/^The buyback confirmed\. A transaction was sent/);
     expect(notice?.body).not.toMatch(/close did not|close failed|long units remain/i);
   });
 

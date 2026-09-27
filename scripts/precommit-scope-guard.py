@@ -21,7 +21,7 @@ REGISTRY = "ops/markets/tier1.json"
 V2_GENERATOR = "ops/v2-env.mjs"
 KEEPER_GENERATOR = "ops/keeper-env.sh"
 V2_ENV_NAMES = frozenset({
-    "indexer-v2", "cranker", "pricing", "mm-bot", "pricer", "notifier",
+    "indexer-v2", "cranker", "pricing", "mm-bot", "pricer", "guardian", "notifier",
 })
 KEEPER_ENV_STATUSES = frozenset({"live", "planned", "superseded-by-v2"})
 THIRD_PARTY_FIXTURE_REASON = "third-party options-chain fixture pending redistribution review"
@@ -110,7 +110,7 @@ def inspect(
 
 
 def generated_env_allowlist(registry_bytes: bytes) -> frozenset[str]:
-    """Only the six fixed service files and exact market names rendered by the registry."""
+    """Only the seven fixed service files and exact market names rendered by the registry."""
     registry = json.loads(registry_bytes)
     markets = registry["markets"]
     if not isinstance(markets, list):
@@ -255,6 +255,9 @@ def self_test() -> int:
     ]}).encode()
     allowlist = generated_env_allowlist(registry)
     assert "ops/v2/env/cranker.env" in allowlist
+    # ops/v2-env.mjs renders guardian.env; without it the hook refuses the file.
+    assert "ops/v2/env/guardian.env" in allowlist
+    assert len([p for p in allowlist if p.startswith("ops/v2/env/")]) == 7
     assert "ops/keeper/markets/NVDA.env" in allowlist
     assert "ops/keeper/markets/TSLA.env" in allowlist
     assert "ops/keeper/markets/PAUSED.env" not in allowlist

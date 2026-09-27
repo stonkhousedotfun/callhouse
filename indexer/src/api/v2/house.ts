@@ -5,10 +5,12 @@ import { asc, desc, eq } from "ponder";
 import { getAddress, isAddress } from "viem";
 
 import { V2_REGISTRY } from "../../../lib/v2/marketRegistry.generated";
+import { houseEarliestWithdrawal } from "../../v2/earnYield";
+import { SETTLEMENT_WINDOW } from "../../v2/settlementWindow";
 import { address, error, money, signedMoney } from "./shared";
 
 /**
- * House vault tape, served from the ingest T-175 landed (indexer/src/v2/houseVault.ts writes
+ * House vault tape, served from the House vault ingest (indexer/src/v2/houseVault.ts writes
  * v2HouseVault, v2HouseEpoch, v2HouseNav, v2HouseShareBalance and the two queue tables).
  *
  * This file used to be a stub that returned `{ items: [], nextCursor: null }` and 404'd every
@@ -31,7 +33,7 @@ type WithdrawRow = typeof schema.v2HouseWithdrawQueue.$inferSelect;
 
 /**
  * Ticker for a vault's underlying Stock Token. The generated registry is the source of truth for
- * the ticker <-> underlying pair (operator note 2026-09-20 on stale generated market data): this
+ * the ticker <-> underlying pair (a stale generated market file named the wrong token once): this
  * reads indexer/lib/v2/marketRegistry.generated.ts, NOT web/lib/markets.generated.ts.
  *
  * Returns null rather than "" when the underlying is not a registered market. An empty string
@@ -42,6 +44,11 @@ function tickerFor(underlying: string): string | null {
   const key = underlying.toLowerCase();
   const row = V2_REGISTRY.markets.find((m) => m.underlying.toLowerCase() === key);
   return row === undefined ? null : row.ticker;
+}
+
+/** The stored kind, or `unknown` for a value this build does not know (never guessed as weekly). */
+function vaultKind(row: VaultRow): "weekly" | "daily" | "unknown" {
+  return row.kind === "weekly" || row.kind === "daily" ? row.kind : "unknown";
 }
 
 function navWire(row: NavRow | undefined) {
@@ -71,7 +78,32 @@ function isOpen(row: { status: string }) {
   return row.status === "queued";
 }
 
-function depositWire(row: DepositRow) {
+/**
+ * Where an open request stands, by the contract's own rule. HouseVault.claim retires a request when
+ * `r.epochId < epochId` (callhouse-contracts src/v2/periphery/house/HouseVault.sol `claim`: `d.epochId < epochId`,
+ * `w.epochId < epochId`), and cancelDepositRequest / cancelWithdrawRequest revert TooEarly when `r.epochId != epochId`.
+ * `epochId` is the vault's CURRENT epoch, which moves only in `rollEpoch`, so the clock never decides this: after
+ * `epochEnd` a request stays pending until the roll. `current` null (the vault's epoch is not indexed) is `unknown`,
+ * never a guess.
+ */
+export function houseRequestStatus(requestEpoch: bigint, current: bigint | null): "pending" | "claimable" | "unknown" {
+  if (current === null) return "unknown";
+  return requestEpoch < current ? "claimable" : "pending";
+}
+
+/** What every queue item carries about its maturity. `current` and `endOf` come from the vault's rows. */
+type Maturity = { current: bigint | null; endOf: (epochId: bigint) => bigint | null };
+
+function maturityWire(row: { epochId: bigint }, m: Maturity) {
+  const end = m.endOf(row.epochId);
+  return {
+    epochId: row.epochId.toString(),
+    status: houseRequestStatus(row.epochId, m.current),
+    maturesAt: end === null ? null : Number(end),
+  };
+}
+
+function depositWire(row: DepositRow, m: Maturity) {
   return {
     kind: "deposit" as const,
     account: address(row.account),
@@ -80,10 +112,11 @@ function depositWire(row: DepositRow) {
     stockAmount: row.stockAmount.toString(),
     shares: null,
     requestedAt: Number(row.requestedAt),
+    ...maturityWire(row, m),
   };
 }
 
-function withdrawWire(row: WithdrawRow) {
+function withdrawWire(row: WithdrawRow, m: Maturity) {
   return {
     kind: "withdraw" as const,
     account: address(row.account),
@@ -91,7 +124,42 @@ function withdrawWire(row: WithdrawRow) {
     stockAmount: null,
     shares: row.shares.toString(),
     requestedAt: Number(row.requestedAt),
+    ...maturityWire(row, m),
   };
+}
+
+/**
+ * When a withdrawal requested now is priced: the current epoch's end (HouseVault `rollEpoch`, see
+ * earnYield.houseEarliestWithdrawal). The vault row's `currentEpochEnd` is the ingest's own read of `epochEnd()`
+ * (VaultCreated / EpochRolled, houseVault.ts); the current epoch row's `end` covers a vault row that lacks it.
+ */
+function earliestWithdrawal(vault: VaultRow, current: EpochRow | undefined, now: number) {
+  const end = vault.currentEpochEnd ?? current?.end ?? null;
+  return houseEarliestWithdrawal({
+    now,
+    kind: vaultKind(vault),
+    epochEnd: end === null ? null : Number(end),
+    settlementWindow: SETTLEMENT_WINDOW,
+  });
+}
+
+/**
+ * The fixed order of a market's House vaults, replacing "whatever row the database returns first". Daily
+ * first (daily vaults lead once they are live, so a caller that names no vault gets the
+ * one open for deposits), then weekly, then unknown. Within one kind the earliest-created vault comes first -- lowest
+ * createdBlock, then createdLogIndex, then the lowercase address -- so the launch vault, which holds the existing
+ * money, leads when two vaults share a kind. With one vault per market (today) this returns exactly what vaults[0] did.
+ */
+const KIND_ORDER = { daily: 0, weekly: 1, unknown: 2 } as const;
+
+export function compareHouseVaults(left: VaultRow, right: VaultRow): number {
+  const byKind = KIND_ORDER[vaultKind(left)] - KIND_ORDER[vaultKind(right)];
+  if (byKind !== 0) return byKind;
+  if (left.createdBlock !== right.createdBlock) return left.createdBlock < right.createdBlock ? -1 : 1;
+  if (left.createdLogIndex !== right.createdLogIndex) return left.createdLogIndex - right.createdLogIndex;
+  const a = left.vault.toLowerCase();
+  const b = right.vault.toLowerCase();
+  return a < b ? -1 : a > b ? 1 : 0;
 }
 
 /**
@@ -110,13 +178,16 @@ function currentEpochRow(rows: EpochRow[]): EpochRow | undefined {
 
 export function registerHouseRoutes(app: Hono) {
   app.get("/house", async (c) => {
+    const now = Math.floor(Date.now() / 1000);
     const [vaults, epochs, navs] = await Promise.all([
       db.select().from(schema.v2HouseVault),
       db.select().from(schema.v2HouseEpoch),
       db.select().from(schema.v2HouseNav),
     ]);
 
-    const items = vaults
+    // Vaults in the fixed per-market order first; the market sort below is stable (ES2019), so it keeps
+    // that order inside each market.
+    const items = [...vaults].sort(compareHouseVaults)
       .map((vault: VaultRow) => {
         const key = vault.vault.toLowerCase();
         const mine = epochs.filter((row: EpochRow) => row.vault.toLowerCase() === key);
@@ -128,13 +199,16 @@ export function registerHouseRoutes(app: Hono) {
           // Falls back to the vault address so an unregistered underlying is still nameable.
           market: tickerFor(vault.underlying) ?? address(vault.vault),
           vault: address(vault.vault),
+          kind: vaultKind(vault),
           currentEpoch: current === undefined ? null : epochWire(current, nav),
           sharesSupply: vault.sharesSupply === null ? null : vault.sharesSupply.toString(),
+          earliestWithdrawal: earliestWithdrawal(vault, current, now),
         };
       })
       .sort((left, right) => left.market.localeCompare(right.market));
 
-    // No cursor pagination yet: one vault per listed market is a small, bounded set.
+    // No cursor pagination yet: a market holds at most one weekly and one daily vault (plus any legacy-factory
+    // weekly vault), so this is a small, bounded set. It is NOT one vault per market; see compareHouseVaults.
     return c.json({ items, nextCursor: null });
   });
 
@@ -151,11 +225,27 @@ export function registerHouseRoutes(app: Hono) {
     }
     const wallet = rawAddress ? getAddress(rawAddress).toLowerCase() : null;
 
+    // `?vault=` opens one exact vault of this market. Same validation as `address` (viem strict: lowercase or
+    // a correct EIP-55 checksum). Rows come back lowercase (the ingest writes lower(), and the t.hex() column lowercases
+    // on write) while every link the web builds carries the checksummed form, so the pick compares lowercase strings.
+    const rawVault = c.req.query("vault");
+    if (rawVault !== undefined && rawVault !== "" && !isAddress(rawVault)) {
+      return error(c, "bad_request", "vault is not a valid address.", 400);
+    }
+    const wanted = rawVault ? rawVault.toLowerCase() : null;
+
     const vaults = await db.select().from(schema.v2HouseVault)
       .where(eq(schema.v2HouseVault.underlying, market.underlying.toLowerCase() as `0x${string}`));
-    const vault = vaults[0];
+    const ordered = [...vaults].sort(compareHouseVaults);
+    const vault = wanted === null
+      ? ordered[0]
+      : ordered.find((row: VaultRow) => row.vault.toLowerCase() === wanted);
     if (vault === undefined) {
-      return error(c, "not_found", "No House vault has been created for that market.", 404);
+      // A named vault that is not one of this market's is a 404, never the default vault: the page would otherwise
+      // show, and write to, a vault nobody asked for.
+      return wanted === null
+        ? error(c, "not_found", "No House vault has been created for that market.", 404)
+        : error(c, "not_found", "That address is not a House vault for this market.", 404);
     }
 
     const vaultKey = vault.vault as `0x${string}`;
@@ -173,9 +263,15 @@ export function registerHouseRoutes(app: Hono) {
     const navFor = (epochId: bigint) => navRows.find((row: NavRow) => row.epochId === epochId);
     const current = currentEpochRow(epochRows);
 
+    // The vault row's own read of epochId (VaultCreated / EpochRolled), else the current epoch row's id.
+    const maturity: Maturity = {
+      current: vault.currentEpochId ?? current?.epochId ?? null,
+      endOf: (epochId) => epochRows.find((row: EpochRow) => row.epochId === epochId)?.end
+        ?? (epochId === vault.currentEpochId ? vault.currentEpochEnd : null) ?? null,
+    };
     const queue = [
-      ...deposits.filter(isOpen).map(depositWire),
-      ...withdrawals.filter(isOpen).map(withdrawWire),
+      ...deposits.filter(isOpen).map((row) => depositWire(row, maturity)),
+      ...withdrawals.filter(isOpen).map((row) => withdrawWire(row, maturity)),
     ].sort((left, right) => left.requestedAt - right.requestedAt);
 
     const shares = wallet === null ? null : (() => {
@@ -191,10 +287,12 @@ export function registerHouseRoutes(app: Hono) {
     return c.json({
       market: market.ticker,
       vault: address(vault.vault),
+      kind: vaultKind(vault),
       currentEpoch: current === undefined ? null : epochWire(current, navFor(current.epochId)),
       epochs: epochRows.map((row: EpochRow) => epochWire(row, navFor(row.epochId))),
       shares,
       queue,
+      earliestWithdrawal: earliestWithdrawal(vault, current, Math.floor(Date.now() / 1000)),
     });
   });
 }

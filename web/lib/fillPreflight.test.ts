@@ -145,7 +145,7 @@ describe("classifyFillSimulation", () => {
 });
 
 describe("fill gas", () => {
-  // Whole-transaction receipts from the keeper's fork dry run (keeper/DRYRUN.md): real Seaport 1.6
+  // Whole-transaction receipts from the keeper's fork dry run: real Seaport 1.6
   // fills of the vault's order through the real Clear on a 4663 fork. The last first fill ran with
   // Valorem's engine fee on.
   const FIRST_FILL_RECEIPTS = [445_577, 450_181, 462_677, 462_701, 476_071];

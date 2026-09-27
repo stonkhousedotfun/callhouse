@@ -1,5 +1,5 @@
 /**
- * Typed client for the Stonkhouse indexer (Ponder + Hono, plan §6) and for this app's own
+ * Typed client for the Stonkhouse indexer (Ponder + Hono) and for this app's own
  * server-side order feed (app/api/keeper/orders).
  *
  * Two rules shape this file.
@@ -179,7 +179,7 @@ export type CycleRow = {
    * week that never stranded; false while the claim is still inside Valorem.
    */
   strandRecovered?: boolean;
-  // THE WEEK'S USDG, SPLIT (W-21). On an assigned week the vault's harvest sweeps premium AND
+  // THE WEEK'S USDG, SPLIT. On an assigned week the vault's harvest sweeps premium AND
   // the strike proceeds from the contracts taken at the strike. The strike proceeds are returned
   // principal, not yield, so every premium figure a page shows — gross, net, per share, "Last
   // week realized" — reads the `premium*` fields, and the strike proceeds get their own line.
@@ -293,7 +293,7 @@ export function normaliseCycle(input: unknown): CycleRow | null {
     pick(settlement, "contractsAssigned") ?? pick(r, "contractsAssigned", "contracts_assigned", "assigned"),
   );
 
-  // Premium and strike proceeds, apart (W-21). The indexer publishes both since W-21; the
+  // Premium and strike proceeds, apart. The indexer publishes both; the
   // presence of `harvest.creditedUsdg` is how its current shape is told from the one before,
   // in which `harvest.premiumNet` meant `grossUsdg − fee` and INCLUDED the strike proceeds. An
   // older payload is split here by subtraction instead, from the same RollClose figure the
@@ -500,7 +500,9 @@ export type KeeperClosedState = "notCurrent" | "soldOut" | "cancelled" | "notLis
 export type KeeperOrderBook = {
   /** False when this deployment has no KEEPER_ORDERS_URL. The page then says the feed is not wired. */
   configured: boolean;
-  /** Orders the server checked against the chain, as listing rows. Still re-checked by OrderPayload. */
+  /** Orders the server checked against the chain, as listing rows. No page fills them since the fill card
+   *  (components/OrderPayload.tsx) was deleted in components/VaultOverview.tsx only counts the contracts
+   *  left from them (lib/orderFillable.ts). */
   listings: ListingRow[];
   /** Integrity failures: the keeper served something under the authorised hash that is not that
    *  order, or that does not parse. Never fillable, and the one outcome that is an alarm. */

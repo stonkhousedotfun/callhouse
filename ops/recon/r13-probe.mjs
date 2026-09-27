@@ -9,11 +9,18 @@ import path from 'node:path';
 const execFileP = promisify(execFile);
 const here = path.dirname(fileURLToPath(import.meta.url));
 const registry = JSON.parse(await readFile(path.join(here, '../markets/tier1.json'), 'utf8'));
+// THE OUTPUT FOLLOWS THE REGISTRY. The market list is tier1.json's, so the market count and the
+// round-history set are the registry's too. Both used to be typed: validate() demanded exactly 35 markets and
+// round history for NVDA, TSLA, SPY and SGOV. Once the registry was cut to NVDA and SPCX the probe
+// could not run at all -- it died reading TSLA's feed at the round-history step -- so v2-sources.json could not
+// be regenerated and kept the 35-market recon with 292 lowercase addresses. Round history now covers every
+// registry market: at two markets that is two feed walks, and a registry that grows back pays one walk per row.
+const ROUND_HISTORY_TICKERS = registry.markets.map((m) => m.ticker);
 const outputPath = path.join(here, '../markets/v2-sources.json');
 const previous = await readFile(outputPath, 'utf8').then(JSON.parse).catch(() => null);
 const check = process.argv.includes('--check');
 const rpcUrl = process.env.RH_PUBLIC_RPC ?? 'https://rpc.mainnet.chain.robinhood.com';
-// T-OP-131: RE-CASED, NOT RE-DERIVED, like V4_POOL_MANAGER below -- the same twenty bytes in the EIP-55 form
+// RE-CASED, NOT RE-DERIVED, like V4_POOL_MANAGER below -- the same twenty bytes in the EIP-55 form
 // `cast to-check-sum-address` prints, so the recon this probe writes (contracts.factory/router/quoter) carries
 // the strings the strict readers accept and build-markets.mjs V2_SKELETON.uniswapV3 pins. The strict guard below
 // covers these three too.
@@ -22,23 +29,24 @@ const ROUTER = '0xCaf681a66D020601342297493863E78C959E5cb2';
 const QUOTER = '0x33e885eD0Ec9bF04EcfB19341582aADCb4c8A9E7';
 const VERIFIER = '0xcE73c8ad08CBDEaCa6078BF0627C8fe0a9a536E7';
 const PYTH_PRO = '0xACeA761c27A909d4D3895128EBe6370FDE2dF481';
-// T-600-LP: DERIVED ON CHAIN, not copied from a row description. eth_chainId -> 4663 and
+// DERIVED ON CHAIN, not copied from a row description. eth_chainId -> 4663 and
 // eth_getCode -> 24009 code bytes, against a positive control (0x...dEaD -> 0 bytes) so the check can
-// fail. ops/recon/R12-overcall-discovery.md:121 records the same address and the same 24009; that
+// fail. The earlier overcall recon records the same address and the same 24009; that
 // column is the CODE SIZE, not a block number, and the size reproduces on chain today.
-// T-608: RE-CASED, NOT RE-DERIVED. The same twenty bytes, now in EIP-55 form; five letters had the wrong
+// RE-CASED, NOT RE-DERIVED. The same twenty bytes, now in EIP-55 form; five letters had the wrong
 // case, which viem's isAddress(a, { strict: true }) rejects. `cast to-check-sum-address` and viem's
 // checksumAddress produce this exact string independently. It survived because RPC and every lowercase
 // comparison ignore case. The strict guard below refuses a regression before any RPC is sent.
 const V4_POOL_MANAGER = '0x8366a39CC670B4001A1121B8F6A443A643e40951';
-// v4StateView, the last key DeployV2Batch.sh dies on (T-OP-014). RE-DERIVED on chain before it was
-// written, not taken from the row that supplied it: eth_chainId 0x1237 on
+// v4StateView, the last key DeployV2Batch.sh dies on. RE-DERIVED on chain before it was
+// written, not taken from the source that supplied it: eth_chainId 0x1237 on
 // https://rpc.mainnet.chain.robinhood.com; eth_getCode 3531 bytes here and 24009 at the pool manager;
 // and the load-bearing one -- eth_call selector 0xdc4c90d3 `poolManager()` returns
-// 0x8366a39cc670b4001a1121b8f6a443a643e40951, so THIS CONTRACT NAMES THE POOL MANAGER ALREADY IN THIS
+// 0x8366a39CC670B4001A1121B8F6A443A643e40951 (the word is lowercase on the wire; EIP-55 here so the strict
+// scan below, which reads comments too, accepts it), so THIS CONTRACT NAMES THE POOL MANAGER ALREADY IN THIS
 // FILE. A table says where a thing is; that call says what it is.
 const V4_STATE_VIEW = '0xF3334192D15450CdD385c8B70e03f9A6bD9E673b';
-// T-600-LP then T-OP-014: BOTH v4 KEYS ARE NOW DERIVED AND APPENDED. NOTHING IS ABSENT.
+// BOTH v4 KEYS ARE NOW DERIVED AND APPENDED. NOTHING IS ABSENT.
 //
 // `DeployV8.s.sol:416-417` calls `_code()` on V2_V4_POOL_MANAGER and V2_V4_STATE_VIEW, and
 // `DeployV2Batch.sh:312-313` reads BOTH out of the `contracts` block this file writes and dies by
@@ -46,7 +54,7 @@ const V4_STATE_VIEW = '0xF3334192D15450CdD385c8B70e03f9A6bD9E673b';
 // wrapper still dies, one key later, on `contracts.v4StateView.address ''`. That is stated here so
 // nobody reads a half-filled file as a finished one.
 //
-// T-OP-014 RESOLVED THE ABOVE. `contracts.v4StateView` is now written, so DeployV2Batch.sh:312-313
+// THE ABOVE IS RESOLVED. `contracts.v4StateView` is now written, so DeployV2Batch.sh:312-313
 // reads both keys and the wrapper no longer dies. The paragraph that follows is KEPT rather than
 // deleted, because it is the record of what was tried and it names the route that finally worked --
 // and because the next person to lose an address will want to know which five failed.
@@ -58,7 +66,7 @@ const V4_STATE_VIEW = '0xF3334192D15450CdD385c8B70e03f9A6bD9E673b';
 // `poolManager()` returning the pool manager ALREADY IN THIS FILE. The old note specified exactly that
 // cross-check, and it is what turns a plausible address into a proven one.
 //
-// [HISTORY, T-600-LP] WHY v4StateView WAS ABSENT RATHER THAN PLACEHELD, and it was not the old reason. The network
+// [HISTORY] WHY v4StateView WAS ABSENT RATHER THAN PLACEHELD, and it was not the old reason. The network
 // gate is LIFTED; the address simply could not be derived with the access available. Five routes were
 // tried and each failed differently: it appears nowhere in this repository; `v2.uniswapV4` is null in
 // tier1.json so there is no registry slot; every `v2.contracts` entry is null so no deployed contract
@@ -78,14 +86,23 @@ const V4_STATE_VIEW = '0xF3334192D15450CdD385c8B70e03f9A6bD9E673b';
 // the `codes` batch and the `contracts` map, so 0..4 are untouched. An INSERT would have silently re-pointed `codes[4]` at the
 // pool manager and pythPro's deployed-or-not answer would describe a different contract entirely:
 // green, wrong, and invisible.
+// The EarnVault's ERC-4626 venue, Steakhouse USDG (with the
+// interest public). callhouse-contracts
+// script/v2/lib/registry-env.sh (:1011-1020) builds the EarnVault's Erc4626VenueAdapter only when
+// contracts.earnVenue.address is in this file, and refuses it without contracts.earnVenue.maxIsAdvisory, a JSON
+// boolean beside it: true for a Morpho Vault V2 such as Steakhouse USDG, whose max* views are advisory.
+// That kind is a property of the venue's code, not an answer the chain gives, so it is pinned with the address.
+// The chain half is read: the code, and asset(), which validate() requires to be the registry's USDG.
+const EARN_VENUE = '0xBeEff033F34C046626B8D0A041844C5d1A5409dd';
+const EARN_VENUE_MAX_IS_ADVISORY = true;
 const FEES = [100, 500, 3000, 10000];
-const SEL = { getPool: '1698ee82', liquidity: '1a686502', slot0: '3850c7bd', observe: '883bdbfd',
+const SEL = { asset: '38d52e0f', getPool: '1698ee82', liquidity: '1a686502', slot0: '3850c7bd', observe: '883bdbfd',
   balanceOf: '70a08231', latestRoundData: 'feaf968c', getRoundData: '9a6fc8f5',
   decimals: '313ce567', token0: '0dfe1681', token1: 'd21220a7', feeManager: '38416b5b',
-  // T-OP-108: `cast sig 'WETH9()'` -> 0x4aa4a4fc (SwapRouter02 and QuoterV2 both expose it).
+  // `cast sig 'WETH9()'` -> 0x4aa4a4fc (SwapRouter02 and QuoterV2 both expose it).
   weth9: '4aa4a4fc' };
-// T-OP-108: the fee tier of the USDG/WETH v3 pool the buyback's first leg swaps through (0.01 %). The
-// contracts spike (callhouse-contracts docs/V2-FLYWHEEL-ROUTE-SPIKE.md) derived it as `factory.getPool(USDG,
+// The fee tier of the USDG/WETH v3 pool the buyback's first leg swaps through (0.01 %). The
+// contracts spike derived it as `factory.getPool(USDG,
 // WETH, 100)`; DeployV2Batch.sh:354 reads the address as contracts.usdgWethV3Pool. All four tiers have a pool
 // with code on 4663 (100/500/3000/10000, measured 2026-09-22 at block 69289315); this is the one the route uses.
 const USDG_WETH_V3_FEE = 100;
@@ -202,6 +219,8 @@ async function poolInventory(markets) {
     call: ethCall(FACTORY, SEL.getPool + addrWord(registry.shared.usdg) + addrWord(m.asset) + word(fee)) })));
   const found = (await rpcMany(lookups.map((x) => x.call))).map((x, i) => ({ ...lookups[i], pool: x ? addr(x) : null }))
     .filter((x) => x.pool && !/^0x0{40}$/.test(x.pool));
+  // Decoded from an RPC word, so lowercase; written in EIP-55 form (see the strict guard).
+  await Promise.all(found.map(async (p) => { p.pool = await checksum(p.pool); }));
   console.error(`Uniswap: ${found.length} pools across ${markets.length} markets`);
   const calls = found.flatMap((p) => [
     ethCall(p.pool, SEL.liquidity), ethCall(p.pool, SEL.slot0),
@@ -216,8 +235,8 @@ async function poolInventory(markets) {
     const p = found[i], v = values.slice(i * 7, i * 7 + 7);
     const sw = asWords(v[1]);
     const ticks = decodeObserve(v[6]);
-    const token0 = v[4] ? addr(v[4]) : null;
-    const token1 = v[5] ? addr(v[5]) : null;
+    const token0 = v[4] ? await checksum(addr(v[4])) : null;
+    const token1 = v[5] ? await checksum(addr(v[5])) : null;
     const tickDelta = ticks ? ticks[1] - ticks[0] : null;
     const avgTick = tickDelta === null ? null : Number(tickDelta < 0n && tickDelta % 1800n !== 0n
       ? tickDelta / 1800n - 1n : tickDelta / 1800n);
@@ -299,7 +318,8 @@ function heuristicStrikeTick(spot) { return spot < 25 ? 0.25 : spot < 100 ? 0.5 
 
 function validate(data) {
   const fail = (why) => { throw new Error(`v2-sources schema: ${why}`); };
-  if (data.chainId !== 4663 || !Array.isArray(data.markets) || data.markets.length !== 35) fail('chain/market count');
+  if (data.chainId !== 4663 || !Array.isArray(data.markets) || data.markets.length !== registry.markets.length) fail('chain/market count');
+  if (data.markets.some((m, i) => m.ticker !== registry.markets[i].ticker)) fail('markets are not the registry markets in registry order');
   const names = new Set();
   for (const m of data.markets) {
     if (names.has(m.ticker) || !/^[A-Z]+$/.test(m.ticker)) fail(`ticker ${m.ticker}`);
@@ -318,6 +338,11 @@ function validate(data) {
     }
   }
   if (!data.providers || !data.nyseHolidays || !data.roundHistory) fail('top-level metadata');
+  // The shape registry-env.sh reads (:1011-1020), and a venue over the registry's own USDG.
+  const venue = data.contracts?.earnVenue;
+  if (!venue || !/^0x[\da-fA-F]{40}$/.test(venue.address) || venue.codeExists !== true) fail('contracts.earnVenue: an address with code');
+  if (typeof venue.maxIsAdvisory !== 'boolean') fail('contracts.earnVenue.maxIsAdvisory is not a boolean');
+  if (typeof venue.asset !== 'string' || venue.asset.toLowerCase() !== registry.shared.usdg.toLowerCase()) fail(`contracts.earnVenue asset ${venue.asset} is not the registry's USDG ${registry.shared.usdg}`);
   for (const key of ['gelato', 'chainlinkAutomation', 'pyth', 'pythCore', 'pythPro']) if (typeof data.providers[key] !== 'boolean') fail(`provider ${key}`);
   for (const year of ['2026', '2027', '2028']) {
     const group = data.nyseHolidays[year];
@@ -326,11 +351,20 @@ function validate(data) {
       if (!/^\d{4}-\d\d-\d\d$/.test(row.date) || row.dayIndex !== utcDayIndex(row.date)) fail(`NYSE day ${row.date}`);
     }
   }
-  for (const ticker of ['NVDA', 'TSLA', 'SPY', 'SGOV']) {
+  const historyKeys = Object.keys(data.roundHistory).sort().join(',');
+  if (historyKeys !== [...ROUND_HISTORY_TICKERS].sort().join(',')) fail(`round history covers ${historyKeys}, not the registry markets`);
+  for (const ticker of ROUND_HISTORY_TICKERS) {
     const h = data.roundHistory[ticker];
     if (!h || !Number.isInteger(h.scanned) || h.scanned < 1 || !h.decrementWithinPhase || Object.keys(h.closeWindows).length !== 10) fail(`round history ${ticker}`);
   }
   return data;
+}
+
+// JSON with every object's keys sorted, so two values compare equal exactly when they hold the same data.
+function canonical(value) {
+  if (Array.isArray(value)) return `[${value.map(canonical).join(',')}]`;
+  if (value && typeof value === 'object') return `{${Object.keys(value).sort().map((k) => `${JSON.stringify(k)}:${canonical(value[k])}`).join(',')}}`;
+  return JSON.stringify(value);
 }
 
 function drift(now, old) {
@@ -344,18 +378,45 @@ function drift(now, old) {
     if (p.cardinality && m.cardinality && m.cardinality < Math.min(300, p.cardinality)) errors.push(`${m.ticker}: cardinality fell`);
     if (m.dataStreamsFeedId !== p.dataStreamsFeedId || m.strikeTick !== p.strikeTick) errors.push(`${m.ticker}: static config drift`);
   }
+  // The other direction. The loop above walks this run's markets only, so a market the committed JSON
+  // still lists but the registry has dropped was invisible to --check -- the 33 removed rows passed it.
+  for (const p of old.markets) {
+    if (!now.markets.some((m) => m.ticker === p.ticker)) errors.push(`${p.ticker}: absent from this run`);
+  }
+  // The contracts block is compared too -- it is what DeployV2Batch.sh reads (factory, router, quoter,
+  // weth, usdgWethV3Pool, v4PoolManager, v4StateView ...), and a check that skipped it passed on any change there.
+  // KEY ORDER IS NORMALISED ON PURPOSE: the committed file carries weth/usdgWethV3Pool after verifierProxy while
+  // this generator appends them last, so an order-sensitive compare would report drift on every run, and
+  // reordering the committed file is a regen, not this check's job. VALUES are compared exactly, addresses
+  // case-sensitively (both sides are EIP-55 by the strict guard below), so a changed byte OR case is drift.
+  const nowKeys = Object.keys(now.contracts ?? {}), oldKeys = Object.keys(old.contracts ?? {});
+  for (const k of oldKeys.filter((k) => !nowKeys.includes(k))) errors.push(`contracts.${k}: absent from this run`);
+  for (const k of nowKeys) {
+    if (!oldKeys.includes(k)) errors.push(`contracts.${k}: absent from the committed JSON`);
+    else if (canonical(now.contracts[k]) !== canonical(old.contracts[k])) {
+      errors.push(`contracts.${k}: ${canonical(old.contracts[k])} -> ${canonical(now.contracts[k])}`);
+    }
+  }
   if (JSON.stringify(now.providers) !== JSON.stringify(old.providers)) errors.push('provider metadata drift');
   if (JSON.stringify(now.nyseHolidays) !== JSON.stringify(old.nyseHolidays)) errors.push('NYSE calendar drift');
   return errors;
 }
 
-// T-608: STRICT EIP-55 GUARD over every address this probe pins or emits. validate() only regex-checks
+// STRICT EIP-55 GUARD over every address this probe pins or emits. validate() only regex-checks
 // shape, so a mis-cased constant passed it and was published into v2-sources.json verbatim.
 //
-// THE RULE IS viem's isAddress(a, { strict: true }), mirrored line for line from viem 2.x
-// utils/address/isAddress.js: well-formed, and then either all-lowercase (unchecksummed is legal) or
-// exactly equal to its own EIP-55 form. NOT getAddress / to-check-sum-address as a validator: both
-// NORMALISE, so a corrupted checksum goes in and a corrected address comes out with no error.
+// THE RULE (one rule in two places): an address is strict iff it is well-formed AND EXACTLY EQUAL to
+// its own EIP-55 form -- the same rule as callhouse-contracts script/v2/check-deploy-inputs.sh `checksum_ok`
+// (`[ "$(cast to-check-sum-address "$1")" = "$1" ]`), which is the preflight these values end up in front of.
+// An ALL-LOWERCASE address is NOT strict (its checksum form differs from it), although viem's
+// isAddress(a, { strict: true }) accepts it: that viem rule, which this guard used to mirror, let every
+// lowercase value through, so the guard could not see a lowercase constant at all. NOT getAddress /
+// to-check-sum-address as a validator either: both NORMALISE, so a corrupted checksum goes in and a corrected
+// address comes out with no error. Normalising lowercase here would be the same trap.
+//
+// Values this probe DECODES from RPC words (pools, token0/token1, feeManager) carry no case information, so they
+// are written in EIP-55 form at the decode site, via the same `checksum` below. That is the writer producing the
+// canonical form, not the guard forgiving a missing one.
 //
 // The EIP-55 form comes from `cast to-check-sum-address`, the helper build-markets.mjs:677-679 and
 // DeployV2Batch.sh:180 already use (not exported, so it cannot be imported). Its input is lowercased first
@@ -384,14 +445,13 @@ function checksum(a) {
 }
 async function isStrictAddress(a) {
   if (typeof a !== 'string' || !ADDRESS.test(a)) return false;
-  if (a.toLowerCase() === a) return true;
   return (await checksum(a)) === a;
 }
 async function refuseNonStrict(pairs, where) {
-  // One `cast` process per distinct mixed-case address; start them all before awaiting any, so a 366-address
+  // One `cast` process per distinct address; start them all before awaiting any, so a 366-address
   // audit costs one spawn's latency per CPU rather than one per address. `checksum` memoises by lowercase
   // key, so this is the same set of processes the sequential loop would have run, just not one at a time.
-  await Promise.allSettled(pairs.filter(([, v]) => ADDRESS.test(v) && v.toLowerCase() !== v).map(([, v]) => checksum(v)));
+  await Promise.allSettled(pairs.filter(([, v]) => ADDRESS.test(v)).map(([, v]) => checksum(v)));
   const issues = [];
   for (const [label, value] of pairs) {
     if (await isStrictAddress(value)) continue;
@@ -439,6 +499,31 @@ if (process.argv.includes('--addresses') || auditAt !== -1) {
     process.exit(e.refused ? 1 : 2);
   }
 }
+// `--drift <file.json>` runs the --check comparison offline: that file (a candidate v2-sources data object)
+// against the committed ops/markets/v2-sources.json, no RPC. It is how drift() is proven by breaking -- edit one
+// value in a scratch copy and this must exit 1 naming it. Exit 0 no drift, 1 drift, 2 unable.
+const driftAt = process.argv.indexOf('--drift');
+if (driftAt !== -1) {
+  const file = process.argv[driftAt + 1];
+  if (!file || file.startsWith('--')) { console.error('--drift needs a JSON file path'); process.exit(2); }
+  const candidate = await readFile(file, 'utf8').then(JSON.parse).catch((e) => { console.error(`--drift: cannot read ${file}: ${e.message}`); process.exit(2); });
+  const changes = drift(candidate, previous);
+  if (changes.length) { console.error(changes.join('\n')); process.exit(1); }
+  console.error('R13 check: no material drift');
+  process.exit(0);
+}
+// `--validate <file.json>` runs validate() -- the schema every generated file must pass before it is
+// written -- over that file, no RPC. It is how the contracts.earnVenue refusals are proven by breaking. Exit 0 valid,
+// 1 refused, 2 unable.
+const validateAt = process.argv.indexOf('--validate');
+if (validateAt !== -1) {
+  const file = process.argv[validateAt + 1];
+  if (!file || file.startsWith('--')) { console.error('--validate needs a JSON file path'); process.exit(2); }
+  const candidate = await readFile(file, 'utf8').then(JSON.parse).catch((e) => { console.error(`--validate: cannot read ${file}: ${e.message}`); process.exit(2); });
+  try { validate(candidate); } catch (e) { console.error(e.message); process.exit(1); }
+  console.error('R13 validate: schema ok');
+  process.exit(0);
+}
 // Pinned literals are checked on EVERY run, before the first RPC: a mis-cased constant stops the probe here
 // instead of being written into the output. The refusal is printed as the one-line verdict the guard produced,
 // not as an uncaught stack trace, and exits 1 (refused) or 2 (cast unavailable) like the --addresses mode.
@@ -461,9 +546,9 @@ if (Number(BigInt(chainId)) !== 4663) throw new Error(`unexpected chain id ${cha
 const contracts = Object.fromEntries([['factory', FACTORY], ['router', ROUTER], ['quoter', QUOTER], ['verifierProxy', VERIFIER], ['pythPro', PYTH_PRO], ['v4PoolManager', V4_POOL_MANAGER], ['v4StateView', V4_STATE_VIEW]]
   .map(([name, address], i) => [name, { address, codeExists: codeExists(codes[i]) }]));
 const feeManagerRaw = (await rpcMany([ethCall(VERIFIER, SEL.feeManager)]))[0];
-contracts.verifierProxy.feeManager = feeManagerRaw ? addr(feeManagerRaw) : null;
-// T-OP-108. TWO ADDRESSES THE WRAPPER READS THAT THIS RECON NEVER WROTE. DeployV2Batch.sh:354 dies on
-// `contracts.weth.address` and `contracts.usdgWethV3Pool.address` being absent; T-OP-038 copied both into the
+contracts.verifierProxy.feeManager = feeManagerRaw ? await checksum(addr(feeManagerRaw)) : null;
+// TWO ADDRESSES THE WRAPPER READS THAT THIS RECON NEVER WROTE. DeployV2Batch.sh:354 dies on
+// `contracts.weth.address` and `contracts.usdgWethV3Pool.address` being absent; both were copied into the
 // contracts fixture from the spike doc because they were not here. Derived, not typed: WETH is what the
 // router says it wraps (`SwapRouter02.WETH9()`), the pool is what the factory returns for (USDG, WETH,
 // USDG_WETH_V3_FEE), and both are code-checked like every other contracts.* entry. Checksummed through the
@@ -477,6 +562,11 @@ const usdgWethV3Pool = await checksum(addr(usdgWethPoolRaw));
 const [wethCode, usdgWethPoolCode] = await rpcMany([weth, usdgWethV3Pool].map((a) => ({ method: 'eth_getCode', params: [a, 'latest'] })));
 contracts.weth = { address: weth, codeExists: codeExists(wethCode) };
 contracts.usdgWethV3Pool = { address: usdgWethV3Pool, codeExists: codeExists(usdgWethPoolCode) };
+// The Earn venue, code-checked like every contracts.* entry, and asset() read so validate() can refuse a
+// venue that is not an ERC-4626 over the registry's USDG.
+const [earnVenueCode, earnVenueAssetRaw] = await rpcMany([{ method: 'eth_getCode', params: [EARN_VENUE, 'latest'] }, ethCall(EARN_VENUE, SEL.asset)]);
+if (!earnVenueAssetRaw || earnVenueAssetRaw === '0x') throw new Error(`earn venue ${EARN_VENUE}: asset() answered nothing`);
+contracts.earnVenue = { address: EARN_VENUE, codeExists: codeExists(earnVenueCode), asset: await checksum(addr(earnVenueAssetRaw)), maxIsAdvisory: EARN_VENUE_MAX_IS_ADVISORY };
 const currentFeedRounds = await rpcMany(registry.markets.map((m) => ethCall(m.feed, SEL.latestRoundData)));
 const currentMarkets = registry.markets.map((m, i) => {
   const round = decodeRound(currentFeedRounds[i]);
@@ -500,7 +590,7 @@ const markets = currentMarkets.map((m) => {
     roundsPerWindowP50: null, pools: all };
 });
 const roundHistoryByTicker = {};
-for (const ticker of ['NVDA', 'TSLA', 'SPY', 'SGOV']) {
+for (const ticker of ROUND_HISTORY_TICKERS) {
   console.error(`Chainlink rounds: ${ticker}`);
   const m = registry.markets.find((x) => x.ticker === ticker);
   const history = await roundHistory(m);
@@ -512,7 +602,7 @@ const data = validate({ _readme: 'R13 recon; generated by ops/recon/r13-probe.mj
   contracts, providers: { gelato: false, chainlinkAutomation: false, pyth: true, pythCore: false, pythPro: codeExists(codes[4]) },
   nyseHolidays,
   roundHistory: roundHistoryByTicker, markets });
-// T-608: every address-shaped string in the output, found by walking it rather than by naming fields, is
+// Every address-shaped string in the output, found by walking it rather than by naming fields, is
 // strict EIP-55 before anything is written or compared.
 await guardOrExit(addressStrings(data), 'the generated v2-sources data');
 if (check) {

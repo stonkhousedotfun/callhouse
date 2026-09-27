@@ -50,7 +50,7 @@ import { clearAbi, seaportAbi, vaultAbi } from './abi.js';
 //////////////////////////////////////////////////////////////*/
 
 /** Overcall's unmodified ValoremOptionsClearinghouse: `newOptionType` is permissionless and
- *  `feesEnabled()` is false (integrations/valorem.md). The vault is constructed against it, exactly
+ *  `feesEnabled()` is false. The vault is constructed against it, exactly
  *  as script/Deploy.s.sol's default. */
 export const CLEAR = '0x9a7b40e5c1dB1Af822ef091c990b58b02C78C0C0' as const;
 export const SEAPORT = '0x0000000000000068F116a894984e2DB1123eB395' as const;
@@ -59,7 +59,7 @@ export const NVDA = '0xd0601CE157Db5bdC3162BbaC2a2C8aF5320D9EEC' as const;
 export const FEED = '0x379EC4f7C378F34a1B47E4F3cbeBCbAC3E8E9F15' as const;
 export const CHAIN_ID = 4663;
 
-/** The EOA holding USDG's PAUSE_ROLE and ASSET_PROTECTION_ROLE on 4663 (integrations/usdg.md §3).
+/** The EOA holding USDG's PAUSE_ROLE and ASSET_PROTECTION_ROLE on 4663.
  *  Impersonated to freeze the vault; if the role has moved, the harness writes the `frozen`
  *  mapping (slot 6) directly, the same fallback contracts/test/fork/ForkLive.t.sol uses. */
 export const USDG_ASSET_PROTECTION = '0x3Af3e85f4f97De7AD0f000B724Fb77fE5ffc024B' as const;
@@ -73,7 +73,7 @@ export const BPS = 10_000n;
 export const ACC_PRECISION = 10n ** 27n;
 /** Policy.MAX_LISTINGS_PER_CYCLE. */
 export const MAX_LISTINGS = 3;
-/** Valorem's `uint8 public constant feeBps = 15` (integrations/valorem.md). */
+/** Valorem's `uint8 public constant feeBps = 15`. */
 export const VALOREM_FEE_BPS = 15n;
 /** ValoremLib.MIN_LEAD, the vault's own floor on how far out the exercise must be at the arm. */
 export const VAULT_MIN_LEAD_S = 3_600;
@@ -1249,7 +1249,7 @@ export const vaultHarnessAbi = [
 
 /**
  * The Clear's fee surface the keeper does not carry in abi.ts: the switch its `feeTo` owns and
- * the per-token fee ledger (integrations/valorem.md §3).
+ * the per-token fee ledger.
  */
 export const clearFeeAbi = [
   { type: 'function', name: 'setFeesEnabled', inputs: [{ name: 'enabled', type: 'bool' }], outputs: [], stateMutability: 'nonpayable' },

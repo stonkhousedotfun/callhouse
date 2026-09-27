@@ -28,8 +28,8 @@ describe("decodeRevertData", () => {
   it("names a vault error and formats its figures in USDG", () => {
     const d = decodeRevertData(vault("PremiumBelowFloorAtFill", [3_000_000n, 4_500_000n]));
     expect(d).toMatchObject({ source: "vault", name: "PremiumBelowFloorAtFill" });
-    expect(d!.text).toContain("3.000000 USDG");
-    expect(d!.text).toContain("4.500000 USDG");
+    expect(d!.text).toContain("3.00 USDG"); // exact, without the zero tail
+    expect(d!.text).toContain("4.50 USDG");
     expect(d!.text).toContain("re-priced");
   });
 
@@ -41,7 +41,7 @@ describe("decodeRevertData", () => {
     expect(band).toMatchObject({ name: "StrikeBelowBand", source: "vault" });
     // The strike is fixed for the week and approveListing re-checks the same floor, so no reprice
     // clears this: the sentence must not tell a buyer to wait for one.
-    expect(band!.text).toContain("this week's strike (190.000000 USDG) is below the vault's minimum of 195.000000 USDG");
+    expect(band!.text).toContain("this week's strike (190.00 USDG) is below the vault's minimum of 195.00 USDG");
     expect(band!.text).toContain("only if spot falls back");
     expect(band!.text).not.toMatch(/keeper|reprice/i);
     // The premium floor IS cleared by a relist at a higher price, and says so.
@@ -102,7 +102,7 @@ describe("decodeRevertData", () => {
   });
 
   it("names USDG's own four errors as the token's, with the selectors verified on chain 4663", () => {
-    // integrations/usdg.md B1 and B4: ContractPaused 0xab35696f, AddressFrozen 0x1fd1cc44; §4
+    // USDG's source (paxos-token-contracts): ContractPaused 0xab35696f, AddressFrozen 0x1fd1cc44,
     // InsufficientFunds 0x356680b7. InsufficientAllowance is derived from the same source tree.
     expect(toFunctionSelector("ContractPaused()")).toBe("0xab35696f");
     expect(toFunctionSelector("AddressFrozen()")).toBe("0x1fd1cc44");

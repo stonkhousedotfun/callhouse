@@ -51,3 +51,14 @@ describe("v7 writer rent budgets", () => {
     expect(writerCapacity(200_120_000n, pinned)).toBe(99n);
   });
 });
+
+// The site vector for a NONZERO v8 rent dial (callhouse-site lib/site.test.ts),
+// verbatim. The header of rent.ts now says v8 (the site's wording); this pins that the budget is exact at 1_200 ppm.
+describe("nonzero v8 rent dial (the site's vector)", () => {
+  it("budgets collateral and rent exactly", () => {
+    const terms = { collateralPerUnit: 2_000_000n, mintFeePpm: 1_200, expiry: 1_800_604_800, snapshotTimestamp: 1_800_000_000 };
+    expect(mintRent(100n, terms)).toBe(240_000n);
+    expect(writerCollateralNeed(100n, terms)).toBe(200_240_000n);
+    expect(writerCapacity(200_000_000n, terms)).toBe(99n);
+  });
+});

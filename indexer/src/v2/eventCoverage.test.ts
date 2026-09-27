@@ -2,15 +2,18 @@
  * Concrete ABI -> Ponder source -> handler -> SCHEMA census at the attached v8 interface.
  *
  * Two layers, because source-level coverage and storage-level coverage are different problems and
- * T-301 could only fence the first. A registered source whose event has no handler is read and
+ * the handler check alone could only guard the first. A registered source whose event has no handler is read and
  * dropped; a handler whose fact has nowhere to persist is read, processed and dropped just as
  * silently. Both fail here, and both are proved by breaking at the bottom of the test.
  *
- * T-295 closed the 49 events that carried independent facts by adding the column AND the handler
+ * A change closed the 49 events that carried independent facts by adding the column AND the handler
  * together (src/v2/adminConfig.ts, src/v2/stateFacts.ts). What remains is in DELIBERATE with a
- * reason per event, and EarnVault:Funded, which OrderBook funding already carries. Eight concrete
- * emitters still have no source because their addresses are null pending the v8 broadcast; never
- * invent an address to make this census green.
+ * reason per event, and EarnVault:Funded, which OrderBook funding already carries.
+ *
+ * A change sourced the three shared price sources from the registry (src/v2/priceSourceRegistry.ts);
+ * they register only when V2_CLEARINGHOUSE is the registry's clearinghouse, so this census stubs
+ * exactly that value. Five concrete emitters still have no source because the registry has no
+ * address for them; never invent an address to make this census green.
  */
 import { readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
@@ -18,14 +21,36 @@ import { fileURLToPath } from "node:url";
 import ts from "typescript";
 import { describe, expect, it, vi } from "vitest";
 
+import { V2_REGISTRY } from "../../lib/v2/marketRegistry.generated";
+import { kindedHouseFactorySourcesFor } from "./houseVaultKind";
+
 const abiDir = fileURLToPath(new URL("../../../ops/abis/v2/", import.meta.url));
 const handlerDir = fileURLToPath(new URL("./", import.meta.url));
 const buybackSource = "BuybackExecutor";
+/**
+ * The (daily) factories are a SECOND Ponder source over the one HouseVaultFactory export: they emit
+ * the generated 5-field VaultCreated, which the launch source (legacy event) never matches. Sourced only when the
+ * registry records a daily factory (src/v2/houseVaultKind.ts); the baked registry may not yet.
+ * Or when the launch source is configured, which the census below does (V2_HOUSE_START_BLOCK 64000000): the
+ * registry's launch factory is sourced on the 5-field topic too, because the v9 launch factory emits only that one. So
+ * the flag is the source function's own answer for the census env, not a second copy of its rule.
+ */
+const kindedHouseSource = "HouseVaultFactoryKinded";
+const kindedHouseSourced = kindedHouseFactorySourcesFor({
+  clearinghouse: V2_REGISTRY.contracts.clearinghouse ?? undefined,
+  envStartBlock: 64_000_000,
+  registry: V2_REGISTRY,
+}) !== undefined;
+function sourcesOf(concrete: string): string[] {
+  if (concrete === "V4BuybackExecutor") return [buybackSource];
+  if (concrete === "HouseVaultFactory") return [concrete, kindedHouseSource];
+  return [concrete];
+}
 
 /**
  * What is STILL not handled on a configured source, with the reason for each one individually.
- * T-295 handled the other 49 by giving each fact a column; an aggregate "the rest are ignorable"
- * is exactly what this row existed to prevent, so anything added here needs its own sentence.
+ * A change handled the other 49 by giving each fact a column; an aggregate "the rest are ignorable"
+ * is exactly what this list exists to prevent, so anything added here needs its own sentence.
  */
 const DELIBERATE: Record<string, string> = {
   "EarnVault:Approval":
@@ -39,13 +64,37 @@ const DELIBERATE: Record<string, string> = {
     "account is marked blocked. The same transaction always emits ProtocolAccountSet, which IS " +
     "handled (src/v2/houseVault.ts:410), so the fact is derivable; what is not indexed is the " +
     "moment the vault became armed. Give it a column the day a view shows arming state.",
+  // The price sources' ADMIN events are handled (src/v2/adminConfig.ts); these four are data.
+  "UniV3TwapSource:Recorded":
+    "The TWAP this source recorded for one (underlying, expiry). The price and whether it was usable " +
+    "already persist from SettlementOracle:SourceRecorded (src/v2/oracle.ts), which carries " +
+    "(underlying, expiry, sourceIndex, ok, price) per recorded source. Not indexed: meanTick and " +
+    "harmonicMeanLiquidity. They need their own table in ponder.schema.ts, which is outside T-417's fence.",
+  "DataStreamsSource:Recorded":
+    "The same fact for the Data Streams source, and the same reason: the price persists through " +
+    "SettlementOracle:SourceRecorded. Not indexed: the `observations` count behind the price, which " +
+    "needs a table outside T-417's fence.",
+  "DataStreamsSource:ObservationStored":
+    "One stored Data Streams report (observedAt, price, mid, uiMultiplier) per push. It is a price " +
+    "tape, not a setting, and nothing reads it yet: no view, route or rule. Give it a table sized " +
+    "for tape volume the day something displays the observation history.",
+  "DataStreamsSource:ReportSkipped":
+    "Why a pushed report was not stored (report index, feedId, reason code). A keeper-health " +
+    "signal with no consumer and no table; the settlement fact it could explain (a missing price) " +
+    "already shows as SourceRecorded ok=false. Give it a table with the keeper-health view.",
 };
 const pendingKeys = Object.keys(DELIBERATE).sort();
 const canonicalKeys = ["EarnVault:Funded"]; // OrderBook funding attempts are the canonical projection.
-const awaitingBroadcast = [
-  "ChainlinkFeedSource", "DataStreamsSource", "Erc4626VenueAdapter", "Hedger",
-  "StockLoanAdapter", "StockVenueAdapter", "UniV3PayoutAdapter", "UniV3TwapSource",
+/**
+ * No source because the registry has no address to give one. hedger and stockVenueAdapter are null
+ * in ops/markets/tier1.json v2.contracts (not deployed); StockLoanAdapter, Erc4626VenueAdapter and
+ * UniV3PayoutAdapter have no registry field at all. Each needs the registry to carry an address AND
+ * a creation block before it can be sourced.
+ */
+const noRegistryAddress = [
+  "Erc4626VenueAdapter", "Hedger", "StockLoanAdapter", "StockVenueAdapter", "UniV3PayoutAdapter",
 ];
+const priceSources = ["ChainlinkFeedSource", "DataStreamsSource", "UniV3TwapSource"];
 
 type Row = { source: string; event: string; abi: string; handler: string | null };
 
@@ -193,8 +242,7 @@ function matrix(
 ): Row[] {
   const rows: Row[] = [];
   const seenSources = new Set<string>();
-  for (const [concrete, events] of exported) {
-    const source = concrete === "V4BuybackExecutor" ? buybackSource : concrete;
+  for (const [concrete, events] of exported) for (const source of sourcesOf(concrete)) {
     const configured = sources.get(source);
     if (configured !== undefined) {
       seenSources.add(source);
@@ -235,6 +283,8 @@ describe("concrete v8 event coverage", () => {
       "V2_REWARDS_DISTRIBUTOR", "V2_HOUSE_VAULT_FACTORY", "V2_EARN_VAULT", "V2_ZAP_HELPER",
     ];
     addresses.forEach((key, index) => vi.stubEnv(key, `0x${(index + 1).toString(16).padStart(40, "0")}`));
+    // The price sources register only for the registry's own deployment.
+    vi.stubEnv("V2_CLEARINGHOUSE", V2_REGISTRY.contracts.clearinghouse);
     vi.stubEnv("V2_FLYWHEEL_TOKEN_ADDRESS", "0x0000000000000000000000000000000000000011");
     vi.stubEnv("V2_START_BLOCK", "64000000");
     vi.stubEnv("V2_FLYWHEEL_START_BLOCK", "63999990");
@@ -252,18 +302,53 @@ describe("concrete v8 event coverage", () => {
       // contract even if its name begins with I and the filter excludes it.
       expect(readdirSync(abiDir).filter((name) => name.endsWith(".json"))).toHaveLength(42);
       expect(exported.size).toBe(25);
-      expect(sources.size).toBe(17);
-      expect(rows).toHaveLength(201);
+      // +1 source the day the registry records a daily factory (the census stubs the registry's Clearinghouse).
+      // And whenever the registry names a launch factory, as the baked one does, since the census configures it.
+      expect(kindedHouseSourced, "the baked registry names a launch factory and the census configures it").toBe(
+        typeof V2_REGISTRY.contracts.houseVaultFactory === "string",
+      );
+      expect(sources.size).toBe(20 + (kindedHouseSourced ? 1 : 0));
+      expect(sources.has(kindedHouseSource)).toBe(kindedHouseSourced);
+      for (const name of priceSources) expect(sources.has(name), name).toBe(true);
+      // 203 + the HouseVaultFactory export's two events again, under the kinded source, sourced or not,
+      // + 2 EarnVault rows, both HANDLED (PaymentDeferred, DeferredClaimed).
+      // + 4 v9 rows (the re-export): ChainlinkFeedSource BandSet / BandPinned and FeeSplitter
+      // UnroutedAssetRecovered and HouseVault:DepositedNow, both HANDLED.
+      // + 5 rows (a re-export of the settables), all HANDLED: FeeSplitter
+      // BuybackCapCeilingSet / BuybackCooldownSet, KeeperRewards:MaxBountySet, EarnVault:LimitsSet (settings,
+      // src/v2/adminConfig.ts) and HouseVault:PerformanceFeeBpsApplied (src/v2/houseVault.ts).
+      // + 1 row (a re-export): FeeSplitter:BuybackBalanceWrittenDown, HANDLED (src/v2/flywheel.ts).
+      // + 1 row (a re-export): AutoRoller:PositionClosed, HANDLED (src/v2/autoRoller.ts).
+      // + 2 rows (a re-export), both HANDLED as settings (src/v2/adminConfig.ts):
+      // SettlementOracle:HouseVaultFactorySet and HouseVault:BoundaryPinFailed.
+      // + 9 rows (the events; VenueReceivableSet does not exist): OrderBook OwedCredited /
+      // OrderPlacedBy, PayoutRouter RouteFeeRefreshed, SettlementOracle SettlementPinConfirmed, EarnVault
+      // HighWaterMarkSet / VenuePulledForFunding, HouseVault PerformanceFeePaid / EpochBatchesPriced / EpochOpened.
+      // All HANDLED.
+      // + 1 row (the tenth event left out): EarnVault:VenueWrittenOff, HANDLED
+      // (src/v2/earn.ts, v2EarnVaultVenueWriteOff).
       // The named comparison runs before the count, so a lost handler fails naming its event
-      // instead of as a bare 110-vs-109.
+      // instead of as a bare 110-vs-109. (It used to sit after the count, so a new
+      // unhandled event failed as 218-vs-217 and never reached this line.)
       const unhandled = rows.filter((row) => sources.has(row.source) && row.handler === null)
         .map((row) => `${row.source}:${row.event}`).sort();
       expect(unhandled).toEqual([...pendingKeys, ...canonicalKeys].sort());
-      expect(rows.filter((row) => row.handler !== null)).toHaveLength(160);
+      expect(rows).toHaveLength(230);
+      // +3 (BandSet, BandPinned, UnroutedAssetRecovered). +1, HouseVault:DepositedNow.
+      // +5, the five rows above. +1, FeeSplitter:BuybackBalanceWrittenDown.
+      // +1, AutoRoller:PositionClosed. +2, the two above. +9, the nine
+      // events named above. +1, EarnVault:VenueWrittenOff.
+      expect(rows.filter((row) => row.handler !== null)).toHaveLength(199 + (kindedHouseSourced ? 2 : 0));
+      // Unsourced: the five with no registry address, plus the kinded factory source while the registry has none.
+      const unsourced = kindedHouseSourced ? noRegistryAddress : [...noRegistryAddress, kindedHouseSource].sort();
       expect(rows.filter((row) => !sources.has(row.source)).map((row) => row.source).filter(
         (name, index, names) => names.indexOf(name) === index
-      ).sort()).toEqual(awaitingBroadcast);
-      expect(rows.filter((row) => !sources.has(row.source))).toHaveLength(37);
+      ).sort()).toEqual(unsourced);
+      expect(rows.filter((row) => !sources.has(row.source))).toHaveLength(21 + (kindedHouseSourced ? 0 : 2));
+      // Teaching the census the kinded mapping did not open a hole for real orphans. A registration for a
+      // source no export maps to (here a misspelling of the kinded one) still fails by name.
+      expect(() => matrix(exported, sources, new Map([...handlers, ["HouseVaultFactoryKindred:VaultCreated", "stray.ts:1"]])))
+        .toThrow(/orphan handler HouseVaultFactoryKindred:VaultCreated/);
       expect(handlers.has("Clearinghouse:MarketRegistered")).toBe(true); // positive control
       // A textual grep would count this comment as a handler.
       expect(registrationsFromSource("comment-only.ts", '// ponder.on("Clearinghouse:MarketRegistered", fn)').size).toBe(0);
@@ -300,6 +385,69 @@ describe("concrete v8 event coverage", () => {
       expect(broken.filter((row) => sources.has(row.source) && row.handler === null)
         .map((row) => `${row.source}:${row.event}`).sort()).not.toEqual(unhandled);
       expect(() => strictCoverage(broken, sources)).toThrow(/Clearinghouse:MarketRegistered/);
+    } finally {
+      vi.unstubAllEnvs();
+      vi.resetModules();
+    }
+  });
+
+  it("a daily-only registry sources the kinded factory and the vaults, and every event on them is handled", async () => {
+    vi.resetModules();
+    vi.doMock("../../lib/v2/marketRegistry.generated", async (importOriginal) => {
+      const real = (await importOriginal()) as { V2_REGISTRY: Record<string, any> };
+      return {
+        V2_REGISTRY: {
+          ...real.V2_REGISTRY,
+          contracts: { ...real.V2_REGISTRY.contracts, houseVaultFactory: null },
+          house: {
+            factories: [{ kind: "daily", address: "0x000000000000000000000000000000000000dA11", deployBlock: 70_000_000 }],
+            vaults: [{ ticker: "NVDA", kind: "daily", address: "0x000000000000000000000000000000000000b0d1" }],
+          },
+        },
+      };
+    });
+    vi.stubEnv("PONDER_RPC_URL_4663", "https://example.invalid/rpc");
+    for (const key of ["V2_ORDER_BOOK", "V2_SETTLEMENT_ORACLE", "V2_AUTO_ROLLER", "V2_MAKER_REGISTRY"]) {
+      vi.stubEnv(key, "0x000000000000000000000000000000000000c012");
+    }
+    // No V2_HOUSE_VAULT_FACTORY / V2_HOUSE_START_BLOCK: there is no launch factory after the daily-only redeploy.
+    vi.stubEnv("V2_CLEARINGHOUSE", V2_REGISTRY.contracts.clearinghouse);
+    vi.stubEnv("V2_START_BLOCK", "64000000");
+    try {
+      const { default: config } = await import("../../ponder.config");
+      const sources = new Map(Object.entries(config.contracts).map(([name, value]) =>
+        [name, value.abi as readonly { type: string; name?: string }[]]
+      ));
+      expect(sources.has("HouseVaultFactory"), "no launch factory, so no launch source").toBe(false);
+      expect(sources.has(kindedHouseSource)).toBe(true);
+      expect(sources.has("HouseVault")).toBe(true);
+      // matrix(): the kinded source's events equal the HouseVaultFactory export's, and no handler is an orphan.
+      const rows = matrix(concreteExports(), sources, registrations());
+      const house = rows.filter((row) => row.source === kindedHouseSource || row.source === "HouseVault");
+      expect(house.filter((row) => row.handler === null).map((row) => `${row.source}:${row.event}`).sort(),
+        "only the deliberate HouseVault debt is unhandled").toEqual(pendingKeys.filter((key) => key.startsWith("HouseVault:")));
+      const kinded = (event: string) => rows.find((row) => row.source === kindedHouseSource && row.event === event)?.handler;
+      expect(kinded("VaultCreated")).toMatch(/^houseVault\.ts:/);
+      expect(kinded("AuthorityUpdated")).toMatch(/^adminConfig\.ts:/);
+    } finally {
+      vi.doUnmock("../../lib/v2/marketRegistry.generated");
+      vi.unstubAllEnvs();
+      vi.resetModules();
+    }
+  });
+
+  it("registers no price source for a Clearinghouse that is not the registry's", async () => {
+    vi.resetModules();
+    vi.stubEnv("PONDER_RPC_URL_4663", "https://example.invalid/rpc");
+    for (const key of ["V2_CLEARINGHOUSE", "V2_ORDER_BOOK", "V2_SETTLEMENT_ORACLE", "V2_AUTO_ROLLER", "V2_MAKER_REGISTRY"]) {
+      vi.stubEnv(key, "0x000000000000000000000000000000000000c011");
+    }
+    vi.stubEnv("V2_START_BLOCK", "64000000");
+    try {
+      const { default: config } = await import("../../ponder.config");
+      const names = Object.keys(config.contracts);
+      expect(names, "positive control: the core sources did register").toContain("Clearinghouse");
+      for (const name of priceSources) expect(names).not.toContain(name);
     } finally {
       vi.unstubAllEnvs();
       vi.resetModules();

@@ -2,12 +2,13 @@
 
 import type { ReactNode } from "react";
 
-import { Card, CardHead, CardMeta, CardTitle, Chip, ExternalLink, Notice, PageHead, Stat, Table } from "@/components/ui";
+import { Card, CardHead, CardMeta, CardTitle, Chip, ExternalLink, InfoTip, Notice, PageHead, Stat, Table } from "@/components/ui";
 import type { ChipTone, StatTone } from "@/components/ui";
 import { txUrl } from "@/lib/chain";
-import { MARKET, SHARE_TICKER, VAULT } from "@/lib/contracts";
+import { SHARE_TICKER, VAULT } from "@/lib/contracts";
 import type { CycleRow } from "@/lib/api";
-import { fmtRealizedWeek, fmtUsdg, fmtUtcDate, premiumPerShare, tvlUsdg } from "@/lib/format";
+import { Time } from "@/components/ui/Time";
+import { fmtRealizedWeek, fmtUsdg, premiumPerShare, tvlUsdg } from "@/lib/format";
 import { useCycleHistory, weekResult } from "@/lib/history";
 import type { WeekResult } from "@/lib/history";
 
@@ -15,7 +16,7 @@ import type { WeekResult } from "@/lib/history";
 const HINT = "cursor-help underline decoration-line-2 decoration-dotted underline-offset-4";
 
 /**
- * One of the three summary figures over the table: its own card holding one Stat. W-13 finds each
+ * One of the three summary figures over the table: its own card holding one Stat. The fork acceptance run finds each
  * card by the Stat's label (`name` here) and reads the value and the line under it.
  */
 function SummaryTile({
@@ -85,7 +86,7 @@ function sumKnown(rows: CycleRow[], figure: (row: CycleRow) => bigint | undefine
  * later Harvest when the claim is retried; the row then says "recovered" and keeps the mark,
  * because the close did strand and that is history.
  *
- * Premium and strike proceeds are separate columns (W-21). On an assigned week the closing
+ * Premium and strike proceeds are separate columns. On an assigned week the closing
  * harvest also sweeps the USDG the assigned collateral was sold for at the strike. That is
  * returned principal: it is credited to holders, but it is not premium, and no premium column,
  * total or ratio on this page includes it.
@@ -111,9 +112,7 @@ export default function ActivityPage() {
         title="Every week, including the zeros"
         lede={
           <p>
-            One row per cycle. Filled weeks show what actually landed; weeks where nobody bought the
-            call show <strong className="font-semibold text-ink">unfilled, 0</strong>: nothing was written,
-            so nothing could be assigned. No week is ever extrapolated to a longer period.
+            One row per week. A week nobody bought shows <strong className="font-semibold text-ink">unfilled, 0</strong>.
           </p>
         }
       />
@@ -145,11 +144,7 @@ export default function ActivityPage() {
             className="sm:col-span-2 lg:col-span-1"
             name="Contracts assigned"
             value={totalAssigned.toString()}
-            sub={
-              <>
-                collateral taken at the strike · {fmtUsdg(totalStrike)} USDG strike proceeds, not premium
-              </>
-            }
+            sub={<>{fmtUsdg(totalStrike)} USDG strike proceeds</>}
           />
         </div>
 
@@ -161,7 +156,14 @@ export default function ActivityPage() {
 
         <Card>
           <CardHead>
-            <CardTitle>Weekly results</CardTitle>
+            {/* The tip sits beside the title, not in it: the fork acceptance run matches the title text exactly. */}
+            <div className="flex items-center gap-2">
+              <CardTitle>Weekly results</CardTitle>
+              <InfoTip label="About weekly results">
+                Strike proceeds are returned collateral, not premium, so no premium column counts them. Net/TVL is one
+                week&apos;s net premium over the collateral&apos;s value.
+              </InfoTip>
+            </div>
             <CardMeta>
               {source === "indexer" ? "indexer" : source === "chain" ? "rebuilt from vault logs" : "no source"}
             </CardMeta>
@@ -177,19 +179,19 @@ export default function ActivityPage() {
                 <th>Cycle</th>
                 <th>Closed</th>
                 <th>Strike</th>
-                <th className={HINT} title="contracts sold, each written inside the fill that bought it (the sum of the week's CallsWritten)">Sold</th>
+                <th className={HINT} title="Calls sold that week">Sold</th>
                 <th>Assigned</th>
-                <th className={HINT} title="premium buyers paid the vault in USDG, strike proceeds excluded">Premium</th>
+                <th className={HINT} title="USDG buyers paid, before the fee">Premium</th>
                 <th>Fee</th>
-                <th className={HINT} title="premium after the protocol fee, strike proceeds excluded">Net premium</th>
+                <th className={HINT} title="Premium after the fee">Net premium</th>
                 <th
                   className={HINT}
-                  title="Strike proceeds (assignment): USDG received for collateral taken at the strike. Returned principal, not premium."
+                  title="USDG paid for stock taken at the strike. Not premium."
                 >
                   Strike proceeds
                 </th>
-                <th className={HINT} title={`net premium in USDG per one ${SHARE_TICKER} share`}>Premium/share</th>
-                <th className={HINT} title="net premium over collateral valued at the feed spot at harvest">Net/TVL</th>
+                <th className={HINT} title={`Net premium per ${SHARE_TICKER}`}>Premium/share</th>
+                <th className={HINT} title="Net premium over the collateral's value that week">Net/TVL</th>
                 <th>Result</th>
                 <th>Tx</th>
               </tr>
@@ -211,8 +213,8 @@ export default function ActivityPage() {
                         : isLoading
                           ? "Loading…"
                           : source === "none"
-                            ? "History is unavailable right now. The vault's own state on the other pages is read straight from the chain and is unaffected."
-                            : "No cycle has run yet. The first row appears after the first week closes."}
+                            ? "History is unavailable right now."
+                            : "No week has closed yet."}
                     </span>
                   </td>
                 </tr>
@@ -232,7 +234,7 @@ export default function ActivityPage() {
                   return (
                     <tr key={row.cycle}>
                       <td className="font-semibold">#{row.cycle}</td>
-                      <td className="text-ink-2!">{fmtUtcDate(row.closedAt)}</td>
+                      <td className="text-ink-2!">{row.closedAt ? <Time at={Number(row.closedAt)} dateOnly /> : "—"}</td>
                       <td>{row.strikeUsdg === undefined ? "—" : fmtUsdg(row.strikeUsdg)}</td>
                       <td>{sold.toString()}</td>
                       <td>{assigned.toString()}</td>
@@ -271,25 +273,6 @@ export default function ActivityPage() {
               )}
             </tbody>
           </Table>
-
-          <div className="mt-1 grid gap-1.5 border-t border-line pt-4 text-[12.5px] leading-[1.55] text-ink-3 [&>p]:max-w-[78ch]">
-            <p>
-              &ldquo;Net / TVL&rdquo; is net premium divided by the vault&apos;s {MARKET} collateral
-              valued at the feed spot recorded at harvest. It describes one week and is never scaled to
-              a longer period. A dash means the indexer has not recorded a collateral snapshot for that
-              harvest.
-            </p>
-            <p>
-              &ldquo;Strike proceeds&rdquo; is the USDG received on an assigned week for the collateral
-              taken at the strike. It is credited to holders with the premium, but it is returned
-              collateral, not earnings, so it is left out of the premium, net premium, per-share and
-              Net / TVL columns.
-            </p>
-            <p>
-              &ldquo;Sold&rdquo; is also the number written: each fill writes exactly the contracts it buys, so the
-              vault is never assigned on more than it sold.
-            </p>
-          </div>
         </Card>
       </div>
     </>

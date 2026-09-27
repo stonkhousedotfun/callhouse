@@ -21,18 +21,46 @@
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { mkdtempSync, writeFileSync } from 'node:fs';
+import { createServer, type AddressInfo } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
 import { fileURLToPath } from 'node:url';
 import { V2ConfigError } from './config.js';
-import { MODE_STARTERS, bootFailureMessage, startV2, type ModeStarters } from './index.js';
+import { MODE_STARTERS, bootFailureMessage, shutdownFailureMessage, startV2, type ModeStarters } from './index.js';
 import { ModeNotImplementedError, requestedV2Mode, type RunningMode } from './mode.js';
 
 const PKG = fileURLToPath(new URL('../../', import.meta.url));
 const REGISTRY = fileURLToPath(new URL('./fixtures/registry-v2.json', import.meta.url));
+// The pricing boots read this calendar, not the live ops/markets/events.json. Its tickers are all in
+// REGISTRY, so the boot does not depend on which markets the live calendar names (SPCX was added there once).
+const EVENTS = fileURLToPath(new URL('./fixtures/events-v2.json', import.meta.url));
 const KEY = `0x${'11'.repeat(32)}`;
 const RPC = 'http://127.0.0.1:9';
+
+/**
+ * A port nothing holds on 127.0.0.1, for a pricing boot these tests then read over 127.0.0.1. PRICING_PORT 0
+ * will not do: on macOS a no-host (`::`) bind for port 0 can be handed a port another process already holds on
+ * 127.0.0.1, which then answers the read. A 127.0.0.1 bind is never handed a held port; after it lets go, only a
+ * listener choosing exactly this port before the boot binds it could take it.
+ */
+async function loopbackPort(): Promise<number> {
+  return new Promise((resolve, reject) => {
+    const probe = createServer();
+    probe.once('error', reject);
+    probe.listen(0, '127.0.0.1', () => {
+      const port = (probe.address() as AddressInfo).port;
+      probe.close(() => resolve(port));
+    });
+  });
+}
+/**
+ * What a pricing boot needs since a change made Massive the only provider (PRICING_CHAIN_PROVIDER defaults to
+ * massive, and pricing/main.ts refuses to boot without MASSIVE_API_KEY). The key is a made-up value that only passes the
+ * format check; the API URL is a dead local https port, so a download that ran by mistake could not reach Massive; and
+ * warm-up is off (its default, stated here), so the boot downloads nothing.
+ */
+const PRICING_MASSIVE = { MASSIVE_API_KEY: 'not-a-real-massive-key', MASSIVE_API_URL: 'https://127.0.0.1:9', PRICING_CHAIN_WARM_UP: '0' };
 
 interface Exit {
   code: number | null;
@@ -118,7 +146,7 @@ test('V2_MODE unset: a full v1 factory boot (database, boot line, chain read, fa
                         V2_MODE SET: v2
 //////////////////////////////////////////////////////////////*/
 
-test('V2_MODE=cranker with a valid environment boots the cranker (K2-03) as far as the chain, and the v1 config is never evaluated', async () => {
+test('V2_MODE=cranker with a valid environment boots the cranker as far as the chain, and the v1 config is never evaluated', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'callhouse-cranker-boot-'));
   const exit = await run('src/index.ts', { V2_MODE: 'cranker', RH_RPC: RPC, CRANKER_PK: KEY, V2_REGISTRY_PATH: REGISTRY, KEEPER_DB_PATH: join(dir, 'cranker.db'), KEEPER_BOOT_RETRY_MS: '0', CRANKER_PORT: '0' });
   assert.equal(exit.code, 1);
@@ -131,7 +159,7 @@ test('V2_MODE=cranker with a valid environment boots the cranker (K2-03) as far 
 test('V2_MODE set but wrong: an unknown mode, and a bad mm environment read from KEEPER_ENV_FILE, each exit 1 with v2\'s list', async () => {
   const unknown = await run('src/index.ts', { V2_MODE: 'crank' });
   assert.equal(unknown.code, 1);
-  assert.match(unknown.stderr, /v2 configuration is not usable\. Fix these and restart:\n {2}V2_MODE: must be one of cranker \| pricing \| mm \| pricer \(got "crank"\)/);
+  assert.match(unknown.stderr, /v2 configuration is not usable\. Fix these and restart:\n {2}V2_MODE: must be one of cranker \| pricing \| mm \| pricer \| guardian \(got "crank"\)/);
   assert.doesNotMatch(unknown.stderr, /Keeper configuration is not usable/);
 
   const dir = mkdtempSync(join(tmpdir(), 'callhouse-v2-env-'));
@@ -148,7 +176,7 @@ test('V2_MODE=pricing: boots on PRICING_PORT, answers /health, exits 0 on SIGTER
   let port: number | null = null;
   const exit = await run(
     'src/index.ts',
-    { V2_MODE: 'pricing', RH_RPC: RPC, PRICING_PORT: '0', V2_REGISTRY_PATH: REGISTRY, KEEPER_LOG_LEVEL: 'info' },
+    { V2_MODE: 'pricing', RH_RPC: RPC, PRICING_PORT: String(await loopbackPort()), V2_REGISTRY_PATH: REGISTRY, PRICING_EVENTS_PATH: EVENTS, KEEPER_LOG_LEVEL: 'info', ...PRICING_MASSIVE },
     {
       onStdout: (text, kill) => {
         const match = /"port":(\d+).*"msg":"pricing service listening"/.exec(text);
@@ -164,7 +192,8 @@ test('V2_MODE=pricing: boots on PRICING_PORT, answers /health, exits 0 on SIGTER
       },
     },
   );
-  assert.ok(port !== null && port > 0, `no listening line in: ${exit.stdout}`);
+  // Stderr too, so a refused boot (MASSIVE_API_KEY missing, say) fails naming its reason.
+  assert.ok(port !== null && port > 0, `no listening line in: ${exit.stdout}\nstderr: ${exit.stderr}`);
   assert.equal(exit.signal, null);
   assert.equal(exit.code, 0, exit.stderr);
 });
@@ -181,32 +210,76 @@ test('startV2 hands each mode its own validated config; the pricing starter also
     cranker: async (c) => (seen.push(`cranker ${c.keyEnv} ${c.port}`), fakeRunning('cranker')),
     mm: async (c) => (seen.push(`mm ${c.keyEnv} ${c.pricingUrl}`), fakeRunning('mm')),
     pricer: async (c) => (seen.push(`pricer ${c.keyEnv} ${c.indexerUrl}`), fakeRunning('pricer')),
+    guardian: async (c) => (seen.push(`guardian ${c.keyEnv} ${c.port} ${c.tuning.autoVeto} ${c.tuning.scaleFactor}`), fakeRunning('guardian')),
     pricing: async (c, env) => (seen.push(`pricing ${c.pricing.port} ${env.PRICING_PORT}`), fakeRunning('pricing')),
   };
   const common = { RH_RPC: RPC, V2_REGISTRY_PATH: REGISTRY };
   await startV2({ ...common, V2_MODE: 'cranker', CRANKER_PK: KEY }, starters);
   await startV2({ ...common, V2_MODE: 'mm', MM_QUOTER_PK: KEY, PRICING_URL: 'http://p:8790', INDEXER_URL: 'http://i:42069', MM_KILL_TOKEN: 'k'.repeat(32) }, starters);
   await startV2({ ...common, V2_MODE: 'pricer', PRICER_PK: KEY, PRICING_URL: 'http://p:8790', INDEXER_URL: 'http://i:42069' }, starters);
-  await startV2({ ...common, V2_MODE: 'pricing', PRICING_PORT: '8799' }, starters);
-  assert.deepEqual(seen, ['cranker CRANKER_PK 8792', 'mm MM_QUOTER_PK http://p:8790', 'pricer PRICER_PK http://i:42069', 'pricing 8799 8799']);
+  await startV2({ ...common, V2_MODE: 'guardian', GUARDIAN_PK: KEY }, starters);
+  await startV2({ ...common, V2_MODE: 'pricing', PRICING_PORT: '8799', ...PRICING_MASSIVE }, starters);
+  assert.deepEqual(seen, [
+    'cranker CRANKER_PK 8792',
+    'mm MM_QUOTER_PK http://p:8790',
+    'pricer PRICER_PK http://i:42069',
+    'guardian GUARDIAN_PK 8795 true 10',
+    'pricing 8799 8799',
+  ]);
   await assert.rejects(startV2({ V2_MODE: 'cranker' }, starters), V2ConfigError);
 });
 
-test('the real starters: the cranker, the MM bot and the pricer boot (and stop at an unreachable chain); pricing starts and closes', async () => {
+test('the real starters: the cranker, the MM bot, the pricer and the guardian boot (and stop at an unreachable chain); pricing starts and closes', async () => {
   const common = { RH_RPC: RPC, V2_REGISTRY_PATH: REGISTRY, PRICING_URL: 'http://p:8790', INDEXER_URL: 'http://i:42069', KEEPER_BOOT_RETRY_MS: '0' };
   for (const env of [
     { ...common, V2_MODE: 'cranker', CRANKER_PK: KEY, CRANKER_PORT: '0', KEEPER_DB_PATH: ':memory:', KEEPER_LOG_LEVEL: 'silent' },
     { ...common, V2_MODE: 'mm', MM_QUOTER_PK: KEY, MM_PORT: '0', MM_KILL_TOKEN: 'k'.repeat(32), KEEPER_DB_PATH: ':memory:', KEEPER_LOG_LEVEL: 'silent' },
     { ...common, V2_MODE: 'pricer', PRICER_PK: KEY, PRICER_PORT: '0', KEEPER_DB_PATH: ':memory:', KEEPER_LOG_LEVEL: 'silent' },
+    // The guardian's first chain read is its boot role check (canCall), so it stops there.
+    { ...common, V2_MODE: 'guardian', GUARDIAN_PK: KEY, GUARDIAN_PORT: '0', KEEPER_DB_PATH: ':memory:', KEEPER_LOG_LEVEL: 'silent' },
   ]) {
     await assert.rejects(startV2(env, MODE_STARTERS), (error: unknown) => !(error instanceof ModeNotImplementedError) && /HTTP request failed/.test(String(error)));
   }
 
-  const pricing = await startV2({ V2_MODE: 'pricing', RH_RPC: RPC, V2_REGISTRY_PATH: REGISTRY, PRICING_PORT: '0', KEEPER_LOG_LEVEL: 'silent' }, MODE_STARTERS);
+  const pricingPort = await loopbackPort();
+  const pricing = await startV2({ V2_MODE: 'pricing', RH_RPC: RPC, V2_REGISTRY_PATH: REGISTRY, PRICING_EVENTS_PATH: EVENTS, PRICING_PORT: String(pricingPort), KEEPER_LOG_LEVEL: 'silent', ...PRICING_MASSIVE }, MODE_STARTERS);
   assert.equal(pricing.mode, 'pricing');
-  assert.ok(pricing.port !== null && pricing.port > 0);
-  assert.equal((await fetch(`http://127.0.0.1:${pricing.port}/health`)).status, 200);
-  await pricing.close();
+  assert.equal(pricing.port, pricingPort);
+  // Closed in `finally`: a failed assertion would otherwise leave the server holding the runner open.
+  try {
+    const health = await fetch(`http://127.0.0.1:${pricing.port}/health`);
+    assert.equal(health.status, 200);
+    // The calendar the boot loaded is EVENTS (through PRICING_EVENTS_PATH), not the live ops/markets/events.json.
+    assert.deepEqual(((await health.json()) as { eventRecheck: unknown }).eventRecheck, { NVDA: { recheckBy: '2099-12-31', overdue: false, coveredBy: null } });
+  } finally {
+    await pricing.close();
+  }
+});
+
+/*
+ * (no fallback). Pricing without MASSIVE_API_KEY
+ * refuses to boot, by name, before any starter runs. The same environment with the key boots (the tests above), so this
+ * pins the key as the one missing thing.
+ */
+test('pricing refuses to boot without MASSIVE_API_KEY, naming it; nothing is started', async () => {
+  const started: string[] = [];
+  const starters: ModeStarters = {
+    cranker: async () => (started.push('cranker'), fakeRunning('cranker')),
+    mm: async () => (started.push('mm'), fakeRunning('mm')),
+    pricer: async () => (started.push('pricer'), fakeRunning('pricer')),
+    guardian: async () => (started.push('guardian'), fakeRunning('guardian')),
+    pricing: async () => (started.push('pricing'), fakeRunning('pricing')),
+  };
+  const { MASSIVE_API_KEY: _key, ...withoutKey } = PRICING_MASSIVE;
+  const env = { V2_MODE: 'pricing', RH_RPC: RPC, V2_REGISTRY_PATH: REGISTRY, PRICING_EVENTS_PATH: EVENTS, PRICING_PORT: '0', ...withoutKey };
+  await assert.rejects(startV2(env, starters), (error: unknown) => error instanceof V2ConfigError
+    && /MASSIVE_API_KEY: required when PRICING_CHAIN_PROVIDER=massive/.test(error.message));
+  // Naming the provider explicitly changes nothing: massive is the only one production accepts.
+  await assert.rejects(startV2({ ...env, PRICING_CHAIN_PROVIDER: 'massive' }, starters), /MASSIVE_API_KEY: required when PRICING_CHAIN_PROVIDER=massive/);
+  assert.deepEqual(started, [], 'no starter ran');
+  // Control: the same environment with the key gets as far as the pricing starter.
+  await startV2({ ...env, ...PRICING_MASSIVE }, starters);
+  assert.deepEqual(started, ['pricing']);
 });
 
 test('bootFailureMessage: not built yet, a config list as is, anything else prefixed with the mode', () => {
@@ -227,4 +300,18 @@ test('bootFailureMessage: an RPC failure names the RPC by origin only; a key in 
   assert.doesNotMatch(message, /SECRETKEY456|QUERYSECRET/);
   assert.match(message, /http:\/\/127\.0\.0\.1:9/);
   assert.match(message, /v2 cranker failed to start: /);
+});
+
+test('shutdownFailureMessage: a rejected close() names the mode and the RPC by origin only; a key in the URL is never printed', async () => {
+  // main() printed error.message raw on an unclean SIGTERM, so a keyed RPC URL in a viem error reached Railway.
+  const { createPublicClient, http } = await import('viem');
+  const client = createPublicClient({ transport: http('http://127.0.0.1:9/v2/SECRETKEY789?dkey=QUERYSECRET2', { retryCount: 0, timeout: 2_000 }) });
+  const error = await client.getBlockNumber().catch((e: unknown) => e);
+  assert.match(String((error as Error).message), /SECRETKEY789/, 'viem\'s own message carries the URL');
+  const message = shutdownFailureMessage(error, 'guardian');
+  assert.doesNotMatch(message, /SECRETKEY789|QUERYSECRET2/);
+  assert.match(message, /^guardian: unclean shutdown: /);
+  assert.match(message, /http:\/\/127\.0\.0\.1:9/);
+  assert.equal(shutdownFailureMessage(new Error('store closed twice'), 'mm'), 'mm: unclean shutdown: store closed twice');
+  assert.equal(shutdownFailureMessage('plain reason', 'pricer'), 'pricer: unclean shutdown: plain reason');
 });

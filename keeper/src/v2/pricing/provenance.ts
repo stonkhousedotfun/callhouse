@@ -1,8 +1,8 @@
 /**
- * The provenance of one fair value (02-interfaces.md §5.1 PricingProvenance, contract `O3-307/1`),
- * built in process from the neutral chain it was priced on. K3-311 keeps it INTERNAL: fair.ts
+ * The provenance of one fair value (PricingProvenance, contract `O3-307/1`),
+ * built in process from the neutral chain it was priced on. It is kept INTERNAL: fair.ts
  * attaches it to every FairQuote, and server.ts does not serialize it, so the legacy /fair body is
- * unchanged until the consumer-first order of §5.1 lets a producer emit it (X3-302, K3-301).
+ * unchanged until every consumer reads it, and only then may a producer emit it.
  * Money stays bigint USDG base units here; the wire shape is the serializer's job.
  *
  * WHAT IT NEVER DOES: guess. A clock the chain does not carry is null and its age is null. The
@@ -11,7 +11,7 @@
  * is `ready` only with no reason at all; Cboe states no quote time, so a Cboe price is `degraded` with
  * `quote-age-unknown`, which is the truth about that feed.
  *
- * UNCERTAINTY (K3-312). `quality.uncertainty` carries the bounds short-maturity.ts derives for a read
+ * UNCERTAINTY. `quality.uncertainty` carries the bounds short-maturity.ts derives for a read
  * the listings do not identify (before the first listing, an event inside a bracket, an event realized
  * since the surface, an early close); its reason codes follow the method's. Every bounded read has at
  * least one reason (`extrapolated`, `event-uncertainty` or `clock-early-close`), so it is never
@@ -40,13 +40,49 @@ import type { SurfaceInput } from './surface.js';
 
 export type ProvenanceMethod = 'listed' | 'interpolated' | 'extrapolated' | 'modeled' | 'external-indicative';
 
-/** §5.1 `quality.uncertainty`, with Money as bigint USDG base units per token. ivLow ≤ iv ≤ ivHigh and
+/** The /fair `quality.uncertainty`, with Money as bigint USDG base units per token. ivLow ≤ iv ≤ ivHigh and
  *  fairLowUsdg6 ≤ fair ≤ fairHighUsdg6 (short-maturity.ts). */
 export interface FairUncertainty {
   ivLow: number | null;
   ivHigh: number | null;
   fairLowUsdg6: bigint | null;
   fairHighUsdg6: bigint | null;
+}
+
+/**
+ * The spot inputs of one price (fair.ts TWO SPOTS AND A LIVE FORWARD): the Chainlink spot,
+ * the equity reference the token was mapped against (the parity forward, or the provider's underlying
+ * with the reason the forward was unavailable), the pool spot when the registry names a pool, and which
+ * token spot priced the request. Money is bigint USDG base units per token; `equity.price` is USD per share.
+ */
+export interface SpotInputs {
+  chainlinkUsdg6: bigint;
+  chainlinkUpdatedAt: number;
+  equity: {
+    source: 'parity-forward' | 'provider-underlying';
+    price: number | null;
+    observedAt: number | null;
+    /** The listed expiry day the forward was read at; null when none was listed. */
+    expiryDay: string | null;
+    pairs: number;
+    /** Why the forward was not used; null when it was. */
+    fallbackWhy: string | null;
+  };
+  /** Token (in share terms) vs `equity.price`, bps: the maxSpotDivergenceBps gate. */
+  equityDivergenceBps: number;
+  pool: {
+    address: string;
+    /** Null when the pool was unusable and poolRequired is off. */
+    spotUsdg6: bigint | null;
+    windowS: number;
+    harmonicLiquidity: bigint | null;
+    minLiquidity: bigint;
+    /** Pool vs Chainlink, bps; null when the pool was unusable. */
+    divergenceBps: number | null;
+    /** Why the pool spot was not used; null when it was read. */
+    unusable: string | null;
+  } | null;
+  pricedWith: 'chainlink' | 'pool';
 }
 
 export interface FairProvenance {
@@ -98,9 +134,11 @@ export interface FairProvenance {
     fallback: null;
   };
   pricedSpotUsdg6: bigint | null;
+  /** How the priced spot was reached; null when the caller did not say. */
+  spotInputs: SpotInputs | null;
 }
 
-/** §5.1's method for the service's FairMethod and the strike reads under it. A wing read (flat vol
+/** The /fair method for the service's FairMethod and the strike reads under it. A wing read (flat vol
  *  beyond the outermost listed strike) is an extrapolation even inside a listed expiry. */
 export function provenanceMethod(method: FairMethod, strikeMethods: ReadonlyArray<SurfaceInput['strikeMethod']>): ProvenanceMethod {
   if (method === 'listed-contract') return 'listed';
@@ -130,6 +168,7 @@ export interface ProvenanceInput {
   /** The read's uncertainty bounds and their reason codes (short-maturity.ts), kept after the method's. */
   uncertainty?: FairUncertainty | null;
   uncertaintyReasons?: readonly string[];
+  spotInputs?: SpotInputs | null;
 }
 
 export function buildFairProvenance(input: ProvenanceInput): FairProvenance {
@@ -167,7 +206,7 @@ export function buildFairProvenance(input: ProvenanceInput): FairProvenance {
   };
   for (const r of ages.reasons) add(r);
   // The underlying price is always an input (forward, spot divergence); an unknown clock on it is not
-  // fresh, so it keeps the estimate from `ready` (§5.1: ready never rests on an unknown input).
+  // fresh, so it keeps the estimate from `ready` (ready never rests on an unknown input).
   if (chain.underlying.price !== null && chain.underlying.observedAt === null) add('underlying-age-unknown');
   for (const row of rows) add(bookState(row.quote).reason);
   for (const r of checkIdentity(chain, canonical).reasons) add(r);
@@ -209,5 +248,6 @@ export function buildFairProvenance(input: ProvenanceInput): FairProvenance {
     expiryClock: { expiry: request.expiry, timeZone: 'America/New_York', basis: 'trading-time', yearsToExpiry: priced.yearsToExpiry },
     quality: { readiness: ready ? 'ready' : 'degraded', reasons, uncertainty, disagreement: null, fallback: null },
     pricedSpotUsdg6: input.spotUsdg6,
+    spotInputs: input.spotInputs ?? null,
   };
 }

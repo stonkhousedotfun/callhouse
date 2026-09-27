@@ -24,7 +24,7 @@ describe("single-series activity hierarchy", () => {
 });
 
 /**
- * T-431: the series facts print expiry and cutoff through the shared `stamp()`, not the local `ET`
+ * The series facts print expiry and cutoff through the shared `stamp()`, not the local `ET`
  * formatter this file carried. Same New York wall-clock time on each side of the daylight-saving
  * change: a formatter that lost its zone would print 8:00 PM / 9:00 PM on a UTC runner, and a
  * hard-coded suffix would name the wrong zone for half the year.
@@ -47,15 +47,20 @@ describe("series facts times", () => {
 
   it("renders expiry and the writing cutoff in New York, naming EDT or EST by the date", () => {
     const summer = facts(SUMMER);
-    expect(summer).toContain("Sep 21, 2026, 4:00 PM EDT");
-    expect(summer).toContain("Sep 21, 2026, 3:30 PM EDT");
+    expect(summer).toContain("Sep 21, 4:00 PM EDT"); // server render (and hydration) shows New York, zone named; the browser switches to the reader's zone.
+    expect(summer).toContain("Sep 21, 3:30 PM EDT");
 
     const winter = facts(WINTER);
-    expect(winter).toContain("Jan 21, 2026, 4:00 PM EST");
-    expect(winter).toContain("Jan 21, 2026, 3:30 PM EST");
+    expect(winter).toContain("Jan 21, 4:00 PM EST");
+    expect(winter).toContain("Jan 21, 3:30 PM EST");
   });
 
-  it("leaves the reader's-local-time row to the browser", () => {
-    expect(facts(SUMMER)).toContain("Your local time</dt><dd class=\"font-semibold\">Loading…");
+  // The Expires row itself switches to
+  // the reader's zone after mount and keeps the ET time beside it, so the separate "Your local time" row is gone.
+  it("has one Expires row and no separate local-time row", () => {
+    const html = facts(SUMMER);
+    expect(html).toContain("Expires</dt>");
+    expect(html).not.toContain("Your local time");
+    expect(html).not.toContain("Expires (New York)");
   });
 });

@@ -2,7 +2,7 @@
  * v1 run-off (SOLO_WIND_DOWN=1) through the real solo tick, with the factory, its accounts and the
  * feed stubbed; and the registry flag that turns it on, through ops/keeper-env.sh into this config.
  *
- * WHY THIS FILE EXISTS: ADR-10 freezes every v1 factory and lets its listed weeks expire. The keeper
+ * WHY THIS FILE EXISTS: the v1 run-off freezes every v1 factory and lets its listed weeks expire. The keeper
  * of a frozen factory must do three things and no more: never `setWeek` (a fresh week on a frozen
  * factory is a market nobody can list into), never `listFor` (every one reverts WritesAreHalted),
  * and keep settling every expired account, because nothing else hands an owner their collateral
@@ -15,14 +15,14 @@
  * The settle guard (both modes, pinned here because run-off is where it matters most): an expired
  * account with `claimKey() != 0` is not settled while USDG is paused, the account or the Clear is
  * frozen on USDG or blocked on the Stock Token, or the Stock Token is paused (the six reads of
- * `settle_safe`, ops/runbooks/v1-runoff.md step 8), nor while any of those reads fails. Each gate
+ * the run-off's `settle_safe` check), nor while any of those reads fails. Each gate
  * holds and alerts `v1_settle_held` once per account; a gate that opens again lets the account
  * settle on the next tick and forgets the alert; `claimKey() == 0` settles regardless; and with
  * every gate open the settles are the ones the tick always sent.
  *
  * The registry half: `v1RunOff: true` must render `SOLO_WIND_DOWN=1` and nothing else, `false` and
  * absent must render the same bytes, the committed files must be the render of the committed flag
- * (absent before the owner's v1 freeze, true after it: flipping it is a registry edit, not a code
+ * (absent before the v1 freeze, true after it: flipping it is a registry edit, not a code
  * change, so the test holds on both sides), and the line must parse into this config.
  *
  * HOW: the technique of roll.vol.test.ts. The keeper's own client methods are replaced per test and
@@ -718,14 +718,14 @@ test('registry v1RunOff: true renders SOLO_WIND_DOWN=1 and nothing else, false a
   const ops = (rel: string) => fileURLToPath(new URL(`../../ops/${rel}`, import.meta.url));
   const script = ops('keeper-env.sh');
   const real = JSON.parse(readFileSync(ops('markets/tier1.json'), 'utf8')) as { markets: Array<Record<string, any>> };
-  // What ops/keeper-env.sh renders: superseded-by-v2 rows (ADR-02) keep their no-factory file.
+  // What ops/keeper-env.sh renders: superseded-by-v2 rows keep their no-factory file.
   const rendered = real.markets.filter((m) => ['live', 'planned', 'superseded-by-v2'].includes(m.status));
   const nvda = real.markets.find((m) => m.ticker === 'NVDA');
   assert.ok(nvda?.deployment?.factory, 'NVDA is the live v1 factory');
   const noFactory = rendered.find((m) => !m.deployment?.factory);
   assert.ok(noFactory, 'a planned or superseded market with no factory');
-  // The committed flag is absent before the owner-run v1 freeze and true after it
-  // (ops/runbooks/v1-runoff.md step 6). Either way it is a registry edit plus a re-render, never code,
+  // The committed flag is absent before the admin-run v1 freeze and true after it.
+  // Either way it is a registry edit plus a re-render, never code,
   // so this test holds on both sides of the freeze.
   for (const m of real.markets.filter((x) => 'v1RunOff' in x)) {
     assert.equal(typeof m.v1RunOff, 'boolean', `${m.ticker}: committed v1RunOff is a boolean`);

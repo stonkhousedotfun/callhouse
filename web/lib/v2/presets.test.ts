@@ -1,13 +1,15 @@
 import { describe, expect, it } from "vitest";
-import { closestDelta, otmBps, presetAutoRollTarget, presetStrategy, resolvePresetPricing,
-  retainedSharesAtExpiry, roundAskToTick, writerQuote } from "./presets";
+import { V2_DEFAULTS } from "../markets.generated";
+import { getV2Market } from "../markets";
+import { closestDelta, dailyOffered, dailyWeekdaysLabel, dailyWeekdaysOf, expiriesAheadOf, otmBps, visiblePresets, weeklyOffered, presetAutoRollTarget,
+  presetStrategy, resolvePresetPricing, retainedSharesAtExpiry, roundAskToTick, writerQuote } from "./presets";
 import { selectSmartPricingReference } from "./smartPricing";
 
 describe("writer presets", () => {
   const spot = 200_000_000n;
   it("maps the four visible presets into bounded on-chain strategies", () => {
     const weekly = presetStrategy("weekly-5", spot, 2_000_000n, 25n);
-    expect(weekly).toMatchObject({ weekly: true, otmBps: 500, askBps: 100, minAskBps: 25,
+    expect(weekly).toMatchObject({ weekly: true, otmBps: 500, askBps: 100, minAskBps: 50,
       maxAskBps: 300, smartPricing: false, maxUnits: "25" });
     expect(presetStrategy("daily-2", spot, null, 1n).otmBps).toBe(200);
     expect(presetStrategy("weekly-10", spot, null, 1n).otmBps).toBe(1_000);
@@ -117,5 +119,88 @@ describe("writer quote and outcome", () => {
   it("prefills a valid AskWrite price tick from an arbitrary fair value", () => {
     expect(roundAskToTick(2_121_643n)).toBe(2_121_600n);
     expect(roundAskToTick(1n)).toBe(100n);
+  });
+});
+
+/*
+ * (six daily closes, no weekly ladder; registry v2.defaults.expiriesAhead { weekly: 0, daily: 6 }).
+ * Whether weeklies are offered is READ from the registry, so these assert against V2_DEFAULTS, not a typed value.
+ */
+describe("the weekly tenor follows the registry", () => {
+  it("offers weeklies exactly when the registry's weekly count is above zero, and today it is not", () => {
+    expect(weeklyOffered()).toBe(V2_DEFAULTS.expiriesAhead.weekly > 0);
+    expect(V2_DEFAULTS.expiriesAhead.weekly).toBe(0);
+    expect(weeklyOffered()).toBe(false);
+  });
+
+  it("a market's own override wins over the default, in both directions", () => {
+    expect(weeklyOffered({ expiriesAhead: { weekly: 2 } })).toBe(true);
+    expect(weeklyOffered({ expiriesAhead: { weekly: 0 } })).toBe(false);
+    // No weekly key: the default applies.
+    expect(weeklyOffered({ expiriesAhead: { daily: 3 } })).toBe(weeklyOffered());
+    expect(weeklyOffered(null)).toBe(weeklyOffered());
+  });
+
+  it("hides every weekly preset when weeklies are off, and shows all four when on", () => {
+    const off = visiblePresets(false);
+    expect(off.length).toBeGreaterThan(0);
+    expect(off.every((preset) => !preset.weekly)).toBe(true);
+    expect(off.map((preset) => preset.id)).toEqual(["daily-2"]);
+    expect(visiblePresets(true)).toHaveLength(4);
+  });
+});
+
+/*
+ * ("List Mon/Wed/Fri only"). NVDA's registry row sets dailyWeekdays; read from the
+ * COMPILED registry, so a registry change moves these.
+ */
+describe("the daily weekdays follow the registry", () => {
+  const overridesOf = (ticker: string) => getV2Market(ticker)!.v2.overrides;
+  it("NVDA lists Mon/Wed/Fri; SPCX and a row without the key get the default (every weekday)", () => {
+    expect(dailyWeekdaysOf(overridesOf("NVDA"))).toEqual(["mon", "wed", "fri"]);
+    expect(dailyWeekdaysLabel(overridesOf("NVDA"))).toBe("Mon, Wed and Fri");
+    expect(V2_DEFAULTS.dailyWeekdays).toEqual(["mon", "tue", "wed", "thu", "fri"]);
+    expect(dailyWeekdaysOf(overridesOf("SPCX"))).toEqual(V2_DEFAULTS.dailyWeekdays);
+    expect(dailyWeekdaysLabel(overridesOf("SPCX"))).toBeNull();
+    expect(dailyWeekdaysLabel(null)).toBeNull();
+    expect(dailyWeekdaysLabel({ dailyWeekdays: ["tue"] })).toBe("Tue");
+    // A malformed list is not trusted: the default stands (the builder and the keeper refuse it anyway).
+    expect(dailyWeekdaysOf({ dailyWeekdays: ["sun"] })).toEqual(V2_DEFAULTS.dailyWeekdays);
+    expect(dailyWeekdaysOf({ dailyWeekdays: [] })).toEqual(V2_DEFAULTS.dailyWeekdays);
+  });
+});
+
+/*
+ * SPCX's registry row sets expiriesAhead
+ * { weekly: 2, daily: 0 }. Before this, the "daily-2" preset was always shown and on SPCX could only throw "No open
+ * series match that expiry type right now." These read the COMPILED registry, so a registry change moves them.
+ */
+describe("the daily tenor follows the registry too", () => {
+  const overridesOf = (ticker: string) => getV2Market(ticker)!.v2.overrides;
+
+  it("SPCX lists Friday (weekly) expiries and no dailies; NVDA keeps the default dailies", () => {
+    expect(expiriesAheadOf(overridesOf("SPCX"))).toEqual({ weekly: 2, daily: 0 });
+    expect(dailyOffered(overridesOf("SPCX"))).toBe(false);
+    expect(weeklyOffered(overridesOf("SPCX"))).toBe(true);
+    expect(expiriesAheadOf(overridesOf("NVDA"))).toEqual(V2_DEFAULTS.expiriesAhead);
+    expect(dailyOffered(overridesOf("NVDA"))).toBe(true);
+    expect(weeklyOffered(overridesOf("NVDA"))).toBe(false);
+  });
+
+  it("a market's own daily count wins over the default, and no daily key falls back to it", () => {
+    expect(dailyOffered({ expiriesAhead: { daily: 0 } })).toBe(false);
+    expect(dailyOffered({ expiriesAhead: { daily: 3 } })).toBe(true);
+    expect(dailyOffered({ expiriesAhead: { weekly: 2 } })).toBe(V2_DEFAULTS.expiriesAhead.daily > 0);
+    expect(dailyOffered(null)).toBe(V2_DEFAULTS.expiriesAhead.daily > 0);
+  });
+
+  it("hides the daily preset on a market with no dailies: SPCX gets the three weekly presets only", () => {
+    const spcx = visiblePresets(weeklyOffered(overridesOf("SPCX")), dailyOffered(overridesOf("SPCX")));
+    expect(spcx.map((preset) => preset.id)).toEqual(["weekly-5", "weekly-delta-15", "weekly-10"]);
+    expect(spcx.every((preset) => preset.weekly)).toBe(true);
+    const nvda = visiblePresets(weeklyOffered(overridesOf("NVDA")), dailyOffered(overridesOf("NVDA")));
+    expect(nvda.map((preset) => preset.id)).toEqual(["daily-2"]);
+    // The second argument defaults to on, so a caller that predates it keeps its old list.
+    expect(visiblePresets(false)).toEqual(visiblePresets(false, true));
   });
 });

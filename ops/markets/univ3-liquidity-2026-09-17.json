@@ -1,8 +1,8 @@
 {
-  "_readme": "MEASURED UniV3 pool-liquidity input set for the v8 univ3MinLiquidity floors (T-216-O8-UNIV3-LIQUIDITY-INPUT-SET). This file is DATA, not a decision: it does NOT derive floors and does NOT set any registry value. T-200-O8-UNIV3-LIQUIDITY-FLOORS owns that.",
+  "_readme": "MEASURED UniV3 pool-liquidity input set for the v8 univ3MinLiquidity floors. This file is DATA, not a decision: it does NOT derive floors and does NOT set any registry value. Deriving the floors is a separate step.",
   "asOf": "2026-09-17",
   "isSnapshot": true,
-  "snapshotWarning": "THIS IS A FROZEN SNAPSHOT OF 11 CLOSES ENDING 2026-09-17. IT DOES NOT REFRESH ITSELF. Re-measurement requires live UniV3 pool reads at historical blocks, which needs the owner RPC gate that T-200 was blocked on. Do not read a number in this file as a live value. Mistaking a stale committed number for a live one is the exact failure this line of work exists to prevent.",
+  "snapshotWarning": "THIS IS A FROZEN SNAPSHOT OF 11 CLOSES ENDING 2026-09-17. IT DOES NOT REFRESH ITSELF. Re-measurement requires live UniV3 pool reads at historical blocks, which needs an archive RPC for historical reads. Do not read a number in this file as a live value. Mistaking a stale committed number for a live one is the exact failure this line of work exists to prevent.",
   "closes": [
     "2026-09-17",
     "2026-09-16",
@@ -20,13 +20,13 @@
   "closeWindow": "16:00 America/New_York = 20:00 UTC, the 1800 s settlement window ending at each close",
   "measurement": "time-weighted harmonic mean in-range liquidity over the settlement window, per close. The contract gates the TIME-WEIGHTED HARMONIC MEAN, which is why an instantaneous liquidity() reading (what ops/markets/README.md scaled the current floors from) is always an OVERESTIMATE.",
   "source": {
-    "recon": "stonkhouse-plan/status/VENUE-RECON-2026-09-17.md section 5.1",
+    "recon": "the venue recon report of 2026-09-17, section 5.1 (not in this repository)",
     "reconDate": "2026-09-17",
     "originalPath": "(local measurement run)",
     "originalSha256": "3412aa1bf2ce9efb808cf91b7101d6991f1b8c117bfc01e2ff238701059b260b",
     "upstream": "univ3-liquidity-sessions-2026-09-17.json in this directory, which is the 13 role=registry rows of the same recon's 09-final.json (the merged 11-session series: observe() where the pool's observation ring still reaches, Swap-log reconstruction elsewhere)",
     "pinnedBlockRange": "65738678-65744833 (2026-09-17 ~22:51-22:56 UTC)",
-    "producingScript": "NOT PRESERVED. Every other step of that recon kept its .mjs (01 through 15); step 16 kept only its .json, and the recon's own INDEX.json documents files through 13 only. The script that emitted 16-minliquidity.json was never saved, so it could not be landed. univ3-liquidity.mjs --derive in this directory regenerates this file from the upstream sessions file and is labelled as what it is: a derivation written on 2026-09-20 for T-216-O8-UNIV3-LIQUIDITY-INPUT-SET, NOT the original measurement script.",
+    "producingScript": "NOT PRESERVED. Every other step of that recon kept its .mjs (01 through 15); step 16 kept only its .json, and the recon's own INDEX.json documents files through 13 only. The script that emitted 16-minliquidity.json was never saved, so it could not be landed. univ3-liquidity.mjs --derive in this directory regenerates this file from the upstream sessions file and is labelled as what it is: a derivation written on 2026-09-20 for this input set, NOT the original measurement script.",
     "networkCallsMade": "NONE. This file was assembled offline from files that already existed."
   },
   "coverage": {
@@ -46,7 +46,7 @@
       "USO"
     ],
     "measuredCount": 13,
-    "rule": "EXACTLY THESE 13 TICKERS ARE MEASURED. Every other market - including every market OWN8-06 would register beyond this list - is UNMEASURED. An unmeasured market must be recorded as unmeasured. Never default one to a floor, never interpolate, never carry a neighbour's value across.",
+    "rule": "EXACTLY THESE 13 TICKERS ARE MEASURED. Every other market - including every market registered later beyond this list - is UNMEASURED. An unmeasured market must be recorded as unmeasured. Never default one to a floor, never interpolate, never carry a neighbour's value across.",
     "whyOnlyThese": "these are the pooled registry markets that had a UniV3 pool at the time of the recon; the recon also measured 44 non-registry candidate pools, which are deliberately excluded here."
   },
   "fields": {
@@ -57,8 +57,8 @@
     "minHarmonicLiquidity": "the smallest perClose value",
     "minAt": "the close date at which that minimum occurred",
     "failsOfSessions": "how many of the sessions fall below floorSet, as fails/sessions",
-    "reDerivedAt250kUsdg": "recon working value, carried verbatim; T-200 decides whether to use it",
-    "suggestedHalfOfMin": "recon working value, carried verbatim; T-200 decides whether to use it",
+    "reDerivedAt250kUsdg": "recon working value, carried verbatim; the floor derivation decides whether to use it",
+    "suggestedHalfOfMin": "recon working value, carried verbatim; the floor derivation decides whether to use it",
     "perClose": "date -> time-weighted harmonic mean in-range liquidity over that close's settlement window"
   },
   "consequenceIfIgnored": "9 of these 13 markets fail their currently-set floor on at least one of the 11 closes, AAPL on 10 of 11. A market that fails the snapshot silently sits on the 6 h settlement path instead of the TWAP path and looks like normal operation.",

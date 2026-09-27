@@ -12,27 +12,27 @@
  * that bug (the dapp read flat keys the indexer never sent). A deliberate shape change is a diff
  * here, visible in review; an accidental one is a red test.
  *
- * Wire conventions pinned below (carried over from v1, see ops/fixtures/api/README.md):
+ * Wire conventions pinned below (carried over from v1):
  * - Money is `{ raw, decimals, formatted }`. `raw` is the base-unit integer as a canonical decimal
  *   string (no sign, no leading zeros); `formatted` is `formatUnits(raw, decimals)` and is for
  *   display only. USDG is 6 dp; Stock Tokens (and therefore every in-kind call payout and call
  *   collateral figure) are 18 dp. Two figures can go negative (unrealised and realised PnL):
  *   they use SignedMoney, which allows a leading `-`.
- * - Every price is USDG base units per WHOLE share (ADR-04). Every `units` is 0.01-share units,
+ * - Every price is USDG base units per WHOLE share. Every `units` is 0.01-share units,
  *   a decimal string.
  * - uint256 ids (longId, shortId, orderId, tokenId) and block numbers are decimal strings; a
  *   uint256 does not survive `Number`, and v1 already sends blocks as strings.
  * - Timestamps are unix SECONDS as non-negative integers (not ISO strings, unlike v1).
  * - Addresses are EIP-55 checksummed; tx hashes are lowercase 0x + 64 hex.
  * - Lists return `{ items, nextCursor }`. `nextCursor` is present on every `items` response, null
- *   on the last page (§4's table omits it on some rows; the list convention above the table
- *   wins). `/v2/markets` is the one bare array, exactly as §4 shows it: the market set is small
+ *   on the last page (the route table omits it on some rows; the list convention above the table
+ *   wins). `/v2/markets` is the one bare array, exactly as the route table shows it: the market set is small
  *   and never paged.
  * - Errors are `{ error: { code, message } }`.
  *
- * Where §4 names a route but not its shape (/v2/config, /v2/accounts/:address/history,
+ * Where the route table names a route but not its shape (/v2/config, /v2/accounts/:address/history,
  * /v2/makers, the leaderboard `value`, the fair-value fallback) the shape below is the decision;
- * ops/fixtures/api/v2/README.md lists each one and why. web/lib/v2/api-types.ts carries the same
+ * each one is deliberate. web/lib/v2/api-types.ts carries the same
  * shapes as hand-written TypeScript with a compile-time equality check per type, so the types a
  * page imports cannot drift from what this file accepts.
  */
@@ -98,7 +98,7 @@ export const txHashSchema = z.string().regex(TX_RE, "expected a lowercase 0x-pre
 export const unixSchema = z.number().int().nonnegative();
 
 /**
- * Highest decimal scale the UI will render. claude-24 measured viem 2.56.3 producing 99,983
+ * Highest decimal scale the UI will render. We measured viem 2.56.3 producing 99,983
  * characters in 5,072 ms for 100,000 decimals, while 1e9 threw "Invalid string length"
  * immediately. 36 is twice the system's real maximum of 18 and stays far below the silent,
  * multi-second denial-of-service range.
@@ -113,7 +113,7 @@ const finiteSchema = z.number().finite();
 const openStringSchema = z.string().min(1);
 
 // ---------------------------------------------------------------------------------------------
-// Shared objects (§4 "Shared objects")
+// Shared objects
 // ---------------------------------------------------------------------------------------------
 
 export const moneySchema = z
@@ -125,7 +125,7 @@ export const signedMoneySchema = z
   .object({ raw: intStringSchema, decimals: decimalsSchema, formatted: z.string() })
   .strict();
 
-/** The provider, method, inputs, clocks and quality state behind one fair-value estimate (§5.1). */
+/** The provider, method, inputs, clocks and quality state behind one fair-value estimate. */
 export const pricingProvenanceSchema = z
   .object({
     contract: z.literal("O3-307/1"),
@@ -356,6 +356,13 @@ export const seriesRefSchema = z
     expiry: unixSchema,
     tenor: z.enum(["daily", "weekly", "special"]),
     mintCutoff: unixSchema,
+    /**
+     * The exercise fee this series PINNED at creation (Clearinghouse copies the market's fee into the
+     * Series struct; a later setMarketConfig does not change it), which is what redeem charges. Optional so builds and
+     * fixtures from before the field existed still parse; a consumer treats an absent value as unknown, never as the market's
+     * current default.
+     */
+    exerciseFeeBps: countSchema.optional(),
     mintFeePpm: countSchema.max(5_000),
     mintFeesHeld: moneySchema,
     mintFeesAccrued: moneySchema,
@@ -363,13 +370,20 @@ export const seriesRefSchema = z
   })
   .strict();
 
-/** Top of book plus the pricing service's view. `bidUnits`/`askUnits` are the units resting at the best price. */
+/**
+ * Top of book plus the pricing service's view. `bidUnits`/`askUnits` are the TOTAL depth on each side, every level.
+ * `bestBidUnits`/`bestAskUnits` are the units at the best price only: a per-share price at `bestAsk` holds
+ * only while the size fits in `bestAskUnits`. They are optional so builds and fixtures from before them still
+ * parse; a consumer treats an absent value as unknown, never as the total depth.
+ */
 export const quoteSchema = z
   .object({
     bestBid: moneySchema.nullable(),
     bestAsk: moneySchema.nullable(),
     bidUnits: uintStringSchema,
     askUnits: uintStringSchema,
+    bestBidUnits: uintStringSchema.optional(),
+    bestAskUnits: uintStringSchema.optional(),
     fair: moneySchema.nullable(),
     iv: finiteSchema.nonnegative().nullable(),
     delta: finiteSchema.min(-1).max(1).nullable(),
@@ -390,7 +404,7 @@ const cardTicketSchema = z
   .strict();
 
 /**
- * A payoff card (ADR-12). `ask` is the best ask per whole share; `target` is the deterministic
+ * A payoff card. `ask` is the best ask per whole share; `target` is the deterministic
  * scenario price: call `roundUp(strike × (1 + cardTargetBps/1e4), strikeTick)`, put
  * `roundDown(strike × (1 − cardTargetBps/1e4), strikeTick)` and never below one strikeTick.
  * `perUnit` is one 0.01-share unit at the best ask with its own taker fee added to the cost and
@@ -531,20 +545,63 @@ export const flywheelResponseSchema = z
   .strict();
 
 /**
- * Lending vault wire (the `/v2/earn` route; not the `/earn` covered-call writer page).
+ * Lending vault wire (the `/v2/earn` route, shown on the `/earn` page; the covered-call writer page is `/sell`).
  * Every figure that can be "not yet observed" is nullable: null is unavailable, "0" is observed
  * zero. The route projects v2EarnVault* rows and does not compute a rate.
+ */
+/**
+ * One of the caller's OPEN requests in a lending vault's queue. ONE FIFO serves BOTH directions
+ * (IEarnVault.Request): a queued REDEMPTION escrows shares, a queued DEPOSIT escrows assets, and the contract
+ * never steps over either. The route lists only rows still `queued`; a partially served withdrawal is one of them.
  */
 export const earnQueuedRequestSchema = z
   .object({
     id: openStringSchema,
     status: z.enum(["queued", "fulfilled", "cancelled"]),
+    /** Shares escrowed when the request was made. "0" for a deposit, which escrows assets instead. */
     sharesQueued: uintStringSchema,
     /** Null: the request did not quote an asset amount. "0" would be an observed ask of nothing. */
     assetsRequested: uintStringSchema.nullable(),
     /** Null: still queued or cancelled — not a zero payout. "0" is a fulfilment that delivered nothing. */
     fulfilledAssets: uintStringSchema.nullable(),
     requestedAt: unixSchema,
+    /** The vault this request waits in. */
+    vault: addressSchema,
+    /**
+     * The contract's queue id, the argument `cancelQueued(id)` takes. Null only when the row id does not
+     * end in one, which the ingest never writes; a consumer then offers no cancel rather than guessing an id.
+     */
+    queueId: uintStringSchema.nullable(),
+    /** `withdrawal` escrows shares; `deposit` escrows assets (`DepositQueued`). */
+    kind: z.enum(["withdrawal", "deposit"]),
+    /** Deposit: asset base units escrowed. Null for a withdrawal, which escrows shares. */
+    assetsQueued: uintStringSchema.nullable(),
+    /** Shares still escrowed: `sharesQueued` less what partial services burned. "0" for a deposit. */
+    sharesEscrowed: uintStringSchema,
+    /** 1-based place among the vault's OPEN entries of both directions: 1 is served next. */
+    position: countSchema.min(1),
+  })
+  .strict();
+
+/**
+ * A queue payment a lending vault HELD because the asset refused to deliver it (EarnVault.sol `_payOrDefer`),
+ * from v2EarnVaultHeldPayment. It stays in the vault until the request's `owner` or `receiver` calls
+ * `claimDeferred(queueId, to)`; nothing pays it out on its own. Only payments still held (`assets` above zero) are
+ * listed, for a caller who is the owner or the receiver. A hold from before the indexer's start block is not here;
+ * the app also reads the vault itself (web/lib/v2/earnDeferred.ts).
+ */
+export const earnHeldPaymentSchema = z
+  .object({
+    vault: addressSchema,
+    /** The request id the payment is held against: the `claimDeferred(id, to)` argument. */
+    queueId: uintStringSchema,
+    owner: addressSchema,
+    receiver: addressSchema,
+    asset: addressSchema,
+    /** Asset base units held now. */
+    assets: uintStringSchema,
+    /** When the latest hold or pull on this request was indexed. */
+    updatedAt: unixSchema,
   })
   .strict();
 
@@ -554,6 +611,8 @@ export const earnAccountSchema = z
     /** Null: no per-account share balance is stored. "0" would be an observed empty holding. */
     shares: uintStringSchema.nullable(),
     queued: z.array(earnQueuedRequestSchema).optional(),
+    /** Payments held for this caller (owner or receiver). OPTIONAL for older producers. */
+    held: z.array(earnHeldPaymentSchema).optional(),
   })
   .strict();
 
@@ -569,11 +628,111 @@ export const earnAdapterMoveSchema = z
   })
   .strict();
 
+/**
+ * One `VenueWrittenOff` (the indexer's v2EarnVaultVenueWriteOff): `setAdapter` could not read
+ * `adapter`'s `totalAssets()` (the venue wired before the call: replaced, or still wired when the same adapter was set
+ * again), and `amount`, its last known value in asset base units, left the vault's totalAssets. A realised loss to every
+ * share holder at that block (each share in proportion), not a move. "0" is an observed zero write-off (the last known
+ * value was already 0), never "not read".
+ */
+export const earnVenueWriteOffSchema = z
+  .object({
+    adapter: addressSchema,
+    amount: uintStringSchema,
+    ts: unixSchema,
+    tx: txHashSchema,
+  })
+  .strict();
+
 export const earnQueueSchema = z
   .object({
     depth: countSchema,
     /** Null when depth is 0 (no open request). */
     oldestRequestedAt: unixSchema.nullable(),
+  })
+  .strict();
+
+/**
+ * One trailing-window yield figure, measured and never extrapolated. `bps` is the growth of a per-share
+ * price between two OBSERVED samples (`from`, `to`), compounded to a 365-day year, in basis points, SIGNED (a vault
+ * or venue can be down). The span `to - from` is at least the window and may be longer when sampling had a gap; it
+ * is never shorter. Null `bps` always carries a reason:
+ *   no-samples     nothing observed yet;
+ *   short-history  no observation at least one window before the newest one -- fewer days of history than the
+ *                  window names, so the figure would be an extrapolation;
+ *   no-price       the older observation priced a share at zero, so growth is undefined;
+ *   out-of-range   the compounded figure is not a safe integer number of bps (a pathological jump).
+ * The samples are indexed eth_call reads (indexer/src/v2/earnSample.ts), never an off-chain API.
+ */
+export const earnApySchema = z
+  .object({
+    bps: z.number().int().nullable(),
+    reason: z.enum(["no-samples", "short-history", "no-price", "out-of-range"]).nullable(),
+    from: unixSchema.nullable(),
+    to: unixSchema.nullable(),
+  })
+  .strict();
+
+/**
+ * The ERC-4626 venue the vault's adapter lends into (Steakhouse USDG on 4663). Address and name are the
+ * adapter's `venue()` and that venue's ERC-20 `name()`, read on chain: the registry has no venue slot.
+ */
+export const earnVenueSchema = z
+  .object({
+    /** Null: `venue()` not read (no sample yet and the live read failed). */
+    address: maybeAddress,
+    /** Null: `name()` not read. */
+    name: openStringSchema.nullable(),
+    /** The venue's own share-price growth, from `convertToAssets` sampled on chain. */
+    apy24h: earnApySchema,
+    apy7d: earnApySchema,
+    /**
+     * Asset base units the vault can take out of the venue now. NOT always `adapter.withdrawable()`: on an advisory
+     * venue (a Morpho Vault V2, `maxIsAdvisory() == true`) that view is 0 by design while `withdraw` still pays, so
+     * the figure there is the vault's position, `adapter.totalAssets()`. `withdrawableSource` says which was used.
+     * Null: not read.
+     */
+    withdrawable: uintStringSchema.nullable(),
+    withdrawableSource: z.enum(["maxWithdraw", "position"]).nullable(),
+    /** The vault's position in the venue, `adapter.totalAssets()`, asset base units. Null: not read. */
+    position: uintStringSchema.nullable(),
+  })
+  .strict();
+
+/**
+ * When a withdrawal asked for NOW would pay, derived from the contract's own rules and nothing else.
+ *   kind     now | queued (Earn); weekly | daily (House, the vault's epoch kind); unknown (a read failed, or a House
+ *            vault of a kind this build does not know).
+ *   at       unix seconds. now: the read time. queued/open-position: the latest expiry among the positions the vault
+ *            still holds, which is the earliest the queue can move (null when the expiry is not indexed). House: the
+ *            current epoch's end. Null otherwise.
+ *   reason   liquid          Earn: no position, no queue, and the vault can raise up to `liquidityCap` now;
+ *            open-position   Earn: `redeem` queues and `processQueue` serves nothing while a position is open;
+ *            queue-ahead     Earn: a queue is open, so a redemption joins its back (FIFO is never stepped over);
+ *            venue-liquidity Earn: wallet, free Clearinghouse ledger and venue liquidity are all zero, so `redeem` queues;
+ *            venue-unreadable Earn: the venue adapter cannot be read, so the vault prices nothing and `redeem` queues
+ *                            even when it could pay;
+ *            epoch-boundary  House: before epochEnd - SETTLEMENT_WINDOW, a withdrawal requested now is priced at this
+ *                            epoch's end;
+ *            boundary-pending House: an older indexer. The end has passed and rollEpoch has not run. The current
+ *                            producer answers queue-closed for that interval instead;
+ *            queue-closed    House: from epochEnd - SETTLEMENT_WINDOW until rollEpoch, requestWithdraw reverts.
+ *                            `at` is the next epoch's end when known, otherwise null. A request after the roll is
+ *                            priced at that next end;
+ *            not-read        a value this needed could not be read. Never guessed.
+ *   liquidityCap  Earn only: unescrowed wallet plus the vault's free Clearinghouse ledger plus venue liquidity (what
+ *            `_raise` can reach), asset base units. A larger redemption queues
+ *            IN FULL -- `redeem` never pays part now. Null when not computed.
+ */
+export const earliestWithdrawalSchema = z
+  .object({
+    kind: z.enum(["now", "queued", "weekly", "daily", "unknown"]),
+    at: unixSchema.nullable(),
+    reason: z.enum([
+      "liquid", "open-position", "queue-ahead", "venue-liquidity", "venue-unreadable", "epoch-boundary", "boundary-pending", "queue-closed",
+      "not-read",
+    ]),
+    liquidityCap: uintStringSchema.nullable().optional(),
   })
   .strict();
 
@@ -584,28 +743,63 @@ export const earnVaultSchema = z
     asset: maybeAddress,
     /** Null until an adapter is observed; the zero address would be a real detached adapter. */
     adapter: maybeAddress,
-    /** Null: pause not observed. false: observed and running. */
-    paused: z.boolean().nullable(),
+    /**
+     * EarnVault.fundingEnabled(): whether the vault lends its idle assets to the OrderBook's just-in-time
+     * book funding (EarnVault.sol `setFundingEnabled`). It is NOT a pause: EarnVault has no deposit or withdrawal
+     * stop, and this flag stops neither. Off by default and never emitted at deploy, so the route reads it live and
+     * falls back to the last FundingEnabledSet it indexed. Null: neither the read nor an event says.
+     */
+    fundingEnabled: z.boolean().nullable(),
     /** Null: share supply not observed. "0" is an observed empty supply. */
     sharesSupply: uintStringSchema.nullable(),
     /** Null: no deposit row yet. "0" is observed deposits that net to zero. */
     deposited: uintStringSchema.nullable(),
-    /** Null: no skim row yet. "0" is an observed skim of nothing. */
+    /** Null: no skim row yet. "0" means no fee moved: a flat skim, or a fee the vault could not take. It is not "nothing was owed". */
     skimmed: uintStringSchema.nullable(),
     queue: earnQueueSchema.optional(),
     lastAdapterMove: earnAdapterMoveSchema.nullable().optional(),
     /**
-     * T-OP-086 (SEC-19 / T-OP-065). Live `indicativeAssetsPerShare()`: asset base units per 1e18 shares,
+     * The vault's venue write-offs, newest first (the route sends at most the 20 newest). [] is observed
+     * none. OPTIONAL on the wire, like `apy7d`, so a consumer deployed before this producer still parses.
+     */
+    venueWriteOffs: z.array(earnVenueWriteOffSchema).optional(),
+    /**
+     * Live `indicativeAssetsPerShare()`: asset base units per 1e18 shares,
      * a DISPLAY-ONLY mark -- locked collateral less the option's intrinsic value at the oracle spot,
      * floored at zero -- never a price the vault pays. `convertToShares` / `convertToAssets` revert
      * `PositionOpen()` while a position is open, so this is the figure to show then. Null: not read (no
      * client, RPC down, or a deployment older than the view). "0" is an observed zero.
+     * REQUIRED, nullable. The route always emits all three (`earn.ts` starts from `NO_LIVE`, every
+     * field null, and overwrites each only on a successful multicall leg), so an ABSENT key is a producer that
+     * stopped emitting it -- a strict parse must refuse that. Null stays legitimate for each field on its own:
+     * `allowFailure` lets one leg fail while the others succeed, and a vault deployed before the view answers
+     * none of them.
      */
-    indicativeAssetsPerShare: uintStringSchema.nullable().optional(),
+    indicativeAssetsPerShare: uintStringSchema.nullable(),
     /** Live `indicativeTotalAssets()`, same mark over the whole vault, asset base units. Null: not read. */
-    indicativeTotalAssets: uintStringSchema.nullable().optional(),
+    indicativeTotalAssets: uintStringSchema.nullable(),
     /** Live `hasOpenPosition()`: true while the convert views refuse. Null: not read. */
-    hasOpenPosition: z.boolean().nullable().optional(),
+    hasOpenPosition: z.boolean().nullable(),
+    /**
+     * The vault's result: totalAssets - sum(deposits) + sum(withdrawals) + sum(skims), asset
+     * base units, SIGNED (a vault can be down). A fact, not a rate. Optional until the indexer row sends it; null:
+     * not computable (e.g. a position is open and totalAssets reverts).
+     */
+    realisedSinceInception: signedMoneySchema.nullable().optional(),
+    /**
+     * Realised yield to a share holder over 7 and 30 days, from the gross share price
+     * (`totalAssets / totalSupply`). Not the net-of-mark price: the mark also rises on a mint, so that
+     * series can climb while the share price does not. The fee that left is `skimmed`.
+     * Samples taken while a position was open are excluded (totalAssets is then the understated flat-NAV floor).
+     * OPTIONAL on the wire, like `kind`, so a consumer deployed before this producer still parses.
+     */
+    apy7d: earnApySchema.optional(),
+    apy30d: earnApySchema.optional(),
+    /** Live `totalAssets()`, asset base units. Null: not read. */
+    totalAssets: uintStringSchema.nullable().optional(),
+    /** Null: no adapter attached, so there is no venue. */
+    venue: earnVenueSchema.nullable().optional(),
+    earliestWithdrawal: earliestWithdrawalSchema.optional(),
   })
   .strict();
 
@@ -619,7 +813,7 @@ export const earnResponseSchema = z
 
 /**
  * House vault tape. NAV exists only at a Friday settlement boundary after positions are
- * redeemed (P8-06 weekly epochs). While the current epoch is running, `nav` is null — never 0,
+ * redeemed (weekly epochs). While the current epoch is running, `nav` is null — never 0,
  * never omitted. Zero would mean a published empty book at a boundary, which is a fact.
  */
 export const houseNavSchema = z
@@ -637,6 +831,16 @@ export const houseNavSchema = z
     stockUnits: uintStringSchema.nullable(),
     settlementPrice: moneySchema,
     navUsdg: moneySchema,
+    /**
+     * Stored on `v2HouseNav` and not yet on the wire; OPTIONAL so the page
+     * ships before the indexer sends them. Absent means "not sent", never 0 -- the share-price chart
+     * refuses to draw without `supply` rather than dividing by a guess.
+     */
+    supply: uintStringSchema.optional(),
+    sharesMinted: uintStringSchema.optional(),
+    sharesBurned: uintStringSchema.optional(),
+    performanceFee: moneySchema.optional(),
+    tx: txHashSchema.optional(),
   })
   .strict();
 
@@ -666,6 +870,26 @@ export const houseQueueItemSchema = z
     stockAmount: uintStringSchema.nullable().optional(),
     shares: uintStringSchema.nullable(),
     requestedAt: unixSchema,
+    /**
+     * The epoch the request was queued in (the contract's `r.epochId`). OPTIONAL for older producers, like
+     * `status` and `maturesAt`.
+     */
+    epochId: uintStringSchema.optional(),
+    /**
+     * HouseVault.claim retires a request when `r.epochId < epochId` (the vault's CURRENT epoch, which moves
+     * only in `rollEpoch`), and both cancels revert TooEarly on exactly those requests (`r.epochId != epochId`). So:
+     *   pending    the request's epoch is the vault's current one: not priced yet; cancel works (a deposit cancel
+     *              also stops at `epochEnd`, PastCutoff), claim does nothing for it.
+     *   claimable  the vault has rolled past the request's epoch: `claim()` collects it; a cancel would revert.
+     *   unknown    the vault's current epoch is not indexed, so the rule cannot be evaluated.
+     * The clock alone never decides it: past `epochEnd` a request stays pending until someone calls `rollEpoch`.
+     */
+    status: z.enum(["pending", "claimable", "unknown"]).optional(),
+    /**
+     * The end of the request's epoch, unix seconds: the earliest `rollEpoch` can price it. A pending request
+     * becomes claimable at that roll, not at this time. Null: that epoch's end is not indexed.
+     */
+    maturesAt: unixSchema.nullable().optional(),
   })
   .strict();
 
@@ -678,18 +902,27 @@ export const houseSharesSchema = z
   })
   .strict();
 
+/**
+ * A House vault's epoch kind, from the factory it came from (indexer src/v2/houseVaultKind.ts). OPTIONAL on
+ * the wire so a consumer deployed before the producer still parses; a consumer reads absent as `unknown`.
+ */
+export const houseVaultKindSchema = z.enum(["weekly", "daily", "unknown"]);
+
 export const houseVaultSchema = z
   .object({
     market: openStringSchema,
     vault: maybeAddress,
+    kind: houseVaultKindSchema.optional(),
     /**
      * Null: no epoch row observed for this vault yet. The vault is still LISTED when that
      * happens - dropping it from the list would hide a real vault behind a missing row, which
-     * is the failure this row exists to kill.
+     * is the failure this null exists to prevent.
      */
     currentEpoch: houseEpochSchema.nullable(),
     /** Null: supply not observed. */
     sharesSupply: uintStringSchema.nullable(),
+    /** The current epoch's end; see `earliestWithdrawalSchema`. OPTIONAL for older producers. */
+    earliestWithdrawal: earliestWithdrawalSchema.optional(),
   })
   .strict();
 
@@ -704,11 +937,14 @@ export const houseMarketResponseSchema = z
   .object({
     market: openStringSchema,
     vault: maybeAddress,
+    kind: houseVaultKindSchema.optional(),
     /** Null for the same reason as on `houseVaultSchema`. */
     currentEpoch: houseEpochSchema.nullable(),
     epochs: z.array(houseEpochSchema),
     shares: houseSharesSchema.nullable().optional(),
     queue: z.array(houseQueueItemSchema).optional(),
+    /** Same rule as on `houseVaultSchema`. */
+    earliestWithdrawal: earliestWithdrawalSchema.optional(),
   })
   .strict();
 
@@ -724,7 +960,7 @@ const payoutRouteSchema = z.discriminatedUnion("venue", [
 // ---------------------------------------------------------------------------------------------
 
 /**
- * /v2/services — readiness of the services the indexer DOES NOT run. Additive (T-424); nothing
+ * /v2/services — readiness of the services the indexer DOES NOT run. Additive; nothing
  * above this line changed.
  *
  * `healthy` is true only when `reason` is `"ready"`. Every other reason is a distinct failure and
@@ -813,7 +1049,7 @@ export const configResponseSchema = z
         makerRebateBps: countSchema,
         exerciseFeeBps: countSchema,
         mintFeePpm: countSchema.max(5_000),
-        // T-OP-120 (G7). The Clearinghouse's `maxPayoutSlippageBps`, from the indexed PayoutAdapterSet event; the
+        // The Clearinghouse's `maxPayoutSlippageBps`, from the indexed PayoutAdapterSet event; the
         // conversion floor of a call payout is value * (BPS - min(this + routeFee, 300)) / BPS. Null until an adapter
         // has been set. Ceiling: MAX_PAYOUT_SLIPPAGE_CEIL_BPS = 300 (V2Constants.sol:88, setPayoutAdapter reverts above it).
         maxPayoutSlippageBps: countSchema.max(300).nullable(),
@@ -863,12 +1099,20 @@ export const marketSchema = z
     underlying: addressSchema,
     status: z.enum(["planned", "live", "paused"]),
     /**
-     * T-OP-099. Whether the market is in the owner's launch set (registry `launchSet.markets`, projected by
+     * Whether the market is in the launch set (registry `launchSet.markets`, projected by
      * gen-v2-registry.mjs). `status` is what the CHAIN says about registration; `launch` is what the REGISTRY says
      * about the launch, and a registered market outside the set is served with `launch: false` rather than dropped.
      * The app never offers a trade on a non-launch market whatever `status` says.
      */
     launch: z.boolean(),
+    /**
+     * The guardian's two brakes, from the indexed logs: `tradingPaused` is the OrderBook's
+     * TradingPausedSet (no order can be placed or taken on any market), `mintPaused` is this market's
+     * Clearinghouse MintPausedSet (no new option can be written; resale asks and bids still trade).
+     * `status` says nothing about either: a paused market is still `live` there.
+     */
+    tradingPaused: z.boolean(),
+    mintPaused: z.boolean(),
     // A failed live oracle read leaves only this market's spot unavailable.
     spot: moneySchema.nullable(),
     spotUpdatedAt: unixSchema.nullable(),
@@ -883,13 +1127,21 @@ export const marketSchema = z
       })
       .strict()
       .optional(),
+    /** Expiries with at least one series still open for writing (before its mint cutoff), ascending. */
     expiries: z.array(unixSchema),
+    /**
+     * Expiries whose series are past the mint cutoff but not yet expired, ascending, never in
+     * `expiries`. No new option can be written for them, but resale asks and bids trade until expiry
+     * (OrderBook), so a buyer can still pick the day. Kept out of `expiries` on purpose: a writer's expiry
+     * select reads `expiries`, and a day it cannot mint on must never be its default.
+     */
+    cutoffExpiries: z.array(unixSchema),
     stats: z
       .object({
         volume24h: moneySchema,
         premium7d: moneySchema,
         /**
-         * T-425. The indexed head's block time, in Unix seconds, that `volume24h` and `premium7d`
+         * The indexed head's block time, in Unix seconds, that `volume24h` and `premium7d`
          * were measured up to. NEVER the host clock: the data only reaches the Ponder checkpoint, so
          * a host-clock window shrinks silently toward zero while the indexer lags and a quiet day
          * cannot be told from a stalled index.
@@ -927,7 +1179,7 @@ export const marketSeriesResponseSchema = z
         })
         .strict(),
     ),
-    /** T-425. The indexed head each item's `volume24h` window ends at. See marketSchema.stats.asOf. */
+    /** The indexed head each item's `volume24h` window ends at. See marketSchema.stats.asOf. */
     asOf: unixSchema,
     nextCursor: nextCursorSchema,
   })
@@ -1345,6 +1597,17 @@ export const strategyPricingSchema = z.object({
   fair: strategyUsdgPriceSchema.nullable(),
 }).strict();
 
+/**
+ * The strategy's last AutoRoller PositionClosed. The position it names is no longer current (currentLongId
+ * and orderId are null until the next roll). orderId null: the close-out carried 0, the ask was already dropped.
+ */
+export const strategyCloseSchema = z.object({
+  at: unixSchema,
+  longId: uintStringSchema,
+  orderId: uintStringSchema.nullable(),
+  redeemed: z.boolean(),
+}).strict();
+
 export const strategiesResponseSchema = z
   .object({
     items: z.array(
@@ -1361,6 +1624,8 @@ export const strategiesResponseSchema = z
           lastStaleCancelAt: unixSchema.nullable(),
           staleSpot: moneySchema.nullable(),
           pricing: strategyPricingSchema.optional(),
+          // Optional like `pricing`: this web build may still read an indexer that predates it.
+          lastClose: strategyCloseSchema.nullable().optional(),
         })
         .strict(),
     ),
@@ -1420,7 +1685,7 @@ export const pnlResponseSchema = winSchema
  * The detector attributes a writer only on `takerIsBuyer && minimumPrice && linked`
  * (indexer/lib/v2/selfTrade.ts), so pricing the primary leg one tick higher, or funding the
  * second wallet off chain so no indexed edge exists, both drive `selfTradeUnits` to exactly 0.
- * D18 accepted the self-trade loophole ON CONDITION that the indexer flags the pattern, and a
+ * The design accepted the self-trade loophole ON CONDITION that the indexer flags the pattern, and a
  * bare 0 does not satisfy that condition - it is indistinguishable from an honest market.
  *
  *   detected - units were attributed; the number means what it says.
@@ -1445,7 +1710,7 @@ export const selfTradeCoverageSchema = z
 export const statsResponseSchema = z
   .object({
     /**
-     * T-425. The indexed head's block time, in Unix seconds, that `volume24h`, `biggestWinDay` and
+     * The indexed head's block time, in Unix seconds, that `volume24h`, `biggestWinDay` and
      * `biggestWinWeek` were measured up to -- never the host clock. REQUIRED, and 0 when no
      * checkpoint could be read, which is the same condition that makes `volume24h` 0 and both
      * biggest-win fields null. See marketSchema.stats.asOf, which carries the identical value.
@@ -1475,11 +1740,11 @@ export const statsResponseSchema = z
 
 /**
  * The scoring policy the epoch's figures were produced under. ADDITIVE and optional: an absent `band`
- * means the producer does not publish its policy (an older producer), and a consumer must not infer one
- * (02-interfaces.md:886-899). `bps` with `minUsdg` is the band a price is inside when
+ * means the producer does not publish its policy (an older producer), and a consumer must not infer one.
+ * `bps` with `minUsdg` is the band a price is inside when
  * `|price - fair| <= max(fair * bps / 10_000, minUsdg)`.
  *
- * The values are OQ-14 PLACEHOLDERS and are not approved for funded use.
+ * The values are PLACEHOLDERS and are not approved for funded use.
  */
 export const makerBandSchema = z.object({ bps: countSchema.max(10_000), minUsdg: moneySchema }).strict();
 
@@ -1490,9 +1755,9 @@ export const makerEpochSchema = z
 const makerStatFields = {
   /**
    * Which benchmark produced uptimePct, avgSpreadBps, depthWithin100bps and score. THEY ARE COMPARABLE
-   * ONLY WITHIN ONE POLICY. 1 = the live /fair estimate, used until callhouse 109e664b and never
+   * ONLY WITHIN ONE POLICY. 1 = the live /fair estimate, used until policy 2 replaced it and never
    * labelled: a maker item WITHOUT this field is a policy-1 figure. 2 = chain-only reference from other
-   * participants' fills (T-307). A new policy is a new number, never a silent redefinition.
+   * participants' fills. A new policy is a new number, never a silent redefinition.
    */
   benchmarkPolicy: countSchema.min(1),
   /**
@@ -1505,7 +1770,7 @@ const makerStatFields = {
   avgSpreadBps: finiteSchema.nonnegative().nullable(), // null: never quoted both sides in the epoch
   depthWithin100bps: uintStringSchema, // units, always inside 100 bps of fair whatever the epoch band is
   /**
-   * The same statistic inside the epoch's `band`, optional and new (F2 D10 lands as add-then-drop, so
+   * The same statistic inside the epoch's `band`, optional and new (lands as add-then-drop, so
    * `depthWithin100bps` keeps its name AND its meaning until a separately logged migration drops it).
    * Absent means the producer does not compute it; it is never an alias of the field above.
    */
@@ -1599,7 +1864,7 @@ export const vaultResponseSchema = z.object({
 }).strict();
 
 /**
- * Proxied from the pricing service (§5), which never throws on bad market data and answers
+ * Proxied from the pricing service, which never throws on bad market data and answers
  * `{ fair: null, reason }` instead; the indexer passes that through rather than inventing a 5xx.
  */
 export const fairResponseSchema = z.union([
@@ -1662,7 +1927,7 @@ export type RouteSpec = {
 
 /**
  * Every v2 route. The fixture test maps each file under ops/fixtures/api/v2 to exactly one entry
- * here and requires every entry to have at least one fixture; X2-04 validates live responses by
+ * here and requires every entry to have at least one fixture; the live-response check validates by
  * the same table. Query strings never change a response's shape, so they are not part of a route.
  */
 export const ROUTES: readonly RouteSpec[] = [

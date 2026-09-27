@@ -106,7 +106,7 @@ ponder.on("Seaport:OrderFulfilled", async ({ event, context }) => {
     lastTimestamp: event.block.timestamp,
   });
 
-  // FILL_DETECTED / PARTIAL_FILL from ops/alerts.md. The most important line of the week.
+  // FILL_DETECTED / PARTIAL_FILL alert. The most important line of the week.
   log.info(
     {
       orderHash,

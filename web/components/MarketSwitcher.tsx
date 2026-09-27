@@ -3,7 +3,7 @@
 /**
  * Compact native select for the app chrome. V1 keeps its live-market account/book section on
  * switch. V2 searches the known registry markets and lands on the new market page; on
- * /earn/[ticker], it keeps the Earn section. A series id cannot move between underlyings. V1
+ * /sell/[ticker], it keeps the Sell options section. A series id cannot move between underlyings. V1
  * keeps the native select; v2 needs a filterable list for its full ticker set.
  */
 import { usePathname, useRouter } from "next/navigation";
@@ -28,14 +28,14 @@ function V2MarketSwitcher({ className }: { className?: string }) {
       : { kind: "loading" };
   const markets = marketDirectoryRows(v2Markets(), apiState);
   const segments = pathname?.split("/").filter(Boolean) ?? [];
-  const onEarnMarket = segments[0] === "earn" && segments.length === 2;
-  const v2Ticker = (onEarnMarket ? segments[1] : segments[0])?.toUpperCase();
+  const onSellMarket = segments[0] === "sell" && segments.length === 2;
+  const v2Ticker = (onSellMarket ? segments[1] : segments[0])?.toUpperCase();
   // The v2 control is a search, not a default-market selector. Generic pages have no
   // selected market; preselecting NVDA there made choosing NVDA a no-op.
   const selected = markets.some((market) => market.ticker === v2Ticker) ? v2Ticker ?? "" : "";
 
   return <MarketPicker key={selected} markets={markets} selected={selected} className={className}
-    onSelect={(next) => router.push(`${onEarnMarket ? "/earn" : ""}/${next.toLowerCase()}`)} />;
+    onSelect={(next) => router.push(`${onSellMarket ? "/sell" : ""}/${next.toLowerCase()}`)} />;
 }
 
 function LegacyMarketSwitcher({ className }: { className?: string }) {

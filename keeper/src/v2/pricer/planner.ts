@@ -1,32 +1,36 @@
 /**
- * The pricer's decisions (K2-05), as pure functions of chain views and a fair value. Nothing here
+ * The pricer's decisions, as pure functions of chain views and a fair value. Nothing here
  * reads a chain, a clock, the pricing service or a database: pricer.ts gathers the views, asks these,
  * and acts. planner.test.ts pins every rule.
  *
  *   priceBand     the PRICE_TICK multiples AutoRoller.reprice accepts for a strategy at a spot
  *   targetPrice   clamp(fair × (1 + edgeBps), minAskBps · spot, maxAskBps · spot), on the tick grid
  *   differsEnough the "> 10 %" rule against the live ask
+ *   repriceFloor  the lowest price one reprice may set: MAX_REPRICE_DROP_BPS below the live ask, up to the tick
+ *   stepFloor     the lowest price the pricer steps to: PRICER_MAX_STEP_DROP_BPS below the live ask, under the monitor's
+ *                 page; when it is above the band's ceiling the ceiling is sent instead, if reprice accepts it
  *   evaluationDue right after each roll, then at most once per PRICER_MIN_INTERVAL_S
  *   planCheck     everything that must hold before a fair value is worth asking for, including the regular session and in-the-money
  *                 refusal of INTERFACE_VERSION 7 included
  *   planReprice   the decision once the fair value is known
  *
- * THE CONTRACT'S RULES, which the send would otherwise discover as a revert (C2-09 AutoRoller.reprice,
+ * THE CONTRACT'S RULES, which the send would otherwise discover as a revert (AutoRoller.reprice,
  * OrderBook.replace): the manager admitting `reprice`; strategy active with smartPricing (NotAuthorized); a tracked ask
- * (OrderNotLive(0)); a fresh spot from the SERIES' pinned oracle (`Series.oracle`, not `market(u).oracle`: T-310 /
- * T-437; `spot()` reverts when stale); the spot short of the strike (InTheMoney, INTERFACE_VERSION 7); the band
+ * (OrderNotLive(0)); a fresh spot from the SERIES' pinned oracle (`Series.oracle`, not `market(u).oracle`:
+ * `spot()` reverts when stale); the spot short of the strike (InTheMoney, INTERFACE_VERSION 7); the band
  * `minAskBps × spot ≤ price × 1e4 ≤ maxAskBps × spot`, inclusive and exact (BadPrice); price > 0 and
- * `price % 100 == 0` (BadPrice); the ask not cancelled, not filled and before its validUntil
- * (OrderNotLive). The replacement keeps the remaining units and the validUntil.
+ * `price % 100 == 0` (BadPrice); at most MAX_REPRICE_DROP_BPS below the ask it replaces (RepriceDropExceeded);
+ * the ask not cancelled, not filled and before its validUntil (OrderNotLive). The replacement keeps the
+ * remaining units and the validUntil.
  *
  * ROUNDING. The band's ends are rounded INWARD to the tick (floor up, ceiling down), so every price
  * this returns passes the exact check at the same spot. The raw target fair × (1 + edge) is rounded
  * UP to the tick, as AutoRoller.roll rounds the price it starts from (never below the rate asked).
  *
- * UNITS (ADR-04): prices, fair values and spot are USDG base units (6 dp) per whole share; bps of
+ * UNITS: prices, fair values and spot are USDG base units (6 dp) per whole share; bps of
  * 10_000; times are unix seconds of the HEAD BLOCK.
  */
-import { BPS, PRICE_TICK } from '../cranker/constants.js';
+import { BPS, MAX_REPRICE_DROP_BPS, PRICER_MAX_STEP_DROP_BPS, PRICE_TICK } from '../cranker/constants.js';
 import { ceilDiv, overtaken, roundDownToTick, roundUpToTick } from '../cranker/planner.js';
 
 /** A reprice is not planned when the ask's validUntil is this close: the transaction would land past the cutoff. */
@@ -72,7 +76,7 @@ export type TargetPrice =
     }
   | { ok: false; reason: 'band-empty' };
 
-/** K2-05: price = clamp(fair × (1 + edgeBps), minAskBps · spot, maxAskBps · spot), on the tick grid. */
+/** Price = clamp(fair × (1 + edgeBps), minAskBps · spot, maxAskBps · spot), on the tick grid. */
 export function targetPrice(input: { fair: bigint; edgeBps: number; spot: bigint; minAskBps: number; maxAskBps: number }): TargetPrice {
   const band = priceBand(input.spot, input.minAskBps, input.maxAskBps);
   if (band === null) return { ok: false, reason: 'band-empty' };
@@ -84,7 +88,32 @@ export function targetPrice(input: { fair: bigint; edgeBps: number; spot: bigint
   return { ok: true, price: raw, raw, band, clamped: null };
 }
 
-/** K2-05's gas discipline: |target − live| / live > thresholdBps / 1e4, strictly. */
+/**
+ * The lowest price AutoRoller.reprice accepts in one call against a live ask of `live`: it reverts
+ * RepriceDropExceeded when `newPrice x BPS < live x (BPS - MAX_REPRICE_DROP_BPS)` (AutoRoller.sol reprice), so the
+ * first price on the tick grid at or above `live x (BPS - MAX_REPRICE_DROP_BPS) / BPS`: exactly the `floor` the revert
+ * itself names (roundUpToTick(ceilDiv(live x (BPS - MAX_REPRICE_DROP_BPS), BPS), PRICE_TICK)).
+ */
+export function repriceFloor(live: bigint): bigint {
+  if (live <= 0n) return 0n;
+  return roundUpToTick(ceilDiv(live * (BPS - MAX_REPRICE_DROP_BPS), BPS), PRICE_TICK);
+}
+
+/**
+ * The lowest price the PRICER itself steps an ask down to in one call:
+ * PRICER_MAX_STEP_DROP_BPS below the live ask, rounded UP to the tick (so the step is never larger), and never below
+ * the contract's repriceFloor. The monitor pages v2_mon_reprice_floorward for a single drop of REPRICE_PAGE_DROP_BPS or
+ * more (the leaked-key signature), so the pricer stays strictly under it; that makes it stricter than the contract on
+ * purpose, and a large fall takes one or two more steps.
+ */
+export function stepFloor(live: bigint): bigint {
+  if (live <= 0n) return 0n;
+  const own = roundUpToTick(ceilDiv(live * (BPS - PRICER_MAX_STEP_DROP_BPS), BPS), PRICE_TICK);
+  const contract = repriceFloor(live);
+  return own > contract ? own : contract;
+}
+
+/** The gas discipline: |target − live| / live > thresholdBps / 1e4, strictly. */
 export function differsEnough(target: bigint, live: bigint, thresholdBps: number): boolean {
   if (live <= 0n) return target !== live;
   const diff = target > live ? target - live : live - target;
@@ -149,7 +178,7 @@ export interface CheckView {
   order: AskView | null;
   /**
    * SettlementOracle.trySpot of the series' PINNED oracle (Clearinghouse.series(longId).oracle), the one reprice reads
-   * and the series settles on (T-310/T-437): null when not ok, and null when the series was not read, since then the
+   * and the series settles on: null when not ok, and null when the series was not read, since then the
    * oracle is unknown. Never market(u).oracle, which a setMarketOracle moves away from existing series.
    */
   spot: bigint | null;
@@ -186,7 +215,7 @@ export const askLive = (o: AskView, now: number): boolean => !o.cancelled && rem
  * Before the fair value: is there a live ask this pricer may move, and is it due? Checked in the
  * contract's order, then the cadence, then spot (the band needs it). Nothing here costs a request.
  *
- * IN THE MONEY (INTERFACE_VERSION 7, c16, v7 design §4.5.2). `reprice` reverts `InTheMoney` once the spot has
+ * IN THE MONEY (INTERFACE_VERSION 7). `reprice` reverts `InTheMoney` once the spot has
  * reached the strike, and it is right to: the band caps the ask at `maxAskBps` of spot, at most 10 %, so every price
  * it would allow there is below intrinsic value and a reprice would only make the writer's loss cheaper to take. The
  * ask is withdrawn instead, by the permissionless `AutoRoller.cancelStale` the cranker sends (`stepStale`). The
@@ -211,11 +240,46 @@ export function planCheck(view: CheckView, settings: { minIntervalS: number; rep
 }
 
 export type RepriceDecision =
-  | { reprice: true; price: bigint; target: Extract<TargetPrice, { ok: true }> }
+  | {
+      reprice: true;
+      price: bigint;
+      target: Extract<TargetPrice, { ok: true }>;
+      /** The step floor (stepFloor) when it lifted the price above the target (a step down), else null. */
+      stepFloor: bigint | null;
+      /**
+       * Present when the step floor is above the band's ceiling but the contract
+       * accepts the ceiling. The price is then `target.band.max`, a step LARGER than the pricer's own; `dropBps` is its
+       * size as the monitor measures it (floored bps of the live ask), which pages v2_mon_reprice_floorward at
+       * REPRICE_PAGE_DROP_BPS or more.
+       */
+      ceilingStep?: { stepFloor: bigint; dropBps: bigint };
+    }
   | { reprice: false; reason: 'band-empty' }
-  | { reprice: false; reason: 'within-threshold'; target: Extract<TargetPrice, { ok: true }> };
+  | { reprice: false; reason: 'within-threshold'; target: Extract<TargetPrice, { ok: true }> }
+  /**
+   * The band's ceiling is below the contract's per-call floor (repriceFloor): every price inside the band is a
+   * drop reprice refuses (RepriceDropExceeded), so nothing can be sent until the spot recovers or the ask rolls.
+   * `floor` is the pricer's step floor, `contractFloor` the contract's.
+   */
+  | { reprice: false; reason: 'drop-floor-above-band'; target: Extract<TargetPrice, { ok: true }>; floor: bigint; contractFloor: bigint };
 
-/** With the fair value: the target, and whether it is far enough from the live ask to send. */
+/**
+ * With the fair value: the target, and whether it is far enough from the live ask to send.
+ *
+ * STEP DOWN. A target more than MAX_REPRICE_DROP_BPS below the live ask is refused by reprice
+ * (RepriceDropExceeded), so it used to be simulated, refused and dropped on every tick, and the ask never moved down.
+ * The price sent is now max(target, stepFloor(live)): a step of at most PRICER_MAX_STEP_DROP_BPS (under the monitor's
+ * leaked-key page, and inside the contract's cap), then another from the new ask on the next evaluation, until the
+ * target is inside one step. "Differs enough" is still judged on the target, so a step is taken whenever the target
+ * itself is worth a reprice.
+ *
+ * STEP FLOOR ABOVE THE BAND. When the spot fell so far that
+ * the step floor is above the band's ceiling, no price is both within one pricer step and inside the band. If the
+ * contract still accepts the ceiling (band.max >= repriceFloor(live)), the ceiling is sent: the ask must never sit
+ * above the band when one reprice can bring it in. That step is larger than the pricer's own and pages the monitor's
+ * v2_mon_reprice_floorward when it is REPRICE_PAGE_DROP_BPS or more (`ceilingStep.dropBps`). Only when the ceiling is
+ * below the contract's floor is nothing sent ('drop-floor-above-band'); the pricer pages that itself.
+ */
 export function planReprice(input: {
   fair: bigint;
   spot: bigint;
@@ -227,5 +291,11 @@ export function planReprice(input: {
   const target = targetPrice({ fair: input.fair, edgeBps: input.edgeBps, spot: input.spot, minAskBps: input.strategy.minAskBps, maxAskBps: input.strategy.maxAskBps });
   if (!target.ok) return { reprice: false, reason: 'band-empty' };
   if (!differsEnough(target.price, input.livePrice, input.thresholdBps)) return { reprice: false, reason: 'within-threshold', target };
-  return { reprice: true, price: target.price, target };
+  const floor = stepFloor(input.livePrice);
+  if (target.price >= floor) return { reprice: true, price: target.price, target, stepFloor: null };
+  if (floor <= target.band.max) return { reprice: true, price: floor, target, stepFloor: floor };
+  const contractFloor = repriceFloor(input.livePrice);
+  if (target.band.max < contractFloor) return { reprice: false, reason: 'drop-floor-above-band', target, floor, contractFloor };
+  const dropBps = ((input.livePrice - target.band.max) * BPS) / input.livePrice;
+  return { reprice: true, price: target.band.max, target, stepFloor: null, ceilingStep: { stepFloor: floor, dropBps } };
 }

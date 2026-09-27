@@ -66,6 +66,8 @@ describe("buy cost and sizing", () => {
       { orderId: "1", price: 1_000_000n, units: 5n },
     ], 10n, { takerFeeFlat: 20_000n, takerFeeCapBps: 1_000 });
     expect(quote).toEqual({
+      // BuyCost carries the site's pricing status; plain resale-style asks price fully.
+      pricingStatus: "priced", unpriceableAsks: [],
       filledUnits: 10n, unfilledUnits: 0n, premium: 110_000n, fee: 11_000n, cost: 121_000n,
       averagePrice: 1_100_000n, orderIds: ["1", "2"],
       fills: [
@@ -153,19 +155,19 @@ describe("scenarios and display", () => {
 });
 
 /**
- * T-OP-120. Every fee term of the explorer, pinned to the contract constant it mirrors. Read at
- * callhouse-contracts branch v8 ee14bfbc56949f1cb626bb4656ffb0965db1f48f (line numbers cited at that SHA):
- *   - V2Constants.sol:88  MAX_PAYOUT_SLIPPAGE_CEIL_BPS = 300
- *   - V2Constants.sol:91  MAX_ROUTE_FEE_BPS = 100
- *   - V2Constants.sol:80  EXERCISE_FEE_MAX_PAYOUT_SHARE_BPS = 1000, :77 EXERCISE_FEE_CEIL_BPS = 200
- *   - Clearinghouse.sol:1177-1189 _conversionFloor: value * (BPS - min(maxPayoutSlippageBps + min(routeFee, 100), 300)) / BPS
- *   - OptionMath.sol:111-113 grossPayoutPerUnit, :130-131 exercise fee, :140-141 longPayoutPerUnit
- *   - OrderBook.sol:834-841 _takerFee = min(flat, premium * capBps / BPS) - discount
- * The design example (docs/product/TRADE-PAYOFF-EXPLORER.md §2.5): 300 units, one ask at 4.1333 USDG/share,
+ * Every fee term of the explorer, pinned to the contract constant it mirrors, in
+ * callhouse-contracts (v8), by name:
+ *   - V2Constants.sol  MAX_PAYOUT_SLIPPAGE_CEIL_BPS = 300
+ *   - V2Constants.sol  MAX_ROUTE_FEE_BPS = 100
+ *   - V2Constants.sol  EXERCISE_FEE_MAX_PAYOUT_SHARE_BPS = 1000, EXERCISE_FEE_CEIL_BPS = 200
+ *   - Clearinghouse.sol _conversionFloor: value * (BPS - min(maxPayoutSlippageBps + min(routeFee, 100), 300)) / BPS
+ *   - OptionMath.sol grossPayoutPerUnit, the exercise fee, longPayoutPerUnit
+ *   - OrderBook.sol _takerFee = min(flat, premium * capBps / BPS) - discount
+ * The design example: 300 units, one ask at 4.1333 USDG/share,
  * strike 230 call, exercise fee 25 bps, settlement 240, taker fee min(0.10 USDG, 10 %).
  */
 
-describe("T-OP-120 conversion band, P&L and USDG break-even", () => {
+describe("conversion band, P&L and USDG break-even", () => {
   const call = { isPut: false, strike: 230_000_000n, units: 300n, exerciseFeeBps: 25 };
   const put = { isPut: true, strike: 230_000_000n, units: 300n, exerciseFeeBps: 25 };
   const fees = { takerFeeFlat: 100_000n, takerFeeCapBps: 1_000 };
@@ -177,7 +179,7 @@ describe("T-OP-120 conversion band, P&L and USDG break-even", () => {
   });
 
   it("prices the design example the way OrderBook.take does", () => {
-    // OptionMath.premium (:49-50): 4_133_300 * 300 / 100; one taker fee on the total premium (OrderBook.sol:454, :834-841).
+    // OptionMath.premium: 4_133_300 * 300 / 100; one taker fee on the total premium (OrderBook `_fill` through `_takerFee`).
     expect(quote.premium).toBe(12_399_900n);
     expect(quote.fee).toBe(100_000n);
     expect(quote.cost).toBe(12_499_900n);
@@ -200,7 +202,7 @@ describe("T-OP-120 conversion band, P&L and USDG break-even", () => {
 
   it("values the design example call at 240 and floors every step", () => {
     const price = 240_000_000n;
-    // OptionMath.sol:113 UNIT * (P - K) / P, floored; :130-131 min(UNIT * 25 / BPS, gross * 1000 / BPS); :141 gross - fee.
+    // OptionMath.grossPayoutPerUnit UNIT * (P - K) / P, floored; feePerUnit min(UNIT * 25 / BPS, gross * 1000 / BPS); longPayoutPerUnit gross - fee.
     const gross = (UNIT * (price - call.strike)) / price;
     expect(gross).toBe(416_666_666_666_666n);
     const fee = exerciseFeePerUnit(gross, UNIT, 25);
@@ -245,5 +247,75 @@ describe("T-OP-120 conversion band, P&L and USDG break-even", () => {
     expect(breakevenUsdg(put, 3_000_000_000n, 300)).toBeNull();
     expect(breakevenUsdg(call, 0n, 300)).toBe(call.strike);
     expect(() => breakevenUsdg(call, 1n, 301)).toThrow(RangeError);
+  });
+});
+
+/*
+ * The site fixes (callhouse-site lib/site.test.ts) ported into the app twin. The
+ * vectors below are the site's own, verbatim; each app-only case pins that the port is ADDITIVE (absent inputs keep
+ * the app's previous results exactly) so the existing app suite above is untouched.
+ */
+describe("the marketing site's payoff port, on its own vectors", () => {
+  it("taker fee applies the per-take discount after the capped base (site vectors)", async () => {
+    const { takerFee } = await import("./payoff");
+    const params = { takerFeeFlat: 100_000n, takerFeeCapBps: 1_000, discountBps: 2_500 };
+    expect(takerFee(2_000_000n, params)).toBe(75_000n);
+    expect(takerFee(100_000n, params)).toBe(7_500n);
+    expect(takerFee(2_000_000n, { ...params, discountBps: 0 })).toBe(100_000n);
+    expect(() => takerFee(2_000_000n, { ...params, discountBps: 5_001 })).toThrow(/discountBps/);
+    expect(() => takerFee(2_000_000n, { ...params, discountBps: -1 })).toThrow(/discountBps/);
+    // App-only: no discount given is exactly the pre-port capped fee.
+    const { discountBps: _d, ...noDiscount } = params;
+    expect(takerFee(2_000_000n, noDiscount)).toBe(100_000n);
+    expect(takerFee(100_000n, noDiscount)).toBe(10_000n);
+  });
+
+  it("missing write-ask inputs remain visible rather than becoming absent depth (site vectors + the maker reason)", async () => {
+    const { costToBuy } = await import("./payoff");
+    const fees = { takerFeeFlat: 100_000n, takerFeeCapBps: 1_000, discountBps: 0 };
+    const ask = { orderId: "1", kind: "AskWrite" as const, maker: "0x123", price: 1_000_000n, units: 1n, makerFreeCollateral: null };
+    const unpriceable = costToBuy([ask], 1n, fees);
+    const absent = costToBuy([], 1n, fees);
+    expect(unpriceable.pricingStatus).toBe("unpriceable");
+    expect(unpriceable.unpriceableAsks).toEqual([{ orderId: "1", reason: "rent" }]);
+    expect(absent.pricingStatus).toBe("priced");
+    expect(absent.unpriceableAsks).toEqual([]);
+    const rent = { collateralPerUnit: 1n, mintFeePpm: 0, expiry: 1_800_604_800, snapshotTimestamp: 1_800_000_000 };
+    expect(costToBuy([ask], 1n, fees, rent).unpriceableAsks[0]?.reason).toBe("collateral");
+    const { maker: _m, ...noMaker } = ask;
+    expect(costToBuy([noMaker], 1n, fees, rent).unpriceableAsks).toEqual([{ orderId: "1", reason: "maker" }]);
+    // The skipped ask is still not filled: listing it changes the status, never the fills or the cost.
+    expect(unpriceable.filledUnits).toBe(0n);
+    expect(unpriceable.cost).toBe(absent.cost);
+    // A resale ask needs none of those inputs and prices.
+    expect(costToBuy([{ orderId: "2", kind: "AskResale", price: 1_000_000n, units: 1n }], 1n, fees).pricingStatus).toBe("priced");
+  });
+
+  it("call conversion floors the whole owed amount before break-even valuation (site vectors)", async () => {
+    const { breakeven, payoutAt } = await import("./payoff");
+    const position = { isPut: false, strike: 223_000_000n, units: 100n, exerciseFeeBps: 25, conversionFloorBps: 9_700 };
+    expect(payoutAt(240_000_000n, position)).toBe(15_907_999n);
+    expect(breakeven(position, 1_100_000n)).toBe(224_260_024n);
+    expect(payoutAt(224_260_023n, position)).toBe(1_099_999n);
+    expect(payoutAt(224_260_024n, position)).toBe(1_100_000n);
+    expect(payoutAt(100_000_104n, { ...position, strike: 100_000_000n, exerciseFeeBps: 0 })).toBe(99n);
+    expect(payoutAt(190_000_000n, { isPut: true, strike: 200_000_000n, units: 1n, exerciseFeeBps: 25 })).toBe(95_000n);
+    expect(() => payoutAt(240_000_000n, { ...position, conversionFloorBps: 9_699 })).toThrow(/conversionFloorBps/);
+    expect(() => payoutAt(240_000_000n, { ...position, conversionFloorBps: 10_001 })).toThrow(/conversionFloorBps/);
+  });
+
+  it("app-only: no floor keeps the in-kind per-contract value; the floor equals the band's low end; breakevenUsdg never floors twice", async () => {
+    const { payoutAt, netPayoutUsdgPerUnit, usdgPayoutBand, breakevenUsdg, MAX_PAYOUT_SLIPPAGE_CEIL_BPS, MAX_ROUTE_FEE_BPS } = await import("./payoff");
+    const { conversionFloorBps } = await import("./fees");
+    const inKind = { isPut: false, strike: 223_000_000n, units: 100n, exerciseFeeBps: 25 };
+    const perUnit = netPayoutUsdgPerUnit(false, inKind.strike, 240_000_000n, 25);
+    expect(payoutAt(240_000_000n, inKind)).toBe(perUnit * 100n);
+    // One unit: the per-contract and total roundings coincide, so the floored payout IS the band's low end.
+    const floor = conversionFloorBps(MAX_PAYOUT_SLIPPAGE_CEIL_BPS, MAX_ROUTE_FEE_BPS);
+    const one = { ...inKind, units: 1n };
+    expect(payoutAt(240_000_000n, { ...one, conversionFloorBps: floor })).toBe(usdgPayoutBand(payoutAt(240_000_000n, one), MAX_PAYOUT_SLIPPAGE_CEIL_BPS, MAX_ROUTE_FEE_BPS).low);
+    expect(netPayoutUsdgPerUnit(false, one.strike, 240_000_000n, 25, floor)).toBe(usdgPayoutBand(perUnit, MAX_PAYOUT_SLIPPAGE_CEIL_BPS, MAX_ROUTE_FEE_BPS).low);
+    const cost = 1_100_000n;
+    expect(breakevenUsdg({ ...inKind, conversionFloorBps: floor }, cost, MAX_PAYOUT_SLIPPAGE_CEIL_BPS)).toBe(breakevenUsdg(inKind, cost, MAX_PAYOUT_SLIPPAGE_CEIL_BPS));
   });
 });

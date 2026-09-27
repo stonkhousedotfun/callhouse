@@ -1,7 +1,7 @@
 /**
  * The Merkle reward claim engine, shared by every program (maker in USDG, lender in $STONKHOUSE).
  *
- * MOVED VERBATIM from `makerRewards.ts` by T-133 — identifiers renamed off "maker", logic untouched.
+ * MOVED VERBATIM from `makerRewards.ts` by — identifiers renamed off "maker", logic untouched.
  * `makerRewards.ts` is now a re-export shim so `makerRewards.test.ts` and every existing maker call
  * site keep working unchanged; that test passing is the control on this move.
  *

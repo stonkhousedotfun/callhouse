@@ -15,6 +15,17 @@
  *     seconds). The service's internal provenance (fair.ts FairQuote.provenance) is NOT in the body. `iv` is
  *     on the trading clock (bs.ts), so it reads below Cboe's calendar-day iv over spans without a
  *     weekend; `iv` and `delta` are rounded to 6 dp.
+ *     ADDED, never renamed (every field above is unchanged):
+ *       gamma, vega      at `iv`; vega per 1.00 of vol (6 dp)
+ *       askIv            max(iv, realizedVol, floor) marked up, >= iv (fair.ts askIvFor; 6 dp)
+ *       realizedVol      the pool's in-session realized vol (realized.ts), or null
+ *       quality          { readiness, reasons, uncertainty: { ivLow, ivHigh, fairLow, fairHigh } | null }: the internal
+ *                        provenance's quality, the one slice of it a quoting bot needs
+ *       event            { input: supplied|missing|short, inWindow }. `input: missing` means no calendar for the
+ *                        ticker, which is unknown, not clear.
+ *     NEVER A `provenance` KEY. The indexer (indexer/lib/v2/pricing.ts fairResult) reads an own `provenance`
+ *     key as the full O3-307/1 provenance and DISCARDS THE WHOLE QUOTE when it does not parse, so a partial
+ *     one here would blank every quote the indexer proxies. quality and event are top-level for that reason.
  *
  *   GET /surface/:ticker
  *       200 { ticker, root, asOf, chainTimestamp, spot: Money, expiries: [{ expiry, day, forward:
@@ -28,7 +39,15 @@
  *   GET /health   200 always while the process serves: liveness. `status: "degraded"` when the
  *                 latest download of any chain failed, or a chain no longer passes its own clocks
  *                 (`usable`: chain-stale, chain-inconsistent), which refuses every /fair of it;
- *                 per-ticker detail under `chains`.
+ *                 per-ticker detail under `chains`, with the provider serving them (`chainProvider`) and
+ *                 each chain's stated entitlement (`real-time`, `delayed`, `unknown`). `spots` has each
+ *                 ticker's latest spot inputs: the Chainlink spot, the equity reference and
+ *                 whether it was the parity forward, the pool spot and its divergence from Chainlink,
+ *                 and which spot priced; `settings` the pool and forward limits. `eventRecheck`:
+ *                 per ticker with a re-check day in the event calendar, { recheckBy, overdue, coveredBy }
+ *                 (events.ts eventRecheckStatus, New York days); null when the app was built without the
+ *                 calendar's re-check days. An overdue ticker does not degrade `status`: its /fair still
+ *                 answers, with the event input `missing`, and ops/v2/monitor.mjs pages on it instead.
  *
  * Every Money is { raw, decimals: 6, formatted }, formatted with viem's formatUnits like the
  * indexer. Unexpected exceptions become 500 { fair: null, reason: "internal-error" } and are
@@ -37,8 +56,10 @@
 import { Hono } from 'hono';
 import { formatUnits } from 'viem';
 import type { PricingReason } from './cboe.js';
+import { eventRecheckStatus, type EventRecheckSchedule } from './events.js';
 import type { FairQuote, PricingLog, PricingService } from './fair.js';
 import type { PricingFailure } from './cboe.js';
+import type { EventCalendar } from './short-maturity.js';
 
 export type Money = { raw: string; decimals: number; formatted: string };
 
@@ -88,8 +109,16 @@ export function parseFairQuery(query: Query): ParsedFairQuery {
   return { ok: true, ticker, strikeUsdg6, expiry: Number(expiryRaw), type: type as 'call' | 'put' };
 }
 
-/** What the legacy /fair body reads from an outcome: never the internal provenance. */
-export type FairBodyInput = PricingFailure | Pick<FairQuote, 'ok' | 'fairUsdg6' | 'iv' | 'delta' | 'source' | 'method' | 'days' | 'spotUsdg6' | 'asOf'>;
+/** What the /fair body reads from an outcome: the legacy fields, plus the added fields when the outcome has
+ *  them (a caller holding only the legacy shape still gets the legacy body). Never the rest of the provenance. */
+export type FairBodyInput =
+  | PricingFailure
+  | (Pick<FairQuote, 'ok' | 'fairUsdg6' | 'iv' | 'delta' | 'source' | 'method' | 'days' | 'spotUsdg6' | 'asOf'> &
+      Partial<Pick<FairQuote, 'gamma' | 'vega' | 'askIv' | 'realizedVol' | 'event'>> & { provenance?: Pick<FairQuote['provenance'], 'quality'> });
+
+function round6OrNull(x: number | null | undefined): number | null {
+  return x === null || x === undefined || !Number.isFinite(x) ? null : round6(x);
+}
 
 /** The /fair body for an outcome, and its status. */
 export function fairResponse(outcome: FairBodyInput): { status: 200 | 404; body: Record<string, unknown> } {
@@ -105,12 +134,42 @@ export function fairResponse(outcome: FairBodyInput): { status: 200 | 404; body:
       source: outcome.source,
       spot: money(outcome.spotUsdg6),
       asOf: outcome.asOf,
+      ...(outcome.gamma === undefined ? {} : { gamma: round6(outcome.gamma) }),
+      ...(outcome.vega === undefined ? {} : { vega: round6(outcome.vega) }),
+      ...(outcome.askIv === undefined ? {} : { askIv: round6(outcome.askIv) }),
+      ...(outcome.realizedVol === undefined ? {} : { realizedVol: round6OrNull(outcome.realizedVol) }),
+      ...(outcome.provenance === undefined
+        ? {}
+        : {
+            quality: {
+              readiness: outcome.provenance.quality.readiness,
+              reasons: [...outcome.provenance.quality.reasons],
+              uncertainty:
+                outcome.provenance.quality.uncertainty === null
+                  ? null
+                  : {
+                      ivLow: round6OrNull(outcome.provenance.quality.uncertainty.ivLow),
+                      ivHigh: round6OrNull(outcome.provenance.quality.uncertainty.ivHigh),
+                      fairLow: outcome.provenance.quality.uncertainty.fairLowUsdg6 === null ? null : money(outcome.provenance.quality.uncertainty.fairLowUsdg6),
+                      fairHigh: outcome.provenance.quality.uncertainty.fairHighUsdg6 === null ? null : money(outcome.provenance.quality.uncertainty.fairHighUsdg6),
+                    },
+            },
+          }),
+      ...(outcome.event === undefined ? {} : { event: { input: outcome.event.input, inWindow: outcome.event.inWindow } }),
     },
   };
 }
 
-export function createPricingApp(service: PricingService, log?: PricingLog): Hono {
+export interface PricingAppOptions {
+  /** The event calendar's re-check days and the calendar that covers them (events.ts), for /health. */
+  eventRecheck?: { recheckBy: EventRecheckSchedule; calendar: EventCalendar };
+  /** SEAM: wall clock, ms, for the re-check days. */
+  nowMs?: () => number;
+}
+
+export function createPricingApp(service: PricingService, log?: PricingLog, options: PricingAppOptions = {}): Hono {
   const app = new Hono();
+  const nowMs = options.nowMs ?? Date.now;
 
   app.onError((error, c) => {
     log?.warn({ err: error instanceof Error ? error.message : String(error), path: c.req.path }, 'pricing request failed');
@@ -173,6 +232,8 @@ export function createPricingApp(service: PricingService, log?: PricingLog): Hon
         chainTimestamp: entry.chain?.clocks.publishedAtText ?? null,
         lastTradeTime: entry.chain?.underlying.observedAtText ?? null,
         options: entry.chain?.rows.length ?? null,
+        // What the chain's own quotes state (massive.ts massiveEntitlement), not what the plan claims.
+        entitlement: entry.chain?.provider.entitlement.class ?? null,
       };
     }
     return c.json({
@@ -181,13 +242,63 @@ export function createPricingApp(service: PricingService, log?: PricingLog): Hon
       uptimeSeconds: service.uptimeSeconds(),
       markets: service.markets.size,
       marketsWithChain: [...service.markets.values()].filter((m) => m.cboe !== null).length,
+      chainProvider: service.chainProvider.id,
       settings: {
         maxChainAgeS: service.settings.maxChainAgeS,
         maxSpotAgeS: service.settings.maxSpotAgeS,
         maxSpotDivergenceBps: service.settings.maxSpotDivergenceBps,
         horizonDays: service.settings.horizonDays,
+        poolTwapS: service.settings.poolTwapS,
+        maxPoolChainlinkDivergenceBps: service.settings.maxPoolChainlinkDivergenceBps,
+        poolRequired: service.settings.poolRequired,
+        forwardMaxQuoteAgeS: service.settings.forward.maxQuoteAgeS,
+        forwardMaxPairSpreadBps: service.settings.forward.maxPairSpreadBps,
       },
       chains,
+      // The tickers the event calendar covers ([] = none supplied: every event flag reads 'missing'),
+      // and each ticker's latest realized-vol read.
+      eventCalendar: service.eventCalendarTickers(),
+      // A ticker whose re-check day has passed with nothing covering today reads `overdue`.
+      eventRecheck:
+        options.eventRecheck === undefined
+          ? null
+          : eventRecheckStatus(options.eventRecheck.recheckBy, options.eventRecheck.calendar, Math.floor(nowMs() / 1000)),
+      realized: Object.fromEntries(
+        [...service.realizedReadsSnapshot()].map(([ticker, r]) => [
+          ticker,
+          { at: new Date(r.atMs).toISOString(), vol: r.ok ? round6(r.vol) : null, why: r.ok ? null : r.why, returns: r.returns, skipped: r.skipped },
+        ]),
+      ),
+      spots: Object.fromEntries(
+        [...service.spotInputs()].map(([ticker, s]) => [
+          ticker,
+          {
+            at: new Date(s.atMs).toISOString(),
+            chainlink: money(s.chainlinkUsdg6),
+            chainlinkUpdatedAt: s.chainlinkUpdatedAt,
+            forwardSource: s.equity.source,
+            equity: s.equity.price === null ? null : usdMoney(s.equity.price),
+            equityObservedAt: s.equity.observedAt,
+            forwardExpiryDay: s.equity.expiryDay,
+            forwardPairs: s.equity.pairs,
+            forwardFallbackWhy: s.equity.fallbackWhy,
+            equityDivergenceBps: Math.round(s.equityDivergenceBps * 10) / 10,
+            pool:
+              s.pool === null
+                ? null
+                : {
+                    address: s.pool.address,
+                    spot: s.pool.spotUsdg6 === null ? null : money(s.pool.spotUsdg6),
+                    windowS: s.pool.windowS,
+                    harmonicLiquidity: s.pool.harmonicLiquidity?.toString() ?? null,
+                    minLiquidity: s.pool.minLiquidity.toString(),
+                    divergenceBps: s.pool.divergenceBps === null ? null : Math.round(s.pool.divergenceBps * 10) / 10,
+                    unusable: s.pool.unusable,
+                  },
+            pricedWith: s.pricedWith,
+          },
+        ]),
+      ),
     });
   });
 

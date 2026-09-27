@@ -178,7 +178,7 @@ export async function submittedReceiptStatus(
 
 export function unknownReceiptToast(hash: Hex): Omit<Toast, "id"> {
   return { tone: "unknown", title: "Transaction submitted; status unknown", hash,
-    body: "A wallet transaction was submitted, but this app could not check its confirmation. Check the explorer link and your account before taking another action." };
+    body: "A transaction was sent, but the app could not confirm it. Check the explorer link before your next step." };
 }
 
 /**
@@ -202,7 +202,7 @@ export function useTxRunner() {
           return null;
         }
         if (status === "reverted") {
-          update(id, { tone: "error", title: "Transaction reverted", body: undefined, hash });
+          update(id, { tone: "error", title: "Transaction failed", body: undefined, hash });
           return null;
         }
         update(id, { tone: "success", title: labels.success, body: undefined, hash });

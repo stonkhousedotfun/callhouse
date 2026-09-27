@@ -7,7 +7,7 @@ import { isAddress, type Address } from "viem";
  * `Policy.launchDefaults()`) directly. `FeeRecipientUpdated`, `DepositCapUpdated` and
  * `PolicyUpdated` fire only on later governance calls, so an index built from events alone
  * published `protocolFeeBps: 0`, `feeRecipient: null` and `depositCap: 0` for a vault charging
- * 5% to a real recipient under a 50-token cap — found by the X-11 fork sync. (`maxPriceAge` is
+ * 5% to a real recipient under a 50-token cap — found by the fork sync. (`maxPriceAge` is
  * set through `_setMaxPriceAge`, which does emit, and needs nothing here.)
  *
  * The `Vault:setup` handler reads the three views at START_BLOCK and patches whatever answered;
@@ -52,7 +52,7 @@ export function constructorSettings(reads: ConstructorReads): ConstructorSetting
  * The four contracts the vault was constructed against, as its immutable views name them, next to
  * the addresses this process was configured with. Pure, like everything above.
  *
- * WHY THE INDEXER REFUSES A MISMATCH. The Clear is a deploy-time choice (decision D16: the
+ * WHY THE INDEXER REFUSES A MISMATCH. The Clear is a deploy-time choice (by design: the
  * upstream build, or our own `DeployClear.s.sol` instance), and so, on a fork or a rehearsal, are
  * Seaport and the two tokens. Every Ponder source is an address from lib/env.ts, and two handlers
  * filter on them: `Seaport:OrderFulfilled` counts only offer items whose token equals

@@ -2,7 +2,7 @@
  * Which (writer, underlying) pairs have an AutoRoller strategy: the list the pricer walks each tick.
  *
  * TWO SOURCES, unioned (as the cranker's rolls step does):
- *   indexer    GET /v2/strategies?active=1 (X2-04), paged by cranker/indexer-client.ts;
+ *   indexer    GET /v2/strategies?active=1, paged by cranker/indexer-client.ts;
  *   log scan   AutoRoller `StrategySet` events from the registry's deploy block, into the pricer's
  *              SQLite file (table v2_pricer_strategies, cursor in v2_meta), so the list survives the
  *              indexer being down and a restart does not rescan from the deploy block.

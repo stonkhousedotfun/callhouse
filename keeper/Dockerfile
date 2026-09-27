@@ -5,8 +5,8 @@
 # keeper/. pnpm-lock.yaml and pnpm-workspace.yaml live at the root and the install must be
 # workspace-aware, so a Dockerfile that could only see keeper/ would have nothing correct to
 # install from. `dockerfilePath` in keeper/railway.json therefore reads `keeper/Dockerfile`,
-# relative to a service Root Directory of the repo root. ops/deploy.md ("keeper") documents every
-# Railway-side setting this file assumes; if you change one, change it there too.
+# relative to a service Root Directory of the repo root. The Railway service settings
+# must match what this file assumes; if you change one, change the other too.
 #
 # THE LAYERING IS THE POINT: manifests → install → sources → build → prune. Copy the sources
 # before the install and every one-line edit reinstalls, and recompiles, better-sqlite3.
@@ -111,7 +111,7 @@ ENV NODE_ENV=production
 # The database is the keeper's memory of what it has already done. Mount a volume at /data.
 # KEEPER_DB_PATH is a default only: Railway service variables win over it.
 ENV KEEPER_DB_PATH=/data/keeper.db
-# Health server. Railway probes $PORT, so ops/deploy.md sets PORT=8787 on the service to match.
+# Health server. Railway probes $PORT, so the service sets PORT=8787 to match.
 ENV KEEPER_PORT=8787
 
 # The stock image's unprivileged user. The volume mount at /data must be writable by it.
@@ -128,8 +128,26 @@ COPY --from=builder --chown=node:node /out ./
 # set V2_REGISTRY_FILE and V2_REGISTRY_PATH together. A missing file fails COPY at build time.
 ARG V2_REGISTRY_FILE=tier1.json
 COPY --chown=node:node ops/markets/${V2_REGISTRY_FILE} ./ops/markets/${V2_REGISTRY_FILE}
-# The external monitor (ops/deploy.md §15.12): one dependency-free script that loads viem from /app/node_modules.
+# The pricing mode's event calendar (keeper/src/v2/pricing/events.ts; earnings blackouts reach the MM through
+# /fair). ops/v2/env/pricing.env sets PRICING_EVENTS_PATH=/app/ops/markets/events.json, so a missing copy refuses
+# boot instead of pricing with no calendar; the keeper's relative default would resolve to /ops, outside /app
+# Other modes never read it.
+COPY --chown=node:node ops/markets/events.json ./ops/markets/events.json
+# The external monitor: one dependency-free script that loads viem from /app/node_modules.
 COPY --chown=node:node ops/v2/monitor.mjs ./ops/v2/monitor.mjs
+# The role manifest the monitor's AccessManager checks read (ROLES_FILE in monitor.mjs: role ids, holders, the selector ->
+# role map). Without it the manager and members checks report "[incomplete]" and never compare the chain with it
+# (the prod monitor at the v9 launch logged ENOENT for it). Every file monitor.mjs reads by a constant path is held to this stage
+# and to .dockerignore by ops/v8/prelaunch-gate-image.test.mjs. Kept above the gate block: go-live-v2.test.mjs reads that
+# block's COPY lines as the gate's file list.
+COPY --chown=node:node ops/abis/v2/roles.json ./ops/abis/v2/roles.json
+# The pre-launch gate. The launch tooling runs it inside the monitor service, the one place the
+# services' *.railway.internal addresses resolve; it runs the monitor.mjs above. The gate and every file it imports at
+# runtime, nothing else of ops/: ops/v8/prelaunch-gate-image.test.mjs derives the list from the imports and names any
+# file missing here or in .dockerignore.
+COPY --chown=node:node ops/v8/prelaunch-gate.mjs ./ops/v8/prelaunch-gate.mjs
+COPY --chown=node:node ops/v2/go-live-gating.mjs ./ops/v2/go-live-gating.mjs
+COPY --chown=node:node ops/v8/tvl-threshold.mjs ./ops/v8/tvl-threshold.mjs
 
 USER node
 

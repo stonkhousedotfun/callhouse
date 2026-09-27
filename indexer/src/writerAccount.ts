@@ -176,7 +176,7 @@ ponder.on("WriterAccount:LotFilled", async ({ event, context }) => {
     premiumUsdg: m.premiumUsdg + premiumUsdg,
   });
 
-  // FILL_DETECTED from ops/alerts.md. The most important line of the week.
+  // FILL_DETECTED alert. The most important line of the week.
   log.info(
     { market: MARKET, account, owner: a.owner, weekId: a.listedWeekId, optionId, orderHash, premiumUsdg, filledLots: a.filledLots + 1n, listedLots: a.listedLots, txHash: event.transaction.hash },
     "lot filled",

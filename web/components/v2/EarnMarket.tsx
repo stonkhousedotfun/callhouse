@@ -1,48 +1,47 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState, useSyncExternalStore, type ReactNode } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { formatUnits, parseUnits, type Address, type WalletClient } from "viem";
+import { formatUnits, parseUnits, type WalletClient } from "viem";
 import { useAccount, useWalletClient } from "wagmi";
-
 import { ConnectButton } from "@/components/ConnectButton";
-import { FairProvenanceNote } from "@/components/v2/FairProvenanceNote";
 import { useNotice, useV2ReceiptNotice } from "@/components/TxToast";
-import { Button, Notice, PageHead, Panel, Segments } from "@/components/ui";
-import { PendingFeeNotice } from "@/components/v2/PendingFeeNotice";
-import { PendingOperationsNotice } from "@/components/v2/PendingOperationsNotice";
+import { Button, Disclosure, Field, InfoTip, Notice, PageHead, Panel, Row, Rows, Segments, SegmentedControl, SelectField, Stat, Tabs } from "@/components/ui";
+import { cn } from "@/lib/cn";
+import { PayoutTiming } from "@/components/ui/PayoutTiming";
+import { ledgerWithdrawTiming, zapTiming } from "@/lib/v2/payoutTiming";
 import { WithdrawalTerms } from "@/components/v2/WithdrawalTerms";
+import { EarnFacts } from "@/components/v2/earn/EarnFacts";
+import { expiryDay, SellTicket } from "@/components/v2/sell/SellTicket";
+import { usd } from "@/components/v2/trade/price";
+import { hasEarnPosition } from "@/components/v2/earn/position";
+import { publicClient } from "@/lib/chain";
 import { USDG, USDG_DECIMALS } from "@/lib/contracts";
 import { useNow } from "@/lib/hooks";
 import { v2Markets } from "@/lib/markets";
-import { v2Api } from "@/lib/v2/api";
+import { v2Api, writerStrategiesOptions } from "@/lib/v2/api";
 import type { MarketSeriesResponse, Strategy } from "@/lib/v2/api-types";
 import { lifetimePremium } from "@/lib/v2/historySummary";
-import { stamp } from "@/lib/v2/time";
-import { V2_DEPLOYMENT, requireV2Address, v2AddressProvenanceNotices, v2ContractAddress,
-  v2ConfigWarnings } from "@/lib/v2/config";
+import { Time, timeText, useViewerTimeZone } from "@/components/ui/Time";
+import { V2_DEPLOYMENT, requireV2Address, v2AddressOverrideConflictNotices, v2AddressProvenanceNotices, v2ConfigWarnings, v2ContractAddress, v2StockZapMismatch } from "@/lib/v2/config";
 import { readPayoutPrefs } from "@/lib/v2/chainReads";
 import { earnActionAvailability } from "@/lib/v2/earnAccess";
-import { createSeries, nextAskExpiry, preflightAsk, readMintCutoff, readRollPosition, readRollState, readWriterBalance, readWriterFree, readWriterRent,
-  setDelegate, setStrategy, stopStrategy } from "@/lib/v2/earnTx";
-import { useAllMarketSeries, useConfig, useFair, useMarketSeries, useMarkets, usePositions, useStrategies, v2Keys } from "@/lib/v2/hooks";
-import { collateralPerUnit, sharesToUnits, shortOutcome } from "@/lib/v2/payoff";
-import { presetStrategy, resolvePresetPricing, retainedSharesAtExpiry, roundAskToTick, writerQuote,
-  WRITER_PRESETS, type PresetId } from "@/lib/v2/presets";
-import { nextRollStep, rollProgressFromChain, ROLL_STEPS, validateRollStrategy } from "@/lib/v2/rollSetup";
-import { autoRollStartPrice, autoRollTargetStrike, fixedAskBpsFromReference, formatUsdgTick, parseUsdgTick,
-  pricingRequestIsCurrent, pricingWriteState, proposedSmartPricingBand, refreshSmartPricingRows, selectSmartPricingReference,
-  smartPricingCandidateState, smartPricingDraft, smartPricingPrices, snapStrategyPriceToBps,
-  strategyPriceAtBps, SMART_PRICING_REVIEW_MS,
-  type PricingRequestSnapshot, type ProposedSmartPricingBand, type SmartPricingPrices,
-  smartPricingOffer, SMART_PRICING_PRICER_UNKNOWN, type SmartPricingOffer,
-  type SmartPricingCandidateSnapshot, type StrategyPriceField } from "@/lib/v2/smartPricing";
+import { depositDoor } from "@/lib/v2/upgradePause";
+import { readRollPosition, readRollState, readWriterBalance, readWriterFree, setDelegate, setStrategy, stopStrategy } from "@/lib/v2/earnTx";
+import { useAllMarketSeries, useConfig, useMarketSeries, useMarkets, usePositions, useStrategies, v2Keys } from "@/lib/v2/hooks";
+import { sharesToUnits } from "@/lib/v2/payoff";
+import { dailyOffered, presetStrategy, resolvePresetPricing, visiblePresets, weeklyOffered, WRITER_PRESETS, type PresetId } from "@/lib/v2/presets";
+import { formatRollPreview, readRollPreview } from "@/lib/v2/moneyPreviews";
+import { nextRollStep, rollProgressFromChain, rollStatusFromChain, ROLL_STEPS, validateRollStrategy } from "@/lib/v2/rollSetup";
+import { autoRollStartPrice, autoRollTargetStrike, closedStrategyPosition, fixedAskBpsFromReference, formatUsdgTick, parseUsdgTick, pricingRequestIsCurrent, pricingWriteState, proposedSmartPricingBand, refreshSmartPricingRows, selectSmartPricingReference, smartPricingCandidateState, smartPricingDraft, smartPricingPrices, snapStrategyPriceToBps, strategyPriceAtBps, SMART_PRICING_REVIEW_MS, type PricingRequestSnapshot, type ProposedSmartPricingBand, type SmartPricingPrices, smartPricingOffer, SMART_PRICING_PRICER_UNKNOWN, type SmartPricingOffer, type SmartPricingCandidateSnapshot, type StrategyPriceField } from "@/lib/v2/smartPricing";
 import { selectTradeSpot } from "@/lib/v2/marketSpot";
 import { approveExact, deposit, place, setOperator, setPayoutToLedger, withdraw, type WriteContext } from "@/lib/v2/tx";
 import { exitZap, quoteExitZap, quoteWriteZap, writeZap, ZAP_SLIPPAGE_BPS_DEFAULT } from "@/lib/v2/zapTx";
+import { displayMoney, displayPercent, displayQuantity } from "@/lib/numberFormat";
 
-const assetAmount = (raw: bigint, decimals: number) => Number(formatUnits(raw, decimals)).toLocaleString("en-US", { maximumFractionDigits: 4 });
-const money = (raw: bigint) => Number(formatUnits(raw, 6)).toLocaleString("en-US", { maximumFractionDigits: 4 });
+// through rules (no zero tails, truncated, compact from 10,000), not a local toLocaleString.
+const assetAmount = (raw: bigint, decimals: number) => displayQuantity(raw, decimals);
+const money = (raw: bigint) => displayMoney(raw, 6, { maxDecimals: 4 });
 
 const parsePositiveAsset = (raw: string, decimals: number): bigint | null => {
   try { const amount = parseUnits(raw, decimals); return amount > 0n ? amount : null; } catch { return null; }
@@ -51,8 +50,30 @@ const parseAskPrice = (raw: string): bigint | null => {
   try { const price = parseUnits(raw, 6); return price > 0n && price % 100n === 0n ? price : null; } catch { return null; }
 };
 
-const EMPTY_STRATEGY: Strategy = { active: true, weekly: true, smartPricing: false, otmBps: 500,
+/** A new strategy starts on the daily cycle unless the registry lists weeklies (presets.ts weeklyOffered). */
+export const EMPTY_STRATEGY: Strategy = { active: true, weekly: weeklyOffered(), smartPricing: false, otmBps: 500,
   askBps: 100, minAskBps: 0, maxAskBps: 0, maxUnits: "1" };
+
+/**
+ * The blank form for one market. It starts on the daily cycle when the market lists dailies and on the weekly
+ * cycle when it lists weeklies only (SPCX: Friday closes, no dailies), so the form never opens on a cycle
+ * the market cannot roll into. A market listing both keeps EMPTY_STRATEGY's choice.
+ */
+export function emptyStrategyFor(weeklyOn: boolean, dailyOn: boolean): Strategy {
+  return dailyOn ? EMPTY_STRATEGY : { ...EMPTY_STRATEGY, weekly: weeklyOn };
+}
+
+/**
+ * The Cycle choices. Weekly is offered only when the market lists weeklies and daily only when it
+ * lists dailies, EXCEPT that a saved strategy keeps its own value visible: hiding it would misstate the saved strategy
+ * and leave the owner unable to see what they are about to stop or change.
+ */
+export function cycleOptions(weeklyOn: boolean, current: Pick<Strategy, "weekly">, dailyOn = true): readonly ("weekly" | "daily")[] {
+  const options: ("weekly" | "daily")[] = [];
+  if (weeklyOn || current.weekly) options.push("weekly");
+  if (dailyOn || !current.weekly) options.push("daily");
+  return options;
+}
 
 function matchedSeries(rows: MarketSeriesResponse["items"], expiry: number, isPut: boolean) {
   return rows.filter((row) => row.series.isPut === isPut && row.series.expiry === expiry && row.series.status === "open")
@@ -81,19 +102,17 @@ const PRICING_LABELS: Record<PricingInput, string> = {
   start: "Starting ask", minimum: "Minimum ask", maximum: "Maximum ask",
 };
 
-export type EarnStage = "deposit" | "ask" | "automate";
-
 /**
- * W3-301: whether the smart-pricing checkbox may be TICKED, and what to say when it may not.
+ * whether the smart-pricing checkbox may be TICKED, and what to say when it may not.
  *
  * SEPARATED FROM THE COMPONENT so it can be asserted without a renderer — this package has no
  * render test, and the alternative is a `disabled={...}` expression inside JSX that nothing can
- * check. A gate nothing can test is the shape this row exists to remove, so it would be an odd
+ * check. A gate nothing can test is the shape this code exists to remove, so it would be an odd
  * way to close it.
  *
  * `disabled` when the pricer is not known-healthy, but ONLY while the control is not already on.
  * Locking a user out of turning smart pricing OFF because the pricer died would be a worse trap
- * than the one this row removes, and AC5 is explicit that an already-live ask is not this row's
+ * than the one this gate removes, and an already-live ask is deliberately not this gate's
  * business: it stays live at its last price, and the user keeps the ability to stand it down.
  */
 export function smartPricingControlState(
@@ -103,17 +122,36 @@ export function smartPricingControlState(
   return { disabled: busy || blocked, note: offer.offered ? null : offer.note };
 }
 
-export function stageAfterEarnAction(stage: EarnStage, action: "deposit" | "ask", isPut: boolean): EarnStage {
-  if (action === "deposit") return "ask";
-  return isPut ? stage : "automate";
-}
-
 /** The Portfolio edit link is explicit; unrelated query values must not preload a strategy. */
 export function portfolioStrategyEditRequested(search: string): boolean {
   return new URLSearchParams(search).get("edit") === "smart-pricing";
 }
 
+/*
+ * The edit request is read from the URL as an external store rather than inside an effect, which is what
+ * react-hooks/set-state-in-effect flagged at the old EarnMarket.tsx:325. The URL does not change under a mounted page
+ * (Portfolio's link is a navigation), so there is nothing to subscribe to; the server render and hydration read false.
+ */
+const subscribeToNothing = () => () => {};
+const readEditRequest = () => portfolioStrategyEditRequested(window.location.search);
+const serverEditRequest = () => false;
+
+const SELL_TABS = ["auto", "once", "swap"] as const;
+type SellTab = (typeof SELL_TABS)[number];
+export function sellTabRequested(search: string): SellTab | null {
+  const tab = new URLSearchParams(search).get("tab");
+  return (SELL_TABS as readonly string[]).includes(tab ?? "") ? tab as SellTab : null;
+}
+const readTabRequest = () => sellTabRequested(window.location.search);
+const serverTabRequest = () => null;
+export function sellSeriesRequested(search: string): string | null {
+  const id = new URLSearchParams(search).get("series");
+  return id && /^\d{1,78}$/.test(id) ? id : null;
+}
+const readSeriesRequest = () => sellSeriesRequested(window.location.search);
+
 export function EarnMarket({ ticker }: { ticker: string }) {
+  const zone = useViewerTimeZone();
   const { address } = useAccount();
   const wallet = useWalletClient();
   const notice = useNotice();
@@ -121,51 +159,67 @@ export function EarnMarket({ ticker }: { ticker: string }) {
   const queryClient = useQueryClient();
   const markets = useMarkets();
   const registryMarket = v2Markets().find((row) => row.ticker === ticker);
+  const weeklyOn = weeklyOffered(registryMarket?.v2.overrides);
+  const dailyOn = dailyOffered(registryMarket?.v2.overrides);
   const market = markets.data?.find((row) => row.ticker === ticker);
-  const [type, setType] = useState<"call" | "put">("call");
-  const [stage, setStage] = useState<EarnStage>("deposit");
+  // Put writing shows only on a market whose registry row enables puts. Until
+  // then the page is calls only: no Calls/Puts switch, no put copy. The put path stays behind the flag, not deleted.
+  const putsEnabled = market?.puts === true;
+  const [typeChoice, setType] = useState<"call" | "put">("call");
+  const type = putsEnabled ? typeChoice : "call";
   const isPut = type === "put";
   const activeType = type;
-  const series = useMarketSeries(ticker, { type: activeType, limit: 200 });
+  // Only OPEN series, filtered by the indexer. The page is oldest-first and the ladder keeps only open
+  // rows anyway, so an unfiltered 200-row page filled up with expired and settled series and emptied the strike list.
+  const series = useMarketSeries(ticker, { type: activeType, status: "open", limit: 200 });
   const allCallSeries = useAllMarketSeries(ticker, { type: "call", status: "open" }, { enabled: false });
   const config = useConfig();
   const positions = usePositions(address);
-  const strategies = useStrategies({ active: true, limit: 200 });
+  // This wallet's strategies, filtered by the indexer. The unfiltered 200-row page of EVERYONE's
+  // strategies (ordered by id) never reached a writer whose row sorted past it, so the saved strategy went missing.
+  const strategies = useStrategies(writerStrategiesOptions(address));
   const underlying = registryMarket?.asset ?? null;
   const collateralAsset = isPut ? USDG : underlying;
   const collateralDecimals = isPut ? 6 : 18;
   const collateralLabel = isPut ? "USDG" : "Stock Tokens";
   const [expiryChoice, setExpiryChoice] = useState(0);
-  const [seriesChoice, setSeriesChoice] = useState("");
+  const [seriesPick, setSeriesChoice] = useState("");
   const [customStrike, setCustomStrike] = useState("");
-  const [shares, setShares] = useState("0.01");
-  const [askPrice, setAskPrice] = useState("");
   const [depositAmount, setDepositAmount] = useState("");
   const [withdrawAmount, setWithdrawAmount] = useState("");
   const [zapUsdgAmount, setZapUsdgAmount] = useState("");
   const [exitZapAmount, setExitZapAmount] = useState("");
-  const [strategy, setStrategyForm] = useState<Strategy>(EMPTY_STRATEGY);
+  const [strategy, setStrategyForm] = useState<Strategy>(() => emptyStrategyFor(weeklyOn, dailyOn));
   const [pricingInputs, setPricingInputs] = useState<Partial<Record<PricingInput, string>>>({});
   const [pricingCommitErrors, setPricingCommitErrors] = useState<Partial<Record<PricingInput, string>>>({});
   const [pricingCandidate, setPricingCandidate] = useState<PricingCandidate | null>(null);
   const [pricingReviewNow, setPricingReviewNow] = useState(() => Date.now());
   const [pricingRevisionValue, setPricingRevisionValue] = useState(0);
-  const [portfolioEditMode, setPortfolioEditMode] = useState(false);
-  const [maxShares, setMaxShares] = useState("0.01");
+  const portfolioEditMode = useSyncExternalStore(subscribeToNothing, readEditRequest, serverEditRequest);
+  const [portfolioEditLoaded, setPortfolioEditLoaded] = useState(false);
+  // A plan's max size defaults to ALL FREE TOKENS. Blank saves maxUnits 0, which
+  // AutoRoller reads as no cap (`if (s.maxUnits != 0 && units > s.maxUnits)`): each roll sizes to the writer's free
+  // collateral at roll time. The field's placeholder and help text say so. The one-off "Size in shares" keeps 0.01.
+  const [maxShares, setMaxShares] = useState("");
   const [formTouched, setFormTouched] = useState(false);
+  const [sellTabChoice, setSellTab] = useState<SellTab | null>(null);
+  const requestedTab = useSyncExternalStore(subscribeToNothing, readTabRequest, serverTabRequest);
+  const requestedSeries = useSyncExternalStore(subscribeToNothing, readSeriesRequest, serverTabRequest);
+  const sellTab: SellTab = sellTabChoice ?? (portfolioEditMode ? "auto" : requestedTab ?? (requestedSeries ? "once" : "auto"));
+  const [balanceTab, setBalanceTab] = useState<"deposit" | "withdraw">("deposit");
+  const [otmInput, setOtmInput] = useState<string | null>(null);
+  const [presetChoice, setPresetChoice] = useState<PresetId | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
   const [rollStep, setRollStep] = useState<string | null>(null);
   const pricingRevision = useRef(0);
   const pricingAction = useRef(0);
-  const portfolioEditLoaded = useRef(false);
 
-  const expiry = expiryChoice || market?.expiries[0] || 0;
+  const requestedRow = requestedSeries ? series.data?.items.find((row) => row.series.longId === requestedSeries && !row.series.isPut === !isPut) : undefined;
+  const expiry = expiryChoice || requestedRow?.series.expiry || market?.expiries[0] || 0;
+  const seriesChoice = seriesPick || (requestedRow && requestedRow.series.expiry === expiry ? requestedRow.series.longId : "");
   const ladder = matchedSeries(series.data?.items ?? [], expiry, isPut);
   const chosen = seriesChoice && seriesChoice !== "custom" ? ladder.find((row) => row.series.longId === seriesChoice) : ladder[0];
   const selected = seriesChoice === "custom" ? null : chosen;
-  const fairQuery = useFair(selected?.series.longId);
-  const fair = fairQuery.data?.fair?.raw ? BigInt(fairQuery.data.fair.raw)
-    : selected?.quote.fair?.raw ? BigInt(selected.quote.fair.raw) : null;
   // The render-time clock is useNow(): whole SECONDS, ticking, and 0 until mounted. selectTradeSpot takes
   // MILLISECONDS, hence the explicit * 1000. Before mount there is no clock to judge a spot against, so the
   // spot fails closed (null) rather than being read at time 0.
@@ -213,11 +267,6 @@ export function EarnMarket({ ticker }: { ticker: string }) {
     : pricingCommitError ? pricingCommitError
     : pendingPricingInput ? `${PRICING_LABELS[pendingPricingInput]} is not committed. Move out of the field or press Enter to convert it to contract bps.`
     : null;
-  const price = parseAskPrice(askPrice);
-  const units = useMemo(() => { try { return sharesToUnits(shares); } catch { return null; } }, [shares]);
-  const strike = selected ? BigInt(selected.series.strike.raw) : seriesChoice === "custom" ? parseAskPrice(customStrike) : null;
-  const quote = price && units && config.data ? writerQuote(price, units, config.data.fees.premiumFeeBps, fair) : null;
-  const requiredCollateral = strike && units ? collateralPerUnit(isPut, strike) * units : null;
   const strategySize = useMemo(() => {
     if (!maxShares.trim()) return "0";
     try { return sharesToUnits(maxShares).toString(); } catch { return null; }
@@ -232,13 +281,21 @@ export function EarnMarket({ ticker }: { ticker: string }) {
     : strategyToSave ? validateRollStrategy(strategyToSave, spot) : "Choose contract-representable USDG prices.");
   const contractReady = Boolean(V2_DEPLOYMENT.contracts.clearinghouse && V2_DEPLOYMENT.contracts.orderBook && V2_DEPLOYMENT.contracts.expiryCalendar);
   const rollerReady = Boolean(contractReady && V2_DEPLOYMENT.contracts.autoRoller);
+  // What the next auto-roll would place, from AutoRoller.previewRoll. Not a local quote.
+  const rollPreview = useQuery({
+    queryKey: ["v2", "roll-preview", address, underlying],
+    enabled: Boolean(address && underlying && V2_DEPLOYMENT.contracts.autoRoller),
+    retry: false,
+    queryFn: () => readRollPreview(publicClient, requireV2Address("autoRoller"), address!, underlying!),
+  });
   const mismatch = config.data ? [
     ...v2ConfigWarnings(config.data),
     ...(isPut && config.data.usdg.address.toLowerCase() !== USDG.toLowerCase() ? ["USDG address differs from this app."] : []),
   ] : [];
   const provenance = v2AddressProvenanceNotices();
-  // W3-301: the pricer runs in the keeper, not here, so its readiness comes from the indexer's
-  // /v2/services (T-424). `retry: false` is deliberate — a retrying query stays `pending` longer,
+  const overrideConflicts = v2AddressOverrideConflictNotices();
+  // The pricer runs in the keeper, not here, so its readiness comes from the indexer's
+  // /v2/services. `retry: false` is deliberate — a retrying query stays `pending` longer,
   // and pending already means "not known", which is the fail-closed answer. The refetch cadence
   // matches the reading's own freshness bound rather than relying on focus alone.
   const services = useQuery({ queryKey: ["v2", "services"], queryFn: () => v2Api.getServices(),
@@ -264,12 +321,17 @@ export function EarnMarket({ ticker }: { ticker: string }) {
     indexerConfigHealthy: Boolean(config.data && mismatch.length === 0),
   });
   const canWrite = availability.newWritesReady && !markets.isError && spot !== null && (!isPut || market?.puts === true);
-  // NOT `V2_DEPLOYMENT.contracts.stockZap`. That read is the registry alone, and no registry can
-  // ever fill this key — its name is in neither generator's V2_CONTRACT_NAMES, and assertExactKeys
-  // rejects an unknown key, so the value was null forever and this flag was false forever. A check
-  // that reports "not configured" because it cannot see its subject is the false-green this row
-  // exists to remove; `v2ContractAddress` consults the validated override as well.
+  // The ledger deposit (Clearinghouse.deposit has no pause of its own) closes while the whole deployment is
+  // paused for an upgrade. Asks already stop on chain; withdraw is never gated.
+  const ledgerDeposit = depositDoor(canWrite, markets.isError ? null : markets.data);
+  // `v2ContractAddress`, NOT `V2_DEPLOYMENT.contracts.stockZap`: that read is the registry alone, and
+  // `v2ContractAddress` consults the validated override as well. Since the registry fills the key
+  // (tier1.json `v2.contracts.stockZap`). An indexer that publishes a DIFFERENT StockZap disables only
+  // the two Zap buttons, with the reason shown; it is never part of `mismatch`, which pauses everything.
   const zapConfigured = Boolean(v2ContractAddress("stockZap"));
+  const zapMismatch = config.data ? v2StockZapMismatch(config.data) : null;
+  const zapReady = zapConfigured && zapMismatch === null;
+  const zapOffLabel = zapConfigured ? "Zap paused" : "Zap not configured";
   const zapUsdg = parsePositiveAsset(zapUsdgAmount, USDG_DECIMALS);
   const writeZapQuote = !isPut && zapUsdg ? quoteWriteZap(zapUsdg, spot, spotDecimals, 18) : null;
   const exitZapIn = parsePositiveAsset(exitZapAmount, 18);
@@ -278,13 +340,6 @@ export function EarnMarket({ ticker }: { ticker: string }) {
   const balance = useQuery({ queryKey: ["v2", "writerBalance", address, ticker, collateralAsset],
     enabled: Boolean(address && collateralAsset && V2_DEPLOYMENT.contracts.clearinghouse),
     queryFn: () => readWriterBalance(address!, collateralAsset!), staleTime: 15_000, refetchInterval: 15_000, retry: 0 });
-  const rentQuote = useQuery({ queryKey: ["v2", "writerRent", underlying, isPut, strike?.toString(), expiry, units?.toString(), address],
-    enabled: Boolean(contractReady && underlying && strike && expiry && units),
-    queryFn: () => readWriterRent(underlying!, isPut, strike!, expiry, units!, address),
-    staleTime: 15_000, refetchInterval: 15_000, retry: 0 });
-  const writerRent = !rentQuote.isError ? rentQuote.data?.rent ?? null : null;
-  const totalCollateral = requiredCollateral !== null && writerRent !== null ? requiredCollateral + writerRent : null;
-  const hasCollateral = totalCollateral !== null && rentQuote.data?.free !== null && rentQuote.data?.free !== undefined && rentQuote.data.free >= totalCollateral;
   const roll = useQuery({ queryKey: ["v2", "writerRoll", address, ticker],
     enabled: Boolean(address && underlying && V2_DEPLOYMENT.contracts.autoRoller),
     queryFn: () => readRollState(address!, underlying!), staleTime: 15_000, refetchInterval: 15_000, retry: 0 });
@@ -303,25 +358,31 @@ export function EarnMarket({ ticker }: { ticker: string }) {
   const latestLockedExpiry = writerShorts?.reduce((latest, row) => BigInt(row.collateralLocked.raw) > 0n
     ? Math.max(latest, row.series.expiry) : latest, 0) || null;
   const progress = { payout: Boolean(payoutPrefs.data?.toLedger),
-    operator: Boolean(balance.data?.rollerOperator), delegate: Boolean(roll.data?.delegate),
-    strategy: Boolean(roll.data?.strategyActive) };
+    operator: Boolean(balance.data?.rollerOperator), bookOperator: Boolean(balance.data?.orderBookOperator),
+    delegate: Boolean(roll.data?.delegate), strategy: Boolean(roll.data?.strategyActive) };
 
-  useEffect(() => {
-    if (!portfolioStrategyEditRequested(window.location.search)) return;
-    setStage("automate");
-    setPortfolioEditMode(true);
-    if (portfolioEditLoaded.current || !indexedStrategy) return;
-    portfolioEditLoaded.current = true;
-    const revision = pricingRevision.current + 1;
-    pricingRevision.current = revision;
-    setPricingRevisionValue(revision);
+  // The Portfolio edit link loads the saved strategy into the form once, as soon as it is indexed. This adjusts state
+  // while rendering (guarded by portfolioEditLoaded, so it runs once) instead of in an effect. The revision bump
+  // discards any in-flight preset or band load; the ref the async actions compare against is synced just below.
+  if (portfolioEditMode && indexedStrategy && !portfolioEditLoaded) {
+    setPortfolioEditLoaded(true);
+    setPricingRevisionValue((revision) => revision + 1);
     setStrategyForm(indexedStrategy.strategy);
     setPricingInputs({});
     setPricingCommitErrors({});
     setPricingCandidate(null);
     setMaxShares(indexedStrategy.strategy.maxUnits === "0" ? "" : formatUnits(BigInt(indexedStrategy.strategy.maxUnits), 2));
     setFormTouched(true);
-  }, [indexedStrategy]);
+  }
+  useEffect(() => {
+    // advancePricingRevision moves the ref and the state together; only the render-time load above moves the state
+    // alone, so the ref catches up here. Refs are written in effects, never during render.
+    if (pricingRevision.current < pricingRevisionValue) pricingRevision.current = pricingRevisionValue;
+  }, [pricingRevisionValue]);
+  useEffect(() => {
+    // The link lands on #auto-roll, which sits inside Advanced; the browser may try the anchor before Advanced opens.
+    if (portfolioEditMode) document.getElementById("auto-roll")?.scrollIntoView({ block: "start" });
+  }, [portfolioEditMode]);
 
   function context(): WriteContext {
     if (!address || !wallet.data) throw new Error("Connect your wallet first.");
@@ -334,11 +395,10 @@ export function EarnMarket({ ticker }: { ticker: string }) {
       } };
   }
 
-  async function act(label: string, task: () => Promise<string>, walletAction = true, onSuccess?: () => void) {
+  async function act(label: string, task: () => Promise<string>, walletAction = true) {
     setBusy(label);
     try { if (walletAction) notice("pending", label, "Review each requested transaction in your wallet.");
       notice("success", label, await task());
-      onSuccess?.();
     } catch (error) {
       if (!unknownReceipt(error))
         notice("error", `${label} stopped`, error instanceof Error ? error.message : "Try again after refreshing.");
@@ -348,6 +408,7 @@ export function EarnMarket({ ticker }: { ticker: string }) {
 
   async function moveBalance(direction: "deposit" | "withdraw") {
     await act(`${direction === "deposit" ? "Deposit" : "Withdraw"} ${collateralLabel}`, async () => {
+      if (direction === "deposit" && ledgerDeposit.note) throw new Error(ledgerDeposit.note);
       if (direction === "deposit" && !canWrite) throw new Error("Deposits are unavailable until the market and indexer configuration are live.");
       if (direction === "deposit" && isPut) await checkPutMarket();
       if (!availability.exitReady || !collateralAsset || !address)
@@ -368,7 +429,7 @@ export function EarnMarket({ ticker }: { ticker: string }) {
       await withdraw(ctx, collateralAsset, amount);
       setWithdrawAmount("");
       return `${assetAmount(amount, collateralDecimals)} ${collateralLabel} returned to your wallet.`;
-    }, true, direction === "deposit" ? () => setStage((current) => stageAfterEarnAction(current, "deposit", isPut)) : undefined);
+    });
   }
 
   async function zapWrite() {
@@ -384,7 +445,7 @@ export function EarnMarket({ ticker }: { ticker: string }) {
       await writeZap(ctx, underlying, amount, spot, spotDecimals, 18, quote.slippageBps);
       setZapUsdgAmount("");
       return `${assetAmount(amount, USDG_DECIMALS)} USDG swapped to Stock Tokens in your free Stonkhouse balance.`;
-    }, true, () => setStage((current) => stageAfterEarnAction(current, "deposit", isPut)));
+    });
   }
 
   async function zapExit() {
@@ -402,23 +463,6 @@ export function EarnMarket({ ticker }: { ticker: string }) {
       setExitZapAmount("");
       return `${assetAmount(amount, 18)} Stock Tokens sold for USDG.`;
     });
-  }
-
-  async function listAsk() {
-    await act("Place your ask", async () => {
-      if (!canWrite || !underlying || !address || !config.data) throw new Error("Writing contracts are not ready in this build.");
-      if (isPut) await checkPutMarket();
-      if (!strike || !price || !units || !expiry) throw new Error("Choose an expiry, strike, size, and price on the 0.0001 USDG tick.");
-      const fresh = await preflightAsk(address, underlying, isPut, strike, expiry, units, config.data.fees.premiumFeeBps);
-      if (selected && fresh.longId !== BigInt(selected.series.longId)) throw new Error("The selected series changed. Refresh the ladder.");
-      const ctx = context();
-      if (!fresh.operator) await setOperator(ctx, requireV2Address("orderBook"), true);
-      if (!fresh.exists) await createSeries(ctx, underlying, isPut, strike, expiry);
-      const beforePlace = await preflightAsk(address, underlying, isPut, strike, expiry, units, config.data.fees.premiumFeeBps);
-      const cutoff = beforePlace.mintCutoff ?? await readMintCutoff(fresh.longId);
-      await place(ctx, fresh.longId, 2, price, units, nextAskExpiry(Math.floor(Date.now() / 1000), cutoff));
-      return `Your ${ticker} ${activeType} ask is open at ${money(price)} USDG per share. Premium arrives only if a buyer fills.`;
-    }, true, () => setStage((current) => stageAfterEarnAction(current, "ask", isPut)));
   }
 
   async function checkPutMarket() {
@@ -458,7 +502,7 @@ export function EarnMarket({ ticker }: { ticker: string }) {
     }
     const snapped = snapStrategyPriceToBps(spot, parsed, field);
     if (!snapped) {
-      setPricingCommitErrors((before) => ({ ...before, [field]: `${PRICING_LABELS[field]} is outside AutoRoller's 0.05%–10% contract range at the current spot.` }));
+      setPricingCommitErrors((before) => ({ ...before, [field]: `${PRICING_LABELS[field]} is outside AutoRoller's 0.5%–10% contract range at the current spot.` }));
       return;
     }
     setStrategyForm((before) => ({ ...before, [PRICING_KEYS[field]]: snapped.bps }));
@@ -512,7 +556,10 @@ export function EarnMarket({ ticker }: { ticker: string }) {
         return live.fair ? BigInt(live.fair.raw) : null;
       });
       const { target, targetStrike, targetFair, reference, referenceFair } = resolved;
-      const size = units ?? 1n;
+      // A preset keeps the plan's own max size (blank = all free tokens) and never copies the one-off
+      // "Size in shares" into it: that copy is how a preset plan came out "up to 0.01 shares". The saved maxUnits
+      // comes from the Max size field (strategySize), so this value only fills the form's strategy object.
+      const size = strategySize === null ? 0n : BigInt(strategySize);
       const filled = presetStrategy(id, spot, referenceFair, size, id === "weekly-delta-15" ? targetStrike : undefined);
       if (!pricingRequestStayedCurrent(requested, actionId))
         throw new Error("The strategy or market changed while the preset was loading. Review the form and try again.");
@@ -529,11 +576,10 @@ export function EarnMarket({ ticker }: { ticker: string }) {
         band: candidateBand, prices: candidatePrices,
       } : null);
       setPricingReviewNow(reviewedAtMs);
-      setMaxShares(formatUnits(size, 2));
       setFormTouched(true);
       setExpiryChoice(target.series.expiry);
       setSeriesChoice(target.series.longId);
-      setAskPrice(formatUnits(roundAskToTick(targetFair ?? spot / 100n), 6));
+      setPresetChoice(id);
       return `${preset.label} filled the ask and auto-roll form. Smart pricing stays off until you review and select it.`;
     }, false);
   }
@@ -585,7 +631,7 @@ export function EarnMarket({ ticker }: { ticker: string }) {
   async function enableRoll() {
     await act("Enable auto-roll", async () => {
       if (!canWrite || !rollerReady || !underlying || !address) throw new Error("AutoRoller is not deployed in this build.");
-      if (active && !formTouched) throw new Error("Load your saved strategy or choose a preset before updating it.");
+      if (strategyOn && !formTouched) throw new Error("Load your saved strategy or choose a preset before updating it.");
       if (strategyError || !strategyToSave) throw new Error(strategyError || "Choose a strategy.");
       const requested = currentPricingRequest();
       if (!requested) throw new Error("Live market inputs changed. Refresh the form before enabling auto-roll.");
@@ -595,12 +641,13 @@ export function EarnMarket({ ticker }: { ticker: string }) {
       const freshBalance = await readWriterBalance(address, underlying);
       const freshRoll = await readRollState(address, underlying);
       const freshPrefs = await readPayoutPrefs(address);
-      const steps = rollProgressFromChain({ payoutToLedger: freshPrefs.toLedger,
-        rollerOperator: freshBalance.rollerOperator, delegate: freshRoll.delegate });
+      const steps = rollProgressFromChain({ payoutToLedger: freshPrefs.toLedger, rollerOperator: freshBalance.rollerOperator,
+        orderBookOperator: freshBalance.orderBookOperator, delegate: freshRoll.delegate });
       for (let key = nextRollStep(steps); key !== null; key = nextRollStep(steps)) {
         setRollStep(key);
         if (key === "payout") await setPayoutToLedger(ctx, true);
         else if (key === "operator") await setOperator(ctx, roller, true);
+        else if (key === "bookOperator") await setOperator(ctx, requireV2Address("orderBook"), true);
         else if (key === "delegate") await setDelegate(ctx, roller, true);
         else {
           const refreshed = await markets.refetch();
@@ -636,196 +683,250 @@ export function EarnMarket({ ticker }: { ticker: string }) {
     });
   }
 
-  const active = roll.data ? roll.data.strategyActive : Boolean(accountStrategy?.strategy.active);
-  const showPause = active || (availability.pauseReady && (roll.isPending || roll.isError));
+  // A saved strategy (what Pause stops and Update overwrites) is not the same as a working one:.
+  const strategyOn = roll.data ? roll.data.strategyActive : Boolean(accountStrategy?.strategy.active);
+  const rollState = roll.data && balance.data ? rollStatusFromChain({ strategyActive: roll.data.strategyActive,
+    rollerOperator: balance.data.rollerOperator, orderBookOperator: balance.data.orderBookOperator,
+    delegate: roll.data.delegate }) : null;
+  const active = rollState === "active";
+  const showPause = strategyOn || (availability.pauseReady && (roll.isPending || roll.isError));
   const nextTime = indexedStrategy?.expiry ? indexedStrategy.expiry + (config.data?.constants.settlementWindow ?? 1_800)
     + (config.data?.constants.finalizeDelay ?? 120) : null;
+  // The AutoRoller closed the last position (PositionClosed) and has not rolled a new one yet.
+  const closedCall = indexedStrategy ? closedStrategyPosition(indexedStrategy) : null;
 
-  return <>
-    <PageHead eyebrow="Writers" title={`Write ${ticker} ${activeType}s`} lede={isPut
-      ? "Deposit USDG to back a put, choose a strike and expiry, and set the premium a buyer must pay."
-      : "Deposit Stock Tokens, choose a strike and expiry, and set the premium a buyer must pay."} />
-    <Segments className="mb-5" label="Option type to write" selected={activeType} disabled={!!busy}
-      options={[{ value: "call", label: "Calls" }, { value: "put", label: "Puts" }] as const}
-      onSelect={(kind) => { advancePricingRevision(); pricingAction.current += 1; setPricingCandidate(null);
-        setType(kind); setStage("deposit"); setSeriesChoice(""); setExpiryChoice(0); setDepositAmount(""); setWithdrawAmount("");
-        setZapUsdgAmount(""); setExitZapAmount(""); }} />
-    {isPut && market && !market.puts ? <Notice tone="info" className="mb-5">Put writing is unavailable for this market. You can still withdraw free USDG.</Notice> : null}
-    <Notice tone="warn" className="mb-5">{isPut
-      ? `A cash-secured put locks ${collateralLabel} equal to the strike value per share. You are paid the premium if filled; if ${ticker} ends below the strike, you lose the difference in USDG. Collateral stays locked until close or redemption.`
-      : "A written call caps your upside above the strike. Premium is paid only if a buyer fills. Collateral stays locked until the option can be closed or redeemed."}</Notice>
-    {markets.isError || series.isError ? <Notice tone="warn" role="status" className="mb-5">Market data is unavailable. Your on-chain balance is unaffected; refresh when the indexer recovers.</Notice> : null}
-    {!isPut && allCallSeries.isError ? <Notice tone="warn" role="status" className="mb-5">The complete call list is unavailable. Select a preset or fill the proposed band to retry; the loaded ladder remains available for a manual ask.</Notice> : null}
-    {market && !market.spot ? <Notice tone="warn" role="status" className="mb-5">Live {ticker} spot is unavailable. New deposits and writing are paused; you can still withdraw free collateral.</Notice> : null}
-    {!contractReady ? <Notice tone="info" className="mb-5">New v2 writing is unavailable until its contracts are configured in this build.</Notice> : null}
-    {mismatch.length ? <Notice tone="warn" className="mb-5">App and indexer contract settings differ. Writing is paused until they match.</Notice> : null}
-    {/*
-      Provenance, and deliberately NOT part of `mismatch` above. An address served from a
-      build-time override must be visible — an override that is silently correct in dev is
-      indistinguishable from one that is silently unreported — but it is not a reason to pause
-      writing, which is what joining that array would have done.
-    */}
-    {provenance.length ? <Notice tone="info" className="mb-5">{provenance.join(" ")}</Notice> : null}
-    {!address ? <Panel className="mb-5"><p className="mb-4 text-ink-2">Connect a wallet to see your free and locked {collateralLabel}.</p><ConnectButton /></Panel> : null}
-    <nav aria-label="Earn flow" className="mb-5 rounded-lg border border-line bg-surface p-3">
-      <ol className={`grid gap-2 ${isPut ? "sm:grid-cols-2" : "sm:grid-cols-3"}`}>
-        {([
-          { id: "deposit", label: "Deposit", detail: `Fund or withdraw ${collateralLabel}` },
-          { id: "ask", label: "Set one ask", detail: "Choose your first price" },
-          ...(!isPut ? [{ id: "automate", label: "Automate", detail: "Optional · skip ahead anytime" }] : []),
-        ] as { id: EarnStage; label: string; detail: string }[]).map((step, index) =>
-          <li key={step.id}><button type="button" aria-current={stage === step.id ? "step" : undefined}
-            aria-controls={`earn-stage-${step.id}`} aria-expanded={stage === step.id} onClick={() => setStage(step.id)}
-            className={`w-full rounded-sm border px-3 py-3 text-left text-sm ${stage === step.id
-              ? "border-accent bg-accent-soft text-accent-text" : "border-line-2 bg-surface-2 text-ink hover:border-accent"}`}>
-            <span className="block font-semibold">{index + 1}. {step.label}</span>
-            <span className="mt-1 block text-xs">{step.detail}</span>
-          </button></li>)}</ol>
-    </nav>
-    <div id="earn-stage-deposit" className={stage === "deposit" ? "block" : "hidden"}>
-      <Panel as="section" aria-label="Writer balance">
-        <h2 className="font-display text-xl font-bold">Your {isPut ? "USDG" : ticker} balance</h2>
-        <div className="mt-4 grid grid-cols-3 gap-3 text-sm">
-          <div><p className="text-ink-3">In wallet</p><p className="num mt-1 font-semibold">{balance.data ? assetAmount(balance.data.wallet, collateralDecimals) : "—"}</p></div>
-          <div><p className="text-ink-3">Free to write</p><p className="num mt-1 font-semibold">{balance.data ? assetAmount(balance.data.free, collateralDecimals) : "—"}</p></div>
-          <div><p className="text-ink-3">Locked in shorts</p><p className="num mt-1 font-semibold">{locked !== null ? assetAmount(locked, collateralDecimals) : "—"}</p></div>
-        </div>
-        {balance.isError ? <Notice tone="warn" role="status" className="mt-4">The balance panel could not be read. A withdrawal can retry the free-balance check on chain before signing.</Notice> : null}
-        <div className="mt-5 grid gap-4 border-t border-line pt-4 sm:grid-cols-2">
-          <div><label htmlFor="writer-deposit" className="text-sm font-semibold">Deposit {collateralLabel}</label>
-            <input id="writer-deposit" inputMode="decimal" value={depositAmount} onChange={(event) => setDepositAmount(event.target.value)} placeholder={isPut ? "100" : "0.25"}
-              className="num mt-2 min-h-11 w-full rounded-sm border border-line-2 bg-surface px-3 text-ink" />
-            <p className="mt-1 text-xs text-ink-3">Your wallet may request an exact token approval first.</p>
-            <WithdrawalTerms className="mt-3" surface="writer" asset={collateralLabel}
-              free={balance.data ? assetAmount(balance.data.free, collateralDecimals) : null}
-              locked={locked !== null ? assetAmount(locked, collateralDecimals) : null}
-              latestExpiry={latestLockedExpiry} timing={config.data?.constants ?? null} />
-            <Button size="sm" className="mt-3 w-full" disabled={!canWrite || !balance.data || !!busy || !parsePositiveAsset(depositAmount, collateralDecimals)} onClick={() => void moveBalance("deposit")}>Deposit</Button></div>
-          <div><label htmlFor="writer-withdraw" className="text-sm font-semibold">Withdraw free {collateralLabel}</label>
-            <input id="writer-withdraw" inputMode="decimal" value={withdrawAmount} onChange={(event) => setWithdrawAmount(event.target.value)} placeholder={isPut ? "100" : "0.25"}
-              className="num mt-2 min-h-11 w-full rounded-sm border border-line-2 bg-surface px-3 text-ink" />
-            <p className="mt-1 text-xs text-ink-3">Locked collateral cannot be withdrawn.</p>
-            <Button size="sm" variant="ghost" className="mt-3 w-full" disabled={!availability.exitReady || !!busy || !parsePositiveAsset(withdrawAmount, collateralDecimals)} onClick={() => void moveBalance("withdraw")}>Withdraw</Button></div>
-        </div>
-        {!isPut ? <div className="mt-5 grid gap-4 border-t border-line pt-4 sm:grid-cols-2">
-          <div>
-            <label htmlFor="writer-zap-in" className="text-sm font-semibold">Zap USDG to {ticker}</label>
-            <input id="writer-zap-in" inputMode="decimal" value={zapUsdgAmount} onChange={(event) => setZapUsdgAmount(event.target.value)} placeholder="100"
-              className="num mt-2 min-h-11 w-full rounded-sm border border-line-2 bg-surface px-3 text-ink" />
-            <p className="mt-1 text-xs text-ink-3">Minimum received: {writeZapQuote ? `${assetAmount(writeZapQuote.minOut, 18)} ${ticker}` : "—"}</p>
-            <p className="mt-1 text-xs text-ink-3">Slippage tolerance: {(ZAP_SLIPPAGE_BPS_DEFAULT / 100).toFixed(2)}%</p>
-            <Button size="sm" className="mt-3 w-full" disabled={!canWrite || !zapConfigured || !writeZapQuote || !!busy}
-              onClick={() => void zapWrite()}>{zapConfigured ? "Zap in" : "Zap not configured"}</Button>
-          </div>
-          <div>
-            <label htmlFor="writer-zap-out" className="text-sm font-semibold">Exit zap {ticker} to USDG</label>
-            <input id="writer-zap-out" inputMode="decimal" value={exitZapAmount} onChange={(event) => setExitZapAmount(event.target.value)} placeholder="0.25"
-              className="num mt-2 min-h-11 w-full rounded-sm border border-line-2 bg-surface px-3 text-ink" />
-            <p className="mt-1 text-xs text-ink-3">Minimum received: {exitZapQuote ? `${assetAmount(exitZapQuote.minOut, USDG_DECIMALS)} USDG` : "—"}</p>
-            <p className="mt-1 text-xs text-ink-3">Slippage tolerance: {(ZAP_SLIPPAGE_BPS_DEFAULT / 100).toFixed(2)}%</p>
-            <p className="mt-1 text-xs text-ink-3">Sells wallet-held tokens. Withdraw free collateral first if it is still in Stonkhouse.</p>
-            <Button size="sm" variant="ghost" className="mt-3 w-full"
-              disabled={!availability.exitReady || !zapConfigured || !exitZapQuote || spot === null || !!busy}
-              onClick={() => void zapExit()}>{zapConfigured ? "Exit zap" : "Zap not configured"}</Button>
-          </div>
-        </div> : null}
-      </Panel>
-      <Button variant="ghost" className="mt-4" onClick={() => setStage("ask")}>Continue to Set one ask</Button>
-    </div>
-    <div id="earn-stage-ask" className={stage === "ask" ? "block" : "hidden"}>
-      {!isPut ? <Panel as="section" aria-label="Writer presets" className="mb-5"><h2 className="font-display text-xl font-bold">Start with a preset</h2>
-        <p className="mt-2 text-sm text-ink-2">A preset fills the ask and auto-roll forms. It does not place an order until you review and sign.</p>
-        <div className="mt-4 grid gap-2">{WRITER_PRESETS.map((preset) => <button key={preset.id} type="button" disabled={!!busy || allCallSeries.isFetching || !spot || !strikeTick}
-          onClick={() => void applyPreset(preset.id)} className="rounded-sm border border-line-2 bg-surface-2 px-4 py-3 text-left hover:border-accent disabled:opacity-60">
-          <span className="block font-semibold">{preset.label}</span><span className="mt-1 block text-xs text-ink-3">{preset.detail}</span>
-        </button>)}</div>
-      </Panel> : <Panel as="section" aria-label="Put collateral" className="mb-5"><h2 className="font-display text-xl font-bold">Cash-secured puts</h2>
-        <p className="mt-2 text-sm text-ink-2">For each share you write, set aside the strike amount in USDG. The option buyer receives the in-the-money difference at expiry; your USDG collateral covers it.</p>
-        <p className="mt-3 text-sm text-ink-2">Auto-roll presets currently write covered calls. Set each put ask manually below.</p>
-      </Panel>}
-      <Panel as="section" id="manual-ask" aria-label="Manual ask">
-      <h2 className="font-display text-xl font-bold">Set your ask</h2>
-      <p className="mt-2 text-sm text-ink-2">An AskWrite order uses free collateral only when a buyer fills. You set the price.</p>
-      <div className="mt-5 grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
-        <label className="text-sm font-semibold">Expiry<select value={expiry} onChange={(event) => { setExpiryChoice(Number(event.target.value)); setSeriesChoice(""); }}
-          className="mt-2 block min-h-11 w-full rounded-sm border border-line-2 bg-surface px-3 text-sm text-ink">
-          {(market?.expiries ?? []).map((time) => <option key={time} value={time}>{stamp(time)}</option>)}
-        </select></label>
-        <label className="text-sm font-semibold">Strike<select value={seriesChoice || chosen?.series.longId || ""} onChange={(event) => setSeriesChoice(event.target.value)}
-          className="mt-2 block min-h-11 w-full rounded-sm border border-line-2 bg-surface px-3 text-sm text-ink">
-          {ladder.map((row) => <option key={row.series.longId} value={row.series.longId}>${row.series.strike.formatted}</option>)}
-          <option value="custom">Custom strike…</option>
-        </select></label>
-        <label className="text-sm font-semibold">Size in shares<input inputMode="decimal" value={shares} onChange={(event) => setShares(event.target.value)} placeholder="0.01"
-          className="num mt-2 block min-h-11 w-full rounded-sm border border-line-2 bg-surface px-3 text-ink" />
-          <span className="mt-1 block text-xs font-normal text-ink-3">0.01-share steps</span></label>
-        <label className="text-sm font-semibold">Your price / share · USDG<input inputMode="decimal" value={askPrice} onChange={(event) => setAskPrice(event.target.value)} placeholder="1.15"
-          className="num mt-2 block min-h-11 w-full rounded-sm border border-line-2 bg-surface px-3 text-ink" />
-          <span className="mt-1 block text-xs font-normal text-ink-3">0.0001 USDG tick</span></label>
-      </div>
-      {seriesChoice === "custom" ? <div className="mt-4 max-w-xs"><label htmlFor="custom-strike" className="text-sm font-semibold">Custom strike · USDG</label>
-        <input id="custom-strike" inputMode="decimal" value={customStrike} onChange={(event) => setCustomStrike(event.target.value)} placeholder="230.00"
-          className="num mt-2 min-h-11 w-full rounded-sm border border-line-2 bg-surface px-3 text-ink" />
-        <p className="mt-1 text-xs text-ink-3">Must be a calendar expiry and a multiple of the market strike tick ({market?.strikeTick.formatted ?? "—"} USDG). Creating a new series adds one transaction.</p>
-      </div> : null}
-      <div className="mt-5 grid gap-3 sm:grid-cols-2">
-        <Notice tone="info" title="Fair-value guideline">
-          {/* W3-303: the fair figure below is qualified by its source. `useFair` carries provenance
-              on the /v2/fair payload; the per-series quote carries its own. Absent reads as unknown. */}
-          <p className="mb-2 text-xs"><FairProvenanceNote provenance={fairQuery.data?.provenance ?? selected?.quote.fairProvenance} /></p>
-          {fair !== null && price !== null ? <>
-          Fair value ≈ {money(fair)} USDG. You are asking {money(price)} USDG — {quote?.comparison ?? "at fair value"}. This is guidance, never a block.
-        </> : "Fair value is unavailable for this selection. You may still set your own price after checking the market."}</Notice>
-        <div className="rounded-xl bg-surface-2 p-4 text-sm"><p>Gross premium if fully filled: <strong className="num">{quote ? money(quote.gross) : "—"} USDG</strong></p>
-          <p className="mt-2">Seller fee ({config.data?.fees.premiumFeeBps ?? "—"} bps): <strong className="num">{quote ? money(quote.fee) : "—"} USDG</strong></p>
-          <p className="mt-2 font-semibold">Premium you receive: <span className="num">{quote ? money(quote.net) : "—"} USDG</span>, only if filled.</p></div>
-      </div>
-      {config.data?.pendingFees ? <PendingFeeNotice className="mt-4" effectiveAt={config.data.pendingFees.effectiveAt}
-        nextFees={config.data.pendingFees} kind="writer" /> : null}
-      <PendingOperationsNotice className="mt-4" />
-      {requiredCollateral !== null ? <p className="mt-4 text-sm font-semibold">Locked collateral for this size: <span className="num">{assetAmount(requiredCollateral, collateralDecimals)} {collateralLabel}</span>{totalCollateral !== null && rentQuote.data?.free !== null && !hasCollateral ? <span className="ml-2 text-warn">Deposit more before listing.</span> : null}</p> : null}
-      {totalCollateral !== null ? <p className="mt-2 text-sm">Free balance required: <strong className="num">{formatUnits(totalCollateral, collateralDecimals)} {collateralLabel}</strong>.</p> : <p className="mt-2 text-sm text-ink-3">Waiting for the on-chain collateral estimate before listing.</p>}
-      {strike && units && quote ? <div className="mt-5 overflow-x-auto"><h3 className="font-display text-lg font-bold">What happens at expiry</h3>
-        <table className="mt-3 w-full text-left text-sm"><thead className="border-b border-line text-ink-3"><tr><th className="py-2">Outcome</th><th className="py-2">Your collateral and premium</th></tr></thead><tbody>
-          {isPut ? <>
-            <tr className="border-b border-line"><td className="py-3">{ticker} at or above ${money(strike)}</td><td className="py-3">Your {money(requiredCollateral!)} USDG collateral returns, plus {money(quote.net)} USDG net premium.</td></tr>
-            <tr><td className="py-3">{ticker} at ${money(strike * 9n / 10n)}</td><td className="py-3">You pay {money(requiredCollateral! - shortOutcome(strike * 9n / 10n, { isPut: true, strike, units, exerciseFeeBps: 0 }, quote.net).collateralReturned)} USDG from collateral. The rest returns, plus {money(quote.net)} USDG net premium.</td></tr>
-          </> : <>
-            <tr className="border-b border-line"><td className="py-3">{ticker} below ${money(strike)}</td><td className="py-3">Keep {formatUnits(units, 2)} Stock Tokens, plus {money(quote.net)} USDG net premium.</td></tr>
-            <tr><td className="py-3">{ticker} at ${money(strike * 11n / 10n)}</td><td className="py-3">Keep about {retainedSharesAtExpiry(strike, strike * 11n / 10n, units).toFixed(4)} Stock Tokens, worth the strike value per original share, plus {money(quote.net)} USDG net premium.</td></tr>
-          </>}
-        </tbody></table><p className="mt-2 text-xs text-ink-3">These outcomes show premium and collateral separately, before gas.</p><p className="mt-2 text-xs text-ink-3">{isPut
-          ? `If ${ticker} ends below the strike, you lose the difference in USDG from your locked collateral. The net premium offsets some of that loss.`
-          : "Above strike, net-share settlement transfers a fraction of shares to the buyer, rather than the whole share."}</p>
-      </div> : null}
-      <div className="mt-5"><Button disabled={!canWrite || !hasCollateral || !!busy || !strike || !price || !units || !expiry} onClick={() => void listAsk()}>{busy === "Place your ask" ? "Placing…" : "Place AskWrite order"}</Button>
-        <p className="mt-2 text-xs text-ink-3">The chain rechecks free collateral, market state, fee, calendar, and cutoff before placement.</p></div>
-      </Panel>
-      {!isPut ? <Button variant="ghost" className="mt-4" onClick={() => setStage("automate")}>Continue to Automate</Button> : null}
+  const free = balance.data?.free ?? null;
+  const showPosition = Boolean(address) && hasEarnPosition({ free, locked, autoRollActive: strategyOn,
+    lifetimePremium: earned.data?.amount ?? null, balanceUnreadable: balance.isError, rollUnreadable: roll.isError });
+  const rollStatus = roll.isError ? "Status unavailable" : roll.isPending && !roll.data ? "Checking…"
+    : rollState === "active" ? "Active" : rollState === "incomplete" ? "Setup incomplete"
+      : strategyOn && balance.isError ? "Status unavailable" : strategyOn && !balance.data ? "Checking…" : "Paused / not set";
+  const rollAction = !strategyOn ? "Enable auto-roll" : rollState === "incomplete" ? "Finish setup" : "Update strategy";
+  const otmPercent = (strategy.otmBps / 100).toLocaleString("en-US", { maximumFractionDigits: 2 });
+  const contractNotices = provenance.length + overrideConflicts.length > 0;
+
+  const spotNumber = spot !== null ? Number(formatUnits(spot, spotDecimals)) : null;
+  const vsSpot = (raw: string, decimals: number) => {
+    if (spotNumber === null || spotNumber <= 0) return null;
+    const pct = (Number(formatUnits(BigInt(raw), decimals)) / spotNumber - 1) * 100;
+    return `${pct >= 0 ? "+" : "−"}${Math.abs(pct).toLocaleString("en-US", { maximumFractionDigits: 1 })}%`;
+  };
+  const selectedStrikeId = seriesChoice === "custom" ? "custom" : seriesChoice || chosen?.series.longId || "";
+  const shortAsset = isPut ? "USDG" : ticker;
+  const walletBalance = balance.data ? assetAmount(balance.data.wallet, collateralDecimals) : null;
+
+  const optionKind = isPut ? "Put" : "Call";
+  const fairOf = (row: MarketSeriesResponse["items"][number]) => row.quote.fair ? BigInt(row.quote.fair.raw) : null;
+  const spotRaw = spot;
+  const firstAboveSpot = spotRaw === null ? -1 : ladder.findIndex((row) => BigInt(row.series.strike.raw) * 10n ** BigInt(spotDecimals) > spotRaw * 10n ** BigInt(row.series.strike.decimals));
+  const pickRow = (row: MarketSeriesResponse["items"][number]) => {
+    setSeriesChoice(row.series.longId);
+  };
+  const manualAsk = <section id="manual-ask" aria-label="Manual ask" className="grid gap-5">
+    {isPut ? <div>
+      <h3 className="flex items-center gap-2 font-display text-lg font-bold">Set your put ask
+        <InfoTip label="About put collateral" text="If the stock ends below your strike, the buyer gets the difference from your USDG. Auto-roll only sells calls, so each put ask is set by hand." /></h3>
+      <p className="mt-1 text-sm text-ink-2">Each share you sell needs the strike amount in USDG set aside.</p>
+    </div> : <div>
+      <h3 className="flex items-center gap-2 font-display text-lg font-bold">Sell one call at your own price
+        <InfoTip label="About a one-off ask" text="You set the price. Your collateral is only used if a buyer fills. Nothing rolls afterwards: when this call settles, you choose again." /></h3>
+      <p className="mt-1 text-sm text-ink-2">Pick an expiry and a strike, then set your price.</p>
+    </div>}
+
+    <div className="grid gap-2">
+      {(market?.expiries ?? []).length ? <Segments label="Expiry" scroll selected={String(expiry)}
+        options={(market?.expiries ?? []).map((time) => ({ value: String(time), label: expiryDay(time) }))}
+        onSelect={(value) => { setExpiryChoice(Number(value)); setSeriesChoice(""); }} />
+        : <p className="text-sm text-ink-3">No expiries are open right now.</p>}
+      {expiry ? <p className="flex items-center gap-1.5 text-[12.5px] text-ink-3">Ends <Time at={expiry} market />
+        <InfoTip label="About the expiry" text={`The option ends at this close. The ${isPut ? "USDG" : "Stock Tokens"} behind it stay locked until then and unlock once it settles.`} /></p> : null}
     </div>
 
-    {!isPut ? <div id="earn-stage-automate" className={stage === "automate" ? "block" : "hidden"}>
-      <Panel as="section" id="auto-roll" aria-label="Auto-roll strategy">
-      <div className="flex flex-wrap items-start justify-between gap-3"><div><h2 className="font-display text-xl font-bold">Auto-roll</h2>
-        <p className="mt-2 text-sm text-ink-2">The keeper can list the next covered call from your free balance during regular New York market hours.</p></div>
-        {showPause ? <Button size="sm" variant="ghost" disabled={!availability.pauseReady || !!busy} onClick={() => void pauseRoll()}>Pause</Button> : null}</div>
-      {portfolioEditMode ? <Notice tone="info" role="status" className="mt-4">{indexedStrategy
-        ? "Your saved strategy is loaded into this form. Review the USDG band below; nothing changes on chain until Update strategy passes the current checks and you sign."
-        : strategies.isError ? "The saved strategy could not be loaded. Return to Portfolio and retry when strategy data recovers."
-          : "Loading the saved strategy for this wallet and underlying…"}</Notice> : null}
-      {!rollerReady ? <Notice tone="info" className="mt-4">AutoRoller is not deployed in this build.</Notice> : null}
-      <div className="mt-4 grid gap-3 text-sm sm:grid-cols-2 lg:grid-cols-4">
-        <div><p className="text-ink-3">Status</p><p className="mt-1 font-semibold">{roll.isError ? "Status unavailable" : roll.isPending && !roll.data ? "Checking…" : active ? "Active" : "Paused / not set"}</p></div>
-        <div><p className="text-ink-3">Current series / order</p><p className="mt-1 font-semibold">{accountStrategy?.currentSeries ? `${accountStrategy.currentSeries.ticker} $${accountStrategy.currentSeries.strike.formatted}` : "None"} · {accountStrategy?.orderId ?? "no order"}</p></div>
-        <div><p className="text-ink-3">Last roll</p><p className="mt-1 font-semibold">{indexedStrategy?.lastRolledAt ? stamp(indexedStrategy.lastRolledAt) : "Not recorded"}</p></div>
-        <div><p className="text-ink-3">Next possible roll</p><p className="mt-1 font-semibold">{nextTime ? stamp(nextTime) : "After the next expiry"}</p></div>
+    <div role="group" aria-label="Strike" className="min-w-0 overflow-hidden rounded-md border border-line-2 bg-surface-2">
+      <div className="flex items-center justify-between border-b border-line px-4 py-2 text-[12px] font-medium text-ink-3">
+        <span className="flex items-center gap-1.5">Strike
+          <InfoTip label="About the strike" align="start" text={isPut
+            ? "The price you agree to buy at. If the stock ends below it, you pay the difference from your USDG."
+            : "The price you agree to sell at. Above it, the gain goes to the buyer; below it, you keep all your tokens."} /></span>
+        <span className="flex items-center gap-1.5">Mark / share
+          <InfoTip label="About the mark" align="end" text="The fair estimate of each call per share. You set your own price in the order below." /></span>
       </div>
-      {indexedStrategy?.lastStaleCancelAt && indexedStrategy.currentLongId && !indexedStrategy.orderId ? <Notice tone="info" role="status" className="mt-3">Ask withdrawn at/past strike after spot reached ${indexedStrategy.staleSpot?.formatted ?? "—"} on {stamp(indexedStrategy.lastStaleCancelAt)}. The existing position remains; the next roll waits until after its expiry.</Notice> : null}
-      <p className="mt-2 text-xs text-ink-3">Deposits must cover the collateral required by each order.</p>
-      <p className="mt-2 text-xs text-ink-3">The exact next roll also waits for settlement and the next regular market session.</p>
-      <p className="mt-3 text-sm">{earned.data ? <><strong>{earned.data.complete ? "Lifetime premium" : "Premium in loaded history"}: </strong><span className="num">{money(earned.data.amount)} USDG</span>{!earned.data.complete ? " (more pages remain)" : null}</>
-        : earned.isError ? "Lifetime premium history is temporarily unavailable." : "Loading premium history…"}</p>
-      {active && indexedStrategy ? <Button variant="ghost" size="sm" className="mt-4" disabled={!!busy} onClick={() => {
+      {ladder.map((row, index) => {
+        const on = selectedStrikeId === row.series.longId;
+        const away = vsSpot(row.series.strike.raw, row.series.strike.decimals);
+        const shown = fairOf(row);
+        return <div key={row.series.longId}>
+          {index === firstAboveSpot && spotRaw !== null ? <SharePriceLine price={usd(spotRaw, spotDecimals)} /> : null}
+          <button type="button" aria-pressed={on} onClick={() => pickRow(row)}
+            className={cn("flex min-h-14 w-full items-center justify-between gap-4 border-b border-line px-4 py-2.5 text-left transition-colors last:border-b-0 focus-visible:outline-none focus-visible:ring-[3px] focus-visible:ring-inset focus-visible:ring-accent/40",
+              on ? "bg-accent-soft" : "hover:bg-field")}>
+            <span className="min-w-0">
+              <span className="block text-[15.5px] font-semibold text-ink"><span className="num">${row.series.strike.formatted}</span> {optionKind}</span>
+              <span className="mt-0.5 block text-[12.5px] text-ink-3">{away ? `${away} vs share price` : "—"}</span>
+            </span>
+            <span className="grid shrink-0 justify-items-end gap-0.5">
+              <span className={cn("num rounded-pill border px-3.5 py-1.5 text-[14px] font-semibold",
+                on ? "border-accent bg-accent text-accent-ink" : "border-accent/50 text-accent-text")}>{shown !== null ? usd(shown) : "—"}</span>
+              <span className="text-[11px] text-ink-3">Mark</span>
+            </span>
+          </button>
+        </div>;
+      })}
+      {ladder.length && firstAboveSpot === -1 && spotRaw !== null ? <SharePriceLine price={usd(spotRaw, spotDecimals)} /> : null}
+      {!ladder.length ? <p className="px-4 py-3 text-[13px] text-ink-3">No open strikes for this expiry yet. Use a custom strike to create one.</p> : null}
+      <button type="button" aria-pressed={selectedStrikeId === "custom"} onClick={() => setSeriesChoice("custom")}
+        className={cn("flex min-h-12 w-full items-center justify-between gap-3 border-t border-dashed border-line-2 px-4 py-2.5 text-left text-[14px] font-semibold transition-colors",
+          selectedStrikeId === "custom" ? "bg-accent-soft text-ink" : "text-ink-2 hover:bg-field")}>
+        Custom strike<span aria-hidden="true" className="text-ink-3">+</span>
+      </button>
+    </div>
+    {seriesChoice === "custom" ? <Field id="custom-strike" className="max-w-xs" label="Custom strike" suffix="USDG" inputMode="decimal"
+      value={customStrike} onChange={(event) => setCustomStrike(event.target.value)} placeholder="230.00"
+      tip={`Strikes go in steps of ${market?.strikeTick.formatted ?? "—"} USDG. A new strike adds one transaction.`} /> : null}
+
+    <SellTicket key={selectedStrikeId || "none"} ticker={ticker} typeChoice={type} row={selected ?? null}
+      customStrike={seriesChoice === "custom" ? parseAskPrice(customStrike) : null} expiry={expiry} />
+  </section>;
+
+  const autoRoll = <section aria-label="Auto-roll strategy" className="grid gap-5">
+    <div>
+      <h3 className="flex items-center gap-2 font-display text-lg font-bold">Sell calls automatically
+        <InfoTip label="About auto-roll" text={`Auto-roll sells a covered call from your free ${ticker} during market hours, then the next one after it settles. Deposits must cover the collateral each order needs.`} /></h3>
+      <p className="mt-1 text-sm text-ink-2">Pick a plan, review it, and sign once. Pause it any time.</p>
+    </div>
+    {allCallSeries.isError ? <Notice tone="warn" role="status">The full call list is unavailable right now. You can still pick a plan or set an ask by hand.</Notice> : null}
+
+    <div className="grid gap-2">
+      <p className="flex items-center gap-1.5 text-[12.5px] font-semibold text-ink-2">Quick plans
+        <InfoTip label="About quick plans" text="A plan fills the settings below from the live call list. Nothing is placed until you review and sign." /></p>
+      <div className={cn("grid gap-2", visiblePresets(weeklyOn, dailyOn).length > 1 && "sm:grid-cols-2")} aria-label="Writer presets" role="group">{visiblePresets(weeklyOn, dailyOn).map((preset) => {
+        const on = presetChoice === preset.id;
+        return <button key={preset.id} type="button" aria-pressed={on} disabled={!!busy || allCallSeries.isFetching || !spot || !strikeTick}
+          onClick={() => void applyPreset(preset.id)}
+          className={cn("flex min-h-14 items-center justify-between gap-3 rounded-md border px-4 py-3 text-left transition-colors disabled:cursor-not-allowed disabled:opacity-60 focus-visible:outline-none focus-visible:ring-[3px] focus-visible:ring-accent/40",
+            on ? "border-accent bg-accent-soft" : "border-line-2 bg-surface-2 hover:border-ink-3")}>
+          <span className="min-w-0"><span className="block font-semibold text-ink">{preset.label}</span>
+            <span className="mt-0.5 block text-[12.5px] text-ink-3">{preset.detail}</span></span>
+          <span aria-hidden="true" className={cn("grid size-5 shrink-0 place-items-center rounded-pill border-2", on ? "border-accent" : "border-line-2")}>
+            {on ? <span className="size-2.5 rounded-pill bg-accent" /> : null}</span>
+        </button>;
+      })}</div>
+    </div>
+
+    <div className="rounded-md border border-line bg-field p-4">
+      <p className="text-[12px] font-semibold uppercase tracking-[0.06em] text-ink-3">Your plan</p>
+      <p className="mt-1.5 text-[15px] leading-relaxed text-ink">Sell a {strategy.weekly ? "weekly" : "daily"} call <span className="font-semibold tabular-nums">{otmPercent}%</span> above the {ticker} price, starting at <span className="font-semibold tabular-nums">{startInput || "—"}</span> USDG per share{strategy.smartPricing
+        ? `, with smart pricing between ${minimumInput || "—"} and ${maximumInput || "—"} USDG`
+        : ""}, {maxShares.trim() ? `up to ${maxShares} shares` : "using all your free tokens"}.</p>
+      {address && underlying && rollerReady ? <p data-slot="roll-preview" className="mt-2 border-t border-line pt-2 text-[13px] text-ink-2">
+        {rollPreview.isPending ? "Checking what the next roll would place…"
+          : formatRollPreview(rollPreview.data ?? { ok: false })}
+      </p> : null}
+    </div>
+    {portfolioEditMode ? <Notice tone="info" role="status">{indexedStrategy
+      ? "Your saved strategy is loaded into this form. Review the USDG band below; nothing changes on chain until Update strategy passes the current checks and you sign."
+      : strategies.isError ? "The saved strategy could not be loaded. Return to Portfolio and retry when strategy data recovers."
+        : "Loading the saved strategy for this wallet and underlying…"}</Notice> : null}
+
+    <Disclosure title="Customize plan" summary="Cycle, strike distance, starting price, size and smart pricing" open={portfolioEditMode} className="bg-surface-2">
+      <section id="auto-roll" aria-label="Auto-roll settings" className="grid gap-5">
+        <p className="text-[13px] text-ink-3">These fill your plan above. Nothing changes on chain until you press {rollAction} and sign.</p>
+        <div className="grid gap-4 sm:grid-cols-2">
+          <SelectField id="roll-cycle" label="Cycle" disabled={!!busy} value={strategy.weekly ? "weekly" : "daily"}
+            tip="Daily calls end at each market close. Weekly calls end at Friday's close."
+            onChange={(event) => { setStrategyForm((before) => ({ ...before, weekly: event.target.value === "weekly" })); setPresetChoice(null); markPricingEdited(); }}>
+            {cycleOptions(weeklyOn, strategy, dailyOn).map((cycle) => <option key={cycle} value={cycle}>{cycle === "weekly" ? "Weekly" : "Daily"}</option>)}</SelectField>
+          <Field id="roll-otm" label="Strike above price" suffix="%" inputMode="decimal" disabled={!!busy}
+            value={otmInput ?? String(strategy.otmBps / 100)}
+            tip="How far above the current price each call's strike sits, from 1% to 25%. Saved in basis points (100 bps = 1%)."
+            onChange={(event) => {
+              setOtmInput(event.target.value);
+              const bps = Math.round(Number(event.target.value) * 100);
+              if (event.target.value.trim() !== "" && Number.isFinite(bps)) { setStrategyForm((before) => ({ ...before, otmBps: bps })); setPresetChoice(null); markPricingEdited(); }
+            }} onBlur={() => setOtmInput(null)} />
+          <Field id="roll-start" label="Starting ask" suffix="USDG / share" inputMode="decimal" maxLength={32} disabled={!!busy} value={startInput}
+            tip={`Saved as ${strategy.askBps} bps of the price after you leave the field. Values between whole bps round up to protect your ask; 0.0001 USDG tick.`}
+            onChange={(event) => editPricingInput("start", event.target.value)} onBlur={() => commitPricingInput("start")}
+            onKeyDown={(event) => { if (event.key === "Enter") event.currentTarget.blur(); }} />
+          <Field id="roll-max" label="Max size" suffix="shares" disabled={!!busy} value={maxShares} placeholder="All free"
+            tip="Blank means all free collateral." onChange={(event) => { setMaxShares(event.target.value); setFormTouched(true); }} />
+        </div>
+
+        <div className="grid gap-3 rounded-md border border-line bg-surface p-4">
+          <label className="flex min-h-11 items-center gap-3 text-sm font-semibold text-ink"><input disabled={smartPricingControl.disabled} type="checkbox" className="size-4 shrink-0 accent-[var(--accent)]" checked={strategy.smartPricing} onChange={(event) => {
+            const smartPricing = event.target.checked;
+            const proposal = currentCandidate?.band ?? null;
+            if (smartPricing) {
+              const draft = spot ? smartPricingDraft(spot, strategy, proposal) : null;
+              if (!draft) {
+                setPricingCommitErrors((before) => ({ ...before, start: "A contract-valid smart-pricing band is unavailable at the current spot." }));
+                return;
+              }
+              setStrategyForm((before) => ({ ...before, smartPricing: true, ...draft }));
+            } else {
+              const fixedAskBps = currentCandidate
+                ? fixedAskBpsFromReference(currentCandidate.spot, currentCandidate.referenceFair) : null;
+              setStrategyForm((before) => ({ ...before, smartPricing: false,
+                askBps: fixedAskBps ?? before.askBps, minAskBps: 0, maxAskBps: 0 }));
+            }
+            const revision = advancePricingRevision();
+            setPricingCandidate((before) => before && candidateState === "current"
+              ? { ...before, revision } : before);
+            setPricingInputs({});
+            setPricingCommitErrors({});
+            setFormTouched(true);
+          }} /> Smart pricing within my limits
+            <InfoTip label="About smart pricing" text={strategy.smartPricing
+              ? "These USDG prices convert at current spot; the contract stores bps, so their USDG values move with spot. During configured market sessions, the pricer checks on its cadence, targets its fair estimate plus its configured edge, rounds to the 0.0001 USDG tick, and clamps every move inside this band. It may leave the ask unchanged. If pricing stops, the last ask stays live at its last price."
+              : "The USDG input converts to bps at current spot. Auto-roll uses those bps with spot when each fixed ask starts. No service may move it while smart pricing is off; hidden minimum and maximum fields are saved as zero."} /></label>
+          {smartPricingControl.note ? <Notice tone="info">{smartPricingControl.note}</Notice> : null}
+          {strategy.smartPricing ? <div className="grid gap-4 sm:grid-cols-2">
+            <Field id="roll-min" label="Minimum ask" suffix="USDG / share" inputMode="decimal" maxLength={32} disabled={!!busy} value={minimumInput}
+              tip={`Saved as ${strategy.minAskBps} bps after you leave the field; 0.0001 USDG tick.`}
+              onChange={(event) => editPricingInput("minimum", event.target.value)} onBlur={() => commitPricingInput("minimum")}
+              onKeyDown={(event) => { if (event.key === "Enter") event.currentTarget.blur(); }} />
+            <Field id="roll-maxask" label="Maximum ask" suffix="USDG / share" inputMode="decimal" maxLength={32} disabled={!!busy} value={maximumInput}
+              tip={`Saved as ${strategy.maxAskBps} bps after you leave the field. Values between whole bps round up; 0.0001 USDG tick.`}
+              onChange={(event) => editPricingInput("maximum", event.target.value)} onBlur={() => commitPricingInput("maximum")}
+              onKeyDown={(event) => { if (event.key === "Enter") event.currentTarget.blur(); }} />
+          </div> : null}
+          <div className="flex flex-wrap items-start justify-between gap-3 border-t border-line pt-3 text-sm">
+            <div className="min-w-0 flex-1">
+              <p className="flex items-center gap-1.5 font-semibold text-ink">Proposed wide band
+                <InfoTip label="About the proposed band" text={<>Filling the candidate changes this form only. {strategy.smartPricing ? "Nothing changes on chain until you sign." : "Smart pricing remains off until you select it and sign."} Starting high reduces the initial underpricing window; it does not guarantee a fill or future value.</>} /></p>
+              {currentCandidate ? <p className="mt-1 text-ink-2">From the {currentCandidate.weekly ? "weekly" : "daily"} ${currentCandidate.reference.series.strike.formatted} call ending <Time at={currentCandidate.reference.series.expiry} market />, estimated at ${money(currentCandidate.referenceFair)} USDG. In smart mode it starts at {money(currentCandidate.prices.start)} and moves between {money(currentCandidate.prices.min)} and {money(currentCandidate.prices.max)} USDG per share.</p>
+                : <p className="mt-1 text-ink-3">Refresh the complete call list to calculate a current candidate. You can still set contract-valid limits by hand.</p>}
+            </div>
+            <Button type="button" size="sm" variant="secondary" disabled={!!busy || allCallSeries.isFetching || !spot || !strikeTick} onClick={() => void fillProposedBand()}>Fill proposed band</Button>
+          </div>
+        </div>
+      </section>
+    </Disclosure>
+
+    {strategyError ? <p role="alert" className="text-sm text-danger">{strategyError}</p> : null}
+    {!rollerReady ? <Notice tone="info">AutoRoller is not deployed in this build.</Notice> : null}
+    {address && ROLL_STEPS.every((step) => progress[step.key]) ? <p className="flex items-center gap-2 rounded-sm border border-line bg-surface-2 px-3 py-2 text-sm text-ink">
+      <span aria-hidden="true" className="grid size-6 shrink-0 place-items-center rounded-pill bg-accent text-[12px] font-bold text-accent-ink">✓</span>
+      Setup complete: all five permissions are on chain.
+      <InfoTip label="About the setup" text="Payouts to your balance, AutoRoller and order-book access, the delegate and your strategy are all in place. Pause auto-roll any time." />
+    </p> : address ? <div className="grid gap-2">
+      <p className="flex items-center gap-1.5 text-sm font-semibold text-ink">Setup, up to five transactions
+        <InfoTip label="About the setup" text="Your wallet asks for each missing permission once. Confirmed setup steps stay on chain, so you can return and continue." /></p>
+      <ol className="grid gap-1.5">{ROLL_STEPS.map((step, index) => {
+        const done = progress[step.key];
+        const confirming = rollStep === step.key;
+        return <li key={step.key} className="flex items-center gap-3 rounded-sm border border-line bg-surface-2 px-3 py-2 text-sm">
+          <span aria-hidden="true" className={cn("num grid size-6 shrink-0 place-items-center rounded-pill text-[12px] font-bold",
+            done ? "bg-accent text-accent-ink" : confirming ? "bg-warn-soft text-warn" : "border border-line-2 text-ink-3")}>{done ? "✓" : index + 1}</span>
+          <span className="min-w-0 flex-1 text-ink">{step.label}</span>
+          <span className="shrink-0 text-xs text-ink-3">{done ? "Done" : confirming ? "Confirming…" : "Needed"}</span>
+        </li>;
+      })}</ol>
+    </div> : null}
+    <div className="flex flex-wrap gap-3">
+      <Button disabled={!canWrite || !rollerReady || !balance.data || !roll.data || !!busy || !!strategyError || (strategyOn && !formTouched)} onClick={() => void enableRoll()}>
+        {busy === "Enable auto-roll" ? "Confirming setup…" : rollAction}</Button>
+      {strategyOn && indexedStrategy ? <Button variant="ghost" disabled={!!busy} onClick={() => {
         advancePricingRevision();
         setStrategyForm(indexedStrategy.strategy);
         setPricingInputs({});
@@ -834,77 +935,186 @@ export function EarnMarket({ ticker }: { ticker: string }) {
         setMaxShares(indexedStrategy.strategy.maxUnits === "0" ? "" : formatUnits(BigInt(indexedStrategy.strategy.maxUnits), 2));
         setFormTouched(true);
       }}>Load saved strategy into form</Button> : null}
-      <div className="mt-6 grid gap-4 border-t border-line pt-5 sm:grid-cols-2 lg:grid-cols-4">
-        <label className="text-sm font-semibold">Cycle<select disabled={!!busy} value={strategy.weekly ? "weekly" : "daily"} onChange={(event) => { setStrategyForm((before) => ({ ...before, weekly: event.target.value === "weekly" })); markPricingEdited(); }}
-          className="mt-2 block min-h-11 w-full rounded-sm border border-line-2 bg-surface px-3 text-ink"><option value="weekly">Weekly</option><option value="daily">Daily</option></select></label>
-        <label className="text-sm font-semibold">Strike above spot · bps<input disabled={!!busy} type="number" inputMode="numeric" min={100} max={2_500} step={1} value={strategy.otmBps} onChange={(event) => { setStrategyForm((before) => ({ ...before, otmBps: Number(event.target.value) })); markPricingEdited(); }}
-          className="num mt-2 block min-h-11 w-full rounded-sm border border-line-2 bg-surface px-3 text-ink" /></label>
-        <label className="text-sm font-semibold">Starting ask · USDG / share<input disabled={!!busy} inputMode="decimal" maxLength={32} value={startInput}
-          onChange={(event) => editPricingInput("start", event.target.value)} onBlur={() => commitPricingInput("start")}
-          onKeyDown={(event) => { if (event.key === "Enter") event.currentTarget.blur(); }}
-          className="num mt-2 block min-h-11 w-full rounded-sm border border-line-2 bg-surface px-3 text-ink" />
-          <span className="mt-1 block text-xs font-normal text-ink-3">Saved as {strategy.askBps} bps after you leave the field. Values between integer bps snap up to protect your ask; 0.0001 USDG tick.</span></label>
-        <label className="text-sm font-semibold">Max size · shares<input disabled={!!busy} value={maxShares} onChange={(event) => { setMaxShares(event.target.value); setFormTouched(true); }} placeholder="All free"
-          className="num mt-2 block min-h-11 w-full rounded-sm border border-line-2 bg-surface px-3 text-ink" />
-          <span className="mt-1 block text-xs font-normal text-ink-3">Blank means all free collateral.</span></label>
+    </div>
+    {strategyOn && !formTouched ? <p className="text-[13px] text-ink-3">Load the saved strategy or select a preset to {rollState === "incomplete" ? "finish the setup" : "update it"}.</p> : null}
+  </section>;
+
+  const swap = <section aria-label="Swap USDG and Stock Tokens" className="grid gap-5">
+    <div>
+      <h3 className="flex items-center gap-2 font-display text-lg font-bold">Swap between USDG and {ticker}
+        <InfoTip label="About the swap" text={`Buy ${ticker} Stock Tokens with USDG straight into your free StonkHouse balance, ready to sell calls on, or sell ${ticker} from your wallet for USDG.`} /></h3>
+      <p className="mt-1 text-sm text-ink-2">No {ticker} yet? Buy it with USDG in one step.</p>
+    </div>
+    <div className="grid gap-4 md:grid-cols-2">
+      <div className="grid content-start gap-3 rounded-md border border-line bg-surface-2 p-4">
+        <p className="font-semibold text-ink">Buy {ticker}</p>
+        <Field id="writer-zap-in" label="You pay" suffix="USDG" inputMode="decimal" value={zapUsdgAmount}
+          onChange={(event) => setZapUsdgAmount(event.target.value)} placeholder="100"
+          tip="Swaps into your free Stonkhouse balance, ready to sell calls on." />
+        <Rows>
+          <Row dense k="Minimum received" v={writeZapQuote ? `${assetAmount(writeZapQuote.minOut, 18)} ${ticker}` : "—"} />
+          <Row dense k="Slippage tolerance" tip="The swap reverts if the price moves more than this before it lands." v={displayPercent(ZAP_SLIPPAGE_BPS_DEFAULT / 100)} />
+        </Rows>
+        <PayoutTiming of={zapTiming} />
+        <Button disabled={!canWrite || !zapReady || !writeZapQuote || !!busy}
+          onClick={() => void zapWrite()}>{zapReady ? "Zap in" : zapOffLabel}</Button>
       </div>
-      <div className="mt-4 rounded-sm border border-line bg-surface-2 p-4 text-sm">
-        <div className="flex flex-wrap items-start justify-between gap-3"><div><h3 className="font-semibold">Proposed wide band</h3>
-          {currentCandidate ? <p className="mt-1 text-ink-2">Reference: longest-dated open {currentCandidate.weekly ? "weekly" : "daily"} near the target strike — ${currentCandidate.reference.series.strike.formatted}, {stamp(currentCandidate.reference.series.expiry)}, estimated at ${money(currentCandidate.referenceFair)} USDG.</p>
-            : <p className="mt-1 text-ink-2">Refresh the complete call list to calculate a current candidate.</p>}</div>
-          <Button type="button" size="sm" variant="ghost" disabled={!!busy || allCallSeries.isFetching || !spot || !strikeTick} onClick={() => void fillProposedBand()}>Fill proposed band</Button></div>
-        {currentCandidate ? <p className="mt-2 text-ink-2">In smart mode, this candidate starts at {money(currentCandidate.prices.start)} USDG and lets the pricer move between {money(currentCandidate.prices.min)} and {money(currentCandidate.prices.max)} USDG per share at the refreshed spot.</p>
-          : <p className="mt-2 text-ink-2">A current reference estimate is required to calculate the candidate. You can still set contract-valid limits manually.</p>}
-        <p className="mt-2 text-xs text-ink-3">Filling the candidate changes this form only. {strategy.smartPricing ? "Nothing changes on chain until you sign." : "Smart pricing remains off until you select it and sign."} Starting high reduces the initial underpricing window; it does not guarantee a fill or future value.</p>
+      <div className="grid content-start gap-3 rounded-md border border-line bg-surface-2 p-4">
+        <p className="font-semibold text-ink">Sell {ticker}</p>
+        <Field id="writer-zap-out" label="You sell" suffix={ticker} inputMode="decimal" value={exitZapAmount}
+          onChange={(event) => setExitZapAmount(event.target.value)} placeholder="0.25"
+          tip="Sells wallet-held tokens. Withdraw free collateral first if it is still in Stonkhouse." />
+        <Rows>
+          <Row dense k="Minimum received" v={exitZapQuote ? `${assetAmount(exitZapQuote.minOut, USDG_DECIMALS)} USDG` : "—"} />
+          <Row dense k="Slippage tolerance" tip="The swap reverts if the price moves more than this before it lands." v={displayPercent(ZAP_SLIPPAGE_BPS_DEFAULT / 100)} />
+        </Rows>
+        <PayoutTiming of={zapTiming} />
+        <Button variant="secondary"
+          disabled={!availability.exitReady || !zapReady || !exitZapQuote || spot === null || !!busy}
+          onClick={() => void zapExit()}>{zapReady ? "Exit zap" : zapOffLabel}</Button>
       </div>
-      {smartPricingControl.note
-        ? <Notice tone="info" className="mt-4">{smartPricingControl.note}</Notice> : null}
-      <label className="mt-4 flex items-center gap-2 text-sm font-semibold"><input disabled={smartPricingControl.disabled} type="checkbox" checked={strategy.smartPricing} onChange={(event) => {
-        const smartPricing = event.target.checked;
-        const proposal = currentCandidate?.band ?? null;
-        if (smartPricing) {
-          const draft = spot ? smartPricingDraft(spot, strategy, proposal) : null;
-          if (!draft) {
-            setPricingCommitErrors((before) => ({ ...before, start: "A contract-valid smart-pricing band is unavailable at the current spot." }));
-            return;
-          }
-          setStrategyForm((before) => ({ ...before, smartPricing: true, ...draft }));
-        } else {
-          const fixedAskBps = currentCandidate
-            ? fixedAskBpsFromReference(currentCandidate.spot, currentCandidate.referenceFair) : null;
-          setStrategyForm((before) => ({ ...before, smartPricing: false,
-            askBps: fixedAskBps ?? before.askBps, minAskBps: 0, maxAskBps: 0 }));
-        }
-        const revision = advancePricingRevision();
-        setPricingCandidate((before) => before && candidateState === "current"
-          ? { ...before, revision } : before);
-        setPricingInputs({});
-        setPricingCommitErrors({});
-        setFormTouched(true);
-      }} /> Smart pricing within my limits</label>
-      {strategy.smartPricing ? <div className="mt-4 grid gap-4 sm:grid-cols-2">
-        <label className="text-sm font-semibold">Minimum ask · USDG / share<input disabled={!!busy} inputMode="decimal" maxLength={32} value={minimumInput}
-          onChange={(event) => editPricingInput("minimum", event.target.value)} onBlur={() => commitPricingInput("minimum")}
-          onKeyDown={(event) => { if (event.key === "Enter") event.currentTarget.blur(); }}
-          className="num mt-2 block min-h-11 w-full rounded-sm border border-line-2 bg-surface px-3 text-ink" />
-          <span className="mt-1 block text-xs font-normal text-ink-3">Saved as {strategy.minAskBps} bps after you leave the field; 0.0001 USDG tick.</span></label>
-        <label className="text-sm font-semibold">Maximum ask · USDG / share<input disabled={!!busy} inputMode="decimal" maxLength={32} value={maximumInput}
-          onChange={(event) => editPricingInput("maximum", event.target.value)} onBlur={() => commitPricingInput("maximum")}
-          onKeyDown={(event) => { if (event.key === "Enter") event.currentTarget.blur(); }}
-          className="num mt-2 block min-h-11 w-full rounded-sm border border-line-2 bg-surface px-3 text-ink" />
-          <span className="mt-1 block text-xs font-normal text-ink-3">Saved as {strategy.maxAskBps} bps after you leave the field. Values between integer bps snap up; 0.0001 USDG tick.</span></label>
-        <p className="sm:col-span-2 text-xs text-ink-3">These USDG prices convert at current spot; the contract stores bps, so their USDG values move with spot. During configured market sessions, the pricer checks on its cadence, targets its fair estimate plus its configured edge, rounds to the 0.0001 USDG tick, and clamps every move inside this band. It may leave the ask unchanged. If pricing stops, the last ask stays live at its last price.</p>
-      </div> : <p className="mt-2 text-xs text-ink-3">The USDG input converts to bps at current spot. Auto-roll uses those bps with spot when each fixed ask starts. No service may move it while smart pricing is off; hidden minimum and maximum fields are saved as zero.</p>}
-      {strategyError ? <p role="alert" className="mt-3 text-sm text-danger">{strategyError}</p> : null}
-      <div className="mt-5"><h3 className="font-display text-lg font-bold">Setup checklist</h3><ol className="mt-3 grid gap-2 sm:grid-cols-2">{ROLL_STEPS.map((step, index) => <li key={step.key} className="rounded-sm border border-line p-3 text-sm">
-        <span className="font-semibold">{index + 1}. {step.label}</span><span className="ml-2 text-xs text-ink-3">{progress[step.key] ? "Done" : rollStep === step.key ? "Confirming…" : "Needed"}</span>
-      </li>)}</ol></div>
+    </div>
+    {zapMismatch ? <Notice tone="warn" role="status">{zapMismatch}</Notice> : null}
+  </section>;
+
+  const contractDetails = contractNotices ? <Disclosure title="Contract details" summary="Where this build's contract addresses come from" className="mt-5">
+    <section aria-label="Contract details" className="grid gap-3">
+      {/*
+        Provenance, and deliberately NOT part of `mismatch`. An address served from a
+        build-time override must be visible — an override that is silently correct in dev is
+        indistinguishable from one that is silently unreported — but it is not a reason to pause
+        writing, which is what joining that array would have done.
+      */}
+      {provenance.length ? <Notice tone="info">{provenance.join(" ")}</Notice> : null}
+      {/* An override the registry outranked: shown, and like provenance never part of `mismatch`. */}
+      {overrideConflicts.length ? <Notice tone="warn">{overrideConflicts.join(" ")}</Notice> : null}
+    </section>
+  </Disclosure> : null;
+
+  const depositForm = <section aria-label="Writer deposit" className="grid gap-3">
+    <Field id="writer-deposit" label="Amount to deposit" suffix={shortAsset} inputMode="decimal" value={depositAmount}
+      onChange={(event) => setDepositAmount(event.target.value)} placeholder={isPut ? "100" : "0.25"}
+      tip="Your wallet may ask you to approve this exact amount first."
+      aside={balance.data ? <span>Wallet {walletBalance} · <button type="button" className="font-semibold text-accent-text hover:underline"
+        onClick={() => setDepositAmount(formatUnits(balance.data!.wallet, collateralDecimals))}>Max</button></span> : "Wallet —"} />
+    <WithdrawalTerms className="mt-3" surface="writer" asset={shortAsset}
+      free={balance.data ? assetAmount(balance.data.free, collateralDecimals) : null}
+      locked={locked !== null ? assetAmount(locked, collateralDecimals) : null}
+      latestExpiry={latestLockedExpiry} timing={config.data?.constants ?? null} />
+    {ledgerDeposit.note ? <p data-slot="upgrade-paused" role="status" className="text-sm text-ink-2">{ledgerDeposit.note}</p> : null}
+    <Button className="w-full" disabled={!ledgerDeposit.open || !balance.data || !!busy || !parsePositiveAsset(depositAmount, collateralDecimals)} onClick={() => void moveBalance("deposit")}>Deposit</Button>
+    {!isPut ? <p className="text-center text-[13px] text-ink-3">No {ticker} yet? <button type="button" className="font-semibold text-accent-text hover:underline"
+      onClick={() => setSellTab("swap")}>Buy it with USDG</button></p> : null}
+  </section>;
+
+  const withdrawForm = <section aria-label="Writer withdraw" className="grid gap-3">
+    <Field id="writer-withdraw" label={`Withdraw free ${collateralLabel}`} suffix={shortAsset} inputMode="decimal" value={withdrawAmount}
+      onChange={(event) => setWithdrawAmount(event.target.value)} placeholder={isPut ? "100" : "0.25"}
+      tip="Locked collateral cannot be withdrawn."
+      aside={free !== null ? <span>Free {assetAmount(free, collateralDecimals)} · <button type="button" className="font-semibold text-accent-text hover:underline"
+        onClick={() => setWithdrawAmount(formatUnits(free, collateralDecimals))}>Max</button></span> : undefined} />
+    <PayoutTiming of={ledgerWithdrawTiming} />
+    <Button className="w-full" variant="secondary" disabled={!availability.exitReady || !!busy || !parsePositiveAsset(withdrawAmount, collateralDecimals)} onClick={() => void moveBalance("withdraw")}>Withdraw</Button>
+  </section>;
+
+  return <>
+    <PageHead eyebrow="Sell options" title={isPut ? `Earn premium with USDG on ${ticker}` : `Earn premium on your ${ticker}`} lede={isPut
+      ? `Sell cash-secured puts on ${ticker} with USDG and earn the premium buyers pay. You cover any fall below your strike.`
+      : `Sell covered calls on your ${ticker} Stock Tokens and earn the premium buyers pay. You give up any gain above your strike.`} />
+    {putsEnabled ? <SegmentedControl className="mb-5" label="Option type to write" selected={activeType} disabled={!!busy}
+      options={[{ value: "call", label: "Calls" }, { value: "put", label: "Puts" }] as const}
+      onSelect={(kind) => { advancePricingRevision(); pricingAction.current += 1; setPricingCandidate(null);
+        setType(kind); setSeriesChoice(""); setExpiryChoice(0); setDepositAmount(""); setWithdrawAmount("");
+        setZapUsdgAmount(""); setExitZapAmount(""); }} /> : null}
+    <EarnFacts ticker={ticker} isPut={isPut} />
+    {markets.isError || series.isError ? <Notice tone="warn" role="status" className="mb-5">Market data is unavailable right now. Your balance is unaffected.</Notice> : null}
+    {market && !market.spot ? <Notice tone="warn" role="status" className="mb-5">The live {ticker} price is unavailable. New deposits and asks are paused; you can still withdraw.</Notice> : null}
+    {!contractReady ? <Notice tone="info" className="mb-5">Selling options isn&apos;t available here yet.</Notice> : null}
+    {mismatch.length ? <Notice tone="warn" className="mb-5">App and indexer contract settings differ. Writing is paused until they match.</Notice> : null}
+
+    {showPosition ? <Panel as="section" aria-label="Your position" className="mb-5">
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <h2 className="font-display text-xl font-bold tracking-[-0.01em]">Your position</h2>
+        {showPause ? <Button size="sm" variant="ghost" disabled={!availability.pauseReady || !!busy} onClick={() => void pauseRoll()}>Pause auto-roll</Button> : null}
+      </div>
+      <div className="mt-4 grid grid-cols-2 gap-x-6 gap-y-5 lg:grid-cols-4">
+        <Stat size="sm" label={<StatLabel tip="Yours to withdraw or sell.">Free</StatLabel>} value={free !== null ? assetAmount(free, collateralDecimals) : "—"} unit={isPut ? "USDG" : ticker} />
+        <Stat size="sm" label={<StatLabel tip="Backs the options you sold. It unlocks after each one settles.">{isPut ? "Locked in sold puts" : "Locked in sold calls"}</StatLabel>} value={locked !== null ? assetAmount(locked, collateralDecimals) : "—"}
+          unit={isPut ? "USDG" : ticker} sub={latestLockedExpiry ? <>Unlocks from {timeText({ at: latestLockedExpiry, market: true }, zone)}</> : undefined} />
+        <Stat size="sm" label={<StatLabel tip={earned.data && !earned.data.complete ? "More history pages remain, so this is the premium in the history loaded so far." : "Premium paid to you so far."}>{earned.data ? (earned.data.complete ? "Lifetime premium" : "Premium in loaded history") : "Premium earned"}</StatLabel>}
+          value={earned.data ? money(earned.data.amount) : "—"} unit="USDG"
+          sub={earned.data ? undefined : earned.isError ? "Premium history is temporarily unavailable." : "Loading premium history…"} />
+        {!isPut ? <Stat size="sm" mono={false} label="Auto-roll" value={rollStatus}
+          sub={rollState === "incomplete" ? "A permission is missing, so nothing rolls: finish the setup below"
+            : nextTime ? `Next possible roll ${timeText({ at: nextTime, market: true }, zone)}`
+              : active && closedCall ? "Last call closed; the next roll opens a new one"
+                : active ? "Next roll after the next expiry" : "Sell calls automatically below"} /> : null}
+      </div>
+      {!isPut && (strategyOn || accountStrategy) ? <p className="mt-4 flex flex-wrap items-center gap-x-1.5 border-t border-line pt-3 text-[13px] text-ink-2">
+        <span>Current call: {accountStrategy?.currentSeries ? `${accountStrategy.currentSeries.ticker} $${accountStrategy.currentSeries.strike.formatted}`
+          : closedCall ? <>none, the last one closed on <Time at={closedCall.at} /></> : "none"} · order {accountStrategy?.orderId ?? "none"} ·
+        last roll {indexedStrategy?.lastRolledAt ? <Time at={indexedStrategy.lastRolledAt} /> : "not recorded"}.</span>
+        <InfoTip label="About the next roll" text="The exact next roll also waits for settlement and the next regular market session." />
+      </p> : null}
+      {indexedStrategy?.lastStaleCancelAt && indexedStrategy.currentLongId && !indexedStrategy.orderId ? <Notice tone="info" role="status" className="mt-3">Ask withdrawn at/past strike after spot reached ${indexedStrategy.staleSpot?.formatted ?? "—"} on <Time at={indexedStrategy.lastStaleCancelAt} />. The existing position remains; the next roll waits until after its expiry.</Notice> : null}
+      {balance.isError ? <Notice tone="warn" role="status" className="mt-4">Your balance could not be read. A withdrawal can retry the free-balance check on chain before signing.</Notice> : null}
       {roll.isError ? <Notice tone="warn" className="mt-4">Auto-roll status could not be read. You can retry after the chain responds.</Notice> : null}
-      <Button className="mt-5" disabled={!canWrite || !rollerReady || !balance.data || !roll.data || !!busy || !!strategyError || (active && !formTouched)} onClick={() => void enableRoll()}>
-        {busy === "Enable auto-roll" ? "Confirming setup…" : active ? "Update strategy" : "Enable auto-roll"}</Button>
-      {active && !formTouched ? <p className="mt-2 text-xs text-ink-3">Load the saved strategy or select a preset to update it.</p> : null}
-      <p className="mt-2 text-xs text-ink-3">Setup may ask for up to four transactions. Confirmed steps stay on chain, so you can return and continue.</p>
+    </Panel> : null}
+
+    <div className="grid items-start gap-5 lg:grid-cols-[minmax(0,1fr)_minmax(320px,380px)]">
+      <Panel as="aside" aria-label="Writer balance" className="lg:sticky lg:top-6 lg:order-2">
+        <div className="flex items-center justify-between gap-3">
+          <h2 className="flex items-center gap-2 font-display text-lg font-bold">Your {shortAsset}
+            <InfoTip label="About your balance" text={`Deposit ${collateralLabel} into your StonkHouse balance first. Free balance backs the ${isPut ? "puts" : "calls"} you sell and can be withdrawn any time; what backs a sold option stays locked until it settles.`} /></h2>
+        </div>
+        {!address ? <div className="mt-3 grid gap-3">
+          <p className="text-sm text-ink-2">Connect a wallet to see your {collateralLabel} and deposit.</p>
+          <ConnectButton />
+        </div> : <div className="mt-4">{showPosition
+          ? <Tabs label="Balance action" value={balanceTab} onChange={setBalanceTab}
+            items={[{ value: "deposit", label: "Deposit", panel: depositForm }, { value: "withdraw", label: "Withdraw", panel: withdrawForm }]} />
+          : depositForm}</div>}
       </Panel>
-    </div> : null}
+
+      <Panel as="section" aria-label="Start earning" className="lg:order-1">
+        <div className="mb-5 flex flex-wrap items-center justify-between gap-2">
+          <h2 className="flex items-center gap-2 font-display text-xl font-bold tracking-[-0.01em]">{showPosition ? "Earn more" : "Start earning"}
+            <InfoTip label="How selling works" text={isPut
+              ? "Two steps: deposit USDG, then set the price a buyer pays for your put."
+              : `Two steps: deposit ${ticker}, then let auto-roll sell calls on it for you, or sell one call at your own price.`} /></h2>
+        </div>
+        {isPut ? manualAsk : <Tabs label="How to sell" value={sellTab} onChange={setSellTab} items={[
+          { value: "auto", label: "Auto-roll", badge: "Simple", panel: autoRoll },
+          { value: "once", label: "Sell once", panel: manualAsk },
+          { value: "swap", label: `Get ${ticker}`, panel: swap },
+        ]} />}
+      </Panel>
+    </div>
+    {contractDetails}
   </>;
+}
+
+function TicketStep({ n, title, tip, children }: { n: number; title: string; tip?: ReactNode; children: ReactNode }) {
+  return <div className="grid gap-3">
+    <p className="flex items-center gap-2.5 text-[15px] font-semibold text-ink">
+      <span aria-hidden="true" className="num grid size-6 shrink-0 place-items-center rounded-pill bg-accent-soft text-[12px] font-bold text-accent-text">{n}</span>
+      {title}{tip ? <InfoTip label={`About ${title.toLowerCase()}`} text={tip} /> : null}
+    </p>
+    <div className="min-w-0">{children}</div>
+  </div>;
+}
+
+
+function StatLabel({ tip, children }: { tip: ReactNode; children: ReactNode }) {
+  return <span className="inline-flex items-center gap-1.5">{children}<InfoTip text={tip} /></span>;
+}
+
+
+
+function SharePriceLine({ price }: { price: string }) {
+  return <div className="flex items-center gap-3 border-b border-line bg-field px-4 py-1.5 text-[12px] font-semibold text-ink-2">
+    <span aria-hidden="true" className="h-px flex-1 bg-accent/50" />
+    <span>Share price <span className="num text-ink">{price}</span></span>
+    <span aria-hidden="true" className="h-px flex-1 bg-accent/50" />
+  </div>;
 }

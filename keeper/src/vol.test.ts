@@ -238,7 +238,7 @@ test('spot mapping: token / share within the divergence limit, else vol-spot-div
   assert.equal((mapSpot(0, TOKEN_SPOT6, 300) as { reason: string }).reason, 'vol-inconsistent');
 });
 
-test('K3-305: spot mapping divides by uiMultiplier; a 2× token is not vol-spot-divergence against the share', () => {
+test('spot mapping divides by uiMultiplier; a 2× token is not vol-spot-divergence against the share', () => {
   const unit = '1000000000000000000';
   const double = '2000000000000000000';
   assert.equal(mapSpot(200, 206_000_000n, 300, unit).ok, true, 'unit multiplier matches the 3-arg path');

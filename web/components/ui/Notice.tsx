@@ -17,11 +17,11 @@ import { CheckCircleIcon, InfoIcon, StopIcon, WarnIcon } from "./icons";
  *
  * `title` renders as a <strong> on its own line. The body is a <div>, so it may hold a list.
  *
- * Copy that disclosure policy (copy-lint enforced this until it was removed on 2026-09-21; nothing checks it now) requires on a page (e.g. "Premium is paid only if a buyer fills" on
+ * Copy that disclosure policy (nothing checks it automatically now) requires on a page (e.g. "Premium is paid only if a buyer fills" on
  * app/vault/nvda/page.tsx) must be written in that page file as children or title, never as a
  * default inside this component: the linter reads the page file's source text.
  *
- * TEST HOOK: `data-slot="notice"` on the box. The W-13 run finds notices by it and reads the
+ * TEST HOOK: `data-slot="notice"` on the box. The run finds notices by it and reads the
  * heading as the box's <strong>.
  */
 export type NoticeTone = "warn" | "danger" | "info" | "accent";

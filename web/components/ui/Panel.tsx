@@ -6,7 +6,12 @@ import { cn } from "@/lib/cn";
  * A surface card. Flat by default (1px line border, the mockup's .panel / .ending-panel). Copied
  * from callhouse-site: components/ui/Panel.tsx, with the app's card head added below.
  *
- * `lift` swaps the border for the lift shadow. Reserve it for the few elevated objects the design
+ * NEON: the outline is --line-2, the card-and-chip border, not --line, which the spec
+ * keeps for rules and dividers; the radius stays --r-lg (22px, inside the spec's 20-24). In night mode there are no
+ * shadows (--elevation-lift is `none` there), so a lifted card keeps its outline too: before Neon `lift`
+ * swapped the border for the shadow, which in night mode would leave the card with no edge at all.
+ *
+ * `lift` adds the lift shadow (day mode only; see NEON below). Reserve it for the few elevated objects the design
  * calls for: the vault card on the home page, the fill card, toasts and menus. Everything else
  * stays flat.
  *
@@ -15,7 +20,7 @@ import { cn } from "@/lib/cn";
  * add `overflow-hidden`.
  *
  * TEST HOOKS. Every card renders `data-slot="card"`, and its head `card-head`, `card-title` and
- * `card-meta`. The fork acceptance run (tests/acceptance/fork.acceptance.ts, W-13) finds cards and
+ * `card-meta`. The fork acceptance run (tests/acceptance/fork.acceptance.ts) finds cards and
  * their figures by those attributes, never by class names, so restyling a card cannot break it.
  * Keep the attributes when you change the markup.
  */
@@ -39,7 +44,7 @@ export function Panel({ as: Tag = "div", lift = false, pad = "md", className, ch
   return (
     <Tag
       data-slot="card"
-      className={cn("min-w-0 rounded-lg bg-surface", lift ? "shadow-lift" : "border border-line", PAD[pad], className)}
+      className={cn("min-w-0 rounded-lg border border-line-2 bg-surface", lift && "shadow-lift", PAD[pad], className)}
       {...rest}
     >
       {children}

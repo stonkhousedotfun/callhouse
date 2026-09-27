@@ -110,6 +110,16 @@ export const transportError = (what = "429 Too Many Requests") => {
   return e;
 };
 
+/**
+ * What viem raises for a call that REVERTED (isRevert() is true for it): a view the contract does not have, as
+ * an older vault answers a function added after it was built. A thrown plain Error reads as a failed read instead.
+ */
+export const revertError = (what = "execution reverted") => {
+  const e = new Error(`The contract function reverted: ${what}`);
+  e.name = "ContractFunctionRevertedError";
+  return e;
+};
+
 /** Default answers for every view the monitor reads: a quiet, healthy deployment. */
 export function defaultRead(chain, address, fn, args) {
   const a = address.toLowerCase();
@@ -189,6 +199,9 @@ export function defaultRead(chain, address, fn, args) {
       return false;
     case "pinnedBy":
       return ZERO;
+    case "pinnedBoundary":
+      // 0 is unset and vouches no expiry.
+      return 0;
     case "settlementConfig":
       return [true, [SRC.chainlink], 150, 21600, 3600];
     case "feeds":
@@ -199,6 +212,21 @@ export function defaultRead(chain, address, fn, args) {
       return [ZERO, false, 18, 300, 0n];
     case "pinnedPools":
       return [ZERO, false, 18, 300, false, 0n];
+    // Views every deployed contract has, answered as a healthy one does: the monitor now reads a failure of
+    // any of them as a read that did not happen (the check goes incomplete), so "no answer" here would be a 429.
+    case "observeWindow": // UniV3TwapSource: a recorded window as deep as the pool's head liquidity below
+      return [true, 100_00000000n, 0, 10n ** 20n];
+    case "feeBps": // V4BuybackExecutor: v3, v4Lp, v4Protocol, hook, creatorTax, total, inside the cap below
+      return [0, 30, 0, 0, 0, 30n];
+    case "maxTotalFeeBps":
+      return 100;
+    case "pinnedBands":
+    case "bands": {
+      // A v8 ChainlinkFeedSource has no band views (v9 added them): the call REVERTS, as a missing function does.
+      const e = new Error(`The contract function "${fn}" reverted: execution reverted`);
+      e.name = "ContractFunctionRevertedError";
+      throw e;
+    }
     case "aggregator":
       return addr(0xf00);
     case "accessController":
@@ -232,6 +260,9 @@ export function defaultRead(chain, address, fn, args) {
       return false;
     case "liquidity":
       return 10n ** 20n;
+    case "convertToAssets":
+      // The EarnVault prices (its venue reads). checkEarnVenue's probe, 1 share -> 1 base unit.
+      return 1n;
     default:
       throw new Error(`fake chain: no answer for ${fn} on ${address}`);
   }
@@ -289,12 +320,21 @@ export class FakeChain {
       async call() {
         return { data: "0x" };
       },
-      async getLogs({ address, event, fromBlock, toBlock }) {
+      async getLogs({ address, event, events, fromBlock, toBlock }) {
         chain.calls.getLogs += 1;
         if (chain.getLogsHook) chain.getLogsHook({ from: fromBlock, to: toBlock, event });
         const want = new Set((Array.isArray(address) ? address : [address]).map((a) => a.toLowerCase()));
         const src = event ? chain.tokenLogs : chain.logs;
-        return src.filter((l) => l.blockNumber >= fromBlock && l.blockNumber <= toBlock && want.has(l.address.toLowerCase()));
+        // `events` narrows by topic0 the way a node does (viem sends their selectors as topics[0]), so a
+        // wrong or missing signature returns nothing. A `topics` field is ignored here because viem's getLogs drops it.
+        const topic0 = events ? new Set(events.map((e) => viem.toEventSelector(e).toLowerCase())) : null;
+        return src.filter(
+          (l) =>
+            l.blockNumber >= fromBlock &&
+            l.blockNumber <= toBlock &&
+            want.has(l.address.toLowerCase()) &&
+            (topic0 === null || topic0.has((l.topics?.[0] ?? "").toLowerCase())),
+        );
       },
     };
   }

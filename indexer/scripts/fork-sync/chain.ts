@@ -126,9 +126,9 @@ export type ChainFacts = {
     /** In log order: the drawdown of an epoch's strand share depends on it. */
     entries: Array<{ owner: Address; epochId: bigint; shares: bigint; assets: bigint; usdgOut: bigint; block: bigint }>;
     completes: Array<{ owner: Address; receiver: Address; shares: bigint; assets: bigint; usdgOut: bigint; block: bigint }>;
-    /** `UsdgLegDeferred`: a payout whose USDG leg could not move (AF-03). */
+    /** `UsdgLegDeferred`: a payout whose USDG leg could not move. */
     deferred: Array<{ owner: Address; receiver: Address; usdgOwed: bigint; block: bigint }>;
-    /** `ReserveHaircut`: a settled redeemer paid less than booked (AF-05). */
+    /** `ReserveHaircut`: a settled redeemer paid less than booked. */
     haircuts: Array<{ owner: Address; booked: bigint; paid: bigint; block: bigint }>;
   };
   deposits: Array<{ owner: Address; assets: bigint; shares: bigint; timestamp: bigint }>;

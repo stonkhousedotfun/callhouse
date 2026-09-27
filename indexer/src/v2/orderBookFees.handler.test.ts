@@ -7,6 +7,12 @@ type Handler = (input: { event: unknown; context: unknown }) => Promise<void>;
 const handlers = vi.hoisted(() => new Map<string, Handler>());
 vi.mock("../../lib/registry", () => ({
   v2Ponder: { on: (event: string, handler: Handler) => handlers.set(event, handler) },
+  // Inert, as lib/registry.ts exports it with no HouseVaultFactory: orderBook.ts imports houseVault.ts,
+  // whose handlers are not this suite's subject.
+  v2HouseVaultPonder: { on: () => undefined },
+  // The vault-event and kinded-factory gates, inert here for the same reason.
+  v2HouseVaultEventsPonder: { on: () => undefined },
+  v2HouseVaultKindedFactoryPonder: { on: () => undefined },
 }));
 vi.mock("ponder:schema", () => ({ default: { v2OrderBookState: "v2OrderBookState" } }));
 

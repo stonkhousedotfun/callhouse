@@ -2,18 +2,19 @@
  * House vault presentation maths. No API, chain, or React imports.
  *
  * Units, each read at the line cited and not retyped from plan prose:
- * - USDG 6 dp, Stock Tokens 18 dp — web/lib/v2/api-schema.ts:18-19
- * - timestamps unix seconds — web/lib/v2/api-schema.ts:25
+ * - USDG 6 dp, Stock Tokens 18 dp — web/lib/v2/api-schema.ts header, "USDG is 6 dp; Stock Tokens ... are 18 dp"
+ * - timestamps unix seconds — web/lib/v2/api-schema.ts header, "Timestamps are unix SECONDS"
  * - New York display — web/lib/v2/time.ts `stamp` (was duplicated inline in EarnMarket.tsx; UX item 8)
- * - shares 18 dp — callhouse-contracts src/v2/periphery/house/HouseVault.sol:36
- *   ("the Stock Token is 18 dp; rates are bps of BPS = 10_000. Shares are 18 dp."), read from a
- *   callhouse-contracts checkout on v8. The contracts submodule in this worktree is not populated,
+ * - shares 18 dp — callhouse-contracts src/v2/periphery/house/HouseVault.sol, the contract NatSpec's UNITS
+ *   paragraph ("the Stock Token is 18 dp; rates are bps of BPS = 10_000. Shares are 18 dp."), read from a
+ *   callhouse-contracts source. The contracts submodule is not always checked out,
  *   so this file does not claim to have read it from `contracts/`.
  *
- * Every HouseVault.sol line cited below was re-read at callhouse-contracts leekzor/v8
- * 0124b58e756568b239f7ad97acd1571add5b58a9 (T-546). The earlier citations (:440-445, :452-455,
- * :456-457, :388-389, :378) were struck against an older tree and had moved; the maths they
- * described has not, except where SEC-27 is named.
+ * HouseVault.sol is cited below BY ANCHOR (function name plus the quoted expression), not by line
+ * number: line citations were struck twice against older trees and had moved each time.
+ * Every anchor was re-read against the contracts;
+ * grep the quoted text to find it. The maths
+ * has not moved, except where named below.
  *
  * NAV exists only at a boundary. This file exposes no function that builds a NAV, a share price or
  * any per-share value from a running-epoch input: both doors that could produce one — {navView} and
@@ -21,12 +22,13 @@
  */
 
 import { stamp } from "./time";
+import { houseIdle, type Cadence } from "./vaultCopy";
 
 export const USDG_DECIMALS = 6;
 export const STOCK_DECIMALS = 18;
 export const SHARE_DECIMALS = 18;
 export { NEW_YORK_TIME_ZONE } from "./time";
-export const NAV_NOT_AVAILABLE = "not available until the next boundary";
+export const NAV_NOT_AVAILABLE = "shown after the next close";
 
 export type RunningEpochInput = { atBoundary: false };
 export type BoundaryNavInput = { atBoundary: true; navUsdg: bigint };
@@ -36,10 +38,31 @@ export type UnavailableNav = { available: false; message: typeof NAV_NOT_AVAILAB
 export type BoundaryNav = { available: true; navUsdg: bigint };
 export type NavView = UnavailableNav | BoundaryNav;
 
+/**
+ * USDG base units per 1e18 shares from `HouseVault.nav()` and `totalSupply()`. `nav()` is the MARK at the
+ * LAST BOUNDARY's settlement price (HouseVault.sol `_nav`), not a live price, so this is a boundary figure and every
+ * caller must render it with `vaultMarkLabel`. Null when either input is missing or the supply is zero -- there is
+ * no per-share figure of an empty vault, and a missing read is not 0.
+ */
+export function markPerShare(navUsdg: bigint | null, supply: bigint | null): bigint | null {
+  if (navUsdg === null || supply === null || supply === 0n) return null;
+  return (navUsdg * 10n ** BigInt(SHARE_DECIMALS)) / supply;
+}
+
 /** Mid-epoch callers get the message, never a number. */
 export function navView(input: NavInput): NavView {
   if (!input.atBoundary) return { available: false, message: NAV_NOT_AVAILABLE };
   return { available: true, navUsdg: input.navUsdg };
+}
+
+/**
+ * `previewBoundary` / `previewClaim` return `exact`. True only when the vault is flat
+ * (no option, no live order, every tracked series settled): the preview is the roll. False means
+ * open positions were valued as if they settled at the chosen price, so the number is an estimate.
+ * A screen that shows those amounts uses this label. No screen calls the views yet.
+ */
+export function houseRollPreviewLabel(exact: boolean): string {
+  return exact ? "what the next close pays" : "estimate; positions are still open";
 }
 
 export type EpochResult = {
@@ -73,19 +96,94 @@ export function secondsUntilBoundary(nowUnixSeconds: number, boundaryUnixSeconds
 export const formatNewYork = stamp;
 
 export function depositJoinsSentence(boundaryUnixSeconds: number): string {
-  return `Your deposit joins at the next boundary (${formatNewYork(boundaryUnixSeconds)}).`;
+  return `Your deposit joins at the next close (${formatNewYork(boundaryUnixSeconds)}).`;
+}
+
+/** "30 minutes": a window in words, whole minutes when exact (the House queue cutoff's copy). */
+export function houseWindowWords(seconds: number): string {
+  if (seconds % 60 !== 0) return `${seconds} seconds`;
+  const minutes = seconds / 60;
+  return minutes === 1 ? "1 minute" : `${minutes} minutes`;
+}
+
+/**
+ * Queued deposits and withdrawal requests (and both cancels)
+ * stop at `epochEnd - SETTLEMENT_WINDOW`: HouseVault.sol `_requireBeforeCutoff` reverts PastCutoff from there until
+ * the roll. `settlementWindowS` is the chain's `SETTLEMENT_WINDOW()` read, never a literal here. Both are
+ * priced at the same close. The weekday wording is a function of the vault's cadence, never a literal (vaultCopy.ts).
+ */
+export type CutoffSentences = { deposit: string; withdraw: string; idle: string };
+
+export function cutoffSentences(cadence: Cadence, boundaryUnixSeconds: number, settlementWindowS: number): CutoffSentences {
+  const at = formatNewYork(boundaryUnixSeconds);
+  const cut = formatNewYork(boundaryUnixSeconds - settlementWindowS);
+  return {
+    deposit: cadence === "daily"
+      ? `Deposit before ${cut} to be priced at today's close (${at}).`
+      // The close time is the vault's own epochEnd, never "Fri 4:00 pm ET" (holiday weeks, early closes).
+      : `Deposit before ${cut} to be priced at this week's close (${at}).`,
+    withdraw: `Withdrawal requests are taken until ${cut}, ${houseWindowWords(settlementWindowS)} before the close, and are priced at that close.`,
+    idle: houseIdle(cadence),
+  };
+}
+
+/**
+ * Mirrors keeper/src/v2/cranker/steps.ts `HOUSE_ROLL_OVERDUE_S` (7 h), the threshold the keeper pages
+ * `v2_house_roll_overdue` at, so a user and an operator read the same fact. The web cannot import keeper code;
+ * houseEpoch.test.ts reads the keeper file and fails if the two drift.
+ */
+export const HOUSE_ROLL_OVERDUE_S = 7 * 3_600;
+
+export type BoundaryState = "open" | "waiting" | "held" | "overdue";
+
+/**
+ * HouseVault.UNPINNED_BOUNDARY_HOLD (private): how long past the close rollEpoch holds a boundary the vault
+ * did not lock before money was exposed to it (`TooEarly(epochEnd + UNPINNED_BOUNDARY_HOLD)`). A declared mirror
+ * (ops/v2/contract-mirrors.list.mjs), so a changed contract value turns the mirror guard red.
+ */
+export const UNPINNED_BOUNDARY_HOLD_S = 7 * 86_400;
+
+/**
+ * What the vault says about the running boundary's lock. `pinnedBoundary` is `pinnedBoundary()`; `exposed` is
+ * shares or a queued deposit (totalSupply, pendingDepositUsdg, pendingDepositStock). Null = not read, never judged.
+ */
+export type BoundaryLock = { pinnedBoundary: number | null; exposed: boolean | null };
+
+/** Whether money is exposed to the running boundary; null when any of the three reads failed. */
+export function houseExposed(totalSupply: bigint | null | undefined, pendingDeposit: { usdg: bigint; stock: bigint } | null | undefined): boolean | null {
+  if (totalSupply === null || totalSupply === undefined || pendingDeposit === null || pendingDeposit === undefined) return null;
+  return totalSupply !== 0n || pendingDeposit.usdg !== 0n || pendingDeposit.stock !== 0n;
+}
+
+/** When a held boundary is processed: its close plus UNPINNED_BOUNDARY_HOLD_S. */
+export const houseHeldUntil = (epochEndUnixSeconds: number): number => epochEndUnixSeconds + UNPINNED_BOUNDARY_HOLD_S;
+
+/**
+ * Before the close: open. From the close until 7 h past it: waiting for Finalized + the roll. After that: overdue.
+ * A boundary money is exposed to that the vault did not lock (`pinnedBoundary != epochEnd`) is
+ * `held` from the close until `houseHeldUntil`, because rollEpoch refuses until then; it is a known wait, not a late
+ * close. Past the hold an unrolled boundary is overdue as before. Without a read `lock` nothing is held.
+ */
+export function boundaryState(nowUnixSeconds: number, epochEndUnixSeconds: number, lock?: BoundaryLock | null): BoundaryState {
+  if (nowUnixSeconds < epochEndUnixSeconds) return "open";
+  if (
+    lock != null && lock.pinnedBoundary !== null && lock.exposed === true && lock.pinnedBoundary !== epochEndUnixSeconds
+    && nowUnixSeconds < houseHeldUntil(epochEndUnixSeconds)
+  ) return "held";
+  return nowUnixSeconds > epochEndUnixSeconds + HOUSE_ROLL_OVERDUE_S ? "overdue" : "waiting";
 }
 
 /**
  * A boundary-time snapshot of everything {inKindPreview} needs.
  *
- * THE POOL FIGURES ARE NOT TOKEN BALANCES. HouseVault.rollEpoch:609-616 computes the pool it pays
- * withdrawals from as
+ * THE POOL FIGURES ARE NOT TOKEN BALANCES. HouseVault.rollEpoch (the `usdgPool` / `stockPool` block under
+ * "WITHDRAWALS, in kind and pro rata") computes the pool it pays withdrawals from as
  *     sat( usdg.balanceOf(vault) + clearinghouse.free(vault, usdg) + orderBook.owed(vault)
  *          − (pendingDepositUsdg + owedUsdg) )
  * where `sat(x − y)` is `x > y ? x − y : 0`, and the same shape for the Stock Token without the
- * book-owed term (:611-612, :614, :616), evaluated AFTER the performance fee is transferred to the
- * splitter (:574-591). The book-owed term is T-OP-073's and is in the pool for the same reason it
+ * book-owed term (`stockPool = underlying.balanceOf(address(this)) + clearinghouse.free(...)`, then
+ * `reservedStock = pendingDepositStock + owedStock`), evaluated AFTER the performance fee is transferred
+ * to the splitter (the "PERFORMANCE FEE" block ending `usdg.safeTransfer(splitter, fee)`). The book-owed term is and is in the pool for the same reason it
  * is in `_nav`. Feeding this a bare `balanceOf` overstates the payout even at a boundary; leaving
  * the ledger or book-owed terms out understates it.
  * Mid-epoch it is worse than wrong: the vault also holds open ERC-1155 option positions, which no
@@ -131,17 +229,19 @@ export type InKindPreview = InKindUnavailable | InKindAvailable;
 /**
  * In-kind withdrawal preview, floor-divided in bigint, mirroring the contract's TWO stages:
  *
- *   stage 1, HouseVault.rollEpoch:617-618   wUsdg = mulDiv(poolUsdg, queueShares, supply)
- *   stage 2, HouseVault.claim:478-479       usdgOut = mulDiv(wUsdg, holderShares, queueShares)
+ *   stage 1, HouseVault.rollEpoch   `wUsdg = Math.mulDiv(usdgPool, wShares, supply)`
+ *   stage 2, HouseVault.claim       `payUsdg = Math.mulDiv(e.withdrawUsdg, w.shares, e.withdrawShares)`
  *
  * Composing two floors is not the same as flooring once: a single
  * `floor(poolUsdg * shares / totalShares)` is always greater than or equal to the composed value,
  * so a one-stage preview can promise more USDG than {claim} actually pays. Both stages are floored
  * here for the same reason the contract floors them — floor division can never overdraw the batch
- * (the comment at HouseVault.sol:467 says so in those terms for the deposit leg).
+ * (HouseVault.claim's deposit leg says so in those terms: "floor-divided against the batch, so rounding
+ * dust stays with the pool and never overdraws it").
  *
- * THE RESIDUE DOES NOT STAY IN THE VAULT. Since SEC-27 (HouseVault.claim:482-503, landed by
- * T-SEC-P4-HOUSEVAULT 5c7ac72b) the batch is RUN DOWN IN STORAGE: each claim subtracts what it paid
+ * THE RESIDUE DOES NOT STAY IN THE VAULT. Since a change to HouseVault.claim (the block headed "THE
+ * BATCH IS RUN DOWN IN STORAGE"),
+ * the batch is RUN DOWN IN STORAGE: each claim subtracts what it paid
  * from the batch's remaining USDG, stock and shares, so the LAST claimant of an epoch divides the
  * whole remainder by the whole remaining share count and receives the dust exactly. Two
  * consequences for this preview, both asserted in the test that walks both claim orders:
@@ -150,7 +250,7 @@ export type InKindPreview = InKindUnavailable | InKindAvailable;
  *      overstates;
  *   2. per-holder dust is still not returned, and is now not even a function of one holder's
  *      inputs: it depends on every other queued holder's share count AND on claim order.
- * `usdgLeftInVault` is unaffected: stage 1 (:617-618) still moves the whole `wUsdg` into the owed
+ * `usdgLeftInVault` is unaffected: stage 1 (`owedUsdg += wUsdg` in rollEpoch) still moves the whole `wUsdg` into the owed
  * reserve, and what the vault keeps for the non-withdrawing shareholders is `poolUsdg − wUsdg`.
  */
 export function inKindPreview(input: InKindPreviewInput): InKindPreview {

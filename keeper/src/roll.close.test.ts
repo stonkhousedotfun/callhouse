@@ -112,7 +112,7 @@ test('contractsAssignedAt: a failed read is null — unknown — never a silent 
 });
 
 /*//////////////////////////////////////////////////////////////
-          K-21: BOTH CLOSE PATHS RECORD THE SPLIT, THROUGH tick()
+          BOTH CLOSE PATHS RECORD THE SPLIT, THROUGH tick()
 //////////////////////////////////////////////////////////////*/
 
 const ZERO32 = `0x${'00'.repeat(32)}` as const;

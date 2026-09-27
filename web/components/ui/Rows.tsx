@@ -2,9 +2,11 @@ import type { ReactNode } from "react";
 
 import { cn } from "@/lib/cn";
 
+import { InfoTip } from "./InfoTip";
+
 /**
  * Label / value lists: the app's ledger rows ("Protocol fee ........ 0.214047"). The fee slip on
- * stonkhouse.fun is the model: a quiet label on the left, the figure right-aligned in Geist Mono,
+ * stonkhouse.fun is the model: a quiet label on the left, the figure right-aligned in JetBrains Mono,
  * a hairline between rows.
  *
  *   <Rows>
@@ -18,7 +20,7 @@ import { cn } from "@/lib/cn";
  *
  * A long value wraps under its label on a narrow screen instead of pushing the page sideways.
  *
- * TEST HOOKS: `data-slot` rows / row / k / v. The W-13 run finds a row by its `k` text and reads `v`.
+ * TEST HOOKS: `data-slot` rows / row / k / v. The run finds a row by its `k` text and reads `v`.
  * Keep the value's visible text free of screen-reader-only additions (use ExternalLink with
  * srNote={false} inside a value) so what the run reads is what a sighted reader sees.
  */
@@ -33,13 +35,14 @@ export function Rows({ className, children }: { className?: string; children: Re
 export type RowProps = {
   k: ReactNode;
   v: ReactNode;
+  tip?: ReactNode;
   title?: string;
   mono?: boolean;
   dense?: boolean;
   className?: string;
 };
 
-export function Row({ k, v, title, mono = true, dense = false, className }: RowProps) {
+export function Row({ k, v, tip, title, mono = true, dense = false, className }: RowProps) {
   return (
     <div
       data-slot="row"
@@ -50,8 +53,9 @@ export function Row({ k, v, title, mono = true, dense = false, className }: RowP
         className,
       )}
     >
-      <dt data-slot="k" className="min-w-0 text-ink-2">
+      <dt data-slot="k" className={cn("min-w-0 text-ink-2", tip ? "inline-flex items-center gap-1.5" : null)}>
         {k}
+        {tip ? <InfoTip text={tip} label={typeof k === "string" ? `About ${k.toLowerCase()}` : undefined} /> : null}
       </dt>
       <dd
         data-slot="v"

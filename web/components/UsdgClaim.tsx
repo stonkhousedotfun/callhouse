@@ -8,7 +8,7 @@ import { CHAIN_ID } from "@/lib/chain";
 import { SHARE_TICKER, VAULT, vaultAbi } from "@/lib/contracts";
 import { fmtUsdg } from "@/lib/format";
 import type { AccountPosition, VaultSnapshot } from "@/lib/hooks";
-import { Button, Card, CardHead, CardMeta, CardTitle, Row, Rows, Stat, Unit } from "@/components/ui";
+import { Button, Card, CardHead, CardMeta, CardTitle, InfoTip, Row, Rows, Stat, Unit } from "@/components/ui";
 import { ConnectButton } from "./ConnectButton";
 import { useTxRunner } from "./TxToast";
 
@@ -41,7 +41,7 @@ export function UsdgClaim({
   const run = useTxRunner();
   const [busy, setBusy] = useState(false);
 
-  // W8-450. The wallet's chain is read from useAccount and compared with the ONE source of truth the rest
+  // The wallet's chain is read from useAccount and compared with the ONE source of truth the rest
   // of the app uses, `CHAIN_ID` from @/lib/chain -- the same pair AccountView.tsx reads. Nothing here switches
   // the wallet's network; a wrong network refuses the action and says so.
   const wrongNetwork = isConnected && chainId !== CHAIN_ID;
@@ -68,7 +68,7 @@ export function UsdgClaim({
             abi: vaultAbi as unknown as Abi,
             functionName: "claimUsdg",
             args: [],
-            // W8-450. Without this @wagmi/core 3.6.5 keys its chain assertion off `!!chainId` and submits to
+            // Without this @wagmi/core 3.6.5 keys its chain assertion off `!!chainId` and submits to
             // whatever network the wallet is on. This is a live vault action.
             chainId: CHAIN_ID,
           }),
@@ -84,7 +84,7 @@ export function UsdgClaim({
     <Card>
       <CardHead>
         <CardTitle>USDG</CardTitle>
-        <CardMeta className="font-body! tracking-normal!">premium on filled weeks, strike proceeds on assigned weeks</CardMeta>
+        <CardMeta className="font-body! tracking-normal!">premium, plus strike proceeds if assigned</CardMeta>
       </CardHead>
 
       <Stat
@@ -98,7 +98,6 @@ export function UsdgClaim({
 
       <Rows className="mt-3">
         <Row
-          title="Everything credited to one share since launch: premium net of fees plus strike proceeds from assignment. Not a return."
           k={<>Distributed to date, per {SHARE_TICKER}</>}
           v={
             lifetimePerShare === undefined ? (
@@ -120,10 +119,14 @@ export function UsdgClaim({
         />
       </Rows>
       {/* The Distributor credits strike proceeds through the same index as premium, so these
-          two figures include both. Said here so neither reads as earnings (W-21). */}
+          two figures include both. Said here so neither reads as earnings. The row's old
+          `title` (invisible to touch) is the InfoTip now; the row label stays as the fork run reads it. */}
       <p className="mt-2 text-[12.5px] leading-[1.55] text-ink-3">
-        Includes strike proceeds from assigned weeks, which are returned collateral rather than
-        premium.
+        Includes strike proceeds from assigned weeks: returned collateral, not premium.{" "}
+        <InfoTip label="About these totals">
+          Distributed to date is everything credited to one share since launch: premium after fees, plus strike proceeds
+          from assigned weeks. Not a return.
+        </InfoTip>
       </p>
 
       <div className="mt-5">

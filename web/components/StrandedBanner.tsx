@@ -8,11 +8,11 @@ import { CHAIN_ID } from "@/lib/chain";
 import { MARKET, VAULT, vaultAbi } from "@/lib/contracts";
 import { WAD, fmtAsset, fmtUsdg, fmtWadPercent } from "@/lib/format";
 import type { AccountPosition, VaultSnapshot } from "@/lib/hooks";
-import { Button, Notice, Row, Rows, Unit } from "@/components/ui";
+import { Button, InfoTip, Notice, Row, Rows, Unit } from "@/components/ui";
 import { useTxRunner } from "./TxToast";
 
 /**
- * The stranded-claim banner (Vault.sol "STRANDED CLAIM", AUDIT-FINDINGS F-02 / AF-02).
+ * The stranded-claim banner (Vault.sol "STRANDED CLAIM").
  *
  * WHAT HAPPENED. `rollClose` redeems the week's Valorem claim, and Valorem pushes USDG and then
  * NVDA to the vault in one call. Either token's issuer can make that revert at will: USDG paused,
@@ -56,7 +56,7 @@ export function StrandedBanner({
   className?: string;
 }) {
   const { address, isConnected, chainId } = useAccount();
-  // W8-450, same pair as AccountView.tsx. No silent network switch; a wrong network refuses and says so.
+  // same pair as AccountView.tsx. No silent network switch; a wrong network refuses and says so.
   const wrongNetwork = isConnected && chainId !== CHAIN_ID;
   const { writeContractAsync } = useWriteContract();
   const run = useTxRunner();
@@ -98,10 +98,10 @@ export function StrandedBanner({
             abi: vaultAbi as unknown as Abi,
             functionName: "retryStrandedClaim",
             args: [],
-            // W8-450: without this @wagmi/core 3.6.5 disables its chain assertion entirely.
+            // without this @wagmi/core 3.6.5 disables its chain assertion entirely.
             chainId: CHAIN_ID,
           }),
-        { pending: "Retrying the stranded claim", success: "Claim redeemed — the week's collateral and strike USDG are home" },
+        { pending: "Retrying the stranded claim", success: "Claim redeemed: the week's collateral and strike USDG are back" },
       );
       if (hash) onDone?.();
     } finally {
@@ -115,33 +115,36 @@ export function StrandedBanner({
       className={className}
       title={
         <>
-          A claim is stranded{snapshot.cycleNumber !== undefined ? ` (cycle #${snapshot.cycleNumber})` : ""}: the week closed, but Valorem
-          could not return its collateral.
+          A claim is stranded{snapshot.cycleNumber !== undefined ? ` (cycle #${snapshot.cycleNumber})` : ""}: the week closed, but its
+          collateral could not be returned yet.
         </>
       }
     >
       {" "}
       {/* A readable measure: the banner spans the page, the sentence should not. */}
       <p className="max-w-[78ch]">
-        The close tried to redeem the week&apos;s Valorem claim and the redeem reverted: a USDG pause or freeze, or the
-        Stock Token issuer blocklisting the vault. The premium was harvested and the vault went to Idle with the claim
-        kept, so <span className="num text-[0.92em] font-medium text-ink">{fmtAsset(snapshot.lockedAssets)} {MARKET}</span> (plus the strike USDG for anything assigned) is still inside
-        Valorem. While that holds, deposits and instant redemption are closed and no new week can be armed. The queue
-        still settles, booking each entry&apos;s share of the idle balance and of the claim, but paying it out moves
-        tokens: a Stock Token blocklist of the vault holds the {MARKET} leg back until it lifts, and a USDG pause or
-        freeze defers the USDG leg.
+        <span className="num text-[0.92em] font-medium text-ink">{fmtAsset(snapshot.lockedAssets)} {MARKET}</span> (plus the
+        strike USDG for anything assigned) is still held by the options contract. Until it comes back, deposits and
+        instant withdrawals are off and no new week can start. Queued withdrawals still settle.{" "}
+        <InfoTip label="Why the claim is stranded">
+          At the close the vault tried to redeem the week&apos;s claim on Valorem, the options contract, and it failed:
+          USDG was paused or frozen, or the Stock Token issuer blocked the vault. The premium was already collected. The
+          queue still settles, booking each entry&apos;s share of the free balance and of the claim, but paying out moves
+          tokens: an issuer block on the vault holds the {MARKET} part back until it lifts, and a USDG pause or freeze
+          holds back the USDG part.
+        </InfoTip>
       </p>
       {!compact ? (
         <>
           <Rows className="mt-3 max-w-[720px] border-t border-danger/20">
-            <Row k="Claim still owned by live shares" v={fmtWadPercent(liveWad)} dense className="border-danger/15!" />
-            <Row k="Claim owed to settled queue epochs" v={fmtWadPercent(queueWad)} dense className="border-danger/15!" />
+            <Row k="Claim owed to current holders" v={fmtWadPercent(liveWad)} dense className="border-danger/15!" />
+            <Row k="Claim owed to settled withdrawals" v={fmtWadPercent(queueWad)} dense className="border-danger/15!" />
             <Row
-              k="Strand generation"
+              k="Stranded claim"
               v={
                 <>
                   #{snapshot.strandGen?.toString() ?? "—"}
-                  {snapshot.lastResolvedGen !== undefined ? ` · last resolved #${snapshot.lastResolvedGen.toString()}` : ""}
+                  {snapshot.lastResolvedGen !== undefined ? ` · last cleared #${snapshot.lastResolvedGen.toString()}` : ""}
                 </>
               }
               dense
@@ -150,21 +153,35 @@ export function StrandedBanner({
             {address && position?.ready ? (
               <>
                 <Row
-                  title="Your queue entry's share of the stranded claim, staged or in your settled epoch. Paid with completeRedeem once the claim is redeemed."
-                  k="Your pending claim share (queue)"
+                  k={
+                    <>
+                      Your share, queued{" "}
+                      <InfoTip label="About your queued share">
+                        Your queued withdrawal&apos;s share of the stranded claim. Paid with Complete redemption once the claim
+                        is redeemed.
+                      </InfoTip>
+                    </>
+                  }
                   v={fmtWadPercent(pendingWad)}
                   dense
                   className="border-danger/15!"
                 />
                 <Row
-                  title="Your live shares' slice of what the claim still owes live shares. It comes back as NAV and, for strike USDG, through the harvest when the claim is redeemed."
-                  k={<>Your live shares&apos; slice</>}
+                  k={
+                    <>
+                      Your share, held{" "}
+                      <InfoTip label="About your held share">
+                        Your current shares&apos; part of what the claim still owes holders. When the claim is redeemed it
+                        comes back in the share price, and any strike USDG through the USDG claim.
+                      </InfoTip>
+                    </>
+                  }
                   v={fmtWadPercent(liveShareWad)}
                   dense
                   className="border-danger/15!"
                 />
                 <Row
-                  k="Collectable now (previewCompleteRedeem)"
+                  k="You can collect now"
                   v={
                     <>
                       {fmtAsset(position.pendingAssets)} <Unit>{MARKET}</Unit> · {fmtUsdg(position.pendingUsdg)} <Unit>USDG</Unit>
@@ -184,8 +201,8 @@ export function StrandedBanner({
               <span className="text-[12.5px] leading-snug text-ink-2">Switch to Robinhood Chain to retry.</span>
             ) : null}
             <span className="min-w-0 flex-1 basis-60 text-[12.5px] leading-snug text-ink-3">
-              Anyone can send this. It reverts StillStranded while the cause persists and settles the claim the
-              first time Valorem lets it through; nothing here needs the keeper.
+              Anyone can send this. It fails until the cause clears, then brings the claim back. No keeper
+              needed.
             </span>
           </div>
         </>

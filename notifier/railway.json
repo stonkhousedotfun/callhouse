@@ -7,7 +7,11 @@
       "notifier/**",
       "package.json",
       "pnpm-lock.yaml",
-      "pnpm-workspace.yaml"
+      "pnpm-workspace.yaml",
+      "relay/package.json",
+      "keeper/package.json",
+      "web/package.json",
+      "indexer/package.json"
     ]
   },
   "deploy": {

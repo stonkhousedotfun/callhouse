@@ -36,7 +36,7 @@ import { GENERATED_MARKETS, GENERATED_REGISTRY, LAUNCH_SET as GENERATED_LAUNCH_S
  *
  * TWO LIFECYCLES PER ROW. `status` is the v1 factory's: live, planned, paused, or
  * `superseded-by-v2`, which the 34 rows planned for their own factory became when that rollout was
- * cancelled (ADR-02) — never deployed, never a page, and not "coming next" on the v1 home either
+ * cancelled — never deployed, never a page, and not "coming next" on the v1 home either
  * (`plannedByWave` leaves them out). `v2` is the v2 market's (planned | live | paused, and a
  * rollout wave of its own), read through `v2Markets()` / `isV2Live()`. The v2 contract addresses,
  * fees and defaults are `V2_CONTRACTS`, `V2_FEES` and `V2_DEFAULTS` in the generated file.
@@ -66,7 +66,7 @@ export type Market = {
   /** Per-account deposit cap in USD notional; null is uncapped. */
   depositCapUsd: number | null;
   /**
-   * When the owner froze this market's v1 factory (writes halted, deposit cap 0), in unix seconds,
+   * When the admin froze this market's v1 factory (writes halted, deposit cap 0), in unix seconds,
    * from the registry's hand-maintained `v1FrozenAt`; null until then, and always null for a market
    * with no v1 factory. Read it through `v1FrozenAt(ticker)`.
    */
@@ -181,7 +181,7 @@ export type V2PayoutRoute =
   | Readonly<{ venue: "v3"; fee: number }>
   | Readonly<{ venue: "v4"; fee: number; tickSpacing: number; poolId: Hex }>;
 
-/** A market's `v2` block from the registry, typed. Big integers are bigint (USDG base units, ADR-04). */
+/** A market's `v2` block from the registry, typed. Big integers are bigint (USDG base units). */
 export type V2MarketConfig = {
   status: V2MarketStatus;
   /** Rollout wave: canary, then wave1, then wave2. Order, not dates. */
@@ -212,7 +212,7 @@ export type V2MarketConfig = {
  * NEXT_PUBLIC_ASSET / NEXT_PUBLIC_FACTORY overrides of the default market do not apply here.
  */
 /**
- * T-OP-099. The owner's launch set (registry `launchSet`, owner ruling 2026-09-21: NVDA and SPCX), widened from the
+ * The launch set (registry `launchSet`: NVDA and SPCX), widened from the
  * generated literal exactly as the market rows are. It is the ONLY thing that may decide whether the app presents
  * a market as part of the launch: `wave` is rollout order and `status` is what the chain says, and neither answers
  * the question (the registry's note says why). No ticker is written here; the generator copies the registry.
@@ -221,7 +221,7 @@ export const LAUNCH_SET: { readonly note: string; readonly markets: readonly str
 /** Upper-case tickers of the launch set, for membership tests. */
 export const LAUNCH_SET_TICKERS: ReadonlySet<string> = new Set(LAUNCH_SET.markets.map((ticker) => ticker.trim().toUpperCase()));
 
-/** Whether the ticker (any case) is in the owner's launch set. False for an unknown, empty or non-launch ticker. */
+/** Whether the ticker (any case) is in the launch set. False for an unknown, empty or non-launch ticker. */
 export function isLaunch(ticker: string | undefined | null): boolean {
   if (!ticker) return false;
   return LAUNCH_SET_TICKERS.has(ticker.trim().toUpperCase());
@@ -232,15 +232,15 @@ export type V2Market = {
   name: string;
   asset: Address;
   feed: Address;
-  /** T-OP-099. In the owner's launch set (LAUNCH_SET). Data on the row, so a consumer never re-derives it. */
+  /** In the launch set (LAUNCH_SET). Data on the row, so a consumer never re-derives it. */
   launch: boolean;
   v2: V2MarketConfig;
 };
 
 /**
- * Owner 2026-09-22 (launch night): the app presents the LAUNCH SET only -- NVDA and SPCX -- everywhere
+ * (launch night): the app presents the LAUNCH SET only -- NVDA and SPCX -- everywhere
  * (market lists, the switcher, /trust/markets, static params). The other 33 registry rows stay in the
- * registry (owner ruling 2026-09-21: the launch scopes the launch, not the registry) and come back here
+ * registry (the launch scopes the launch, not the registry) and come back here
  * by widening `launchSet.markets`, never by editing this file. An empty launch set falls back to every
  * row so a registry without one cannot blank the app.
  */
@@ -302,7 +302,7 @@ export function isV2Live(ticker: string | undefined | null): boolean {
 /**
  * When the ticker's (any case) v1 factory was frozen, in unix seconds, or null: not frozen yet, no v1
  * factory, or an unknown ticker. The registry writes the date together with `v1RunOff: true` when the
- * owner runs the v1 freeze, so null means "no date to show", never "not frozen" on its own: a banner
+ * admin runs the v1 freeze, so null means "no date to show", never "not frozen" on its own: a banner
  * that reads the factory's own `writesHalted` should keep doing so and add the date when there is one.
  * Looks at every registry row, not only live ones.
  */

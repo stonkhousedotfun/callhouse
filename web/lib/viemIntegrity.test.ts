@@ -5,7 +5,7 @@
  * replaced by a four-line "probe stub" that exported checksumAddress as the IDENTITY function,
  * getAddress as a bare regex and nothing else. Every assertion in this repo that compared a
  * checksummed address to a checksummed literal then passed without checking anything, and no
- * address checksum was validated anywhere for the days it sat there. T-74 restored the package.
+ * address checksum was validated anywhere for the days it sat there. The package was then restored.
  *
  * Each workspace package resolves viem through its own node_modules symlink, so this guard is
  * duplicated in indexer, web and keeper deliberately: one package can be contaminated alone.

@@ -1,5 +1,5 @@
 /**
- * New York calendar arithmetic for the rules: expiries are 16:00 New York (ADR-07), the regular
+ * New York calendar arithmetic for the rules: expiries are 16:00 New York, the regular
  * session is 09:30-16:00 New York on a session day (IExpiryCalendar.isRegularSession), and "a day"
  * in "once per direction per day" is a New York trading date.
  *

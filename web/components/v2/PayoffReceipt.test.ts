@@ -10,7 +10,7 @@ import { buildPayoffReceipt, type PayoffReceiptInput } from "@/lib/v2/payoffRece
 import { PayoffReceipt } from "./PayoffReceipt";
 
 /**
- * T-OP-120. The receipt component (design §2.5, §2.7) at the design example ticket: 300 units at 4.1333 USDG/share,
+ * The receipt component at the design example ticket: 300 units at 4.1333 USDG/share,
  * strike 230 call, exercise fee 25 bps, settlement 240, conversion at the contract ceiling. The figures themselves
  * are pinned in lib/v2/payoffReceipt.test.ts; this file pins that the markup renders every line the builder
  * produced, in order, with its note and its rule, and that the server render is collapsed with the total visible.
@@ -59,7 +59,7 @@ describe("payoff receipt markup", () => {
     }
     expect(flat).toContain(receipt.pay.title);
     expect(flat).toContain("What you can get at settlement (if NVDA ends at $240.00; strike 230.00 call)");
-    // The known ticket, line by line (§2.5), as the reader sees it.
+    // The known ticket, line by line, as the reader sees it.
     for (const snippet of [
       "Premium|", "12.40 USDG", "300 × 0.01-share units at 4.1333 USDG/share average ask",
       "Taker fee|", "0.10 USDG", "the lesser of 0.10 USDG or 10 % of premium (1.24)",

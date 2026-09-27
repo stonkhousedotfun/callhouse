@@ -2,8 +2,12 @@
  * The pricing service's `/fair` as the pricer reads it (pricing/server.ts):
  *
  *   GET {PRICING_URL}/fair?ticker=NVDA&strike=231000000&expiry=1790020800&type=call
- *     200 { fair: Money, iv, delta, source, spot: Money, asOf, provenance? }
- *       → { ok: true, fair, source, asOf, spot?, provenance? }  provenance is optional and never required
+ *     200 { fair: Money, iv, delta, source, spot: Money, asOf, quality?, event?, provenance? }
+ *       → { ok: true, fair, source, asOf, spot?, quality?, provenance? }  none of the optional blocks is required
+ *     `quality` { readiness, reasons: string[], uncertainty } and `event` { input, inWindow } are TOP-LEVEL
+ *     (pricing/server.ts fairResponse): the service never sends a `provenance` key. They are read the way
+ *     mm/pricing-client.ts reads them: top-level first, `provenance.quality` / `provenance.event` only as a
+ *     fallback, and a block that IS present with the wrong shape refuses the answer instead of being dropped.
  *     200 { fair: null, reason, detail }                          → { ok: false, reason }
  *     400 / 404 / 500 { fair: null, reason }                      → { ok: false, reason }
  *
@@ -11,6 +15,8 @@
  * so an unreachable service, a timeout, a body of the wrong shape and a null fair all come back as
  * `{ ok: false, reason }`. The FairSource port lets the devnet harness and the tests inject prices.
  */
+
+import type { FairInput } from '../mm/engine.js';
 
 export interface FairRequest {
   ticker: string;
@@ -21,7 +27,13 @@ export interface FairRequest {
   type: 'call' | 'put';
 }
 
-/** Additive §5.1 provenance on /fair, when a producer emits it. Every field is optional so a
+/**
+ * The quality flags the market maker halts on (mm/engine.ts eventUncertaintyOf), in its own shape: the service's
+ * `quality.reasons` plus `event.inWindow` / `event.input`. qualifyFair applies the MM's rule to it.
+ */
+export type FairQuality = NonNullable<Extract<FairInput, { ok: true }>['quality']>;
+
+/** Additive provenance on /fair, when a producer emits it. Every field is optional so a
  *  partial object cannot crash the pricer; qualifyFair treats missing clocks/reasons as unknown. */
 export interface FairWireProvenance {
   quality?: { readiness?: string; reasons?: string[] };
@@ -45,6 +57,8 @@ export type FairAnswer =
       asOf: number | null;
       /** Token spot the estimate was priced at, when the body carries it. */
       spot?: bigint;
+      /** The service's quality reasons and event flags (top-level, else provenance's); absent = an older service. */
+      quality?: FairQuality;
       /** Ignored when absent; never required. */
       provenance?: FairWireProvenance;
     }
@@ -97,6 +111,31 @@ function parseProvenance(value: unknown): FairWireProvenance | undefined {
   return out;
 }
 
+const EVENT_INPUTS = new Set(['supplied', 'missing', 'short']);
+
+/**
+ * `quality` / `event` as mm/pricing-client.ts parseFairResponse reads them: the top-level block, else the one under
+ * `provenance`. Absent both = undefined (an older service; no flag). A block that is present in the wrong shape is an
+ * error string: the MM treats that body as bad and halts, so the pricer refuses it rather than re-price without it.
+ */
+function parseQuality(top: Record<string, unknown>, provenance: unknown): FairQuality | undefined | string {
+  const prov = typeof provenance === 'object' && provenance !== null ? (provenance as Record<string, unknown>) : {};
+  const q = top.quality !== undefined ? top.quality : prov.quality;
+  const e = top.event !== undefined ? top.event : prov.event;
+  if (q === undefined && e === undefined) return undefined;
+  let reasons: string[] = [];
+  if (q !== undefined) {
+    const raw = typeof q === 'object' && q !== null ? (q as { reasons?: unknown }).reasons : undefined;
+    if (!Array.isArray(raw) || !raw.every((r) => typeof r === 'string')) return 'quality is not { reasons: string[] }';
+    reasons = raw as string[];
+  }
+  if (e === undefined) return { reasons };
+  const ev = typeof e === 'object' && e !== null ? (e as { inWindow?: unknown; input?: unknown }) : undefined;
+  if (ev === undefined || typeof ev.inWindow !== 'boolean') return 'event is not { inWindow: boolean }';
+  if (ev.input !== undefined && (typeof ev.input !== 'string' || !EVENT_INPUTS.has(ev.input))) return 'event.input is not supplied | missing | short';
+  return { reasons, eventInWindow: ev.inWindow, ...(ev.input === undefined ? {} : { eventInput: ev.input as FairQuality['eventInput'] }) };
+}
+
 /** The /fair body (and status) as a FairAnswer. Pure; exported for tests. Extra keys are ignored. */
 export function parseFairBody(status: number, body: unknown): FairAnswer {
   if (typeof body !== 'object' || body === null) return { ok: false, reason: `HTTP ${status}: not a JSON object` };
@@ -107,6 +146,9 @@ export function parseFairBody(status: number, body: unknown): FairAnswer {
     const parsed: Extract<FairAnswer, { ok: true }> = { ok: true, fair: BigInt(raw), source: typeof source === 'string' ? source : 'unknown', asOf: typeof asOf === 'number' ? asOf : null };
     const spotRaw = moneyRaw(spot);
     if (spotRaw !== undefined) parsed.spot = spotRaw;
+    const quality = parseQuality(body as Record<string, unknown>, provenance);
+    if (typeof quality === 'string') return { ok: false, reason: quality };
+    if (quality !== undefined) parsed.quality = quality;
     const prov = parseProvenance(provenance);
     if (prov !== undefined) parsed.provenance = prov;
     return parsed;

@@ -12,7 +12,10 @@ import { test } from 'node:test';
 
 import {
   EXERCISE_WINDOW_SECONDS,
+  HOLIDAY_HORIZON_WARN_DAYS,
   NYSE_HOLIDAYS_2026_2027,
+  NYSE_HOLIDAYS_2026_2028,
+  holidayHorizon,
   describeInstant,
   newYorkParts,
   newYorkTimeToUnix,
@@ -112,4 +115,31 @@ test('parseHolidays: unset is the table, a list must be YYYY-MM-DD', () => {
 test('describeInstant names both clocks', () => {
   assert.equal(describeInstant(1789761600), '2026-09-18T20:00:00Z (2026-09-18 16:00 ET, UTC-4)');
   assert.equal(describeInstant(utc(2026, 12, 24, 21)), '2026-12-24T21:00:00Z (2026-12-24 16:00 ET, UTC-5)');
+});
+
+test('holidayHorizon: warns from exactly one quarter before the last listed year ends, and never invents a date', () => {
+  const end = Date.UTC(2029, 0, 1) / 1000; // the built-in table's last listed date is 2028-12-25
+  const quarter = HOLIDAY_HORIZON_WARN_DAYS * 86_400;
+  assert.equal(HOLIDAY_HORIZON_WARN_DAYS, 92);
+
+  const today = holidayHorizon(Date.UTC(2026, 8, 23) / 1000);
+  assert.equal(today.lastListed, '2028-12-25');
+  assert.equal(today.coveredThrough, '2028-12-31');
+  assert.equal(today.warning, null, '2026: more than a quarter left');
+
+  assert.equal(holidayHorizon(end - quarter - 1).warning, null, 'one second more than a quarter left: quiet');
+  const atQuarter = holidayHorizon(end - quarter);
+  assert.equal(atQuarter.daysLeft, 92);
+  assert.match(atQuarter.warning ?? '', /ends 2028-12-31 \(92 days left\)/, 'exactly a quarter left: warns');
+  assert.match(holidayHorizon(end - 86_400).warning ?? '', /\(1 days left\)/);
+  const past = holidayHorizon(end + 86_400);
+  assert.ok(past.warning !== null && past.daysLeft !== null && past.daysLeft <= 0, 'past the table: still warns');
+
+  // The default is the MM's own table (spot-lag.ts); an explicit table is measured against its own last year.
+  assert.deepEqual(holidayHorizon(end - quarter), holidayHorizon(end - quarter, NYSE_HOLIDAYS_2026_2028));
+  assert.equal(holidayHorizon(Date.UTC(2027, 9, 1) / 1000, NYSE_HOLIDAYS_2026_2027).coveredThrough, '2027-12-31');
+  assert.match(holidayHorizon(Date.UTC(2027, 9, 1) / 1000, NYSE_HOLIDAYS_2026_2027).warning ?? '', /ends 2027-12-31/);
+  assert.match(holidayHorizon(0, []).warning ?? '', /empty/);
+  // It reads the table and nothing else: the table itself is unchanged, no 2029 date was made up.
+  assert.equal(NYSE_HOLIDAYS_2026_2028.at(-1), '2028-12-25');
 });

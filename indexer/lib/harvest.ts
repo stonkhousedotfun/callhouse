@@ -1,7 +1,7 @@
 /**
  * One `Harvest` event, split into premium and strike proceeds. Pure: no Ponder, no database.
  *
- * WHY THIS EXISTS (W-21). `Vault._harvest` inside `rollClose` sweeps everything that arrived
+ * WHY THIS EXISTS. `Vault._harvest` inside `rollClose` sweeps everything that arrived
  * since the last sweep, and on an assigned week that includes the USDG the claim returned for
  * the contracts taken at the strike. So on the terminal harvest of an assigned week:
  *

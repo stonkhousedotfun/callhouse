@@ -13,6 +13,7 @@
  */
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
+import { MAX_REPRICE_DROP_BPS, PRICER_MAX_STEP_DROP_BPS, REPRICE_PAGE_DROP_BPS } from '../cranker/constants.js';
 import {
   CUTOFF_MARGIN_S,
   askLive,
@@ -22,6 +23,8 @@ import {
   planCheck,
   planReprice,
   priceBand,
+  repriceFloor,
+  stepFloor,
   targetPrice,
   type CheckView,
 } from './planner.js';
@@ -40,7 +43,7 @@ test('priceBand: the ends are rounded inward to the tick and both pass the contr
   assert.ok(inBand(band!.min, SPOT, 30, 150) && inBand(band!.max, SPOT, 30, 150));
   assert.ok(!inBand(band!.min - 100n, SPOT, 30, 150), 'one tick under the floor is BadPrice');
   assert.ok(!inBand(band!.max + 100n, SPOT, 30, 150), 'one tick over the ceiling is BadPrice');
-  // An exact multiple is inclusive at both ends (the C2-09 test: 1_100_000 and 11_000_000 at spot 220 with 50-500 bps).
+  // An exact multiple is inclusive at both ends (the contract's test: 1_100_000 and 11_000_000 at spot 220 with 50-500 bps).
   assert.deepEqual(priceBand(220_000_000n, 50, 500), { min: 1_100_000n, max: 11_000_000n });
   assert.ok(inBand(1_100_000n, 220_000_000n, 50, 500) && inBand(11_000_000n, 220_000_000n, 50, 500));
   assert.ok(!inBand(1_099_900n, 220_000_000n, 50, 500) && !inBand(11_000_100n, 220_000_000n, 50, 500));
@@ -233,4 +236,133 @@ test('planReprice: repriced to the clamped target only when it moves more than t
   const pinned = planReprice({ ...base, fair: 50_000_000n, livePrice: 3_183_100n });
   assert.ok(!pinned.reprice && pinned.reason === 'within-threshold');
   assert.deepEqual(planReprice({ ...base, spot: 1_000_100n, strategy: { minAskBps: 5, maxAskBps: 5 }, fair: 1n, livePrice: 100n }), { reprice: false, reason: 'band-empty' });
+});
+
+/*//////////////////////////////////////////////////////////////
+          THE PER-CALL DROP FLOOR
+//////////////////////////////////////////////////////////////*/
+
+/**
+ * AutoRoller.reprice's drop rule, written from the contract (callhouse-contracts AutoRoller.sol reprice):
+ * `if (newPrice * BPS < o.price * (BPS - MAX_REPRICE_DROP_BPS)) revert RepriceDropExceeded(...)`, MAX_REPRICE_DROP_BPS
+ * 2_500 (AutoRoller.sol:162), and the book's tick (`price % 100 == 0`). A literal copy, deliberately not the planner's.
+ */
+const contractAcceptsDrop = (newPrice: bigint, live: bigint): boolean => newPrice % 100n === 0n && newPrice * 10_000n >= live * 7_500n;
+
+test('repriceFloor: the lowest tick the contract accepts in one call, exactly; one tick less is refused', () => {
+  for (const live of [100n, 1_273_300n, 1_000_000n, 3_183_100n, 7_777_700n, 123_456_700n, 999_999_900n]) {
+    const floor = repriceFloor(live);
+    assert.ok(contractAcceptsDrop(floor, live), `floor ${floor} of ${live} is accepted`);
+    assert.ok(!contractAcceptsDrop(floor - 100n, live), `one tick under the floor of ${live} is refused`);
+  }
+  // The revert's own named floor: roundUpToTick(ceilDiv(1_273_300 x 7_500, 10_000), 100) = 955_000.
+  assert.equal(repriceFloor(1_273_300n), 955_000n);
+  assert.equal(repriceFloor(0n), 0n);
+});
+
+/**
+ * ops/v2/monitor.mjs repriceFindings' own measure of a reprice's drop, bps of the ask it replaced (integer, floored):
+ * at REPRICE_PAGE_DROP_BPS or more it pages v2_mon_reprice_floorward at ERROR, the leaked-key signature.
+ */
+const monitorDropBps = (before: bigint, price: bigint): bigint => ((before - price) * 10_000n) / before;
+
+test('the pricer step sits strictly under the monitor page, which sits under the contract cap', () => {
+  assert.ok(PRICER_MAX_STEP_DROP_BPS < REPRICE_PAGE_DROP_BPS, 'an honest step never pages as a leaked key');
+  assert.ok(REPRICE_PAGE_DROP_BPS < MAX_REPRICE_DROP_BPS, 'the page fires before a key reaches the contract cap');
+  for (const live of [100n, 1_273_300n, 1_000_000n, 3_183_100n, 7_777_700n, 123_456_700n, 999_999_900n]) {
+    const floor = stepFloor(live);
+    assert.ok(contractAcceptsDrop(floor, live), `the step from ${live} is one reprice accepts`);
+    assert.ok(monitorDropBps(live, floor) < REPRICE_PAGE_DROP_BPS, `the step from ${live} (${monitorDropBps(live, floor)} bps) does not page`);
+  }
+});
+
+test('planReprice: a fair 50 % below the ask steps down, each step accepted by reprice and under the monitor page, until within threshold', () => {
+  const strategy = { minAskBps: 30, maxAskBps: 150 };
+  // Live 3.183100 (the ceiling); fair 1.500000 +5 % = 1.575000, 50.5 % below the ask.
+  let live = 3_183_100n;
+  const steps: bigint[] = [];
+  for (let i = 0; i < 10; i += 1) {
+    const plan = planReprice({ spot: SPOT, strategy, edgeBps: 500, thresholdBps: 1_000, fair: 1_500_000n, livePrice: live });
+    if (!plan.reprice) {
+      assert.equal(plan.reason, 'within-threshold');
+      break;
+    }
+    assert.ok(contractAcceptsDrop(plan.price, live), `step ${i + 1}: ${live} -> ${plan.price} is accepted by reprice`);
+    assert.ok(monitorDropBps(live, plan.price) < REPRICE_PAGE_DROP_BPS, `step ${i + 1}: ${live} -> ${plan.price} does not page v2_mon_reprice_floorward`);
+    assert.ok(inBand(plan.price, SPOT, strategy.minAskBps, strategy.maxAskBps), `step ${i + 1} is inside the band`);
+    steps.push(plan.price);
+    live = plan.price;
+  }
+  assert.deepEqual(steps, [2_578_400n, 2_088_600n, 1_691_800n], 'three 19 % steps; 1.691800 is then within 10 % of the target');
+  // The first plan is a step: its price is the step floor, and the target is kept for the report.
+  const first = planReprice({ spot: SPOT, strategy, edgeBps: 500, thresholdBps: 1_000, fair: 1_500_000n, livePrice: 3_183_100n });
+  assert.ok(first.reprice && first.stepFloor === 2_578_400n && first.target.price === 1_575_000n);
+  // A target inside one step is sent as it is.
+  const near = planReprice({ spot: SPOT, strategy, edgeBps: 500, thresholdBps: 1_000, fair: 2_000_000n, livePrice: 2_500_000n });
+  assert.ok(near.reprice && near.price === 2_100_000n && near.stepFloor === null);
+});
+
+test('planReprice: a step floor above the band\'s ceiling means no price is within one step, and nothing is sent', () => {
+  // The ask sits at 5.000000 while the band tops out at 3.183100: every price one pricer step down (>= 4.050000) is
+  // above the band, and every price inside the band is more than one step down.
+  const strategy = { minAskBps: 30, maxAskBps: 150 };
+  const plan = planReprice({ spot: SPOT, strategy, edgeBps: 500, thresholdBps: 1_000, fair: 1_500_000n, livePrice: 5_000_000n });
+  assert.ok(!plan.reprice && plan.reason === 'drop-floor-above-band');
+  assert.equal(plan.floor, 4_050_000n);
+  assert.equal(plan.target.band.max, 3_183_100n);
+});
+
+
+/*//////////////////////////////////////////////////////////////
+   THE STEP FLOOR ABOVE THE BAND'S CEILING
+   (the ceiling wins)
+//////////////////////////////////////////////////////////////*/
+
+test('planReprice: the step floor above the band but the ceiling within the contract floor sends the ceiling', () => {
+  // The numbers: live 1.000000, spot 53.666667, band 50-150 bps, fair 0.763810 (+5 % = 0.802100, a 19.79 %
+  // drop). The band's ceiling is 150 bps x 53.666667 = 0.805000 on the tick; the pricer's 19 % step floor is 0.810000,
+  // above it; the contract's 25 % floor is 0.750000, below it. The old planner returned drop-floor-above-band and sent nothing.
+  const plan = planReprice({ spot: 53_666_667n, strategy: { minAskBps: 50, maxAskBps: 150 }, edgeBps: 500, thresholdBps: 1_000, fair: 763_810n, livePrice: 1_000_000n });
+  assert.ok(plan.reprice, 'a reprice is planned');
+  assert.equal(plan.target.price, 802_100n, 'the target the base sent');
+  assert.equal(plan.target.band.max, 805_000n);
+  assert.equal(plan.price, 805_000n, 'the band ceiling is sent');
+  assert.equal(plan.stepFloor, null, 'the price is not the step floor');
+  assert.deepEqual(plan.ceilingStep, { stepFloor: 810_000n, dropBps: 1_950n });
+  assert.ok(contractAcceptsDrop(plan.price, 1_000_000n), 'reprice accepts it');
+  assert.ok(monitorDropBps(1_000_000n, plan.price) < REPRICE_PAGE_DROP_BPS, 'a 19.5 % step: the monitor does not page it');
+});
+
+test('planReprice: a ceiling step of 20 % or more is still sent, and its drop is the monitor\'s page measure', () => {
+  // Band ceiling 3.183100 at SPOT (150 bps). Live 4.000000: step floor 3.240000 is above it, contract floor 3.000000 is
+  // below it, so the ceiling goes out, a 20.42 % drop that pages v2_mon_reprice_floorward.
+  const strategy = { minAskBps: 30, maxAskBps: 150 };
+  const plan = planReprice({ spot: SPOT, strategy, edgeBps: 500, thresholdBps: 1_000, fair: 1_500_000n, livePrice: 4_000_000n });
+  assert.ok(plan.reprice && plan.ceilingStep !== undefined);
+  assert.equal(plan.price, 3_183_100n);
+  assert.equal(plan.ceilingStep.stepFloor, 3_240_000n);
+  assert.equal(plan.ceilingStep.dropBps, 2_042n);
+  assert.equal(plan.ceilingStep.dropBps, monitorDropBps(4_000_000n, plan.price), 'the same floored bps the monitor computes');
+  assert.ok(plan.ceilingStep.dropBps >= REPRICE_PAGE_DROP_BPS, 'at or over the page line');
+  assert.ok(contractAcceptsDrop(plan.price, 4_000_000n));
+  assert.ok(inBand(plan.price, SPOT, strategy.minAskBps, strategy.maxAskBps));
+});
+
+test('planReprice: nothing is sent only when the band\'s ceiling is below the contract floor, to the tick', () => {
+  const strategy = { minAskBps: 30, maxAskBps: 150 };
+  const at = (livePrice: bigint) => planReprice({ spot: SPOT, strategy, edgeBps: 500, thresholdBps: 1_000, fair: 1_500_000n, livePrice });
+  // Live 4.244100: the contract floor is ceil(3.183075) on the tick = 3.183100, exactly the ceiling: accepted, sent.
+  const edge = at(4_244_100n);
+  assert.ok(contractAcceptsDrop(3_183_100n, 4_244_100n), 'the literal contract rule accepts the ceiling at 4.244100');
+  assert.ok(edge.reprice && edge.price === 3_183_100n && edge.ceilingStep?.dropBps === 2_499n);
+  // One tick more on the ask: the contract floor is 3.183200, one tick over the ceiling: refused, nothing sent.
+  const stuck = at(4_244_200n);
+  assert.ok(!contractAcceptsDrop(3_183_100n, 4_244_200n), 'the literal contract rule refuses the ceiling at 4.244200');
+  assert.ok(!stuck.reprice && stuck.reason === 'drop-floor-above-band');
+  assert.equal(stuck.contractFloor, 3_183_200n);
+  assert.equal(stuck.contractFloor, repriceFloor(4_244_200n));
+  assert.equal(stuck.floor, stepFloor(4_244_200n), 'floor is still the pricer\'s step floor');
+  // The earlier 5.000000 case is this one: contract floor 3.750000 over the 3.183100 ceiling.
+  const far = at(5_000_000n);
+  assert.ok(!far.reprice && far.reason === 'drop-floor-above-band' && far.contractFloor === 3_750_000n);
 });

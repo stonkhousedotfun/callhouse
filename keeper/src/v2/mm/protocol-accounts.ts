@@ -1,5 +1,5 @@
 /**
- * Protocol-owned maker predicates for the MM quote plan (K8-05).
+ * Protocol-owned maker predicates for the MM quote plan.
  *
  * THE HAZARD IS RESTING, NOT TAKING. Two protocol vaults quoting the same series
  * (vault A bidding 100 while vault B asks 99) lets any outside account take B then
@@ -7,7 +7,7 @@
  * protocol-owned maker's resting order on the same longId; skip that slot.
  *
  * There is no taker path here. `MmTx` and `quoter.ts callOf` have no `take`;
- * v8-plan/06-QUIRKS.md says the production bot never takes.
+ * by design, the production bot never takes.
  *
  * Address compare is lower-case, matching `mm/mm-store.ts` `lc()`. Never checksum
  * equality (a stubbed viem identity `checksumAddress` made that class of test green).

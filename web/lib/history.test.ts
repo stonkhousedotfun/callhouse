@@ -260,9 +260,9 @@ describe("foldVaultLogs", () => {
     // The log fallback has no per-sweep figure; the page divides net premium by the supply.
     expect(row.premiumNetPerShare).toBeUndefined();
     expect(premiumPerShare(row)).toBe(456000n);
-    expect(fmtUsdg(premiumPerShare(row), 6)).toBe("0.456000");
-    expect(fmtRealizedWeek(row.premiumNetUsdg, 1_400_000000n)).toBe("3.257%");
-    expect(fmtUsdg(row.strikeProceedsUsdg)).toBe("950.00");
+    expect(fmtUsdg(premiumPerShare(row), 6)).toBe("0.456"); // No zero tail
+    expect(fmtRealizedWeek(row.premiumNetUsdg, 1_400_000000n)).toBe("3.2%"); // 45.6 / 1400 = 3.257%, one decimal
+    expect(fmtUsdg(row.strikeProceedsUsdg)).toBe("950"); // whole: no ".00"
   });
 
   it("a RollClose in another transaction never turns a checkpoint's premium into strike proceeds", () => {

@@ -1,7 +1,7 @@
 /**
- * The delivery queue: `enqueue` in, a worker out. This is the API the rules engine (N2-02) uses.
+ * The delivery queue: `enqueue` in, a worker out. This is the API the rules engine uses.
  *
- * ─── FOR N2-02 ──────────────────────────────────────────────────────────────────────────────
+ * ─── USAGE ──────────────────────────────────────────────────────────────────────────────
  *
  *   const result = await notifier.delivery.enqueue(kind, address, payload, dedupeKey);
  *
@@ -28,7 +28,7 @@
  *     the lease to expire and the row is sent again: a duplicate is possible, a loss is not.
  *   - Retries: 3, after 30 s, 2 min and 10 min (or the channel's Retry-After, if longer), then
  *     `failed`. Only transient outcomes retry (channels/types.ts).
- *   - Rate limit, per subscription per rolling hour and PER CLASS (F4 D7): 60 receipts and 20
+ *   - Rate limit, per subscription per rolling hour and PER CLASS: 60 receipts and 20
  *     alerts, each counted only against its own class's sends. The excess is DROPPED, not delayed:
  *     a storm that produces more than that is noise, and holding it back would only deliver stale
  *     alerts later. The drop reason is `rate_limited:<class>`, so an overflow says which budget ran
@@ -60,7 +60,7 @@ export interface DeliveryOptions {
   pollMs: number;
   /** Wait before retry n (1-based index n-1). Its length is the number of retries. */
   retryBackoffMs: number[];
-  /** Messages per subscription per rolling hour, counted and spent per class (F4 D7). */
+  /** Messages per subscription per rolling hour, counted and spent per class. */
   ratePerHour: Record<DeliveryClass, number>;
   maxAgeMs: number;
   purgeEveryMs: number;
@@ -77,7 +77,7 @@ export const DEFAULT_DELIVERY_OPTIONS: DeliveryOptions = {
 };
 
 /**
- * The two delivery classes and their separate hourly budgets (F4 D7).
+ * The two delivery classes and their separate hourly budgets.
  *
  *   receipts  what already happened to the wallet's money or positions: a fill, a settlement, a
  *             payout that went to the ledger, an auto-roll. Losing one loses a record.
@@ -352,7 +352,7 @@ export class DeliveryService {
     if (prefs === null || !prefsAllow(prefs, parsed.event)) return drop('pref_off');
 
     // The hourly budget of this message's class only: a storm of reminders must not consume the
-    // budget a receipt needs (F4 D7). The reason names the class the message was refused by.
+    // budget a receipt needs. The reason names the class the message was refused by.
     const messageClass = deliveryClass(row.kind);
     const { rows: sent } = await db.query<{ n: number }>(
       `SELECT count(*)::int AS n FROM notifier.delivery

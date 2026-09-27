@@ -125,6 +125,18 @@ function sameAddress(a: string | null, b: string | null): boolean {
   return a?.toLowerCase() === b?.toLowerCase();
 }
 
+/**
+ * Fees and writer rent are OWNER SETTINGS on chain (OrderBook `setFeeParams`, Clearinghouse
+ * `setDefaultMarketFees` / `setMarketFees`), not deploy identity. When the indexed live value differs from the pinned
+ * registry, the likely cause after launch is a legitimate fee change the registry has not caught up with, not a chain or
+ * indexer fault. It still fails this check (the registry is the pin this command verifies, and the app's launch
+ * fallbacks are generated from it), but the message says which kind of mismatch it is and what to do.
+ */
+function registryDrift(field: string): string {
+  return `${field} differs from registry: live on-chain setting differs from the pinned registry ` +
+    "(registry drift, not a chain fault); if the change was intended, re-sync the --registry file.";
+}
+
 export async function checkDeployedDev(options: Options): Promise<Report> {
   const report: Report = { scope: "read-only-deployment-manifest", status: "failed",
     registrySha256: null, checks: [], pendingChecks: [
@@ -165,7 +177,7 @@ export async function checkDeployedDev(options: Options): Promise<Report> {
       throw new Error("Registry has no intended live markets.");
     // THE RENT RULE IS INVERTED PER INTERFACE, NOT REMOVED AND NOT APPLIED FLAT.
     // v7 charged collateral rent and a registered market with zero effective rent was the fault.
-    // INTERFACE_VERSION 8 launches rent at 0 with `allowRent: false` (06-QUIRKS §C), so the fault is
+    // INTERFACE_VERSION 8 launches rent at 0 with `allowRent: false`, so the fault is
     // the opposite one: a registered market that quietly still charges rent. Deleting the check
     // would let a dev deployment that re-enabled v7 rent pass this gate in silence, which is the one
     // outcome worse than either rule.
@@ -219,9 +231,10 @@ export async function checkDeployedDev(options: Options): Promise<Report> {
         if (!sameAddress(config.usdg.address, registry.shared.usdg) || config.usdg.decimals !== 6 || config.usdg.symbol !== "USDG") details.push("USDG identity differs from registry.");
         for (const key of Object.keys(registry.v2.fees) as (keyof typeof registry.v2.fees)[]) {
           if (key === "takerFeeFlat") {
-            if (config.fees.takerFeeFlat.raw !== registry.v2.fees.takerFeeFlat || config.fees.takerFeeFlat.decimals !== 6)
-              details.push("fees.takerFeeFlat differs from registry.");
-          } else if (config.fees[key] !== registry.v2.fees[key]) details.push(`fees.${key} differs from registry.`);
+            // Decimals are USDG's identity, not a setting: a wrong value is an API fault, reported as such.
+            if (config.fees.takerFeeFlat.decimals !== 6) details.push("fees.takerFeeFlat is not in USDG's 6 decimals.");
+            else if (config.fees.takerFeeFlat.raw !== registry.v2.fees.takerFeeFlat) details.push(registryDrift("fees.takerFeeFlat"));
+          } else if (config.fees[key] !== registry.v2.fees[key]) details.push(registryDrift(`fees.${key}`));
         }
         for (const key of Object.keys(registry.v2.contracts) as (keyof typeof registry.v2.contracts)[]) {
           if (key === "sources") {
@@ -249,7 +262,7 @@ export async function checkDeployedDev(options: Options): Promise<Report> {
               row.puts !== expected.v2.puts || row.strikeTick.raw !== expected.v2.strikeTick || row.strikeTick.decimals !== 6)
             details.push(`Market ${expected.ticker} identity or policy differs from registry.`);
           const effectivePpm = expected.v2.mintFeePpm ?? expected.v2.overrides?.mintFeePpm ?? registry.v2.fees.mintFeePpm;
-          if (row.mintFeePpm !== effectivePpm) details.push(`Market ${expected.ticker} writer rent differs from registry.`);
+          if (row.mintFeePpm !== effectivePpm) details.push(registryDrift(`Market ${expected.ticker} writer rent`));
         }
         const actual = new Set(rows.map((row) => row.ticker));
         for (const market of registry.markets)

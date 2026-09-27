@@ -2,7 +2,7 @@
  * The pricing service behind the provider-neutral seam, with deterministic fake providers
  * (fake-provider.ts) instead of Cboe. No network, no credential, no provider contact.
  *
- * WHY THIS FILE EXISTS: K3-311's contract is only real if a second provider can stand where Cboe
+ * WHY THIS FILE EXISTS: the contract is only real if a second provider can stand where Cboe
  * stands. These tests pin that:
  *   parity        the same listed quotes priced through a fake provider give the same numbers as
  *                 through the Cboe adapter, and only the provider label differs: an exact listed
@@ -20,10 +20,11 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import type { Address } from 'viem';
 import { syntheticNvdaChain, syntheticTslaChain } from '../../fixtures/synthetic-chains.js';
-import { PRICING_MIN_REFETCH_MS, cboeToNormalized, type PricingReason } from './cboe.js';
+import { CBOE_PROVIDER, PRICING_MIN_REFETCH_MS, cboeToNormalized, type PricingReason } from './cboe.js';
 import type { ChainRow, NormalizedChain, OptionChainProvider } from './chain.js';
 import { FAKE_LISTED_PROVIDER, FAKE_THEORETICAL_PROVIDER, createFakeProvider, fakeListedChain, fakeTheoreticalChain, withTheoretical } from './fake-provider.js';
-import { PricingService, type FairOutcome, type FairQuote, type FairRequest } from './fair.js';
+import { PricingService, refuseLastGood, type FairOutcome, type FairQuote, type FairRequest } from './fair.js';
+import { MASSIVE_PROVIDER } from './massive.js';
 import type { PricingMarket } from './markets.js';
 import { fairResponse } from './server.js';
 import type { FeedRound } from './spot.js';
@@ -230,7 +231,9 @@ test('clocks: a frozen underlying beside fresh quotes is priced and reported; wi
   assert.equal(r.detail.why, 'the source gives no observation time', 'never priced on the download time');
 });
 
-test('clocks: a refetch advances only receivedAt, and a failed refetch serves the old chain with its old clocks', async () => {
+// A failed refetch from any provider but Cboe no longer serves
+// the last good chain; it refuses chain-unavailable naming the provider and the error (fair.ts refuseLastGood).
+test('clocks: a refetch advances only receivedAt; a failed refetch refuses chain-unavailable instead of serving the old chain', async () => {
   let fail = false;
   const base = listedTwin(NVDA, NVDA_AS_OF);
   const provider: OptionChainProvider = {
@@ -250,9 +253,32 @@ test('clocks: a refetch advances only receivedAt, and a failed refetch serves th
   assert.equal(again.ages.quoteS, first.ages.quoteS! + PRICING_MIN_REFETCH_MS / 1000, 'so the quotes are five minutes older, not fresh');
   fail = true;
   setNow(NVDA_NOW_MS + 2 * PRICING_MIN_REFETCH_MS);
-  const fallback = priced(await svc.fair(request('NVDA', 220, closeOf(18), 'call'))).provenance;
-  assert.equal(fallback.clocks.receivedAt, again.clocks.receivedAt, 'serving the last good chain after a failure refreshes nothing');
+  const down = refused(await svc.fair(request('NVDA', 220, closeOf(18), 'call')), 'chain-unavailable');
+  assert.deepEqual(down.detail, {
+    why: 'the latest download from a real-time provider failed; its last good chain is not served',
+    provider: FAKE_LISTED_PROVIDER.id,
+    error: 'http-status: HTTP 503',
+    consecutiveFailures: '1',
+  });
   assert.equal(svc.chainAttempts().get('NVDA')?.error, 'http-status: HTTP 503');
+  assert.ok(svc.chainAttempts().get('NVDA')?.chain !== null, 'the cache still holds the last good chain; it is not priced on');
+  assert.equal(svc.chainUsable('NVDA'), 'chain-unavailable', '/health says so too');
+  // The cache retries on its failure schedule; the next good download prices again.
+  fail = false;
+  setNow(NVDA_NOW_MS + 2 * PRICING_MIN_REFETCH_MS + PRICING_MIN_REFETCH_MS);
+  priced(await svc.fair(request('NVDA', 220, closeOf(18), 'call')));
+});
+
+test('refuseLastGood: a failed latest attempt refuses for Massive (and any non-Cboe provider); Cboe keeps serving its last good chain', () => {
+  const failed = { error: 'not-entitled: HTTP 403', failures: 2 };
+  assert.deepEqual(refuseLastGood(failed, MASSIVE_PROVIDER), {
+    ok: false,
+    reason: 'chain-unavailable',
+    detail: { why: 'the latest download from a real-time provider failed; its last good chain is not served', provider: 'massive-options', error: 'not-entitled: HTTP 403', consecutiveFailures: '2' },
+  });
+  assert.equal(refuseLastGood({ error: null, failures: 0 }, MASSIVE_PROVIDER), null, 'a successful latest attempt is served');
+  // Control: Cboe's 15-minute-behind file keeps its last-good rule (cboe.ts THE CACHE); it is off production anyway.
+  assert.equal(refuseLastGood(failed, CBOE_PROVIDER), null);
 });
 
 /*//////////////////////////////////////////////////////////////

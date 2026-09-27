@@ -1,19 +1,24 @@
-import type { InputHTMLAttributes, ReactNode } from "react";
+import type { InputHTMLAttributes, ReactNode, SelectHTMLAttributes } from "react";
 
 import { cn } from "@/lib/cn";
 
+import { ChevronDownIcon } from "./icons";
+import { InfoTip } from "./InfoTip";
+
 /**
- * An amount field: a label over a Geist Mono input with the unit pinned inside its right edge.
+ * An amount field: a label over a JetBrains Mono input with the unit pinned inside its right edge.
  *
  *   <Field id="deposit-amount" label="Amount" suffix="NVDA" value={raw} onChange={…} inputMode="decimal" />
  *
- * `id` is required: it ties the <label> to the input, and the W-13 run fills the input by it
+ * `id` is required: it ties the <label> to the input, and the run fills the input by it
  * (#deposit-amount, #redeem-shares, #fill-qty). `hint` renders under the input, linked by
  * aria-describedby.
  */
 export type FieldProps = Omit<InputHTMLAttributes<HTMLInputElement>, "id" | "className" | "type" | "size"> & {
   id: string;
   label?: ReactNode;
+  tip?: ReactNode;
+  aside?: ReactNode;
   suffix?: ReactNode;
   hint?: ReactNode;
   size?: "md" | "sm";
@@ -28,14 +33,24 @@ const INPUT_SIZE = {
   sm: "px-2.5 py-1.5 text-[14px]",
 } as const;
 
-export function Field({ id, label, suffix, hint, size = "md", className, ...input }: FieldProps) {
+export function FieldLabel({ htmlFor, tip, tipLabel, aside, children }: {
+  htmlFor: string; tip?: ReactNode; tipLabel?: string; aside?: ReactNode; children: ReactNode;
+}) {
+  return <div className="flex min-h-5 min-w-0 items-center justify-between gap-3">
+    <span className="flex min-w-0 items-center gap-1.5">
+      <label htmlFor={htmlFor} className="text-[12.5px] font-semibold text-ink-2">{children}</label>
+      {tip ? <InfoTip text={tip} label={tipLabel ?? (typeof children === "string" ? `About ${children.toLowerCase()}` : undefined)} /> : null}
+    </span>
+    {aside ? <span className="min-w-0 truncate text-[12.5px] text-ink-3">{aside}</span> : null}
+  </div>;
+}
+
+export function Field({ id, label, tip, aside, suffix, hint, size = "md", className, ...input }: FieldProps) {
   const hintId = hint ? `${id}-hint` : undefined;
   return (
-    <div className={cn("grid gap-1.5", className)}>
+    <div className={cn("grid min-w-0 gap-1.5", className)}>
       {label ? (
-        <label htmlFor={id} className="text-[12px] font-semibold text-ink-2">
-          {label}
-        </label>
+        <FieldLabel htmlFor={id} tip={tip} aside={aside}>{label}</FieldLabel>
       ) : (
         <label htmlFor={id} className="sr-only">
           Amount
@@ -68,4 +83,25 @@ export function Field({ id, label, suffix, hint, size = "md", className, ...inpu
       ) : null}
     </div>
   );
+}
+
+export type SelectFieldProps = Omit<SelectHTMLAttributes<HTMLSelectElement>, "id" | "className"> & {
+  id: string;
+  label: ReactNode;
+  tip?: ReactNode;
+  aside?: ReactNode;
+  className?: string;
+  children: ReactNode;
+};
+
+export function SelectField({ id, label, tip, aside, className, children, ...select }: SelectFieldProps) {
+  return <div className={cn("grid min-w-0 gap-1.5", className)}>
+    <FieldLabel htmlFor={id} tip={tip} aside={aside}>{label}</FieldLabel>
+    <div className="relative">
+      <select id={id} className={cn(inputClasses, "appearance-none py-3 pl-3.5 pr-10 font-body text-[15px] font-medium")} {...select}>
+        {children}
+      </select>
+      <ChevronDownIcon className="pointer-events-none absolute right-3.5 top-1/2 -translate-y-1/2 text-ink-3" />
+    </div>
+  </div>;
 }

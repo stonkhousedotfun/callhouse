@@ -1,3 +1,4 @@
+import { spawnSync } from "node:child_process";
 import { readdirSync, readFileSync, statSync } from "node:fs";
 import { join, relative, sep } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -7,6 +8,7 @@ import { ApiUnavailable, V2ApiClient, V2_API_TIMEOUT_MS } from "./api";
 import { ALL_MARKET_SERIES_POLICY, v2Keys } from "./hooks";
 
 const FIXTURES = fileURLToPath(new URL("../../../ops/fixtures/api/v2/", import.meta.url));
+const GEN = join(FIXTURES, "gen.mjs");
 
 function listJson(dir: string, out: string[] = []): string[] {
   for (const name of readdirSync(dir).sort()) {
@@ -56,6 +58,9 @@ function invoke(api: V2ApiClient, rel: string): Promise<unknown> {
   if (path === "makers") return api.getMakers();
   if (path === "earn") return api.getEarn();
   if (path === "house") return api.getHouse();
+  if (path === "vault") return api.getVault();
+  // The route refuses a request without ?program=; the fixture's own program is the one it answers for.
+  if (path === "rewards/epochs") return api.getRewardEpochs((JSON.parse(readFileSync(join(FIXTURES, rel), "utf8")) as { program: string }).program);
   const parts = path.split("/");
   if (parts[0] === "house" && parts.length === 2) return api.getHouseMarket(parts[1]);
   if (parts[0] === "markets" && parts[2] === "series") return api.getMarketSeries(parts[1]);
@@ -69,6 +74,7 @@ function invoke(api: V2ApiClient, rel: string): Promise<unknown> {
     if (parts[2] === "positions") return api.getPositions(parts[1]);
     if (parts[2] === "history") return api.getHistory(parts[1]);
   }
+  if (parts[0] === "rewards" && parts[2] === "claims") return api.getRewardClaims(parts[1]);
   if (parts[0] === "pnl") return api.getPnl(parts[1]);
   if (parts[0] === "makers") return api.getMaker(parts[1]);
   if (parts[0] === "fair") return api.getFair(parts[1]);
@@ -78,9 +84,17 @@ function invoke(api: V2ApiClient, rel: string): Promise<unknown> {
 describe("V2ApiClient", () => {
   it("validates every fixture through its typed route method", async () => {
     const files = listJson(FIXTURES);
-    // 232 since T-452 generated services.json (46813b5e). A route added without its fixture, or a fixture
-    // lost, moves this number; invoke() throws for a fixture with no client method.
-    expect(files.length).toBe(232);
+    // The expected count is the generator's, not a typed number: `gen.mjs --check` reports how many files it
+    // writes, and only after it has held the directory byte-equal to them (no missing, extra or differing file).
+    // So this walk sees every fixture the generator defines, one route file each, and nothing else; a route
+    // added to gen.mjs is validated here with no edit to this test, and invoke() throws for one with no client
+    // method. (A typed 232 went stale when the fixture set grew to 235 and was red for no defect.)
+    const gen = spawnSync(process.execPath, [GEN, "--check"], { encoding: "utf8" });
+    expect(gen.status, `${gen.stdout}${gen.stderr}`).toBe(0);
+    const generated = /fixtures OK — (\d+) files match gen\.mjs/.exec(gen.stdout);
+    expect(generated, gen.stdout).not.toBeNull();
+    expect(files.length).toBe(Number(generated![1]));
+    expect(files.length).toBeGreaterThan(0);
     for (const file of files) {
       const rel = relative(FIXTURES, file).split(sep).join("/");
       const body = JSON.parse(readFileSync(file, "utf8")) as unknown;
@@ -89,7 +103,7 @@ describe("V2ApiClient", () => {
       expect(calls, rel).toHaveLength(1);
       expect(new URL(calls[0].url).pathname, rel).toBe(`/v2/${rel.slice(0, -5)}`);
     }
-  });
+  }, 30_000);
 
   it("uses no-store for health and fee config, normal HTTP cache behavior for other routes", async () => {
     const health = JSON.parse(readFileSync(join(FIXTURES, "health.json"), "utf8")) as unknown;
@@ -406,6 +420,17 @@ describe("V2ApiClient", () => {
     expect(parsed.currentEpoch?.nav).toBeNull();
     expect(parsed.epochs.some((epoch) => epoch.resultUsdg?.raw.startsWith("-"))).toBe(true);
     expect(new URL(nvda.calls[0].url).pathname).toBe("/v2/house/NVDA");
+    expect(new URL(nvda.calls[0].url).search).toBe("");
+
+    // `vault` opens one exact vault of the market and travels as a query parameter, next to `address`.
+    const vault = "0x" + "c3".repeat(20);
+    const account = "0x" + "44".repeat(20);
+    const picked = clientReturning(market);
+    await picked.api.getHouseMarket("NVDA", { vault, address: account });
+    const url = new URL(picked.calls[0].url);
+    expect(url.pathname).toBe("/v2/house/NVDA");
+    expect(url.searchParams.get("vault")).toBe(vault);
+    expect(url.searchParams.get("address")).toBe(account);
 
     const drifted = clientReturning({ ...(list as object), extra: true });
     await expect(drifted.api.getHouse()).rejects.toMatchObject({ name: "ApiUnavailable", reason: "invalid" });
@@ -427,6 +452,10 @@ describe("v2 query keys", () => {
     expect(v2Keys.house).not.toEqual(v2Keys.earn());
     expect(v2Keys.houseMarket("NVDA")).not.toEqual(v2Keys.houseMarket("TSLA"));
     expect(v2Keys.houseMarket("NVDA", "0xABC")).toEqual(v2Keys.houseMarket("NVDA", "0xabc"));
+    // Two vaults of one market never share a cache entry; the vault's case does not split one.
+    expect(v2Keys.houseMarket("NVDA", "0xabc", "0xC3C3")).not.toEqual(v2Keys.houseMarket("NVDA", "0xabc", "0xD4D4"));
+    expect(v2Keys.houseMarket("NVDA", "0xabc", "0xC3C3")).toEqual(v2Keys.houseMarket("NVDA", "0xABC", "0xc3c3"));
+    expect(v2Keys.houseMarket("NVDA", "0xabc", "0xC3C3")).not.toEqual(v2Keys.houseMarket("NVDA", "0xabc"));
   });
 
   it("keeps full series traversal off the live polling and retry cadence", () => {
@@ -441,7 +470,7 @@ describe("v2 query keys", () => {
 });
 
 /**
- * `/v2/services` (T-424 producer, T-296 consumer).
+ * `/v2/services` (producer, consumer).
  *
  * There is no fixture for this route, so it is not covered by the fixture sweep above and needs
  * its own test. What is asserted here is what the CONSUMER depends on: the answer is parsed

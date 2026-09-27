@@ -44,7 +44,7 @@ describe("nextStatus (WriteRequested / LotsListed / Settled)", () => {
     expect(nextStatus({ kind: "Settled" })).toBe("settled");
   });
 
-  it("every status the helpers produce is a schema enum value, and every enum value is produced (X-2)", () => {
+  it("every status the helpers produce is a schema enum value, and every enum value is produced", () => {
     const produced = new Set<WriterAccountStatus>(["idle"]);
     produced.add(nextStatus({ kind: "WriteRequested", lots: 0n }));
     produced.add(nextStatus({ kind: "WriteRequested", lots: 3n }));

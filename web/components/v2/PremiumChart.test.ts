@@ -35,11 +35,30 @@ describe("premium history chart", () => {
     expect(html).toContain("Premium history");
     expect(html).toContain("Option premium per share over time");
     expect(html).toContain("USDG / share");
-    expect(html).toContain("Trade time · New York");
+    expect(html).toContain(">Trade time</text>"); // The zone is named on each time, not in the caption
     expect(html).toContain("3 trades from");
     expect(html).toContain("Latest trade: 2.50 USDG per share");
     expect(html).toContain('role="slider"');
     expect(html).toContain("Tap or drag across the chart");
+  });
+
+  it("floats the selected trade's price on the Y axis and its date + hour on the X axis, over round price levels", () => {
+    const html = renderToStaticMarkup(createElement(PremiumChart, {
+      trades: [
+        trade("1", 1_700_000_000, "1.25", "1250000"),
+        trade("2", 1_700_003_600, "2.50", "2500000"),
+      ],
+      loading: false,
+      error: false,
+    }));
+    // The latest trade is selected until the pointer or a key moves the selection.
+    expect(html).toMatch(/data-slot="crosshair-price">[\s\S]*?>2\.5<\/text>/);
+    // 1_700_003_600 = 2023-11-14 23:13:20 UTC = 6:13 PM in New York. The server render is New York, zone named.
+    expect(html).toMatch(/data-slot="crosshair-time">[\s\S]*?>Nov 14, 6:13 PM EST<\/text>/);
+    // More than the old three levels (top, middle, bottom).
+    const levels = html.match(/<text x="\d+(?:\.\d+)?" y="[\d.]+" text-anchor="end" fill="var\(--ink-3\)"/g) ?? [];
+    expect(levels.length).toBeGreaterThanOrEqual(4);
+    expect(html).toContain("hover with a mouse");
   });
 
   it("keeps loading, outage, empty, and one-fill states distinct", () => {

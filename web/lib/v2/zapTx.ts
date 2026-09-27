@@ -4,7 +4,7 @@ import { USDG_DECIMALS } from "../contracts";
 import { publicClient, robinhoodChain } from "../chain";
 import { requireV2Address } from "./config";
 import { stockZapAbi } from "../abi/v2/stockZap";
-import { explainV2Error } from "./errors";
+import { explainV2Error, v2ErrorName, type V2ErrorName } from "./errors";
 import { BPS } from "./payoff";
 import type { WriteContext } from "./tx";
 import { V2ReceiptUnknownError, waitForV2Receipt } from "./txStatus";
@@ -73,6 +73,25 @@ export function quoteExitZap(assetIn: bigint, spot: bigint | null, spotDecimals:
   return { minOut, slippageBps };
 }
 
+/**
+ * StockZap gives `BadPrice` its own meaning. writeZap reverts with it when the swap returns less than
+ * `minAssetOut` (StockZap.writeZap) and, since v9, when the Clearinghouse credits less than that
+ * (its check after the credit); exitZap gets it from PayoutRouter.swapToUsdg when the USDG out is below
+ * `minUsdgOut`. Both also refuse a zero minimum, which never reaches the
+ * chain from here because the quotes above return null instead. So from a zap, `BadPrice` is a
+ * slippage miss. The shared copy for that name is order-ticket text ("Enter a price on the market's
+ * price tick."), which tells a zap user nothing they can act on.
+ */
+export const ZAP_ERROR_TEXT = {
+  BadPrice: "The price moved past your slippage limit before the swap filled. Refresh the quote and try again.",
+} as const satisfies Partial<Record<V2ErrorName, string>>;
+
+export function explainZapError(error: unknown): string {
+  const name = v2ErrorName(error);
+  if (name !== null && name in ZAP_ERROR_TEXT) return ZAP_ERROR_TEXT[name as keyof typeof ZAP_ERROR_TEXT];
+  return explainV2Error(error);
+}
+
 async function write(context: WriteContext, address: Address, abi: Abi, functionName: string, args: readonly unknown[]): Promise<Hex> {
   const client = context.client ?? publicClient;
   if (await context.wallet.getChainId() !== robinhoodChain.id) throw new Error("Switch to Robinhood Chain to continue.");
@@ -84,12 +103,12 @@ async function write(context: WriteContext, address: Address, abi: Abi, function
     return hash;
   } catch (error) {
     if (error instanceof V2ReceiptUnknownError) throw error;
-    throw new Error(explainV2Error(error), { cause: error });
+    throw new Error(explainZapError(error), { cause: error });
   }
 }
 
 /**
- * F-APP-02. The deadline is derived from CHAIN time, never the client wall clock.
+ * The deadline is derived from CHAIN time, never the client wall clock.
  *
  * `Math.floor(Date.now() / 1000)` was the old source, and it is a guard that cannot see its subject:
  * the thing it bounds is chain time, and it was reading the browser's. A clock behind chain time

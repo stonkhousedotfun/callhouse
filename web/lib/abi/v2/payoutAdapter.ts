@@ -62,6 +62,25 @@ export const payoutAdapterAbi = [
   },
   {
     "type": "function",
+    "name": "everConfigured",
+    "inputs": [
+      {
+        "name": "asset",
+        "type": "address",
+        "internalType": "address"
+      }
+    ],
+    "outputs": [
+      {
+        "name": "",
+        "type": "bool",
+        "internalType": "bool"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
     "name": "isConsumingScheduledOp",
     "inputs": [],
     "outputs": [
@@ -72,6 +91,47 @@ export const payoutAdapterAbi = [
       }
     ],
     "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "listRouteV3",
+    "inputs": [
+      {
+        "name": "asset",
+        "type": "address",
+        "internalType": "address"
+      },
+      {
+        "name": "fee",
+        "type": "uint24",
+        "internalType": "uint24"
+      }
+    ],
+    "outputs": [],
+    "stateMutability": "nonpayable"
+  },
+  {
+    "type": "function",
+    "name": "listRouteV4",
+    "inputs": [
+      {
+        "name": "asset",
+        "type": "address",
+        "internalType": "address"
+      },
+      {
+        "name": "fee",
+        "type": "uint24",
+        "internalType": "uint24"
+      },
+      {
+        "name": "tickSpacing",
+        "type": "int24",
+        "internalType": "int24"
+      }
+    ],
+    "outputs": [],
+    "stateMutability": "nonpayable"
   },
   {
     "type": "function",
@@ -351,6 +411,31 @@ export const payoutAdapterAbi = [
   },
   {
     "type": "event",
+    "name": "RouteFeeRefreshed",
+    "inputs": [
+      {
+        "name": "asset",
+        "type": "address",
+        "internalType": "address",
+        "indexed": true
+      },
+      {
+        "name": "previousFeeBps",
+        "type": "uint16",
+        "internalType": "uint16",
+        "indexed": false
+      },
+      {
+        "name": "feeBps",
+        "type": "uint16",
+        "internalType": "uint16",
+        "indexed": false
+      }
+    ],
+    "anonymous": false
+  },
+  {
+    "type": "event",
     "name": "RouteSet",
     "inputs": [
       {
@@ -419,6 +504,17 @@ export const payoutAdapterAbi = [
     "inputs": [
       {
         "name": "caller",
+        "type": "address",
+        "internalType": "address"
+      }
+    ]
+  },
+  {
+    "type": "error",
+    "name": "AlreadyListed",
+    "inputs": [
+      {
+        "name": "asset",
         "type": "address",
         "internalType": "address"
       }

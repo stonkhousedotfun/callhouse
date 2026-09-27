@@ -23,9 +23,12 @@ import { expiryKeyString, scheduleWake, selectExpiries, yieldDeadlineMs, type Ex
 import { CrankerMetrics } from './metrics.js';
 import type { RaisedAlert } from './effects.js';
 import { stepFlywheel } from './flywheel.js';
+import { stepFirstMint } from './firstmint.js';
 import {
   STEP_ORDER,
+  houseBoundaryKeys,
   stepFinalize,
+  stepHouse,
   stepHousekeeping,
   stepIndex,
   stepLadders,
@@ -137,6 +140,34 @@ export class Cranker {
     return this.anchored;
   }
 
+  /**
+   * Adds every House vault's current epoch boundary to the tick's expiries (steps.ts
+   * houseBoundaryKeys), unless it is already there or marked done, and records them on the context so the survey marks
+   * them `houseBoundary`: the snapshot and finalize steps then handle a boundary that has no series. A failed read
+   * leaves the tick's expiries as they were and is reported, never thrown: the series expiries must still settle.
+   */
+  private async withHouseBoundaries(keys: ExpiryKey[], h: Head, report: TickReport): Promise<ExpiryKey[]> {
+    try {
+      const house = await houseBoundaryKeys(this.ctx, h);
+      if (house.length === 0) return keys;
+      const done = this.ctx.index.doneExpiries();
+      const ids = new Set(keys.map(expiryKeyString));
+      const merged = [...keys];
+      for (const k of house) {
+        const id = expiryKeyString(k);
+        if (ids.has(id) || done.has(id)) continue;
+        ids.add(id);
+        merged.push(k);
+      }
+      this.ctx.houseBoundaries = new Set(house.map(expiryKeyString));
+      report.expiries = merged.map(expiryKeyString);
+      return merged;
+    } catch (error) {
+      report.errors.push({ step: 'house', message: `House boundary read failed: ${describeError(error)}` });
+      return keys;
+    }
+  }
+
   async tick(): Promise<TickReport> {
     const started = this.now();
     const report: TickReport = { head: null, expiries: [], reports: [], errors: [], alerts: [], wake: null };
@@ -157,6 +188,9 @@ export class Cranker {
     } catch (error) {
       report.errors.push({ step: 'index', message: `head read failed: ${describeError(error)}` });
     }
+    ctx.houseBoundaries = undefined;
+    // Only on a head read THIS tick: after a failed read the index step's expiries are empty too.
+    if (report.head !== null) keys = await this.withHouseBoundaries(keys, report.head, report);
 
     for (const step of STEP_ORDER) {
       switch (step) {
@@ -184,11 +218,27 @@ export class Cranker {
         case 'redeem':
           await this.run(step, () => stepRedeem(ctx, keys), report);
           break;
+        // After redeem: a House vault only rolls once its series are settled and redeemed (steps.ts, houseRoll).
+        case 'house':
+          await this.run(step, () => stepHouse(ctx), report);
+          break;
         case 'ladders':
           await this.run(step, () => stepLadders(ctx), report);
           break;
         case 'rolls':
           await this.run(step, () => stepRolls(ctx), report);
+          break;
+        // After rolls, which place the fresh expiry's asks: the keeper's one-unit take pins the expiry before any
+        // heavy-hook receiver's fill would have to (firstmint.ts).
+        case 'firstmint':
+          await this.run(
+            step,
+            async () => {
+              this.usdg ??= await ctx.client.readContract({ address: ctx.addresses.clearinghouse, abi: clearinghouseAbi, functionName: 'usdg' });
+              return stepFirstMint(ctx, this.usdg);
+            },
+            report,
+          );
           break;
         case 'housekeeping':
           await this.run(
@@ -215,6 +265,7 @@ export class Cranker {
     }
 
     ctx.yieldWhen = undefined;
+    ctx.houseBoundaries = undefined;
     report.alerts = ctx.alerts.drain();
     this.metrics.recordTick(started, this.now() - started, report.alerts);
     if (this.options.schedule && this.lastHead !== null) report.wake = this.arm(report);
@@ -261,6 +312,7 @@ export class Cranker {
       indexer: this.ctx.config.indexerUrl === null ? null : new URL(this.ctx.config.indexerUrl).origin,
       index: { scannedTo: this.ctx.index.scannedTo(), ...this.ctx.index.counts() },
       steps: m.steps,
+      firstMint: m.firstMint,
       recentAlerts: m.recentAlerts,
       recentTxs: this.ctx.store.recentTxs(20),
     };

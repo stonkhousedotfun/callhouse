@@ -30,7 +30,7 @@ import {
   EnqueueError,
   type DeliveryOptions,
 } from './delivery.js';
-import type { EventKind } from './events.js';
+import { EVENT_KINDS, type EventKind } from './events.js';
 import { DEFAULT_PREFS, prefsSchema, type Prefs } from './prefs.js';
 import { disableSubscription, linkTelegramChat, purge, upsertWebPush } from './store.js';
 import type { Rendered } from './templates.js';
@@ -113,7 +113,7 @@ async function deliveries() {
 const fill = (bucket: string | number, address = ADDRESS) =>
   ['fill_receipt', address, SAMPLE_PAYLOADS.fill_receipt, dedupeKey('fill_receipt', address, SERIES_221.longId, bucket)] as const;
 
-/** A message of the other delivery class (F4 D7): a reminder, not a receipt. */
+/** A message of the other delivery class: a reminder, not a receipt. */
 const alert = (bucket: string | number, address = ADDRESS) =>
   ['expiry_1h', address, SAMPLE_PAYLOADS.expiry_1h, dedupeKey('expiry_1h', address, SERIES_221.longId, bucket)] as const;
 
@@ -323,7 +323,15 @@ test('the caps are per class: receipts have their own hourly budget, and its ove
     ['auto_roll', 'fill_receipt', 'payout_failed_to_ledger', 'settlement_receipt'],
     'what already happened to the wallet is a receipt',
   );
-  assert.deepEqual([...CLASS_KINDS.alerts].sort(), ['expiry_1h', 'expiry_24h', 'price_alert', 'strike_cross', 'writer_itm_warning']);
+  // Everything that is not a receipt is an alert (deliveryClass). A change added fee_notice, admin_operation and
+  // market_live to EVENT_KINDS: notices about the protocol, not something that already happened to the wallet, so
+  // they share the alert budget. This list predated them.
+  assert.deepEqual([...CLASS_KINDS.alerts].sort(), [
+    'admin_operation', 'expiry_1h', 'expiry_24h', 'fee_notice', 'market_live', 'price_alert', 'strike_cross', 'writer_itm_warning',
+  ]);
+  // The two classes partition EVENT_KINDS, so the next kind added lands in exactly one budget.
+  assert.deepEqual([...CLASS_KINDS.receipts, ...CLASS_KINDS.alerts].sort(), [...EVENT_KINDS].sort());
+  assert.equal(CLASS_KINDS.receipts.filter((kind) => CLASS_KINDS.alerts.includes(kind)).length, 0);
   assert.equal(deliveryClass('settlement_receipt'), 'receipts');
   assert.equal(deliveryClass('expiry_1h'), 'alerts');
 

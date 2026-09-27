@@ -224,6 +224,8 @@ export async function surveyExpiries(
     keys: readonly ExpiryKey[];
     seriesOf: (key: ExpiryKey) => IndexedSeries[];
     snapshotDone: (key: ExpiryKey) => boolean;
+    /** Whether a House vault's epoch boundary is this expiry (ExpiryView.houseBoundary). Absent = none is. */
+    houseBoundary?: (key: ExpiryKey) => boolean;
     now: number;
     blockNumber: bigint;
     withOrders: boolean;
@@ -252,7 +254,7 @@ export async function surveyExpiries(
     const o = i * 6;
     const price = must<readonly [number, bigint]>(base[o + 1], `settlementPrice(${k.underlying}, ${k.expiry})`);
     // `must`, like settlementPrice beside it: candidate() is on ISettlementOracle, so a failed read is a fault, never
-    // "no candidate" (T-476). A default here read as finalizableAt 0, exactly the no-candidate value, so a Pending
+    // "no candidate". A default here read as finalizableAt 0, exactly the no-candidate value, so a Pending
     // expiry was finalized every tick and its sources-disagree and pending-stuck alerts were skipped inside the veto
     // window. The tick fails and the next one reads again.
     const cand = must<readonly [bigint, number, boolean, number]>(base[o + 2], `candidate(${k.underlying}, ${k.expiry})`);
@@ -334,6 +336,7 @@ export async function surveyExpiries(
       pinned: p.pinned,
       series: seriesViews,
       snapshotDone: input.snapshotDone(p.key),
+      houseBoundary: input.houseBoundary?.(p.key) ?? false,
     };
     return { key: p.key, view, series, orders: seriesOrders };
   });
@@ -343,19 +346,34 @@ export async function surveyExpiries(
                              HOLDERS
 //////////////////////////////////////////////////////////////*/
 
-/** Balance, third-party permission and in-kind preference of each candidate for `tokenId`. */
-export async function readHolders(client: MulticallClient, clearinghouse: Address, tokenId: bigint, holders: readonly Address[], blockNumber: bigint): Promise<HolderView[]> {
+/**
+ * Balance, redeem permission and in-kind preference of each candidate for `tokenId`.
+ *
+ * `thirdPartyAllowed` is `Clearinghouse._mayRedeem(holder, caller)` when `caller` is given: the caller IS the
+ * holder, or the holder allows third parties, or the holder made the caller its operator. It used to be the middle
+ * clause alone (`thirdPartyRedeemAllowed`), so a holder who opted out but approved the cranker as operator, or the
+ * cranker's own account (its first-mint longs) after an opt-out, was skipped as opted out while redeemBatch would have
+ * redeemed it. Without `caller` it is the middle clause alone, as before.
+ */
+export async function readHolders(client: MulticallClient, clearinghouse: Address, tokenId: bigint, holders: readonly Address[], blockNumber: bigint, caller?: Address): Promise<HolderView[]> {
+  const per = caller === undefined ? 3 : 4;
   const calls: AnyRead[] = [];
   for (const h of holders) {
     calls.push({ address: clearinghouse, abi: clearinghouseAbi, functionName: 'balanceOf', args: [h, tokenId] });
     calls.push({ address: clearinghouse, abi: clearinghouseAbi, functionName: 'thirdPartyRedeemAllowed', args: [h] });
     calls.push({ address: clearinghouse, abi: clearinghouseAbi, functionName: 'payoutPrefs', args: [h] });
+    if (caller !== undefined) calls.push({ address: clearinghouse, abi: clearinghouseAbi, functionName: 'isOperator', args: [h, caller] });
   }
   const out = await readMany(client, calls, blockNumber);
-  return holders.map((holder, i) => ({
-    holder,
-    balance: must<bigint>(out[i * 3], `balanceOf(${holder}, ${tokenId})`),
-    thirdPartyAllowed: must<boolean>(out[i * 3 + 1], `thirdPartyRedeemAllowed(${holder})`),
-    inKind: must<readonly [boolean, boolean]>(out[i * 3 + 2], `payoutPrefs(${holder})`)[0],
-  }));
+  return holders.map((holder, i) => {
+    const allowed = must<boolean>(out[i * per + 1], `thirdPartyRedeemAllowed(${holder})`);
+    const self = caller !== undefined && holder.toLowerCase() === caller.toLowerCase();
+    const operator = caller !== undefined && must<boolean>(out[i * per + 3], `isOperator(${holder}, ${caller})`);
+    return {
+      holder,
+      balance: must<bigint>(out[i * per], `balanceOf(${holder}, ${tokenId})`),
+      thirdPartyAllowed: self || allowed || operator,
+      inKind: must<readonly [boolean, boolean]>(out[i * per + 2], `payoutPrefs(${holder})`)[0],
+    };
+  });
 }

@@ -59,9 +59,9 @@ describe("pending admin operations notice", () => {
     const html = renderOperations([operation, later]);
 
     expect(html).toContain('role="status"');
-    expect(html).toContain("Admin operations scheduled");
+    expect(html).toContain("Admin changes scheduled"); // plain words, as "Fee change scheduled"
     expect(html).toContain("Update fee policy");
-    expect(html).toContain("Sep 18, 2026");
+    expect(html).toContain("Sep 18, 1:30 PM EDT"); // server render (and hydration) shows New York, zone named; the browser switches to the reader's zone.
     expect(html).toContain("1:30 PM EDT");
     expect(html).toContain(new Date(readyAt * 1000).toISOString());
     expect(html).toContain("Rotate guardian");
@@ -69,7 +69,7 @@ describe("pending admin operations notice", () => {
     expect(html).not.toContain("Sep 16, 2026");
   });
 
-  // T-434. AccessManager REUSES an operation id when the same call is rescheduled, so two live rows
+  // AccessManager REUSES an operation id when the same call is rescheduled, so two live rows
   // can carry the same `id` while the indexer keys each on `operationId:nonce`. Keying this list on
   // `id` gives React two children with one key.
   //
@@ -96,7 +96,7 @@ describe("pending admin operations notice", () => {
     expect(new Set(keys).size).toBe(2);
     expect(keys).toEqual([operation.key, rescheduled.key]);
 
-    // And the row's own criterion: both are actually rendered.
+    // And the point of it all: both are actually rendered.
     const html = renderOperations([operation, rescheduled]);
     expect(html).toContain("Update fee policy");
     expect(html).toContain("Rotate guardian");
@@ -105,7 +105,7 @@ describe("pending admin operations notice", () => {
   it("falls back to the target and selector when the label is blank", () => {
     const html = renderOperations([{ ...operation, label: "   " }]);
 
-    expect(html).toContain("Admin operation scheduled");
+    expect(html).toContain("Admin change scheduled");
     expect(html).toContain(`${operation.target} ${operation.selector}`);
   });
 
@@ -120,5 +120,23 @@ describe("pending admin operations notice", () => {
   it("stays hidden until config reports a pending operation", () => {
     expect(renderOperations(undefined)).toBe("");
     expect(renderOperations([])).toBe("");
+  });
+});
+
+/** At delay 0 nothing is scheduled; after the lock, a matured operation shows its ready date, never a clock. */
+describe("pending admin operations notice at delay 0 and after", () => {
+  it("an empty list renders nothing", () => {
+    expect(renderOperations([])).toBe("");
+  });
+
+  it("a readyAt already in the past renders the ready date, with no countdown digits and no negative or zero clock", () => {
+    const past = Math.floor(Date.now() / 1000) - 3_600;
+    const html = renderOperations([{ ...operation, readyAt: past }]);
+    expect(html).toContain("Update fee policy");
+    expect(html).toContain(new Date(past * 1000).toISOString());
+    expect(html).not.toContain('role="timer"');
+    // Visible text only: the <time dateTime> attribute is an ISO stamp with seconds, not a clock a reader sees.
+    const text = html.replace(/<[^>]*>/g, " ");
+    expect(text).not.toMatch(/\d\d:\d\d:\d\d|-\d+\s*(s|sec|m|h)\b|\b0s\b|\bnow\b/);
   });
 });

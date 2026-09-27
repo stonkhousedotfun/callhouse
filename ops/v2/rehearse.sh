@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # -------------------------------------------------------------------------------------------------
-# ops/v2/rehearse.sh — the O2-03 end-to-end rehearsal of Stonkhouse v2 on a fork of Robinhood Chain (4663).
+# ops/v2/rehearse.sh — the end-to-end rehearsal of Stonkhouse v2 on a fork of Robinhood Chain (4663).
 #
 #   ops/v2/rehearse.sh                     every step; stops every process it started on exit
 #   ops/v2/rehearse.sh --keep              leave anvil and the services running (stop: node ops/v2/rehearse/stop.mjs)
@@ -8,7 +8,7 @@
 #   ops/v2/rehearse.sh --only 3 --keep     one step against what an earlier --keep run left running
 #   ops/v2/rehearse.sh --publish           also copy the report to ops/v2/REHEARSAL-<date>.md (tracked)
 #   ops/v2/rehearse.sh --fork-live [--services cranker,indexer] [--registry <path>]
-#                                         O3-005 live-set fork: no fresh deploy. Forks 4663 at head, impersonates
+#                                         Live-set fork: no fresh deploy. Forks 4663 at head, impersonates
 #                                         admin/writer/holder, boots the named services against the ALREADY-LIVE
 #                                         addresses, writes a report under a temp dir, tears it down on exit.
 #                                         THE LIVE SET IS v7, so this path reads ops/markets/v7-legacy.json, NOT
@@ -22,8 +22,11 @@
 #
 # Steps (one node module each under ops/v2/rehearse/, sharing lib.mjs):
 #   1  1-fork.mjs      anvil fork (the fork block is recorded) -> callhouse-contracts script/v2/DeployV2Batch.sh
-#                      --rehearse (DeployV2, RegisterMarkets NVDA + TSLA + META, VerifyV2) -> VerifyV2 alone ->
-#                      Chainlink feeds etched -> owner funding -> warm-up -> detached node
+#                      --rehearse on INTERFACE_VERSION 8 (DeployV8, the externals, RegisterMarkets DIRECT for the
+#                      registry's launchSet.markets -- NVDA + SPCX --, HandBack, VerifyV8) from a fresh INPUT copy of
+#                      tier1.json in which the single-source market's pool and payout route are nulled
+#                      (rehearse/launch-set.mjs) -> VerifyV8 alone -> the PayoutRouter routes read back -> Chainlink
+#                      feeds etched -> owner funding -> warm-up -> detached node
 #   2  2-services.mjs  Telegram stand-in, relay, Postgres, pricing stand-in, indexer-v2, cranker, mm-bot, pricer,
 #                      notifier, web; each health-checked
 #   3  3-story.mjs     the scripted story: writers, MM quotes, buyers, resale, bid hit by writing, expiry by warp,
@@ -37,7 +40,7 @@
 # Output: ops/v2/rehearse/out/ (gitignored): state.json, ledger.json (every transaction with its gas), services.json,
 # logs/, screenshots/, tier1.rehearsal.json (the registry copy the deploy wrote back), state/fork-state.json.
 #
-# Environment: CONTRACTS_DIR (a built callhouse-contracts checkout on v2; default ../callhouse-contracts),
+# Environment: CONTRACTS_DIR (a built callhouse-contracts checkout on v8; default ../callhouse-contracts),
 # REHEARSE_FORK_BLOCK (pin anvil to a block the public RPC still serves; default: anvil pins the head),
 # REHEARSE_HEADFUL=1 (a visible browser), REHEARSE_STRICT=1 (a drill that found a product issue fails step 4).
 # Ports: anvil 8590 (drill MM bot 8591), services 42190-42199 (drill crankers 42199), web 3190.

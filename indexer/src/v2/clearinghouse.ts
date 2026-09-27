@@ -8,6 +8,7 @@ import { expiryCalendarAbi } from "../../abis/v2/expiryCalendar";
 import { USDG, V2_CLEARINGHOUSE, V2_EXPIRY_CALENDAR, V2_ORDER_BOOK } from "../../lib/env";
 import type { DB, EventMeta } from "../../lib/indexing";
 import { v2Ponder as ponder } from "../../lib/registry";
+import { markPnlInput } from "./pnlInput";
 import { isWeeklyExpiry } from "../../lib/v2/calendar";
 import { seriesTenor } from "../../lib/v2/periphery";
 import {
@@ -66,6 +67,7 @@ async function protocol(db: DB, ts: bigint) {
 async function transfer(db: DB, input: TokenTransfer, event: EventMeta, batchIndex = 0) {
   const ts = event.block.timestamp;
   const { longId, side } = positionId(input.tokenId);
+  await markPnlInput(db, event.block.number);
   if (side === "long") {
     await db.insert(schema.v2Transfer).values({
       id: `${event.transaction.hash}-${event.log.logIndex}-${batchIndex}`,
@@ -184,6 +186,7 @@ ponder.on("Clearinghouse:SeriesCreated", async ({ event, context }) => {
     abi: clearinghouseAbi, address: clearinghouse(), functionName: "mintCutoff", args: [longId], cache: "immutable",
   });
   const special = await context.db.find(schema.v2SpecialExpiry, { ts: BigInt(expiry) });
+  await markPnlInput(context.db, event.block.number);
   await context.db.insert(schema.v2Series).values({
     longId, underlying: id, ticker: market.ticker, isPut, strike, expiry: BigInt(expiry),
     tenor: seriesTenor(weekly, special?.allowed ?? false), mintCutoff: BigInt(mintCutoff), oracle: key(oracle),
@@ -221,6 +224,7 @@ ponder.on("Clearinghouse:Minted", async ({ event, context }) => {
   await ledgerDelta(context.db, writer, collateralAsset, -(collateral + fee));
   const series = await context.db.find(schema.v2Series, { longId });
   if (series === null) throw new Error(`Minted for unknown series ${longId}`);
+  await markPnlInput(context.db, event.block.number);
   await context.db.update(schema.v2Series, { longId }).set({ mintFeesHeld: series.mintFeesHeld + fee });
   await context.db.insert(schema.v2Mint).values({
     id: logId(event), longId, writer: key(writer), longTo: key(longTo), units, collateral, fee,
@@ -240,6 +244,7 @@ ponder.on("Clearinghouse:Closed", async ({ event, context }) => {
   await ledgerDelta(context.db, holder, collateralAsset, collateralFreed + feeRefund);
   const series = await context.db.find(schema.v2Series, { longId });
   if (series === null) throw new Error(`Closed for unknown series ${longId}`);
+  await markPnlInput(context.db, event.block.number);
   await context.db.update(schema.v2Series, { longId }).set({
     mintFeesHeld: addNonnegative(series.mintFeesHeld, -feeRefund, `series ${longId} held rent`),
   });
@@ -255,6 +260,7 @@ ponder.on("Clearinghouse:SeriesSettled", async ({ event, context }) => {
   const { longId, settlementPrice, longPayoutPerUnit, feePerUnit, shortPayoutPerUnit } = event.args;
   const series = await context.db.find(schema.v2Series, { longId });
   if (series === null) throw new Error(`SeriesSettled for unknown series ${longId}`);
+  await markPnlInput(context.db, event.block.number);
   await context.db.update(schema.v2Series, { longId }).set({
     status: "settled", settlementPrice, longPayoutPerUnit, feePerUnit, shortPayoutPerUnit,
     settledAt: event.block.timestamp, settledTx: event.transaction.hash,
@@ -272,6 +278,7 @@ ponder.on("Clearinghouse:SeriesSettled", async ({ event, context }) => {
 ponder.on("Clearinghouse:Redeemed", async ({ event, context }) => {
   const { tokenId, holder, to, units, asset, amount, amountInKind, toLedger } = event.args;
   const { longId, side } = positionId(tokenId);
+  await markPnlInput(context.db, event.block.number);
   await context.db.insert(schema.v2Redemption).values({
     id: logId(event), tokenId, longId, side, holder: key(holder), to: key(to), units,
     asset: key(asset), amount, amountInKind, toLedger,
@@ -286,6 +293,7 @@ ponder.on("Clearinghouse:Deposited", async ({ event, context }) => {
   const { account: holder, asset, amount, from } = event.args;
   await ledgerDelta(context.db, holder, asset, amount);
   await account(context.db, holder, event.block.timestamp);
+  await markPnlInput(context.db, event.block.number);
   await context.db.insert(schema.v2CashFlow).values({ id: logId(event), kind: "deposit", account: key(holder), actor: key(from),
     asset: key(asset), amount, ts: event.block.timestamp, block: event.block.number,
     logIndex: event.log.logIndex, tx: event.transaction.hash });
@@ -295,6 +303,7 @@ ponder.on("Clearinghouse:Withdrawn", async ({ event, context }) => {
   const { account: holder, asset, amount, to } = event.args;
   await ledgerDelta(context.db, holder, asset, -amount);
   await account(context.db, holder, event.block.timestamp);
+  await markPnlInput(context.db, event.block.number);
   await context.db.insert(schema.v2CashFlow).values({ id: logId(event), kind: "withdrawal", account: key(holder), actor: key(to),
     asset: key(asset), amount, ts: event.block.timestamp, block: event.block.number,
     logIndex: event.log.logIndex, tx: event.transaction.hash });
@@ -303,6 +312,7 @@ ponder.on("Clearinghouse:Withdrawn", async ({ event, context }) => {
 ponder.on("Clearinghouse:OperatorSet", async ({ event, context }) => {
   const { account: holder, operator, approved } = event.args;
   const current = await account(context.db, holder, event.block.timestamp);
+  await markPnlInput(context.db, event.block.number);
   await context.db.update(schema.v2Account, { account: key(holder) }).set({
     operators: setAddressFlag(current.operators, operator, approved), lastSeen: event.block.timestamp,
   });
@@ -311,6 +321,7 @@ ponder.on("Clearinghouse:OperatorSet", async ({ event, context }) => {
 ponder.on("Clearinghouse:PayoutPrefsSet", async ({ event, context }) => {
   const { account: holder, inKind, toLedger } = event.args;
   await account(context.db, holder, event.block.timestamp);
+  await markPnlInput(context.db, event.block.number);
   await context.db.update(schema.v2Account, { account: key(holder) }).set({
     inKind, toLedger, lastSeen: event.block.timestamp,
   });
@@ -319,6 +330,7 @@ ponder.on("Clearinghouse:PayoutPrefsSet", async ({ event, context }) => {
 ponder.on("Clearinghouse:ThirdPartyRedeemSet", async ({ event, context }) => {
   const { account: holder, allowed } = event.args;
   await account(context.db, holder, event.block.timestamp);
+  await markPnlInput(context.db, event.block.number);
   await context.db.update(schema.v2Account, { account: key(holder) }).set({
     thirdPartyRedeem: allowed, lastSeen: event.block.timestamp,
   });
@@ -327,6 +339,7 @@ ponder.on("Clearinghouse:ThirdPartyRedeemSet", async ({ event, context }) => {
 ponder.on("Clearinghouse:ApprovalForAll", async ({ event, context }) => {
   const { account: holder, operator, approved } = event.args;
   const current = await account(context.db, holder, event.block.timestamp);
+  await markPnlInput(context.db, event.block.number);
   await context.db.update(schema.v2Account, { account: key(holder) }).set({
     approvals: setAddressFlag(current.approvals, operator, approved), lastSeen: event.block.timestamp,
   });
@@ -409,6 +422,7 @@ ponder.on("Clearinghouse:MintFeesAccrued", async ({ event, context }) => {
       key(asset) !== key(series.isPut ? USDG : series.underlying)) {
     throw new Error(`MintFeesAccrued does not match settled held rent for ${longId}`);
   }
+  await markPnlInput(context.db, event.block.number);
   await context.db.update(schema.v2Series, { longId }).set({
     mintFeesHeld: 0n, mintFeesAccrued: series.mintFeesAccrued + amount,
   });

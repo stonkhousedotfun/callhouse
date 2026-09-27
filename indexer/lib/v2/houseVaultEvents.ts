@@ -1,14 +1,21 @@
 /**
  * Event/view ABI fragments mirrored from callhouse-contracts
- * src/v2/periphery/house/HouseVault.sol and HouseVaultFactory.sol (wt/v8-contracts).
+ * src/v2/periphery/house/HouseVault.sol and HouseVaultFactory.sol.
  *
- * ops/abis/v2 has no HouseVault.json / HouseVaultFactory.json yet (T-78 owns
- * script/v2/abi-manifest.txt; T-87 left it unchanged). Same pattern as
+ * ops/abis/v2 has no HouseVault.json / HouseVaultFactory.json yet (the export list
+ * script/v2/abi-manifest.txt does not name them). Same pattern as
  * buybackExecutorEvents.ts: an indexing surface outside abis/v2 until export-abis.sh
  * copies the compiler artefact. Signatures match HouseVaultInterface.t.sol topics.
  *
  * Transfer is OpenZeppelin ERC20 (HouseVault is ERC20). epochEnd/epochId are public
  * getters used once at VaultCreated to open epoch 0 without inventing the boundary.
+ */
+/**
+ * The LEGACY `VaultCreated`, as the legacy factory emits it (4 fields, topic
+ * 0xf4c8fe3d...6e29). A change appended `bool weekly`, so the generated abis/v2/houseVaultFactory.ts now
+ * carries a different event (topic 0xeef0325f...500d) that the live launch factory never emits. The
+ * configured HouseVaultFactory source and its clone discovery use this fragment (ponder.config.ts
+ * legacyHouseVaultFactoryAbi); a factory that emits the new event is a separate source,.
  */
 export const houseVaultFactoryIndexingAbi = [
   {
@@ -174,7 +181,11 @@ export const houseVaultIndexingAbi = [
 
 /** Declared exactly as HouseVaultInterface.t.sol keccak's them. */
 export const HOUSE_VAULT_EVENTS = {
+  /** The legacy (legacy) factory's event: what the live launch factory emits and what discovery watches. */
   VaultCreated: "event VaultCreated(address indexed underlying, address indexed vault, string name, string symbol)",
+  /** The event, with the epoch kind: what the generated ABI carries. */
+  VaultCreatedKinded:
+    "event VaultCreated(address indexed underlying, address indexed vault, string name, string symbol, bool weekly)",
   DepositRequested:
     "event DepositRequested(address indexed account, uint256 usdgAmount, uint256 stockAmount, uint64 indexed epochId)",
   DepositRequestCancelled:
@@ -191,4 +202,10 @@ export const HOUSE_VAULT_EVENTS = {
   ExposureSet:
     "event ExposureSet(uint256 indexed longId, uint256 units, uint256 notional, uint256 totalNotional)",
   Transfer: "event Transfer(address indexed from, address indexed to, uint256 value)",
+  // Kept beside the generated ABI: this file is what ponder.config's legacy factory
+  // fragment and the handler topic pins import. Deleting it would drop the 4-field VaultCreated.
+  PerformanceFeePaid: "event PerformanceFeePaid(uint64 indexed epochId, uint256 paid, uint256 owed)",
+  EpochBatchesPriced:
+    "event EpochBatchesPriced(uint64 indexed epochId, uint256 depositValue, bool depositRefused, uint256 withdrawUsdg, uint256 withdrawStock)",
+  EpochOpened: "event EpochOpened(uint64 indexed epochId, uint40 epochEnd)",
 } as const;

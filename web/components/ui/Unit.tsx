@@ -11,7 +11,7 @@ import { cn } from "@/lib/cn";
  *
  * The unit is the market's ticker (lib/markets.ts), never a literal; the closed pooled vault's
  * components are the one place MARKET from lib/contracts still appears. Keep the space between the
- * figure and the unit as a literal space in the JSX: the W-13 run reads a row's textContent
+ * figure and the unit as a literal space in the JSX: the run reads a row's textContent
  * ("20.0000 NVDA"), and the span adds no characters of its own.
  */
 export function Unit({ className, children }: { className?: string; children: ReactNode }) {

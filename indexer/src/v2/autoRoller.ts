@@ -80,6 +80,15 @@ ponder.on("AutoRoller:Repriced", async ({ event, context }) => {
   }
 });
 
+// roll() step 1 cleared the writer's expired position. Without this the row kept the closed
+// period as its current position and /strategies served it as open.
+ponder.on("AutoRoller:PositionClosed", async ({ event, context }) => {
+  const { writer, underlying, longId, orderId, redeemed } = event.args;
+  await updateStrategy(context.db, writer, underlying, event.block.timestamp, {
+    kind: "PositionClosed", longId, orderId, redeemed,
+  });
+});
+
 ponder.on("AutoRoller:StaleAskCancelled", async ({ event, context }) => {
   const { writer, underlying, longId, orderId, spot, updatedAt } = event.args;
   await updateStrategy(context.db, writer, underlying, event.block.timestamp, {

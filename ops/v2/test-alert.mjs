@@ -61,6 +61,31 @@ export async function sendTestAlert({ url, token, source = "callhouse-ops-test",
   return { status: res.status, text };
 }
 
+/**
+ * Whether the alert REACHED a target, from the relay's own answer. The relay answers 200 when at least one
+ * target delivered and lists the rest in `failed` (relay/src/server.ts summarise), so a 2xx alone is not delivery: a
+ * partial delivery, or an answer that names no delivered/failed lists, is not ok. Before this the CLI exited 0 on any 2xx.
+ */
+export function deliveryVerdict({ status, text }) {
+  if (!(status >= 200 && status < 300)) return { ok: false, why: `HTTP ${status}` };
+  let body;
+  try {
+    body = JSON.parse(text);
+  } catch {
+    return { ok: false, why: "the relay's answer is not JSON: whether any target delivered is unknown" };
+  }
+  const delivered = Array.isArray(body?.delivered) ? body.delivered : null;
+  const failed = Array.isArray(body?.failed) ? body.failed : null;
+  if (delivered === null || failed === null) {
+    return { ok: false, why: "the relay's answer names no delivered[] and failed[]: whether any target delivered is unknown" };
+  }
+  if (failed.length > 0) {
+    return { ok: false, why: `${failed.length} target(s) failed: ${failed.map((f) => f?.target ?? "?").join(", ")}` };
+  }
+  if (delivered.length === 0) return { ok: false, why: "no target delivered" };
+  return { ok: true, why: `delivered to ${delivered.join(", ")}` };
+}
+
 function parseArgs(argv) {
   const out = { fromEnv: false, tokenFromStdin: false, url: process.env.ALERT_WEBHOOK || "" };
   for (let i = 0; i < argv.length; i += 1) {
@@ -88,7 +113,9 @@ async function main(argv = process.argv.slice(2)) {
   const result = await sendTestAlert({ url: args.url, token });
   process.stdout.write(`${result.status} ${result.text}\n`);
   process.stderr.write(`posted boot alert to host ${hostOf(args.url)}\n`);
-  if (result.status < 200 || result.status >= 300) process.exit(1);
+  const verdict = deliveryVerdict(result);
+  process.stderr.write(`${verdict.ok ? "DELIVERED" : "NOT DELIVERED"}: ${verdict.why}\n`);
+  if (!verdict.ok) process.exit(1);
 }
 
 if (process.argv[1] && process.argv[1].endsWith("test-alert.mjs")) {

@@ -9,18 +9,27 @@ const WAD = 10n ** 18n;
 const USDG_CENT = 10_000n;
 const MAX_EXERCISE_FEE_BPS = 200n;
 const MAX_PAYOUT_FEE_SHARE_BPS = 1_000n;
-/** Clearinghouse conversion bounds (callhouse-contracts v8 ee14bfbc, src/v2/interfaces/V2Constants.sol:88 and :91).
- * `MAX_PAYOUT_SLIPPAGE_CEIL_BPS` caps `maxPayoutSlippageBps` in setPayoutAdapter (Clearinghouse.sol:446) AND the
- * combined slippage-plus-route-fee in `_conversionFloor` (:1185-1188); `MAX_ROUTE_FEE_BPS` clamps the adapter's
- * routeFeeBps read (:1183). Both are the worst case the app assumes when the chain value is not on the wire. */
+/** Clearinghouse conversion bounds (callhouse-contracts src/v2/interfaces/V2Constants.sol, the same two names).
+ * `MAX_PAYOUT_SLIPPAGE_CEIL_BPS` caps `maxPayoutSlippageBps` in Clearinghouse.setPayoutAdapter AND the
+ * combined slippage-plus-route-fee in `_conversionFloor`; `MAX_ROUTE_FEE_BPS` clamps the adapter's
+ * routeFeeBps read (also in `_conversionFloor`). Both are the worst case the app assumes when the chain value is not on the wire. */
 export const MAX_PAYOUT_SLIPPAGE_CEIL_BPS = 300;
 export const MAX_ROUTE_FEE_BPS = 100;
 
-export type TakerFeeParams = { takerFeeFlat: bigint; takerFeeCapBps: number };
+/** `discountBps`: the taker's effective discount, which
+ * OrderBook._takerFee subtracts after the cap (clamped to MAX_DISCOUNT_BPS 5,000). Absent = 0. The app's live
+ * estimate leaves it absent on purpose: it does not know the taker's discount, and tx.ts bounds the charged fee
+ * from above instead, which a discount can only lower. */
+export type TakerFeeParams = { takerFeeFlat: bigint; takerFeeCapBps: number; discountBps?: number };
 export type Ask = { orderId: string; price: bigint; units: bigint;
   maker?: string; kind?: "AskResale" | "AskWrite"; onChainRemainingUnits?: bigint;
   makerFreeCollateral?: bigint | null; makerFreeUnits?: bigint | null };
 export type BuyCost = {
+  /** An AskWrite this walk could not price for want of an input (its maker, the
+   * rent terms, or the maker's free collateral) is listed, not silently treated as absent liquidity; any listed ask
+   * makes the result a lower-bound estimate. */
+  pricingStatus: "priced" | "unpriceable";
+  unpriceableAsks: { orderId: string; reason: "maker" | "rent" | "collateral" }[];
   filledUnits: bigint;
   unfilledUnits: bigint;
   premium: bigint;
@@ -30,12 +39,16 @@ export type BuyCost = {
   orderIds: string[];
   fills: { orderId: string; price: bigint; units: bigint; premium: bigint }[];
 };
-export type PayoffPosition = { isPut: boolean; strike: bigint; units: bigint; exerciseFeeBps: number };
+/** `conversionFloorBps`: when set on a CALL, payouts are the conditional USDG floor
+ * of a successful routed conversion (see {payoutAt}); a bps rate in [9_700, 10_000] (the contract bounds the loss at
+ * MAX_PAYOUT_SLIPPAGE_CEIL_BPS). Absent: the call is valued in kind at the settlement price, as before. Ignored for
+ * puts, which pay USDG natively. */
+export type PayoffPosition = { isPut: boolean; strike: bigint; units: bigint; exerciseFeeBps: number; conversionFloorBps?: number };
 /** The two Clearinghouse-side conversion parameters the explorer needs (G7): the indexed `maxPayoutSlippageBps`
  * (or the ceiling when the wire has none) and the route fee (the ceiling; the adapter's per-asset read is not on
  * the wire). */
 export type ConversionTerms = { slippageBps: number; routeFeeBps: number };
-/** G2. What USDG conversion of a call payout can deliver: `low` at the contract's conversion floor, `high` the
+/** What USDG conversion of a call payout can deliver: `low` at the contract's conversion floor, `high` the
  * in-kind value at the settlement price. `floorBps` is the floor as a share of value, for copy. */
 export type UsdgBand = { low: bigint; high: bigint; floorBps: number };
 /** The three P&L figures of one scenario. `pct` and `multiple` are floored to two decimals (a loss floors away from
@@ -67,10 +80,19 @@ function feeBps(value: number): bigint {
   return BigInt(value);
 }
 
+/** `conversionFloorBps` as a bigint; refused outside [9_700, 10_000]. `conversionBps` names the band helper. */
+function conversionFloorRate(value: number | undefined): bigint {
+  if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 9_700 || value > 10_000) {
+    throw new RangeError("conversionFloorBps must be an explicit contract-bounded rate");
+  }
+  return BigInt(value);
+}
+
 function validatePosition(position: PayoffPosition): void {
   requirePositive(position.strike, "strike");
   requirePositive(position.units, "units");
   feeBps(position.exerciseFeeBps);
+  if (!position.isPut && position.conversionFloorBps !== undefined) conversionFloorRate(position.conversionFloorBps);
 }
 
 /** Premium is exact because order prices are multiples of PRICE_TICK. */
@@ -81,19 +103,26 @@ export function premium(price: bigint, units: bigint): bigint {
   return (price * units) / UNITS_PER_SHARE;
 }
 
-/** One capped taker fee per take call, on the actual filled premium. */
+/** OrderBook._takerFee: one capped fee on filled premium, then the taker's effective clamped discount.
+ * With no discount the result is the capped fee, exactly as before. */
 export function takerFee(premiumPaid: bigint, params: TakerFeeParams): bigint {
   requireNonnegative(premiumPaid, "premiumPaid");
   requireNonnegative(params.takerFeeFlat, "takerFeeFlat");
   if (!Number.isInteger(params.takerFeeCapBps) || params.takerFeeCapBps < 0 || params.takerFeeCapBps > 1_000) {
     throw new RangeError("takerFeeCapBps exceeds the contract ceiling");
   }
+  const discountBps = params.discountBps ?? 0;
+  if (!Number.isSafeInteger(discountBps) || discountBps < 0 || discountBps > 5_000) {
+    throw new RangeError("discountBps exceeds the contract ceiling");
+  }
   const capped = (premiumPaid * BigInt(params.takerFeeCapBps)) / BPS;
-  return params.takerFeeFlat < capped ? params.takerFeeFlat : capped;
+  const base = params.takerFeeFlat < capped ? params.takerFeeFlat : capped;
+  return base - (base * BigInt(discountBps)) / BPS;
 }
 
 /** Walk asks as OrderBook._plan does: a writer's free collateral is shared by all its asks,
- * and an ask that cannot cover this call's planned units is skipped whole. quoteTake remains
+ * and an ask that cannot cover this call's planned units is skipped whole. Missing inputs are
+ * reported as unpriceable rather than mistaken for absent liquidity. quoteTake remains
  * authoritative before a trade (approvals, pauses and concurrent transactions can still change). */
 export function costToBuy(asks: readonly Ask[], units: bigint, params: TakerFeeParams, rent?: RentTerms): BuyCost {
   requirePositive(units, "units");
@@ -104,6 +133,7 @@ export function costToBuy(asks: readonly Ask[], units: bigint, params: TakerFeeP
   let remaining = units;
   let totalPremium = 0n;
   const fills: BuyCost["fills"] = [];
+  const unpriceableAsks: BuyCost["unpriceableAsks"] = [];
   for (const ask of sorted) {
     if (!/^\d+$/.test(ask.orderId) || seen.has(ask.orderId)) throw new RangeError("order IDs must be unique decimal strings");
     seen.add(ask.orderId);
@@ -114,9 +144,10 @@ export function costToBuy(asks: readonly Ask[], units: bigint, params: TakerFeeP
     const filled = orderRemaining < remaining ? orderRemaining : remaining;
     if (ask.kind === "AskWrite") {
       const key = ask.maker?.toLowerCase();
-      if (key === undefined || !rent) continue;
+      if (key === undefined) { unpriceableAsks.push({ orderId: ask.orderId, reason: "maker" }); continue; }
+      if (!rent) { unpriceableAsks.push({ orderId: ask.orderId, reason: "rent" }); continue; }
       const initial = ask.makerFreeCollateral;
-      if (initial === undefined || initial === null) continue;
+      if (initial === undefined || initial === null) { unpriceableAsks.push({ orderId: ask.orderId, reason: "collateral" }); continue; }
       if ((rent.snapshotTimestamp >= rent.expiry || (rent.mintCutoff !== undefined && rent.snapshotTimestamp >= rent.mintCutoff))) continue;
       const budget = writerBudget.get(key) ?? initial;
       const need = writerCollateralNeed(filled, rent);
@@ -130,7 +161,8 @@ export function costToBuy(asks: readonly Ask[], units: bigint, params: TakerFeeP
   }
   const filledUnits = units - remaining;
   const fee = takerFee(totalPremium, params);
-  return { filledUnits, unfilledUnits: remaining, premium: totalPremium, fee, cost: totalPremium + fee,
+  return { pricingStatus: unpriceableAsks.length ? "unpriceable" : "priced", unpriceableAsks,
+    filledUnits, unfilledUnits: remaining, premium: totalPremium, fee, cost: totalPremium + fee,
     averagePrice: filledUnits > 0n ? ceilDiv(totalPremium * UNITS_PER_SHARE, filledUnits) : null,
     orderIds: fills.map((fill) => fill.orderId), fills };
 }
@@ -158,17 +190,29 @@ export function exerciseFeePerUnit(gross: bigint, collateral: bigint, exerciseFe
   return byCollateral < byPayout ? byCollateral : byPayout;
 }
 
-/** Call payouts are valued at settlement price after the in-kind exercise fee. */
-export function netPayoutUsdgPerUnit(isPut: boolean, strike: bigint, price: bigint, exerciseFeeBps: number): bigint {
+/** Call payouts are valued at settlement price after the in-kind exercise fee; with `conversionFloorBps`, at the
+ * conditional USDG floor of a successful routed conversion. Puts pay USDG natively. */
+export function netPayoutUsdgPerUnit(isPut: boolean, strike: bigint, price: bigint, exerciseFeeBps: number,
+  conversionFloorBps?: number): bigint {
   const gross = grossPayoutPerUnit(isPut, strike, price);
   const fee = exerciseFeePerUnit(gross, collateralPerUnit(isPut, strike), exerciseFeeBps);
   const net = gross - fee;
-  return isPut ? net : (net * price) / WAD;
+  if (isPut) return net;
+  const value = (net * price) / WAD;
+  return conversionFloorBps === undefined ? value : (value * conversionFloorRate(conversionFloorBps)) / BPS;
 }
 
-/** Hypothetical settlement payout in USDG base units, rounded down per contract. */
+/** Hypothetical settlement payout in USDG base units. In kind (no `conversionFloorBps`): rounded down per contract,
+ * as before. With `conversionFloorBps` on a call, the contract's semantics: Clearinghouse._redeem
+ * values the TOTAL owed units at the settlement price, then _conversionFloor rounds down once. */
 export function payoutAt(price: bigint, position: PayoffPosition): bigint {
   validatePosition(position);
+  if (!position.isPut && position.conversionFloorBps !== undefined) {
+    const gross = grossPayoutPerUnit(false, position.strike, price);
+    const fee = exerciseFeePerUnit(gross, collateralPerUnit(false, position.strike), position.exerciseFeeBps);
+    const owed = (gross - fee) * position.units;
+    return (((owed * price) / WAD) * conversionFloorRate(position.conversionFloorBps)) / BPS;
+  }
   return netPayoutUsdgPerUnit(position.isPut, position.strike, price, position.exerciseFeeBps) * position.units;
 }
 
@@ -209,17 +253,17 @@ function conversionBps(slippageBps: number, routeFeeBps: number): number {
     throw new RangeError("slippageBps exceeds the contract ceiling");
   }
   if (!Number.isInteger(routeFeeBps) || routeFeeBps < 0) throw new RangeError("routeFeeBps must be a nonnegative integer");
-  // Clearinghouse._conversionFloor (ee14bfbc :1183-1188): the route fee clamps to MAX_ROUTE_FEE_BPS, then the sum
+  // Clearinghouse._conversionFloor: the route fee clamps to MAX_ROUTE_FEE_BPS, then the sum
   // clamps to MAX_PAYOUT_SLIPPAGE_CEIL_BPS.
   const routeFee = routeFeeBps > MAX_ROUTE_FEE_BPS ? MAX_ROUTE_FEE_BPS : routeFeeBps;
   const total = slippageBps + routeFee;
   return total > MAX_PAYOUT_SLIPPAGE_CEIL_BPS ? MAX_PAYOUT_SLIPPAGE_CEIL_BPS : total;
 }
 
-/** G2. The USDG band a converted call payout lands in. `valueUsdg` is the in-kind value at the settlement price
- * (what `payoutAt` returns for a call); the floor mirrors Clearinghouse._conversionFloor (ee14bfbc :1189)
+/** The USDG band a converted call payout lands in. `valueUsdg` is the in-kind value at the settlement price
+ * (what `payoutAt` returns for a call); the floor mirrors Clearinghouse._conversionFloor
  * `value * (BPS - min(maxPayoutSlippageBps + routeFee, MAX_PAYOUT_SLIPPAGE_CEIL_BPS)) / BPS`, floored. Calls only:
- * a put is paid in USDG outright (Clearinghouse.sol:1092-1096) and has no band. */
+ * a put is paid in USDG outright (Clearinghouse._redeem) and has no band. */
 export function usdgPayoutBand(valueUsdg: bigint, slippageBps: number, routeFeeBps: number): UsdgBand {
   requireNonnegative(valueUsdg, "valueUsdg");
   const bps = conversionBps(slippageBps, routeFeeBps);
@@ -253,7 +297,10 @@ export function breakevenUsdg(position: PayoffPosition, cost: bigint, slippageBp
   conversionBps(slippageBps, routeFeeBps);
   if (position.isPut) return breakeven(position, cost);
   if (cost === 0n) return position.strike;
-  const covers = (price: bigint) => usdgPayoutBand(payoutAt(price, position), slippageBps, routeFeeBps).low >= cost;
+  // The band applies the conversion floor itself: value the call IN KIND here, or a position that already carries
+  // `conversionFloorBps` would be floored twice.
+  const inKind: PayoffPosition = { ...position, conversionFloorBps: undefined };
+  const covers = (price: bigint) => usdgPayoutBand(payoutAt(price, inKind), slippageBps, routeFeeBps).low >= cost;
   let low = position.strike;
   let high = position.strike * 2n;
   // A call's in-kind value per unit tends to UNIT * price / WAD, so the floor keeps rising with price.

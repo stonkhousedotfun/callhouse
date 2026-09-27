@@ -1,52 +1,54 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
+import type { PublicClient } from "viem";
 
-import { countdownLabel, houseDepositsOpen, launchGatePhase, soonestPendingHouseGate } from "./launchGates";
+vi.mock("./config", () => ({ requireV2Address: () => "0x0000000000000000000000000000000000000002" }));
 
-describe("launch gates", () => {
-  it("derives the phase from the effect, the schedule and the clock", () => {
-    expect(launchGatePhase({ done: true, scheduledAt: 0 }, 100)).toBe("done");
-    expect(launchGatePhase({ done: true, scheduledAt: 500 }, 100)).toBe("done");
-    expect(launchGatePhase({ done: false, scheduledAt: 0 }, 100)).toBe("unscheduled");
-    expect(launchGatePhase({ done: false, scheduledAt: 101 }, 100)).toBe("counting");
-    expect(launchGatePhase({ done: false, scheduledAt: 100 }, 100)).toBe("due");
-    expect(launchGatePhase({ done: false, scheduledAt: 99 }, 100)).toBe("due");
+import { GENERATED_MARKETS, LAUNCH_SET } from "../markets.generated";
+import { houseDepositsOpen, pendingHouseMarkets, readLaunchGates } from "./launchGates";
+
+describe("launch gates (effects only, no schedule, no clock)", () => {
+  it("opens House deposits only on a true arming read; unread, failed and false all stay shut", () => {
+    // The only opener: `protocolAccountsConfirmed()` read back true.
+    expect(houseDepositsOpen(true)).toBe(true);
+    expect(houseDepositsOpen(false)).toBe(false);
+    // Fail closed: an unread gate (still loading) or a failed read must not open the control.
+    expect(houseDepositsOpen(undefined)).toBe(false);
+    expect(houseDepositsOpen(null)).toBe(false);
   });
 
-  it("formats a countdown with days only when there are days, and never negative", () => {
-    expect(countdownLabel(0)).toBe("00:00:00");
-    expect(countdownLabel(-5)).toBe("00:00:00");
-    expect(countdownLabel(59)).toBe("00:00:59");
-    expect(countdownLabel(3600 + 120 + 3)).toBe("01:02:03");
-    expect(countdownLabel(86_400 + 3600 + 5)).toBe("1d 01:00:05");
-    expect(countdownLabel(2 * 86_400)).toBe("2d 00:00:00");
+  it("lists the launch markets whose House vault is not armed; null while unread, never an empty 'all armed'", () => {
+    expect(pendingHouseMarkets(undefined)).toBeNull();
+    expect(pendingHouseMarkets({})).toEqual([]);
+    expect(pendingHouseMarkets({ NVDA: true, SPCX: true })).toEqual([]);
+    expect(pendingHouseMarkets({ NVDA: true, SPCX: false })).toEqual(["SPCX"]);
+    expect(pendingHouseMarkets({ NVDA: false, SPCX: false })).toEqual(["NVDA", "SPCX"]);
   });
 
-  it("opens House deposits only on the effect, never on a schedule", () => {
-    // The only opener: the arming is read back on chain.
-    expect(houseDepositsOpen({ done: true, scheduledAt: 0 }, 100)).toBe(true);
-    // Scheduled and even executable is NOT armed — protocolAccountsConfirmed is still false until the
-    // Safe sends the execute, so the vault still quotes nothing and a deposit would sit idle.
-    expect(houseDepositsOpen({ done: false, scheduledAt: 101 }, 100)).toBe(false);
-    expect(houseDepositsOpen({ done: false, scheduledAt: 100 }, 100)).toBe(false);
-    expect(houseDepositsOpen({ done: false, scheduledAt: 0 }, 100)).toBe(false);
-    // Fail closed: an unread gate (still loading, or the chain read errored) must not open the control.
-    expect(houseDepositsOpen(undefined, 100)).toBe(false);
+  it("reads market(asset).enabled and protocolAccountsConfirmed() per launch market, and nothing from the AccessManager", async () => {
+    const readContract = vi.fn(async ({ functionName, address }: { functionName: string; address: string }) => {
+      if (functionName === "market") return { enabled: true };
+      if (functionName === "protocolAccountsConfirmed") return address.toLowerCase().startsWith("0xfb5c");
+      throw new Error(`unexpected read ${functionName}`);
+    });
+    const gates = await readLaunchGates({ readContract } as unknown as PublicClient);
+    const names = readContract.mock.calls.map(([call]) => call.functionName);
+    expect(names).not.toContain("getSchedule");
+    expect(new Set(names)).toEqual(new Set(["market", "protocolAccountsConfirmed"]));
+    for (const ticker of LAUNCH_SET.markets) expect(gates.trading[ticker]).toBe(true);
+    const withVault = LAUNCH_SET.markets.filter((t) => GENERATED_MARKETS.find((m) => m.ticker === t)?.v2.houseVault);
+    expect(Object.keys(gates.house).sort()).toEqual([...withVault].sort());
+    // The vault read is the registry's: the mock arms only the vault whose address starts 0xfb5c.
+    for (const ticker of withVault) {
+      const vault = GENERATED_MARKETS.find((m) => m.ticker === ticker)!.v2.houseVault!;
+      expect(gates.house[ticker]).toBe(vault.toLowerCase().startsWith("0xfb5c"));
+    }
   });
 
-  it("picks the soonest pending House arming for an index row, and nothing once all are armed", () => {
-    const armed = { done: true, scheduledAt: 0 };
-    expect(soonestPendingHouseGate({ NVDA: armed, SPCX: armed }, 100)).toBeNull();
-    expect(soonestPendingHouseGate(undefined, 100)).toBeNull();
-    expect(soonestPendingHouseGate({}, 100)).toBeNull();
-
-    const soon = { done: false, scheduledAt: 200 };
-    const later = { done: false, scheduledAt: 900 };
-    expect(soonestPendingHouseGate({ NVDA: later, SPCX: soon }, 100)?.ticker).toBe("SPCX");
-    // One armed, one not: the row still counts down to the one that is not.
-    expect(soonestPendingHouseGate({ NVDA: armed, SPCX: later }, 100)?.ticker).toBe("SPCX");
-    // Unscheduled is still pending, and sorts behind every scheduled gate rather than reading as open.
-    const unscheduled = { done: false, scheduledAt: 0 };
-    expect(soonestPendingHouseGate({ NVDA: unscheduled }, 100)?.ticker).toBe("NVDA");
-    expect(soonestPendingHouseGate({ NVDA: unscheduled, SPCX: later }, 100)?.ticker).toBe("SPCX");
+  it("a failed read rejects the whole read, which the caller treats as unread (shut), never as open", async () => {
+    const readContract = vi.fn(async ({ functionName }: { functionName: string }) => {
+      if (functionName === "market") return { enabled: true };
+      throw new Error("execution reverted");
+    });
+    await expect(readLaunchGates({ readContract } as unknown as PublicClient)).rejects.toThrow("execution reverted");
   });
 });

@@ -1,7 +1,7 @@
 /**
  * The market registry as the v2 bots read it: ops/markets/tier1.json and its `v2` blocks.
  *
- * Two kinds of `v2` block, both hand-maintained until the O2 deploy write-back fills addresses:
+ * Two kinds of `v2` block, both hand-maintained until the deploy write-back fills addresses:
  *   - top level `v2`: interface version, deploy block, contract addresses (INTERFACE_VERSION 8 included the
  *     AccessManager among them), the `flywheel` block, Uniswap v3 periphery, fee params, and `defaults`
  *     (oracle bounds, ladders per tenor, expiries ahead per tenor);
@@ -12,12 +12,12 @@
  * rather than partly read. That is what keeps the v7 run-off and v8 apart — `ops/markets/v7-legacy.json` is
  * the frozen v7 file and the v7 image reads it; one process never serves both.
  *
- * RESOLUTION, one rule for every market parameter: the §3 defaults compiled in here, then the
+ * RESOLUTION, one rule for every market parameter: the defaults compiled in here, then the
  * registry's `v2.defaults`, then the market's `overrides`, each layer replacing only the keys it
  * names. So a registry may carry a partial `defaults`, and SGOV can say
  * `"overrides": { "expiriesAhead": { "daily": 0 } }` (no dailies) without restating its ladders.
  *
- * ABSENCE IS NOT AN ERROR. Until O2-01 lands the registry has no `v2` blocks at all: the loader
+ * ABSENCE IS NOT AN ERROR. Until the v2 deploy lands the registry has no `v2` blocks at all: the loader
  * then returns every contract address as null, the compiled defaults, and `v2: null` on every
  * market. Whether a missing address matters is the caller's question (config.ts asks it per mode),
  * so the pricing service and a dry run keep working on today's file.
@@ -30,7 +30,7 @@
  * harmless, and a misspelt address is caught anyway when a mode needs it.
  *
  * Big integers (strikeTick, takerFeeFlat, univ3MinLiquidity, deployBlock) are decimal strings in
- * the file (§3) and bigint here; a plain JSON integer is accepted too when it is exact.
+ * the file and bigint here; a plain JSON integer is accepted too when it is exact.
  *
  * The v1 fields each v2 market also needs (ticker, name, `asset` = the underlying, `feed`, `cboe`)
  * are read from the same row, so this loader is a superset of pricing/markets.ts, which keeps its
@@ -82,7 +82,7 @@ export const V8_ALLOW_RENT_KEY = 'v2.fees.allowRent';
 //////////////////////////////////////////////////////////////*/
 
 /**
- * `v2.contracts` keys, in §3 order. INTERFACE_VERSION 8 appends `accessManager`, the OpenZeppelin
+ * `v2.contracts` keys, in registry order. INTERFACE_VERSION 8 appends `accessManager`, the OpenZeppelin
  * AccessManager every v8 target is `Managed` by, taking the counted set from 13 addresses to 14
  * (these 11 plus the three `sources`). Mirrors `ops/markets/build-markets.mjs` `V2_CONTRACT_NAMES` (:228-231).
  *
@@ -133,7 +133,26 @@ export type V2MarketStatus = (typeof V2_MARKET_STATUSES)[number];
 export const TENORS = ['weekly', 'daily'] as const;
 export type Tenor = (typeof TENORS)[number];
 
-/** One tenor's strike ladder (K2-03 builds it, ADR-12 reads `cardTargetBps`). */
+/**
+ * The weekdays a market's DAILY ladder may list, by the UTC day of the close (a 16:00 or 13:00 New York
+ * close is the same calendar day in UTC). `v2.defaults` lists all five; NVDA overrides to Mon/Wed/Fri (its
+ * listed options expire those days, so a Tue/Thu series can only
+ * be priced by extrapolation). A holiday on a listed day has no close at all, as before; nothing moves to another day.
+ */
+export const WEEKDAYS = ['mon', 'tue', 'wed', 'thu', 'fri'] as const;
+export type Weekday = (typeof WEEKDAYS)[number];
+const UTC_DAY_NAMES = ['sun', 'mon', 'tue', 'wed', 'thu', 'fri', 'sat'] as const;
+
+/**
+ * Whether a daily close at `expiry` (unix seconds) may list: false only on a Mon-Fri day the market leaves out, so the
+ * default (all five) filters nothing at all. The calendar never has a weekend close; one would not be filtered here.
+ */
+export function listsDailyOn(params: Pick<MarketParams, 'dailyWeekdays'>, expiry: number): boolean {
+  const day = UTC_DAY_NAMES[new Date(expiry * 1000).getUTCDay()]!;
+  return !(WEEKDAYS as readonly string[]).includes(day) || (params.dailyWeekdays as readonly string[]).includes(day);
+}
+
+/** One tenor's strike ladder (the cranker builds it; the payoff card reads `cardTargetBps`). */
 export interface LadderParams {
   rungs: number;
   /** Rung 0 = roundUp(spot × (1 + firstOtmBps / 1e4), strikeTick); puts mirror below spot. */
@@ -152,19 +171,29 @@ export interface MarketParams {
   ladder: Record<Tenor, LadderParams>;
   /** How many upcoming expiries of each tenor carry a ladder. 0 switches the tenor off. */
   expiriesAhead: Record<Tenor, number>;
+  /**
+   * Of the first `expiriesAhead.daily` daily closes, only those on these weekdays carry a ladder, and a daily
+   * AutoRoller strategy is rolled only into a close on one of them (listsDailyOn). The horizon is unchanged: NVDA's six
+   * daily closes ahead list their Mon/Wed/Fri ones.
+   */
+  dailyWeekdays: readonly Weekday[];
 }
 
-/** §3's `v2.defaults`, verbatim. What a registry without (part of) that block resolves to. */
+/** The registry's `v2.defaults`, verbatim. What a registry without (part of) that block resolves to. */
 export const SPEC_DEFAULTS: MarketParams = {
   maxDeviationBps: 150,
   uncorroboratedDelayS: 21_600,
-  // A feed heartbeat (24 h) plus 1 h: the last print of a quiet feed stays a valid spot (ops/deploy.md §15.13).
+  // A feed heartbeat (24 h) plus 1 h: the last print of a quiet feed stays a valid spot.
   spotMaxAgeS: 90_000,
   ladder: {
     weekly: { rungs: 5, firstOtmBps: 200, stepBps: 200, cardTargetBps: 400 },
     daily: { rungs: 5, firstOtmBps: 100, stepBps: 100, cardTargetBps: 200 },
   },
-  expiriesAhead: { weekly: 2, daily: 3 },
+  // The defaults went daily-only (0DTE) and
+  // list six daily closes, up to 6 days ahead, still no weekly ladder. Mirrors
+  // ops/markets/build-markets.mjs V2_SKELETON.defaults and both committed registries; `ladder.weekly` stays defined.
+  expiriesAhead: { weekly: 0, daily: 6 },
+  dailyWeekdays: WEEKDAYS,
 };
 
 /** A market's `overrides`, as written: any subset of MarketParams. */
@@ -174,12 +203,13 @@ export interface MarketOverrides {
   spotMaxAgeS?: number;
   ladder?: Partial<Record<Tenor, Partial<LadderParams>>>;
   expiriesAhead?: Partial<Record<Tenor, number>>;
+  dailyWeekdays?: readonly Weekday[];
 }
 
-/** §3 `v2.fees`: what the deploy sets on chain. The bots read the live values from the contracts. */
+/** `v2.fees`: what the deploy sets on chain. The bots read the live values from the contracts. */
 export interface V2Fees {
   /**
-   * INTERFACE_VERSION 8 (V3-D6, D17): the writer fee IS the premium fee, charged on the first sale of every
+   * INTERFACE_VERSION 8: the writer fee IS the premium fee, charged on the first sale of every
    * long, and it must be ABOVE `resaleFeeBps`. v7 required the opposite — it was 0 and rent replaced it — so
    * the two directions are one inversion, checked below only for an interface-8 registry.
    */
@@ -188,7 +218,7 @@ export interface V2Fees {
    * The shared collateral rent, millionths of the locked collateral per 7 days of remaining life. A market's own
    * `v2.mintFeePpm` overrides it; null when the registry carries no `v2.fees` block at all.
    *
-   * INTERFACE_VERSION 8 (V3-D18): **0 everywhere**. The dial survives in the Clearinghouse so rent can be
+   * INTERFACE_VERSION 8: **0 everywhere**. The dial survives in the Clearinghouse so rent can be
    * switched back on later under the 72 h lane, and a registry that carries a non-zero rate is refused unless it
    * also carries `allowRent: true`.
    */
@@ -206,7 +236,7 @@ export interface V2Fees {
 }
 
 /**
- * §3 `v2.vault`: the MakerVault `Limits` tuple the deploy sets, in `setLimits` order (INTERFACE_VERSION 7, c21).
+ * `v2.vault`: the MakerVault `Limits` tuple the deploy sets, in `setLimits` order (INTERFACE_VERSION 7).
  * The bots read the live values from the vault; this is what the deploy was asked for. null when the registry
  * carries no `v2.vault` block.
  */
@@ -221,7 +251,7 @@ export interface V2VaultLimits {
 }
 
 /**
- * §3 `markets[].v2.payoutRoute` (INTERFACE_VERSION 8): the venue that sells this market's Stock Tokens for USDG
+ * `markets[].v2.payoutRoute` (INTERFACE_VERSION 8): the venue that sells this market's Stock Tokens for USDG
  * — the Clearinghouse's payout leg and the FeeSplitter's fee stock. `null` is not a failure: a winning call is
  * then paid in kind.
  *
@@ -234,7 +264,7 @@ export type V2PayoutRoute =
   | { venue: 'v4'; fee: number; tickSpacing: number; poolId: Hex };
 
 /**
- * §3 `v2.flywheel` (INTERFACE_VERSION 8): the native FeeSplitter and the v4 buyback executor. Its own block and
+ * `v2.flywheel` (INTERFACE_VERSION 8): the native FeeSplitter and the v4 buyback executor. Its own block and
  * never a `v2.contracts` key, because that set is closed and counted by the deploy tooling
  * (`ops/markets/build-markets.mjs` :812-814). null when the registry carries no `v2.flywheel` block.
  */
@@ -243,6 +273,54 @@ export interface V2Flywheel {
   buybackExecutor: Address | null;
   /** The splitter is deployed BEFORE the core, so this is deliberately not `v2.deployBlock`. */
   deployBlock: bigint | null;
+}
+
+/**
+ * `v2.house.factories[].kind` (ops/markets/build-markets.mjs HOUSE_FACTORY_KINDS): on v8 `weekly` is the
+ * launch factory, compiled BEFORE kinding, which is also `v2.contracts.houseVaultFactory`; `daily` is the
+ * kinded factory. The registry records at most one of each. On v9 the launch factory IS a kinded
+ * factory that makes daily vaults only, so the `daily` entry is `v2.contracts.houseVaultFactory` and there is no
+ * weekly entry ({@link launchFactoryKind}).
+ */
+export const HOUSE_REGISTRY_KINDS = ['weekly', 'daily'] as const;
+export type HouseRegistryKind = (typeof HOUSE_REGISTRY_KINDS)[number];
+
+/**
+ * The kind the registry records for its LAUNCH factory (`v2.contracts.houseVaultFactory`), restated rule for
+ * rule from ops/markets/build-markets.mjs launchFactoryKind, so the keeper and the builder cannot disagree:
+ *   'weekly'  no launch factory, no entry names it (the implied legacy launch), or the weekly entry does (v8);
+ *   'daily'   the daily entry names it (v9: the redeploy creates DAILY vaults only from its launch factory);
+ *   null      entries of BOTH kinds name it: one launch factory, two kinds. Refused at boot (parseV2Registry), as
+ *             build-markets validateV2 refuses it.
+ * The market's `houseVault` (the launch vault) is its vault of THIS kind. Pure.
+ */
+export function launchFactoryKind(
+  launchFactory: Address | null,
+  factories: readonly { kind: HouseRegistryKind; address: Address }[] | null,
+): HouseRegistryKind | null {
+  if (launchFactory === null) return 'weekly';
+  const launch = launchFactory.toLowerCase();
+  const kinds = new Set((factories ?? []).filter((f) => f.address.toLowerCase() === launch).map((f) => f.kind));
+  if (kinds.has('weekly') && kinds.has('daily')) return null;
+  return kinds.has('daily') ? 'daily' : 'weekly';
+}
+
+/**
+ * What the registry records about the House vaults, so a bot can find them with no environment
+ * variable: the factories (`v2.house.factories`), the launch factory (`v2.contracts.houseVaultFactory`,
+ * read before the registry had the list) and every vault a market names.
+ */
+export interface V2House {
+  /** `v2.house.factories`, in file order. null when the registry has no such list at all (it predates the list). */
+  factories: readonly { kind: HouseRegistryKind; address: Address; deployBlock: bigint | null }[] | null;
+  /** `v2.contracts.houseVaultFactory`: the launch factory. null when unset. */
+  launchFactory: Address | null;
+  /**
+   * Every House vault a market records (`v2.houseVault`, `v2.house.weekly`, `v2.house.daily`), deduplicated. The
+   * launch vault `v2.houseVault` carries the launch factory's kind ({@link launchFactoryKind}): weekly on
+   * v8, daily on v9.
+   */
+  vaults: readonly { ticker: string; kind: HouseRegistryKind; address: Address }[];
 }
 
 export interface UniswapV3Periphery {
@@ -259,7 +337,7 @@ export interface V2MarketBlock {
   strikeTick: bigint;
   puts: boolean;
   /**
-   * The collateral rent this market is registered with (INTERFACE_VERSION 7, c05): millionths of the locked
+   * The collateral rent this market is registered with (INTERFACE_VERSION 7): millionths of the locked
    * collateral per 7 days of remaining life, pinned into every series created afterwards. Falls back to the
    * registry's `v2.fees.mintFeePpm`; null only on a registry that predates v7.
    */
@@ -295,7 +373,14 @@ export interface V2Registry {
   chainId: number | null;
   usdg: Address | null;
   multicall3: Address | null;
-  /** false before O2-01: no top-level `v2` block. Every address is then null. */
+  /**
+   * `shared.safes.admin` and `v2.bots.guardian`, for the guardian mode: after the lock the guardian
+   * key holds no GUARDIAN and only the Admin Safe can veto or pause. Optional
+   * so a registry built by hand (tests) needs neither; null when the file does not name it.
+   */
+  adminSafe?: Address | null;
+  guardianBot?: Address | null;
+  /** false for a registry with no top-level `v2` block. Every address is then null. */
   hasV2Block: boolean;
   interfaceVersion: number | null;
   deployBlock: bigint | null;
@@ -307,6 +392,8 @@ export interface V2Registry {
   flywheel: V2Flywheel | null;
   /** `v2.vault`, the MakerVault limits the deploy sets. null when the registry has no `v2.vault` block. */
   vault: V2VaultLimits | null;
+  /** The House factories and vaults (`v2.house`, `v2.contracts.houseVaultFactory`, `markets[].v2.house`). */
+  house: V2House;
   /** SPEC_DEFAULTS ← registry `v2.defaults`. What a market with no overrides trades on. */
   defaults: MarketParams;
   /** Every market row, in file order, v2 or not. */
@@ -335,7 +422,7 @@ const httpsUrl = z.string().refine((raw) => {
   }
 }, 'not an https URL');
 
-/** A non-negative integer as a decimal string (§3) or an exact JSON integer. */
+/** A non-negative integer as a decimal string or an exact JSON integer. */
 const uint = z.union([z.string(), z.number()]).transform((raw, ctx): bigint => {
   if (typeof raw === 'number') {
     if (!Number.isSafeInteger(raw) || raw < 0) {
@@ -354,7 +441,7 @@ const uint = z.union([z.string(), z.number()]).transform((raw, ctx): bigint => {
 const int = (min: number, max: number) => z.number().int().min(min).max(max);
 
 /** Bounds the contracts (or the calendar) enforce, restated so a bad registry fails at boot and
- *  not as a revert. Ceilings: V2Constants.sol; oracle bounds: architecture §3.4; MAX_TENOR = 45 days
+ *  not as a revert. Ceilings: V2Constants.sol; oracle bounds: SettlementOracle.setMarket; MAX_TENOR = 45 days
  *  caps how many expiries ahead can exist at all (6 weeklies, ~31 session days). */
 const ladderFields = {
   rungs: int(1, 50),
@@ -370,20 +457,44 @@ const paramFields = {
   spotMaxAgeS: int(1, 4 * 86_400),
 };
 const expiriesAheadFields = { weekly: int(0, 6), daily: int(0, 31) };
+/** A non-empty list of distinct weekdays (an empty list is `expiriesAhead.daily: 0`, which says it plainly). */
+const dailyWeekdaysField = z
+  .array(z.enum(WEEKDAYS))
+  .min(1)
+  .refine((days) => new Set(days).size === days.length, { message: 'dailyWeekdays lists a weekday twice' });
+/** The oracle source tuning RegisterMarkets sends, in `v2.defaults` and a market's
+ *  `overrides`. The keeper resolves none of it (it is not a MarketParams field), but both objects are strict, so it
+ *  is named here or the registry would not load. Bounds: ChainlinkFeedSource.setFeed takes maxStale in [1 h, 7 d] and
+ *  maxJump in [1, 5000]; UniV3TwapSource.setPool takes a window in [60, 3600]. */
+const oracleTuningFields = {
+  chainlinkMaxStaleS: int(3_600, 7 * 86_400),
+  chainlinkMaxRoundJumpBps: int(1, 5_000),
+  univ3WindowS: int(60, 3_600),
+};
 
 const ladderPartial = z.object(ladderFields).partial().strict();
-const paramsPartial = z
-  .object({
-    ...paramFields,
-    ladder: z.object({ weekly: ladderPartial, daily: ladderPartial }).partial().strict(),
-    expiriesAhead: z.object(expiriesAheadFields).partial().strict(),
-  })
+const paramsShape = {
+  ...paramFields,
+  ...oracleTuningFields,
+  ladder: z.object({ weekly: ladderPartial, daily: ladderPartial }).partial().strict(),
+  expiriesAhead: z.object(expiriesAheadFields).partial().strict(),
+  dailyWeekdays: dailyWeekdaysField,
+};
+/** A market's `overrides`: strict. */
+const paramsPartial = z.object(paramsShape).partial().strict();
+/** `v2.defaults`: the same, plus the registry-wide `maxFeedAgeS` (V2_MAX_FEED_AGE_S; no per-market form, so an
+ *  `overrides.maxFeedAgeS` is refused as an unknown key). Same [1 h, 7 d] as the feed's maxStale. */
+const defaultsPartial = z
+  .object({ ...paramsShape, maxFeedAgeS: int(3_600, 7 * 86_400) })
   .partial()
   .strict();
 
 const contractsSchema = z
   .object({
     ...Object.fromEntries(V2_CONTRACT_NAMES.map((name) => [name, address.nullable().optional()])),
+    // Not in V2_CONTRACT_NAMES: no bot is POINTED at it through CONTRACT_ENV; it is where the House vaults
+    // are found (V2House.launchFactory). Validated here so a typo fails at boot instead of reading as "no factory".
+    houseVaultFactory: address.nullable().optional(),
     sources: z
       .object(Object.fromEntries(V2_SOURCE_NAMES.map((name) => [name, address.nullable().optional()])))
       .passthrough()
@@ -392,12 +503,26 @@ const contractsSchema = z
   })
   .passthrough();
 
+/** One launch ticker's `v2.house.limits` row: HouseVault.Limits, which mirrors MakerVault.Limits field for field. */
+const houseLimitsSchema = z
+  .object({
+    maxSeriesUnits: uint.refine((v) => v < 2n ** 64n, 'does not fit uint64'),
+    maxTotalNotional: uint.refine((v) => v < 2n ** 128n, 'does not fit uint128'),
+    askToleranceBps: int(0, 10_000),
+    maxBidBpsOfSpot: int(0, 10_000),
+    maxOrderLifetime: int(0, 2 ** 32 - 1),
+    maxDailyOutflow: uint.refine((v) => v > 0n && v < 2n ** 128n, 'must be > 0 and fit uint128'),
+  })
+  .strict();
+
 const v2BlockSchema = z
   .object({
     interfaceVersion: z.number().int().positive(),
     deployBlock: uint.nullable().optional(),
     contracts: contractsSchema.optional(),
     uniswapV3: z.object({ factory: address, swapRouter02: address, quoterV2: address }).passthrough().nullable().optional(),
+    // The guardian mode compares its signer with v2.bots.guardian (the key the lock revokes GUARDIAN from).
+    bots: z.object({ guardian: address.nullable().optional() }).passthrough().nullable().optional(),
     fees: z
       .object({
         premiumFeeBps: int(0, 1_000), // PREMIUM_FEE_CEIL_BPS
@@ -405,7 +530,7 @@ const v2BlockSchema = z
         // against `allowRent` below. Optional so an older registry still parses structurally and the version
         // gate is the message an operator gets.
         mintFeePpm: int(0, MINT_FEE_CEIL_PPM).nullable().optional(), // MINT_FEE_CEIL_PPM
-        // INTERFACE_VERSION 8 (V3-D18). Optional here for the same reason; required by the v8 rules below.
+        // INTERFACE_VERSION 8. Optional here for the same reason; required by the v8 rules below.
         allowRent: z.boolean().nullable().optional(),
         resaleFeeBps: int(0, 1_000), // same ceiling
         takerFeeFlat: uint.refine((v) => v <= 1_000_000n, 'above TAKER_FEE_FLAT_CEIL (1000000)'),
@@ -440,11 +565,63 @@ const v2BlockSchema = z
         feeSplitter: address.nullable().optional(),
         buybackExecutor: address.nullable().optional(),
         deployBlock: uint.nullable().optional(),
+        // The flywheel's deploy knobs (V2_BURN_BPS ... V2_BUYBACK_CAP), read by the deploy, not by a bot.
+        // Strict like its parent; widths only (the contracts enforce their own tighter ceilings at deploy).
+        config: z
+          .object({
+            burnBps: int(0, 10_000),
+            conversionSlippageBps: int(0, 10_000),
+            buybackMaxTotalFeeBps: int(0, 10_000),
+            buybackSlippageBps: int(0, 10_000),
+            buybackTwapWindowS: int(1, 2 ** 32 - 1),
+            buybackMinLiquidity: uint.refine((v) => v < 2n ** 128n, 'does not fit uint128'),
+            buybackCap: uint.refine((v) => v < 2n ** 256n, 'does not fit uint256'),
+            // A change made the ceiling and the cooldown ADMIN-settable. The cooldown
+            // is a uint40 that FeeSplitter.setBuybackCooldown refuses at 0.
+            buybackCapCeiling: uint.refine((v) => v < 2n ** 256n, 'does not fit uint256'),
+            buybackCooldownS: int(1, 2 ** 40 - 1),
+          })
+          .strict()
+          .nullable()
+          .optional(),
       })
       .strict()
       .nullable()
       .optional(),
-    defaults: paramsPartial.optional(),
+    defaults: defaultsPartial.optional(),
+    // `.strict()`, like `flywheel`: an address under a misspelt key would read as "no factory".
+    house: z
+      .object({
+        factories: z.array(
+          z.object({ kind: z.enum(HOUSE_REGISTRY_KINDS), address, deployBlock: uint.nullable().optional() }).strict(),
+        ),
+        // The HouseVault Limits per launch ticker, read by the deploy (the launch tooling writes
+        // them into V2_HOUSE_LIMITS_FILE), not by a bot. Strict like its parent; widths only, as for `vault`
+        // (ops/markets/build-markets.mjs validateVaultLimits holds the launch-set and ceiling rules).
+        limits: z.record(z.string(), houseLimitsSchema).optional(),
+      })
+      .strict()
+      .nullable()
+      .optional(),
+    // The EarnVault skim and Limits, read by the deploy, not by a bot. Strict, so a misspelt key
+    // fails at boot like every other v2 block the deploy reads, instead of passing through unseen.
+    earn: z
+      .object({
+        skimBps: int(0, 10_000),
+        limits: z
+          .object({
+            maxSeriesUnits: uint.refine((v) => v < 2n ** 64n, 'does not fit uint64'),
+            maxOrderNotional: uint.refine((v) => v < 2n ** 128n, 'does not fit uint128'),
+            maxWrittenUnitsPerSeries: uint.refine((v) => v < 2n ** 64n, 'does not fit uint64'),
+            maxWrittenNotional: uint.refine((v) => v < 2n ** 128n, 'does not fit uint128'),
+            maxDailyOutflow: uint.refine((v) => v < 2n ** 128n, 'does not fit uint128'),
+          })
+          .strict()
+          .optional(),
+      })
+      .strict()
+      .nullable()
+      .optional(),
   })
   .passthrough();
 
@@ -472,7 +649,7 @@ const marketV2Schema = z
     wave: z.string().min(1),
     strikeTick: uint.refine((v) => v > 0n && v % 100n === 0n && v < 2n ** 64n, 'must be > 0, a multiple of 100 (PRICE_TICK) and fit uint64'),
     puts: z.boolean(),
-    // INTERFACE_VERSION 7 (c05); optional so a v6 registry still parses.
+    // INTERFACE_VERSION 7; optional so a v6 registry still parses.
     mintFeePpm: int(0, MINT_FEE_CEIL_PPM).nullable().optional(),
     univ3Pool: address.nullable().optional(),
     univ3MinLiquidity: uint.nullable().optional(),
@@ -483,13 +660,22 @@ const marketV2Schema = z
     overrides: paramsPartial.optional(),
     registeredAt: z.union([z.number().int().nonnegative(), z.string().min(1)]).nullable().optional(),
     registerTx: bytes32.nullable().optional(),
+    // The market's launch House vault, and its vault of each kind.
+    houseVault: address.nullable().optional(),
+    house: z.object({ weekly: address.nullable().optional(), daily: address.nullable().optional() }).strict().nullable().optional(),
   })
   .passthrough();
 
 const registrySchema = z
   .object({
     shared: z
-      .object({ chainId: z.number().int().positive().optional(), usdg: address.optional(), multicall3: address.optional() })
+      .object({
+        chainId: z.number().int().positive().optional(),
+        usdg: address.optional(),
+        multicall3: address.optional(),
+        // The guardian mode reads the Admin Safe (after the lock only it holds GUARDIAN).
+        safes: z.object({ admin: address.nullable().optional() }).passthrough().nullable().optional(),
+      })
       .passthrough()
       .optional(),
     v2: v2BlockSchema.nullable().optional(),
@@ -514,7 +700,8 @@ const registrySchema = z
                            RESOLUTION
 //////////////////////////////////////////////////////////////*/
 
-/** `base` with `layer`'s keys replacing it, one level into `ladder.<tenor>` and `expiriesAhead`. Pure. */
+/** `base` with `layer`'s keys replacing it, one level into `ladder.<tenor>` and `expiriesAhead`; `dailyWeekdays` is
+ *  replaced whole. Pure. */
 export function applyOverrides(base: MarketParams, layer: MarketOverrides | undefined): MarketParams {
   if (layer === undefined) return base;
   const ladder = (tenor: Tenor): LadderParams => ({ ...base.ladder[tenor], ...stripUndefined(layer.ladder?.[tenor]) });
@@ -524,6 +711,7 @@ export function applyOverrides(base: MarketParams, layer: MarketOverrides | unde
     spotMaxAgeS: layer.spotMaxAgeS ?? base.spotMaxAgeS,
     ladder: { weekly: ladder('weekly'), daily: ladder('daily') },
     expiriesAhead: { ...base.expiriesAhead, ...stripUndefined(layer.expiriesAhead) },
+    dailyWeekdays: layer.dailyWeekdays ?? base.dailyWeekdays,
   };
 }
 
@@ -688,6 +876,44 @@ export function parseV2Registry(json: unknown, path: string | null = null): V2Re
     };
   });
 
+  // The House block, restated from ops/markets/build-markets.mjs :1056-1078 so a hand-edited registry fails
+  // at boot rather than the bots rolling or quoting under the wrong rule: at most one factory per kind, and the
+  // `weekly` entry IS the launch factory.
+  const launchFactory = (block?.contracts?.houseVaultFactory ?? null) as Address | null;
+  const houseList = block?.house?.factories ?? null;
+  if (houseList !== null) {
+    const kinds = new Set<string>();
+    houseList.forEach((f, i) => {
+      if (kinds.has(f.kind)) problems.push(`v2.house.factories[${i}]: a second ${f.kind} factory; the registry records at most one per kind`);
+      kinds.add(f.kind);
+      if (f.kind === 'weekly' && launchFactory !== null && f.address !== launchFactory) {
+        problems.push(`v2.house.factories[${i}]: the weekly factory ${f.address} is not v2.contracts.houseVaultFactory ${launchFactory}: the weekly entry IS the launch factory`);
+      }
+    });
+  }
+  // The launch factory's kind, as build-markets decides it. A launch factory recorded under both kinds is
+  // refused by name (build-markets validateV2 refuses the same record): the launch vault's kind would be a guess.
+  const launchKind = launchFactoryKind(launchFactory, houseList);
+  if (launchKind === null) {
+    problems.push(`v2.house.factories: the launch factory v2.contracts.houseVaultFactory ${launchFactory} is recorded as BOTH the weekly and the daily factory: one launch factory has one kind (weekly on v8, daily on v9)`);
+  }
+  const houseVaults: { ticker: string; kind: HouseRegistryKind; address: Address }[] = [];
+  const seenVaults = new Set<string>();
+  const addVault = (ticker: string, kind: HouseRegistryKind, vault: string | null | undefined) => {
+    if (vault === null || vault === undefined || seenVaults.has(vault.toLowerCase())) return;
+    seenVaults.add(vault.toLowerCase());
+    houseVaults.push({ ticker, kind, address: vault as Address });
+  };
+  for (const m of data.markets) {
+    // `houseVault` is the launch vault: the market's vault of the LAUNCH factory's kind (build-markets.mjs, the
+    // launchKind check in the per-market House block). It was labelled `weekly` unconditionally, so
+    // on v9 (daily launch factory, houseVault == house.daily) the daily vault was listed as weekly and the dedupe
+    // dropped its correct `daily` entry. `?? 'weekly'` is never reached: a null kind is refused above.
+    addVault(m.ticker, launchKind ?? 'weekly', m.v2?.houseVault);
+    addVault(m.ticker, 'weekly', m.v2?.house?.weekly);
+    addVault(m.ticker, 'daily', m.v2?.house?.daily);
+  }
+
   if (problems.length > 0) throw new V2RegistryError(`${where} is not usable:\n  ${problems.join('\n  ')}`, problems);
 
   return {
@@ -695,6 +921,8 @@ export function parseV2Registry(json: unknown, path: string | null = null): V2Re
     chainId: data.shared?.chainId ?? null,
     usdg: data.shared?.usdg ?? null,
     multicall3: data.shared?.multicall3 ?? null,
+    adminSafe: data.shared?.safes?.admin ?? null,
+    guardianBot: block?.bots?.guardian ?? null,
     hasV2Block: block !== null,
     interfaceVersion: block?.interfaceVersion ?? null,
     deployBlock: block?.deployBlock ?? null,
@@ -730,6 +958,11 @@ export function parseV2Registry(json: unknown, path: string | null = null): V2Re
           maxDailyOutflow: block.vault.maxDailyOutflow,
         }
       : null,
+    house: {
+      factories: houseList === null ? null : houseList.map((f) => ({ kind: f.kind, address: f.address, deployBlock: f.deployBlock ?? null })),
+      launchFactory,
+      vaults: houseVaults,
+    },
     defaults,
     markets,
   };

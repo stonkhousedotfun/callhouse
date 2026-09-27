@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /* -------------------------------------------------------------------------------------------------
- * ops/v2/notifier-smoke.mjs — O3-405: does a deployed notifier actually work?
+ * ops/v2/notifier-smoke.mjs — does a deployed notifier actually work?
  *
  * The notifier's own suite proves the code. This proves the DEPLOYMENT: that the process that
  * answers a hostname has a database, a Telegram bot, a VAPID pair and the rules engine the dapp
@@ -278,14 +278,17 @@ export async function runSmoke(options) {
     expect(body.status === "ok", `status is ${JSON.stringify(body.status)}`);
     expect(body.telegramBot === "ok", `telegramBot is ${JSON.stringify(body.telegramBot)}: the bot's username was never read, so no wallet can be handed a link to attach a chat`);
     expect(isObject(body.channels), `channels is ${JSON.stringify(body.channels)}, expected the per-channel breaker states`);
-    const rules = isObject(body.rules) ? body.rules : {};
+    // A /health with no rules block did not report its rules engine at all; before this it read as {} and
+    // the check passed, printing "rules=off" for a value nobody read.
+    expect(isObject(body.rules), `rules is ${JSON.stringify(body.rules)}: the notifier did not report its rules engine, so whether any alert is evaluated is unknown`);
+    const rules = body.rules;
     expect(
       rules.status !== "failing",
       `the rules engine is failing (${rules.consecutiveFailures ?? "?"} consecutive failures, last success ${rules.lastSuccessAt ?? "never"}): no alert of any kind is being evaluated`,
     );
     expect(r.headers.get("cache-control") === "no-store", `cache-control is ${JSON.stringify(r.headers.get("cache-control"))}, expected no-store`);
     expect(r.headers.get("referrer-policy") === "no-referrer", `referrer-policy is ${JSON.stringify(r.headers.get("referrer-policy"))}, expected no-referrer (the email pages carry their token in the URL)`);
-    return `status=${body.status} database=${body.database} rules=${rules.status ?? "off"} channels=${JSON.stringify(body.channels)}`;
+    return `status=${body.status} database=${body.database} rules=${rules.status ?? "?"} channels=${JSON.stringify(body.channels)}`;
   });
 
   /* ---- cors ---- */
@@ -488,7 +491,10 @@ export async function runSmoke(options) {
     expect(deleted.status === 200, `DELETE /v1/subscriptions/${subscriptionId} answered ${deleted.status}${errorOf(deleted)}`);
     expect(deleted.json?.ok === true, `it answered ${JSON.stringify(deleted.json)}, expected { ok: true }`);
     const list = await request("GET", "/v1/subscriptions", { token });
-    const still = (Array.isArray(list.json?.items) ? list.json.items : []).some((x) => isObject(x) && x.id === subscriptionId);
+    // A list read that failed is not an empty list. Read as [] it "proved" the row was gone.
+    expect(list.status === 200 && Array.isArray(list.json?.items),
+      `GET /v1/subscriptions after the DELETE answered ${list.status}${errorOf(list)}: whether ${subscriptionId} is gone is unknown`);
+    const still = list.json.items.some((x) => isObject(x) && x.id === subscriptionId);
     expect(!still, `${subscriptionId} is still listed after DELETE: this smoke leaves a subscription behind on every run`);
     const twice = await request("DELETE", `/v1/subscriptions/${id}`, { token });
     expect(twice.status === 404, `deleting it a second time answered ${twice.status}, expected 404`);

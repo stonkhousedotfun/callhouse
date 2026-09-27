@@ -4,7 +4,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 
 import { teardown } from "./teardown";
 
-// The shape T-452 found: the row is stored lowercase, the teardown is handed the checksummed form.
+// The shape that broke it: the row is stored lowercase, the teardown is handed the checksummed form.
 const STORED = `0x${"a1".repeat(20)}`;
 const CHECKSUMMED = getAddress(STORED);
 

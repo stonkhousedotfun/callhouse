@@ -1,14 +1,16 @@
 {
   "provenance": {
-    "capturedAt": "2026-09-19",
+    "capturedAt": "2026-09-24",
     "machine": "Apple M3 Max, darwin arm64",
     "node": "v26.5.0",
+    "loadAverage": "about 80 (1-minute; 30 lanes compiling on the same machine)",
     "runs": 3,
     "samples": 20,
-    "method": "Median of three local runs: ordered PGlite replay through real Clearinghouse handlers and the committed holiday-table SQL path; each API p95 uses 20 uncached in-process Hono requests after two warm-ups"
+    "method": "Median of three local runs of metric / calibration, each metric divided by the same-run calibration measured on the same PGlite instance immediately before and after it (mean of the two; each calibration the median of 3 runs of 200 single-row inserts, 200 point selects, one scan and a JSON round trip). Replay: ordered PGlite replay through the real Clearinghouse handlers and the committed holiday-table SQL path. Each API p95: 20 uncached in-process Hono requests after two warm-ups. Ceilings are 8x the median ratio.",
+    "registryRepin": "2026-09-24: registryProjectionSha256 re-pinned from e9aa8541... (the registry this baseline was measured on) to f2e1efb7... WITHOUT re-measuring. The only projection change between them is SPCX v2.overrides.expiriesAhead { weekly: 2, daily: 0 }. The measured shape does not read it: scalePlan (v2-scale.ts) takes its expiry counts from SCALE_EXPIRIES_AHEAD, not the registry, and reads only the ladder, strike tick, puts and mint fee, none of which changed; no indexer runtime path reads expiriesAhead (git grep over indexer/src and indexer/lib, generated files and tests aside). The shape assertion in v2-scale.test.ts still passes unchanged."
   },
-  "baseCommit": "2454c8744c445c3f3673ad353169021e21cbcf22",
-  "registryProjectionSha256": "ff8e114ec219b6e0f6e4e9478c24eb30b3190b8a747630e8dea70334c3e173d7",
+  "baseCommit": "the pre-launch indexer tree measured on 2026-09-24",
+  "registryProjectionSha256": "f2e1efb72ec88e0165410ac7e3095282d9e6020fed24815eb0927bce68922f44",
   "shape": {
     "markets": 20,
     "additions": 19,
@@ -18,18 +20,30 @@
     "calls": 450,
     "puts": 0
   },
-  "metricsMs": {
-    "handlerReplay": 788.13,
-    "marketsP95": 3.74,
-    "cardsP95": 69.85,
-    "marketSeriesP95": 63.29,
-    "seriesDetailP95": 4.05
+  "calibration": {
+    "rows": 200,
+    "repeats": 3,
+    "medianMsAtCapture": 232.58
   },
-  "ceilingsMs": {
-    "handlerReplay": 6000,
-    "marketsP95": 32,
-    "cardsP95": 650,
-    "marketSeriesP95": 550,
-    "seriesDetailP95": 35
+  "metricsPerCalibration": {
+    "handlerReplay": 13.1069,
+    "marketsP95": 0.3163,
+    "cardsP95": 1.3757,
+    "marketSeriesP95": 1.5967,
+    "seriesDetailP95": 0.2039
+  },
+  "ceilingsPerCalibration": {
+    "handlerReplay": 104.8552,
+    "marketsP95": 2.5304,
+    "cardsP95": 11.0056,
+    "marketSeriesP95": 12.7736,
+    "seriesDetailP95": 1.6312
+  },
+  "metricsMsAtCapture": {
+    "handlerReplay": 3048.34,
+    "marketsP95": 57.6,
+    "cardsP95": 360.2,
+    "marketSeriesP95": 386.86,
+    "seriesDetailP95": 53.09
   }
 }

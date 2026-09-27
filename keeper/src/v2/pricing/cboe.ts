@@ -18,7 +18,7 @@
  * the strike rises; both prices are convex in strike). For calls the two functions below answer
  * exactly what vol.ts's do; a test pins that on every row of the real chain.
  *
- * THE PROVIDER SEAM (K3-311). The Cboe file is one provider: cboeToNormalized turns it into the
+ * THE PROVIDER SEAM. The Cboe file is one provider: cboeToNormalized turns it into the
  * provider-neutral NormalizedChain (chain.ts) the moment it is parsed, and everything after this file
  * (the gates below, the cache, surface.ts, fair.ts) reads only that. The gates take chain.ts
  * ListedOption, which a row becomes only from a supplied quote plus the provider's greeks; a provider
@@ -98,7 +98,10 @@ export type PricingReason =
   | 'no-quotes'
   | 'quotes-inconsistent'
   | 'expired'
-  | 'model-uncertainty';
+  | 'model-uncertainty'
+  // The pool TWAP and the Chainlink spot disagree beyond maxPoolChainlinkDivergenceBps (fair.ts).
+  // A published /fair reason code, so the pricer and ops/v2/monitor.mjs already know it.
+  | 'source-disagreement';
 
 export interface PricingFailure {
   ok: false;
@@ -404,4 +407,40 @@ export class ChainCache {
     this.entries.set(ticker, entry);
     return entry;
   }
+}
+
+/*//////////////////////////////////////////////////////////////
+                             WARM-UP
+//////////////////////////////////////////////////////////////*/
+
+/** One ticker's warm-up: whether its first download produced a usable chain. */
+export interface WarmResult {
+  ticker: string;
+  ok: boolean;
+  /** The refusal reason, or the thrown message, when not ok. */
+  reason: string | null;
+}
+
+/**
+ * Downloads every market's chain once, one ticker after another, so the first /fair after a boot does
+ * not wait for its download.
+ * Sequential on purpose: Cboe's free file blocks an IP that bursts, and a boot is exactly a burst.
+ * `load` is the service's own chain path (PricingService.surface), so a warmed chain lands in the same
+ * cache /fair reads and obeys the same refetch floor. Never rejects: a failed download is an entry the
+ * cache already records, and the first /fair retries it on the failure schedule.
+ */
+export async function warmChains(
+  tickers: readonly string[],
+  load: (ticker: string) => Promise<{ ok: true } | { ok: false; reason: string }>,
+): Promise<WarmResult[]> {
+  const results: WarmResult[] = [];
+  for (const ticker of tickers) {
+    try {
+      const outcome = await load(ticker);
+      results.push({ ticker, ok: outcome.ok, reason: outcome.ok ? null : outcome.reason });
+    } catch (error) {
+      results.push({ ticker, ok: false, reason: error instanceof Error ? error.message : String(error) });
+    }
+  }
+  return results;
 }

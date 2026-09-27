@@ -9,7 +9,7 @@
  * the devnet exists, and every number in them is load-bearing: a longId that is not
  * keccak256(abi.encode(underlying, isPut, strike, expiry)) & ~1 would send a dapp to a series that
  * does not exist; a `formatted` that disagrees with `raw` would hide a decimals bug; a card whose
- * multiple does not follow ADR-12 would teach the UI a headline the contracts cannot pay. So no
+ * multiple does not follow the payout rule would teach the UI a headline the contracts cannot pay. So no
  * id, no Money and no derived figure below is typed by hand. What IS typed by hand is the
  * scenario: who traded what, at which spot, when, and at what price where a human (not the
  * pricing model) chose it. Everything the indexer would derive — balances, open interest,
@@ -20,7 +20,7 @@
  * red test, not a silent drift.
  *
  * THE SCENARIO ("now" = 1789592400 = Wed 2026-09-16 21:00Z = 17:00 New York, after the close).
- * README.md in this directory has the full table. In short: NVDA (two sources) and TSLA
+ * In short: NVDA (two sources) and TSLA
  * (Chainlink only), calls only; a settled ITM NVDA weekly (Fri 09-11) with wins, losses, one
  * position below the 0.10 USDG integrity floor and one holder the cranker cannot redeem; an NVDA
  * daily (09-16) waiting as an uncorroborated candidate; a TSLA daily (09-15) the guardian vetoed;
@@ -157,7 +157,7 @@ const MARKETS = {
     ticker: "NVDA",
     name: "NVIDIA • Robinhood Token",
     underlying: "0xd0601CE157Db5bdC3162BbaC2a2C8aF5320D9EEC",
-    // T-OP-099. In the owner's launch set (tier1.json launchSet: NVDA, SPCX).
+    // In the launch set (tier1.json launchSet: NVDA, SPCX).
     launch: true,
     strikeTick: usd("1"),
     spot: usd("215.50"),
@@ -168,7 +168,7 @@ const MARKETS = {
     settlement: { sourceCount: 2, uncorroboratedDelayS: UNCORROBORATED_DELAY, route: { venue: "v3", fee: 100 } },
     baseIv: 0.42,
     // Cboe expiries listed for the root on 09-16 (tier1.json cboe.expiries): Thu 09-17 is not
-    // one, so the pricing service interpolates it ("model"); 09-18 and 09-25 are "cboe".
+    // one, so the pricing service interpolates it ("model"); 09-18 and 09-25 are "cboe" (a Cboe-era label: on Massive every answer is "model").
     cboeExpiries: [EXPIRY["09-16"], EXPIRY["09-18"], EXPIRY["09-25"]],
     mvSeriesCapUnits: 400n,
     mvQuoteUnits: 250n,
@@ -177,7 +177,7 @@ const MARKETS = {
     ticker: "TSLA",
     name: "Tesla • Robinhood Token",
     underlying: "0x322F0929c4625eD5bAd873c95208D54E1c003b2d",
-    // T-OP-099. Registered and live on chain in this fixture, yet NOT in the launch set: the shape a
+    // Registered and live on chain in this fixture, yet NOT in the launch set: the shape a
     // `--wave wave1` broadcast would produce, and the case the app must render as deferred.
     launch: false,
     strikeTick: usd("5"),
@@ -240,6 +240,8 @@ const ACCESS_ROLES = [
   { id: 8, name: "PRICER", delayS: 0, holders: [{ address: KEYS.pricer, delayS: 0 }] },
   { id: 9, name: "QUOTER", delayS: 0, holders: [{ address: SAFES.admin, delayS: 0 }, { address: KEYS.quoter, delayS: 0 }] },
   { id: 10, name: "BUYBACK", delayS: 0, holders: [{ address: KEYS.cranker, delayS: 0 }] },
+  // The Admin Safe's zero-delay first-listing lane; 0 here is its planned delay too.
+  { id: 11, name: "NEW_LISTING", delayS: 0, holders: [{ address: SAFES.admin, delayS: 0 }] },
 ];
 
 // The nonce is part of the row's identity, not decoration: AccessManager REUSES an operation id
@@ -386,6 +388,8 @@ function addSeries(ticker, date, tenor, strike, extra = {}) {
     expiry,
     tenor,
     mintCutoff: expiry - SETTLEMENT_WINDOW,
+    // Pinned at creation from the market's fee, as Clearinghouse.createSeries does.
+    exerciseFeeBps: Number(FEES.exerciseFeeBps),
     mintFeePpm: 0,
     mintFeesHeld: 0n,
     mintFeesAccrued: 0n,
@@ -902,6 +906,7 @@ const seriesRef = (s) => ({
   expiry: s.expiry,
   tenor: s.tenor,
   mintCutoff: s.mintCutoff,
+  exerciseFeeBps: s.exerciseFeeBps,
   mintFeePpm: s.mintFeePpm,
   mintFeesHeld: money(s.mintFeesHeld, 18),
   mintFeesAccrued: money(s.mintFeesAccrued, 18),
@@ -945,8 +950,12 @@ function quoteOf(s) {
   return {
     bestBid: bids[0]?.price ?? null,
     bestAsk: asks[0]?.price ?? null,
-    bidUnits: bids[0]?.units ?? "0",
-    askUnits: asks[0]?.units ?? "0",
+    // bid/askUnits are TOTAL depth, as indexer/lib/v2/book.ts quoteFromBook serves them; this used to send the
+    // best level there. The units at the best price are bestBid/bestAskUnits, which the market page prices a share on.
+    bidUnits: bids.reduce((sum, level) => sum + BigInt(level.units), 0n).toString(),
+    askUnits: asks.reduce((sum, level) => sum + BigInt(level.units), 0n).toString(),
+    bestBidUnits: bids[0]?.units ?? "0",
+    bestAskUnits: asks[0]?.units ?? "0",
     fair: f ? usdg(f.fair) : null,
     iv: f ? f.iv : null,
     delta: f ? f.delta : null,
@@ -958,10 +967,10 @@ const openInterest = (s) => s.supply;
 const volumeOf = (fills) => sumBy(fills, (f) => f.premium);
 const within = (fills, seconds) => fills.filter((f) => f.ts > NOW - seconds);
 /**
- * T-425. The instant every trailing window in these fixtures ends at, published as `asOf` beside the
+ * The instant every trailing window in these fixtures ends at, published as `asOf` beside the
  * figures it qualifies. It is NOW because this generator has no host clock at all -- NOW is the
  * scenario's indexed state, which is exactly what the routes anchor to via indexedHead(). It is NOT
- * a wall clock, which is the thing T-188 removed from those routes.
+ * a wall clock, which is the thing those routes no longer read.
  *
  * KNOWN FIDELITY GAP: health.json models a 2-second indexer lag (block at NOW - 2, lagSeconds 2)
  * while `within` anchors at NOW, so these fixtures never exercise a head BEHIND the scenario clock --
@@ -1000,7 +1009,7 @@ function settlementOf(s) {
   };
 }
 
-// --- cards (ADR-12) -----------------------------------------------------------------------------
+// --- cards --------------------------------------------------------------------------------------
 /**
  * The card's scenario price. Call: T = roundUp(K × (1 + bps/1e4), strikeTick). Put: T =
  * roundDown(K × (1 − bps/1e4), strikeTick), never below one strikeTick.
@@ -1069,7 +1078,7 @@ function cardOf(s) {
   };
 }
 
-// --- wins (X2-03 integrity rules) ----------------------------------------------------------------
+// --- wins (integrity rules) ----------------------------------------------------------------------
 const MIN_COUNTED_COST = usd("0.10");
 const POSITIONS = []; // every settled long position, counted or not
 for (const s of SERIES.filter((x) => x.settledAt !== null)) {
@@ -1127,7 +1136,7 @@ const put = (path, body) => {
 put("health.json", { status: "ok", block: blockAt(NOW - 2).toString(), lagSeconds: 2, interfaceVersion: INTERFACE_VERSION });
 
 /**
- * /v2/services — the readiness of a service the indexer does NOT run (T-424; the route existed with no
+ * /v2/services — the readiness of a service the indexer does NOT run (the route once existed with no
  * fixture, which is why the coverage test was red). The scenario's pricer is up: `healthy` is true only
  * when `reason` is "ready", and `reasons` is the pricer's own closed set, empty while it is ready.
  * `lastEvaluationAt` is its last completed tick, deliberately EARLIER than `checkedAt` -- the indexer
@@ -1162,7 +1171,7 @@ put("config.json", {
     makerRebateBps: Number(FEES.makerRebateBps),
     exerciseFeeBps: Number(FEES.exerciseFeeBps),
     mintFeePpm: Number(FEES.mintFeePpm),
-    // T-OP-120 (G7): the registry's payoutAdapter is null (ops/markets/tier1.json), so no PayoutAdapterSet has
+    // The registry's payoutAdapter is null (ops/markets/tier1.json), so no PayoutAdapterSet has
     // been indexed and the Clearinghouse slippage bound is unknown to the wire; the app uses the 300 bps ceiling.
     maxPayoutSlippageBps: null,
   },
@@ -1199,13 +1208,19 @@ put(
       underlying: m.underlying,
       status: "live",
       launch: m.launch,
+      // No guardian brake is on in the scenario.
+      tradingPaused: false,
+      mintPaused: false,
       spot: usdg(m.spot),
       spotUpdatedAt: m.spotUpdatedAt,
       strikeTick: usdg(m.strikeTick),
       puts: false,
       mintFeePpm: 0,
       settlement: m.settlement,
-      expiries: [...new Set(ss.filter((s) => ["open", "cutoff"].includes(statusOf(s))).map((s) => s.expiry))].sort((a, b) => a - b),
+      // `expiries` is the days still open for writing, as the indexer serves them
+      // (status `open`); days past the mint cutoff that still trade resale asks and bids are listed apart.
+      expiries: [...new Set(ss.filter((s) => statusOf(s) === "open").map((s) => s.expiry))].sort((a, b) => a - b),
+      cutoffExpiries: [...new Set(ss.filter((s) => statusOf(s) === "cutoff").map((s) => s.expiry))].sort((a, b) => a - b),
       stats: {
         volume24h: usdg(volumeOf(within(fills, DAY))),
         premium7d: usdg(volumeOf(within(fills, 7 * DAY).filter((f) => f.primary))),
@@ -1626,16 +1641,91 @@ put("flywheel.json", {
   distributions: FLYWHEEL_DISTRIBUTIONS,
 });
 
+// Earn/House APY, venue and earliestWithdrawal. MIRRORED from
+// indexer/src/v2/earnYield.ts (trailingApy, earnEarliestWithdrawal, houseEarliestWithdrawal), not retyped per
+// vault: the scenario states the chain facts (samples, wallet, venue liquidity, queue, position) and these
+// derive the wire values the way the producer does. Before this, no fixture carried any of these fields, so
+// fixture mode showed "Unavailable" for every vault's earliest withdrawal and nothing exercised the rest.
+const YEAR_S = 365 * DAY;
+const trailingApy = (end, start, windowS) => {
+  if (end === undefined) return { bps: null, reason: "no-samples", from: null, to: null };
+  if (start === undefined || end.ts - start.ts < windowS) return { bps: null, reason: "short-history", from: null, to: end.ts };
+  if (start.price <= 0n) return { bps: null, reason: "no-price", from: start.ts, to: end.ts };
+  const span = end.ts - start.ts;
+  const ratio = Number((end.price * 10n ** 12n) / start.price) / 1e12;
+  const bps = Math.round(Math.expm1((Math.log(ratio) * YEAR_S) / span) * 10_000);
+  if (!Number.isSafeInteger(bps)) return { bps: null, reason: "out-of-range", from: start.ts, to: end.ts };
+  return { bps, reason: null, from: start.ts, to: end.ts };
+};
+/** The producer's pick: the newest sample, and the newest one at or before `newest.ts - windowS`. */
+const apyOver = (samples, windowS) => {
+  const end = samples.at(-1);
+  const start = end === undefined ? undefined : samples.filter((s) => s.ts <= end.ts - windowS).at(-1);
+  return trailingApy(end, start, windowS);
+};
+const EARN_NOT_READ = { kind: "unknown", at: null, reason: "not-read", liquidityCap: null };
+const earnEarliest = (i) => {
+  if (i.positionOpen === null) return { ...EARN_NOT_READ };
+  if (i.positionOpen) return { kind: "queued", at: i.positionExpiry, reason: "open-position", liquidityCap: null };
+  // The producer's venue-unreadable branch, before the queue as in earnEarliestWithdrawal.
+  if (i.venueUnreadable === true) return { kind: "queued", at: null, reason: "venue-unreadable", liquidityCap: null };
+  if (i.queueOpen === null) return { ...EARN_NOT_READ };
+  if (i.queueOpen) return { kind: "queued", at: null, reason: "queue-ahead", liquidityCap: null };
+  const venue = i.venueAttached ? i.venue : 0n;
+  if (i.wallet === null || venue === null) return { ...EARN_NOT_READ };
+  const cap = i.wallet + venue;
+  if (cap === 0n) return { kind: "queued", at: null, reason: "venue-liquidity", liquidityCap: "0" };
+  return { kind: "now", at: NOW, reason: "liquid", liquidityCap: cap.toString() };
+};
+// houseEarliest uses the SETTLEMENT_WINDOW already declared above (mint cutoff). It must stay equal to the
+// indexer module the producer imports, so a one-sided edit cannot make the fixtures lie.
+const settlementWindowSrc = readFileSync(join(REPO, "indexer/src/v2/settlementWindow.ts"), "utf8");
+const settlementWindowMatch = settlementWindowSrc.match(/export const SETTLEMENT_WINDOW = (\d+);/);
+if (settlementWindowMatch === null || Number(settlementWindowMatch[1]) !== SETTLEMENT_WINDOW) {
+  throw new Error("indexer/src/v2/settlementWindow.ts SETTLEMENT_WINDOW disagrees with this generator");
+}
+const houseEarliest = (kind, epochEnd) => {
+  if (epochEnd === null) return { kind, at: null, reason: "not-read" };
+  // Same rule as houseEarliestWithdrawal: shut from epochEnd - SETTLEMENT_WINDOW until the roll.
+  if (NOW + SETTLEMENT_WINDOW >= epochEnd) return { kind, at: null, reason: "queue-closed" };
+  return { kind, at: epochEnd, reason: "epoch-boundary" };
+};
+
 // Lending vault at /v2/earn. skimmed is null (no skim observed) vs deposited "0" would be a
 // measured empty book; lastAdapterMove.delivered is null (move not reported), not zero.
-put("earn.json", {
-  configured: true,
-  vaults: [
+// Five vaults, one per earliestWithdrawal reason the Earn side has (queue-ahead, liquid, open-position,
+// venue-liquidity, not-read), and a sixth (venue-unreadable), with the venue absent (no adapter), advisory (Steakhouse-like, `position`), standard
+// (`maxWithdraw`) and unread, and APY figures next to short-history, no-samples and no-price nulls.
+{
+  // Per-share price samples, asset base units per 1e18 shares, hourly in the producer (EARN_SAMPLE_INTERVAL_S); here
+  // only the ones a window picks matter. 10 USDG a share growing to 10.02 over 8 days is ~9.5 % a year.
+  const sample = (ageS, price) => ({ ts: NOW - ageS, price: usd(price) });
+  const young = [sample(3 * DAY, "10"), sample(0, "10.001")];
+  const grown = [sample(31 * DAY + 3_600, "0"), sample(8 * DAY, "10"), sample(DAY + 60, "10.015"), sample(0, "10.02")];
+  const venueGrowth = [sample(8 * DAY, "1.000"), sample(DAY, "1.0012"), sample(0, "1.0014")];
+  const venueOf = (label, name, samples, advisory, withdrawable, position) => {
+    const amount = advisory ? position : withdrawable;
+    return {
+      address: derive(`contract:EarnVenue.${label}`),
+      name,
+      apy24h: apyOver(samples, DAY),
+      apy7d: apyOver(samples, 7 * DAY),
+      withdrawable: amount === null ? null : amount.toString(),
+      withdrawableSource: amount === null ? null : advisory ? "position" : "maxWithdraw",
+      position: position === null ? null : position.toString(),
+    };
+  };
+  const flatMark = (total, supply) => ({
+    indicativeAssetsPerShare: ((total * 10n ** 18n) / supply).toString(),
+    indicativeTotalAssets: total.toString(),
+    hasOpenPosition: false,
+  });
+  const vaults = [
     {
       vault: derive("contract:EarnVault"),
       asset: USDG.address,
       adapter: null,
-      paused: false,
+      fundingEnabled: true,
       sharesSupply: tokens("100").toString(),
       deposited: usd("1000").toString(),
       skimmed: null,
@@ -1648,11 +1738,115 @@ put("earn.json", {
         ts: NOW - 1_800,
         tx: txHash("earn:adapter:pull"),
       },
+      // The live mark (earn.ts readEarnLive), present on every vault. A flat vault's mark is its
+      // assets: indicativeTotalAssets = the 1000 USDG deposited, and indicativeAssetsPerShare =
+      // mulDiv(total, 1e18, supply) (EarnVault.indicativeAssetsPerShare) = 1000e6 * 1e18 / 100e18 = 10 USDG.
+      // The all-null (not read) shape is `live-response.fixture.ts`'s and routes.test's.
+      ...flatMark(usd("1000"), tokens("100")),
+      apy7d: apyOver(young, 7 * DAY),
+      apy30d: apyOver(young, 30 * DAY),
+      totalAssets: usd("1000").toString(),
+      venue: null,
+      earliestWithdrawal: earnEarliest({ positionOpen: false, queueOpen: true, wallet: usd("0"), venueAttached: false, venue: null }),
     },
-  ],
-});
+    {
+      vault: derive("contract:EarnVault.venue"),
+      asset: USDG.address,
+      adapter: derive("contract:EarnVenueAdapter.steakhouse"),
+      fundingEnabled: true,
+      sharesSupply: tokens("200").toString(),
+      deposited: usd("2000").toString(),
+      skimmed: usd("0").toString(),
+      queue: { depth: 0, oldestRequestedAt: null },
+      lastAdapterMove: null,
+      ...flatMark(usd("2004"), tokens("200")),
+      apy7d: apyOver(grown, 7 * DAY),
+      apy30d: apyOver(grown, 30 * DAY),
+      totalAssets: usd("2004").toString(),
+      // An advisory venue (a Morpho Vault V2): maxWithdraw reads 0 by design, so the figure is the position.
+      venue: venueOf("steakhouse", "Steakhouse USDG", venueGrowth, true, usd("0"), usd("1500")),
+      earliestWithdrawal: earnEarliest({ positionOpen: false, queueOpen: false, wallet: usd("504"), venueAttached: true, venue: usd("1500") }),
+    },
+    {
+      vault: derive("contract:EarnVault.open"),
+      asset: USDG.address,
+      adapter: derive("contract:EarnVenueAdapter.standard"),
+      fundingEnabled: true,
+      sharesSupply: tokens("50").toString(),
+      deposited: usd("500").toString(),
+      skimmed: null,
+      queue: { depth: 0, oldestRequestedAt: null },
+      lastAdapterMove: null,
+      // A position is open: the convert views refuse, the mark is the display floor.
+      indicativeAssetsPerShare: ((usd("480") * 10n ** 18n) / tokens("50")).toString(),
+      indicativeTotalAssets: usd("480").toString(),
+      hasOpenPosition: true,
+      apy7d: apyOver([], 7 * DAY),
+      apy30d: apyOver([], 30 * DAY),
+      totalAssets: null,
+      venue: venueOf("standard", "USDG Lending", [], false, usd("120"), usd("300")),
+      earliestWithdrawal: earnEarliest({ positionOpen: true, positionExpiry: EXPIRY["09-18"], queueOpen: false, wallet: usd("0"), venueAttached: true, venue: usd("120") }),
+    },
+    {
+      vault: derive("contract:EarnVault.dry"),
+      asset: USDG.address,
+      adapter: derive("contract:EarnVenueAdapter.dry"),
+      fundingEnabled: true,
+      sharesSupply: tokens("30").toString(),
+      deposited: usd("300").toString(),
+      skimmed: null,
+      queue: { depth: 0, oldestRequestedAt: null },
+      lastAdapterMove: null,
+      ...flatMark(usd("300"), tokens("30")),
+      apy7d: apyOver(grown, 7 * DAY),
+      apy30d: apyOver(grown, 30 * DAY),
+      totalAssets: usd("300").toString(),
+      // A standard venue at full utilisation: nothing to withdraw, and the wallet is empty, so redeem queues.
+      venue: venueOf("dry", "USDG Lending (full)", venueGrowth, false, usd("0"), usd("300")),
+      earliestWithdrawal: earnEarliest({ positionOpen: false, queueOpen: false, wallet: usd("0"), venueAttached: true, venue: usd("0") }),
+    },
+    {
+      vault: derive("contract:EarnVault.unread"),
+      asset: null,
+      adapter: derive("contract:EarnVenueAdapter.unread"),
+      fundingEnabled: null,
+      sharesSupply: null,
+      deposited: null,
+      skimmed: null,
+      lastAdapterMove: null,
+      // The RPC failed: every live read is null, and nothing is guessed.
+      indicativeAssetsPerShare: null,
+      indicativeTotalAssets: null,
+      hasOpenPosition: null,
+      totalAssets: null,
+      venue: { address: null, name: null, apy24h: apyOver([], DAY), apy7d: apyOver([], 7 * DAY), withdrawable: null, withdrawableSource: null, position: null },
+      earliestWithdrawal: earnEarliest({ positionOpen: null, queueOpen: null, wallet: null, venueAttached: true, venue: null }),
+    },
+    {
+      // The venue adapter's reads revert, so the vault prices nothing. totalAssets() still shows
+      // the last known venue value (a display figure), the adapter's own reads are null, and redeem queues even though
+      // the 100 USDG wallet could pay.
+      vault: derive("contract:EarnVault.unreadable"),
+      asset: USDG.address,
+      adapter: derive("contract:EarnVenueAdapter.broken"),
+      fundingEnabled: true,
+      sharesSupply: tokens("40").toString(),
+      deposited: usd("400").toString(),
+      skimmed: null,
+      queue: { depth: 0, oldestRequestedAt: null },
+      lastAdapterMove: null,
+      ...flatMark(usd("400"), tokens("40")),
+      apy7d: apyOver(young, 7 * DAY),
+      apy30d: apyOver(young, 30 * DAY),
+      totalAssets: usd("400").toString(),
+      venue: { address: null, name: null, apy24h: apyOver([], DAY), apy7d: apyOver([], 7 * DAY), withdrawable: null, withdrawableSource: null, position: null },
+      earliestWithdrawal: earnEarliest({ positionOpen: false, queueOpen: false, venueUnreadable: true, wallet: usd("100"), venueAttached: true, venue: null }),
+    },
+  ];
+  put("earn.json", { configured: true, vaults });
+}
 
-// House vault tape. Epochs are Friday 20:00Z settlement to the next Friday (P8-06).
+// House vault tape. Epochs are Friday 20:00Z settlement to the next Friday.
 // The running epoch (09-11 → 09-18, NOW is Wed 09-16) has nav: null — never 0, never omitted.
 // 09-04 → 09-11 is a published LOSING epoch (resultUsdg negative).
 {
@@ -1682,28 +1876,79 @@ put("earn.json", {
     },
     resultUsdg: money(-usd("180"), 6),
   };
+  // TSLA's vault is a DAILY one whose 09-15 -> 09-16 epoch
+  // ended at 20:00Z, an hour before NOW, and has not rolled: the queue is closed until the roll.
+  // NVDA's weekly epoch ends Friday: epoch-boundary.
+  // MSFT is the older-indexer answer for that same closed interval (boundary-pending). The current producer
+  // no longer returns it; the wire still accepts it, and the fixture set has to carry every wire reason.
+  const tslaDaily = {
+    id: String(EXPIRY["09-15"]),
+    start: EXPIRY["09-15"],
+    end: EXPIRY["09-16"],
+    nav: null,
+    resultUsdg: null,
+  };
   const nvdaVault = derive("contract:HouseVault.NVDA");
   const tslaVault = derive("contract:HouseVault.TSLA");
+  const msftVault = derive("contract:HouseVault.MSFT");
   put("house.json", {
     items: [
-      { market: "NVDA", vault: nvdaVault, currentEpoch: running, sharesSupply: tokens("1000").toString() },
-      { market: "TSLA", vault: tslaVault, currentEpoch: running, sharesSupply: tokens("250").toString() },
+      {
+        market: "NVDA",
+        vault: nvdaVault,
+        kind: "weekly",
+        currentEpoch: running,
+        sharesSupply: tokens("1000").toString(),
+        earliestWithdrawal: houseEarliest("weekly", running.end),
+      },
+      {
+        market: "TSLA",
+        vault: tslaVault,
+        kind: "daily",
+        currentEpoch: tslaDaily,
+        sharesSupply: tokens("250").toString(),
+        earliestWithdrawal: houseEarliest("daily", tslaDaily.end),
+      },
+      {
+        market: "MSFT",
+        vault: msftVault,
+        kind: "daily",
+        currentEpoch: tslaDaily,
+        sharesSupply: tokens("250").toString(),
+        earliestWithdrawal: { kind: "daily", at: tslaDaily.end, reason: "boundary-pending" },
+      },
     ],
     nextCursor: null,
   });
   put("house/NVDA.json", {
     market: "NVDA",
     vault: nvdaVault,
+    kind: "weekly",
+    earliestWithdrawal: houseEarliest("weekly", running.end),
     currentEpoch: running,
     epochs: [lost, running],
     shares: null,
     queue: [
+      // Queued in the epoch that already rolled, so HouseVault.claim collects it and a cancel would revert.
+      {
+        kind: "withdraw",
+        account: A.lucy,
+        assets: null,
+        shares: tokens("4").toString(),
+        requestedAt: lostStart + 3_600,
+        epochId: lost.id,
+        status: "claimable",
+        maturesAt: lost.end,
+      },
       {
         kind: "withdraw",
         account: A.sam,
         assets: null,
         shares: tokens("10").toString(),
         requestedAt: NOW - 7_200,
+        epochId: running.id,
+        status: "pending",
+        maturesAt: running.end,
       },
     ],
   });
@@ -1715,20 +1960,20 @@ put("admin/operations.json", {
 });
 
 // --- makers: weekly epochs from Monday 00:00Z; quoting-quality figures are fixture constants -------
-// Epoch id (02-interfaces §1.9): whole weeks since Monday 1970-01-05 00:00Z, i.e. floor((t - 345600) / 604800).
+// Epoch id: whole weeks since Monday 1970-01-05 00:00Z, i.e. floor((t - 345600) / 604800).
 // Unix time 0 was a Thursday, so floor(t / 604800) would roll over on Thursdays; for a Monday start the two agree.
 const MONDAY_EPOCH_OFFSET = 345_600;
 const WEEK = 604_800;
 const epochIdOf = (t) => Math.floor((t - MONDAY_EPOCH_OFFSET) / WEEK);
 {
-  // The epoch publishes the scoring policy its figures were produced under (X3-201). The values are the
-  // OQ-14 placeholders from indexer/lib/v2/makerScoring.ts MAKER_SCORING_POLICY, mirrored here rather than
+  // The epoch publishes the scoring policy its figures were produced under. The values are the
+  // placeholders from indexer/lib/v2/makerScoring.ts MAKER_SCORING_POLICY, mirrored here rather than
   // chosen: 1000 bps with a 0.02 USDG floor. They are NOT approved for funded use.
   const MAKER_BAND = { bps: 1000, minUsdg: usdg(20_000n) };
   const epochAt = (iso) => ({ id: epochIdOf(at(iso)), start: at(iso), end: at(iso) + WEEK, band: MAKER_BAND });
   const EPOCHS = [epochAt("2026-09-07T00:00:00Z"), epochAt("2026-09-14T00:00:00Z")];
   const [E1, E2] = EPOCHS.map((e) => e.id);
-  // X8-312. WHICH BENCHMARK THESE FIGURES CAME FROM, MIRRORED FROM THE PRODUCER, NOT RETYPED.
+  // WHICH BENCHMARK THESE FIGURES CAME FROM, MIRRORED FROM THE PRODUCER, NOT RETYPED.
   // A fixture that states a policy number of its own would agree with itself forever while the
   // indexer moved underneath it, which is the exact failure this field exists to make impossible.
   // So read the constant out of the source that defines it and fail generation if it is not there.
@@ -1741,7 +1986,7 @@ const epochIdOf = (t) => Math.floor((t - MONDAY_EPOCH_OFFSET) / WEEK);
   })();
   // Not derivable from events (they come from the indexer's book sampling): stated here.
   //
-  // `samples` is stated for the same reason, and it is the point of X8-312: absent (no quote on
+  // `samples` is stated for the same reason, and it is the point of the quality samples: absent (no quote on
   // either side) and valid (quoted and measured, possibly at zero) are DIFFERENT FACTS about a
   // maker, and a score alone cannot tell them apart. `manual` in E1 is the mostly-absent maker;
   // `roller` in E1 quoted four times as often for a score only 4.2 points higher, and the counts
@@ -1793,7 +2038,7 @@ const epochIdOf = (t) => Math.floor((t - MONDAY_EPOCH_OFFSET) / WEEK);
   }
   // The 1000 bps band strictly CONTAINS the 100 bps one, so every order counted in depthWithin100bps is
   // also counted in depthInBand. A fixture where the band figure is the smaller one would teach a consumer
-  // that the two are interchangeable, which is exactly what D10 forbids.
+  // that the two are interchangeable, which is exactly what the wire schema forbids.
   for (const [maker, byEpoch] of QUALITY) {
     for (const [id, q] of Object.entries(byEpoch)) {
       if (BigInt(q.depthInBand) < BigInt(q.depthWithin100bps)) {
@@ -1820,7 +2065,7 @@ const epochIdOf = (t) => Math.floor((t - MONDAY_EPOCH_OFFSET) / WEEK);
     const all = [...QUALITY.values()].flatMap((byEpoch) => Object.values(byEpoch));
     if (!all.some((q) => q.samples.missingReference > 0)) throw new Error("scenario pin failed: no maker-epoch has a missing reference");
     if (!all.some((q) => q.samples.missingReference === 0)) throw new Error("scenario pin failed: every maker-epoch has a missing reference");
-    // The X8-312 contrast itself: two makers whose scores are close while their absence is not.
+    // The contrast itself: two makers whose scores are close while their absence is not.
     const absent = QUALITY.get(A.manual)[E1].samples.absent;
     const quoted = QUALITY.get(A.roller)[E1].samples.absent;
     if (!(absent > quoted * 3)) throw new Error("scenario pin failed: no absent-vs-quoted contrast in E1");

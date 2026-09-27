@@ -107,3 +107,25 @@ test('no issue message echoes a secret value', () => {
   assert.ok(issues.length >= 7, text);
   assert.ok(!text.includes('SECRET'), text);
 });
+
+test('RH_RPC_2: optional backup RPC; unset or blank is null, a URL is kept, anything else refuses to boot', () => {
+  assert.equal(parseConfig(testEnv()).rpcBackupUrl, null);
+  assert.equal(parseConfig(testEnv({ RH_RPC_2: '  ' })).rpcBackupUrl, null);
+  // A provider URL with its key in the path, kept exactly (fake key).
+  const backup = 'https://backup-rpc.invalid/rh/FAKE-KEY-0000';
+  const config = parseConfig(testEnv({ RH_RPC_2: backup }));
+  assert.equal(config.rpcBackupUrl, backup);
+  assert.equal(config.rpcUrl, 'https://rpc.invalid');
+
+  for (const bad of ['not a url', 'ftp://backup-rpc.invalid/SECRET-BACKUP', 'wss://backup-rpc.invalid/SECRET-BACKUP']) {
+    const issues = issuesOf(testEnv({ RH_RPC_2: bad }));
+    assert.ok(issues.some((i) => i.startsWith('RH_RPC_2')), `${bad}: ${issues.join(' | ')}`);
+    assert.ok(!issues.join('\n').includes('SECRET'), 'the value is never echoed');
+  }
+});
+
+test('RH_RPC_2 equal to RH_RPC is refused: a backup that is the primary is no backup', () => {
+  const issues = issuesOf(testEnv({ RH_RPC: 'https://rpc.invalid/SECRET-SAME', RH_RPC_2: 'https://rpc.invalid/SECRET-SAME' }));
+  assert.ok(issues.some((i) => i.startsWith('RH_RPC_2') && i.includes('must differ from RH_RPC')), issues.join(' | '));
+  assert.ok(!issues.join('\n').includes('SECRET'), 'the value is never echoed');
+});

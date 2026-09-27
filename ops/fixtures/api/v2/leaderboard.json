@@ -26,6 +26,7 @@
           "expiry": 1789156800,
           "tenor": "weekly",
           "mintCutoff": 1789155000,
+          "exerciseFeeBps": 25,
           "mintFeePpm": 0,
           "mintFeesHeld": {
             "raw": "0",
@@ -78,6 +79,7 @@
           "expiry": 1789156800,
           "tenor": "weekly",
           "mintCutoff": 1789155000,
+          "exerciseFeeBps": 25,
           "mintFeePpm": 0,
           "mintFeesHeld": {
             "raw": "0",
@@ -130,6 +132,7 @@
           "expiry": 1789156800,
           "tenor": "weekly",
           "mintCutoff": 1789155000,
+          "exerciseFeeBps": 25,
           "mintFeePpm": 0,
           "mintFeesHeld": {
             "raw": "0",
@@ -182,6 +185,7 @@
           "expiry": 1789156800,
           "tenor": "weekly",
           "mintCutoff": 1789155000,
+          "exerciseFeeBps": 25,
           "mintFeePpm": 0,
           "mintFeesHeld": {
             "raw": "0",

@@ -130,7 +130,7 @@ describe("normaliseCycle reads the indexer's nested shape (ops/fixtures/api/)", 
     expect(r.harvestGrossUsdg).toBe(998_000000n);
     expect(r.feeUsdg).toBe(2_400000n);
     expect(r.creditedUsdg).toBe(995_600000n);
-    // W-21: the premium figures are premium only. 998 − 950 = 48 premium; 48 − 2.4 = 45.6 net
+    // The premium figures are premium only. 998 − 950 = 48 premium; 48 − 2.4 = 45.6 net
     // premium, identical to the filled week that sold the same 12 contracts.
     expect(r.strikeProceedsUsdg).toBe(950_000000n);
     expect(r.premiumGrossUsdg).toBe(48_000000n);
@@ -147,16 +147,16 @@ describe("normaliseCycle reads the indexer's nested shape (ops/fixtures/api/)", 
   it("cycle-assigned.json renders premium-only realized figures and a separate strike line", () => {
     const r = normaliseCycle(fixture("cycle-assigned.json"))!;
     // What `/vault/nvda` and `/activity` put on screen for this week.
-    expect(fmtUsdg(premiumPerShare(r), 6)).toBe("0.456000");
-    expect(fmtUsdg(r.premiumGrossUsdg)).toBe("48.00");
+    expect(fmtUsdg(premiumPerShare(r), 6)).toBe("0.456"); // No zero tail
+    expect(fmtUsdg(r.premiumGrossUsdg)).toBe("48"); // whole: no ".00"
     expect(fmtUsdg(r.premiumNetUsdg)).toBe("45.60");
-    expect(fmtUsdg(r.strikeProceedsUsdg)).toBe("950.00");
+    expect(fmtUsdg(r.strikeProceedsUsdg)).toBe("950");
     // Net premium over collateral at harvest. Take 7 lots left × 200 USDG spot = 1_400_000000
     // of collateral: 45_600000 × 100 × 100_000 / 1_400_000000 = 325_714 → 3.25714% → "3.257%".
     // With the strike proceeds wrongly included it would be 995_600000 / 1_400_000000 = 71.114%.
     const tvl = 1_400_000000n;
-    expect(fmtRealizedWeek(r.premiumNetUsdg, tvl)).toBe("3.257%");
-    expect(fmtRealizedWeek(r.creditedUsdg, tvl)).toBe("71.114%");
+    expect(fmtRealizedWeek(r.premiumNetUsdg, tvl)).toBe("3.2%"); // 45.6 / 1400 = 3.257%, one decimal
+    expect(fmtRealizedWeek(r.creditedUsdg, tvl)).toBe("71.1%"); // 995.6 / 1400 = 71.114%
   });
 
   describe("cycle-stranded.json: the close could not redeem the claim", () => {
@@ -253,7 +253,7 @@ describe("normaliseCycle reads the indexer's nested shape (ops/fixtures/api/)", 
     });
   });
 
-  it("splits a pre-W-21 indexer payload by subtraction, where premiumNet still meant gross − fee", () => {
+  it("splits an older indexer payload by subtraction, where premiumNet still meant gross − fee", () => {
     // The shape before this change: no `creditedUsdg`, no `strikeProceedsUsdg`, and
     // `harvest.premiumNet` = 995.6 INCLUDING the strike proceeds. The split comes from
     // `settlement.assignmentUsdg`: 998 − 950 = 48 premium; 995.6 − 950 = 45.6 net premium.

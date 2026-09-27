@@ -319,10 +319,10 @@ test('restart safety: close the file, reopen it, every row is still there', () =
 });
 
 /*//////////////////////////////////////////////////////////////
-               K-21: STRIKE PROCEEDS SEPARATE FROM PREMIUM
+               STRIKE PROCEEDS SEPARATE FROM PREMIUM
 //////////////////////////////////////////////////////////////*/
 
-/** The `cycles` table exactly as the keeper before K-21 created it: no assets_returned, no
+/** The `cycles` table exactly as the keeper before the split created it: no assets_returned, no
  *  usdg_from_assignment. A production volume holds a file like this. */
 function columnsOf(db: Database.Database): string[] {
   return (db.prepare('PRAGMA table_info(cycles)').all() as Array<{ name: string }>).map((c) => c.name).sort();

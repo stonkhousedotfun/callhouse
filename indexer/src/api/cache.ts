@@ -34,7 +34,7 @@ export const v2QueryKeys: readonly [RegExp, readonly string[]][] = [
   [/^\/v2\/series\/[^/]+\/trades$/, ["cursor", "limit"]],
   [/^\/v2\/cards$/, ["type", "sort", "tenor", "ticker", "cursor", "limit"]],
   [/^\/v2\/series\/[^/]+\/holders$/, ["side", "cursor", "limit"]],
-  [/^\/v2\/strategies$/, ["active", "cursor", "limit"]],
+  [/^\/v2\/strategies$/, ["active", "writer", "cursor", "limit"]],
   [/^\/v2\/feed\/activity$/, ["since", "kinds", "cursor", "limit"]],
   [/^\/v2\/accounts\/[^/]+\/history$/, ["cursor", "limit"]],
   [/^\/v2\/feed\/wins$/, ["window", "cursor", "limit"]],
@@ -42,7 +42,7 @@ export const v2QueryKeys: readonly [RegExp, readonly string[]][] = [
   [/^\/v2\/makers$/, ["epoch", "cursor", "limit"]],
   [/^\/v2\/admin\/operations$/, ["status", "cursor", "limit"]],
   [/^\/v2\/earn$/, ["address"]],
-  [/^\/v2\/house\/[^/]+$/, ["address"]],
+  [/^\/v2\/house\/[^/]+$/, ["address", "vault"]],
   [/^\/v2\/(?:accounts\/[^/]+\/positions|config|markets|series\/[^/]+|cards\/hero|fair\/[^/]+|pnl\/[^/]+|stats|flywheel|house|makers\/[^/]+)$/, []],
 ];
 

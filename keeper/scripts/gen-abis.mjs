@@ -47,11 +47,11 @@ const SERIES_ID_OUT = "src/v2/seriesId.ts";
  * The logical v2 ABI set. COPIED TABLE: identical in indexer/scripts/gen-abis.mjs and
  * web/scripts/gen-abis.mjs; change all three together.
  *
- * `sources` is ordered and the FIRST file present in ops/abis/v2 wins. Until a contract lane
+ * `sources` is ordered and the FIRST file present in ops/abis/v2 wins. Until the contracts repo
  * exports the concrete artefact (Clearinghouse.json), the frozen interface (IClearinghouse.json)
  * stands in, and when the artefact lands it replaces the interface under the same module and export
  * name, so no consumer import changes. A logical name with no source present yet is skipped; the
- * one-source adapters and vaults appear when their tasks export them.
+ * one-source adapters and vaults appear when the contracts export them.
  */
 const V2_MODULES = [
   {
@@ -80,19 +80,19 @@ const V2_MODULES = [
     what: "IPriceSource: the adapter interface every settlement price source implements.",
   },
   {
-    // optional until C2-03
+    // optional
     name: "chainlinkFeedSource",
     sources: ["ChainlinkFeedSource.json"],
     what: "ChainlinkFeedSource: IPriceSource over the push feed's on-chain round history.",
   },
   {
-    // optional until C2-03
+    // optional
     name: "uniV3TwapSource",
     sources: ["UniV3TwapSource.json"],
     what: "UniV3TwapSource: IPriceSource over a keeper-snapshotted Uniswap v3 pool TWAP.",
   },
   {
-    // optional until C2-12
+    // optional
     name: "dataStreamsSource",
     sources: ["DataStreamsSource.json"],
     what: "DataStreamsSource: IPriceSource over Data Streams reports verified through the VerifierProxy.",
@@ -133,27 +133,27 @@ const V2_MODULES = [
     what: "MakerRegistry: per-maker rebate tiers on the order book.",
   },
   {
-    // optional until C2-11
+    // optional
     name: "makerVault",
     sources: ["MakerVault.json"],
     what: "MakerVault: the treasury-funded protocol maker that quotes on the book.",
   },
   {
-    // the interface stands in until C2-11 exports the contract
+    // The interface is the fallback source if RewardsDistributor.json is ever missing.
     name: "rewardsDistributor",
     sources: ["RewardsDistributor.json", "IRewardsDistributor.json"],
     what: "RewardsDistributor: per-epoch Merkle claims of USDG.",
   },
   {
-    // P8-02. Absent from ops/abis/v2 until the contract lane exports it; the loop below then
-    // silently skips this row, so abis/v2/earnVault.ts does not exist yet and nothing imports it.
+    // EarnVault.json is exported. If both sources were missing, the loop below would skip
+    // this module and dormantV2 would print its name.
     name: "earnVault",
     sources: ["EarnVault.json", "IEarnVault.json"],
     what: "EarnVault: the LENDING vault — shares against supplied stock or USDG, venue adapter, yield skim.",
   },
   {
-    // P8-01. The contract is landed (src/v2/periphery/StockZap.sol) but is not in
-    // script/v2/abi-manifest.txt, so export-abis.sh does not copy it here yet; see T-78.
+    // StockZap.json comes from src/v2/periphery/StockZap.sol in the contracts repo; export-abis.sh
+    // copies it to ops/abis/v2 because script/v2/abi-manifest.txt names it.
     name: "stockZap",
     sources: ["StockZap.json", "IStockZap.json"],
     what: "StockZap: stateless USDG<->Stock Token zaps over the PayoutRouter's pinned route.",
@@ -164,15 +164,15 @@ const V2_MODULES = [
     what: "V2Errors: the shared custom errors of every v2 contract.",
   },
   {
-    // P8-06. Absent from ops/abis/v2 until T-78 adds HouseVaultFactory to
-    // script/v2/abi-manifest.txt; the loop then skips this row. Indexing uses
-    // lib/v2/houseVaultEvents.ts until the artefact lands.
+    // HouseVaultFactory.json is exported. The indexer still indexes the launch factory with the
+    // legacy 4-field VaultCreated in its lib/v2/houseVaultEvents.ts, because this ABI carries the
+    // newer event with `bool weekly`, which the launch factory never emits.
     name: "houseVaultFactory",
     sources: ["HouseVaultFactory.json"],
-    what: "HouseVaultFactory: LISTING deploys one HouseVault per underlying.",
+    what: "HouseVaultFactory: NEW_LISTING (no delay; refuses an underlying that already has a vault) deploys one HouseVault per underlying.",
   },
   {
-    // P8-06. Same export gap as houseVaultFactory. Do not stand in MakerVault.json.
+    // HouseVault.json is its only source. Do not use MakerVault.json as a stand-in.
     name: "houseVault",
     sources: ["HouseVault.json"],
     what: "HouseVault: user-funded weekly-epoch market maker; depositor shares, queued deposits/withdrawals.",
@@ -180,7 +180,7 @@ const V2_MODULES = [
 ];
 
 /**
- * COVERAGE, BOTH DIRECTIONS (T-300).
+ * COVERAGE, BOTH DIRECTIONS.
  *
  * The generation loop at the bottom of this file reads `const source = m.sources.find(v2Present)`
  * and then `if (source) renderV2Module(...)`. That bare `if` is the whole defect this block exists
@@ -190,17 +190,17 @@ const V2_MODULES = [
  *
  * ALL THREE GENERATORS HAD THE SAME SHAPE. web/scripts/gen-abis.mjs, indexer/scripts/gen-abis.mjs
  * and keeper/scripts/gen-abis.mjs each carried that identical two-line loop, so all three are fixed
- * together here rather than one being cited as different. The keeper's was in neither audit's scope
- * (CH3 covered the indexer, CH4 the web) and was found while fencing this row.
+ * together here rather than one being cited as different. The keeper's copy had the same defect
+ * as the other two and is fixed the same way.
  *
  * NOT SET EQUALITY, DELIBERATELY. Some exported ABIs legitimately have no consumer module, so
- * requiring the two sets to match would fire on a clean tree and the next lane would add exclusions
- * until it went green - which is the unguarded list this row is about. The rule instead is that
+ * requiring the two sets to match would fire on a clean tree and the next change would add exclusions
+ * until it went green - which is the unguarded list this check exists to prevent. The rule instead is that
  * every PRESENT export must be ACCOUNTED FOR by name, either by a module that names it as a source
  * or by V2_UNWIRED_ABIS below, and that adding one requires a deliberate edit in this file.
  *
  * The fourth instance of this class lives in the contracts repo, in script/v2/export-abis.sh's
- * manifest half, and belongs to T-279-C8-ABI-EXPORT-GUARD-GAPS. It is cited here, not touched.
+ * manifest half, and is a separate fix. It is cited here, not touched.
  */
 /**
  * Exported ABI files that deliberately have no generated consumer module. This is a named
@@ -281,8 +281,8 @@ const absentV2Unwired = () => [...V2_UNWIRED_ABIS].filter((file) => !v2Present(f
  * The generation loop at the bottom of this file skips a sourceless module with a bare `if`, and
  * that silence is the other half of the defect the coverage checks above exist to remove: an ABI
  * the contracts repo exports and nobody wires is now visible, and a module wired here that nothing
- * exports must be nameable too. It is NOT an error. A module row deliberately lands before its ABI
- * is exported, and making this red would turn a planned row into a broken tree - the failure the
+ * exports must be nameable too. It is NOT an error. A module entry may be added before its ABI
+ * is exported, and making this red would turn a planned entry into a broken tree - the failure the
  * named-exclusion design above was chosen to avoid. So it prints, always, and the exit code does
  * not move.
  */

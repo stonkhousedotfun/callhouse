@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * ops/markets/check-shared-token.mjs — a read-only, on-chain guard for the launch pool T-OP-108 pinned.
+ * ops/markets/check-shared-token.mjs — a read-only, on-chain guard for the pinned launch pool.
  *
  *   node ops/markets/check-shared-token.mjs [--registry ops/markets/tier1.json]
  *        [--sources ops/markets/v2-sources.json] [--rpc URL] [--block N] [--v3-fee 100]
@@ -58,7 +58,7 @@ const V3_FEE_TIERS = [100, 500, 3000, 10000];
  * The fee tier of the USDG/WETH v3 pool the buyback's first leg swaps through: a ROUTE PARAMETER, not
  * an address, and the one number this guard does not read from a file. It is the same constant the
  * recon writes the pool from (`ops/recon/r13-probe.mjs` `USDG_WETH_V3_FEE`) and the contracts spike
- * derived (`callhouse-contracts/docs/V2-FLYWHEEL-ROUTE-SPIKE.md`, "v3 USDG/WETH 0.01 %"); `--v3-fee`
+ * derived ("v3 USDG/WETH 0.01 %"); `--v3-fee`
  * overrides it. The guard asserts the pinned pool IS that tier and IS the factory's pool for it.
  */
 export const USDG_WETH_V3_FEE = 100;

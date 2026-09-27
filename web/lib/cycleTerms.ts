@@ -1,4 +1,6 @@
-import { fmtEastern, fmtUsdg, fmtUtc, unitPriceUsdg } from "./format";
+import { USDG_DECIMALS } from "./contracts";
+import { fmtEastern, unitPriceUsdg } from "./format";
+import { displayExact } from "./numberFormat";
 import type { VaultSnapshot } from "./hooks";
 
 /**
@@ -8,7 +10,7 @@ import type { VaultSnapshot } from "./hooks";
  * price, what the open order comes to if every remaining contract sells, and the protocol fee on
  * that). Deriving each figure once, here, means two pages cannot round the fee differently or
  * print the exercise time in a different zone. The words around the figures live in the page and
- * component files, which copy-lint scanned until its removal on 2026-09-21; `CYCLE_TERMS_LABELS` below is the only wording pinned
+ * component files, which copy-lint scanned until its removal; `CYCLE_TERMS_LABELS` below is the only wording pinned
  * here, and its test runs it through the forbidden-copy table now inlined in that test.
  *
  * WHAT IS AND IS NOT A FIGURE HERE. Everything below is either a value the chain holds (strike,
@@ -21,21 +23,22 @@ import type { VaultSnapshot } from "./hooks";
  * be read as a return.
  *
  * DELIBERATELY ABSENT: React, fetch, a clock, and general-purpose formatters (lib/format.ts owns
- * those). The two local helpers below only choose how many decimals fmtUsdg prints, and how a feed's
+ * those). The two local helpers below only choose how an exact USDG figure is written, and how a feed's
  * float is cut to a fixed width; they do not format anything format.ts does not.
  *
- * MONEY DISPLAY. Every USDG figure here is shown exactly: two decimals when it is whole cents, all
- * six otherwise, because fmtUsdg truncates and a truncated figure is a wrong figure. That includes
- * spot, so strike − spot = distance holds on screen digit for digit.
+ * MONEY DISPLAY. Every USDG figure here is shown exactly: two decimals when it is whole cents, every
+ * significant digit otherwise (trailing zeros dropped), because a truncated figure is a wrong
+ * figure. That includes spot, so strike − spot = distance holds on screen digit for digit. fmtUsdg is
+ * the display rule (trims, floors, compacts) and is deliberately not used here.
  */
 
 const BPS = 10_000n;
 const DASH = "—";
 
-/** Exact USDG: two decimals when the value is whole cents, six when it is not. Wraps fmtUsdg. */
+/** Exact USDG: two decimals when the value is whole cents, every significant digit when it is not. */
 function exactUsdg(value: bigint | undefined): string {
   if (value === undefined) return DASH;
-  return fmtUsdg(value, value % 10_000n === 0n ? 2 : 6);
+  return displayExact(value, USDG_DECIMALS);
 }
 
 function count(value: bigint | undefined): string {
@@ -49,7 +52,7 @@ function count(value: bigint | undefined): string {
 /**
  * Row labels for the figures below, for a page that wants the same words everywhere. Optional:
  * a page may write its own. Pinned by lib/cycleTerms.test.ts against the forbidden-copy table
- * (inlined there since copy-lint was removed on 2026-09-21) and against return, profit and per-year framing:
+ * (inlined there since copy-lint was removed) and against return, profit and per-year framing:
  * the order figures are the listing's own arithmetic, not an outcome for anyone. There is no
  * "after fee" figure: the fee is charged at harvest on the week's premium, not on an order, and a
  * total less the fee reads as what a depositor receives.
@@ -95,8 +98,8 @@ export type CycleTermsOptions = {
   unitPrice6?: bigint;
   /**
    * Contracts a buyer can take right now. The CALLER computes it, from Seaport's getOrderStatus
-   * for the vault's listingHash capped by the vault's capacity, as components/OrderPayload.tsx
-   * does; the keeper row's `remaining` is not an input. Capped here again at the vault's capacity
+   * for the vault's listingHash capped by the vault's capacity, as lib/orderFillable.ts does for
+   * components/VaultOverview.tsx; the keeper row's `remaining` is not an input. Capped here again at the vault's capacity
    * and at the listing's own size (listingAmount), which is idempotent for a correct caller, and
    * ignored while capacity is unread: an uncapped caller figure is never shown.
    */
@@ -117,11 +120,9 @@ export type CycleTerms = {
   strikeAboveSpotFmt: string;
   /** The cycle's exercise time (the week's NYSE close), from the vault's snapshot. */
   exerciseTs: number;
-  exerciseUtc: string;
   exerciseEastern: string;
   /** The option's expiry, 24 hours after exercise, from the vault's snapshot. */
   expiryTs: number;
-  expiryUtc: string;
   expiryEastern: string;
   /** Per-contract price, USDG base units; undefined when there is no priced listing. */
   unitPrice6: bigint | undefined;
@@ -212,10 +213,8 @@ export function cycleTerms(snapshot: CycleTermsInput, options: CycleTermsOptions
     strikeAboveSpotUsdg: strikeAboveSpot,
     strikeAboveSpotFmt: exactUsdg(strikeAboveSpot),
     exerciseTs,
-    exerciseUtc: fmtUtc(exerciseTs),
     exerciseEastern: fmtEastern(exerciseTs),
     expiryTs,
-    expiryUtc: fmtUtc(expiryTs),
     expiryEastern: fmtEastern(expiryTs),
     unitPrice6,
     unitPriceFmt: exactUsdg(unitPrice6),
@@ -278,7 +277,7 @@ export function cycleTerms(snapshot: CycleTermsInput, options: CycleTermsOptions
  *
  * TIMES are unix seconds, an ISO-8601 string with a zone (Z or ±hh:mm), or, for source
  * "cboe-delayed" only, Cboe's own zone-less strings, converted by the zones the keeper measured and
- * documents (keeper/README.md, "Market data (vol mode)"): the file `timestamp` is UTC and
+ * documents ("Market data (vol mode)"): the file `timestamp` is UTC and
  * `last_trade_time` is the New York wall clock. A zone-less time from any other source is kept as
  * reported and not converted. Every instant must fall in 2020..2099.
  *
@@ -296,11 +295,13 @@ export function cycleTerms(snapshot: CycleTermsInput, options: CycleTermsOptions
 export type PriceSource = "fill-floor" | "vol-fair" | "vol-previous-fair" | "manual-override";
 export type StrikeClamp = "band-floor" | "band-ceiling" | null;
 
-/** A keeper-reported instant. `ts` and the converted strings exist only when the zone is known. */
+/**
+ * A keeper-reported instant. `ts` and `eastern` exist only when the zone is known. There is no UTC string (
+ * no UTC lines): the page renders `ts` in the reader's zone with components/ui/Time.tsx.
+ */
 export type ReportedTime = {
   raw: string;
   ts: number | undefined;
-  utc: string;
   eastern: string;
 };
 
@@ -463,7 +464,7 @@ type LocalZone = "utc" | "new-york" | "unknown";
 
 function reported(raw: string, ts: number): ReportedTime {
   if (!Number.isSafeInteger(ts) || ts < MIN_TS || ts >= MAX_TS) return fail();
-  return { raw, ts, utc: fmtUtc(ts), eastern: fmtEastern(ts) };
+  return { raw, ts, eastern: fmtEastern(ts) };
 }
 
 function optionalTime(x: unknown, localZone: LocalZone): ReportedTime | undefined {
@@ -494,7 +495,7 @@ function optionalTime(x: unknown, localZone: LocalZone): ReportedTime | undefine
     return ms === undefined ? fail() : reported(x, ms / 1000);
   }
   if (y < 2020 || y > 2099) return fail();
-  return { raw: x, ts: undefined, utc: DASH, eastern: DASH };
+  return { raw: x, ts: undefined, eastern: DASH };
 }
 
 /**

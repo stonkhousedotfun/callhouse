@@ -29,7 +29,7 @@
  * is 401 session-invalid. A bearer beats signature/nonce sent in the same request, and that nonce
  * is not spent. DELETE needs nothing but the bearer. /v1/session itself ignores a bearer.
  *
- * DECISIONS WHERE §6 IS SILENT (the dapp, W2-10, builds against these):
+ * DECISIONS MADE HERE (the dapp builds against these):
  *   - `target` per channel: webpush = the PushSubscription JSON (object or string); email = the
  *     address; telegram = omitted (or "" / null). The chat is bound by the bot's /start, never
  *     typed in: POST with channel "telegram" stores or updates PREFS for the wallet's (single)
@@ -114,7 +114,7 @@ export interface AppDeps {
   breakerStates: () => Record<ChannelName, BreakerState | 'off'>;
   /** Delivery outcomes of the last hour, for /health. Absent = not reported. */
   deliveryStats?: () => Promise<DeliveryStats>;
-  /** The rules engine (N2-02). Absent = off. */
+  /** The rules engine. Absent = off. */
   rulesHealth?: () => RulesHealth;
   /**
    * The tickers of the rules engine's last /v2/markets read. A price alert on a ticker that is not

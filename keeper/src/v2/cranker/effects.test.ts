@@ -155,12 +155,12 @@ test('Cranker.tick with every RPC failing: each step fails on its own, is paged 
   assert.equal(index.scannedTo(), null, 'the stale deployment\'s cursor went before the index step');
   assert.equal(store.getMeta('cranker:snapshot:stale'), null);
   const failed = [...new Set(report.errors.map((e) => e.step))];
-  assert.deepEqual(failed, ['index', 'snapshot', 'finalize', 'settle', 'prune', 'redeem', 'ladders', 'housekeeping']);
+  assert.deepEqual(failed, ['index', 'snapshot', 'finalize', 'settle', 'prune', 'redeem', 'ladders', 'firstmint', 'housekeeping']);
   assert.ok(report.errors.every((e) => /rpc down/.test(e.message)));
   assert.equal(report.wake, null);
   const rolls = report.reports.find((r) => r.step === 'rolls');
   assert.match(String(rolls?.notes.skipped), /no autoRoller configured/);
-  assert.deepEqual(paged, ['index', 'snapshot', 'finalize', 'settle', 'prune', 'redeem', 'ladders', 'housekeeping'].map((s) => `v2_error:${s}`));
+  assert.deepEqual(paged, ['index', 'snapshot', 'finalize', 'settle', 'prune', 'redeem', 'ladders', 'firstmint', 'housekeeping'].map((s) => `v2_error:${s}`));
   const state = cranker.state() as { steps: Record<string, { runs: number; errors: number; lastError: { message: string } | null }>; ticks: number };
   assert.equal(state.ticks, 1);
   assert.equal(state.steps.ladders!.errors, 1);

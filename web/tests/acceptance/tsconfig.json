@@ -1,4 +1,4 @@
-// The W-13 fork acceptance run is its own TypeScript project, not part of the app's. It imports
+// The fork acceptance run is its own TypeScript project, not part of the app's. It imports
 // ../../../keeper/src, which the web Docker build context does not contain, so the app tsconfig
 // (and therefore `next build`) excludes this directory and `pnpm typecheck` checks it here.
 // `lib` follows keeper/tsconfig.json, because the keeper modules this run imports with types are

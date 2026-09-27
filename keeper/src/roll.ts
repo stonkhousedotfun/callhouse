@@ -1470,7 +1470,7 @@ async function noteWeekRollover(window: WeekWindow): Promise<void> {
 }
 
 /*//////////////////////////////////////////////////////////////
-                      STRANDED CLAIM (AF-02)
+                      STRANDED CLAIM
 //////////////////////////////////////////////////////////////*/
 
 const STRAND_ALERTED_KEY = (gen: bigint) => `strand_alerted:${gen}`;

@@ -277,7 +277,7 @@ ponder.on("Vault:QueueSettled", async ({ event, context }) => {
     // `_settleQueue` takes the escrow's accrual through `Distributor._takeAccrued`, which adds it
     // to `totalUsdgClaimed` exactly as `_claimUsdg` does; `usdgOut` is that amount. Counting only
     // `ClaimUsdg` left the queue's USDG claimed nowhere, so `distributed − claimed` read the whole
-    // escrow as still owed to holders (X-11: 1244.000475 published against 2061.250593 on chain).
+    // escrow as still owed to holders (1244.000475 published against 2061.250593 on chain).
     totalUsdgClaimed: state.totalUsdgClaimed + usdgOut,
     // The vault bumps its epoch counter immediately after emitting this.
     epochId: epochId + 1n,
@@ -360,7 +360,7 @@ ponder.on("Vault:QueueEntrySettled", async ({ event, context }) => {
 });
 
 /**
- * An owner's staged share of a stranded claim became assets and USDG (AF-02).
+ * An owner's staged share of a stranded claim became assets and USDG.
  *
  * The strand analogue of `QueueEntrySettled`: books move, no token. Fires inside
  * `completeRedeem` (and inside `_stageStrandShare` when a newer share displaces an older,
@@ -391,7 +391,7 @@ ponder.on("Vault:StrandShareSettled", async ({ event, context }) => {
 });
 
 /**
- * The reserve was unbacked and a settled redeemer took the pro-rata haircut (AF-05).
+ * The reserve was unbacked and a settled redeemer took the pro-rata haircut.
  *
  * `reservedAssets` on chain is released by the BOOKED amount while only `paid` leaves the
  * vault, and `CompleteRedeem` (one log later) reports `paid`. The shortfall therefore comes off
@@ -418,7 +418,7 @@ ponder.on("Vault:ReserveHaircut", async ({ event, context }) => {
 });
 
 /**
- * The USDG leg of a payout could not move (AF-03): USDG paused, or the vault or the receiver
+ * The USDG leg of a payout could not move: USDG paused, or the vault or the receiver
  * frozen on it. The Stock Token leg still went, `owedQueueUsdg` stays booked, and a later
  * `completeRedeem` — to the same or another receiver — collects it. Nothing here is lost; it is
  * surfaced so the UI can say "your USDG is still owed" instead of "paid".
@@ -646,7 +646,7 @@ ponder.on("Vault:BookLocked", async ({ event, context }) => {
 });
 
 /**
- * `rollClose` could not redeem the claim (AF-02): Valorem's `redeem` reverted — USDG paused,
+ * `rollClose` could not redeem the claim: Valorem's `redeem` reverted — USDG paused,
  * the vault or Clear frozen on USDG, Clear's USDG burnt, or the vault blocklisted on the Stock
  * Token in an unassigned week. Emitted immediately BEFORE the `RollClose` of the same
  * transaction, which then reports zero legs.
@@ -802,7 +802,7 @@ ponder.on("Vault:ClaimRedeemed", async ({ event, context }) => {
 });
 
 /**
- * `retryStrandedClaim` got the claim through (AF-02). What the redeem returned is split by
+ * `retryStrandedClaim` got the claim through. What the redeem returned is split by
  * `queueWad`: the settled epochs' part of both legs moves into the reserves and is drawn down
  * owner by owner (`StrandShareSettled`); the live shares' NVDA is simply in the balance again,
  * and their USDG goes through the retry's `Harvest` fee-free, one log later, under the stranded
@@ -1033,7 +1033,7 @@ async function refineEndReason(
  * `feeUsdg / grossUsdg` is NOT the policy rate there and must never be used as one.
  * `netUsdg == grossUsdg − feeUsdg` always.
  *
- * And for the same reason `netUsdg` is NOT premium on an assigned week (W-21): the strike
+ * And for the same reason `netUsdg` is NOT premium on an assigned week: the strike
  * proceeds in it are returned principal. `lib/harvest.ts` splits every event into premium and
  * strike proceeds, and every "premium" column here is premium only. The whole credited figure
  * is kept under its own name (`creditedUsdg`, `usdgPerShare`) so nothing has to be inferred.

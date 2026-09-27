@@ -1,5 +1,5 @@
 /**
- * The devnet harnesses' `--pricing-url` flag (K3-304): point v2:devnet-pricer and v2:devnet-mm at
+ * The devnet harnesses' `--pricing-url` flag: point v2:devnet-pricer and v2:devnet-mm at
  * a real running pricing service instead of the in-process stub. Precedence: the flag wins over
  * the PRICING_URL environment variable; with neither, the harness keeps its default stub.
  *

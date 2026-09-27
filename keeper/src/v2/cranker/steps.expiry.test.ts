@@ -20,10 +20,11 @@ import { silentLogger } from '../logger.js';
 import { longIdOf, shortIdOf } from '../seriesId.js';
 import { V2Store } from '../store.js';
 import type { TxOutcome } from '../tx.js';
+import { GAS, SOURCE_GAS, starvedCeiling } from './constants.js';
 import { CrankAlerts, type CrankSender, type FixedGasCall } from './effects.js';
 import { CrankerIndex } from './index-store.js';
-import { yieldDeadlineMs } from './planner.js';
-import { settledSeenMetaKey, snapshotMetaKey, stepHousekeeping, stepPrune, stepRedeem, stepSettle, stepSnapshot, unprunableMetaKey, type CrankContext } from './steps.js';
+import { expiryKeyString, yieldDeadlineMs } from './planner.js';
+import { Budget, houseRoll, newReport, settledSeenMetaKey, snapshotMetaKey, stepFinalize, stepHousekeeping, stepPrune, stepRedeem, stepSettle, stepSnapshot, unprunableMetaKey, type CrankContext, type HouseRollReads } from './steps.js';
 
 const REGISTRY = fileURLToPath(new URL('../fixtures/registry-v2.json', import.meta.url));
 const CH = getAddress('0x2256c045245288A314048aD2d71006a564343C63');
@@ -85,8 +86,13 @@ export function harness() {
     balances: new Map<string, bigint>(),
     orders: new Map<bigint, FakeOrder>(),
     accruedFees: new Map<string, bigint>(),
+    /** Holders that opted out of third-party redemption, and `holder:operator` approvals (lower-case). */
+    optedOut: new Set<string>(),
+    operators: new Set<string>(),
+    /** HouseVault.trackedSeries() of the one House vault a test registers. */
+    tracked: [] as bigint[],
     /**
-     * T-496. State AT A PAST BLOCK, keyed by block number, for the post-reads the cranker pins to a
+     * State AT A PAST BLOCK, keyed by block number, for the post-reads the cranker pins to a
      * receipt's block. Empty by default, so a test that registers nothing sees head exactly as before.
      *
      * The cranker's post-reads (`settledAtBlock`, `deadAtBlock`, `stillHeldAtBlock`) run at
@@ -123,11 +129,14 @@ export function harness() {
     getOrders: ([ids]) => (ids as bigint[]).map((id) => state.orders.get(id) ?? { maker: ZERO, longId: 0n, kind: 0, price: 0n, units: 0n, filled: 0n, validUntil: 0, cancelled: false }),
     payoutAdapter: () => ZERO,
     balanceOf: ([holder, id]) => state.balances.get(`${String(holder).toLowerCase()}:${id}`) ?? 0n,
-    thirdPartyRedeemAllowed: () => true,
+    thirdPartyRedeemAllowed: ([holder]) => !state.optedOut.has(String(holder).toLowerCase()),
+    isOperator: ([holder, operator]) => state.operators.has(`${String(holder).toLowerCase()}:${String(operator).toLowerCase()}`),
     payoutPrefs: () => [false, false],
     accruedFees: ([asset]) => state.accruedFees.get(String(asset).toLowerCase()) ?? 0n,
+    trackedSeries: () => state.tracked,
+    epochId: () => 7n,
   };
-  /** T-496. The views as of `blockNumber`: a registered past block, else head. An absent pin IS head. */
+  /** The views as of `blockNumber`: a registered past block, else head. An absent pin IS head. */
   const viewsAt = (blockNumber?: bigint) => {
     const past = blockNumber === undefined ? undefined : state.atBlock.get(String(blockNumber));
     return past === undefined ? views : { ...views, ...past };
@@ -166,7 +175,7 @@ export function harness() {
         state.sends.push({ fn: call.functionName, args, gas: call.gas, status: 'send-failed' });
         return { status: 'send-failed', error: 'HTTP request failed.' };
       }
-      // T-496. The block this tx MINED IN, captured before `apply` runs. A receipt reports where it
+      // The block this tx MINED IN, captured before `apply` runs. A receipt reports where it
       // landed, not where head drifted to afterwards, and an `apply` that advances head (as the
       // post-read tests do) must not be able to rewrite its own receipt's block.
       const minedAt = state.block;
@@ -287,9 +296,39 @@ function chRedeemBatch(h: ReturnType<typeof harness>, each: bigint): SimHandler 
   return (args, gas) => {
     const [tokenId, holders] = args as [bigint, Address[]];
     if (gas < 60_000n + each * BigInt(holders.length)) return { ok: false, revert: null };
-    return { ok: true, result: BigInt(holders.length), apply: () => holders.forEach((a) => h.state.balances.set(`${a.toLowerCase()}:${tokenId}`, 0n)) };
+    // (redeemed, paidUsdg, paidInKind). The old reader compares this tuple to BigInt(n) and never sends.
+    return { ok: true, result: [BigInt(holders.length), 0n, 0n] as const, apply: () => holders.forEach((a) => h.state.balances.set(`${a.toLowerCase()}:${tokenId}`, 0n)) };
   };
 }
+
+test('a redeemBatch simulation that returns (redeemed, paidUsdg, paidInKind) is sent when redeemed equals the chunk', async () => {
+  const h = harness();
+  const longId = h.addSeries(200_000_000n, { longPayoutPerUnit: 10n ** 16n, shortPayoutPerUnit: 0n }, { long: 100n });
+  const holder = getAddress(`0x${'11'.padStart(40, '0')}`);
+  h.state.balances.set(`${holder.toLowerCase()}:${longId}`, 100n);
+  h.index.applyRange({ series: [], holders: [{ tokenId: longId, holder }], orders: [], strategies: [], block: h.state.block }, h.state.block);
+  h.state.sim.redeemBatch = (args) => {
+    const [, holders] = args as [bigint, Address[]];
+    return { ok: true, result: [BigInt(holders.length), 5n, 7n] as const };
+  };
+  await stepRedeem(h.ctx, [h.key]);
+  const sent = h.state.sends.filter((s) => s.fn === 'redeemBatch');
+  assert.equal(sent.length, 1, 'the (redeemed, paidUsdg, paidInKind) tuple was not worth sending: the reader compared the tuple to a count');
+  assert.equal(sent[0]!.status, 'confirmed');
+});
+
+test('a redeemBatch simulation that still returns one uint256 is sent (the ABI committed before 818 lands)', async () => {
+  const h = harness();
+  const longId = h.addSeries(200_000_000n, { longPayoutPerUnit: 10n ** 16n, shortPayoutPerUnit: 0n }, { long: 100n });
+  const holder = getAddress(`0x${'22'.padStart(40, '0')}`);
+  h.state.balances.set(`${holder.toLowerCase()}:${longId}`, 100n);
+  h.index.applyRange({ series: [], holders: [{ tokenId: longId, holder }], orders: [], strategies: [], block: h.state.block }, h.state.block);
+  h.state.sim.redeemBatch = () => ({ ok: true, result: 1n });
+  await stepRedeem(h.ctx, [h.key]);
+  const sent = h.state.sends.filter((s) => s.fn === 'redeemBatch');
+  assert.equal(sent.length, 1, 'the single-uint256 simulation was not worth sending');
+  assert.equal(sent[0]!.status, 'confirmed');
+});
 
 test('redeem: a chunk that runs out of gas as a whole (a holder costs more than its budget) is split until it fits, not dropped every tick', async () => {
   const h = harness();
@@ -308,14 +347,14 @@ test('redeem: a chunk that runs out of gas as a whole (a holder costs more than 
 });
 
 /*//////////////////////////////////////////////////////////////
-    T-462: A MINED BATCH THAT DID LESS THAN ITS SIMULATION
+    A MINED BATCH THAT DID LESS THAN ITS SIMULATION
 //////////////////////////////////////////////////////////////*/
 
 // The sender's confirmed outcome carries the SIMULATED result (tx.ts), and redeemBatch and prune each swallow a
 // per-item failure, so the receipt reads success either way. These handlers make the two diverge: the simulation
 // reports every item done, and the mined effect (`apply`) leaves one item as it was.
 
-test('redeem: a holder the MINED batch skipped is not counted redeemed from the simulation; its expiry stays open and the backlog counts it (T-462)', async () => {
+test('redeem: a holder the MINED batch skipped is not counted redeemed from the simulation; its expiry stays open and the backlog counts it', async () => {
   const h = harness();
   const longId = h.addSeries(200_000_000n, { longPayoutPerUnit: 10n ** 16n, shortPayoutPerUnit: 0n }, { long: 300n });
   const holders = [0xa1, 0xa2, 0xa3].map((n) => getAddress(`0x${n.toString(16).padStart(40, '0')}`));
@@ -326,7 +365,7 @@ test('redeem: a holder the MINED batch skipped is not counted redeemed from the 
   h.store.setMeta(settledSeenMetaKey(longId), String(h.state.now - 7_200));
   h.state.sim.redeemBatch = (args) => {
     const [tokenId, batch] = args as [bigint, Address[]];
-    return { ok: true, result: BigInt(batch.length), apply: () => batch.filter((a) => a !== SKIPPED).forEach((a) => h.state.balances.set(`${a.toLowerCase()}:${tokenId}`, 0n)) };
+    return { ok: true, result: [BigInt(batch.length), 0n, 0n] as const, apply: () => batch.filter((a) => a !== SKIPPED).forEach((a) => h.state.balances.set(`${a.toLowerCase()}:${tokenId}`, 0n)) };
   };
 
   const report = await stepRedeem(h.ctx, [h.key]);
@@ -341,7 +380,33 @@ test('redeem: a holder the MINED batch skipped is not counted redeemed from the 
   assert.equal(backlog[0]!.data.holders, 1, `the backlog counts exactly one holder left: ${SKIPPED}`);
 });
 
-test('prune: an order the MINED prune skipped is not marked dead from the simulation; it stays live for the next tick (T-462)', async () => {
+test('redeem: an opted-out holder is redeemed when the cranker may redeem it anyway -- itself, or its operator -- as Clearinghouse._mayRedeem', async () => {
+  // _mayRedeem(holder, caller) = caller == holder || !noThirdPartyRedeem || isOperator[holder][caller]. The keeper read
+  // only the middle clause, so these two holders were skipped as opted out while redeemBatch would redeem them.
+  const h = harness();
+  const CRANKER = getAddress(h.ctx.sender.account);
+  const longId = h.addSeries(200_000_000n, { longPayoutPerUnit: 10n ** 16n, shortPayoutPerUnit: 0n }, { long: 400n });
+  const [OPERATED, OPTED_OUT, OPEN] = [0xb1, 0xb2, 0xb3].map((n) => getAddress(`0x${n.toString(16).padStart(40, '0')}`)) as [Address, Address, Address];
+  const holders = [CRANKER, OPERATED, OPTED_OUT, OPEN];
+  for (const a of holders) h.state.balances.set(`${a.toLowerCase()}:${longId}`, 100n);
+  for (const a of [CRANKER, OPERATED, OPTED_OUT]) h.state.optedOut.add(a.toLowerCase());
+  h.state.operators.add(`${OPERATED.toLowerCase()}:${CRANKER.toLowerCase()}`);
+  h.state.operators.add(`${OPTED_OUT.toLowerCase()}:${getAddress('0x00000000000000000000000000000000000000c0').toLowerCase()}`); // some OTHER operator
+  h.index.applyRange({ series: [], holders: holders.map((holder) => ({ tokenId: longId, holder })), orders: [], strategies: [], block: h.state.block }, h.state.block);
+
+  const report = await stepRedeem(h.ctx, [h.key]);
+  const batches = h.state.simulations.filter((s) => s.fn === 'redeemBatch').map((s) => (s.args[1] as Address[]).map((a) => a.toLowerCase()));
+  const sent = new Set(batches.flat());
+  assert.ok(sent.has(CRANKER.toLowerCase()), 'the cranker redeems its own balance: caller == holder');
+  assert.ok(sent.has(OPERATED.toLowerCase()), 'a holder that made the cranker its operator is redeemable');
+  assert.ok(sent.has(OPEN.toLowerCase()));
+  assert.ok(!sent.has(OPTED_OUT.toLowerCase()), 'an opt-out whose operator is someone else stays skipped: redeemBatch would skip it');
+  const token = (report.notes.tokens as Array<{ optedOut: number; redeemable: number }>)[0]!;
+  assert.equal(token.optedOut, 1);
+  assert.equal(token.redeemable, 3);
+});
+
+test('prune: an order the MINED prune skipped is not marked dead from the simulation; it stays live for the next tick', async () => {
   const h = harness();
   const longId = h.addSeries(200_000_000n);
   const ids = [1n, 2n, 3n];
@@ -364,7 +429,7 @@ test('prune: an order the MINED prune skipped is not marked dead from the simula
   );
 });
 
-test('settle: a mined settle that did not settle does not start the redeem backlog clock from the simulated `true`; one that did, does (T-462)', async () => {
+test('settle: a mined settle that did not settle does not start the redeem backlog clock from the simulated `true`; one that did, does', async () => {
   const h = harness();
   // Clearinghouse.settle returns false, with a successful receipt, when the price is not final on chain.
   const unsettled = h.addSeries(200_000_000n, { settled: false }, { long: 100n });
@@ -376,6 +441,80 @@ test('settle: a mined settle that did not settle does not start the redeem backl
   assert.equal(h.state.series.get(unsettled.toString())!.settled, false, 'the break landed: the mined settle left the series unsettled');
   assert.equal(h.store.getMeta(settledSeenMetaKey(unsettled)), null, `series ${unsettled} is not settled on chain, so its settled mark must not be set`);
   assert.notEqual(h.store.getMeta(settledSeenMetaKey(settles)), null, `series ${settles} did settle on chain, so its settled mark is set`);
+});
+
+/*
+ * HouseVault._requireFlat (HouseVault.sol)
+ * refuses rollEpoch NotSettled for ANY tracked series that is not settled; the settle step settled only series with long
+ * supply. A House quote that never filled leaves its series tracked at zero supply, and before this nothing settled it.
+ */
+const HOUSE_VAULT = getAddress('0x00000000000000000000000000000000000000f1');
+
+/** HouseRollReads for one registry House vault whose boundary is E, read from the harness state. */
+function houseReads(h: ReturnType<typeof harness>): HouseRollReads {
+  return {
+    factories: [],
+    registryVaults: () => [HOUSE_VAULT],
+    discover: async () => [],
+    readVault: async () => ({ epochEnd: E, epochId: 7n, underlying: U, oracle: ORACLE, tracked: h.state.tracked, uncorroboratedDelayS: 21_600 }),
+    readTracked: async (_vault, tracked) => tracked.map((longId) => ({ longId, settled: h.state.series.get(longId.toString())?.settled === true, longs: 0n, shorts: 0n, live: 0n })),
+    readFinalized: async () => h.state.status === 2,
+    readConverts: async () => false,
+    readSpotFresh: async () => true,
+    readPinSources: async () => 2,
+  };
+}
+
+test('settle: a zero-supply series a House vault still tracks is settled, so the vault\'s boundary can roll', async () => {
+  const h = harness();
+  // The House vault quoted this series, nothing filled, the order expired: tracked, no supply, unsettled.
+  const quoted = h.addSeries(200_000_000n, { settled: false }, { long: 0n, short: 0n });
+  // An unsettled zero-supply series NO vault tracks, and one the vault tracks that has not expired: neither is sent.
+  const untracked = h.addSeries(210_000_000n, { settled: false }, { long: 0n, short: 0n });
+  const future = longIdOf(U, false, 220_000_000n, E + 86_400);
+  h.state.series.set(future.toString(), { underlying: U, isPut: false, strike: 220_000_000n, expiry: E + 86_400, oracle: ORACLE, settled: false, settlementPrice: 0n, longPayoutPerUnit: 0n, shortPayoutPerUnit: 0n });
+  h.state.tracked = [quoted, future];
+  h.state.sim.settle = (args) => ({ ok: true, result: true, apply: () => (h.state.series.get(String(args[0]))!.settled = true) });
+  const reads = houseReads(h);
+  const at = { blockNumber: h.state.block, timestamp: h.state.now };
+
+  // The stuck case: the boundary is due and Finalized, and the roll is refused on the unsettled tracked series.
+  const before = await houseRoll(h.ctx, newReport('house'), new Budget(10), at, reads);
+  assert.equal(before[0]!.decision, 'not-flat', 'rollEpoch would revert NotSettled: the tracked series is unsettled');
+  assert.match(String(before[0]!.detail), new RegExp(`${quoted}:unsettled`));
+
+  const report = await stepSettle(h.ctx, [h.key], reads);
+  const settled = h.state.sends.filter((s) => s.fn === 'settle').map((s) => s.args[0]);
+  assert.deepEqual(settled, [quoted], 'only the expired, unsettled series the vault tracks is settled, at zero supply');
+  assert.ok(!settled.includes(untracked), 'an untracked zero-supply series is left alone: nothing needs it settled');
+  assert.ok(!settled.includes(future), 'a tracked series before its expiry is not sent: settle would revert NotExpired');
+  assert.equal(report.notes.houseTrackedUnsettled, 1);
+
+  const after = await houseRoll(h.ctx, newReport('house'), new Budget(10), at, reads);
+  assert.doesNotMatch(String(after[0]!.detail), new RegExp(`${quoted}:`), 'the settled series no longer blocks the boundary');
+
+  // With only the expired quote tracked, the boundary that was refused now rolls.
+  h.state.tracked = [quoted];
+  const rolled = await houseRoll(h.ctx, newReport('house'), new Budget(10), at, reads);
+  assert.equal(rolled[0]!.decision, 'sent', 'rollEpoch is sent once nothing tracked is unsettled');
+});
+
+test('settle: a House-tracked series the expiry survey already settles is sent once, not twice; a no-op simulation sends nothing', async () => {
+  const h = harness();
+  const held = h.addSeries(200_000_000n, { settled: false }, { long: 100n, short: 100n });
+  h.state.tracked = [held];
+  h.state.sim.settle = () => ({ ok: true, result: true });
+  await stepSettle(h.ctx, [h.key], houseReads(h));
+  assert.deepEqual(h.state.simulations.filter((s) => s.fn === 'settle').map((s) => s.args[0]), [held], 'one settle for the series, from the survey');
+
+  // A price that is not final yet: settle returns false, so the House pass sends nothing and asks again next tick.
+  const early = harness();
+  const quoted = early.addSeries(200_000_000n, { settled: false }, { long: 0n, short: 0n });
+  early.state.tracked = [quoted];
+  early.state.sim.settle = () => ({ ok: true, result: false });
+  const r = await stepSettle(early.ctx, [early.key], houseReads(early));
+  assert.deepEqual(early.state.sends.filter((s) => s.fn === 'settle'), [], 'nothing is sent for a settle that would not advance');
+  assert.deepEqual((r.notes.houseSettle as Array<{ status: string }>).map((x) => x.status), ['no-op']);
 });
 
 test('a redeem backlog pages once per expiry, naming its tokens, not once per token id; a settle that does not advance pages once per expiry', async () => {
@@ -443,7 +582,7 @@ test('a tick that must yield to a time-critical target (an expiry\'s snapshot) s
   assert.equal(h.state.sends.filter((s) => s.fn === 'snapshot').length, 1);
 });
 
-test('snapshot: a mined snapshot whose source recorded nothing does not mark its expiry from the simulated count; one that recorded, does (T-469)', async () => {
+test('snapshot: a mined snapshot whose source recorded nothing does not mark its expiry from the simulated count; one that recorded, does', async () => {
   const h = harness();
   h.state.openInterest = 100n;
   h.state.status = 0;
@@ -490,11 +629,11 @@ test('yieldDeadlineMs: the wall-clock moment the head reaches the earliest futur
 });
 
 /*//////////////////////////////////////////////////////////////
-    T-496: THE POST-READ MUST READ THE RECEIPT'S BLOCK
+    THE POST-READ MUST READ THE RECEIPT'S BLOCK
 //////////////////////////////////////////////////////////////*/
 
 /**
- * T-462 and T-469 each recorded the same suspicion: the fake chain ignored `blockNumber`, so their tests
+ * Earlier changes each noted the same gap: the fake chain ignored `blockNumber`, so their tests
  * proved the counting logic and not that the block reached the RPC. Both were right, and neither could
  * test it, because every block answered from the same live state.
  *
@@ -508,7 +647,7 @@ test('yieldDeadlineMs: the wall-clock moment the head reaches the earliest futur
  * mined-skipped holder and a redeem backlog that never happened. Note the direction — the failure invents
  * work rather than losing it, which is why nothing downstream would have caught it either.
  */
-test('T-496: the redeem post-read reads the receipt block, not head', async () => {
+test('the redeem post-read reads the receipt block, not head', async () => {
   const h = harness();
   const longId = h.addSeries(200_000_000n, { longPayoutPerUnit: 10n ** 16n, shortPayoutPerUnit: 0n }, { long: 300n });
   const holders = [0xb1, 0xb2, 0xb3].map((n) => getAddress(`0x${n.toString(16).padStart(40, '0')}`));
@@ -522,7 +661,7 @@ test('T-496: the redeem post-read reads the receipt block, not head', async () =
     const [tokenId, batch] = args as [bigint, Address[]];
     return {
       ok: true,
-      result: BigInt(batch.length),
+      result: [BigInt(batch.length), 0n, 0n] as const,
       apply: () => {
         batch.forEach((a) => h.state.balances.set(`${a.toLowerCase()}:${tokenId}`, 0n));
         // Freeze the receipt block: every holder in the batch is redeemed AS OF HERE.
@@ -566,4 +705,205 @@ test('T-496: the redeem post-read reads the receipt block, not head', async () =
     `block ${receiptBlock}: no holder was left behind, so there is no backlog. One here is invented by`
       + ` reading head (block ${h.state.block}).`,
   );
+});
+
+/**
+ * A House vault's boundary expiry with NO series: the survey sees no open interest and no supply,
+ * so before the boundary marking nothing snapshotted or finalized it (only Clearinghouse.settle finalizes, and it needs a series).
+ * Marked in ctx.houseBoundaries, the same expiry is snapshotted inside its window and finalized after it.
+ */
+function houseBoundaryHarness() {
+  const h = harness();
+  h.state.openInterest = 0n;
+  h.state.status = 0;
+  const SOURCE = getAddress('0x00000000000000000000000000000000000000c1');
+  type Call = { functionName: string; args?: readonly unknown[] };
+  const client = h.ctx.client as unknown as { multicall: (a: { contracts: Call[] }) => Promise<unknown[]> };
+  const inner = client.multicall;
+  h.ctx.client = {
+    ...client,
+    multicall: async ({ contracts }: { contracts: Call[] }) => {
+      const base = await inner({ contracts });
+      return contracts.map((c, i) => {
+        // Not captured, one source on the market's configuration (unpinned), and it prices the window.
+        if (c.functionName === 'settlementInfo') return { status: 'success', result: [0, 0n, 0, false, false, false] };
+        if (c.functionName === 'settlementConfig') return { status: 'success', result: [false, [SOURCE], 150, 21_600, 90_000] };
+        if (c.functionName === 'windowPrice') return { status: 'success', result: [true, 10n ** 8n] };
+        return base[i];
+      });
+    },
+  } as never;
+  h.state.sim.snapshot = () => ({ ok: true, result: 1 });
+  return h;
+}
+
+test('a House boundary with no series is snapshotted inside its window; unmarked, the same expiry is not', async () => {
+  const inWindow = (h: ReturnType<typeof harness>) => ({ ...h.key, expiry: h.state.now - 10 });
+  const control = houseBoundaryHarness();
+  await stepSnapshot(control.ctx, [inWindow(control)]);
+  assert.equal(control.state.sends.filter((s) => s.fn === 'snapshot').length, 0, 'no series, no open interest, not a boundary: nothing to snapshot');
+
+  const h = houseBoundaryHarness();
+  const key = inWindow(h);
+  h.ctx.houseBoundaries = new Set([expiryKeyString(key)]);
+  await stepSnapshot(h.ctx, [key]);
+  assert.deepEqual(h.state.sends.filter((s) => s.fn === 'snapshot').map((s) => [String(s.args[0]).toLowerCase(), Number(s.args[1])]), [[key.underlying.toLowerCase(), key.expiry]]);
+});
+
+test('a House boundary with no series is finalized after its window; unmarked, the same expiry is not', async () => {
+  const control = houseBoundaryHarness();
+  await stepFinalize(control.ctx, [control.key]);
+  assert.equal(control.state.sends.filter((s) => s.fn === 'finalize').length, 0, 'no series, no open interest, not a boundary: nothing to finalize');
+
+  const h = houseBoundaryHarness();
+  h.ctx.houseBoundaries = new Set([expiryKeyString(h.key)]);
+  const report = await stepFinalize(h.ctx, [h.key]);
+  assert.deepEqual(h.state.sends.filter((s) => s.fn === 'finalize').map((s) => [String(s.args[0]).toLowerCase(), Number(s.args[1]), s.status]), [[h.key.underlying.toLowerCase(), h.key.expiry, 'confirmed']]);
+  assert.equal(report.actions.filter((a) => a.kind === 'finalize').length, 1);
+});
+
+/*//////////////////////////////////////////////////////////////
+    'S STARVED-CALL CEILINGS AT THE KEEPER
+//////////////////////////////////////////////////////////////*/
+
+/**
+ * A finalize/snapshot harness: nothing captured, `sources` on the market's configuration, every one pricing the window,
+ * the expiry a House boundary so the steps plan it without series. `needs` is the least gas at which the oracle call
+ * does not re-throw a starved source call (below it the simulation reverts with no reason, as an out-of-gas does).
+ */
+function starvedOracleHarness(sources: readonly Address[], expiry: number | null, needs: bigint, below: { revert: string | null; transport?: true } = { revert: null }) {
+  const h = harness();
+  h.state.openInterest = 0n;
+  h.state.status = 0;
+  type Call = { functionName: string; args?: readonly unknown[] };
+  const client = h.ctx.client as unknown as { multicall: (a: { contracts: Call[] }) => Promise<unknown[]> };
+  const inner = client.multicall;
+  h.ctx.client = {
+    ...client,
+    multicall: async ({ contracts }: { contracts: Call[] }) => {
+      const base = await inner({ contracts });
+      return contracts.map((c, i) => {
+        if (c.functionName === 'settlementInfo') return { status: 'success', result: [0, 0n, 0, false, false, false] };
+        if (c.functionName === 'settlementConfig') return { status: 'success', result: [false, sources, 150, 21_600, 90_000] };
+        if (c.functionName === 'windowPrice') return { status: 'success', result: [true, 10n ** 8n] };
+        return base[i];
+      });
+    },
+  } as never;
+  const key = { ...h.key, expiry: expiry ?? h.key.expiry };
+  h.ctx.houseBoundaries = new Set([expiryKeyString(key)]);
+  const execute = h.ctx.sender.execute.bind(h.ctx.sender);
+  if (below.transport === true) {
+    h.ctx.sender = { ...h.ctx.sender, execute: async (call, opts) => (call.gas < needs ? (h.state.simulations.push({ fn: call.functionName, args: call.args as readonly unknown[], gas: call.gas }), { status: 'simulation-reverted', revert: null, error: 'HTTP request failed.', transportError: true }) : execute(call, opts)) };
+  }
+  const answer = (result: unknown) => (_args: readonly unknown[], gas: bigint) => (gas >= needs ? { ok: true as const, result } : { ok: false as const, revert: below.revert });
+  h.state.sim.finalize = answer([true, 10n ** 8n]);
+  h.state.sim.snapshot = answer(1);
+  return { h, key };
+}
+
+const SRC_A = getAddress('0x00000000000000000000000000000000000000a1');
+const SRC_B = getAddress('0x00000000000000000000000000000000000000a2');
+
+test('a finalize whose simulation reverts with no reason (a source call starved below its ceiling) is resent at once with every source call\'s ceiling, and lands', async () => {
+  // After the grace: finalize reads each of the two sources once.
+  const needs = GAS.finalize + 2n * starvedCeiling(SOURCE_GAS);
+  const { h, key } = starvedOracleHarness([SRC_A, SRC_B], null, needs);
+  const report = await stepFinalize(h.ctx, [key]);
+  assert.deepEqual(h.state.simulations.filter((s) => s.fn === 'finalize').map((s) => s.gas), [GAS.finalize, needs], 'simulated at the fixed limit, then at the fixed limit plus two source ceilings');
+  assert.deepEqual(h.state.sends.filter((s) => s.fn === 'finalize').map((s) => [s.gas, s.status]), [[needs, 'confirmed']]);
+  assert.deepEqual(report.actions.filter((a) => a.kind === 'finalize').map((a) => a.status), ['simulation-reverted', 'confirmed']);
+  assert.equal(h.alerts.filter((a) => a.kind === 'v2_tx_revert').length, 0, 'a starved simulation sends nothing and pages nothing');
+});
+
+test('inside the snapshot grace finalize records each source before it reads it, so the resend covers twice the source calls', async () => {
+  const { h, key } = starvedOracleHarness([SRC_A, SRC_B], harness().state.now - 300, GAS.finalize + 4n * starvedCeiling(SOURCE_GAS));
+  // Inside the grace the planner holds finalize until the expiry is marked snapshotted.
+  h.store.setMeta(snapshotMetaKey(key), JSON.stringify({ at: h.state.now, recorded: 2 }));
+  await stepFinalize(h.ctx, [key]);
+  assert.deepEqual(h.state.simulations.filter((s) => s.fn === 'finalize').map((s) => s.gas), [GAS.finalize, GAS.finalize + 4n * starvedCeiling(SOURCE_GAS)]);
+  assert.deepEqual(h.state.sends.filter((s) => s.fn === 'finalize').map((s) => s.gas), [GAS.finalize + 4n * starvedCeiling(SOURCE_GAS)]);
+});
+
+test('a snapshot that reverts with no reason is resent with its source call\'s ceiling', async () => {
+  const needs = GAS.snapshot + starvedCeiling(SOURCE_GAS);
+  const { h, key } = starvedOracleHarness([SRC_A], harness().state.now - 10, needs);
+  await stepSnapshot(h.ctx, [key]);
+  assert.deepEqual(h.state.simulations.filter((s) => s.fn === 'snapshot').map((s) => s.gas), [GAS.snapshot, needs]);
+  assert.deepEqual(h.state.sends.filter((s) => s.fn === 'snapshot').map((s) => [s.gas, s.status]), [[needs, 'confirmed']]);
+});
+
+test('controls: a decoded revert is the contract\'s answer and a transport failure is the node\'s: neither is resent', async () => {
+  const needs = GAS.finalize + 2n * starvedCeiling(SOURCE_GAS);
+  const decoded = starvedOracleHarness([SRC_A, SRC_B], null, needs, { revert: 'TooEarly' });
+  await stepFinalize(decoded.h.ctx, [decoded.key]);
+  assert.deepEqual(decoded.h.state.simulations.filter((s) => s.fn === 'finalize').map((s) => s.gas), [GAS.finalize], 'TooEarly is not a starved call');
+  assert.equal(decoded.h.state.sends.length, 0);
+
+  const transport = starvedOracleHarness([SRC_A, SRC_B], null, needs, { revert: null, transport: true });
+  await stepFinalize(transport.h.ctx, [transport.key]);
+  assert.deepEqual(transport.h.state.simulations.filter((s) => s.fn === 'finalize').map((s) => s.gas), [GAS.finalize], 'a node that did not answer is not a starved call');
+  assert.equal(transport.h.state.sends.length, 0);
+
+  // And a finalize that simulates at the fixed limit is sent at it: the resend is only for the starved case.
+  const fine = starvedOracleHarness([SRC_A, SRC_B], null, GAS.finalize);
+  await stepFinalize(fine.h.ctx, [fine.key]);
+  assert.deepEqual(fine.h.state.sends.filter((s) => s.fn === 'finalize').map((s) => s.gas), [GAS.finalize]);
+});
+
+test('a redeemBatch of a converting ITM call long carries one conversion reserve; the same holders paid in kind (no adapter) do not', async () => {
+  const run = async (adapter: Address) => {
+    const h = harness();
+    const longId = h.addSeries(200_000_000n, { longPayoutPerUnit: 10n ** 16n, shortPayoutPerUnit: 0n }, { long: 300n });
+    const holders = [1, 2, 3].map((i) => getAddress(`0x${i.toString(16).padStart(40, '0')}`));
+    for (const a of holders) h.state.balances.set(`${a.toLowerCase()}:${longId}`, 100n);
+    h.index.applyRange({ series: [], holders: holders.map((holder) => ({ tokenId: longId, holder })), orders: [], strategies: [], block: h.state.block }, h.state.block);
+    type Call = { functionName: string; args?: readonly unknown[] };
+    const client = h.ctx.client as unknown as { multicall: (a: { contracts: Call[]; blockNumber?: bigint }) => Promise<unknown[]> };
+    const inner = client.multicall;
+    h.ctx.client = {
+      ...client,
+      multicall: async (a: { contracts: Call[]; blockNumber?: bigint }) => {
+        const base = await inner(a);
+        return a.contracts.map((c, i) => (c.functionName === 'payoutAdapter' ? { status: 'success', result: adapter } : base[i]));
+      },
+    } as never;
+    h.state.sim.redeemBatch = chRedeemBatch(h, 0n);
+    await stepRedeem(h.ctx, [h.key]);
+    return h.state.sends.filter((s) => s.fn === 'redeemBatch').map((s) => [(s.args[1] as Address[]).length, s.gas]);
+  };
+  assert.deepEqual(await run(getAddress('0x00000000000000000000000000000000000000ad')), [[3, GAS.redeemBase + GAS.redeemConvertReserve + 3n * GAS.redeemConvertEach]]);
+  assert.deepEqual(await run(ZERO), [[3, GAS.redeemBase + 3n * GAS.redeemInKindEach]], 'no adapter: every holder is paid in kind, nothing is reserved');
+});
+
+test('an unread payoutAdapter() is not "no adapter": no redeemBatch is sized on it, the expiry stays open, and the note says why', async () => {
+  const run = async (adapter: Address | 'fail') => {
+    const h = harness();
+    const longId = h.addSeries(200_000_000n, { longPayoutPerUnit: 10n ** 16n, shortPayoutPerUnit: 0n }, { long: 300n });
+    const holders = [1, 2, 3].map((i) => getAddress(`0x${i.toString(16).padStart(40, '0')}`));
+    for (const a of holders) h.state.balances.set(`${a.toLowerCase()}:${longId}`, 100n);
+    h.index.applyRange({ series: [], holders: holders.map((holder) => ({ tokenId: longId, holder })), orders: [], strategies: [], block: h.state.block }, h.state.block);
+    type Call = { functionName: string; args?: readonly unknown[] };
+    const client = h.ctx.client as unknown as { multicall: (a: { contracts: Call[]; blockNumber?: bigint }) => Promise<unknown[]> };
+    const inner = client.multicall;
+    h.ctx.client = {
+      ...client,
+      // Only payoutAdapter() fails, the way an allowFailure multicall reports a revert; every other view answers.
+      multicall: async (a: { contracts: Call[]; blockNumber?: bigint }) => {
+        const base = await inner(a);
+        return a.contracts.map((c, i) => (c.functionName !== 'payoutAdapter' ? base[i] : adapter === 'fail' ? { status: 'failure', error: new Error('payoutAdapter() reverted') } : { status: 'success', result: adapter }));
+      },
+    } as never;
+    h.state.sim.redeemBatch = chRedeemBatch(h, 0n);
+    const report = await stepRedeem(h.ctx, [h.key]);
+    return { report, sends: h.state.sends.filter((s) => s.fn === 'redeemBatch').length, done: h.index.doneExpiries().size };
+  };
+  const unread = await run('fail');
+  assert.equal(unread.sends, 0, 'no redeemBatch on a guessed adapter');
+  assert.equal(unread.report.notes.adapterSet, null, 'the note does not show a made-up false');
+  assert.match(String(unread.report.notes.skipped), /payoutAdapter\(\) read failed/);
+  assert.equal(unread.done, 0, 'the expiry is not marked done on a tick that redeemed nothing');
+  // Control: the same chain with the adapter read (set or unset) redeems.
+  assert.equal((await run(getAddress('0x00000000000000000000000000000000000000ad'))).sends, 1);
+  assert.equal((await run(ZERO)).sends, 1);
 });

@@ -7,17 +7,17 @@
  * A market moves from the second card to the first by turning live in ops/markets/tier1.json,
  * gen:markets and a rebuild. The old pooled vault is closed; collect a queued redemption on /collect.
  *
- * Copy discipline (disclosure policy (copy-lint enforced this until it was removed on 2026-09-21; nothing checks it now)): what a market IS and where it is, never what it might
+ * Copy discipline (disclosure policy (nothing checks it automatically now)): what a market IS and where it is, never what it might
  * pay. "Planned" is a statement about a registry row, not a promise of a date.
  *
- * Status matches stonkhouse.fun: beta, pending audit.
+ * No beta, audit or preview status is shown.
  */
 import Link from "next/link";
 
-import { Button, Card, Chip, ExternalLink, Figure, Notice, PageHead, SectionHead } from "@/components/ui";
+import { Button, Card, Chip, ExternalLink, Figure, InfoTip, Notice, PageHead, SectionHead, TickerLogo } from "@/components/ui";
 import { addressUrl } from "@/lib/chain";
 import { DEFAULT_MARKET, MARKETS, marketHref, plannedByWave, type MarketWave } from "@/lib/markets";
-import { SITE_URL, STATUS } from "@/lib/site";
+import { SITE_URL } from "@/lib/site";
 
 /**
  * How each wave is labelled on the "Next" card. Rollout order, no dates. The card lists the
@@ -50,14 +50,9 @@ export default function HomePage() {
         }
         lede={
           <>
-            <div className="mb-3 flex flex-wrap gap-2">
-              <Chip tone="accent" dot>
-                {STATUS.phase}
-              </Chip>
-            </div>
             <p>
-              Put your Stock Tokens in. Each week someone can pay you for the chance to buy them at a set price. If they
-              don&apos;t, you keep the stock. Only the amount you offer can be sold.
+              Each week someone can pay you for the chance to buy your Stock Tokens at a set price.{" "}
+              <InfoTip label="About offers">If nobody buys, you keep the stock. Only the amount you offer can be sold.</InfoTip>
             </p>
           </>
         }
@@ -69,8 +64,8 @@ export default function HomePage() {
       />
 
       <Notice tone="warn" className="mb-6 lg:[&>div]:max-w-[88ch]">
-        Premium is paid only if a buyer fills. Assignment can take the collateral at the strike. Stock Tokens are debt
-        securities, not shares in the underlying company.
+        You&apos;re paid only if a buyer fills, and your stock can be sold at the strike.{" "}
+        <InfoTip label="About Stock Tokens">Stock Tokens are debt securities, not shares in the underlying company.</InfoTip>
       </Notice>
 
       <div className="grid gap-4 sm:gap-5">
@@ -85,11 +80,10 @@ export default function HomePage() {
                       <Chip tone="accent" dot>
                         Live
                       </Chip>
-                      <h2 className="mt-3 text-[26px] font-extrabold tracking-[-0.02em]">{m.ticker}</h2>
+                      <h2 className="mt-3 flex items-center gap-2 text-[26px] font-extrabold tracking-[-0.02em]"><TickerLogo ticker={m.ticker} />{m.ticker}</h2>
                       <p className="mt-1 text-[13.5px] text-ink-3">{m.name}</p>
                       <p className="mt-2 max-w-[36em] text-[15.5px] text-ink-2">
-                        Deposit your {m.ticker}. Choose how much is for sale this week. If someone pays, you get USDG. If they
-                        don&apos;t, you keep the stock.
+                        Deposit your {m.ticker} and choose how much is for sale each week.
                       </p>
                     </div>
                   </div>
@@ -118,15 +112,14 @@ export default function HomePage() {
           <div className="flex flex-wrap items-center gap-2">
             <Chip>Next</Chip>
             <span className="text-[13px] text-ink-3">
-              {plannedCount} more {plannedCount === 1 ? "stock" : "stocks"} in the registry, not open yet.
+              {plannedCount} more, not open yet.
             </span>
           </div>
-          <h2 className="text-[22px] font-extrabold tracking-[-0.02em] text-ink-2">More stocks, in this order.</h2>
-          <p className="text-[15.5px] text-ink-2">
-            Each one opens when its own factory is deployed and configured. Until then its page does not exist and
-            nothing of it is for sale. Same design for every market: one account per wallet, one lot per offer, USDG
-            in, no basket, no points.
-          </p>
+          <h2 className="flex items-center gap-2 text-[22px] font-extrabold tracking-[-0.02em] text-ink-2">
+            More stocks, in this order.
+            <InfoTip label="About upcoming stocks">Each one opens when its own factory is deployed and set up. Every
+              market works the same way.</InfoTip>
+          </h2>
           <dl className="grid gap-3">
             {planned.map((group) => (
               <div key={group.wave} className="grid gap-1.5">
@@ -134,6 +127,7 @@ export default function HomePage() {
                 <dd className="flex flex-wrap gap-1.5">
                   {group.markets.map((m) => (
                     <Chip key={m.ticker} title={m.name}>
+                      <TickerLogo ticker={m.ticker} />
                       {m.ticker}
                     </Chip>
                   ))}
@@ -145,7 +139,7 @@ export default function HomePage() {
         ) : null}
 
         <p className="text-[13.5px] text-ink-3">
-          How a week runs, the policy limits and the risks are on{" "}
+          More on{" "}
           <Link href="/docs" className="link">
             Docs
           </Link>{" "}

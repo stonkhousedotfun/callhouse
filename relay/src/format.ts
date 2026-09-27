@@ -1,7 +1,7 @@
 /**
  * Keeper alert → the text a human reads in Discord or Telegram. Pure functions, no I/O.
  *
- * Both renderings lead with the severity, because ops/alerts.md routes on it: an `error` is
+ * Both renderings lead with the severity, because alerts are routed on it: an `error` is
  * somebody's pager, an `info` is a record. Then the kind (what the runbook index keys on), the
  * message, one line of context, and `data` as indented JSON.
  *

@@ -1,6 +1,7 @@
 import { db } from "ponder:api";
 import schema from "ponder:schema";
 import type { Hono } from "hono";
+import { isAddress } from "viem";
 import { and, asc, desc, eq, gt, gte, inArray, isNotNull, lte, sql } from "ponder";
 
 import { V2_AUTO_ROLLER, V2_ORDER_BOOK } from "../../../lib/env";
@@ -91,7 +92,7 @@ type ActivityQuery = {
 };
 
 /**
- * F-APP-INDEXER-09. One page of /feed/activity, read entirely at ONE indexed checkpoint.
+ * One page of /feed/activity, read entirely at ONE indexed checkpoint.
  *
  * The page is assembled from ten independent selects across five tables. Read against a moving
  * checkpoint they can land on either side of a Ponder commit, so a page can mix two index states:
@@ -277,9 +278,16 @@ export function registerMachineRoutes(app: Hono) {
     const cursor = c.req.query("cursor");
     if (cursor !== undefined && !/^0x[\da-fA-F]{40}-0x[\da-fA-F]{40}$/.test(cursor))
       return error(c, "bad_cursor", "Invalid strategy cursor.");
+    // One writer's strategies, so a wallet finds its own row without paging everyone's. Same validation as
+    // house.ts `address` (viem strict: lowercase or a correct EIP-55 checksum); v2_strategy.writer is stored lowercase.
+    const writerRaw = c.req.query("writer");
+    if (writerRaw !== undefined && !isAddress(writerRaw))
+      return error(c, "bad_writer", "writer must be an EVM address.");
+    const writer = writerRaw === undefined ? undefined : writerRaw.toLowerCase() as `0x${string}`;
     const { rows, sliced, orders, series, bookState, accounts } = await readIndexedSnapshot(async () => {
       const rows = await db.select().from(schema.v2Strategy).where(and(
         ...(active === undefined ? [] : [eq(schema.v2Strategy.active, active === "1")]),
+        ...(writer === undefined ? [] : [eq(schema.v2Strategy.writer, writer)]),
         ...(cursor ? [gt(schema.v2Strategy.id, cursor.toLowerCase())] : []),
       )).orderBy(schema.v2Strategy.id).limit(size + 1);
       const sliced = rows.slice(0, size);
@@ -335,6 +343,11 @@ export function registerMachineRoutes(app: Hono) {
         lastRolledAt: row.lastRolledAt === null ? null : Number(row.lastRolledAt),
         lastStaleCancelAt: row.lastStaleCancelAt === null ? null : Number(row.lastStaleCancelAt),
         staleSpot: row.staleSpot === null ? null : money(row.staleSpot),
+        // The last PositionClosed. currentLongId above is already null for a closed position.
+        lastClose: row.lastClosedAt === null || row.lastClosedLongId === null || row.lastCloseRedeemed === null ? null : {
+          at: Number(row.lastClosedAt), longId: row.lastClosedLongId.toString(),
+          orderId: row.lastClosedOrderId?.toString() ?? null, redeemed: row.lastCloseRedeemed,
+        },
         pricing: {
           currentAsk: currentAsk === null ? null : money(currentAsk),
           band: band === null ? null : { min: money(band.min), max: money(band.max) },
@@ -366,7 +379,7 @@ export function registerMachineRoutes(app: Hono) {
     const cursor = parseCursor(c.req.query("cursor"));
     if (c.req.query("cursor") !== undefined && cursor === null) return error(c, "bad_cursor", "Invalid activity cursor.");
     const size = limit(c.req.query("limit"));
-    // F-APP-INDEXER-09: the whole page comes from ONE indexed checkpoint. Unwrapped, the ten selects
+    // The whole page comes from ONE indexed checkpoint. Unwrapped, the ten selects
     // inside activityPage could straddle a checkpoint advance and the resulting cursor page could
     // skip or duplicate an item. readIndexedSnapshot retries, then answers 503 snapshot_changing
     // rather than serving a mixed page - the same contract /strategies already exposes.

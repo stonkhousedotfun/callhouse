@@ -21,6 +21,12 @@ export type StrategyState = StrategyTerms & {
   repriceCount: number;
   lastStaleCancelAt: bigint | null;
   staleSpot: bigint | null;
+  /** The last PositionClosed. It outlives the position it describes; the next close overwrites it. */
+  lastClosedAt: bigint | null;
+  lastClosedLongId: bigint | null;
+  /** The ask the roller still tracked at close-out; null when the event carried 0 (stop or cancelStale dropped it). */
+  lastClosedOrderId: bigint | null;
+  lastCloseRedeemed: boolean | null;
   updatedAt: bigint;
 };
 
@@ -29,12 +35,18 @@ export type RollerEvent =
   | { kind: "StrategyStopped" }
   | { kind: "Rolled"; longId: bigint; orderId: bigint; expiry: bigint }
   | { kind: "StaleAskCancelled"; longId: bigint; orderId: bigint; spot: bigint }
-  | { kind: "Repriced"; newOrderId: bigint; price: bigint };
+  | { kind: "Repriced"; newOrderId: bigint; price: bigint }
+  | { kind: "PositionClosed"; longId: bigint; orderId: bigint; redeemed: boolean };
 
 const BPS = 10_000n;
 const PRICE_TICK = 100n;
-const MIN_ASK_BPS = 5;
+// AutoRoller.MIN_ASK_BPS / MAX_ASK_BPS (AutoRoller.sol:152-153). A change raised the floor from 5 to 50 before the v8 deploy;
+// ops/v2/contract-mirrors.list.mjs pins both against the contracts.
+const MIN_ASK_BPS = 50;
 const MAX_ASK_BPS = 1_000;
+// AutoRoller.MAX_REPRICE_DROP_BPS (AutoRoller.sol:162, a compiled constant): one reprice may not go below
+// `current x (BPS - MAX_REPRICE_DROP_BPS) / BPS` (RepriceDropExceeded, :504).
+export const MAX_REPRICE_DROP_BPS = 2_500;
 
 const ceilDiv = (value: bigint, divisor: bigint): bigint => (value + divisor - 1n) / divisor;
 
@@ -58,10 +70,20 @@ export type IndexedAutoRollerOrder = {
   longId: bigint;
   kind: string;
   status: string;
+  price: bigint;
   units: bigint;
   filled: bigint;
   validUntil: bigint;
 };
+
+/**
+ * The lowest price `reprice` accepts against the ask it replaces: AutoRoller.sol:504 reverts
+ * RepriceDropExceeded when `newPrice x BPS < current x (BPS - MAX_REPRICE_DROP_BPS)`, and a price must sit on the tick,
+ * so the floor is that bound rounded up to the tick -- the same figure the revert reports as its third argument.
+ */
+export function repriceDropFloor(current: bigint): bigint {
+  return ceilDiv(ceilDiv(current * (BPS - BigInt(MAX_REPRICE_DROP_BPS)), BPS), PRICE_TICK) * PRICE_TICK;
+}
 
 export type IndexedAutoRollerSeries = {
   longId: bigint;
@@ -106,7 +128,13 @@ export function eligibleStrategyPriceBand(input: {
   const overtaken = input.series.isPut
     ? input.spot <= input.series.strike
     : input.spot >= input.series.strike;
-  return overtaken ? null : strategyPriceBand(input.spot, input.strategy);
+  if (overtaken) return null;
+  const band = strategyPriceBand(input.spot, input.strategy);
+  if (band === null) return null;
+  // The spot band alone let `min` fall below the drop floor, and a reprice there reverts.
+  const floor = repriceDropFloor(input.order.price);
+  const min = band.min > floor ? band.min : floor;
+  return min <= band.max ? { min, max: band.max } : null;
 }
 
 export const strategyId = (writer: Address, underlying: Address): string =>
@@ -130,6 +158,10 @@ export const emptyStrategy = (at: bigint): StrategyState => ({
   repriceCount: 0,
   lastStaleCancelAt: null,
   staleSpot: null,
+  lastClosedAt: null,
+  lastClosedLongId: null,
+  lastClosedOrderId: null,
+  lastCloseRedeemed: null,
   updatedAt: at,
 });
 
@@ -164,6 +196,27 @@ export function reduceStrategy(current: StrategyState, event: RollerEvent, at: b
         lastRepricedAt: at,
         lastRepricedPrice: event.price,
         repriceCount: current.repriceCount + 1,
+        updatedAt: at,
+      };
+    case "PositionClosed":
+      // AutoRoller._closeOut deletes the whole position and emits this (IAutoRoller.PositionClosed), so the
+      // row keeps no current position, order or expiry, and drops the reprice and stale-cancel state that belonged to
+      // it. Unlike StaleAskCancelled this never refuses a mismatch: the contract has already cleared the position, so
+      // a replay that began after its Rolled (currentLongId null) still ends where the chain is.
+      return {
+        ...current,
+        currentLongId: null,
+        orderId: null,
+        expiry: null,
+        lastRepricedAt: null,
+        lastRepricedPrice: null,
+        repriceCount: 0,
+        lastStaleCancelAt: null,
+        staleSpot: null,
+        lastClosedAt: at,
+        lastClosedLongId: event.longId,
+        lastClosedOrderId: event.orderId === 0n ? null : event.orderId,
+        lastCloseRedeemed: event.redeemed,
         updatedAt: at,
       };
   }

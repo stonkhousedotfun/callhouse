@@ -3,12 +3,13 @@ import { useQuery } from "@tanstack/react-query";
 import type { Address } from "viem";
 import { readConversionFloorState, type ConversionFloorState } from "@/lib/v2/conversion";
 import { V2_DEPLOYMENT } from "@/lib/v2/config";
+import { displayExact } from "@/lib/numberFormat";
 
 export function ConversionFloorCopy({ state, unavailable = false }: {
   state?: ConversionFloorState; unavailable?: boolean;
 }) {
   const message = state?.kind === "routed"
-    ? `This market's current conversion floor is ${(state.floorBps / 100).toFixed(2)}% of the contract's reference value, including the route fee. The reference uses settlement price or an acceptable higher live spot. If conversion fails, you receive Stock Tokens.`
+    ? `USDG conversion pays at least ${displayExact(BigInt(state.floorBps), 2, { minDecimals: 0 })}% of the tokens' value at settlement, or you get the tokens.`
     : state?.kind === "unrouted"
       ? "This market has no USDG conversion route. Winning calls are paid in Stock Tokens."
       : state?.kind === "unset"

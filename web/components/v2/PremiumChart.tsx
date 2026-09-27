@@ -10,7 +10,10 @@ import {
 } from "react";
 
 import { Panel } from "@/components/ui";
+import { useViewerTimeZone } from "@/components/ui/Time";
+import { niceTicks } from "@/components/v2/chart/chartMath";
 import type { Trade } from "@/lib/v2/api-types";
+import { localStamp, NEW_YORK_TIME_ZONE } from "@/lib/v2/time";
 import { formatShares } from "@/lib/v2/payoffCard";
 
 type PremiumChartProps = {
@@ -32,26 +35,9 @@ const RIGHT = 20;
 const TOP = 18;
 const BOTTOM = 54;
 
-const ET_TICK = new Intl.DateTimeFormat("en-US", {
-  timeZone: "America/New_York",
-  month: "short",
-  day: "numeric",
-  hour: "numeric",
-  minute: "2-digit",
-});
-
-const ET_DETAIL = new Intl.DateTimeFormat("en-US", {
-  timeZone: "America/New_York",
-  month: "short",
-  day: "numeric",
-  year: "numeric",
-  hour: "numeric",
-  minute: "2-digit",
-  timeZoneName: "short",
-});
-
-function time(seconds: number, detail = false): string {
-  return (detail ? ET_DETAIL : ET_TICK).format(new Date(seconds * 1_000));
+/** A trade time in the reader's zone, zone named (the component reads the zone after mount). */
+function time(seconds: number, timeZone: string): string {
+  return localStamp(seconds, timeZone);
 }
 
 function priceNumber(trade: Trade): number {
@@ -62,9 +48,9 @@ function axisPrice(value: number): string {
   return new Intl.NumberFormat("en-US", { maximumFractionDigits: value < 1 ? 4 : 2 }).format(value);
 }
 
-function selectedSentence(point: ChartPoint, latest: boolean): string {
+function selectedSentence(point: ChartPoint, latest: boolean, timeZone: string): string {
   const side = point.trade.takerIsBuyer ? "Buyer took the ask" : "Seller took the bid";
-  return `${latest ? "Latest" : "Selected"} trade: ${point.trade.price.formatted} USDG per share at ${time(point.trade.ts, true)}. ${formatShares(BigInt(point.trade.units))} shares. ${side}.`;
+  return `${latest ? "Latest" : "Selected"} trade: ${point.trade.price.formatted} USDG per share at ${time(point.trade.ts, timeZone)}. ${formatShares(BigInt(point.trade.units))} shares. ${side}.`;
 }
 
 function chartPoints(trades: Trade[], width: number): {
@@ -108,6 +94,7 @@ function chartPoints(trades: Trade[], width: number): {
 }
 
 export function PremiumChart({ trades, loading, error }: PremiumChartProps) {
+  const zone = useViewerTimeZone() ?? NEW_YORK_TIME_ZONE;
   const headingId = useId();
   const titleId = useId();
   const descriptionId = useId();
@@ -143,12 +130,14 @@ export function PremiumChart({ trades, loading, error }: PremiumChartProps) {
   const line = points.map((point, index) => `${index === 0 ? "M" : "L"} ${point.x} ${point.y}`).join(" ");
   const areaLine = points.map((point) => `L ${point.x} ${point.y}`).join(" ");
   const area = `M ${points[0]!.x} ${plotBottom} ${areaLine} L ${points[points.length - 1]!.x} ${plotBottom} Z`;
-  const yTicks = [high, (high + low) / 2, low];
+  // 4-6 round price levels inside the plotted range, instead of the top, middle and bottom only.
+  const yTicks = niceTicks(low, high).filter((v) => v >= low && v <= high);
+  const yOf = (v: number) => TOP + (high - v) / (high - low) * (plotBottom - TOP);
   const xIndices = Array.from(new Set(width < 480
     ? [0, points.length - 1]
     : [0, Math.floor((points.length - 1) / 2), points.length - 1]));
   const latest = points[points.length - 1]!;
-  const detail = selectedSentence(selected!, effectiveIndex === points.length - 1);
+  const detail = selectedSentence(selected!, effectiveIndex === points.length - 1, zone);
   const minimumTrade = points.reduce((best, point) => point.price < best.price ? point : best, points[0]!);
   const maximumTrade = points.reduce((best, point) => point.price > best.price ? point : best, points[0]!);
 
@@ -198,10 +187,10 @@ export function PremiumChart({ trades, loading, error }: PremiumChartProps) {
           preserveAspectRatio="none"
         >
           <title id={titleId}>Option premium per share over time</title>
-          <desc id={descriptionId}>{points.length} trades from {time(points[0]!.trade.ts, true)} to {time(latest.trade.ts, true)}. Prices range from {minimumTrade.trade.price.formatted} to {maximumTrade.trade.price.formatted} USDG per share.</desc>
+          <desc id={descriptionId}>{points.length} trades from {time(points[0]!.trade.ts, zone)} to {time(latest.trade.ts, zone)}. Prices range from {minimumTrade.trade.price.formatted} to {maximumTrade.trade.price.formatted} USDG per share.</desc>
           <rect x={LEFT} y={TOP} width={plotWidth} height={plotBottom - TOP} fill="var(--surface-2)" />
-          {yTicks.map((tick, index) => {
-            const y = TOP + index * (plotBottom - TOP) / 2;
+          {yTicks.map((tick) => {
+            const y = yOf(tick);
             return <g key={tick}>
               <line x1={LEFT} x2={width - RIGHT} y1={y} y2={y} stroke="var(--line-2)" strokeWidth={1} />
               <text x={LEFT - 10} y={y + 4} textAnchor="end" fill="var(--ink-3)" fontSize={12}>{axisPrice(tick)}</text>
@@ -214,14 +203,23 @@ export function PremiumChart({ trades, loading, error }: PremiumChartProps) {
             const anchor = index === 0 ? "start" : index === points.length - 1 ? "end" : "middle";
             return <g key={`${point.trade.id}:${index}`}>
               <line x1={point.x} x2={point.x} y1={plotBottom} y2={plotBottom + 5} stroke="var(--line-2)" />
-              <text x={point.x} y={plotBottom + 20} textAnchor={anchor} fill="var(--ink-3)" fontSize={12}>{time(point.trade.ts)}</text>
+              <text x={point.x} y={plotBottom + 20} textAnchor={anchor} fill="var(--ink-3)" fontSize={12}>{time(point.trade.ts, zone)}</text>
             </g>;
           })}
           {/* The latest fill keeps a surface ring so it stays readable where it sits on the line. */}
           <circle cx={latest.x} cy={latest.y} r={5} fill="var(--accent)" stroke="var(--surface)" strokeWidth={2} vectorEffect="non-scaling-stroke" />
           <line x1={selected!.x} x2={selected!.x} y1={TOP} y2={plotBottom} stroke="var(--accent)" strokeWidth={1.5} opacity={0.75} />
           <circle cx={selected!.x} cy={selected!.y} r={7} fill="var(--surface)" stroke="var(--accent)" strokeWidth={3} vectorEffect="non-scaling-stroke" />
-          <text x={LEFT + plotWidth / 2} y={HEIGHT - 5} textAnchor="middle" fill="var(--ink-3)" fontSize={12}>Trade time · New York</text>
+          {/* The selected trade's PRICE floats on the Y axis and its DATE + HOUR on the X axis. */}
+          <g data-slot="crosshair-price">
+            <rect x={2} y={selected!.y - 10} width={LEFT - 6} height={20} rx={4} fill="var(--ink)" />
+            <text x={LEFT - 8} y={selected!.y + 4} textAnchor="end" fill="var(--surface)" fontSize={12} fontWeight={700}>{axisPrice(selected!.price)}</text>
+          </g>
+          <g data-slot="crosshair-time">
+            <rect x={Math.min(Math.max(selected!.x - 62, LEFT), width - RIGHT - 124)} y={plotBottom + 6} width={124} height={20} rx={4} fill="var(--ink)" />
+            <text x={Math.min(Math.max(selected!.x, LEFT + 62), width - RIGHT - 62)} y={plotBottom + 20} textAnchor="middle" fill="var(--surface)" fontSize={12} fontWeight={700}>{time(selected!.trade.ts, zone)}</text>
+          </g>
+          <text x={LEFT + plotWidth / 2} y={HEIGHT - 5} textAnchor="middle" fill="var(--ink-3)" fontSize={12}>Trade time</text>
           <text transform={`translate(17 ${TOP + (plotBottom - TOP) / 2}) rotate(-90)`} textAnchor="middle" fill="var(--ink-3)" fontSize={12}>USDG / share</text>
         </svg>
         {points.length > 1 ? <div
@@ -233,7 +231,10 @@ export function PremiumChart({ trades, loading, error }: PremiumChartProps) {
           aria-valuenow={effectiveIndex + 1}
           aria-valuetext={detail}
           onPointerDown={onPointerDown}
-          onPointerMove={(event) => { if (event.currentTarget.hasPointerCapture(event.pointerId)) selectFromPointer(event); }}
+          onPointerMove={(event) => {
+            // A mouse inspects on hover; touch and pen keep press-and-drag, so a scroll gesture is not stolen.
+            if (event.pointerType === "mouse" || event.currentTarget.hasPointerCapture(event.pointerId)) selectFromPointer(event);
+          }}
           onPointerUp={(event) => { if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId); }}
           onPointerCancel={(event) => { if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId); }}
           onKeyDown={onKeyDown}
@@ -243,7 +244,7 @@ export function PremiumChart({ trades, loading, error }: PremiumChartProps) {
       </div>
       <figcaption className="mt-3">
         <p className="text-sm text-ink" aria-live="polite">{detail}</p>
-        {points.length > 1 ? <p className="mt-1 text-xs text-ink-3">Tap or drag across the chart, or use arrow keys, to inspect a trade.</p> : null}
+        {points.length > 1 ? <p className="mt-1 text-xs text-ink-3">Tap or drag across the chart, hover with a mouse, or use arrow keys, to inspect a trade.</p> : null}
       </figcaption>
     </figure>
   </Panel>;

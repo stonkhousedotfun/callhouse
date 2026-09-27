@@ -4,6 +4,7 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { useState } from "react";
 import { WagmiProvider } from "wagmi";
 
+import { WrongNetworkBanner } from "@/components/ConnectButton";
 import { ToastProvider } from "@/components/TxToast";
 import { wagmiConfig } from "@/lib/wagmi";
 
@@ -32,7 +33,11 @@ export function Providers({ children }: { children: React.ReactNode }) {
   return (
     <WagmiProvider config={wagmiConfig}>
       <QueryClientProvider client={queryClient}>
-        <ToastProvider>{children}</ToastProvider>
+        <ToastProvider>
+          {/* Renders nothing unless a connected wallet is on another network. */}
+          <WrongNetworkBanner />
+          {children}
+        </ToastProvider>
       </QueryClientProvider>
     </WagmiProvider>
   );

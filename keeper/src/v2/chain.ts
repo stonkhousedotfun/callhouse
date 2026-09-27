@@ -126,8 +126,8 @@ export function createV2Signer(clients: V2Clients, options: { privateKey: Hex; p
  * The contracts with a generated ABI module, by registry name.
  *
  * INTERFACE_VERSION 8 adds three. `accessManager` is what the mm bot and the pricer read their own role from
- * now that a `Managed` target has no `hasRole` of its own (K8-03); `feeSplitter` is what the cranker claims,
- * distributes and buys back through (K8-02). `buybackExecutor` is here because it has a generated module and
+ * now that a `Managed` target has no `hasRole` of its own; `feeSplitter` is what the cranker claims,
+ * distributes and buys back through. `buybackExecutor` is here because it has a generated module and
  * this map is the index of those — the keeper never calls it, and it cannot: both of its entry points revert
  * for anyone but the splitter.
  */
@@ -316,7 +316,7 @@ export function wiringProblems(expected: WiringExpectation, observed: WiringObse
   if (expected.expiryCalendar !== null) {
     if (observed.clearinghouseCalendar === null) problems.push(`clearinghouse ${expected.clearinghouse}: calendar() could not be read`);
     else if (!same(observed.clearinghouseCalendar, expected.expiryCalendar)) {
-      // The calendar pointer is admin-settable for NEW series (ADR-07); after a switch the registry must follow.
+      // The calendar pointer is admin-settable for NEW series; after a switch the registry must follow.
       problems.push(`clearinghouse ${expected.clearinghouse} uses calendar ${observed.clearinghouseCalendar}, not the configured ${expected.expiryCalendar}`);
     }
   }

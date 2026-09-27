@@ -1,10 +1,10 @@
 /**
- * The cranker's stale-ask step (INTERFACE_VERSION 7, c16) through the real `stepStale` on a fake chain.
+ * The cranker's stale-ask step (INTERFACE_VERSION 7) through the real `stepStale` on a fake chain.
  *
  * WHY THIS FILE EXISTS: an AutoRoller ask the spot has overtaken is free money for the first taker, and nothing else
  * withdraws it — `reprice` refuses (`InTheMoney`) and the writer may be asleep. The decision table is pinned in
  * planner.test.ts; what is pinned HERE is the wiring, which is where a keeper goes quietly wrong: reading the SERIES'
- * OWN pinned oracle for the spot (T-310/T-437 - not the registry default and not `market(u).oracle`, which a
+ * OWN pinned oracle for the spot (not the registry default and not `market(u).oracle`, which a
  * `setMarketOracle` moves away from every series already created), comparing against the SERIES' strike, sending with the fixed
  * `GAS.cancelStale`, not sending for a writer the contract would answer `false` for, ordering the bounty-paying
  * cancels first and capping the rest, and paging `v2_stale_cancel_failed` at `warn` when the writer revoked the
@@ -33,11 +33,13 @@ const MARKET_ORACLE = getAddress('0x4b8c2BEFfecbdc4BeD6e6826e62093F0Cf635E78');
 /**
  * Two series' pinned oracles, both different from each other AND from the market's pointer: the post-migration shape
  * a `setMarketOracle` leaves behind. Distinct from MARKET_ORACLE on purpose - a mirror that read the market's would
- * read neither of these, so the assertion on `spotFrom` fails rather than passing on a coincidence (T-437).
+ * read neither of these, so the assertion on `spotFrom` fails rather than passing on a coincidence.
  */
 const SERIES_ORACLE_A = getAddress('0x1111111111111111111111111111111111111111');
 const SERIES_ORACLE_B = getAddress('0x2222222222222222222222222222222222222222');
 const ZERO = '0x0000000000000000000000000000000000000000';
+/** Source 1 of the expiry's settlement configuration: the pool TWAP on the launch markets. */
+const WITNESS_SOURCE = getAddress('0x3333333333333333333333333333333333333333');
 const T0 = 1_789_750_000;
 const E = 1_789_934_400;
 const STRIKE = 220_000_000n;
@@ -58,6 +60,12 @@ function harness(
     seriesOracleOf?: (longId: bigint) => Address;
     /** The trySpot answer of ONE oracle address, lower-case. Default: the single `state.spot` for every oracle. */
     spotOf?: (oracle: string) => readonly [boolean, bigint];
+    /**
+     * The witness chain AutoRoller._tryWitness reads: settlementConfig's source list, the Stock Token's
+     * oraclePaused ('revert' = the view reverts) and source 1's latest (price, age in seconds before the head, ok).
+     * Absent: settlementConfig is not answered, so no witness exists (the earlier fake chain).
+     */
+    witness?: { sources?: readonly Address[]; paused?: boolean | 'revert'; price?: bigint; ageS?: number; ok?: boolean };
   } = {},
 ) {
   const config = loadV2Config({
@@ -73,7 +81,7 @@ function harness(
   }) as CrankerConfig;
   const nvda = config.registry.markets.find((m) => m.ticker === 'NVDA')!;
 
-  const state = { now: T0, block: 65_000_000n, spot: options.spot ?? 225_000_000n, spotOk: true, spotFrom: [] as string[] };
+  const state = { now: T0, block: 65_000_000n, spot: options.spot ?? 225_000_000n, spotOk: true, spotFrom: [] as string[], configReads: [] as string[], latestFrom: [] as string[] };
   const byOrderId = new Map(writers.map((w) => [w.position[1].toString(), w.order]));
 
   const client = {
@@ -109,6 +117,20 @@ function harness(
             state.spotFrom.push(c.address.toLowerCase());
             const per = options.spotOf?.(c.address.toLowerCase());
             return { status: 'success', result: per === undefined ? [state.spotOk, state.spot, BigInt(state.now)] : [per[0], per[1], BigInt(state.now)] };
+          }
+          case 'settlementConfig': {
+            if (options.witness === undefined) return { status: 'failure', error: new Error('no view settlementConfig') };
+            state.configReads.push(`${c.address.toLowerCase()}:${String(args[0]).toLowerCase()}:${args[1]}`);
+            return { status: 'success', result: [true, options.witness.sources ?? [MARKET_ORACLE, WITNESS_SOURCE], 100, 3_600, 86_400] };
+          }
+          case 'oraclePaused': {
+            const paused = options.witness?.paused ?? false;
+            return paused === 'revert' ? { status: 'failure', error: new Error('reverted') } : { status: 'success', result: paused };
+          }
+          case 'latest': {
+            state.latestFrom.push(c.address.toLowerCase());
+            const w = options.witness ?? {};
+            return { status: 'success', result: [w.ok ?? true, w.price ?? STRIKE + 1_000_000n, BigInt(state.now - (w.ageS ?? 60))] };
           }
           default:
             return { status: 'failure', error: new Error(`no view ${c.functionName}`) };
@@ -245,7 +267,7 @@ test('stepStale: no AutoRoller configured is a skip, not an error', async () => 
 
 test('stepStale: two series on ONE underlying with different pinned oracles are each judged on their own', async () => {
   // The shape a setMarketOracle leaves behind: the market's pointer moved, every series already created kept the
-  // oracle createSeries pinned into it, and AutoRoller.cancelStale reads THAT one (T-310). Series 1 is overtaken on
+  // oracle createSeries pinned into it, and AutoRoller.cancelStale reads THAT one. Series 1 is overtaken on
   // its oracle and series 2 is not, while the market's pointer would say neither is — so a mirror that still read
   // `market(u).oracle` sends nothing and leaves an in-the-money ask resting for the first taker.
   const h = harness([writer(1), writer(2, { position: [2n, 1_002n, E] })], {
@@ -281,4 +303,64 @@ test('stepStale: a series with no pinned oracle is judged on no oracle at all', 
   assert.deepEqual(h.state.spotFrom, [], 'no spot is read from any oracle for a series with no pinned one');
   assert.equal(h.sends.length, 0);
   assert.deepEqual(report.notes.reasons, { unread: 1 });
+});
+
+/*//////////////////////////////////////////////////////////////
+        THE WITNESS PATH
+//////////////////////////////////////////////////////////////*/
+
+test('stepStale: Chainlink silent and the pool witness past the strike -> cancelStale is sent', async () => {
+  // AutoRoller.cancelStale reads the expiry's witness when the spot declines. Earlier this step stopped at the
+  // spot, so this exact state (nights, weekends) answered spot-stale and the in-the-money ask stayed live.
+  const h = harness([writer(1)], { witness: {} });
+  h.state.spotOk = false;
+  const report = await stepStale(h.ctx);
+  assert.equal(h.sends.length, 1, 'the cancel the contract would make is sent');
+  assert.equal(h.sends[0]!.fn, 'cancelStale');
+  assert.deepEqual(report.notes.reasons, { cancel: 1 });
+  const cancelled = report.notes.cancelled as Array<{ via: string; witness: bigint }>;
+  assert.equal(cancelled[0]!.via, 'witness');
+  assert.equal(cancelled[0]!.witness, STRIKE + 1_000_000n);
+  assert.deepEqual(h.state.configReads, [`${MARKET_ORACLE.toLowerCase()}:${h.nvda.underlying.toLowerCase()}:${E}`], 'settlementConfig of the SERIES\' pinned oracle at the SERIES\' expiry');
+  assert.deepEqual(h.state.latestFrom, [WITNESS_SOURCE.toLowerCase()], 'latest is read from source 1');
+});
+
+test('stepStale: a spot short of the strike still consults the witness, as the contract does', async () => {
+  const h = harness([writer(1)], { spot: STRIKE - 1n, witness: { price: STRIKE } });
+  const report = await stepStale(h.ctx);
+  assert.equal(h.sends.length, 1);
+  assert.equal((report.notes.cancelled as Array<{ via: string }>)[0]!.via, 'witness');
+});
+
+test('stepStale: a spot that settles the ask never reads the witness', async () => {
+  const h = harness([writer(1)], { witness: {} });
+  await stepStale(h.ctx);
+  assert.equal(h.sends.length, 1);
+  assert.deepEqual(h.state.configReads, [], 'the contract takes the spot path first and never reaches _tryWitness');
+});
+
+test('stepStale: every _tryWitness refusal is a null witness, so nothing is sent', async () => {
+  const cases: Array<[string, { sources?: readonly Address[]; paused?: boolean | 'revert'; price?: bigint; ageS?: number; ok?: boolean }]> = [
+    ['one source: no source 1', { sources: [MARKET_ORACLE] }],
+    ['issuer oracle paused', { paused: true }],
+    ['oraclePaused reverts (counts as paused)', { paused: 'revert' }],
+    ['latest not ok', { ok: false }],
+    ['latest price zero', { price: 0n }],
+    ['latest price above 2^128 - 1', { price: 1n << 128n }],
+    ['latest older than WITNESS_MAX_AGE', { ageS: 1_801 }],
+    ['latest in the future', { ageS: -1 }],
+    ['witness short of the strike', { price: STRIKE - 1n }],
+  ];
+  for (const [label, witness] of cases) {
+    const h = harness([writer(1)], { witness });
+    h.state.spotOk = false;
+    const report = await stepStale(h.ctx);
+    assert.equal(h.sends.length, 0, `${label}: nothing is sent`);
+    assert.ok(!('cancel' in (report.notes.reasons as Record<string, number>)), `${label}: not planned`);
+  }
+  // The age bound is inclusive at WITNESS_MAX_AGE, as `block.timestamp - t > WITNESS_MAX_AGE` refuses only past it.
+  const edge = harness([writer(1)], { witness: { ageS: 1_800 } });
+  edge.state.spotOk = false;
+  await stepStale(edge.ctx);
+  assert.equal(edge.sends.length, 1, 'exactly 30 minutes old is still a witness');
 });

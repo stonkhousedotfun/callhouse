@@ -263,6 +263,11 @@ test('web push: subscribe (201), subscribe again (200, same id), list, delete', 
         fills: true,
         writerItmWarning: true,
         autoRoll: true,
+        // The protocol-wide kinds default to OFF (prefs.ts): a subscription that did not name them
+        // stores them false. This expectation predated them.
+        feeNotice: false,
+        adminOperation: false,
+        marketLive: false,
         priceAlerts: [{ ticker: 'NVDA', above: '230000000' }],
       },
       createdAt: Math.floor(clock.ms / 1000),

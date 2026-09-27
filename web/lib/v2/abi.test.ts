@@ -2,7 +2,7 @@
  * The v2 ABI pipeline's consumer end, as the dapp sees it.
  *
  * WHY THIS FILE EXISTS: lib/abi/v2/*.ts and lib/v2/seriesId.ts are generated from ops/
- * and committed. Nothing else notices when a contract lane re-exports
+ * and committed. Nothing else notices when the contracts re-export
  * ops/abis/v2 and nobody reruns `pnpm gen:abis`: the app would encode calls against the old ABI and
  * print a new revert as a bare selector. So:
  *   1. the drift test runs the generator in `--check` mode, which renders every output in memory
@@ -130,6 +130,9 @@ describe("v8 take, authority and payout router ABI pins", () => {
     ]);
     expect(toFunctionSelector(take)).toBe("0xcf96851b");
     expect(toFunctionSelector(quoteTake)).toBe("0xe2e13f01");
+    // Same selector and returns, but no longer a view -- it runs take and rolls it back, so the app
+    // simulates it from the taker's account (tx.ts recheckTakeQuote), never reads it.
+    expect(quoteTake.stateMutability).toBe("nonpayable");
   });
 
   it("decodes AccessManager's uint64 role and complete scheduled operation", () => {

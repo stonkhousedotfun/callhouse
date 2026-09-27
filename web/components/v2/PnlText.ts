@@ -1,4 +1,6 @@
-import type { Money, PnlResponse, SeriesRef } from "@/lib/v2/api-types";
+import { displayQuantity } from "@/lib/numberFormat";
+import type { Card, Money, PnlResponse, SeriesRef } from "@/lib/v2/api-types";
+import { group } from "@/lib/v2/payoffFormat";
 
 function decimal(raw: string, decimals: number, places: number, direction: "up" | "down"): string {
   const unit = 10n ** BigInt(decimals);
@@ -22,8 +24,16 @@ export function sharesFromUnits(units: string): string {
   return fraction ? `${whole}.${fraction}` : String(whole);
 }
 
+/** To the cent, rounded the stated way (cost up, value down), with no ".00" tail: "1.03", "5", "1,234.50". */
 export function imageMoney(money: Money, direction: "up" | "down"): string {
-  return decimal(money.raw, money.decimals, 2, direction);
+  const [whole = "0", cents = "00"] = decimal(money.raw, money.decimals, 2, direction).split(".");
+  return cents === "00" ? group(BigInt(whole)) : `${group(BigInt(whole))}.${cents}`;
+}
+
+/** A multiple to at most two decimals, no zero tail: "4.29×", "1.1×", "8×". A 1.04× win never reads 1×. */
+export function multipleText(multiple: number): string {
+  if (!Number.isFinite(multiple)) return "—";
+  return `${displayQuantity(BigInt(Math.round(multiple * 100)), 2)}×`;
 }
 
 export function seriesTitle(series: SeriesRef): string {
@@ -39,10 +49,27 @@ export function expiryLabel(timestamp: number): string {
 export function receiptImageCopy(pnl: PnlResponse) {
   return {
     headline: `${imageMoney(pnl.cost, "up")} → ${imageMoney(pnl.payout, "down")} USDG value`,
-    multiple: `${pnl.multiple.toFixed(2).replace(/0+$/, "").replace(/\.$/, "")}×`,
+    multiple: multipleText(pnl.multiple),
     series: seriesTitle(pnl.series),
     expiry: expiryLabel(pnl.series.expiry),
     maxLoss: `Max loss was ${imageMoney(pnl.cost, "up")} USDG`,
+  };
+}
+
+/**
+ * (a multiple always carries its scenario). The root OG image's live-option lines.
+ * The card's multiple is payout at `card.target` ÷ cost, so the scenario that makes it true is the headline printed
+ * directly under it, and the max loss is the risk line. A put "falls to" its target and a call "reaches" it; at most
+ * two decimals like every other multiple in the app (the image used to print the raw float).
+ */
+export function liveOptionImageLines(card: Card) {
+  const ticket = card.perShare ?? card.perUnit;
+  return {
+    eyebrow: "Live option",
+    metric: multipleText(ticket.multiple),
+    headline: `If ${card.series.ticker} ${card.series.isPut ? "falls to" : "reaches"} $${receiptMoney(card.target)} by expiry`,
+    detail: `${seriesTitle(card.series)} · payout at that price ÷ cost, after fees`,
+    risk: `Max loss is ${imageMoney(ticket.cost, "up")} USDG for this ticket`,
   };
 }
 
@@ -60,5 +87,5 @@ export function tokenMetadataText(series: SeriesRef, isShort: boolean) {
   const rule = isShort
     ? `This short position writes a ${series.isPut ? "put" : "call"}. Its payoff depends on the settlement price and any premium earned from a fill.`
     : `This long position pays if the settlement price is ${outcome} the $${receiptMoney(series.strike)} strike at expiry. Maximum loss is the amount paid to acquire it.`;
-  return { title, description: `${rule} One token unit represents 0.01 share. Settlement follows the StonkHouse v2 contracts on Robinhood Chain.` };
+  return { title, description: `${rule} One token unit represents 0.01 share.` };
 }

@@ -1,7 +1,7 @@
 import type { Metadata } from "next";
 import Link from "next/link";
 
-import { Button, ExternalLink, PageHead, Panel } from "@/components/ui";
+import { Button, ExternalLink, InfoTip, PageHead, Panel } from "@/components/ui";
 import { legacyMarketPath } from "@/app/legacy/routes";
 import { addressUrl } from "@/lib/chain";
 import { DEFAULT_MARKET, MARKETS, REGISTRY, marketHref } from "@/lib/markets";
@@ -24,21 +24,25 @@ export default function DocsPage() {
         eyebrow="Docs"
         title="How this works"
         lede={isV2
-          ? "Explore v2 options and ways to earn, or find your legacy v1 account below."
+          ? "Buy options, write them in Earn, or find your legacy v1 account below."
           : "Use your v1 account to list Stock Token calls, settle, and collect USDG. Use the book to buy or exercise calls."}
       />
 
       {isV2 ? <Panel as="section" pad="lg" className="grid gap-3">
         <h2 className="text-lg font-bold tracking-[-0.015em]">Current v2</h2>
-        <p className="text-[15.5px] text-ink-2">This page describes the current app. The external documentation linked below covers legacy v1 accounts, not v2 trading.</p>
         <ol className="grid gap-3 text-[15.5px] text-ink-2">
-          <li><strong className="text-ink">Buy:</strong> Compare live asks by market, expiry, strike, total cost including fees, and max loss. A quote can change before your transaction confirms. The full amount paid can be lost.</li>
-          <li><strong className="text-ink">Write:</strong> In Earn, choose an available series and deposit the required Stock Tokens for a covered call, or USDG for a cash-secured put where supported. Set an ask; the current v2 launch fee takes 5% of premium on a first sale and 0% on a true resale. Review any scheduled fee notice before confirming. Transactions also cost gas.</li>
-          <li><strong className="text-ink">Manage:</strong> Portfolio shows positions, resting orders, and balances. You can cancel an unfilled order, sell an eligible long position, or withdraw a free balance there.</li>
-          <li><strong className="text-ink">Settle:</strong> Expiry does not itself complete settlement. A separate on-chain settlement step needs an available oracle result and may be delayed or disputed. Once the series is settled, check Portfolio for a payout to redeem and any balance to withdraw.</li>
+          <li><strong className="text-ink">Buy:</strong> Pick a market, expiry and strike, and buy at the ask.{" "}
+            <InfoTip label="About buying">Your total cost, fees included, is the most you can lose. A quote can change before your transaction confirms.</InfoTip></li>
+          <li><strong className="text-ink">Sell options:</strong> Lock Stock Tokens for a covered call, or USDG for a cash-secured put where offered, and set an ask.{" "}
+            <InfoTip label="About fees">A first sale currently pays 5% of the premium; a resale currently pays nothing. Fees can change after a scheduled notice. Gas is extra.</InfoTip></li>
+          <li><strong className="text-ink">Earn:</strong> Deposit USDG into the Earn vault. It&apos;s lent out for interest.</li>
+          <li><strong className="text-ink">Manage:</strong> Portfolio shows your positions, orders and balances. Cancel, sell or withdraw from there.</li>
+          <li><strong className="text-ink">Settle:</strong> After expiry, a separate on-chain step settles the series. Then check Portfolio for any payout.{" "}
+            <InfoTip label="About settlement">That step needs a price from the oracle and can be delayed or disputed.</InfoTip></li>
         </ol>
         <div className="flex flex-wrap gap-3">
           <Button href="/">Explore markets</Button>
+          <Button href="/sell" variant="ghost">Sell options</Button>
           <Button href="/earn" variant="ghost">Explore Earn</Button>
           <Button href="/portfolio" variant="ghost">Open Portfolio</Button>
         </div>
@@ -48,7 +52,7 @@ export default function DocsPage() {
         <div>
           <h2 className="text-lg font-bold tracking-[-0.015em]">{isV2 ? "Legacy v1 accounts and calls" : "Current v1 accounts and calls"}</h2>
           <p className="mt-2 text-[15.5px] text-ink-2">{isV2
-            ? "These steps describe the old call account and book. Existing v1 positions remain accessible for settlement and withdrawal."
+            ? "Existing v1 positions can still be settled and withdrawn."
             : "Your v1 account and book let you manage listings, settle expired calls, collect USDG, and exercise calls you hold."}</p>
         </div>
         <ol className="grid gap-3 text-[15.5px] text-ink-2">
@@ -56,7 +60,7 @@ export default function DocsPage() {
             <Link href={v1Href(DEFAULT_MARKET.ticker, "account")} className="link font-semibold">
               Account
             </Link>
-            — deposit, set how much is for sale, list, settle, collect USDG. One account per wallet per market.
+            — deposit, list, settle and collect USDG. One account per wallet per market.
           </li>
           <li>
             <Link href={v1Href(DEFAULT_MARKET.ticker, "book")} className="link font-semibold">

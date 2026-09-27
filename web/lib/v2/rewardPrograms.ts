@@ -3,18 +3,18 @@
  * in the lender reward token.
  *
  * WHY THIS FILE EXISTS. `RewardsDistributor` is token-agnostic — its getter is still named `usdg()`
- * but it holds whatever `IERC20` it was constructed with (`contracts/src/v2/mm/RewardsDistributor.sol:45,61-66`),
- * and P8-05 deploys a SECOND instance holding the lender token. So the contract needed nothing. What
+ * but it holds whatever `IERC20` it was constructed with (its constructor's `usdg_` argument, kept in the `usdg` immutable),
+ * and deploys a SECOND instance holding the lender token. So the contract needed nothing. What
  * needed fixing was the UI: `MakersPage.tsx` formatted every amount with a literal `6` and appended
  * the literal string "USDG", which for an 18-decimal token does not error — it renders a number
  * roughly a trillion times too large, in the wrong unit, next to a button that spends it. A claim
  * screen that is wrong by 1e12 and still looks like a claim screen is the failure this
  * parameterisation removes.
  *
- * DECIMALS AND SYMBOL ARE READ FROM CHAIN AND LITERALS NOWHERE (D6, owner directive 2026-09-20).
+ * DECIMALS AND SYMBOL ARE READ FROM CHAIN AND LITERALS NOWHERE.
  * They used to be fields filled from constants: an 18 mirrored out of
- * `ops/runbooks/lender-rewards-epoch.md:3` and a token symbol typed by hand. Both constants are
- * deleted, and their NAMES are deliberately not quoted anywhere in this tree either — AC7 greps
+ * the epoch runbook and a token symbol typed by hand. Both constants are
+ * deleted, and their NAMES are deliberately not quoted anywhere in this tree either — a grep
  * for them and has to come back empty. The guard
  * that made an unconfirmed constant safe was `LENDER_PROGRAM.status = "planned"`, so shipping the
  * program while keeping the constant would have shipped the risk with its guard removed. Deleting
@@ -61,15 +61,15 @@ export type RewardProgram = {
   /**
    * DERIVED, never a literal. `live` means this program has both an address to claim from and a
    * token to denominate the claim in. The previous `status: "planned"` literal on the lender
-   * program is what AC9 removes: a literal can disagree with the address beside it, a derivation
+   * program is what this removes: a literal can disagree with the address beside it, a derivation
    * cannot.
    */
   status: RewardProgramStatus;
   /**
    * What the view says when the program is not configured.
    *
-   * IT IS A FIELD BECAUSE THE TWO PROGRAMS MUST DIFFER HERE. T-113 requires the lender view to say
-   * "Rewards are not configured"; T-133 requires the maker path to render byte-identically to what
+   * IT IS A FIELD BECAUSE THE TWO PROGRAMS MUST DIFFER HERE. The lender view must say
+   * "Rewards are not configured"; the maker path must render byte-identically to what
    * shipped before, and what shipped before was a different sentence. Hardcoding either one would
    * quietly break the other criterion, and the maker regression would be invisible — there is no
    * render test in this package that could catch it.
@@ -117,7 +117,7 @@ export function rewardProgramConfigured(program: RewardProgram): boolean {
   return program.status === "live" && program.distributor !== null && program.token !== null;
 }
 
-/** AC9 copy, in one place so the page and its test cannot disagree about the wording. */
+/** The copy, in one place so the page and its test cannot disagree about the wording. */
 export const REWARDS_NOT_CONFIGURED = "Rewards are not configured";
 
 /** Each program's own published path. Neither is the other's. */
@@ -179,8 +179,8 @@ export function rewardTokenQueryKey(program: RewardProgram): readonly unknown[] 
 
 /**
  * The maker program. `distributor` is supplied by the caller from
- * `V2_DEPLOYMENT.contracts.rewardsDistributor`, which is the MAKER instance — the generated
- * registry's only distributor key today. `token` is supplied by the caller from
+ * `V2_DEPLOYMENT.contracts.rewardsDistributor`, which is the MAKER instance. The lender instance is
+ * the separate external key `rewardsDistributorLender` ({lenderProgram}). `token` is supplied by the caller from
  * {resolveRewardToken} against that same distributor; it is NOT `USDG, 6` by assumption, because
  * assuming it is what this deliverable removes.
  */
@@ -192,8 +192,8 @@ export function makerProgram(distributor: Address | null, token: RewardToken | n
     token,
     distributor,
     status: programStatus(distributor, token),
-    // VERBATIM the sentence the maker page rendered before T-133 extracted this component. Do not
-    // "improve" it — T-133 acceptance criterion 4 is that the maker path is byte-identical.
+    // VERBATIM the sentence the maker page rendered before this component was extracted. Do not
+    // "improve" it — acceptance criterion 4 is that the maker path is byte-identical.
     notConfiguredNotice: "Reward claims will open after the RewardsDistributor is deployed.",
   };
 }
@@ -203,9 +203,10 @@ export function makerProgram(distributor: Address | null, token: RewardToken | n
  * longer a module-level `null` constant.
  *
  * WHERE THE ADDRESS COMES FROM, and the two places it must never come from:
- *   - `lenderRewards.ts` resolves it through `config.ts` `resolveV2Address`, which under design B
- *     means a validated `NEXT_PUBLIC_V2_LENDER_REWARDS_DISTRIBUTOR` override. No registry key is
- *     added for it (rule 2, 02-interfaces.md:584-590).
+ *   - `lenderRewards.ts` resolves it through `config.ts` `resolveV2Address` (`:123-130`): REGISTRY
+ *     FIRST, from the external key `rewardsDistributorLender` that `V2_CONTRACTS` copies through from
+ *     `v2.contracts` (`config.ts:87-91` maps it, under the amended rule 2), and a
+ *     validated `NEXT_PUBLIC_V2_LENDER_REWARDS_DISTRIBUTOR` override only while the registry is silent.
  *   - NOT `ops/markets/tier1.json` `v2.protocolAddresses.distributors.lender`. That near-miss is
  *     the generator's EXCLUSION registry of protocol-owned wallets to drop from a reward
  *     computation, is not exposed to the web app at all, and wiring it up would point the claim
@@ -221,6 +222,7 @@ export function lenderProgram(distributor: Address | null, token: RewardToken | 
     token,
     distributor,
     status: programStatus(distributor, token),
-    notConfiguredNotice: `${REWARDS_NOT_CONFIGURED}. Claiming is permissionless once it is — the contract checks your Merkle proof, so this page is a convenience and never an eligibility gate.`,
+    // short and plain. "permissionless" stays because lib/v2/lenderRewards.test.ts pins it.
+    notConfiguredNotice: `${REWARDS_NOT_CONFIGURED} yet. Once they are, claims are permissionless: this page only helps you claim.`,
   };
 }

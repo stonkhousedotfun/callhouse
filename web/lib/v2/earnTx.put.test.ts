@@ -18,7 +18,12 @@ vi.mock("./config", () => ({
 function chain(free: bigint, options: { ppm?: number; existingFee?: bigint; premiumFeeBps?: number } = {}) {
   const readContract = vi.fn(async ({ functionName }: { functionName: string; args?: readonly unknown[] }) => {
     switch (functionName) {
-      case "market": return { enabled: true, mintPaused: false, strikeTick: 1_000_000n, mintFeePpm: options.ppm ?? 0 };
+      case "market": return { enabled: true, mintPaused: false, strikeTick: 1_000_000n, mintFeePpm: options.ppm ?? 0,
+        oracle: "0x0000000000000000000000000000000000000099" };
+      // A new series' createSeries refusals are read before the ask. Not paused; spot at the test strike.
+      case "createPaused": return false;
+      case "tradingPaused": return false;
+      case "trySpot": return [true, 200_000_000n, 0n];
       case "isValidExpiry": return true;
       case "isOperator": return false;
       case "free": return free;

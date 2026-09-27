@@ -1068,7 +1068,7 @@ describe("fetchKeeperOrderBook (the browser's client)", () => {
   });
 });
 
-/** The keeper's documented vol-mode record (keeper/README.md, "Market data (vol mode)"). */
+/** The keeper's documented vol-mode record ("Market data (vol mode)"). */
 const PRICING = {
   mode: "vol", source: "cboe-delayed", priceSource: "vol-fair", volPath: "fresh",
   volUnavailableReason: null, targetDelta: 0.15, deltaAtStrike: 0.1464, ivAtStrike: 0.3266,

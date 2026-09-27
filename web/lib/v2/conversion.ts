@@ -15,7 +15,8 @@ export type ConversionFloorState =
   | { kind: "unset" };
 
 export async function readConversionFloorState(asset: Address, client: PublicClient = publicClient): Promise<ConversionFloorState> {
-  const blockNumber = await client.getBlockNumber();
+  // cacheTime 0. viem caches the head for 4 s; read the payout route at the latest block.
+  const blockNumber = await client.getBlockNumber({ cacheTime: 0 });
   const clearinghouse = requireV2Address("clearinghouse");
   const [adapter, slippage] = await client.multicall({ allowFailure: false, blockNumber, contracts: [
     { address: clearinghouse, abi: clearinghouseAbi, functionName: "payoutAdapter" },

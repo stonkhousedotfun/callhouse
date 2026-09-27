@@ -39,7 +39,7 @@ test("empty dir is ok", async () => {
   }
 });
 
-test("C2-11 fixture verifies as unposted", async () => {
+test("Fixture verifies as unposted", async () => {
   const dir = tmp();
   try {
     writeFileSync(path.join(dir, "2958.json"), JSON.stringify(fixtureUnposted()));

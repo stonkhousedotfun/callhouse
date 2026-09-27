@@ -7,8 +7,12 @@
  * these are credentials, and the other half (DATABASE_URL, SMTP_URL) carry one.
  *
  *   DATABASE_URL         required. postgres:// or postgresql://. The notifier owns schema "notifier".
- *   INDEXER_URL          required. The indexer API (/v2/*) the rules engine polls (N2-02).
+ *   INDEXER_URL          required. The indexer API (/v2/*) the rules engine polls.
  *   RH_RPC               required. Used only to verify ERC-1271 / ERC-6492 wallet signatures.
+ *   RH_RPC_2             optional. A backup for RH_RPC, same name as the keeper's read fallback. Set,
+ *                        the verifier tries RH_RPC first and RH_RPC_2 only when RH_RPC fails
+ *                        (app.ts verifierTransport). A keyed provider URL goes here as a Railway
+ *                        variable, never in the repo. Must differ from RH_RPC.
  *   NOTIFIER_DATA_KEY    required. 32 bytes as 64 hex characters (`openssl rand -hex 32`).
  *                        Encrypts stored targets (AES-256-GCM) and keys the lookup HMACs and the
  *                        email link tokens. Losing it orphans every stored target; rotating it is
@@ -27,13 +31,13 @@
  *   APP_URL              required. The dapp origin. Every message links into it, and it is the
  *                        only origin CORS admits.
  *   PORT                 default 8791. Railway injects it.
- *   RULES_ENABLED        default true. false / 0 turns the rules engine (N2-02) off: the API and
+ *   RULES_ENABLED        default true. false / 0 turns the rules engine off: the API and
  *                        the delivery worker still run, nothing new is enqueued.
  *   RULES_POLL_S         default 30. Seconds between rules ticks over INDEXER_URL (5-3600).
  *
  * EMAIL_FROM, NOTIFIER_PUBLIC_URL and VAPID_SUBJECT are additional delivery settings: an email
  * needs a sender and an absolute confirmation link, and web-push refuses an http subject.
- * RULES_ENABLED and RULES_POLL_S are operator switches for N2-02.
+ * RULES_ENABLED and RULES_POLL_S are operator switches for the rules engine.
  *
  * Blank variables count as unset: Railway keeps a variable that was cleared in the UI as "".
  */
@@ -45,6 +49,8 @@ export interface NotifierConfig {
   databaseUrl: string;
   indexerUrl: string;
   rpcUrl: string;
+  /** RH_RPC_2, or null when unset: the verifier's backup RPC. */
+  rpcBackupUrl: string | null;
   /** 32 bytes. */
   dataKey: Buffer;
   /** Origin plus optional path, no trailing slash. */
@@ -90,6 +96,7 @@ const envSchema = z
     DATABASE_URL: z.preprocess(blankIsUnset, urlWith(['postgres:', 'postgresql:'], 'a postgres:// URL')),
     INDEXER_URL: z.preprocess(blankIsUnset, httpUrl),
     RH_RPC: z.preprocess(blankIsUnset, httpUrl),
+    RH_RPC_2: z.preprocess(blankIsUnset, httpUrl.optional()),
     NOTIFIER_DATA_KEY: z.preprocess(
       blankIsUnset,
       z
@@ -157,6 +164,10 @@ const envSchema = z
         message: 'EMAIL_FROM or NOTIFIER_PUBLIC_URL is set but SMTP_URL is not: set all three or none',
       });
     }
+    if (env.RH_RPC_2 !== undefined && env.RH_RPC_2 === env.RH_RPC) {
+      // A backup that is the primary is no backup; most likely the wrong variable was copied.
+      ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['RH_RPC_2'], message: 'must differ from RH_RPC (value not shown)' });
+    }
     if (env.VAPID_SUBJECT === undefined && typeof env.APP_URL === 'string') {
       let https = false;
       try {
@@ -211,6 +222,7 @@ export function parseConfig(env: Record<string, string | undefined>): NotifierCo
     databaseUrl: e.DATABASE_URL,
     indexerUrl: stripSlash(e.INDEXER_URL),
     rpcUrl: e.RH_RPC,
+    rpcBackupUrl: e.RH_RPC_2 ?? null,
     dataKey: Buffer.from(e.NOTIFIER_DATA_KEY, 'hex'),
     appUrl,
     telegram: { botToken: e.TELEGRAM_BOT_TOKEN, apiBase: stripSlash(e.TELEGRAM_API_BASE) },

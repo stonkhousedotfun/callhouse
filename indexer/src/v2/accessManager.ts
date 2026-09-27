@@ -15,7 +15,7 @@ const lower = <T extends string>(value: T): T => value.toLowerCase() as T;
 
 /**
  * Name -> address for the targets an address source exists for. ENV FIRST, generated registry
- * second: `indexer/lib/v2/marketRegistry.generated.ts` is all nulls until O8-08's post-broadcast
+ * second: `indexer/lib/v2/marketRegistry.generated.ts` is all nulls before the post-broadcast
  * write-back, so building from the registry alone made EVERY target unresolvable on a real
  * deployment. `api/v2/markets.ts` already does `V2_ACCESS_MANAGER ?? contracts.accessManager` one
  * file away; this is that idiom applied to the whole set.
@@ -41,7 +41,7 @@ const addressByName: Record<string, string | null> = {
   V4BuybackExecutor: V2_BUYBACK_EXECUTOR ?? V2_REGISTRY.flywheel.buybackExecutor,
   HouseVaultFactory: V2_HOUSE_VAULT_FACTORY ?? null,
   // The Earn vault HAS an address source and was simply never listed here: `V2_EARN_VAULT`
-  // (lib/env.ts) is the same env ponder.config.ts registers the Earn sources from. Until T-501 the
+  // (lib/env.ts) is the same env ponder.config.ts registers the Earn sources from. Previously the
   // manifest carried an EarnVault target while this map did not, so every Earn AccessManager
   // operation labelled `unknown-target …` although the address was available all along. There is no
   // registry key to fall back to — marketRegistry.generated.ts has no earnVault — so env or null.
@@ -49,11 +49,11 @@ const addressByName: Record<string, string | null> = {
   // No address source exists for these four today: no env name, no registry key. HouseVault is
   // created per instance by the factory, so it is not a single static address at all. They resolve
   // to null, which no longer hides their operations — the label falls back to `unknown-target …`.
-  // StockVenueAdapter arrived in the manifest with the same T-422 export that added EarnVault, and
+  // StockVenueAdapter arrived in the manifest with the same export that added EarnVault, and
   // the bidirectional guard below is what surfaced it: fixing only the reported name would have left
   // this one silent, which is the whole reason the guard and not the entry is the defect. Checked
   // before writing null rather than guessing an address: the NAME `V2_STOCK_VENUE_ADAPTER` exists
-  // on the DEPLOY side (callhouse-contracts script/v2/DeployV8.s.sol, docs/DEPLOY-V2.md, where its
+  // on the DEPLOY side (callhouse-contracts script/v2/DeployV8.s.sol, where its
   // own source reads "none, and blocked on an owner input"), but lib/env.ts exports no such
   // variable and marketRegistry.generated.ts has no venue or adapter key, so nothing here can read
   // one today. When an env name lands, this null becomes `V2_STOCK_VENUE_ADAPTER ?? null`.
@@ -67,7 +67,7 @@ const addressByName: Record<string, string | null> = {
  * THE LIST OF TARGETS COMES FROM THE MANIFEST, NOT FROM A LITERAL HERE.
  *
  * A hand-maintained list is how this broke: `accessManagerRoles.generated.ts` grew to 19 targets in
- * T-153 while this map stayed at 15, so RewardsDistributorLender, HouseVault, HouseVaultFactory and
+ * while this map stayed at 15, so RewardsDistributorLender, HouseVault, HouseVaultFactory and
  * Hedger had no entry at all and their operations could never be named. Keying off the manifest
  * means the next manifest change cannot silently desync — a new target appears here automatically
  * with a null address, and the assertion below fails loudly if this file has no address entry for
@@ -89,7 +89,7 @@ if (unknownAddressNames.length > 0) {
 }
 
 /**
- * THE SAME DESYNC, THE OTHER WAY ROUND, AND THE ONE THAT ACTUALLY HAPPENED (T-501).
+ * THE SAME DESYNC, THE OTHER WAY ROUND, AND THE ONE THAT ACTUALLY HAPPENED.
  *
  * The check above only ever looked from `addressByName` towards the manifest. A manifest target
  * with NO entry here passed in silence, because `targetAddresses` maps it to `null` through the

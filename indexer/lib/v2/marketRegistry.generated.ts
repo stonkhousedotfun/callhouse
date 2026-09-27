@@ -3,29 +3,30 @@
 export const V2_REGISTRY = {
   "chainId": 4663,
   "interfaceVersion": 8,
-  "deployBlock": 69512673,
+  "deployBlock": 72462898,
   "contracts": {
-    "clearinghouse": "0x1A67948175DFf13426F0d61bfB483579D2ff2EeE",
-    "orderBook": "0x65A97a05e9726DA45794DA206943bbc4280b5ce6",
-    "settlementOracle": "0x0e4F266b73e95dc6d4cA10674DCd5eF353e2BDCD",
-    "expiryCalendar": "0x5d0D98C6774B5db0b83D8Bc16FDd09a8Df826d18",
-    "keeperRewards": "0x475D2649E991f4D2f1E21dEB758cd1d6D76C27c5",
-    "autoRoller": "0x7C6Fbc78c460e7994e6A47f7AEe63E36709ab05D",
-    "payoutAdapter": "0x6d97634501b52D78c8dEb77a7d9105587DBAAf18",
-    "makerVault": "0xfbC35FCc0508788b0a2eAF09bBb3Df04402d30A2",
-    "makerRegistry": "0x6FeecE6CbE97b4f0b453eD6373a599795BdBBeee",
-    "rewardsDistributor": "0x08F233c5E338a35F7Ba6cD16C729AB61f40325ce",
-    "accessManager": "0xb663C1EAEeD4664515Cc864667263f3e75238da3",
-    "houseVault": "0xfb5CcB9CF9249E46D8Af0C4f8fe7Eaa9bD7BfF51",
-    "houseVaultFactory": "0x5BEa4c9887C322d5Ec8C7ae547c25091599774d2",
+    "clearinghouse": "0xD33663CD8A363710daF87C78616899cED34b9374",
+    "orderBook": "0x581AFCC6Da498F4D8161705E1D294a6e4fEeaeF3",
+    "settlementOracle": "0x932c9BF2350633382ed6b2CB52e1c82345A3B160",
+    "expiryCalendar": "0x7ae41B8b0ba2189CC59a9c124b20D9BA00177ae5",
+    "keeperRewards": "0x7410FcBE201f40a731336B723E510B9131229Eb1",
+    "autoRoller": "0x47dE4E61C10d3508505594575404086C5941EeD2",
+    "payoutAdapter": "0x92E01EbED9A3253a7D029912546C594bD3DD2737",
+    "makerVault": "0x491D26c3c3C2Eb36e9D7629f5bd6C16344972A28",
+    "makerRegistry": "0xeCD6F1842E292A2B93288bb22Ac318871d7C8B1f",
+    "rewardsDistributor": "0x54545581d614C40bbD4942b527d463402eb446f6",
+    "accessManager": "0x3698FDcD6A29675382d287b30546B75dE9174103",
+    "houseVault": "0xF9F95d999aA798fc0B60a0f85f7CCe251fe247a7",
+    "houseVaultFactory": "0x4626da1A3fCf06d837dBD49708C7B658DFD08843",
     "hedger": null,
     "rewardsDistributorLender": null,
-    "earnVault": "0xf7d21652473014d1Ca0e22FF75420494cdd09164",
+    "earnVault": "0x847794900FAE91516Cc3fbc36955C6B64a2dD609",
     "stockVenueAdapter": null,
+    "stockZap": "0x0E3C7Ea59d89D6BE8bB6Af5706856C4E913a0FE7",
     "sources": {
-      "chainlink": "0xD824c6488982473364039e3790063b8bF1f2Cc93",
-      "univ3": "0x48B8d36bA9BB66A033094a84d52c95D20964C666",
-      "dataStreams": "0xF57BB92543de0cA0B97Dc862A31c8E5A32F6b5C5"
+      "chainlink": "0xC01067D7fb962AB6374DCe20E98b1DdC9086780a",
+      "univ3": "0x1E2F642C8DA800ffc5c7898DF7d28A1DBfE0f70C",
+      "dataStreams": "0x459a09Ea21156de69849522B1599a9e5deEF24A6"
     }
   },
   "safes": {
@@ -33,9 +34,9 @@ export const V2_REGISTRY = {
     "treasury": "0x014b996a084690FB27265BfAC157b04e9FeBbF4E"
   },
   "flywheel": {
-    "feeSplitter": "0x52a5674FFD2aDe74738d2347ef1366Bdc1881C37",
-    "buybackExecutor": "0xE7Ae90cDCfF293C7434942bEF0aE7C7C59A39565",
-    "deployBlock": 69512673
+    "feeSplitter": "0xb837819273097BC6D2F1AdB4AC897DFd5c5DBdf0",
+    "buybackExecutor": "0xE99972FbF00a5292CecB7DB04063A35079fEE3bd",
+    "deployBlock": 72462898
   },
   "fees": {
     "premiumFeeBps": 500,
@@ -45,7 +46,8 @@ export const V2_REGISTRY = {
     "takerFeeFlat": "100000",
     "takerFeeCapBps": 1000,
     "makerRebateBps": 5000,
-    "exerciseFeeBps": 25
+    "exerciseFeeBps": 25,
+    "payoutSlippageBps": 30
   },
   "defaults": {
     "ladder": {
@@ -63,428 +65,39 @@ export const V2_REGISTRY = {
       }
     },
     "expiriesAhead": {
-      "daily": 3,
-      "weekly": 2
+      "daily": 6,
+      "weekly": 0
     }
   },
   "launchSet": {
-    "note": "The v8 launch set, owner ruling 2026-09-21: launch is NVDA and SPCX only. This is the AUTHORITATIVE list and it is deliberately NOT derived from `wave` or `status`. Waves mean rollout ORDER and no market moves bucket for this; the two fields answer different questions and a tool that infers the launch set from either gets a different answer. `markets` names tickers that must exist in `markets[]`; build-markets.mjs validates that and preserves this block across a rebuild.",
+    "note": "The v8 launch set: launch is NVDA and SPCX only. This is the AUTHORITATIVE list and it is deliberately NOT derived from `wave` or `status`. Waves mean rollout ORDER and no market moves bucket for this; the two fields answer different questions and a tool that infers the launch set from either gets a different answer. `markets` names tickers that must exist in `markets[]`; build-markets.mjs validates that and preserves this block across a rebuild.",
     "markets": [
       "NVDA",
       "SPCX"
     ]
   },
+  "house": {
+    "factories": [
+      {
+        "kind": "daily",
+        "address": "0x4626da1A3fCf06d837dBD49708C7B658DFD08843",
+        "deployBlock": 72467085
+      }
+    ],
+    "vaults": [
+      {
+        "ticker": "NVDA",
+        "kind": "daily",
+        "address": "0xF9F95d999aA798fc0B60a0f85f7CCe251fe247a7"
+      },
+      {
+        "ticker": "SPCX",
+        "kind": "daily",
+        "address": "0x031AB8C376C31447e766Fb95d19D2369f3806Ce1"
+      }
+    ]
+  },
   "markets": [
-    {
-      "ticker": "AAPL",
-      "name": "Apple • Robinhood Token",
-      "underlying": "0xaF3D76f1834A1d425780943C99Ea8A608f8a93f9",
-      "uiMultiplier": "1000566080061092436",
-      "status": "planned",
-      "strikeTick": "2500000",
-      "puts": false,
-      "mintFeePpm": 0,
-      "payoutRoute": {
-        "venue": "v4",
-        "fee": 3000,
-        "tickSpacing": 60,
-        "poolId": "0xc748f4671a867db48b552f6b7650bf3255e05f80f00e3f7aad1b17ccb7898fdb"
-      },
-      "settlement": {
-        "sourceCount": 1,
-        "uncorroboratedDelayS": 3600,
-        "route": {
-          "venue": "v4",
-          "fee": 3000,
-          "tickSpacing": 60,
-          "poolId": "0xc748f4671a867db48b552f6b7650bf3255e05f80f00e3f7aad1b17ccb7898fdb"
-        }
-      },
-      "overrides": {}
-    },
-    {
-      "ticker": "AMD",
-      "name": "AMD • Robinhood Token",
-      "underlying": "0x86923f96303D656E4aa86D9d42D1e57ad2023fdC",
-      "uiMultiplier": "1000000000000000000",
-      "status": "planned",
-      "strikeTick": "2500000",
-      "puts": false,
-      "mintFeePpm": 0,
-      "payoutRoute": null,
-      "settlement": {
-        "sourceCount": 1,
-        "uncorroboratedDelayS": 3600,
-        "route": null
-      },
-      "overrides": {}
-    },
-    {
-      "ticker": "AMZN",
-      "name": "Amazon • Robinhood Token",
-      "underlying": "0x12f190a9F9d7D37a250758b26824B97CE941bF54",
-      "uiMultiplier": "1000000000000000000",
-      "status": "planned",
-      "strikeTick": "2500000",
-      "puts": false,
-      "mintFeePpm": 0,
-      "payoutRoute": null,
-      "settlement": {
-        "sourceCount": 1,
-        "uncorroboratedDelayS": 3600,
-        "route": null
-      },
-      "overrides": {}
-    },
-    {
-      "ticker": "ASML",
-      "name": "ASML Holding NV • Robinhood Token",
-      "underlying": "0x47F93d52cBeC7C6D2CfC080e154002370a60dAEA",
-      "uiMultiplier": "1000101323251417769",
-      "status": "planned",
-      "strikeTick": "10000000",
-      "puts": false,
-      "mintFeePpm": 0,
-      "payoutRoute": null,
-      "settlement": {
-        "sourceCount": 1,
-        "uncorroboratedDelayS": 21600,
-        "route": null
-      },
-      "overrides": {}
-    },
-    {
-      "ticker": "BABA",
-      "name": "Alibaba • Robinhood Token",
-      "underlying": "0xad25Ac6C84D497db898fa1E8387bf6Af3532a1c4",
-      "uiMultiplier": "1000000000000000000",
-      "status": "planned",
-      "strikeTick": "1000000",
-      "puts": false,
-      "mintFeePpm": 0,
-      "payoutRoute": null,
-      "settlement": {
-        "sourceCount": 1,
-        "uncorroboratedDelayS": 21600,
-        "route": null
-      },
-      "overrides": {}
-    },
-    {
-      "ticker": "CLSK",
-      "name": "CleanSpark • Robinhood Token",
-      "underlying": "0xcBB95BBF36099d34dA091dc6Fa6F49EfA257Cee3",
-      "uiMultiplier": "1000000000000000000",
-      "status": "planned",
-      "strikeTick": "500000",
-      "puts": false,
-      "mintFeePpm": 0,
-      "payoutRoute": null,
-      "settlement": {
-        "sourceCount": 1,
-        "uncorroboratedDelayS": 21600,
-        "route": null
-      },
-      "overrides": {}
-    },
-    {
-      "ticker": "COIN",
-      "name": "Coinbase • Robinhood Token",
-      "underlying": "0x6330D8C3178a418788dF01a47479c0ce7CCF450b",
-      "uiMultiplier": "1000000000000000000",
-      "status": "planned",
-      "strikeTick": "2500000",
-      "puts": false,
-      "mintFeePpm": 0,
-      "payoutRoute": null,
-      "settlement": {
-        "sourceCount": 1,
-        "uncorroboratedDelayS": 21600,
-        "route": null
-      },
-      "overrides": {}
-    },
-    {
-      "ticker": "CRCL",
-      "name": "Circle Internet Group • Robinhood Token",
-      "underlying": "0xdF0992E440dD0be65BD8439b609d6D4366bf1CB5",
-      "uiMultiplier": "1000000000000000000",
-      "status": "planned",
-      "strikeTick": "1000000",
-      "puts": false,
-      "mintFeePpm": 0,
-      "payoutRoute": null,
-      "settlement": {
-        "sourceCount": 1,
-        "uncorroboratedDelayS": 21600,
-        "route": null
-      },
-      "overrides": {}
-    },
-    {
-      "ticker": "CRWV",
-      "name": "CoreWeave • Robinhood Token",
-      "underlying": "0x5f10A1C971B69e47e059e1dC91901B59b3fB49C3",
-      "uiMultiplier": "1000000000000000000",
-      "status": "planned",
-      "strikeTick": "1000000",
-      "puts": false,
-      "mintFeePpm": 0,
-      "payoutRoute": null,
-      "settlement": {
-        "sourceCount": 1,
-        "uncorroboratedDelayS": 3600,
-        "route": null
-      },
-      "overrides": {}
-    },
-    {
-      "ticker": "DELL",
-      "name": "Dell • Robinhood Token",
-      "underlying": "0x941AE714EC6D8130c7B75d67160Ca08f1e7d11Dd",
-      "uiMultiplier": "1000063708620124549",
-      "status": "planned",
-      "strikeTick": "2500000",
-      "puts": false,
-      "mintFeePpm": 0,
-      "payoutRoute": {
-        "venue": "v4",
-        "fee": 5000,
-        "tickSpacing": 25,
-        "poolId": "0x729651c09684919bdffda473141be4e908ee0e8cf8a43f41135831217fa7d3bb"
-      },
-      "settlement": {
-        "sourceCount": 1,
-        "uncorroboratedDelayS": 3600,
-        "route": {
-          "venue": "v4",
-          "fee": 5000,
-          "tickSpacing": 25,
-          "poolId": "0x729651c09684919bdffda473141be4e908ee0e8cf8a43f41135831217fa7d3bb"
-        }
-      },
-      "overrides": {}
-    },
-    {
-      "ticker": "EWY",
-      "name": "iShares MSCI South Korea fund • Robinhood Token",
-      "underlying": "0x7f0aBeF0C07280F82c6a08ead09dEd6BAE2C13Fc",
-      "uiMultiplier": "1000000000000000000",
-      "status": "planned",
-      "strikeTick": "1000000",
-      "puts": false,
-      "mintFeePpm": 0,
-      "payoutRoute": null,
-      "settlement": {
-        "sourceCount": 1,
-        "uncorroboratedDelayS": 21600,
-        "route": null
-      },
-      "overrides": {}
-    },
-    {
-      "ticker": "GME",
-      "name": "GameStop • Robinhood Token",
-      "underlying": "0x1b0E319c6A659F002271B69dB8A7df2F911c153E",
-      "uiMultiplier": "1000000000000000000",
-      "status": "planned",
-      "strikeTick": "500000",
-      "puts": false,
-      "mintFeePpm": 0,
-      "payoutRoute": null,
-      "settlement": {
-        "sourceCount": 1,
-        "uncorroboratedDelayS": 21600,
-        "route": null
-      },
-      "overrides": {}
-    },
-    {
-      "ticker": "GOOGL",
-      "name": "Alphabet Class A • Robinhood Token",
-      "underlying": "0x2e0847E8910a9732eB3fb1bb4b70a580ADAD4FE3",
-      "uiMultiplier": "1000193924414112587",
-      "status": "planned",
-      "strikeTick": "2500000",
-      "puts": false,
-      "mintFeePpm": 0,
-      "payoutRoute": {
-        "venue": "v4",
-        "fee": 300,
-        "tickSpacing": 3,
-        "poolId": "0x43fe16b75cabbf38f5b185d16142b02d1d9200d8f1ba17cb6cf899f562c6197f"
-      },
-      "settlement": {
-        "sourceCount": 1,
-        "uncorroboratedDelayS": 3600,
-        "route": {
-          "venue": "v4",
-          "fee": 300,
-          "tickSpacing": 3,
-          "poolId": "0x43fe16b75cabbf38f5b185d16142b02d1d9200d8f1ba17cb6cf899f562c6197f"
-        }
-      },
-      "overrides": {}
-    },
-    {
-      "ticker": "INTC",
-      "name": "Intel • Robinhood Token",
-      "underlying": "0xc72b96e0E48ecd4DC75E1e45396e26300BC39681",
-      "uiMultiplier": "1000000000000000000",
-      "status": "planned",
-      "strikeTick": "500000",
-      "puts": false,
-      "mintFeePpm": 0,
-      "payoutRoute": {
-        "venue": "v4",
-        "fee": 10000,
-        "tickSpacing": 200,
-        "poolId": "0xf2e329e631d0fb315a5c563ee3a9120f24822b5ef6c502a91cb56b174d5d8c22"
-      },
-      "settlement": {
-        "sourceCount": 1,
-        "uncorroboratedDelayS": 3600,
-        "route": {
-          "venue": "v4",
-          "fee": 10000,
-          "tickSpacing": 200,
-          "poolId": "0xf2e329e631d0fb315a5c563ee3a9120f24822b5ef6c502a91cb56b174d5d8c22"
-        }
-      },
-      "overrides": {}
-    },
-    {
-      "ticker": "IONQ",
-      "name": "IonQ • Robinhood Token",
-      "underlying": "0x558378E000D634A36593E338eBacdd6207640EfE",
-      "uiMultiplier": "1000000000000000000",
-      "status": "planned",
-      "strikeTick": "500000",
-      "puts": false,
-      "mintFeePpm": 0,
-      "payoutRoute": null,
-      "settlement": {
-        "sourceCount": 1,
-        "uncorroboratedDelayS": 21600,
-        "route": null
-      },
-      "overrides": {}
-    },
-    {
-      "ticker": "META",
-      "name": "Meta Platforms • Robinhood Token",
-      "underlying": "0xc0D6457C16Cc70d6790Dd43521C899C87ce02f35",
-      "uiMultiplier": "1000000000000000000",
-      "status": "planned",
-      "strikeTick": "2500000",
-      "puts": false,
-      "mintFeePpm": 0,
-      "payoutRoute": {
-        "venue": "v4",
-        "fee": 3000,
-        "tickSpacing": 60,
-        "poolId": "0x5875d407a42965b0e768c8925cea290e06fa50603ef34fc99eb92a1050e6ae36"
-      },
-      "settlement": {
-        "sourceCount": 1,
-        "uncorroboratedDelayS": 3600,
-        "route": {
-          "venue": "v4",
-          "fee": 3000,
-          "tickSpacing": 60,
-          "poolId": "0x5875d407a42965b0e768c8925cea290e06fa50603ef34fc99eb92a1050e6ae36"
-        }
-      },
-      "overrides": {}
-    },
-    {
-      "ticker": "MSFT",
-      "name": "Microsoft • Robinhood Token",
-      "underlying": "0xe93237C50D904957Cf27E7B1133b510C669c2e74",
-      "uiMultiplier": "1000412952576205964",
-      "status": "planned",
-      "strikeTick": "2500000",
-      "puts": false,
-      "mintFeePpm": 0,
-      "payoutRoute": {
-        "venue": "v4",
-        "fee": 3000,
-        "tickSpacing": 60,
-        "poolId": "0x9194a557b6a6bb2236b49ea7e2bbccec5d3eeb705aef00903be4b3de1d949579"
-      },
-      "settlement": {
-        "sourceCount": 1,
-        "uncorroboratedDelayS": 3600,
-        "route": {
-          "venue": "v4",
-          "fee": 3000,
-          "tickSpacing": 60,
-          "poolId": "0x9194a557b6a6bb2236b49ea7e2bbccec5d3eeb705aef00903be4b3de1d949579"
-        }
-      },
-      "overrides": {}
-    },
-    {
-      "ticker": "MSTR",
-      "name": "Strategy Inc. • Robinhood Token",
-      "underlying": "0xec262a75e413fAfD0dF80480274532C79D42da09",
-      "uiMultiplier": "1000000000000000000",
-      "status": "planned",
-      "strikeTick": "1000000",
-      "puts": false,
-      "mintFeePpm": 0,
-      "payoutRoute": {
-        "venue": "v4",
-        "fee": 2500,
-        "tickSpacing": 25,
-        "poolId": "0x319bac87e616a89e241c10aeb8afd4892a852cdd8b373cd9765ecddc40b87cfe"
-      },
-      "settlement": {
-        "sourceCount": 1,
-        "uncorroboratedDelayS": 3600,
-        "route": {
-          "venue": "v4",
-          "fee": 2500,
-          "tickSpacing": 25,
-          "poolId": "0x319bac87e616a89e241c10aeb8afd4892a852cdd8b373cd9765ecddc40b87cfe"
-        }
-      },
-      "overrides": {}
-    },
-    {
-      "ticker": "MU",
-      "name": "Micron Technology • Robinhood Token",
-      "underlying": "0xfF080c8ce2E5feadaCa0Da81314Ae59D232d4afD",
-      "uiMultiplier": "1000074823219171086",
-      "status": "planned",
-      "strikeTick": "5000000",
-      "puts": false,
-      "mintFeePpm": 0,
-      "payoutRoute": null,
-      "settlement": {
-        "sourceCount": 1,
-        "uncorroboratedDelayS": 3600,
-        "route": null
-      },
-      "overrides": {}
-    },
-    {
-      "ticker": "NBIS",
-      "name": "Nebius Group • Robinhood Token",
-      "underlying": "0x9D9c6684F596F66a64C030B93A886D51Fd4D7931",
-      "uiMultiplier": "1000000000000000000",
-      "status": "planned",
-      "strikeTick": "2500000",
-      "puts": false,
-      "mintFeePpm": 0,
-      "payoutRoute": null,
-      "settlement": {
-        "sourceCount": 1,
-        "uncorroboratedDelayS": 21600,
-        "route": null
-      },
-      "overrides": {}
-    },
     {
       "ticker": "NVDA",
       "name": "NVIDIA • Robinhood Token",
@@ -495,176 +108,16 @@ export const V2_REGISTRY = {
       "puts": false,
       "mintFeePpm": 0,
       "payoutRoute": {
-        "venue": "v4",
-        "fee": 375,
-        "tickSpacing": 4,
-        "poolId": "0xdf5c0bcd967d54774c139a4ef803ec994779736346fb4c21b50ed241b1fd2682"
+        "venue": "v3",
+        "fee": 500
       },
       "settlement": {
         "sourceCount": 2,
         "uncorroboratedDelayS": 21600,
         "route": {
-          "venue": "v4",
-          "fee": 375,
-          "tickSpacing": 4,
-          "poolId": "0xdf5c0bcd967d54774c139a4ef803ec994779736346fb4c21b50ed241b1fd2682"
+          "venue": "v3",
+          "fee": 500
         }
-      },
-      "overrides": {}
-    },
-    {
-      "ticker": "ORCL",
-      "name": "Oracle • Robinhood Token",
-      "underlying": "0xb0992820E760d836549ba69BC7598b4af75dEE03",
-      "uiMultiplier": "1002210914971013375",
-      "status": "planned",
-      "strikeTick": "1000000",
-      "puts": false,
-      "mintFeePpm": 0,
-      "payoutRoute": null,
-      "settlement": {
-        "sourceCount": 1,
-        "uncorroboratedDelayS": 3600,
-        "route": null
-      },
-      "overrides": {}
-    },
-    {
-      "ticker": "PLTR",
-      "name": "Palantir Technologies • Robinhood Token",
-      "underlying": "0x894E1EC2D74FFE5AEF8Dc8A9e84686acCB964F2A",
-      "uiMultiplier": "1000000000000000000",
-      "status": "planned",
-      "strikeTick": "2500000",
-      "puts": false,
-      "mintFeePpm": 0,
-      "payoutRoute": {
-        "venue": "v4",
-        "fee": 1500,
-        "tickSpacing": 15,
-        "poolId": "0xc59eaeda6d1a6f031bc7e1d039772f2d675e7b4de2c8668610f4471bd60b3802"
-      },
-      "settlement": {
-        "sourceCount": 1,
-        "uncorroboratedDelayS": 3600,
-        "route": {
-          "venue": "v4",
-          "fee": 1500,
-          "tickSpacing": 15,
-          "poolId": "0xc59eaeda6d1a6f031bc7e1d039772f2d675e7b4de2c8668610f4471bd60b3802"
-        }
-      },
-      "overrides": {}
-    },
-    {
-      "ticker": "QQQ",
-      "name": "Invesco QQQ • Robinhood Token",
-      "underlying": "0xD5f3879160bc7c32ebb4dC785F8a4F505888de68",
-      "uiMultiplier": "1000000000000000000",
-      "status": "planned",
-      "strikeTick": "1000000",
-      "puts": false,
-      "mintFeePpm": 0,
-      "payoutRoute": {
-        "venue": "v4",
-        "fee": 3000,
-        "tickSpacing": 60,
-        "poolId": "0xf9568ec0cba6e9ba30d9daabbf3e807813b8852e5737b7d83ea06529c73c9758"
-      },
-      "settlement": {
-        "sourceCount": 1,
-        "uncorroboratedDelayS": 3600,
-        "route": {
-          "venue": "v4",
-          "fee": 3000,
-          "tickSpacing": 60,
-          "poolId": "0xf9568ec0cba6e9ba30d9daabbf3e807813b8852e5737b7d83ea06529c73c9758"
-        }
-      },
-      "overrides": {}
-    },
-    {
-      "ticker": "RGTI",
-      "name": "Rigetti Computing • Robinhood Token",
-      "underlying": "0x284358abc07F9359f19f4b5b4aC91901Be2597Ba",
-      "uiMultiplier": "1000000000000000000",
-      "status": "planned",
-      "strikeTick": "500000",
-      "puts": false,
-      "mintFeePpm": 0,
-      "payoutRoute": null,
-      "settlement": {
-        "sourceCount": 1,
-        "uncorroboratedDelayS": 21600,
-        "route": null
-      },
-      "overrides": {}
-    },
-    {
-      "ticker": "RKLB",
-      "name": "Rocket Lab Corporation • Robinhood Token",
-      "underlying": "0x3b14C39E89D60D627b42a1A4CA45b5bb45Fc12e2",
-      "uiMultiplier": "1000000000000000000",
-      "status": "planned",
-      "strikeTick": "1000000",
-      "puts": false,
-      "mintFeePpm": 0,
-      "payoutRoute": null,
-      "settlement": {
-        "sourceCount": 1,
-        "uncorroboratedDelayS": 21600,
-        "route": null
-      },
-      "overrides": {}
-    },
-    {
-      "ticker": "SGOV",
-      "name": "iShares 0-3 Month Treasury Bond • Robinhood Token",
-      "underlying": "0x92FD66527192E3e61d4DDd13322Aa222DE86F9B5",
-      "uiMultiplier": "1005101770003214918",
-      "status": "planned",
-      "strikeTick": "1000000",
-      "puts": false,
-      "mintFeePpm": 0,
-      "payoutRoute": null,
-      "settlement": {
-        "sourceCount": 1,
-        "uncorroboratedDelayS": 21600,
-        "route": null
-      },
-      "overrides": {}
-    },
-    {
-      "ticker": "SLV",
-      "name": "iShares Silver Trust • Robinhood Token",
-      "underlying": "0x411eFb0E7f985935DAec3D4C3ebaEa0d0AD7D89f",
-      "uiMultiplier": "1000000000000000000",
-      "status": "planned",
-      "strikeTick": "500000",
-      "puts": false,
-      "mintFeePpm": 0,
-      "payoutRoute": null,
-      "settlement": {
-        "sourceCount": 1,
-        "uncorroboratedDelayS": 21600,
-        "route": null
-      },
-      "overrides": {}
-    },
-    {
-      "ticker": "SNDK",
-      "name": "Sandisk Corporation • Robinhood Token",
-      "underlying": "0xB90A19fF0Af67f7779afF50A882A9CfF42446400",
-      "uiMultiplier": "1000000000000000000",
-      "status": "planned",
-      "strikeTick": "10000000",
-      "puts": false,
-      "mintFeePpm": 0,
-      "payoutRoute": null,
-      "settlement": {
-        "sourceCount": 1,
-        "uncorroboratedDelayS": 3600,
-        "route": null
       },
       "overrides": {}
     },
@@ -678,137 +131,23 @@ export const V2_REGISTRY = {
       "puts": false,
       "mintFeePpm": 0,
       "payoutRoute": {
-        "venue": "v4",
-        "fee": 10000,
-        "tickSpacing": 200,
-        "poolId": "0xcb6ffbcc84359535c2cc0a5688c0a76520ea6e0a4820fddd3ac8d7880e576370"
+        "venue": "v3",
+        "fee": 500
       },
       "settlement": {
         "sourceCount": 2,
         "uncorroboratedDelayS": 21600,
         "route": {
-          "venue": "v4",
-          "fee": 10000,
-          "tickSpacing": 200,
-          "poolId": "0xcb6ffbcc84359535c2cc0a5688c0a76520ea6e0a4820fddd3ac8d7880e576370"
+          "venue": "v3",
+          "fee": 500
         }
       },
-      "overrides": {}
-    },
-    {
-      "ticker": "SPY",
-      "name": "SPDR S&P 500 ETF Trust • Robinhood Token",
-      "underlying": "0x117cc2133c37B721F49dE2A7a74833232B3B4C0C",
-      "uiMultiplier": "1000000000000000000",
-      "status": "planned",
-      "strikeTick": "1000000",
-      "puts": false,
-      "mintFeePpm": 0,
-      "payoutRoute": {
-        "venue": "v4",
-        "fee": 500,
-        "tickSpacing": 5,
-        "poolId": "0xe5923c8a8be481ec89a2ca784a2bbfa4235de6d88f92260fd66b660c4babf907"
-      },
-      "settlement": {
-        "sourceCount": 1,
-        "uncorroboratedDelayS": 3600,
-        "route": {
-          "venue": "v4",
-          "fee": 500,
-          "tickSpacing": 5,
-          "poolId": "0xe5923c8a8be481ec89a2ca784a2bbfa4235de6d88f92260fd66b660c4babf907"
+      "overrides": {
+        "expiriesAhead": {
+          "daily": 0,
+          "weekly": 2
         }
-      },
-      "overrides": {}
-    },
-    {
-      "ticker": "TSLA",
-      "name": "Tesla • Robinhood Token",
-      "underlying": "0x322F0929c4625eD5bAd873c95208D54E1c003b2d",
-      "uiMultiplier": "1000000000000000000",
-      "status": "planned",
-      "strikeTick": "2500000",
-      "puts": false,
-      "mintFeePpm": 0,
-      "payoutRoute": {
-        "venue": "v4",
-        "fee": 3000,
-        "tickSpacing": 60,
-        "poolId": "0x8517f8071ae5b831b738052f12125e8e3d6c158b78728aa44ce3b25e5104d32e"
-      },
-      "settlement": {
-        "sourceCount": 1,
-        "uncorroboratedDelayS": 3600,
-        "route": {
-          "venue": "v4",
-          "fee": 3000,
-          "tickSpacing": 60,
-          "poolId": "0x8517f8071ae5b831b738052f12125e8e3d6c158b78728aa44ce3b25e5104d32e"
-        }
-      },
-      "overrides": {}
-    },
-    {
-      "ticker": "TSM",
-      "name": "Taiwan Semiconductor Manufacturing • Robinhood Token",
-      "underlying": "0x58FfE4a942d3885bAa22D7520691F611EF09e7AA",
-      "uiMultiplier": "1001463024159690554",
-      "status": "planned",
-      "strikeTick": "2500000",
-      "puts": false,
-      "mintFeePpm": 0,
-      "payoutRoute": {
-        "venue": "v4",
-        "fee": 7500,
-        "tickSpacing": 75,
-        "poolId": "0x0ba5d53d2f6255f334b7c8ead4f56b6aef5af3402c5e4d11180afd38c6b85fb1"
-      },
-      "settlement": {
-        "sourceCount": 1,
-        "uncorroboratedDelayS": 3600,
-        "route": {
-          "venue": "v4",
-          "fee": 7500,
-          "tickSpacing": 75,
-          "poolId": "0x0ba5d53d2f6255f334b7c8ead4f56b6aef5af3402c5e4d11180afd38c6b85fb1"
-        }
-      },
-      "overrides": {}
-    },
-    {
-      "ticker": "USAR",
-      "name": "USA Rare Earth • Robinhood Token",
-      "underlying": "0xd917B029C761D264c6A312BBbcDA868658eF86a6",
-      "uiMultiplier": "1000000000000000000",
-      "status": "planned",
-      "strikeTick": "500000",
-      "puts": false,
-      "mintFeePpm": 0,
-      "payoutRoute": null,
-      "settlement": {
-        "sourceCount": 1,
-        "uncorroboratedDelayS": 21600,
-        "route": null
-      },
-      "overrides": {}
-    },
-    {
-      "ticker": "USO",
-      "name": "United States Oil Fund • Robinhood Token",
-      "underlying": "0xa30FA36Db767ad9eD3f7a60fC79526fB4d56D344",
-      "uiMultiplier": "1000000000000000000",
-      "status": "planned",
-      "strikeTick": "1000000",
-      "puts": false,
-      "mintFeePpm": 0,
-      "payoutRoute": null,
-      "settlement": {
-        "sourceCount": 1,
-        "uncorroboratedDelayS": 21600,
-        "route": null
-      },
-      "overrides": {}
+      }
     }
   ]
 } as const;

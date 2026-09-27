@@ -36,7 +36,7 @@
  *            plus 15 bps in NVDA), the exercise pays its own fee (15 bps of the strike, in USDG),
  *            and `rollClose`'s claim proceeds are untouched by either.
  *
- * HOW TO RUN IT (keeper/README.md has the long form):
+ * HOW TO RUN IT:
  *   anvil --fork-url https://rpc.mainnet.chain.robinhood.com --chain-id 4663 --port 8560 --code-size-limit 98304
  *   (cd contracts && forge build)
  *   pnpm --filter @callhouse/keeper dryrun:extended

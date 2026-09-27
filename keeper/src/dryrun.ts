@@ -19,7 +19,7 @@
  *           buyer B fills 3 more (gas recorded for both: the first fill opens the claim, the
  *           second tops it up). CallsWritten fires once per fill, `contractsWritten == 5`, and the
  *           vault's ERC-1155 balance of the option is 0 after each fill: written == sold. A
- *           Listed-phase deposit succeeds (decision D8) and checkpoints the premium early
+ *           Listed-phase deposit succeeds and checkpoints the premium early
  *           (`sweepFee` then pays the fee to the base unit); the depositor queues while Listed.
  *           At the exercise timestamp spot moves above the strike, buyer A exercises 2 on the
  *           real Clear, `lockBook`, then `rollClose`: assignment 2, ClaimRedeemed, a second
@@ -53,7 +53,7 @@
  * guardian cancel, the relist budget, the Valorem fee branch, a reprice after a rally, an
  * anyone-rollClose, and a fill the vault refuses — all in dryrun-extended.ts.
  *
- * HOW TO RUN IT (keeper/README.md "Dry run" has the long form):
+ * HOW TO RUN IT:
  *   anvil --fork-url https://rpc.mainnet.chain.robinhood.com --chain-id 4663 --port 8560 --code-size-limit 98304
  *   (cd contracts && forge build)
  *   pnpm --filter @callhouse/keeper dryrun

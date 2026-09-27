@@ -30,7 +30,7 @@
 // off-chain mirror of the Clearinghouse id formula) is copied to lib/v2/seriesId.ts. The v2
 // modules are UNFILTERED, unlike vault.ts above: the v2 pages need the views and the user writes,
 // and which v2 functions are admin- or keeper-only is not settled until the contracts land, so a
-// filter written now would guess. A later web task (W2) may add one. The same table and the same
+// filter written now would guess. A later change may add one. The same table and the same
 // helper copy live in indexer/scripts/gen-abis.mjs and keeper/scripts/gen-abis.mjs: the workspace
 // has no cross-package imports.
 //
@@ -38,7 +38,8 @@
 // mode was added) and compares it with the files on disk. It lists drifted, missing and stale files
 // (a module in lib/abi/v2 whose source left ops/abis/v2) and exits 1 on any, 0 otherwise.
 // lib/v2/abi.test.ts runs it, so a committed module that no longer matches ops/ fails the tests.
-// Without the flag the outputs are written and stale v2 modules are removed.
+// Without the flag the outputs are written and stale v2 modules are removed. The hand-written ABIs
+// of external contracts named in V2_HAND_WRITTEN are never stale, written or removed.
 import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -181,11 +182,11 @@ const SERIES_ID_OUT = "lib/v2/seriesId.ts";
  * The logical v2 ABI set. COPIED TABLE: identical in indexer/scripts/gen-abis.mjs and
  * keeper/scripts/gen-abis.mjs; change all three together.
  *
- * `sources` is ordered and the FIRST file present in ops/abis/v2 wins. Until a contract lane
- * exports the concrete artefact (Clearinghouse.json), the frozen interface (IClearinghouse.json)
+ * `sources` is ordered and the FIRST file present in ops/abis/v2 wins. Until the contracts
+ * export the concrete artefact (Clearinghouse.json), the frozen interface (IClearinghouse.json)
  * stands in, and when the artefact lands it replaces the interface under the same module and export
  * name, so no consumer import changes. A logical name with no source present yet is skipped; the
- * one-source adapters and vaults appear when their tasks export them.
+ * one-source adapters and vaults appear when the contracts export them.
  */
 const V2_MODULES = [
   {
@@ -214,19 +215,19 @@ const V2_MODULES = [
     what: "IPriceSource: the adapter interface every settlement price source implements.",
   },
   {
-    // optional until C2-03
+    // optional
     name: "chainlinkFeedSource",
     sources: ["ChainlinkFeedSource.json"],
     what: "ChainlinkFeedSource: IPriceSource over the push feed's on-chain round history.",
   },
   {
-    // optional until C2-03
+    // optional
     name: "uniV3TwapSource",
     sources: ["UniV3TwapSource.json"],
     what: "UniV3TwapSource: IPriceSource over a keeper-snapshotted Uniswap v3 pool TWAP.",
   },
   {
-    // optional until C2-12
+    // optional
     name: "dataStreamsSource",
     sources: ["DataStreamsSource.json"],
     what: "DataStreamsSource: IPriceSource over Data Streams reports verified through the VerifierProxy.",
@@ -267,27 +268,27 @@ const V2_MODULES = [
     what: "MakerRegistry: per-maker rebate tiers on the order book.",
   },
   {
-    // optional until C2-11
+    // optional
     name: "makerVault",
     sources: ["MakerVault.json"],
     what: "MakerVault: the treasury-funded protocol maker that quotes on the book.",
   },
   {
-    // the interface stands in until C2-11 exports the contract
+    // The interface is the fallback source if RewardsDistributor.json is ever missing.
     name: "rewardsDistributor",
     sources: ["RewardsDistributor.json", "IRewardsDistributor.json"],
     what: "RewardsDistributor: per-epoch Merkle claims of USDG.",
   },
   {
-    // P8-02. Absent from ops/abis/v2 until the contract lane exports it; the loop below then
-    // silently skips this row, so abis/v2/earnVault.ts does not exist yet and nothing imports it.
+    // EarnVault.json is exported. If both sources were missing, the loop below would skip
+    // this module and dormantV2 would print its name.
     name: "earnVault",
     sources: ["EarnVault.json", "IEarnVault.json"],
     what: "EarnVault: the LENDING vault — shares against supplied stock or USDG, venue adapter, yield skim.",
   },
   {
-    // P8-01. The contract is landed (src/v2/periphery/StockZap.sol) but is not in
-    // script/v2/abi-manifest.txt, so export-abis.sh does not copy it here yet; see T-78.
+    // StockZap.json comes from src/v2/periphery/StockZap.sol in the contracts repo; export-abis.sh
+    // copies it to ops/abis/v2 because script/v2/abi-manifest.txt names it.
     name: "stockZap",
     sources: ["StockZap.json", "IStockZap.json"],
     what: "StockZap: stateless USDG<->Stock Token zaps over the PayoutRouter's pinned route.",
@@ -298,15 +299,15 @@ const V2_MODULES = [
     what: "V2Errors: the shared custom errors of every v2 contract.",
   },
   {
-    // P8-06. Absent from ops/abis/v2 until T-78 adds HouseVaultFactory to
-    // script/v2/abi-manifest.txt; the loop then skips this row. Indexing uses
-    // lib/v2/houseVaultEvents.ts until the artefact lands.
+    // HouseVaultFactory.json is exported. The indexer still indexes the launch factory with the
+    // legacy 4-field VaultCreated in its lib/v2/houseVaultEvents.ts, because this ABI carries the
+    // newer event with `bool weekly`, which the launch factory never emits.
     name: "houseVaultFactory",
     sources: ["HouseVaultFactory.json"],
-    what: "HouseVaultFactory: LISTING deploys one HouseVault per underlying.",
+    what: "HouseVaultFactory: NEW_LISTING (no delay; refuses an underlying that already has a vault) deploys one HouseVault per underlying.",
   },
   {
-    // P8-06. Same export gap as houseVaultFactory. Do not stand in MakerVault.json.
+    // HouseVault.json is its only source. Do not use MakerVault.json as a stand-in.
     name: "houseVault",
     sources: ["HouseVault.json"],
     what: "HouseVault: user-funded weekly-epoch market maker; depositor shares, queued deposits/withdrawals.",
@@ -314,7 +315,7 @@ const V2_MODULES = [
 ];
 
 /**
- * COVERAGE, BOTH DIRECTIONS (T-300).
+ * COVERAGE, BOTH DIRECTIONS.
  *
  * The generation loop at the bottom of this file reads `const source = m.sources.find(v2Present)`
  * and then `if (source) renderV2Module(...)`. That bare `if` is the whole defect this block exists
@@ -324,17 +325,17 @@ const V2_MODULES = [
  *
  * ALL THREE GENERATORS HAD THE SAME SHAPE. web/scripts/gen-abis.mjs, indexer/scripts/gen-abis.mjs
  * and keeper/scripts/gen-abis.mjs each carried that identical two-line loop, so all three are fixed
- * together here rather than one being cited as different. The keeper's was in neither audit's scope
- * (CH3 covered the indexer, CH4 the web) and was found while fencing this row.
+ * together here rather than one being cited as different. The keeper's copy had the same defect
+ * as the other two and is fixed the same way.
  *
  * NOT SET EQUALITY, DELIBERATELY. Some exported ABIs legitimately have no consumer module, so
- * requiring the two sets to match would fire on a clean tree and the next lane would add exclusions
- * until it went green - which is the unguarded list this row is about. The rule instead is that
+ * requiring the two sets to match would fire on a clean tree and the next change would add exclusions
+ * until it went green - which is the unguarded list this rule is about. The rule instead is that
  * every PRESENT export must be ACCOUNTED FOR by name, either by a module that names it as a source
  * or by V2_UNWIRED_ABIS below, and that adding one requires a deliberate edit in this file.
  *
  * The fourth instance of this class lives in the contracts repo, in script/v2/export-abis.sh's
- * manifest half, and belongs to T-279-C8-ABI-EXPORT-GUARD-GAPS. It is cited here, not touched.
+ * manifest half, and belongs to a separate change. It is cited here, not touched.
  */
 /**
  * Exported ABI files that deliberately have no generated consumer module. This is a named
@@ -354,6 +355,31 @@ const V2_UNWIRED_ABIS = new Set([
 
 /** JSON metadata exported beside the ABIs, but not itself a contract ABI. */
 const V2_NON_ABI_JSON = new Set(["roles.json"]);
+
+/**
+ * Hand-written modules in lib/abi/v2 for EXTERNAL contracts. ops/abis/v2 mirrors the
+ * contracts repo's export and has no source for a Uniswap contract, so without this list staleV2
+ * reports these files under --check and write mode deletes them, while lib/v2/stockSwap.ts imports
+ * both. Each entry is a file name in V2_OUT_DIR with its upstream source; the file's own header
+ * carries the full provenance.
+ *
+ * NAMED, NOT A RULE. The stale sweep still catches every other sourceless module. And an entry is
+ * refused in both modes, the way V2_UNWIRED_ABIS refuses a stale allowance, when its file is absent
+ * (the allowance would outlive its file and bless a later one of the same name) or when a V2_MODULES
+ * row generates the same path (a name collision: write mode would overwrite the hand-written file).
+ * WEB ONLY: the indexer and keeper generators have no hand-written modules.
+ */
+const V2_HAND_WRITTEN = new Set([
+  // quoterV3Abi: Uniswap v3 QuoterV2 at 0x33e885eD0Ec9bF04EcfB19341582aADCb4c8A9E7 on chain 4663 (the
+  // registry's v2.uniswapV3.quoterV2). uniswapV3PoolAbi: slot0() of the UniswapV3Pool at
+  // 0xd4EB21209C4D6093f80B5b84f5C45cc093EA14a3 on chain 4663. Both copied from the Etherscan-verified ABIs
+  // through api.etherscan.io/v2 getsourcecode.
+  "quoterV3.ts",
+  // universalRouterAbi: UniversalRouter at 0x8876789976decbfcbbbe364623c63652db8c0904 on chain 4663, copied
+  // from its Etherscan-verified ABI. permit2Abi: Permit2 at 0x000000000022D473030F116dDEE9F6B43aC78BA3,
+  // copied from the Ethereum mainnet verification of that address (it is not verified on the 4663 explorer).
+  "universalRouter.ts",
+]);
 
 /** Every module but v2Errors merges these fragments (see renderV2Module). */
 const V2_ERRORS = "V2Errors.json";
@@ -411,8 +437,8 @@ const absentV2Unwired = () => [...V2_UNWIRED_ABIS].filter((file) => !v2Present(f
  * The generation loop at the bottom of this file skips a sourceless module with a bare `if`, and
  * that silence is the other half of the defect the coverage checks above exist to remove: an ABI
  * the contracts repo exports and nobody wires is now visible, and a module wired here that nothing
- * exports must be nameable too. It is NOT an error. A module row deliberately lands before its ABI
- * is exported, and making this red would turn a planned row into a broken tree - the failure the
+ * exports must be nameable too. It is NOT an error. A module entry may be added before its ABI
+ * is exported, and making this red would turn a planned entry into a broken tree - the failure the
  * named-exclusion design above was chosen to avoid. So it prints, always, and the exit code does
  * not move.
  */
@@ -482,11 +508,19 @@ const staleV2 = () => {
   const dir = path.join(pkgRoot, V2_OUT_DIR);
   if (!existsSync(dir)) return [];
   return readdirSync(dir)
-    .filter((f) => f.endsWith(".ts"))
+    .filter((f) => f.endsWith(".ts") && !V2_HAND_WRITTEN.has(f))
     .map((f) => `${V2_OUT_DIR}/${f}`)
     .filter((rel) => !outputs.has(rel))
     .sort();
 };
+
+const handWrittenPaths = () => [...V2_HAND_WRITTEN].map((f) => `${V2_OUT_DIR}/${f}`).sort();
+
+/** V2_HAND_WRITTEN entries whose file is gone (package-relative paths). */
+const absentV2HandWritten = () => handWrittenPaths().filter((rel) => !existsSync(path.join(pkgRoot, rel)));
+
+/** V2_HAND_WRITTEN entries that a V2_MODULES row also generates (package-relative paths). */
+const collidingV2HandWritten = () => handWrittenPaths().filter((rel) => outputs.has(rel));
 
 const reportV2Coverage = (unwired, absentUnwired) => {
   for (const file of unwired) {
@@ -497,8 +531,20 @@ const reportV2Coverage = (unwired, absentUnwired) => {
   }
 };
 
+const reportV2HandWritten = (absentHandWritten, collidingHandWritten) => {
+  for (const rel of absentHandWritten) {
+    console.error(`stale allowance: ${rel} (named in V2_HAND_WRITTEN but absent)`);
+  }
+  for (const rel of collidingHandWritten) {
+    console.error(`collision: ${rel} (named in V2_HAND_WRITTEN and also generated from ops/abis/v2)`);
+  }
+};
+
 const unwired = unwiredV2();
 const absentUnwired = absentV2Unwired();
+const absentHandWritten = absentV2HandWritten();
+const collidingHandWritten = collidingV2HandWritten();
+const handWrittenProblems = absentHandWritten.length + collidingHandWritten.length;
 const dormant = dormantV2();
 for (const entry of dormant) console.log(`dormant: ${entry}`);
 
@@ -513,25 +559,36 @@ if (check) {
   const stale = staleV2();
   const outputProblems = drifted.length + missing.length + stale.length;
   const coverageProblems = unwired.length + absentUnwired.length;
-  if (outputProblems + coverageProblems === 0) {
+  if (outputProblems + coverageProblems + handWrittenProblems === 0) {
     console.log(`gen-abis --check: ${outputs.size} files match ops/`);
   } else {
     for (const rel of drifted) console.error(`drifted: ${rel}`);
     for (const rel of missing) console.error(`missing: ${rel}`);
     for (const rel of stale) console.error(`stale:   ${rel} (no source in ops/abis/v2)`);
     reportV2Coverage(unwired, absentUnwired);
+    reportV2HandWritten(absentHandWritten, collidingHandWritten);
     if (outputProblems) {
       console.error("gen-abis --check: generated files differ from ops/; run `pnpm gen:abis` and commit the result");
     }
     if (coverageProblems) {
       console.error("gen-abis --check: exported ABI coverage is incomplete; update V2_MODULES or V2_UNWIRED_ABIS");
     }
+    if (handWrittenProblems) {
+      console.error("gen-abis --check: V2_HAND_WRITTEN is out of step with lib/abi/v2 and V2_MODULES; update it");
+    }
     process.exit(1);
   }
 } else {
-  if (unwired.length + absentUnwired.length > 0) {
+  const coverageProblems = unwired.length + absentUnwired.length;
+  if (coverageProblems + handWrittenProblems > 0) {
     reportV2Coverage(unwired, absentUnwired);
-    console.error("gen-abis: exported ABI coverage is incomplete; update V2_MODULES or V2_UNWIRED_ABIS");
+    reportV2HandWritten(absentHandWritten, collidingHandWritten);
+    if (coverageProblems) {
+      console.error("gen-abis: exported ABI coverage is incomplete; update V2_MODULES or V2_UNWIRED_ABIS");
+    }
+    if (handWrittenProblems) {
+      console.error("gen-abis: V2_HAND_WRITTEN is out of step with lib/abi/v2 and V2_MODULES; nothing written");
+    }
     process.exit(1);
   }
   for (const [rel, { body: contents, summary }] of outputs) {

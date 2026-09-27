@@ -21,7 +21,10 @@ try {
     process.stderr.write(`${error.message}\n`);
     process.exit(1);
   }
-  throw error;
+  // Anything else is unexpected, and its message could quote a value from the environment (a webhook URL is a
+  // credential), so only its name is printed.
+  process.stderr.write(`relay: configuration failed (${error instanceof Error ? error.name : 'unknown error'})\n`);
+  process.exit(1);
 }
 
 const server = createRelayServer(config, { logger });

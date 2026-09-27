@@ -15,6 +15,7 @@
         "expiry": 1789502400,
         "tenor": "daily",
         "mintCutoff": 1789500600,
+        "exerciseFeeBps": 25,
         "mintFeePpm": 0,
         "mintFeesHeld": {
           "raw": "0",
@@ -33,6 +34,8 @@
         "bestAsk": null,
         "bidUnits": "0",
         "askUnits": "0",
+        "bestBidUnits": "0",
+        "bestAskUnits": "0",
         "fair": null,
         "iv": null,
         "delta": null,
@@ -60,6 +63,7 @@
         "expiry": 1789502400,
         "tenor": "daily",
         "mintCutoff": 1789500600,
+        "exerciseFeeBps": 25,
         "mintFeePpm": 0,
         "mintFeesHeld": {
           "raw": "0",
@@ -78,6 +82,8 @@
         "bestAsk": null,
         "bidUnits": "0",
         "askUnits": "0",
+        "bestBidUnits": "0",
+        "bestAskUnits": "0",
         "fair": null,
         "iv": null,
         "delta": null,
@@ -109,6 +115,7 @@
         "expiry": 1789502400,
         "tenor": "daily",
         "mintCutoff": 1789500600,
+        "exerciseFeeBps": 25,
         "mintFeePpm": 0,
         "mintFeesHeld": {
           "raw": "0",
@@ -127,6 +134,8 @@
         "bestAsk": null,
         "bidUnits": "0",
         "askUnits": "0",
+        "bestBidUnits": "0",
+        "bestAskUnits": "0",
         "fair": null,
         "iv": null,
         "delta": null,
@@ -154,6 +163,7 @@
         "expiry": 1789502400,
         "tenor": "daily",
         "mintCutoff": 1789500600,
+        "exerciseFeeBps": 25,
         "mintFeePpm": 0,
         "mintFeesHeld": {
           "raw": "0",
@@ -172,6 +182,8 @@
         "bestAsk": null,
         "bidUnits": "0",
         "askUnits": "0",
+        "bestBidUnits": "0",
+        "bestAskUnits": "0",
         "fair": null,
         "iv": null,
         "delta": null,
@@ -199,6 +211,7 @@
         "expiry": 1789761600,
         "tenor": "weekly",
         "mintCutoff": 1789759800,
+        "exerciseFeeBps": 25,
         "mintFeePpm": 0,
         "mintFeesHeld": {
           "raw": "0",
@@ -225,6 +238,8 @@
         },
         "bidUnits": "100",
         "askUnits": "120",
+        "bestBidUnits": "100",
+        "bestAskUnits": "120",
         "fair": {
           "raw": "3942844",
           "decimals": 6,
@@ -256,6 +271,7 @@
         "expiry": 1789761600,
         "tenor": "weekly",
         "mintCutoff": 1789759800,
+        "exerciseFeeBps": 25,
         "mintFeePpm": 0,
         "mintFeesHeld": {
           "raw": "0",
@@ -282,6 +298,8 @@
         },
         "bidUnits": "100",
         "askUnits": "120",
+        "bestBidUnits": "100",
+        "bestAskUnits": "120",
         "fair": {
           "raw": "2385217",
           "decimals": 6,
@@ -313,6 +331,7 @@
         "expiry": 1789761600,
         "tenor": "weekly",
         "mintCutoff": 1789759800,
+        "exerciseFeeBps": 25,
         "mintFeePpm": 0,
         "mintFeesHeld": {
           "raw": "0",
@@ -339,6 +358,8 @@
         },
         "bidUnits": "100",
         "askUnits": "90",
+        "bestBidUnits": "100",
+        "bestAskUnits": "90",
         "fair": {
           "raw": "1358913",
           "decimals": 6,
@@ -374,6 +395,7 @@
         "expiry": 1789761600,
         "tenor": "weekly",
         "mintCutoff": 1789759800,
+        "exerciseFeeBps": 25,
         "mintFeePpm": 0,
         "mintFeesHeld": {
           "raw": "0",
@@ -400,6 +422,8 @@
         },
         "bidUnits": "100",
         "askUnits": "120",
+        "bestBidUnits": "100",
+        "bestAskUnits": "120",
         "fair": {
           "raw": "369263",
           "decimals": 6,
@@ -431,6 +455,7 @@
         "expiry": 1789761600,
         "tenor": "weekly",
         "mintCutoff": 1789759800,
+        "exerciseFeeBps": 25,
         "mintFeePpm": 0,
         "mintFeesHeld": {
           "raw": "0",
@@ -456,7 +481,9 @@
           "formatted": "0.25"
         },
         "bidUnits": "100",
-        "askUnits": "40",
+        "askUnits": "70",
+        "bestBidUnits": "100",
+        "bestAskUnits": "40",
         "fair": {
           "raw": "176672",
           "decimals": 6,
@@ -492,6 +519,7 @@
         "expiry": 1790366400,
         "tenor": "weekly",
         "mintCutoff": 1790364600,
+        "exerciseFeeBps": 25,
         "mintFeePpm": 0,
         "mintFeesHeld": {
           "raw": "0",
@@ -510,6 +538,8 @@
         "bestAsk": null,
         "bidUnits": "0",
         "askUnits": "0",
+        "bestBidUnits": "0",
+        "bestAskUnits": "0",
         "fair": {
           "raw": "8479925",
           "decimals": 6,
@@ -541,6 +571,7 @@
         "expiry": 1790366400,
         "tenor": "weekly",
         "mintCutoff": 1790364600,
+        "exerciseFeeBps": 25,
         "mintFeePpm": 0,
         "mintFeesHeld": {
           "raw": "0",
@@ -559,6 +590,8 @@
         "bestAsk": null,
         "bidUnits": "0",
         "askUnits": "0",
+        "bestBidUnits": "0",
+        "bestAskUnits": "0",
         "fair": {
           "raw": "5484366",
           "decimals": 6,
@@ -590,6 +623,7 @@
         "expiry": 1790366400,
         "tenor": "weekly",
         "mintCutoff": 1790364600,
+        "exerciseFeeBps": 25,
         "mintFeePpm": 0,
         "mintFeesHeld": {
           "raw": "0",
@@ -608,6 +642,8 @@
         "bestAsk": null,
         "bidUnits": "0",
         "askUnits": "0",
+        "bestBidUnits": "0",
+        "bestAskUnits": "0",
         "fair": {
           "raw": "4352044",
           "decimals": 6,
@@ -639,6 +675,7 @@
         "expiry": 1790366400,
         "tenor": "weekly",
         "mintCutoff": 1790364600,
+        "exerciseFeeBps": 25,
         "mintFeePpm": 0,
         "mintFeesHeld": {
           "raw": "0",
@@ -657,6 +694,8 @@
         "bestAsk": null,
         "bidUnits": "0",
         "askUnits": "0",
+        "bestBidUnits": "0",
+        "bestAskUnits": "0",
         "fair": {
           "raw": "3425535",
           "decimals": 6,
@@ -688,6 +727,7 @@
         "expiry": 1790366400,
         "tenor": "weekly",
         "mintCutoff": 1790364600,
+        "exerciseFeeBps": 25,
         "mintFeePpm": 0,
         "mintFeesHeld": {
           "raw": "0",
@@ -706,6 +746,8 @@
         "bestAsk": null,
         "bidUnits": "0",
         "askUnits": "0",
+        "bestBidUnits": "0",
+        "bestAskUnits": "0",
         "fair": {
           "raw": "2072736",
           "decimals": 6,

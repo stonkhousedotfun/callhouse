@@ -9,7 +9,7 @@ const usd = (amount: number) => BigInt(Math.round(amount * 1_000_000));
 
 describe("payoff slider price range and input", () => {
   it("uses 25% around a nearby strike and three strike distances around a far strike", () => {
-    // T-OP-120 widened 15% to 25% so the ±20% presets (design §2.3) sit inside the view.
+    // Widened from 15% to 25% so the ±20% presets sit inside the view.
     expect(payoffPriceRange(usd(200), usd(210))).toEqual({ min: usd(150), max: usd(250) });
     expect(payoffPriceRange(usd(200), usd(250))).toEqual({ min: usd(50), max: usd(350) });
     expect(payoffPriceRange(usd(100), usd(200))).toEqual({ min: 0n, max: usd(400) });

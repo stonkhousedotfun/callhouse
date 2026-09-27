@@ -10,8 +10,9 @@
  * ------------------------------------------------------------------------------------------------- */
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { readFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { createServer } from "node:http";
+import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { after, before, describe, test } from "node:test";
 import { fileURLToPath } from "node:url";
@@ -19,12 +20,17 @@ import { fileURLToPath } from "node:url";
 import {
   DISCLAIMER,
   DataError,
+  LEDGER_VERSION,
   PostCheckError,
   X_ENV,
   assertPost,
   buildPost,
   checkPost,
+  ledgerBlock,
+  ledgerPath,
+  newYorkDay,
   oauth1Header,
+  parseArgs,
   percentEncode,
   qualify,
   readXCredentials,
@@ -38,7 +44,7 @@ const SCRIPT = join(HERE, "daily-win.mjs");
 const FIXTURES = join(REPO, "ops", "fixtures", "api", "v2");
 const readJson = (...p) => JSON.parse(readFileSync(join(FIXTURES, ...p), "utf8"));
 
-/** The fixture scenario's "now" (ops/fixtures/api/v2/README.md). */
+/** The fixture scenario's "now". */
 const FIXTURE_NOW = 1789592400;
 const STATS = readJson("stats.json");
 const WEEK_WIN = STATS.biggestWinWeek;
@@ -93,8 +99,8 @@ after(() => {
 
 /**
  * One in-process HTTP server. `routes` maps "METHOD /path" (exact, query string stripped) or
- * "METHOD /prefix*" to [status, body, contentType?]. Unmatched requests are 404. Every request is
- * recorded with its headers and body.
+ * "METHOD /prefix*" to [status, body, contentType?], or to a (req, res) handler. Unmatched requests are
+ * 404. Every request is recorded with its headers and body.
  */
 async function startFake(routes) {
   const requests = [];
@@ -107,6 +113,7 @@ async function startFake(routes) {
       const key = `${req.method} ${path}`;
       const hit = routes[key] ??
         Object.entries(routes).find(([k]) => k.endsWith("*") && key.startsWith(k.slice(0, -1)))?.[1];
+      if (typeof hit === "function") return hit(req, res); // a handler that answers (or drops the socket) itself
       const [status, body, type] = hit ?? [404, { error: { code: "not_found", message: key } }];
       const text = typeof body === "string" || Buffer.isBuffer(body) ? body : JSON.stringify(body);
       res.writeHead(status, { "Content-Type": type ?? "application/json" });
@@ -152,6 +159,19 @@ const postBlock = (stdout) => {
   const m = stdout.match(/----- post -----\n([\s\S]*?)\n----- end -----/);
   return m ? m[1] : null;
 };
+
+/** A ledger path in a fresh temp directory; the file itself does not exist yet. */
+const freshLedger = () => join(mkdtempSync(join(tmpdir(), "daily-win-ledger-")), "ledger.json");
+const readLedgerFile = (file) => JSON.parse(readFileSync(file, "utf8"));
+const seedLedger = (file, entries) => writeFileSync(file, JSON.stringify({ version: LEDGER_VERSION, entries }));
+/** The environment of a --post run against the fixture server and the fake app + X at `x`. */
+const postEnv = (x, ledger = freshLedger()) => ({
+  INDEXER_URL: fixtureUrl,
+  APP_URL: x.url,
+  X_API_BASE: x.url,
+  DAILY_WIN_LEDGER: ledger,
+  ...FAKE_CREDS,
+});
 
 const assertNoCredentialsIn = (...outputs) => {
   for (const value of Object.values(FAKE_CREDS)) {
@@ -291,7 +311,7 @@ describe("qualification rule", () => {
 describe("post copy", () => {
   /**
    * The forbidden-copy rules, INLINED. They were read out of scripts/copy-lint.mjs until that
-   * script was removed on 2026-09-21 by owner instruction. This is now the only copy in this
+   * script was removed. This is now the only copy in this
    * file's reach, so it cannot drift from an upstream that no longer exists - and nothing
    * outside this test checks post copy any more.
    */
@@ -335,23 +355,36 @@ describe("post copy", () => {
   test("checkPost names each broken rule", () => {
     assert.equal(good, expectedWeekPost("https://app.stonkhouse.fun"));
     assert.deepEqual(checkPost(good), []);
+    // Every mutation must actually change the post. A replacement whose search string drifted away from the
+    // fixture (a re-baseline moved the week win from a $216 to a $214 call and this test kept "$216") is a
+    // no-op, and checkPost(good) is [] by the assertion above, so the rule under test was never exercised.
     const broken = (text, pattern) => {
+      assert.notEqual(text, good, `the mutation for ${pattern} did not change the post`);
       const problems = checkPost(text);
       assert.ok(problems.some((p) => pattern.test(p)), `${pattern} not in ${JSON.stringify(problems)}`);
     };
+    // The instrument phrase as the fixture renders it, read from the post rather than typed here.
+    const instrument = good.match(/\bNVDA \$\d+ call\b/)?.[0];
+    assert.ok(instrument, `the week post names no "NVDA $<strike> call": ${good}`);
     broken(good.replace(DISCLAIMER, ""), /Most options expire worthless/);
     broken(good.replace("the cost.", "the cost, guaranteed."), /guaranteed/);
     broken(good.replace("the cost.", "the cost. Risk-free."), /risk-free/i);
     broken(good.replace("the cost.", "the cost. 900% APY."), /APY/);
     broken(good.replace("the cost.", "the cost. Only on tokenized stocks."), /tokenized/);
-    broken(good.replace("NVDA $216 call", "NVDA stock call"), /Stock Tokens/);
+    broken(good.replace(instrument, "NVDA stock call"), /Stock Tokens/);
     broken(good.replace("the cost.", "the cost. You could win next."), /never promise returns/);
     broken(good.replace("Stonkhouse:", "@stonkhousefun:"), /@handles/);
     broken(good.replace("the cost.", "the cost. \u{1F680}"), /emojis/);
-    broken(good.replace("most they could lose was 0.55", "most they could lose was 0.54"), /must equal what was paid/);
-    broken(good.replace(", and the most they could lose was 0.55 USDG", ""), /payoff must come with its cost/);
+    // The cost as the fixture renders it (the same value twice: "paid X USDG, and the most they could lose was X USDG").
+    const cost = good.match(/most they could lose was (\d+\.\d\d) USDG/)?.[1];
+    assert.ok(cost, `the week post states no cost: ${good}`);
+    const lessThanCost = (Number(cost) - 0.01).toFixed(2);
+    broken(good.replace(`most they could lose was ${cost}`, `most they could lose was ${lessThanCost}`), /must equal what was paid/);
+    broken(good.replace(`, and the most they could lose was ${cost} USDG`, ""), /payoff must come with its cost/);
     broken(good.replace("Receipt: ", "Receipt: https://example.org/x and "), /exactly one link/);
-    assert.deepEqual(checkPost(good.replace("NVDA $216 call", "NVDA Stock Token $216 call")), []);
+    const tokenPost = good.replace(instrument, instrument.replace("NVDA ", "NVDA Stock Token "));
+    assert.notEqual(tokenPost, good);
+    assert.deepEqual(checkPost(tokenPost), []);
   });
 
   test("weights as X does: every URL is 23, heavy code points 2", () => {
@@ -385,6 +418,7 @@ describe("post copy", () => {
         INDEXER_URL: indexer.url,
         APP_URL: x.url,
         X_API_BASE: x.url,
+        DAILY_WIN_LEDGER: freshLedger(),
         ...FAKE_CREDS,
       });
       assert.equal(r.code, 1);
@@ -507,7 +541,7 @@ describe("--post", () => {
   test("checks the page and image, then sends exactly one signed POST /2/tweets with the post", async () => {
     const x = await startFake(appAndXRoutes());
     try {
-      const r = await runCli(weekArgs, { INDEXER_URL: fixtureUrl, APP_URL: x.url, X_API_BASE: x.url, ...FAKE_CREDS });
+      const r = await runCli(weekArgs, postEnv(x));
       assert.equal(r.code, 0, r.stderr);
       const text = expectedWeekPost(x.url);
       assert.equal(postBlock(r.stdout), text);
@@ -554,7 +588,7 @@ describe("--post", () => {
   test("refuses when the share page does not answer 200", async () => {
     const x = await startFake(appAndXRoutes({ "GET /pnl/*": [404, "not found", "text/html"] }));
     try {
-      const r = await runCli(weekArgs, { INDEXER_URL: fixtureUrl, APP_URL: x.url, X_API_BASE: x.url, ...FAKE_CREDS });
+      const r = await runCli(weekArgs, postEnv(x));
       assert.equal(r.code, 1);
       assert.match(r.stderr, /refusing to post: GET .*\/pnl\/.* answered 404/);
       assert.equal(x.requests.filter((q) => q.method === "POST").length, 0);
@@ -568,14 +602,450 @@ describe("--post", () => {
       "POST /2/tweets": [403, { detail: "You are not allowed to create a Tweet with duplicate content.", status: 403 }],
     }));
     try {
-      const r = await runCli(weekArgs, { INDEXER_URL: fixtureUrl, APP_URL: x.url, X_API_BASE: x.url, ...FAKE_CREDS });
+      const ledger = freshLedger();
+      const r = await runCli(weekArgs, postEnv(x, ledger));
       assert.equal(r.code, 1);
       assert.match(r.stderr, /X answered 403: .*duplicate content/);
+      assert.match(r.stderr, /X did not create the post; nothing was posted/);
       assert.doesNotMatch(r.stdout, /posted:/);
       assert.equal(x.requests.filter((q) => q.method === "POST").length, 1);
+      // A 4xx is X's definite refusal: the entry written before the POST is removed, so nothing blocks a re-run.
+      assert.deepEqual(readLedgerFile(ledger).entries, []);
       assertNoCredentialsIn(r.stdout, r.stderr);
     } finally {
       await x.close();
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------------------------
+// The post ledger: an unknown post outcome is never "nothing posted"
+// ---------------------------------------------------------------------------------------------
+
+describe("--post ledger", () => {
+  const weekArgs = ["--window", "week", "--now", String(FIXTURE_NOW), "--post"];
+  /** The fixture "now" (17:00 EDT) as a New York day, written out rather than computed with the code under test. */
+  const FIXTURE_DAY = "2026-09-16";
+  const posts = (x) => x.requests.filter((q) => q.method === "POST").length;
+  const unknownEntry = (over = {}) => ({ window: "week", day: FIXTURE_DAY, winId: WEEK_ID, outcome: "unknown", postId: null, ...over });
+
+  /**
+   * A POST /2/tweets handler that makes the ledger's directory read-only (so every ledger write after the one made
+   * before the POST fails with EACCES), then answers `status` + `body`. The test's finally makes it writable again.
+   */
+  const lockThen = (ledger, status, body) => (req, res) => {
+    chmodSync(dirname(ledger), 0o500);
+    res.writeHead(status, { "Content-Type": "application/json" });
+    res.end(JSON.stringify(body));
+  };
+  /** The detail the entry written before the POST carries; a later rewrite replaces it. */
+  const SENT_DETAIL = "POST /2/tweets sent; no answer recorded";
+
+  /** A POST /2/tweets handler that answers `first` once, then 201 with the fake id. */
+  const thenCreated = (first) => {
+    let calls = 0;
+    return (req, res) => {
+      calls += 1;
+      if (calls === 1) return first(req, res);
+      res.writeHead(201, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ data: { id: FAKE_TWEET_ID } }));
+    };
+  };
+
+  test("a 5xx from X is an UNKNOWN outcome, never 'nothing posted', and the re-run refuses without a second POST", async () => {
+    const x = await startFake(appAndXRoutes({
+      "POST /2/tweets": thenCreated((req, res) => {
+        res.writeHead(503, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ title: "Service Unavailable" }));
+      }),
+    }));
+    try {
+      const ledger = freshLedger();
+      const first = await runCli(weekArgs, postEnv(x, ledger));
+      assert.equal(first.code, 3, first.stderr);
+      assert.match(first.stderr, /post outcome UNKNOWN: X answered 503/);
+      assert.match(first.stderr, /may be live on X/);
+      assert.doesNotMatch(first.stderr + first.stdout, /nothing posted/i);
+      const entries = readLedgerFile(ledger).entries;
+      assert.equal(entries.length, 1);
+      assert.deepEqual(
+        { window: entries[0].window, day: entries[0].day, winId: entries[0].winId, outcome: entries[0].outcome, postId: entries[0].postId },
+        unknownEntry(),
+      );
+
+      // X would now answer 201, so a re-run that posted would succeed: it must refuse instead.
+      const again = await runCli(weekArgs, postEnv(x, ledger));
+      assert.equal(again.code, 1, again.stderr);
+      assert.match(again.stderr, /refusing to post: the week post for 2026-09-16, win .* has an UNKNOWN outcome/);
+      assert.match(again.stderr, /--window week --resolve posted/);
+      assert.equal(posts(x), 1, "the re-run sent a second POST");
+      assertNoCredentialsIn(first.stdout, first.stderr, again.stdout, again.stderr);
+    } finally {
+      await x.close();
+    }
+  });
+
+  test("a connection X drops mid-POST is UNKNOWN (exit 3), not 'nothing posted'", async () => {
+    const x = await startFake(appAndXRoutes({ "POST /2/tweets": (req) => req.socket.destroy() }));
+    try {
+      const ledger = freshLedger();
+      const r = await runCli(weekArgs, postEnv(x, ledger));
+      assert.equal(r.code, 3, r.stderr);
+      assert.match(r.stderr, /post outcome UNKNOWN: POST .*\/2\/tweets got no answer/);
+      assert.doesNotMatch(r.stderr, /nothing posted/i);
+      assert.equal(readLedgerFile(ledger).entries[0].outcome, "unknown");
+    } finally {
+      await x.close();
+    }
+  });
+
+  test("a 201 whose body is cut off is UNKNOWN (exit 3) and says the body was cut off", async () => {
+    const x = await startFake(appAndXRoutes({
+      "POST /2/tweets": (req, res) => {
+        res.writeHead(201, { "Content-Type": "application/json", "Content-Length": "100" });
+        res.write('{"data":', () => res.socket.destroy());
+      },
+    }));
+    try {
+      const ledger = freshLedger();
+      const r = await runCli(weekArgs, postEnv(x, ledger));
+      assert.equal(r.code, 3, r.stderr);
+      assert.match(r.stderr, /post outcome UNKNOWN: X answered 201 and the body was cut off/);
+      assert.equal(readLedgerFile(ledger).entries[0].outcome, "unknown");
+    } finally {
+      await x.close();
+    }
+  });
+
+  test("a 201 without data.id is UNKNOWN (exit 3): the post may be live with no id to show", async () => {
+    const x = await startFake(appAndXRoutes({ "POST /2/tweets": [201, { data: {} }] }));
+    try {
+      const ledger = freshLedger();
+      const r = await runCli(weekArgs, postEnv(x, ledger));
+      assert.equal(r.code, 3, r.stderr);
+      assert.match(r.stderr, /post outcome UNKNOWN: X answered 201 without data\.id/);
+      assert.equal(readLedgerFile(ledger).entries[0].outcome, "unknown");
+    } finally {
+      await x.close();
+    }
+  });
+
+  test("a 201 whose data.id is empty is UNKNOWN (exit 3), not a post with no id", async () => {
+    const x = await startFake(appAndXRoutes({ "POST /2/tweets": [201, { data: { id: "" } }] }));
+    try {
+      const ledger = freshLedger();
+      const r = await runCli(weekArgs, postEnv(x, ledger));
+      assert.equal(r.code, 3, r.stderr);
+      assert.match(r.stderr, /post outcome UNKNOWN: X answered 201 without data\.id/);
+      assert.doesNotMatch(r.stdout, /posted: https/);
+      assert.equal(readLedgerFile(ledger).entries[0].outcome, "unknown");
+    } finally {
+      await x.close();
+    }
+  });
+
+  test("a connection that never opened is not a post: exit 1, no UNKNOWN entry, and the next run posts", async () => {
+    const closed = createServer();
+    await new Promise((resolve) => closed.listen(0, "127.0.0.1", resolve));
+    const deadBase = `http://127.0.0.1:${closed.address().port}`;
+    await new Promise((resolve) => closed.close(resolve));
+    const x = await startFake(appAndXRoutes());
+    try {
+      const ledger = freshLedger();
+      const r = await runCli(weekArgs, { ...postEnv(x, ledger), X_API_BASE: deadBase });
+      assert.equal(r.code, 1, r.stderr);
+      assert.match(r.stderr, /could not connect \(ECONNREFUSED\)\. X did not create the post; nothing was posted/);
+      assert.deepEqual(readLedgerFile(ledger).entries, []);
+
+      const next = await runCli(weekArgs, postEnv(x, ledger));
+      assert.equal(next.code, 0, next.stderr);
+      assert.equal(posts(x), 1);
+    } finally {
+      await x.close();
+    }
+  });
+
+  test("the UNKNOWN entry is on disk BEFORE the POST is sent", async () => {
+    const ledger = freshLedger();
+    let seenAtPost = null;
+    const x = await startFake(appAndXRoutes({
+      "POST /2/tweets": (req, res) => {
+        seenAtPost = readLedgerFile(ledger).entries;
+        res.writeHead(201, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ data: { id: FAKE_TWEET_ID } }));
+      },
+    }));
+    try {
+      const r = await runCli(weekArgs, postEnv(x, ledger));
+      assert.equal(r.code, 0, r.stderr);
+      assert.equal(seenAtPost?.length, 1);
+      assert.equal(seenAtPost[0].outcome, "unknown");
+      assert.equal(seenAtPost[0].winId, WEEK_ID);
+    } finally {
+      await x.close();
+    }
+  });
+
+  test("a posted day is never posted again: the re-run skips with the post's link, and no second POST", async () => {
+    const x = await startFake(appAndXRoutes());
+    try {
+      const ledger = freshLedger();
+      const first = await runCli(weekArgs, postEnv(x, ledger));
+      assert.equal(first.code, 0, first.stderr);
+      const [entry] = readLedgerFile(ledger).entries;
+      assert.equal(entry.outcome, "posted");
+      assert.equal(entry.postId, FAKE_TWEET_ID);
+      assert.equal(entry.day, FIXTURE_DAY);
+
+      const again = await runCli(weekArgs, postEnv(x, ledger));
+      assert.equal(again.code, 0, again.stderr);
+      assert.match(again.stdout, new RegExp(`skip \\(week\\): already posted .*status/${FAKE_TWEET_ID}\\. Nothing to post\\.`));
+      assert.equal(posts(x), 1, "a posted day was posted again");
+    } finally {
+      await x.close();
+    }
+  });
+
+  test("the same win posted on an earlier day is not posted again; another window is not blocked", async () => {
+    const x = await startFake(appAndXRoutes());
+    try {
+      const ledger = freshLedger();
+      seedLedger(ledger, [{ window: "week", day: "2026-09-15", winId: WEEK_ID, outcome: "posted", postId: "1" }]);
+      const r = await runCli(weekArgs, postEnv(x, ledger));
+      assert.equal(r.code, 0, r.stderr);
+      assert.match(r.stdout, /skip \(week\): already posted \(the week post for 2026-09-15/);
+      assert.equal(posts(x), 0);
+
+      // A day-window entry, even UNKNOWN, says nothing about the week window.
+      seedLedger(ledger, [unknownEntry({ window: "day" })]);
+      const week = await runCli(weekArgs, postEnv(x, ledger));
+      assert.equal(week.code, 0, week.stderr);
+      assert.equal(posts(x), 1);
+    } finally {
+      await x.close();
+    }
+  });
+
+  test("the post day is the New York day: a run at 21:00 EDT (01:00 UTC the next day) is the same day as one at 17:00", async () => {
+    const x = await startFake(appAndXRoutes());
+    try {
+      // Posted on the New York evening of the 16th, another win. 1789606800 is 2026-09-17 01:00 UTC = 2026-09-16
+      // 21:00 EDT; 1789621200 is 2026-09-17 01:00 EDT (both checked with date -r, not with the code under test).
+      const ledger = freshLedger();
+      seedLedger(ledger, [{ window: "week", day: FIXTURE_DAY, winId: "an-earlier-win", outcome: "posted", postId: "1" }]);
+      const sameEvening = ["--window", "week", "--now", "1789606800", "--post"];
+      const r = await runCli(sameEvening, postEnv(x, ledger));
+      assert.equal(r.code, 0, r.stderr);
+      assert.match(r.stdout, /skip \(week\): already posted \(the week post for 2026-09-16, win an-earlier-win/);
+      assert.equal(posts(x), 0, "a second post on one New York day");
+
+      // Control: after New York midnight it is a new day, and the post goes out.
+      const nextDay = await runCli(["--window", "week", "--now", "1789621200", "--post"], postEnv(x, ledger));
+      assert.equal(nextDay.code, 0, nextDay.stderr);
+      assert.equal(posts(x), 1);
+      assert.equal(readLedgerFile(ledger).entries[1].day, "2026-09-17");
+    } finally {
+      await x.close();
+    }
+  });
+
+  test("an UNKNOWN from an earlier day still blocks: it may be live", async () => {
+    const x = await startFake(appAndXRoutes());
+    try {
+      const ledger = freshLedger();
+      seedLedger(ledger, [unknownEntry({ day: "2026-09-10", winId: "some-older-win" })]);
+      const r = await runCli(weekArgs, postEnv(x, ledger));
+      assert.equal(r.code, 1, r.stderr);
+      assert.match(r.stderr, /the week post for 2026-09-10, win some-older-win has an UNKNOWN outcome/);
+      assert.equal(posts(x), 0);
+    } finally {
+      await x.close();
+    }
+  });
+
+  test("--resolve not-posted clears the UNKNOWN and --post runs again; --resolve posted records it and --post skips", async () => {
+    const x = await startFake(appAndXRoutes());
+    try {
+      const ledger = freshLedger();
+      const resolveEnv = { DAILY_WIN_LEDGER: ledger };
+
+      seedLedger(ledger, [unknownEntry()]);
+      const cleared = await runCli(["--window", "week", "--resolve", "not-posted"], resolveEnv);
+      assert.equal(cleared.code, 0, cleared.stderr);
+      assert.match(cleared.stdout, /cleared as not posted: the week post for 2026-09-16/);
+      assert.deepEqual(readLedgerFile(ledger).entries, []);
+      const posted = await runCli(weekArgs, postEnv(x, ledger));
+      assert.equal(posted.code, 0, posted.stderr);
+      assert.equal(posts(x), 1);
+
+      seedLedger(ledger, [unknownEntry()]);
+      const recorded = await runCli(["--window", "week", "--resolve", "posted"], resolveEnv);
+      assert.equal(recorded.code, 0, recorded.stderr);
+      assert.match(recorded.stdout, /recorded as posted: the week post for 2026-09-16/);
+      assert.equal(readLedgerFile(ledger).entries[0].outcome, "posted");
+      const skipped = await runCli(weekArgs, postEnv(x, ledger));
+      assert.equal(skipped.code, 0, skipped.stderr);
+      assert.match(skipped.stdout, /skip \(week\): already posted/);
+      assert.equal(posts(x), 1, "--resolve posted did not stop a second post");
+
+      // --resolve for the day window leaves the week entries alone.
+      seedLedger(ledger, [unknownEntry()]);
+      const other = await runCli(["--resolve", "not-posted"], resolveEnv);
+      assert.equal(other.code, 0, other.stderr);
+      assert.match(other.stdout, /nothing to resolve: no UNKNOWN day post/);
+      assert.equal(readLedgerFile(ledger).entries[0].outcome, "unknown");
+    } finally {
+      await x.close();
+    }
+  });
+
+  test("--resolve with no ledger path, or a ledger it cannot read, says so and resolves nothing", async () => {
+    const none = await runCli(["--window", "week", "--resolve", "posted"], {});
+    assert.equal(none.code, 1, none.stderr);
+    assert.match(none.stderr, /nothing to resolve: neither DAILY_WIN_LEDGER nor HOME is set, so there is no post ledger/);
+
+    const ledger = freshLedger();
+    writeFileSync(ledger, "not json");
+    const bad = await runCli(["--window", "week", "--resolve", "posted"], { DAILY_WIN_LEDGER: ledger });
+    assert.equal(bad.code, 1, bad.stderr);
+    assert.match(bad.stderr, /^daily-win: the post ledger .* is not JSON\. Nothing was resolved\.$/m);
+    assert.equal(readFileSync(ledger, "utf8"), "not json");
+  });
+
+  test("a ledger that exists but cannot be read refuses by name and never POSTs", async () => {
+    const x = await startFake(appAndXRoutes());
+    try {
+      const cases = [
+        ["not json", /the post ledger .* is not JSON/],
+        [JSON.stringify({ version: LEDGER_VERSION, entries: [{ window: "week" }] }), /is not a version 1 ledger/],
+        [JSON.stringify({ version: 2, entries: [] }), /is not a version 1 ledger/],
+        [JSON.stringify([]), /is not a version 1 ledger/],
+      ];
+      for (const [content, why] of cases) {
+        const ledger = freshLedger();
+        writeFileSync(ledger, content);
+        const r = await runCli(weekArgs, postEnv(x, ledger));
+        assert.equal(r.code, 1, `${content}: ${r.stderr}`);
+        assert.match(r.stderr, /refusing to post: /);
+        assert.match(r.stderr, why);
+        assert.match(r.stderr, /Nothing was posted/);
+      }
+      // A directory where the file should be: a read error that is not "missing".
+      const dirLedger = freshLedger();
+      mkdirSync(dirLedger);
+      const r = await runCli(weekArgs, postEnv(x, dirLedger));
+      assert.equal(r.code, 1, r.stderr);
+      assert.match(r.stderr, /refusing to post: could not read the post ledger .*\(EISDIR\)/);
+      assert.equal(posts(x), 0);
+    } finally {
+      await x.close();
+    }
+  });
+
+  test("a ledger that cannot be written refuses before the POST", async () => {
+    const x = await startFake(appAndXRoutes());
+    const ledger = freshLedger();
+    chmodSync(dirname(ledger), 0o500);
+    try {
+      const r = await runCli(weekArgs, postEnv(x, ledger));
+      assert.equal(r.code, 1, r.stderr);
+      assert.match(r.stderr, /refusing to post: could not write the post ledger .*\(EACCES\)/);
+      assert.equal(posts(x), 0);
+    } finally {
+      chmodSync(dirname(ledger), 0o700);
+      await x.close();
+    }
+  });
+
+  // The ledger becomes unwritable AFTER the pre-POST write (inside the X handler). Whatever X answered, the run must
+  // report what X did, never "Nothing was posted" for a post that is or may be live.
+  test("X created the post but the ledger cannot record it: exit 3, 'the post is live', never 'Nothing was posted'", async () => {
+    const ledger = freshLedger();
+    const x = await startFake(appAndXRoutes({ "POST /2/tweets": lockThen(ledger, 201, { data: { id: FAKE_TWEET_ID } }) }));
+    try {
+      const r = await runCli(weekArgs, postEnv(x, ledger));
+      assert.equal(r.code, 3, r.stderr);
+      assert.match(r.stdout, new RegExp(`posted: https://x\\.com/i/web/status/${FAKE_TWEET_ID}`));
+      assert.match(r.stderr, /the post is live, but could not write the post ledger .*\(EACCES\): the ledger still says UNKNOWN for it, so run --resolve posted/);
+      assert.doesNotMatch(r.stderr, /nothing was posted/i);
+      const [entry] = readLedgerFile(ledger).entries;
+      assert.deepEqual([entry.outcome, entry.detail], ["unknown", SENT_DETAIL]);
+      assert.equal(posts(x), 1);
+    } finally {
+      chmodSync(dirname(ledger), 0o700);
+      await x.close();
+    }
+  });
+
+  test("an UNKNOWN outcome whose detail cannot be written is still exit 3 UNKNOWN, never 'Nothing was posted'", async () => {
+    const ledger = freshLedger();
+    const x = await startFake(appAndXRoutes({ "POST /2/tweets": lockThen(ledger, 503, { title: "Service Unavailable" }) }));
+    try {
+      const r = await runCli(weekArgs, postEnv(x, ledger));
+      assert.equal(r.code, 3, r.stderr);
+      assert.match(r.stderr, /post outcome UNKNOWN: X answered 503/);
+      assert.doesNotMatch(r.stderr, /nothing was posted/i);
+      // The detail rewrite failed, so the entry written before the POST stands, still UNKNOWN.
+      const [entry] = readLedgerFile(ledger).entries;
+      assert.deepEqual([entry.outcome, entry.detail], ["unknown", SENT_DETAIL]);
+    } finally {
+      chmodSync(dirname(ledger), 0o700);
+      await x.close();
+    }
+  });
+
+  test("X did not create the post and the UNKNOWN entry cannot be removed: exit 1, and it says to --resolve not-posted", async () => {
+    const ledger = freshLedger();
+    const x = await startFake(appAndXRoutes({ "POST /2/tweets": lockThen(ledger, 403, { title: "Forbidden" }) }));
+    try {
+      const r = await runCli(weekArgs, postEnv(x, ledger));
+      assert.equal(r.code, 1, r.stderr);
+      assert.match(r.stderr, /could not write the post ledger .*\(EACCES\); its UNKNOWN entry for this post stays, so run --resolve not-posted before the next --post/);
+      assert.match(r.stderr, /X answered 403: .*\. X did not create the post; nothing was posted\./);
+      assert.doesNotMatch(r.stderr, /refusing to post/);
+      assert.equal(readLedgerFile(ledger).entries[0].outcome, "unknown");
+    } finally {
+      chmodSync(dirname(ledger), 0o700);
+      await x.close();
+    }
+  });
+
+  test("--post with neither DAILY_WIN_LEDGER nor HOME refuses before contacting anything", async () => {
+    const x = await startFake(appAndXRoutes());
+    try {
+      const { DAILY_WIN_LEDGER: _omit, ...env } = postEnv(x);
+      const r = await runCli(weekArgs, env);
+      assert.equal(r.code, 1, r.stderr);
+      assert.match(r.stderr, /refusing to post: neither DAILY_WIN_LEDGER nor HOME is set/);
+      assert.equal(x.requests.length, 0);
+    } finally {
+      await x.close();
+    }
+  });
+
+  test("ledgerPath, newYorkDay, ledgerBlock and the --resolve flag", async () => {
+    assert.equal(ledgerPath({ DAILY_WIN_LEDGER: "/x/l.json", HOME: "/h" }), "/x/l.json");
+    assert.equal(ledgerPath({ HOME: "/h" }), "/h/.stonkhouse/daily-win-ledger.json");
+    assert.equal(ledgerPath({ DAILY_WIN_LEDGER: " ", HOME: "" }), null);
+    // Epochs checked with TZ=America/New_York date -r, not with the code under test.
+    assert.equal(newYorkDay(FIXTURE_NOW), FIXTURE_DAY);
+    assert.equal(newYorkDay(1789603200), "2026-09-16"); // 00:00 UTC on the 17th is 20:00 EDT on the 16th
+    assert.equal(newYorkDay(1789617599), "2026-09-16"); // 23:59:59 EDT
+    assert.equal(newYorkDay(1789617600), "2026-09-17"); // 00:00 EDT
+    assert.equal(newYorkDay(1797224399), "2026-12-13"); // 23:59:59 EST (UTC-5): the winter offset too
+    assert.equal(newYorkDay(1797224400), "2026-12-14"); // 00:00 EST
+
+    const posted = { window: "day", day: "2026-09-16", winId: "a", outcome: "posted", postId: "9" };
+    assert.equal(ledgerBlock([posted], { window: "day", day: "2026-09-16", winId: "b" })?.kind, "posted");
+    assert.equal(ledgerBlock([posted], { window: "day", day: "2026-09-17", winId: "a" })?.kind, "posted");
+    assert.equal(ledgerBlock([posted], { window: "day", day: "2026-09-17", winId: "b" }), null);
+    assert.equal(ledgerBlock([posted], { window: "week", day: "2026-09-16", winId: "a" }), null);
+
+    assert.equal(parseArgs(["--resolve", "posted"]).resolve, "posted");
+    assert.equal(parseArgs(["--resolve=not-posted"]).resolve, "not-posted");
+    for (const argv of [["--resolve", "maybe"], ["--resolve"], ["--post", "--resolve", "posted"]]) {
+      const r = await runCli(argv, {});
+      assert.equal(r.code, 2, `${argv.join(" ")}: ${r.stderr}`);
     }
   });
 });

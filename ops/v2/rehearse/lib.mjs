@@ -1,5 +1,5 @@
 /* -------------------------------------------------------------------------------------------------
- * ops/v2/rehearse/lib.mjs — what every stage of the O2-03 fork rehearsal shares.
+ * ops/v2/rehearse/lib.mjs — what every stage of the fork rehearsal shares.
  *
  *   paths and ports      out/ (gitignored): state.json, ledger.json, services.json, logs/, screenshots/
  *   the chain            viem clients against the rehearsal anvil, anvil's public dev accounts by role
@@ -34,7 +34,7 @@ export const ABI_DIR = path.join(ROOT, "ops", "abis", "v2");
 export const CONTRACTS_DIR = path.resolve(process.env.CONTRACTS_DIR ?? path.join(ROOT, "..", "callhouse-contracts"));
 export const PUBLIC_RPC = "https://rpc.mainnet.chain.robinhood.com";
 
-/** Ports reserved for this rehearsal (O2-03): anvil 8590-8594, services 42190-42199, web 3190. */
+/** Ports reserved for this rehearsal: anvil 8590-8594, services 42190-42199, web 3190. */
 export const PORTS = {
   anvil: Number(process.env.REHEARSE_ANVIL_PORT ?? 8590),
   indexer: 42190,
@@ -160,8 +160,8 @@ export const ROLE_INDEX = {
   cranker2: 11,
   fay: 12, // buys the resale
   gus: 13, // places the bid a writer hits by writing
-  hal: 14, // buyer: TSLA (the 0.30 % pool route)
-  ivy: 15, // buyer: META (Chainlink only, paid in kind)
+  hal: 14, // buyer: the MM vault's ask on the single-source market (was TSLA's 0.30 % pool route)
+  ivy: 15, // buyer: the single-source market (Chainlink only, paid in kind; was META)
   web: 16, // the browser buyer
   feeds: 17, // pushes the etched feeds' rounds (the rehearsal's price operator; no protocol role)
   whale: 18, // funds the MakerVault and KeeperRewards stand-in treasury
@@ -194,8 +194,13 @@ export const ABI = {
   chainlink: abiOf("ChainlinkFeedSource"),
   univ3: abiOf("UniV3TwapSource"),
   autoRoller: abiOf("AutoRoller"),
-  payoutAdapter: abiOf("UniV3PayoutAdapter"),
+  // INTERFACE_VERSION 8: the registry key `payoutAdapter` is kept and names the PayoutRouter (DeployV8.s.sol,
+  // "V2_ADDRESS payoutAdapter", d.payoutRouter); UniV3PayoutAdapter is the v7 contract.
+  payoutAdapter: abiOf("PayoutRouter"),
   makerVault: abiOf("MakerVault"),
+  // INTERFACE_VERSION 8: every admin setter is `restricted` by one AccessManager (V8Roles); a member whose role has an
+  // execution delay schedules, waits it out and executes (drill-kit.mjs managed()).
+  accessManager: abiOf("AccessManager"),
   erc20: erc20Abi,
   swapRouter02: parseAbi([
     "struct ExactInputSingleParams { address tokenIn; address tokenOut; uint24 fee; address recipient; uint256 amountIn; uint256 amountOutMinimum; uint160 sqrtPriceLimitX96; }",
@@ -316,6 +321,19 @@ export function placedOrderId(receipt, orderBook) {
   return logs[0].args.orderId;
 }
 
+/**
+ * OrderBook.quoteTake AS THE TAKER. v8 plans a quote for msg.sender: its fee discount, its own orders skipped and,
+ * when selling, ITS free collateral (writeToSell) or long balance (resale). A quote read with no account was found
+ * quoting 0 units for a sell. quoteTake is no longer a view -- it runs take's own code and rolls it back -- so
+ * it is SIMULATED from the taker's account, and a call with no `from` reverts NotAuthorized. A missing taker is refused
+ * here before any RPC.
+ */
+export async function quoteTake(orderBook, taker, params, client = pub) {
+  if (!taker || BigInt(taker) === 0n) fail("quoteTake needs the taker account: since T-OP-835 a quote with no `from` reverts NotAuthorized");
+  const { result } = await client.simulateContract({ address: orderBook, abi: ABI.orderBook, functionName: "quoteTake", args: [params], account: taker });
+  return result;
+}
+
 export async function read(address, abi, functionName, args = []) {
   return pub.readContract({ address, abi, functionName, args });
 }
@@ -428,9 +446,16 @@ export async function etchFeed(feedAddress, history, runtime) {
   ledgerAppend([{ step: currentStage, action: "etch-feed", label: `etch MockRoundFeed over ${description} ${feed} (phase ${phase}, round ${n}, ${rounds.length} rounds copied)`, from: null, to: feed, hash: null, status: "fork-control", gasUsed: "0", block: Number(await pub.getBlockNumber()), ts: await now() }]);
 }
 
-/** Print a round on an etched feed (8-dp answer), from the rehearsal's price operator. */
-export async function pushRound(feed, answer8, updatedAt, label) {
-  return send(accountOf("feeds"), { address: feed, abi: ABI.mockFeed, functionName: "push", args: [answer8, BigInt(updatedAt)], label: `push ${label}`, action: "feed-round" });
+/**
+ * Print a round on an etched feed (8-dp answer), from the rehearsal's price operator. Serialized within the process: the
+ * story's feed heartbeat (3-story.mjs) prints from the same account while the story runs, and two concurrent
+ * sends would read the same pending nonce.
+ */
+let feedQueue = Promise.resolve();
+export function pushRound(feed, answer8, updatedAt, label) {
+  const sent = feedQueue.then(() => send(accountOf("feeds"), { address: feed, abi: ABI.mockFeed, functionName: "push", args: [answer8, BigInt(updatedAt)], label: `push ${label}`, action: "feed-round" }));
+  feedQueue = sent.catch(() => undefined);
+  return sent;
 }
 
 /* ---------------------------------------------------------------------------------------------- */

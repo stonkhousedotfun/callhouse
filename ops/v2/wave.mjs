@@ -1,6 +1,6 @@
 /**
- * One command regenerates and checks every registry projection (O3-102; 02-interfaces.md §3.1
- * rule 5; ops/markets/README.md's projection table).
+ * One command regenerates and checks every registry projection.
+ *
  *
  *   node ops/v2/wave.mjs            # validate the registries, regenerate every projection, print
  *                                   # the exact file commit set and the services to rebuild
@@ -15,16 +15,18 @@
  * tier1.json is the INPUT: build-markets only validates it (its write build re-derives from the
  * network and is a separate, runbooked action). dev.json is NOT derived from it and wave never
  * edits a registry: from INTERFACE_VERSION 8 dev.json is the local anvil devnet's own registry
- * (ops/markets/README.md "dev.json, the second registry"), whose wallets are anvil accounts and
+ * (the second registry), whose wallets are anvil accounts and
  * whose --check refuses any production wallet, key or contract (validateDevIsolation,
  * ops/markets/build-markets.mjs:1267-1321). What wave checks instead is the one thing a
  * hand-maintained second registry loses silently - the market SET - and it names the builder as the
  * fix. The Codex-owned indexer/web generators and keeper-env.sh are invoked as commands; their
  * source is never edited. No generated output may be hand-edited: wave exists so nobody has to.
  *
- * The commit set names every file to commit: changed projections plus a registry file that differs
- * from HEAD. The services to rebuild are derived from it: a registry change rebuilds the five
- * services built from the image that bakes it (keeper/Dockerfile: pricing, cranker, pricer, mm-bot
+ * The commit set names every file to commit: projections that differ from HEAD in the tree (git status, so a
+ * projection an earlier run left uncommitted is still listed) plus a registry file that differs from HEAD. In
+ * --check mode it is the STALE projections only: a step that FAILED for another reason, or a registry that is
+ * INVALID, puts nothing in it. The services to rebuild are derived from it: a registry change rebuilds the six
+ * services built from the image that bakes it (keeper/Dockerfile: pricing, cranker, pricer, mm-bot, guardian
  * and the monitor), minus the signing bots for the dev registry, which the stonkhouse-dev project
  * refuses; projections map to their own service (indexer-v2 for the indexer's, keeper-<ticker> for
  * keeper-env's, the env file's stem for v2-env's, docs (publish) for the docs').
@@ -59,16 +61,18 @@ const REGISTRY_FILES = ["ops/markets/tier1.json", "ops/markets/dev.json", "ops/m
 /**
  * The services built from the image that bakes a registry: keeper/Dockerfile copies
  * ops/markets/${V2_REGISTRY_FILE} into the image (keeper/Dockerfile:122-130), and pricing, cranker,
- * pricer and mm-bot run from it (ops/deploy.md:1217-1220) - as does the monitor, which runs the same
- * image and reads the baked file (ops/deploy.md:2001-2002; ops/v2/monitor.mjs:107 defaults to
+ * pricer, mm-bot and guardian run from it - as does the monitor, which runs the same
+ * image and reads the baked file (ops/v2/monitor.mjs defaults to
  * ops/markets/tier1.json). A registry edit that does not rebuild the monitor leaves it checking the
- * previous registry, which is the one service whose job is to notice that.
+ * previous registry, which is the one service whose job is to notice that. The guardian reads
+ * the baked registry too (ops/v2/env/guardian.env sets V2_REGISTRY_PATH), so a registry edit that does
+ * not rebuild it leaves it judging settlements against the previous market set.
  */
-const KEEPER_IMAGE_SERVICES = ["pricing", "cranker", "pricer", "mm-bot", "monitor"];
+const KEEPER_IMAGE_SERVICES = ["pricing", "cranker", "pricer", "mm-bot", "guardian", "monitor"];
 
 /**
  * What an operator rebuilds for a changed registry. The dev registry is baked by the stonkhouse-dev
- * project (V2_REGISTRY_FILE=dev.json, ops/deploy.md:2026-2028), which refuses the signing bots
+ * project (V2_REGISTRY_FILE=dev.json), which refuses the signing bots
  * (ops/v2/go-live-gating.mjs SIGNING, enforced at planGating :60-67) - so naming them there sends an
  * operator at a service that does not exist. The frozen v7 registry rebuilds nothing by itself.
  */
@@ -92,8 +96,8 @@ export function waveChildEnv(env = process.env) {
 /**
  * dev.json is not a projection of tier1.json and wave never writes it. Until INTERFACE_VERSION 8 it
  * was tier1.json byte-for-byte plus `_dev`, and this file used to regenerate it that way; the v8
- * registry commit made it the LOCAL ANVIL DEVNET's own registry (ops/markets/README.md "dev.json,
- * the second registry"): every wallet in it is a public anvil account, its v1 deployment fields and
+ * registry commit made it the LOCAL ANVIL DEVNET's own registry, the second one:
+ * every wallet in it is a public anvil account, its v1 deployment fields and
  * its `v2.contracts` / `v2.deployBlock` / `v2.flywheel` are null, and `build-markets.mjs --check
  * --registry ops/markets/dev.json` refuses any address production owns (validateDevIsolation,
  * ops/markets/build-markets.mjs:1267-1321). Copying tier1's values in would import production
@@ -125,6 +129,22 @@ export function devParity(tier1Text, devText) {
     problems.push(`v2.interfaceVersion is ${JSON.stringify(tier1Version)} in tier1.json and ${JSON.stringify(devVersion)} in dev.json`);
   }
   return problems;
+}
+
+/** A registry's text, or `error` naming why it cannot be read as JSON (never thrown). */
+function readRegistry(root, file) {
+  let text;
+  try {
+    text = readFileSync(path.join(root, file), "utf8");
+  } catch (error) {
+    return { error: `${file} cannot be read (${error.code ?? error.message})` };
+  }
+  try {
+    JSON.parse(text);
+  } catch (error) {
+    return { error: `${file} is not valid JSON (${error.message})` };
+  }
+  return { text };
 }
 
 /*//////////////////////////////////////////////////////////////
@@ -167,13 +187,26 @@ export function waveSteps(root) {
       files: () => ["ops/markets/dev.json"],
       services: () => [],
       run(mode, r) {
-        const problems = devParity(
-          readFileSync(path.join(r, "ops/markets/tier1.json"), "utf8"),
-          readFileSync(path.join(r, "ops/markets/dev.json"), "utf8"),
-        );
+        // An unreadable or malformed registry is a named refusal, never an exception out of runWave.
+        const tier1 = readRegistry(r, "ops/markets/tier1.json");
+        const dev = readRegistry(r, "ops/markets/dev.json");
+        const unreadable = [tier1.error, dev.error].filter((e) => e !== undefined);
+        if (unreadable.length > 0) {
+          return {
+            code: 1,
+            kind: "invalid",
+            output: [
+              `INVALID ${unreadable.join("; ")}`,
+              "  fix the file, or rebuild ops/markets/dev.json with node ops/markets/build-markets.mjs --registry ops/markets/dev.json;",
+              "  wave never edits a registry.",
+            ].join("\n"),
+          };
+        }
+        const problems = devParity(tier1.text, dev.text);
         if (problems.length === 0) return { code: 0, output: "" };
         return {
           code: 1,
+          kind: "drift",
           output: [
             `DRIFT ops/markets/dev.json: ${problems.join("; ")}`,
             "  rebuild it with node ops/markets/build-markets.mjs --registry ops/markets/dev.json — it regenerates the",
@@ -282,6 +315,25 @@ function registryDirty(root, git) {
   return new Set(ran.output.split("\n").map((s) => s.trim()).filter((s) => s !== ""));
 }
 
+/**
+ * Of `files`, the ones that differ from HEAD in the repository at `dir` (modified, added, deleted or
+ * untracked), from `git status --porcelain`, whose paths are always relative to the repository root. null when git
+ * cannot say. This, not what changed during one run, is what there is to commit: an idempotent generator re-run on
+ * a tree an earlier run left uncommitted changes nothing, and the tree still has to be committed.
+ */
+function treeChanged(dir, files, git) {
+  if (files.length === 0) return new Set();
+  const ran = git(["status", "--porcelain=v1", "--untracked-files=all", "--", ...files], dir);
+  if (ran.code !== 0) return null;
+  const changed = new Set();
+  for (const line of ran.output.split("\n")) {
+    if (line.trim() === "") continue;
+    const entry = line.slice(3);
+    changed.add(entry.includes(" -> ") ? entry.slice(entry.indexOf(" -> ") + 4) : entry);
+  }
+  return changed;
+}
+
 function snapshot(root, files) {
   const bytes = new Map();
   for (const file of files) {
@@ -306,6 +358,19 @@ function changedFiles(before, after) {
 const DRIFT_MARK = /DRIFT|differs|is missing|is stale/i;
 export const failureKind = (output) => (DRIFT_MARK.test(output) ? "drift" : "error");
 
+/**
+ * What one failed check is. A validator (build-markets --check on an input registry) projects nothing,
+ * so its "DRIFT:" - which is how build-markets prints every validation problem - is an INVALID registry, not a stale
+ * projection wave could regenerate. An internal step names its own kind. Everything else goes by failureKind.
+ */
+function checkKind(step, ran) {
+  if (ran.kind !== undefined) return ran.kind;
+  const kind = failureKind(ran.output);
+  return kind === "drift" && step.checkOnly && !step.internal ? "invalid" : kind;
+}
+
+const LABEL = { drift: "STALE", invalid: "INVALID", error: "FAILED (not drift)" };
+
 const tail = (output, lines = 40) => {
   const all = output.trim().split("\n");
   const shown = all.length <= lines ? all : [`… (${all.length - lines} earlier line(s) elided)`, ...all.slice(-lines)];
@@ -329,12 +394,12 @@ function printServices(out, services) {
 //////////////////////////////////////////////////////////////*/
 
 /**
- * Run the wave. Returns { code, stale, failed, changed, services, skippedDocs, registryDirty } —
+ * Run the wave. Returns { code, stale, invalid, failed, changed, services, skippedDocs, registryDirty } —
  * the CLI prints and exits with it; the tests drive it with fake exec/git and a temp root.
  */
 export function runWave({ root, check = false, docsDir = null, skipDocs = false, exec = defaultExec, git = defaultGit, out = () => {} }) {
   const steps = waveSteps(root);
-  const report = { code: 0, stale: [], failed: [], changed: new Map(), services: new Set(), skippedDocs: false, registryDirty: null };
+  const report = { code: 0, stale: [], invalid: [], failed: [], changed: new Map(), services: new Set(), skippedDocs: false, registryDirty: null };
 
   if (skipDocs && !check) {
     out("error: --skip-docs only applies with --check (write mode regenerates the docs projection: pass --docs-dir <callhouse-docs checkout>)");
@@ -383,29 +448,38 @@ export function runWave({ root, check = false, docsDir = null, skipDocs = false,
     for (const step of active) {
       const ran = runCheck(step);
       if (ran.code !== 0) {
-        const entry = { step, output: ran.output.trim(), kind: failureKind(ran.output) };
-        (entry.kind === "drift" ? report.stale : report.failed).push(entry);
-        const files = owned(step);
-        report.changed.set(step.id, files);
-        noteServices(step, files);
+        const entry = { step, output: ran.output.trim(), kind: checkKind(step, ran) };
+        ({ drift: report.stale, invalid: report.invalid, error: report.failed })[entry.kind].push(entry);
+        // Only a STALE projection is something to commit and a service to rebuild. A step that failed
+        // for another reason (a missing module, an RPC) did not say what it would write, and an invalid registry is
+        // an input wave never writes: a registry file enters the commit set only when it differs from HEAD.
+        if (entry.kind === "drift") {
+          const files = owned(step);
+          report.changed.set(step.id, files);
+          noteServices(step, files);
+        }
       }
     }
     // A registry edit shows up even before anything built from it is stale.
     if (dirty === null) out("note: git could not compare the registry against HEAD; the registry-vs-HEAD part of the commit set is unknown");
     if (dirty !== null) for (const file of REGISTRY_FILES) if (dirty.has(file)) for (const service of registryServices(file)) report.services.add(service);
-    if (report.stale.length > 0 || report.failed.length > 0) {
+    if (report.stale.length > 0 || report.invalid.length > 0 || report.failed.length > 0) {
       report.code = 1;
       out("");
-      for (const { step, output, kind } of [...report.stale, ...report.failed]) {
-        out(`${kind === "drift" ? "STALE" : "FAILED (not drift)"}: ${step.label}`);
+      for (const { step, output, kind } of [...report.invalid, ...report.stale, ...report.failed]) {
+        out(`${LABEL[kind]}: ${step.label}`);
         if (output !== "") out(tail(output));
       }
+      if (report.invalid.length > 0) out("  an INVALID registry is an input: wave never edits one. Fix it (or rebuild it with build-markets.mjs) and re-run.");
       out("");
       const rows = [];
       if (dirty !== null) for (const file of REGISTRY_FILES) if (dirty.has(file)) rows.push(file);
-      for (const { step } of [...report.stale, ...report.failed]) rows.push(...displayFiles(step, owned(step)));
+      for (const { step } of report.stale) rows.push(...displayFiles(step, owned(step)));
       printCommitSet(out, [...new Set(rows)]);
       printServices(out, [...report.services].sort());
+      if (report.failed.length > 0) {
+        out(`not checked (fix and re-run; nothing of theirs is in the commit set): ${report.failed.map(({ step }) => step.label).join(", ")}`);
+      }
     } else {
       out(`wave: every projection is current${report.skippedDocs ? " (docs skipped)" : ""}`);
     }
@@ -439,9 +513,7 @@ export function runWave({ root, check = false, docsDir = null, skipDocs = false,
     }
     // A generator may add or remove projection files: re-read the owned list before comparing.
     const after = snapshot(where, owned(step));
-    const changed = changedFiles(before, after);
-    report.changed.set(step.id, changed);
-    if (changed.length > 0) noteServices(step, changed);
+    report.changed.set(step.id, changedFiles(before, after));
   }
 
   // What wave wrote must check clean: a generator whose output disagrees with its own --check
@@ -457,11 +529,24 @@ export function runWave({ root, check = false, docsDir = null, skipDocs = false,
   }
 
   if (dirty === null) out("note: git could not compare the registry against HEAD; the registry-vs-HEAD part of the commit set is unknown");
+  // The commit set is what differs from HEAD in the tree, plus anything this run changed (a file it
+  // deleted is no longer among the owned files git is asked about). Never only what changed during this run.
+  let treeUnknown = false;
+  for (const step of regenerated) {
+    const where = step.id === "docs" ? docsDirAbs : root;
+    const ranChanged = report.changed.get(step.id) ?? [];
+    const inTree = treeChanged(where, [...new Set([...owned(step), ...ranChanged])], git);
+    if (inTree === null) treeUnknown = true;
+    const changed = [...new Set([...ranChanged, ...(inTree ?? [])])].sort();
+    report.changed.set(step.id, changed);
+    if (changed.length > 0) noteServices(step, changed);
+  }
+  if (treeUnknown) out("note: git could not list the projections that differ from HEAD; the commit set shows only what this run changed");
   const rows = [];
   if (dirty !== null) for (const file of REGISTRY_FILES) if (dirty.has(file)) rows.push(file);
   for (const step of regenerated) for (const file of report.changed.get(step.id) ?? []) rows.push(...displayFiles(step, [file]));
   if (dirty !== null) for (const file of REGISTRY_FILES) if (dirty.has(file)) for (const service of registryServices(file)) report.services.add(service);
-  if (rows.length === 0) out("wave: every projection already byte-identical; nothing to commit");
+  if (rows.length === 0) out("wave: every projection matches HEAD; nothing to commit");
   printCommitSet(out, [...new Set(rows)]);
   printServices(out, [...report.services].sort());
   return report;

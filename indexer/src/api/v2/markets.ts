@@ -9,6 +9,9 @@ import { CHAIN_ID, PRICING_URL, USDG, V2_AUTO_ROLLER, V2_CLEARINGHOUSE, V2_EXPIR
 import { V2_ACCESS_MANIFEST } from "../../../lib/v2/accessManagerRoles.generated";
 import { V2_REGISTRY } from "../../../lib/v2/marketRegistry.generated";
 import { effectiveFees, feeStateFromRow, feesEqual } from "../../../lib/v2/fees";
+import { settlementMeta } from "../../../lib/v2/settlementMeta";
+import { CALENDAR_MODE_ID, isCalendarSessionDay, yearDays, yearOfDay } from "../../../lib/v2/calendar";
+import { SETTLEMENT_WINDOW } from "../../v2/settlementWindow";
 import { fetchFairResult } from "../../../lib/v2/pricing";
 import { loadPendingOperations } from "./admin";
 import { readSpots } from "./chain";
@@ -18,10 +21,10 @@ import { type IndexedHead, windowAsOf } from "./head";
 import { indexedHead } from "./machine";
 import { address, error, limit, money, nextOffset, offset, page, parseId, seriesWire, settlementWire } from "./shared";
 
-const ZERO_QUOTE = { bestBid: null, bestAsk: null, bidUnits: "0", askUnits: "0",
+const ZERO_QUOTE = { bestBid: null, bestAsk: null, bidUnits: "0", askUnits: "0", bestBidUnits: "0", bestAskUnits: "0",
   fair: null, iv: null, delta: null, last: null, fairProvenance: null };
 const registryMarkets = new Map<string, (typeof V2_REGISTRY.markets)[number]>(V2_REGISTRY.markets.map((market) => [market.ticker, market]));
-// T-OP-099. The owner's launch set (registry `launchSet.markets`, rendered by gen-v2-registry.mjs). The chain decides
+// The launch set (registry `launchSet.markets`, rendered by gen-v2-registry.mjs). The chain decides
 // what is REGISTERED; this decides what is IN THE LAUNCH. A registered market outside it is served with
 // `launch: false` rather than dropped, so the app can show it as deferred and an operator can see it exists.
 const launchTickers = new Set<string>(V2_REGISTRY.launchSet.markets);
@@ -110,7 +113,7 @@ function seriesCursorOf(row: { expiry: bigint; strike: bigint; longId: bigint })
 
 export function registerMarketRoutes(app: Hono) {
   /**
-   * F-APP-INDEXER-08. This route stays `no-store` and OFF the 15-second cache on purpose: fee changes
+   * This route stays `no-store` and OFF the 15-second cache on purpose: fee changes
    * and pending governance operations must switch at the indexed block, and a TTL would serve the old
    * policy for up to 15 s after it stopped being true. What it used to cost instead was a scan of both
    * AccessManager role tables plus loadPendingOperations on EVERY hit of a public GET.
@@ -182,7 +185,7 @@ export function registerMarketRoutes(app: Hono) {
         makerRebateBps: current.makerRebateBps,
         exerciseFeeBps: protocol[0]?.defaultExerciseFeeBps ?? fees.exerciseFeeBps,
         mintFeePpm: protocol[0]?.defaultMintFeePpm ?? fees.mintFeePpm,
-        // T-OP-120 (G7). Indexed from Clearinghouse:PayoutAdapterSet (src/v2/clearinghouse.ts); null until one has
+        // (G7). Indexed from Clearinghouse:PayoutAdapterSet (src/v2/clearinghouse.ts); null until one has
         // been emitted. The app prices a call's USDG band with this, falling back to the 300 bps ceiling.
         maxPayoutSlippageBps: protocol[0]?.maxSlippageBps ?? null,
       },
@@ -196,7 +199,7 @@ export function registerMarketRoutes(app: Hono) {
       },
       constants: {
         unit: "10000000000000000", unitsPerShare: 100, priceTick: 100,
-        settlementWindow: 1800, finalizeDelay: 120, snapshotGrace: 600,
+        settlementWindow: SETTLEMENT_WINDOW, finalizeDelay: 120, snapshotGrace: 600,
         resolveDelay: 172800, maxTenor: 3888000, minSeriesLead: 3600,
         // Source: callhouse-contracts branch v8, src/v2/interfaces/V2Constants.sol:60.
         // This protocol fee-change delay is distinct from the AccessManager FEE_MANAGER delay.
@@ -207,7 +210,7 @@ export function registerMarketRoutes(app: Hono) {
   }
 
   app.get("/config", async (c) => {
-    // F-APP-INDEXER-08, acceptance criterion 6e - the staleness this introduces for pending
+    // The staleness this introduces for pending
     // operations, stated: NONE beyond the index itself. /config is kept off the 15s response cache
     // (see index.ts) because a pending operation that has just become executable must not be
     // announced up to 15 seconds late. computeAtCheckpoint instead shares ONE computation per
@@ -225,12 +228,23 @@ export function registerMarketRoutes(app: Hono) {
   app.get("/markets", async (c) => {
     const rows = await db.select().from(schema.v2Market);
     const spots = await readSpots(rows.map((row) => row.underlying));
-    // F-APP-INDEXER-05: the 24h and 7d windows end at the INDEXED head, not the host clock, and agree
+    // The 24h and 7d windows end at the INDEXED head, not the host clock, and agree
     // with /stats. A missing checkpoint measures no window at all. See windowAsOf.
     const asOf = windowAsOf(await indexedHead());
-    const [openExpiries, recentPremiums] = await Promise.all([
+    const [openExpiries, cutoffRows, bookState, openSeries, recentPremiums, oracleConfigs, payoutRoutes] = await Promise.all([
       db.selectDistinct({ underlying: schema.v2Series.underlying, expiry: schema.v2Series.expiry })
         .from(schema.v2Series).where(eq(schema.v2Series.status, "open")),
+      // Past the mint cutoff, not yet expired: the book still trades resale asks and bids.
+      db.selectDistinct({ underlying: schema.v2Series.underlying, expiry: schema.v2Series.expiry })
+        .from(schema.v2Series).where(eq(schema.v2Series.status, "cutoff")),
+      // One OrderBook, one row; no row yet means no TradingPausedSet was ever logged.
+      db.select({ tradingPaused: schema.v2OrderBookState.tradingPaused }).from(schema.v2OrderBookState).limit(1),
+      // "Open series" is the series whose status is `open` NOW. The market row's
+      // `seriesOpen` counter goes up at SeriesCreated and down only at settlement, so it still counts
+      // series past their mint cutoff, expired and held; it is not served.
+      db.select({ underlying: schema.v2Series.underlying, count: sql<number>`count(*)::int` })
+        .from(schema.v2Series).where(eq(schema.v2Series.status, "open"))
+        .groupBy(schema.v2Series.underlying),
       asOf === null ? [] : db.select({
         underlying: schema.v2Series.underlying,
         volume24h: sql<string>`coalesce(sum(case when ${schema.v2Fill.ts} >= ${asOf - 86_400n} then ${schema.v2Fill.premium} else 0 end), 0)::text`,
@@ -239,7 +253,13 @@ export function registerMarketRoutes(app: Hono) {
         .innerJoin(schema.v2Series, eq(schema.v2Fill.longId, schema.v2Series.longId))
         .where(gte(schema.v2Fill.ts, asOf - 7n * 86_400n))
         .groupBy(schema.v2Series.underlying),
+      // The live settlement settings (SettlementOracle.setMarket, PayoutRouter routes): see settlementMeta.
+      db.select({ underlying: schema.v2OracleMarketConfig.underlying, sources: schema.v2OracleMarketConfig.sources,
+        uncorroboratedDelayS: schema.v2OracleMarketConfig.uncorroboratedDelayS }).from(schema.v2OracleMarketConfig),
+      db.select().from(schema.v2PayoutRoute),
     ]);
+    const oracleByUnderlying = new Map(oracleConfigs.map((row) => [row.underlying.toLowerCase(), row]));
+    const routeByAsset = new Map(payoutRoutes.map((row) => [row.asset.toLowerCase(), row]));
     const expiriesByUnderlying = new Map<string, number[]>();
     for (const row of openExpiries) {
       const key = row.underlying.toLowerCase();
@@ -249,6 +269,20 @@ export function registerMarketRoutes(app: Hono) {
       expiriesByUnderlying.set(key, expiries);
     }
     for (const expiries of expiriesByUnderlying.values()) expiries.sort((a, b) => a - b);
+    const cutoffByUnderlying = new Map<string, number[]>();
+    for (const row of cutoffRows) {
+      const key = row.underlying.toLowerCase();
+      const expiry = Number(row.expiry);
+      // An expiry is on one side of its mint cutoff for every series on it; the guard keeps the two lists
+      // disjoint even if a status sweep has only reached some of them.
+      if (expiriesByUnderlying.get(key)?.includes(expiry)) continue;
+      const list = cutoffByUnderlying.get(key) ?? [];
+      if (!list.includes(expiry)) list.push(expiry);
+      cutoffByUnderlying.set(key, list);
+    }
+    for (const list of cutoffByUnderlying.values()) list.sort((a, b) => a - b);
+    const tradingPaused = bookState[0]?.tradingPaused ?? false;
+    const openSeriesByUnderlying = new Map(openSeries.map((row) => [row.underlying.toLowerCase(), Number(row.count)]));
     const premiumsByUnderlying = new Map<string, { volume24h: bigint; premium7d: bigint }>();
     for (const row of recentPremiums) {
       const key = row.underlying.toLowerCase();
@@ -266,24 +300,24 @@ export function registerMarketRoutes(app: Hono) {
       const premiums = premiumsByUnderlying.get(key);
       const volume24h = premiums?.volume24h ?? 0n;
       const premium7d = premiums?.premium7d ?? 0n;
+      const settlement = settlementMeta(registered === undefined ? undefined : { ...registered.settlement, route: registered.payoutRoute },
+        oracleByUnderlying.get(key), routeByAsset.get(key));
       return {
         ticker: row.ticker, name: registered?.name ?? row.ticker, underlying: address(row.underlying),
         status: row.status, launch: launchTickers.has(row.ticker),
+        tradingPaused, mintPaused: row.mintPaused,
         spot: spot ? money(spot.price) : null, spotUpdatedAt: spot?.updatedAt ?? null,
         strikeTick: money(row.strikeTick), mintFeePpm: row.mintFeePpm, puts: registered?.puts ?? false, expiries,
-        ...(registered === undefined ? {} : { settlement: {
-          sourceCount: registered.settlement.sourceCount,
-          uncorroboratedDelayS: registered.settlement.uncorroboratedDelayS,
-          route: registered.payoutRoute,
-        } }),
+        cutoffExpiries: cutoffByUnderlying.get(key) ?? [],
+        ...(settlement === undefined ? {} : { settlement }),
         stats: { volume24h: money(volume24h), premium7d: money(premium7d),
-          // T-425. The instant the two windows above end at: the INDEXED head, never the host clock.
+          // The instant the two windows above end at: the INDEXED head, never the host clock.
           // It sits inside `stats` because that is the object whose figures it qualifies, and it is
           // one value per response -- every market's copy comes from the same `asOf` local, so two
           // markets on one page cannot disagree. 0 means no checkpoint was readable, which is the
           // same condition that makes both figures 0: no window was measured rather than a quiet day.
           asOf: Number(asOf ?? 0n),
-          openInterestUnits: row.openInterestUnits.toString(), seriesOpen: row.seriesOpen },
+          openInterestUnits: row.openInterestUnits.toString(), seriesOpen: openSeriesByUnderlying.get(key) ?? 0 },
       };
     }));
   });
@@ -302,16 +336,24 @@ export function registerMarketRoutes(app: Hono) {
     if (!Number.isSafeInteger(fromDay) || !Number.isSafeInteger(toDay) || fromDay < 0 ||
       toDay < fromDay || toDay > 100_000_000 || toDay - fromDay >= 62)
       return error(c, "bad_calendar_range", "Calendar range must contain 1 to 62 UTC days.");
-    const rows = await db.select().from(schema.v2CalendarHoliday).where(and(
-      gte(schema.v2CalendarHoliday.dayIndex, fromDay),
-      lte(schema.v2CalendarHoliday.dayIndex, toDay),
-    ));
+    // isSessionDay is ExpiryCalendar._isSessionDay, including AN UNSEEDED YEAR FAILS CLOSED.
+    // Whole calendar years are read (a range spans at most two), so each year's seeded state counts
+    // every closure set in it, not only those inside the range.
+    const [rows, modes] = await Promise.all([
+      db.select().from(schema.v2CalendarHoliday).where(and(
+        gte(schema.v2CalendarHoliday.dayIndex, yearDays(yearOfDay(fromDay))[0]),
+        lte(schema.v2CalendarHoliday.dayIndex, yearDays(yearOfDay(toDay))[1]),
+      )),
+      db.select().from(schema.v2CalendarMode).where(eq(schema.v2CalendarMode.id, CALENDAR_MODE_ID)).limit(1),
+    ]);
     const holidays = new Map(rows.map((row) => [row.dayIndex, row.isHoliday]));
+    const seededYears = new Set(rows.filter((row) => row.isHoliday).map((row) => yearOfDay(row.dayIndex)));
+    const unseededYearsClosed = modes[0]?.unseededYearsClosed ?? false;
     const items = Array.from({ length: toDay - fromDay + 1 }, (_, offset) => {
       const dayIndex = fromDay + offset;
-      const weekday = new Date(dayIndex * 86_400_000).getUTCDay();
       const isHoliday = holidays.get(dayIndex) ?? false;
-      return { dayIndex, isHoliday, isSessionDay: weekday !== 0 && weekday !== 6 && !isHoliday };
+      return { dayIndex, isHoliday,
+        isSessionDay: isCalendarSessionDay(dayIndex, holidays, unseededYearsClosed, seededYears) };
     });
     return c.json({ items });
   });
@@ -335,7 +377,7 @@ export function registerMarketRoutes(app: Hono) {
     if (status !== undefined && statusFilter === undefined) return error(c, "bad_status", "Unknown series status.");
     // Two clocks, deliberately. `now` (host) decides which resting orders are still live in the book,
     // as on every book route; the trailing 24h volume is a window over indexed fills and ends at the
-    // indexed head, like /markets and /stats (F-APP-INDEXER-05).
+    // indexed head, like /markets and /stats.
     const now = BigInt(Math.floor(Date.now() / 1000));
     const asOf = windowAsOf(await indexedHead());
     const size = limit(c.req.query("limit"));
@@ -362,7 +404,7 @@ export function registerMarketRoutes(app: Hono) {
       const volume24h = volumeBySeries.get(row.longId) ?? 0n;
       return { series: seriesWire(row), quote, openInterestUnits: row.openInterestUnits.toString(), volume24h: money(volume24h) };
     }));
-    // T-425. `volume24h` on every item is a window over indexed fills ending at the indexed head, so
+    // `volume24h` on every item is a window over indexed fills ending at the indexed head, so
     // the page states that head once. Note `now` above is the HOST clock and is a different thing: it
     // decides which resting orders are still live, and it is deliberately not published.
     return c.json({ items, asOf: Number(asOf ?? 0n),

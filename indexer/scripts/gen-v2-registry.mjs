@@ -79,7 +79,7 @@ function payoutRoute(value, name) {
   return { venue: "v4", fee: value.fee, tickSpacing: value.tickSpacing, poolId: value.poolId.toLowerCase() };
 }
 /**
- * T-OP-099. The registry's `launchSet` block: the owner's launch set (2026-09-21: NVDA and SPCX), AUTHORITATIVE and
+ * The registry's `launchSet` block: the launch set (NVDA and SPCX), AUTHORITATIVE and
  * deliberately not derived from `wave` or `status` (the block's own note says why). Rendered into the projection so
  * /v2/markets can flag launch membership without reading tier1.json, which the production image does not carry.
  * Validated the way ops/markets/build-markets.mjs validates it: an object of { note, markets }, a non-empty note, a
@@ -113,6 +113,79 @@ function expiriesAhead(value, name, partial = false) {
   }
   return result;
 }
+/**
+ * The House factories and every House vault the registry records, for the indexer's HouseVault source
+ * (indexer/lib/v2/houseVaultSource.ts). The indexer indexes the vaults as a plain address list instead of discovering
+ * them through the factory, so this list IS what gets indexed: a vault missing here is created on chain but its
+ * events are never read (the VaultCreated handler alerts HOUSE_VAULT_UNREGISTERED for it).
+ *
+ * Read from the shape (ops/markets/build-markets.mjs validates it): `v2.house.factories[]` of
+ * { kind, address, deployBlock }, `markets[].v2.houseVault` (the launch vault, of the launch factory's kind) and
+ * `markets[].v2.house.{weekly,daily}`, plus `v2.contracts.houseVault` (VerifyV8's walked vault, which build-markets
+ * requires to be the first launch ticker's `houseVault`). A registry without a house block projects empty lists.
+ * Each vault appears once, under the first market that names it. A malformed or zero address throws: an address
+ * list is what the indexer filters on, so a bad entry is never passed through.
+ *
+ * The launch vault's kind is the launch factory's (launchFactoryKind below): weekly on v8, daily on v9. It was
+ * `weekly` unconditionally, so a v9 daily vault (houseVault == house.daily) was projected as weekly and the dedupe
+ * dropped its daily entry, the defect keeper/src/v2/registry.ts had too.
+ */
+/**
+ * ops/markets/build-markets.mjs launchFactoryKind, restated rule for rule (importing the builder
+ * would run its main): "weekly" with no launch factory, no entry naming it, or the weekly entry naming it (v8); "daily"
+ * when the daily entry names it (v9); null when entries of both kinds name it, a record build-markets refuses.
+ */
+function launchFactoryKind(registry) {
+  const launch = registry.v2.contracts?.houseVaultFactory;
+  const factories = Array.isArray(registry.v2.house?.factories) ? registry.v2.house.factories : [];
+  const isAddress = (v) => typeof v === "string" && /^0x[0-9a-fA-F]{40}$/.test(v);
+  if (!isAddress(launch)) return "weekly";
+  const kinds = new Set(factories
+    .filter((f) => f !== null && typeof f === "object" && isAddress(f.address) && f.address.toLowerCase() === launch.toLowerCase())
+    .map((f) => f.kind));
+  if (kinds.has("weekly") && kinds.has("daily")) return null;
+  return kinds.has("daily") ? "daily" : "weekly";
+}
+function houseAddress(value, name) {
+  let address;
+  try { address = getAddress(value); }
+  catch { throw new Error(`${name} must be an address`); }
+  if (address === "0x0000000000000000000000000000000000000000") throw new Error(`${name} is the zero address`);
+  return address;
+}
+function house(registry) {
+  const factories = registry.v2.house?.factories ?? [];
+  if (!Array.isArray(factories)) throw new Error("v2.house.factories must be an array");
+  const projectedFactories = factories.map((factory, i) => {
+    if (factory === null || typeof factory !== "object") throw new Error(`v2.house.factories[${i}] must be an object`);
+    if (factory.kind !== "weekly" && factory.kind !== "daily") throw new Error(`v2.house.factories[${i}].kind must be weekly or daily`);
+    return {
+      kind: factory.kind,
+      address: houseAddress(factory.address, `v2.house.factories[${i}].address`),
+      deployBlock: deployBlock(factory.deployBlock ?? null, `v2.house.factories[${i}].deployBlock`),
+    };
+  });
+  const vaults = [];
+  const seen = new Set();
+  const add = (ticker, kind, value, name) => {
+    if (value === null || value === undefined) return;
+    const address = houseAddress(value, name);
+    if (seen.has(address.toLowerCase())) return;
+    seen.add(address.toLowerCase());
+    vaults.push({ ticker, kind, address });
+  };
+  const launchKind = launchFactoryKind(registry);
+  if (launchKind === null) {
+    throw new Error(`v2.house.factories records the launch factory v2.contracts.houseVaultFactory ${registry.v2.contracts.houseVaultFactory} as BOTH weekly and daily: one launch factory has one kind (weekly on v8, daily on v9)`);
+  }
+  for (const market of registry.markets) {
+    add(market.ticker, launchKind, market.v2?.houseVault, `${market.ticker}.v2.houseVault`);
+    add(market.ticker, "weekly", market.v2?.house?.weekly, `${market.ticker}.v2.house.weekly`);
+    add(market.ticker, "daily", market.v2?.house?.daily, `${market.ticker}.v2.house.daily`);
+  }
+  add(null, launchKind, registry.v2.contracts?.houseVault, "v2.contracts.houseVault");
+  return { factories: projectedFactories, vaults };
+}
 rate(registry.v2.fees?.mintFeePpm, "v2.fees.mintFeePpm");
 const data = {
   chainId: chainId(registry.shared?.chainId, "shared.chainId"),
@@ -133,8 +206,10 @@ const data = {
     ladder: registry.v2.defaults.ladder,
     expiriesAhead: expiriesAhead(registry.v2.defaults.expiriesAhead, "v2.defaults.expiriesAhead"),
   },
-  // T-OP-099. The owner's launch set, verbatim from the registry root; /v2/markets flags membership from it.
+  // The launch set, verbatim from the registry root; /v2/markets flags membership from it.
   launchSet: launchSet(registry.launchSet, registry.markets),
+  // The House factories and vaults: the indexer's HouseVault source is this address list.
+  house: house(registry),
   markets: registry.markets.map((market) => ({
     ticker: market.ticker,
     name: market.name,

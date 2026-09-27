@@ -1,5 +1,5 @@
 {
-  "_readme": "Fixture for keeper/src/v2/registry.test.ts: a trimmed copy of ops/markets/tier1.json (4 markets, verification and explorer blocks dropped). No v2 blocks: the registry before O2-01.",
+  "_readme": "Fixture for keeper/src/v2/registry.test.ts: a trimmed copy of ops/markets/tier1.json (4 markets, verification and explorer blocks dropped). No v2 blocks: the registry before the v2 blocks were added.",
   "generatedAt": "2026-09-16T02:30:56.707Z",
   "verifiedAtBlock": 64151977,
   "shared": {
@@ -131,7 +131,7 @@
         "sourcify": null,
         "configuredAt": "2026-09-15"
       },
-      "notes": "Live since 2026-09-15 (factory deploy block 64038234). depositCap() is type(uint256).max on chain; policy() (300,1200,40,9500,500,50). Keeper key = mnemonic account 1, the original single-market keeper; it is not moved. The pooled cNVDA vault 0x88a98931… is closed and is not this market."
+      "notes": "Live since 2026-09-15 (factory deploy block 64038234). depositCap() is type(uint256).max on chain; policy() (300,1200,40,9500,500,50). The keeper key is the original single-market keeper's; it is not moved. The pooled cNVDA vault 0x88a98931… is closed and is not this market."
     },
     {
       "ticker": "SGOV",

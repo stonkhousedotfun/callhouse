@@ -1,5 +1,5 @@
 /**
- * W5, plan gap 9 and section 5.2: the writer's realised figures, which the history endpoint already
+ * The writer's realised figures, which the history endpoint already
  * returns and the UI already throws away.
  *
  * THE ASSERTION THAT MATTERS is not the arithmetic — it is the refusal to add two assets together.
@@ -8,11 +8,13 @@
  * renders, looks plausible, and is wrong — the failure class this workspace logs as false-green.
  * PROVE BY BREAKING: fold `mint.fee` into `feesRaw` and the collateral test below goes red.
  */
-import { describe, expect, it } from "vitest";
+import { createElement } from "react";
+import { renderToStaticMarkup } from "react-dom/server";
+import { describe, expect, it, vi } from "vitest";
 
 import type { HistoryItem } from "@/lib/v2/api-types";
 
-import { realisedSummary } from "./EarnOverview";
+import { EarnRealised, earnCardPrice, readWholeHistory, realisedSummary, WHOLE_HISTORY_MAX_ROWS, writerCopy } from "./EarnOverview";
 
 const usdg = (raw: string) => ({ raw, decimals: 6, formatted: raw });
 const series = { ticker: "NVDA", isPut: false, strike: usdg("220000000"), expiry: 0 } as unknown as HistoryItem extends { series: infer S } ? S : never;
@@ -83,5 +85,86 @@ describe("a writer's realised figures", () => {
   it("counts realised P&L where the API reported one", () => {
     const summary = realisedSummary([fill({ realised: "250000" })]);
     expect(summary.kind === "figures" && summary.realisedRaw).toBe(250_000n);
+  });
+});
+
+describe("writer copy names puts only when a live market enables them", () => {
+  it("puts:false on every live market: no put in the lede or the warning", () => {
+    const copy = writerCopy([{ puts: false }, { puts: false }]);
+    expect(copy.hasPuts).toBe(false);
+    expect(copy.lede.toLowerCase()).not.toContain("put");
+    expect(copy.notice.toLowerCase()).not.toContain("put");
+  });
+
+  it("puts:true on a live market: the put copy is back", () => {
+    const copy = writerCopy([{ puts: false }, { puts: true }]);
+    expect(copy.hasPuts).toBe(true);
+    expect(copy.lede).toContain("cash-secured puts");
+    expect(copy.notice).toContain("a put can lose");
+  });
+
+  it("no live market: calls copy", () => {
+    expect(writerCopy([]).hasPuts).toBe(false);
+  });
+});
+
+/*
+ * The realised block says "your whole history", and it used to read the history endpoint's default
+ * page: the newest 50 rows. Now it walks the keyset cursor to the end, and when it stops at its page cap it says how
+ * many entries it counted instead.
+ * PROVE BY BREAKING: return after the first page in readWholeHistory and "reads every page" goes red; always pass
+ * complete=true and "a capped walk" goes red.
+ */
+describe("the realised figures read the whole history", () => {
+  const page = (n: number, next: string | null) => ({ items: Array.from({ length: n }, (_, i) => fill({ premium: String(1_000_000 + i) })), nextCursor: next });
+
+  it("reads every page until the cursor runs out", async () => {
+    const pages = [page(200, "c1"), page(200, "c2"), page(7, null)];
+    const read = vi.fn(async (cursor: string | undefined) => pages[cursor === undefined ? 0 : cursor === "c1" ? 1 : 2]!);
+    const whole = await readWholeHistory(read);
+    expect(whole.complete).toBe(true);
+    expect(whole.items).toHaveLength(407);
+    expect(read.mock.calls.map((call) => call[0])).toEqual([undefined, "c1", "c2"]);
+  });
+
+  it("a capped walk reports complete: false, and the block names the entries it counted", async () => {
+    let n = 0;
+    const whole = await readWholeHistory(async () => page(1, `c${++n}`), 3);
+    expect(whole).toMatchObject({ complete: false });
+    expect(whole.items).toHaveLength(3);
+    const summary = realisedSummary([fill()]);
+    const capped = renderToStaticMarkup(createElement(EarnRealised, { summary, complete: false }));
+    expect(capped).toContain(`Realised across your latest ${WHOLE_HISTORY_MAX_ROWS.toLocaleString("en-US")} history entries`);
+    expect(capped).not.toContain("whole history");
+    const full = renderToStaticMarkup(createElement(EarnRealised, { summary }));
+    expect(full).toContain("Realised across your whole history, in USDG.");
+  });
+
+  it("a cursor the API repeats is an error, not a loop", async () => {
+    await expect(readWholeHistory(async () => page(1, "same"))).rejects.toThrow("The history cursor repeated.");
+  });
+});
+
+/* A writing card always shows a price when anything has one; the Write button is not decided here. */
+describe("earn cards fall back to a display price", () => {
+  const fallback = { raw: 148_774_050n, updatedAt: 1_790_196_519, source: "pool" as const };
+
+  it("API spot first, else the fallback with its line, else unavailable", () => {
+    const NY = "America/New_York";
+    expect(earnCardPrice({ spot: { raw: "148774050", decimals: 6, formatted: "148.77405" }, spotUpdatedAt: 1_790_196_519 }, fallback, 1_790_223_000, NY))
+      .toEqual({ price: "$148.77405", line: null });
+    expect(earnCardPrice({ spot: null, spotUpdatedAt: null }, fallback, 1_790_223_000, NY))
+      .toEqual({ price: "$148.77", line: "Pool price, updated 4:48 PM EDT" });
+    // The reader's zone, named; never UTC.
+    expect(earnCardPrice({ spot: null, spotUpdatedAt: null }, fallback, 1_790_223_000, "America/Los_Angeles"))
+      .toEqual({ price: "$148.77", line: "Pool price, updated 1:48 PM PDT" });
+    expect(earnCardPrice({ spot: null, spotUpdatedAt: null }, undefined, 1_790_223_000, NY))
+      .toEqual({ price: "Price unavailable", line: null });
+  });
+
+  it("with the clock not yet read (useNow() is 0 before mount), an old Chainlink price is dated, not current", () => {
+    const old = { raw: 148_774_050n, updatedAt: 1_790_196_519, source: "chainlink" as const };
+    expect(earnCardPrice({ spot: null, spotUpdatedAt: null }, old, 0, "America/New_York"))
+      .toEqual({ price: "$148.77", line: "Updated Sep 23, 4:48 PM EDT" });
   });
 });

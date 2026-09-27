@@ -1,8 +1,8 @@
 /* -------------------------------------------------------------------------------------------------
  * ops/v2/lib/admin.mjs — the one place that knows how an INTERFACE_VERSION 8 admin action is
- * performed on a devnet. K8-04 (keeper devnet scripts), W8-04 (web acceptance), X8-05 (indexer sync
- * harness) and O8-06 (rehearsal drills) call this instead of hand-rolling schedule/execute, which is
- * how a delay lane gets silently wrong in four places at once. See ops/v2/ADMIN-DRIVER.md.
+ * performed on a devnet. The keeper devnet scripts, the web acceptance tests, the indexer sync
+ * harness and the rehearsal drills call this instead of hand-rolling schedule/execute, which is
+ * how a delay lane gets silently wrong in four places at once.
  *
  * TWO HALVES, AND THE LINE BETWEEN THEM IS LOAD-BEARING.
  *   pure   loadRoles / planFor / parseSignature / coerceArgs read ops/abis/v2/roles.json and answer
@@ -63,7 +63,7 @@ export const DEVNET_LIB = path.join(ROOT, "ops", "devnet", "lib.mjs");
  */
 export const INTERFACE_VERSION = 8;
 
-/** The three shapes planFor can return, in the order ADMIN-DRIVER.md documents them. */
+/** The three shapes planFor can return, in the order the driver documents them. */
 export const MODES = Object.freeze(["execute", "schedule-execute", "schedule-direct"]);
 
 /** Paths in a message are shown relative to the checkout: an absolute one is noise in a CLI line. */
@@ -135,7 +135,7 @@ export function loadRoles(file = ROLES_FILE) {
  * called DIRECTLY on the target by the member: `AccessManaged._checkCanCall` (AccessManaged.sol:95-111,
  * and this repository's override at src/v2/access/Managed.sol:65-72) calls
  * `authority().consumeScheduledOp(caller, data)` when the caller is not immediate and has a delay,
- * which consumes the very same operation id. v8-plan/06-QUIRKS.md §D.2 and
+ * which consumes the very same operation id. The v8 access notes and
  * callhouse-contracts src/v2/access/V8Roles.sol:17-19 state the same rule.
  *
  * WHICH DIRECTION IS DANGEROUS. A MISSING entry is the bad one: the call still succeeds, with the
@@ -143,13 +143,13 @@ export function loadRoles(file = ROLES_FILE) {
  * manager. An EXTRA entry is merely pedantic: a direct call works for any delayed function on a
  * `Managed` target. The list therefore errs toward listing. It is not the default for everything
  * delayed only because a target that is still on its v7 `AccessControl` gate (roles.json
- * notes.freezeState: C8-01..C8-08 are mid-migration) accepts the `execute` relay and refuses the
+ * notes.freezeState: some targets are mid-migration) accepts the `execute` relay and refuses the
  * direct call, and because `execute` is the lane the rehearsals and the monitor's
  * OperationExecuted events are written against.
  *
  * THE SET IS EMPTY AT INTERFACE_VERSION 8, AND THAT IS A READ RESULT, NOT AN OVERSIGHT. Every entry
  * of roles.json whose role carries a delay > 0 was read in callhouse-contracts at
- * 522cf603dd306c875711c17401de864d06585095: not one of them reads msg.sender. v8 deleted exactly the
+ * the v8 deploy: not one of them reads msg.sender. v8 deleted exactly the
  * functions that would have — the free-`to` money exits — so each now pays the stored `treasury`:
  * MakerVault.withdraw / withdrawPosition (MakerVault.sol:312-316, 332-337), KeeperRewards.defund
  * (KeeperRewards.sol:187-191) and RewardsDistributor.defund (RewardsDistributor.sol:161-165). The
@@ -268,7 +268,7 @@ function canonicalType(param) {
  * The signature as a one-entry JSON ABI, which is what viem encodes from and what ops/devnet/lib.mjs
  * `send` decodes reverts against. Built from the signature rather than from a published ABI file on
  * purpose: three of roles.json's targets (PayoutRouter, FeeSplitter, V4BuybackExecutor) are frozen
- * from 03-INTERFACES and have no compiled ABI in ops/abis/v2 yet, and roles.json's own key is the
+ * from their frozen interfaces and have no compiled ABI in ops/abis/v2 yet, and roles.json's own key is the
  * canonical signature in any case.
  */
 export function abiItemFor(signature) {
@@ -576,7 +576,7 @@ export async function adminCall({ manager, safe, target, signature, args = [], d
  * takes the SAFE as `caller` because that is who scheduled it and what the id was hashed with
  * (AccessManager.sol:537-552); the SENDER may be the scheduler itself, an ADMIN, or the role's
  * guardian (`_canCancel`, AccessManager.sol:722), which for roles 1-5 is GUARDIAN (roles.json
- * roleGuardian). O8-06 drills exactly this.
+ * roleGuardian). The v8 rehearsal drills exactly this.
  */
 export async function adminCancel({ manager, guardian, safe, target, signature, args = [], roles = loadRoles() }) {
   const { contract, address } = resolveTarget(target, { needAddress: true });

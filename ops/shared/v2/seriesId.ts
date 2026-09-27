@@ -12,7 +12,7 @@
 //
 // abi.encode, not encodePacked: every field is a full 32-byte word, so the mirror is a plain
 // encodeAbiParameters over the same four types. The low bit tells a long (0) from a short (1).
-// Units (ADR-04): `strike` is USDG base units (6 dp) per whole share, $215.00 = 215_000_000n;
+// Units: `strike` is USDG base units (6 dp) per whole share, $215.00 = 215_000_000n;
 // `expiry` is unix seconds.
 //
 // ONE COPY IS EDITED: this file. indexer, web and keeper each import a byte copy that their

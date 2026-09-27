@@ -1,12 +1,14 @@
 import { BaseError, ContractFunctionRevertedError, RawContractError, decodeErrorResult, formatUnits, type Abi, type Address, type Hex } from "viem";
 
 import { clearExerciseErrorsAbi } from "./abi/clear";
-import { fmtEastern, fmtUsdg, fmtUtc } from "./format";
+import { USDG_DECIMALS } from "./contracts";
+import { fmtEastern, fmtUtc, formatAmount } from "./format";
 import { SOLIDITY_ERROR_SELECTOR, SOLIDITY_PANIC_SELECTOR, decodeRevertData, type DecodedRevert, type RevertSource } from "./revert";
 
 /**
- * Exercising this week's option from the cycle page (components/ExercisePanel.tsx): the window, the
- * amounts, the fee, the spot check, what a simulation means, and when the button is live.
+ * Exercising a held option from the book page (components/legacy/ExercisePanel.tsx, rendered by
+ * components/BookView.tsx): the window, the amounts, the fee, the spot check, what a simulation
+ * means, and when the button is live.
  *
  * WHAT THE CLEARINGHOUSE DOES. `exercise(optionId, amount)` on the Valorem clearinghouse
  * (valorem-core 6436c823, ValoremOptionsClearinghouse.sol) checks, in this order:
@@ -25,7 +27,7 @@ import { SOLIDITY_ERROR_SELECTOR, SOLIDITY_PANIC_SELECTOR, decodeRevertData, typ
  * THE CLOCK IS THE CHAIN'S. The window is `exerciseTimestamp <= t < expiryTimestamp` where `t` is
  * the timestamp of the chain's latest block, never the device's clock: a device that runs a few
  * seconds fast would otherwise enable the button before the clearinghouse accepts it, and on the
- * W-13 fork the chain is warped days ahead of the wall. A block's timestamp is never later than
+ * On the acceptance fork the chain is warped days ahead of the wall. A block's timestamp is never later than
  * the next block's, so the opening edge cannot be early. At the closing edge the latest block can
  * be up to one block interval behind, so the button can stay live for that interval after expiry;
  * the simulation (which runs against the same latest block) and the one run again right before
@@ -178,7 +180,9 @@ function group(intPart: string): string {
 
 /** USDG to all 6 decimals: "400.000000". Never rounded. */
 export function fmtUsdgExact(value: bigint | undefined): string {
-  return fmtUsdg(value, 6);
+  // The exact fixed-decimal primitive, not fmtUsdg: fmtUsdg is a display rule (trims, floors a tiny
+  // amount to "<0.0001"), and the exercise review must show every base unit the transaction moves.
+  return formatAmount(value, USDG_DECIMALS, 6);
 }
 
 /** The Stock Token to full precision with trailing zeros trimmed: 1e18 → "1", 25e17 → "2.5", 1 → "0.000000000000000001". */

@@ -3,7 +3,7 @@
 // reverted with.
 //
 // The deployed 0x0000000000000068F116a894984e2DB1123eB395 on 4663 was byte-diffed against
-// Ethereum mainnet Seaport 1.6 in ops/recon/R2-R9-seaport-order-shape.md: identical except
+// Ethereum mainnet Seaport 1.6: identical except
 // the two immutables (chainId, domainSeparator). So the canonical ABI applies verbatim.
 //
 // THE ORDER SHAPE. Every listing of the vault's is orderType 3 (PARTIAL_RESTRICTED) with the

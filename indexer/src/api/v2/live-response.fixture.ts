@@ -5,8 +5,10 @@
  * and protocol arithmetic are its inputs; no value here is captured from an API response.
  */
 
+import { V2_REGISTRY } from "../../../lib/v2/marketRegistry.generated";
+
 const NOW = 1_800_000_000;
-// T-425's `asOf` is the indexed head's block time (head.ts `windowAsOf`), never the host clock. routes.test.ts
+// `asOf` is the indexed head's block time (head.ts `windowAsOf`), never the host clock. routes.test.ts
 // seeds `_ponder_checkpoint` with `state.now` as the checkpoint timestamp (createTables, routes.test.ts:137), and
 // `state.now` is NOW.
 const INDEXED_HEAD_TS = NOW;
@@ -52,6 +54,7 @@ function series(
     strike: money(strikeRaw, 6, strikeFormatted),
     expiry,
     tenor: "daily",
+    exerciseFeeBps: 25,
     mintFeePpm: 0,
     mintFeesHeld: money("0", 18, "0"),
     mintFeesAccrued: money("0", 18, "0"),
@@ -70,6 +73,8 @@ const EMPTY_QUOTE = {
   bestAsk: null,
   bidUnits: "0",
   askUnits: "0",
+  bestBidUnits: "0",
+  bestAskUnits: "0",
   fair: null,
   iv: null,
   delta: null,
@@ -81,6 +86,7 @@ const SERIES_2_QUOTE = {
   ...EMPTY_QUOTE,
   bestAsk: money("3000000", 6, "3"),
   askUnits: "200",
+  bestAskUnits: "200",
   last: money("3000000", 6, "3"),
 } as const;
 
@@ -157,6 +163,10 @@ const HOUSE_BUYER_DEPOSIT = {
   stockAmount: "0",
   shares: null,
   requestedAt: NOW - 200,
+  // Queued in the vault's current epoch 7, so pending until epoch 7's roll.
+  epochId: "7",
+  status: "pending",
+  maturesAt: NOW + 600,
 } as const;
 
 const HOUSE_WRITER_DEPOSIT = {
@@ -166,6 +176,10 @@ const HOUSE_WRITER_DEPOSIT = {
   stockAmount: "2000000000000000000",
   shares: null,
   requestedAt: NOW - 190,
+  // Queued in the vault's current epoch 7, so pending until epoch 7's roll.
+  epochId: "7",
+  status: "pending",
+  maturesAt: NOW + 600,
 } as const;
 
 const MAKER_EPOCH = {
@@ -173,7 +187,7 @@ const MAKER_EPOCH = {
   start: 1_799_884_800,
   end: 1_800_230_400,
   /**
-   * The scoring policy the epoch's figures were produced under (X3-201). LITERALS, not the imported
+   * The scoring policy the epoch's figures were produced under. LITERALS, not the imported
    * MAKER_SCORING_POLICY, for the same reason the benchmark policy below is a literal: changing the band
    * must turn this wire sample RED so a human looks at it, rather than have the sample quietly relabel
    * itself to agree with whatever the producer now does.
@@ -183,13 +197,13 @@ const MAKER_EPOCH = {
 
 const MAKER_STATS = {
   /**
-   * X8-312. Both fields are REQUIRED on a maker item now, and this fixture is compared to the live
+   * Both fields are REQUIRED on a maker item now, and this fixture is compared to the live
    * response by deep equality (routes.test.ts), so these must match the seeded v2MakerEpoch row
    * exactly: benchmarkPolicy MAKER_BENCHMARK_POLICY, samples absent 4 / valid 6 / missingReference 2.
    *
    * The 2 is a LITERAL, not the imported constant, on purpose: bumping MAKER_BENCHMARK_POLICY must
    * turn this red so the wire sample is looked at rather than silently relabelled. That is the same
-   * defect this row exists to close, one layer out.
+   * defect the policy tag exists to catch, one layer out.
    *
    * uptimePct 50 is the two-sided share of absent + valid (5 of 10); missingReference sits outside
    * that denominator, which is why 2 more samples do not move it.
@@ -286,21 +300,30 @@ export const LIVE_RESPONSE_FIXTURES = {
         clearinghouse: "0x000000000000000000000000000000000000c011",
         orderBook: "0x000000000000000000000000000000000000c012",
         settlementOracle: "0x000000000000000000000000000000000000C013",
-        expiryCalendar: null,
-        keeperRewards: null,
+        // The seed leaves these env vars unset, so /v2/config falls back to the generated registry. Since the
+        // v8 broadcast write-back those registry entries are addresses, not null. They are
+        // read from lib/v2/marketRegistry.generated.ts `contracts` (the route's input), not typed: the v8 copies
+        // went stale at the v9 regen.
+        expiryCalendar: V2_REGISTRY.contracts.expiryCalendar,
+        keeperRewards: V2_REGISTRY.contracts.keeperRewards,
         autoRoller: "0x000000000000000000000000000000000000c014",
-        payoutAdapter: null,
-        makerVault: null,
+        payoutAdapter: V2_REGISTRY.contracts.payoutAdapter,
+        makerVault: V2_REGISTRY.contracts.makerVault,
         makerRegistry: "0x000000000000000000000000000000000000c015",
-        rewardsDistributor: null,
+        rewardsDistributor: V2_REGISTRY.contracts.rewardsDistributor,
         accessManager: ACCESS_MANAGER,
-        sources: { chainlink: null, univ3: null, dataStreams: null },
+        sources: {
+          chainlink: V2_REGISTRY.contracts.sources.chainlink,
+          univ3: V2_REGISTRY.contracts.sources.univ3,
+          dataStreams: V2_REGISTRY.contracts.sources.dataStreams,
+        },
       },
       flywheel: {
         feeSplitter: FEE_SPLITTER,
         buybackExecutor: "0x0000000000000000000000000000000000007002",
       },
-      safes: { admin: null, treasury: null },
+      // Registry safes (lib/v2/marketRegistry.generated.ts `safes`), written back with the broadcast.
+      safes: { admin: "0x6f8A7B77b72511cD8939596b1659bA28C28f101B", treasury: "0x014b996a084690FB27265BfAC157b04e9FeBbF4E" },
       access: {
         manager: ACCESS_MANAGER,
         roles: [{
@@ -378,7 +401,7 @@ export const LIVE_RESPONSE_FIXTURES = {
         vault: EARN_VAULT,
         asset: USDG,
         adapter: null,
-        paused: false,
+        fundingEnabled: true,
         sharesSupply: "100",
         deposited: "1000",
         skimmed: null,
@@ -391,15 +414,27 @@ export const LIVE_RESPONSE_FIXTURES = {
           ts: NOW - 20,
           tx: TX3,
         },
-        // T-OP-086: the scenario mocks `ponder:api` with no public client, so the live mark is NOT READ and
+        // The scenario mocks `ponder:api` with no public client, so the live mark is NOT READ and
         // the route says so with null on all three (never "0", which would be an observed zero).
         indicativeAssetsPerShare: null,
         indicativeTotalAssets: null,
         hasOpenPosition: null,
+        // No sample rows are seeded, so both windows say so rather than showing a rate; no public
+        // client, so totalAssets and every liquidity input are NOT READ and earliestWithdrawal is not-read
+        // (never "now" with a guessed cap); adapter null, so there is no venue object at all.
+        apy7d: { bps: null, reason: "no-samples", from: null, to: null },
+        apy30d: { bps: null, reason: "no-samples", from: null, to: null },
+        totalAssets: null,
+        venue: null,
+        earliestWithdrawal: { kind: "unknown", at: null, reason: "not-read", liquidityCap: null },
+        // No VenueWrittenOff row is seeded, so the vault has had no write-off: [], never absent.
+        venueWriteOffs: [],
       }],
       account: {
         address: BUYER,
         shares: null,
+        // Nothing held for this caller.
+        held: [],
         queued: [{
           id: `${EARN_VAULT}-fixture-7`,
           status: "queued",
@@ -407,6 +442,14 @@ export const LIVE_RESPONSE_FIXTURES = {
           assetsRequested: null,
           fulfilledAssets: "60",
           requestedAt: NOW - 30,
+          // The id's trailing number is the contract queue id; no served-withdrawal row names this
+          // request, so all 100 shares are still escrowed; it is the vault's only open entry, so it is first.
+          vault: EARN_VAULT,
+          queueId: "7",
+          kind: "withdrawal",
+          assetsQueued: null,
+          sharesEscrowed: "100",
+          position: 1,
         }],
       },
     },
@@ -419,20 +462,26 @@ export const LIVE_RESPONSE_FIXTURES = {
       name: "TEST",
       underlying: MARKET,
       status: "live",
-      // T-OP-099. TEST is not a registry ticker, so it is not in the launch set: the wire says so.
+      // TEST is not a registry ticker, so it is not in the launch set: the wire says so.
       launch: false,
+      // The scenario seeds no TradingPausedSet and the market row has mintPaused false.
+      tradingPaused: false,
+      mintPaused: false,
       spot: money("200000000", 6, "200"),
       spotUpdatedAt: NOW,
       strikeTick: money("1000000", 6, "1"),
       mintFeePpm: 0,
       puts: false,
       expiries: [NOW + 86_400],
+      // Both seeded unsettled series (long ids 2 and 4) are `open`; none is past its cutoff.
+      cutoffExpiries: [],
       stats: {
         volume24h: money("3600000", 6, "3.6"),
         premium7d: money("3600000", 6, "3.6"),
         asOf: INDEXED_HEAD_TS,
         openInterestUnits: "100",
-        seriesOpen: 1,
+        // The status-`open` series, long ids 2 and 4, not the market row's counter (seeded 1).
+        seriesOpen: 2,
       },
     }],
   },
@@ -868,10 +917,13 @@ export const LIVE_RESPONSE_FIXTURES = {
         lastRolledAt: NOW - 120,
         lastStaleCancelAt: null,
         staleSpot: null,
+        // The seed records no AutoRoller PositionClosed.
+        lastClose: null,
         pricing: {
           currentAsk: money("3000000", 6, "3"),
           band: {
-            min: money("2000000", 6, "2"),
+            // The 3.00 ask's reprice drop floor, 2.25, binds above the spot band's 2.00 (AutoRoller.sol:504).
+            min: money("2250000", 6, "2.25"),
             max: money("10000000", 6, "10"),
           },
           lastRepricedAt: null,
@@ -1019,20 +1071,27 @@ export const LIVE_RESPONSE_FIXTURES = {
     request: "/v2/house",
     response: {
       items: [{
-        market: "AAPL",
+        // routes.test.ts seeds the house vault on V2_REGISTRY.markets[0]; cutting the
+        // registry to NVDA and SPCX made that row NVDA (it was AAPL).
+        market: "NVDA",
         vault: HOUSE_VAULT,
+        // The vault's epoch kind (routes.test.ts seeds it weekly, as a launch-factory vault is).
+        kind: "weekly",
         currentEpoch: HOUSE_EPOCH,
         sharesSupply: "1000",
+        // routes.test.ts seeds currentEpochEnd = NOW + 600, inside SETTLEMENT_WINDOW (1800), so the queue is closed.
+        earliestWithdrawal: { kind: "weekly", at: null, reason: "queue-closed" },
       }],
       nextCursor: null,
     },
   },
 
   "/v2/house/:market": {
-    request: `/v2/house/AAPL?address=${BUYER}`,
+    request: `/v2/house/NVDA?address=${BUYER}`,
     response: {
-      market: "AAPL",
+      market: "NVDA",
       vault: HOUSE_VAULT,
+      kind: "weekly",
       currentEpoch: HOUSE_EPOCH,
       epochs: [HOUSE_EPOCH],
       shares: {
@@ -1041,6 +1100,7 @@ export const LIVE_RESPONSE_FIXTURES = {
         queued: [HOUSE_BUYER_DEPOSIT],
       },
       queue: [HOUSE_BUYER_DEPOSIT, HOUSE_WRITER_DEPOSIT],
+      earliestWithdrawal: { kind: "weekly", at: null, reason: "queue-closed" },
     },
   },
 } as const satisfies Record<string, LiveResponseFixtureEntry>;

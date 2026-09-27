@@ -21,9 +21,11 @@ describe("market settlement disclosure", () => {
       ticker: tsla.ticker,
     }));
 
-    expect(html).toContain("Market configuration lists one price source");
-    expect(html).toContain("wait about 1 hour");
-    expect(html).toContain("winning calls pay TSLA Stock Tokens in kind");
+    // plain words; the timing sits in the heading's "?" and the payout is the one visible line.
+    expect(html).toContain("This market has one price source");
+    expect(html).toContain("waits about 1 hour");
+    expect(html).toMatch(/Settlement and payout <span[^>]*><button[^>]*aria-label="About settlement timing"/);
+    expect(html).toContain("winning calls pay TSLA Stock Tokens.");
     expect(html).toContain("no USDG conversion route configured");
   });
 
@@ -31,11 +33,10 @@ describe("market settlement disclosure", () => {
     const nvda = market("NVDA");
     const copy = settlementDisclosure(nvda.settlement, false, nvda.ticker);
 
-    expect(copy.timing).toContain("configuration lists 2 price sources");
+    expect(copy.timing).toContain("This market has 2 price sources");
     expect(copy.timing).toContain("about 6 hours");
-    expect(copy.payout).toContain("Uniswap v3 fee-tier route that can attempt USDG conversion");
-    expect(copy.payout).toContain("does not prove the route is currently usable");
-    expect(copy.payout).toContain("route failure or conversion-floor miss pays Stock Tokens in kind");
+    expect(copy.payout).toContain("a listed Uniswap v3 route tries to convert them to USDG");
+    expect(copy.payout).toContain("if that fails or pays too little, you get the tokens");
     expect(copy.payout).not.toContain("pool address");
     expect(copy.payout).not.toContain("will convert");
   });
@@ -52,21 +53,22 @@ describe("market settlement disclosure", () => {
       },
     }, false, "nvda");
 
-    expect(copy.payout).toContain("Uniswap v4 pool route that can attempt USDG conversion");
-    expect(copy.payout).toContain("does not prove the route is currently usable");
+    expect(copy.payout).toContain("a listed Uniswap v4 route tries to convert them to USDG");
+    expect(copy.payout).toContain("if that fails or pays too little, you get the tokens");
     expect(copy.payout).not.toContain("will convert");
   });
 
   it("keeps puts in USDG and degrades honestly when metadata is absent", () => {
     expect(settlementDisclosure(undefined, true, "TSLA")).toEqual({
-      timing: "Settlement timing is unavailable for this market. Expiry alone does not complete settlement; follow the live series status.",
+      timing: "Settlement timing is unavailable. Watch the option's status after expiry.",
       payout: "Winning puts pay USDG.",
     });
 
     const call = settlementDisclosure(undefined, false, "nvda");
     expect(call.payout).toContain("Winning calls are owed NVDA Stock Tokens");
-    expect(call.payout).toContain("cannot confirm whether USDG conversion is configured");
-    expect(call.payout).toContain("route fails or misses its floor");
+    expect(call.payout).toContain("Conversion details are unavailable");
+    expect(call.payout).toContain("if conversion fails, you get the tokens");
+    expect(call.payout).not.toContain("will convert");
   });
 
   it("formats the configured delay instead of hard-coding one hour", () => {

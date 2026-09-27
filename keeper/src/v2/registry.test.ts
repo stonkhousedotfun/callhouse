@@ -3,11 +3,11 @@
  *
  * WHY THIS FILE EXISTS: every v2 bot reads its markets and addresses from ops/markets/tier1.json,
  * whose `v2` blocks record the live deployment. Pinned here: that today's file loads with
- * the deployment addresses and §3 defaults; that §3's block as written parses; that the resolution
+ * the deployment addresses and the compiled-in defaults; that the unset v2 block as written parses; that the resolution
  * order is SPEC_DEFAULTS ← registry defaults ← market overrides, key by key; and that a present but
  * malformed block refuses to load with every problem listed under the market's ticker.
  *
- * Fixtures (src/v2/fixtures/): registry-no-v2.json (before O2-01), registry-v2-unset.json (§3's block
+ * Fixtures (src/v2/fixtures/): registry-no-v2.json, registry-v2-unset.json (the unset v2 block
  * verbatim, every address null), registry-v2.json (a deployed block, partial defaults, overrides).
  * DELIBERATELY ABSENT: any RPC.
  *
@@ -34,7 +34,10 @@ import {
   V2_FLYWHEEL_NAMES,
   V2RegistryError,
   V8_ALLOW_RENT_KEY,
+  WEEKDAYS,
   applyOverrides,
+  launchFactoryKind,
+  listsDailyOn,
   loadV2Registry,
   marketByTicker,
   marketByUnderlying,
@@ -66,10 +69,15 @@ function refusal(json: unknown): V2RegistryError {
                          ABSENT v2 BLOCKS
 //////////////////////////////////////////////////////////////*/
 
-// The production registry as it stands before the v8 deploy write-back: the shape is final, the addresses
-// are not. Both halves matter — the shape is what this loader is for, and "not deployed yet" is a fact the
-// test states rather than an absence it tolerates silently.
-test('today\'s ops/markets/tier1.json loads as an INTERFACE_VERSION 8 registry, before the deploy write-back', () => {
+// The production registry as it stands AFTER the deploy write-back. This test used to pin the
+// pre-deploy state -- every address null, every market planned, no payout route -- and each of those facts has
+// since been superseded by a landed change, not by drift: one change pinned the v4 payout routes (the first red,
+// "AAPL payoutRoute"), another wrote the deployment back (deployBlock 69512673), a third released the launch
+// set live after the Safe's go-live execute. The v9 mainnet launch (12:02 PM PT 2026-09-25, deployBlock
+// 72462898) re-pinned the launch set's routes to v3 fee 500 (the launch tooling's route pins,
+// build-markets V2_PAYOUT_ROUTE_PINS) and wrote the v9 deployment back. The shape assertions are unchanged;
+// the state assertions state the deployed facts, each as exactly as the old ones stated their absence.
+test('today\'s ops/markets/tier1.json loads as the DEPLOYED INTERFACE_VERSION 8 registry: every address written back, the launch set live', () => {
   const registry = loadV2Registry(TIER1);
   assert.equal(registry.path, TIER1);
   assert.equal(registry.hasV2Block, true);
@@ -79,35 +87,51 @@ test('today\'s ops/markets/tier1.json loads as an INTERFACE_VERSION 8 registry, 
   assert.deepEqual(registry.defaults, SPEC_DEFAULTS);
   assert.equal(registry.chainId, 4663);
   assert.equal(registry.usdg, '0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168');
-  assert.ok(registry.markets.length >= 35);
+  // Exactly the launch set, read from the file, not a typed count.
+  const launch = (JSON.parse(readFileSync(TIER1, 'utf8')) as { launchSet: { markets: string[] } }).launchSet.markets;
+  assert.deepEqual(registry.markets.map((m) => m.ticker).sort(), [...launch].sort());
   assert.ok(registry.markets.every((m) => m.v2 !== null));
 
-  // NOT DEPLOYED YET. Asserted as `null`, never as "falsy": an address that came back `undefined` because a
-  // name reached one list and not the other would pass a truthiness check and fail every `=== null` guard
-  // downstream. v2.deployBlock is the registry's own statement that a deployment exists.
-  assert.equal(registry.deployBlock, null, 'no v8 deployment yet: O8 writes this back');
+  // DEPLOYED. v2.deployBlock is the registry's own statement that a deployment exists, and every address the
+  // loader knows has a home and is filled, EIP-55 exactly (a lower-case address would pass `!== null` and still
+  // differ from every checksummed comparison downstream).
+  assert.equal(typeof registry.deployBlock, 'bigint', 'the v8 deployment is written back');
+  assert.ok((registry.deployBlock ?? 0n) > 0n);
   for (const name of V2_ADDRESS_NAMES) {
     assert.ok(name in registry.contracts || name in (registry.flywheel ?? {}), `${name} has a home`);
-    assert.equal(v2Address(registry, name), null, `${name} (${V2_ADDRESS_PATH[name]})`);
+    const a = v2Address(registry, name);
+    assert.notEqual(a, null, `${name} (${V2_ADDRESS_PATH[name]}) is written back`);
+    assert.equal(a, getAddress(a!), `${name} is EIP-55`);
   }
-  for (const name of ['chainlink', 'univ3', 'dataStreams'] as const) assert.equal(registry.sources[name], null, name);
-  // INTERFACE_VERSION 8: the flywheel is its own block, present and empty, never a v2.contracts key.
-  assert.deepEqual(registry.flywheel, { feeSplitter: null, buybackExecutor: null, deployBlock: null });
+  for (const name of ['chainlink', 'univ3', 'dataStreams'] as const) {
+    assert.notEqual(registry.sources[name], null, name);
+    assert.equal(registry.sources[name], getAddress(registry.sources[name]!), `${name} is EIP-55`);
+  }
+  // INTERFACE_VERSION 8: the flywheel is its own block, never a v2.contracts key, and it carries its own start block.
+  assert.notEqual(registry.flywheel?.feeSplitter ?? null, null);
+  assert.notEqual(registry.flywheel?.buybackExecutor ?? null, null);
+  assert.notEqual(registry.flywheel?.deployBlock ?? null, null, 'the flywheel has a start block for the indexer');
   assert.ok(!(('feeSplitter' as string) in registry.contracts), 'the flywheel is not a v2.contracts key');
 
+  // LIVE = THE LAUNCH SET, and nothing else. The launch set is read from the file's own launchSet block (the
+  // loader does not project it), so this pins the two against each other rather than against a typed-in list.
+  const launchSet = (JSON.parse(readFileSync(TIER1, 'utf8')) as { launchSet: { markets: string[] } }).launchSet.markets;
+  const live = v2Markets(registry, ['live']);
+  assert.deepEqual(live.map((m) => m.ticker).sort(), [...launchSet].sort(), 'exactly the launch set is live');
+  for (const m of live) assert.notEqual(m.v2?.registeredAt ?? null, null, `${m.ticker} is registered`);
   const planned = v2Markets(registry, ['planned']);
-  assert.equal(v2Markets(registry, ['live']).length, 0, 'nothing is live on v8 yet');
-  assert.equal(planned.length, registry.markets.length, 'every market is planned until the deploy registers it');
+  assert.equal(planned.length + live.length, registry.markets.length, 'every other market is still planned');
+  for (const m of planned) assert.equal(m.v2?.registeredAt ?? null, null, `${m.ticker} is not registered`);
   const nvda = marketByTicker(registry, 'NVDA');
-  assert.equal(nvda?.v2?.status, 'planned');
+  assert.equal(nvda?.v2?.status, 'live');
   assert.equal(nvda?.underlying, '0xd0601CE157Db5bdC3162BbaC2a2C8aF5320D9EEC');
   assert.equal(nvda?.cboe?.root, 'NVDA');
   // The feeds print on a 0.5 % move or a 24 h heartbeat: a 1 h spot age made spot() revert for 2-100 % of each
-  // session. 25 h (heartbeat + 1 h) left no stale session second on any of the 35 feeds (ops/deploy.md §15.13).
+  // session. 25 h (heartbeat + 1 h) left no stale session second on any of the 35 feeds.
   assert.equal(SPEC_DEFAULTS.spotMaxAgeS, 90_000);
   for (const m of registry.markets) assert.equal(m.v2?.params.spotMaxAgeS, 90_000, `${m.ticker} spotMaxAgeS`);
 
-  // INTERFACE_VERSION 8 (V3-D6, D17, D18), and the exact inversion of what v7 asserted here: the writer fee IS
+  // INTERFACE_VERSION 8, and the exact inversion of what v7 asserted here: the writer fee IS
   // the premium fee and it is ABOVE the resale fee, and there is no rent anywhere — stated as 0 with allowRent
   // false, not left unsaid.
   assert.equal(registry.fees?.premiumFeeBps, 500);
@@ -115,12 +139,24 @@ test('today\'s ops/markets/tier1.json loads as an INTERFACE_VERSION 8 registry, 
   assert.ok((registry.fees?.premiumFeeBps ?? 0) > (registry.fees?.resaleFeeBps ?? 0), 'premium above resale');
   assert.equal(registry.fees?.allowRent, false);
   assert.equal(registry.fees?.mintFeePpm, 0);
-  assert.equal(registry.vault?.maxDailyOutflow, 2_500_000_000n);
+  // The owner's MakerVault limits: NO daily-outflow cap, written
+  // as type(uint128).max (it was 2,500 USDG). Still > 0 and within uint128, which this schema requires.
+  assert.equal(registry.vault?.maxDailyOutflow, 2n ** 128n - 1n);
   for (const m of registry.markets) {
     assert.equal(m.v2?.mintFeePpm, 0, `${m.ticker} mintFeePpm`);
-    // No payout route is configured before the deploy; a winning call is paid in kind until one is.
-    assert.equal(m.v2?.payoutRoute, null, `${m.ticker} payoutRoute`);
+    // A payout route is pinned where the 2026-09-17 snapshot found a v4 pool, and only there; a
+    // market without one is paid in kind. A v4 route is named by its 32-byte PoolId; a v3 route (the v9 launch pins)
+    // by its fee tier. No other venue.
+    const route = m.v2?.payoutRoute as { venue?: string; poolId?: string; fee?: number } | null | undefined;
+    if (route === null || route === undefined) continue;
+    assert.ok(route.venue === 'v3' || route.venue === 'v4', `${m.ticker} payoutRoute venue ${String(route.venue)}`);
+    if (route.venue === 'v4') assert.match(String(route.poolId), /^0x[0-9a-f]{64}$/, `${m.ticker} payoutRoute poolId`);
+    else assert.ok(Number.isInteger(route.fee) && (route.fee ?? 0) > 0, `${m.ticker} v3 payoutRoute fee`);
   }
+  // The launch set is paid out through a route, never in kind.
+  for (const t of launchSet) assert.notEqual(marketByTicker(registry, t)?.v2?.payoutRoute ?? null, null, `${t} has a payout route`);
+  // The v9 launch's pin (12:02 PM PT 2026-09-25, deployBlock 72462898): NVDA pays out through the v3 fee-500 pool.
+  assert.deepEqual(nvda?.v2?.payoutRoute, { venue: 'v3', fee: 500 }, 'NVDA payoutRoute');
   assert.ok(MINT_FEE_CEIL_PPM === 5_000, 'the dial ceiling survives v8 even though the dial is at 0');
 });
 
@@ -161,23 +197,23 @@ test('registry-no-v2.json: the same, on the trimmed fixture', () => {
 });
 
 /*//////////////////////////////////////////////////////////////
-                         §3 AS WRITTEN
+                    THE UNSET BLOCK AS WRITTEN
 //////////////////////////////////////////////////////////////*/
 
-test('registry-v2-unset.json: §3\'s block verbatim parses; addresses null, fees and periphery typed, every market on the defaults', () => {
+test('registry-v2-unset.json: the unset v2 block verbatim parses; addresses null, fees and periphery typed, every market on the defaults', () => {
   const registry = loadV2Registry(fixture('registry-v2-unset.json'));
   assert.equal(registry.hasV2Block, true);
   assert.equal(registry.interfaceVersion, INTERFACE_VERSION);
   assert.equal(registry.deployBlock, null);
   for (const name of V2_CONTRACT_NAMES) assert.equal(registry.contracts[name], null, name);
   for (const name of V2_FLYWHEEL_NAMES) assert.equal(v2Address(registry, name), null, V2_ADDRESS_PATH[name]);
-  // INTERFACE_VERSION 8 (V3-D6, D18): the fee block states the v8 position — a premium fee above the resale
+  // INTERFACE_VERSION 8: the fee block states the v8 position — a premium fee above the resale
   // fee, and rent explicitly 0 with allowRent false. It is spelled out rather than omitted because a loader
   // that read silence as "no rent" could not tell a v8 registry from a v6 one.
   assert.deepEqual(registry.fees, { premiumFeeBps: 500, mintFeePpm: 0, allowRent: false, resaleFeeBps: 0, takerFeeFlat: 100_000n, takerFeeCapBps: 1000, makerRebateBps: 5000, exerciseFeeBps: 25 });
   assert.deepEqual(registry.flywheel, { feeSplitter: null, buybackExecutor: null, deployBlock: null });
   assert.equal(registry.vault, null, 'no v2.vault block');
-  // §3 writes them lower-case; they come back checksummed.
+  // The unset block writes them lower-case; they come back checksummed.
   assert.deepEqual(registry.uniswapV3, {
     factory: '0x1f7d7550B1b028f7571E69A784071F0205FD2EfA',
     swapRouter02: '0xCaf681a66D020601342297493863E78C959E5cb2',
@@ -203,7 +239,7 @@ test('registry-v2-unset.json: §3\'s block verbatim parses; addresses null, fees
                     DEFAULTS AND OVERRIDES
 //////////////////////////////////////////////////////////////*/
 
-test('registry-v2.json: addresses checksummed, deploy block a bigint, partial registry defaults merged over §3', () => {
+test('registry-v2.json: addresses checksummed, deploy block a bigint, partial registry defaults merged over the unset block', () => {
   const registry = loadV2Registry(fixture('registry-v2.json'));
   assert.equal(registry.contracts.clearinghouse, '0x00000000000000000000000000000000C0DE0001');
   assert.equal(registry.contracts.rewardsDistributor, getAddress('0x00000000000000000000000000000000c0de000a'));
@@ -227,11 +263,13 @@ test('registry-v2.json: addresses checksummed, deploy block a bigint, partial re
   assert.ok((registry.flywheel?.deployBlock ?? 0n) < (registry.deployBlock ?? 0n), 'the splitter predates the core');
   assert.equal(registry.sources.dataStreams, null);
   assert.equal(registry.deployBlock, 65_100_000n);
-  // `defaults` names uncorroboratedDelayS and daily.rungs only; everything else is §3's.
+  // `defaults` names uncorroboratedDelayS, daily.rungs and expiriesAhead only; everything else is the compiled-in default. The fixture
+  // states expiriesAhead { weekly 2, daily 3 } since the defaults went 0DTE only, so its tests keep a weekly ladder.
   const expected: MarketParams = {
     ...SPEC_DEFAULTS,
     uncorroboratedDelayS: 7200,
     ladder: { weekly: SPEC_DEFAULTS.ladder.weekly, daily: { ...SPEC_DEFAULTS.ladder.daily, rungs: 4 } },
+    expiriesAhead: { weekly: 2, daily: 3 },
   };
   assert.deepEqual(registry.defaults, expected);
   assert.deepEqual(marketByTicker(registry, 'NVDA')?.v2?.params, expected, 'no overrides: the registry defaults');
@@ -279,7 +317,7 @@ test('registry-v2.json: a market override beats the registry default, key by key
   assert.equal(nvda?.mintFeePpm, 80, 'NVDA names its own rate');
   assert.equal(tsla.mintFeePpm, 300, 'TSLA names a different one');
   assert.equal(sgov.mintFeePpm, 80, 'SGOV names none: the shared rate');
-  // INTERFACE_VERSION 7 (c21): the MakerVault Limits the deploy sets, all six fields in setLimits order.
+  // INTERFACE_VERSION 7: the MakerVault Limits the deploy sets, all six fields in setLimits order.
   assert.deepEqual(registry.vault, {
     maxSeriesUnits: 10_000n,
     maxTotalNotional: 250_000_000_000n,
@@ -301,7 +339,8 @@ test('applyOverrides is pure: no layer returns the base, a layer never mutates i
   assert.equal(out.spotMaxAgeS, 60);
   assert.deepEqual(out.ladder.daily, { rungs: 5, firstOtmBps: 100, stepBps: 300, cardTargetBps: 200 });
   assert.deepEqual(out.ladder.weekly, SPEC_DEFAULTS.ladder.weekly);
-  assert.deepEqual(out.expiriesAhead, { weekly: 1, daily: 3 });
+  assert.deepEqual(out.expiriesAhead, { weekly: 1, daily: SPEC_DEFAULTS.expiriesAhead.daily }, 'weekly from the layer, daily kept from the base');
+  assert.equal(SPEC_DEFAULTS.expiriesAhead.daily, 6, 'six daily closes (T-OP-216)');
 });
 
 /*//////////////////////////////////////////////////////////////
@@ -432,6 +471,58 @@ test('INTERFACE_VERSION 8: the flywheel block is strict, and its two addresses a
   assert.match(refusal(typo).message, /v2\.flywheel: Unrecognized key\(s\) in object: 'feeSpliter'/);
 });
 
+test('the registry\'s launch knobs load, and every one of them stays strict and bounded', () => {
+  // The shipped registry carries v2.flywheel.config and the oracle tuning in v2.defaults: it must still load.
+  const tier1 = readJson(TIER1);
+  const v2 = tier1.v2 as { flywheel: Record<string, unknown>; defaults: Record<string, unknown> };
+  assert.ok(v2.flywheel.config !== undefined && v2.defaults.chainlinkMaxStaleS !== undefined, 'tier1.json has the T-OP-609 blocks');
+  parseV2Registry(tier1);
+
+  // A misspelt knob inside flywheel.config is refused, like a misspelt flywheel address.
+  const typo = readJson(TIER1);
+  const config = (typo.v2 as { flywheel: { config: Record<string, unknown> } }).flywheel.config;
+  config.burnBp = config.burnBps;
+  delete config.burnBps;
+  assert.match(refusal(typo).message, /v2\.flywheel\.config: Unrecognized key\(s\) in object: 'burnBp'/);
+
+  // The oracle keys are bounded as the source contracts bound them, in defaults and in a market override.
+  const bounds = readJson(TIER1);
+  const d = (bounds.v2 as { defaults: Record<string, unknown> }).defaults;
+  d.chainlinkMaxStaleS = 60;
+  d.univ3WindowS = 7_200;
+  (bounds.markets[0]!.v2 as { overrides: Record<string, unknown> }).overrides = { chainlinkMaxRoundJumpBps: 0 };
+  const error = refusal(bounds);
+  assert.match(error.message, /v2\.defaults\.chainlinkMaxStaleS: Number must be greater than or equal to 3600/);
+  assert.match(error.message, /v2\.defaults\.univ3WindowS: Number must be less than or equal to 3600/);
+  assert.match(error.message, /overrides\.chainlinkMaxRoundJumpBps: Number must be greater than or equal to 1/);
+
+  // maxFeedAgeS is registry-wide (V2_MAX_FEED_AGE_S): a market override of it is an unknown key, not a silent no-op.
+  const perMarket = readJson(TIER1);
+  (perMarket.markets[0]!.v2 as { overrides: Record<string, unknown> }).overrides = { maxFeedAgeS: 86_400 };
+  assert.match(refusal(perMarket).message, /overrides: Unrecognized key\(s\) in object: 'maxFeedAgeS'/);
+
+  // A market override of the per-market oracle keys is accepted (the deploy reads it; the keeper resolves none of it).
+  const ok = readJson(TIER1);
+  (ok.markets[0]!.v2 as { overrides: Record<string, unknown> }).overrides = { chainlinkMaxStaleS: 7_200, univ3WindowS: 600 };
+  parseV2Registry(ok);
+});
+
+test('the buyback ceiling and cooldown are strict flywheel.config keys', () => {
+  // the two FeeSplitter values made settable join the registry.
+  const tier1 = readJson(TIER1);
+  const config = (tier1.v2 as { flywheel: { config: Record<string, unknown> } }).flywheel.config;
+  assert.deepEqual([config.buybackCapCeiling, config.buybackCooldownS], ['1000000000', 300]);
+  parseV2Registry(tier1);
+
+  // Required like every other flywheel.config key, and the cooldown is refused at 0 (setBuybackCooldown does).
+  const missing = readJson(TIER1);
+  delete (missing.v2 as { flywheel: { config: Record<string, unknown> } }).flywheel.config.buybackCapCeiling;
+  assert.match(refusal(missing).message, /v2\.flywheel\.config\.buybackCapCeiling: Invalid input/);
+  const zero = readJson(TIER1);
+  (zero.v2 as { flywheel: { config: Record<string, unknown> } }).flywheel.config.buybackCooldownS = 0;
+  assert.match(refusal(zero).message, /v2\.flywheel\.config\.buybackCooldownS: Number must be greater than or equal to 1/);
+});
+
 test('INTERFACE_VERSION 8: a payout route is closed per venue and is not the settlement pool', () => {
   const badVenue = readJson(fixture('registry-v2.json'));
   ((badVenue.markets.find((m) => m.ticker === 'NVDA') as { v2: Record<string, unknown> }).v2).payoutRoute = { venue: 'v2', fee: 3000 };
@@ -496,10 +587,227 @@ test('ladder and oracle bounds: zero rungs, a 0 card target, a 10-minute veto wi
   assert.match(error.message, /v2\.defaults\.expiriesAhead\.weekly: Number must be less than or equal to 6/);
 });
 
+/*
+ * Daily weekdays. `dailyWeekdays` is a MarketParams key: every weekday by
+ * default, a market override replaces the whole list, and the strict parser refuses an unknown day, a repeat and an empty
+ * list (an empty list would be `expiriesAhead.daily: 0` said less plainly).
+ */
+test('dailyWeekdays defaults to every weekday, an override replaces it, and the parser refuses bad lists', () => {
+  assert.deepEqual(SPEC_DEFAULTS.dailyWeekdays, ['mon', 'tue', 'wed', 'thu', 'fri']);
+  const nvda = marketByTicker(loadV2Registry(TIER1), 'NVDA')!.v2!.params;
+  assert.deepEqual(nvda.dailyWeekdays, ['mon', 'wed', 'fri'], 'the shipped NVDA row');
+  assert.deepEqual(marketByTicker(loadV2Registry(TIER1), 'SPCX')!.v2!.params.dailyWeekdays, WEEKDAYS, 'SPCX keeps the default');
+  assert.deepEqual(applyOverrides(SPEC_DEFAULTS, { dailyWeekdays: ['fri'] }).dailyWeekdays, ['fri'], 'replaced whole, not merged');
+  assert.deepEqual(applyOverrides(SPEC_DEFAULTS, {}).dailyWeekdays, WEEKDAYS);
+
+  // 16:00 New York closes, Monday 2026-09-28 to Friday 2026-10-02, and an early 13:00 close (Friday 2026-11-27).
+  const close = (d: number, h = 20) => Date.UTC(2026, 8, d, h, 0, 0) / 1_000;
+  assert.deepEqual([28, 29, 30].map((d) => listsDailyOn(nvda, close(d))), [true, false, true], 'Mon yes, Tue no, Wed yes');
+  assert.deepEqual([1, 2].map((d) => listsDailyOn(nvda, Date.UTC(2026, 9, d, 20, 0, 0) / 1_000)), [false, true], 'Thu no, Fri yes');
+  assert.equal(listsDailyOn(nvda, Date.UTC(2026, 10, 27, 18, 0, 0) / 1_000), true, 'an early (13:00 EST) Friday close is still Friday');
+  assert.equal(listsDailyOn(SPEC_DEFAULTS, close(29)), true, 'the default filters nothing');
+
+  const refused = (days: unknown) => {
+    const json = readJson(fixture('registry-v2.json'));
+    const v2 = json.markets.find((m) => (m as { ticker?: string }).ticker === 'NVDA')!.v2 as Record<string, unknown>;
+    v2.overrides = { ...((v2.overrides as object | undefined) ?? {}), dailyWeekdays: days };
+    return refusal(json).message;
+  };
+  assert.match(refused(['mon', 'sat']), /overrides\.dailyWeekdays\.1: Invalid enum value\. Expected 'mon' \| 'tue' \| 'wed' \| 'thu' \| 'fri', received 'sat'/);
+  assert.match(refused(['mon', 'mon']), /overrides\.dailyWeekdays: dailyWeekdays lists a weekday twice/);
+  assert.match(refused([]), /overrides\.dailyWeekdays: Array must contain at least 1 element\(s\)/);
+});
+
 test('an unreadable file is a V2RegistryError naming the path', () => {
   const path = fixture('does-not-exist.json');
   assert.throws(
     () => loadV2Registry(path),
     (error: unknown) => error instanceof V2RegistryError && error.message.startsWith(`cannot read the market registry at ${path}`),
   );
+});
+
+test('the shipped registry names its House factory, the launch factory and both House vaults', () => {
+  const house = loadV2Registry(TIER1).house;
+  // The v9 launch (12:02 PM PT 2026-09-25, deployBlock 72462898): one DAILY launch factory and each market's daily vault.
+  const launch = getAddress('0x4626da1A3fCf06d837dBD49708C7B658DFD08843');
+  assert.deepEqual(house.factories, [{ kind: 'daily', address: launch, deployBlock: 72_467_085n }]);
+  assert.equal(house.launchFactory, launch);
+  // `houseVault` and `house.daily` name the same vault on each market: listed once, as daily.
+  assert.deepEqual(house.vaults, [
+    { ticker: 'NVDA', kind: 'daily', address: getAddress('0xF9F95d999aA798fc0B60a0f85f7CCe251fe247a7') },
+    { ticker: 'SPCX', kind: 'daily', address: getAddress('0x031AB8C376C31447e766Fb95d19D2369f3806Ce1') },
+  ]);
+  // A registry with no House block at all: no list, no launch factory, no vaults. Nothing to roll, nothing to refuse.
+  assert.deepEqual(loadV2Registry(fixture('registry-v2.json')).house, { factories: null, launchFactory: null, vaults: [] });
+});
+
+test('the House block is refused the way build-markets refuses it, and is strict about its keys', () => {
+  const shipped = () => readJson(TIER1) as ReturnType<typeof readJson> & { v2: { house: { factories: Array<Record<string, unknown>> }; contracts: Record<string, unknown> } };
+  const other = '0x00000000000000000000000000000000000fac76';
+  // The shipped registry is v9's (its one factory is the DAILY launch factory), read here, never typed.
+  const launchKind = String(shipped().v2.house.factories[0]!.kind);
+  const launchAddr = String(shipped().v2.contracts.houseVaultFactory);
+  assert.equal(launchKind, 'daily', 'the v9 launch factory is recorded as the daily entry');
+
+  const twoOfKind = shipped();
+  twoOfKind.v2.house.factories.push({ ...twoOfKind.v2.house.factories[0], address: other });
+  assert.match(refusal(twoOfKind).message, /v2\.house\.factories\[1\]: a second daily factory; the registry records at most one per kind/);
+
+  // The weekly entry IS the launch factory: on a daily-launch registry a weekly entry naming another factory is refused.
+  const notLaunch = shipped();
+  notLaunch.v2.house.factories.push({ kind: 'weekly', address: other, deployBlock: null });
+  assert.match(
+    refusal(notLaunch).message,
+    new RegExp(`v2\\.house\\.factories\\[1\\]: the weekly factory 0x0{35}fAc76 is not v2\\.contracts\\.houseVaultFactory ${launchAddr}`, 'i'),
+  );
+
+  const badKind = shipped();
+  badKind.v2.house.factories[0]!.kind = 'monthly';
+  assert.match(refusal(badKind).message, /v2\.house\.factories\.0\.kind/);
+
+  const typo = shipped();
+  typo.v2.house.factories[0]!.adress = typo.v2.house.factories[0]!.address;
+  delete typo.v2.house.factories[0]!.address;
+  assert.match(refusal(typo).message, /Unrecognized key\(s\) in object: 'adress'/);
+
+  const badLaunch = shipped();
+  badLaunch.v2.contracts.houseVaultFactory = '0x1234';
+  assert.match(refusal(badLaunch).message, /houseVaultFactory/);
+
+  // Both kinds listed: a WEEKLY launch factory (the v8 shape, built from the shipped file) beside a daily factory,
+  // each market's weekly vault as its launch vault, and one market's daily vault listed with the daily factory.
+  const withDaily = shipped();
+  const weekly = '0x000000000000000000000000000000000000fa11';
+  withDaily.v2.contracts.houseVaultFactory = weekly;
+  withDaily.v2.house.factories = [{ kind: 'weekly', address: weekly, deployBlock: null }, { kind: 'daily', address: other, deployBlock: null }];
+  withDaily.markets.forEach((m, i) => {
+    const v2 = m.v2 as Record<string, unknown>;
+    const vault = i === 0 ? '0x000000000000000000000000000000000000b0a1' : '0x000000000000000000000000000000000000b0a2';
+    v2.houseVault = vault;
+    v2.house = { weekly: vault, daily: i === 0 ? '0x00000000000000000000000000000000000da117' : null };
+  });
+  const house = parseV2Registry(withDaily).house;
+  assert.deepEqual(house.factories?.map((f) => f.kind), ['weekly', 'daily']);
+  assert.deepEqual(house.vaults.map((v) => `${v.ticker}:${v.kind}`), ['NVDA:weekly', 'NVDA:daily', 'SPCX:weekly']);
+});
+
+/**
+ * On v9 the launch factory is a kinded factory recorded as the DAILY entry, and
+ * build-markets requires `v2.houseVault == v2.house.daily` (its launchKind check). The loader used to add
+ * `houseVault` as `weekly` unconditionally and dedupe by address, so each v9 daily vault was listed as weekly and its
+ * correct `daily` entry was dropped. The v8 shape is the control: still weekly, still once. Since the v9
+ * launch the SHIPPED registry is the v9 shape, so it is asserted too, and the v8 control is built from it.
+ */
+test('a v9 registry (daily launch factory) lists each launch vault once, as daily; the v8 shape still lists it weekly', () => {
+  type Shipped = ReturnType<typeof readJson> & { v2: { contracts: Record<string, unknown>; house: { factories: Array<Record<string, unknown>> } } };
+  const V9 = getAddress('0x000000000000000000000000000000000000f009');
+  const DAILY = { NVDA: getAddress('0x000000000000000000000000000000000000b0d1'), SPCX: getAddress('0x000000000000000000000000000000000000b0d2') };
+  const v9 = readJson(TIER1) as Shipped;
+  v9.v2.contracts.houseVaultFactory = V9;
+  v9.v2.house.factories = [{ kind: 'daily', address: V9, deployBlock: 70_100_000 }];
+  for (const [ticker, vault] of Object.entries(DAILY)) {
+    const v2 = v9.markets.find((m) => m.ticker === ticker)!.v2 as Record<string, unknown>;
+    v2.houseVault = vault;
+    v2.house = { weekly: null, daily: vault };
+  }
+  const house = parseV2Registry(v9).house;
+  assert.equal(house.launchFactory, V9);
+  assert.deepEqual(house.vaults, [
+    { ticker: 'NVDA', kind: 'daily', address: DAILY.NVDA },
+    { ticker: 'SPCX', kind: 'daily', address: DAILY.SPCX },
+  ]);
+
+  // The shipped registry IS v9 (the 12:02 PM PT 2026-09-25 launch): daily, each launch vault listed once.
+  const shipped = loadV2Registry(TIER1).house;
+  assert.equal(launchFactoryKind(shipped.launchFactory, shipped.factories), 'daily');
+  assert.deepEqual(shipped.vaults.map((v) => `${v.ticker}:${v.kind}`), ['NVDA:daily', 'SPCX:daily']);
+
+  // The v8 control, built from the shipped file: the weekly launch factory's vault is weekly, listed once
+  // (houseVault == house.weekly).
+  const V8 = getAddress('0x000000000000000000000000000000000000f008');
+  const WEEKLY = { NVDA: getAddress('0x000000000000000000000000000000000000b0e1'), SPCX: getAddress('0x000000000000000000000000000000000000b0e2') };
+  const v8json = readJson(TIER1) as Shipped;
+  v8json.v2.contracts.houseVaultFactory = V8;
+  v8json.v2.house.factories = [{ kind: 'weekly', address: V8, deployBlock: 69_517_900 }];
+  for (const [ticker, vault] of Object.entries(WEEKLY)) {
+    const v2 = v8json.markets.find((m) => m.ticker === ticker)!.v2 as Record<string, unknown>;
+    v2.houseVault = vault;
+    v2.house = { weekly: vault, daily: null };
+  }
+  const v8 = parseV2Registry(v8json).house;
+  assert.equal(launchFactoryKind(v8.launchFactory, v8.factories), 'weekly');
+  assert.deepEqual(v8.vaults.map((v) => `${v.ticker}:${v.kind}`), ['NVDA:weekly', 'SPCX:weekly']);
+});
+
+test('launchFactoryKind is build-markets launchFactoryKind rule for rule, and a launch factory under both kinds stops the keeper at boot', () => {
+  const L = getAddress('0x000000000000000000000000000000000000f009');
+  const O = getAddress('0x000000000000000000000000000000000000f00a');
+  assert.equal(launchFactoryKind(null, [{ kind: 'daily', address: O }]), 'weekly', 'no launch factory');
+  assert.equal(launchFactoryKind(L, null), 'weekly', 'no list: the implied pre-T-OP-101 launch');
+  assert.equal(launchFactoryKind(L, [{ kind: 'daily', address: O }]), 'weekly', 'no entry names the launch factory');
+  assert.equal(launchFactoryKind(L, [{ kind: 'weekly', address: L }, { kind: 'daily', address: O }]), 'weekly', 'v8');
+  assert.equal(launchFactoryKind(L, [{ kind: 'daily', address: L.toLowerCase() as typeof L }]), 'daily', 'v9, compared ignoring case');
+  assert.equal(launchFactoryKind(L, [{ kind: 'weekly', address: L }, { kind: 'daily', address: L }]), null, 'both kinds');
+
+  // The shipped (v9) registry records its launch factory as the DAILY entry; a WEEKLY entry naming the same
+  // factory gives it both kinds. The launch address is the registry's, never typed.
+  const both = readJson(TIER1) as ReturnType<typeof readJson> & { v2: { contracts: { houseVaultFactory: string }; house: { factories: Array<Record<string, unknown>> } } };
+  assert.deepEqual(both.v2.house.factories.map((f) => f.kind), ['daily'], 'the shipped launch factory is the daily entry');
+  both.v2.house.factories.push({ kind: 'weekly', address: both.v2.contracts.houseVaultFactory, deployBlock: null });
+  assert.match(
+    refusal(both).message,
+    new RegExp(`v2\\.house\\.factories: the launch factory v2\\.contracts\\.houseVaultFactory ${both.v2.contracts.houseVaultFactory} is recorded as BOTH the weekly and the daily factory`),
+  );
+});
+
+test('the House and Earn limits blocks load, and a misspelt or out-of-range limit stops the keeper at boot', () => {
+  type Limits = Record<string, Record<string, unknown>>;
+  const shipped = () => readJson(TIER1) as ReturnType<typeof readJson> & { v2: { house: { limits: Limits }; earn: { limits: Record<string, unknown> } } };
+  // The shipped registry carries both blocks and still loads.
+  const tier1 = shipped();
+  assert.deepEqual(Object.keys(tier1.v2.house.limits), ['NVDA', 'SPCX']);
+  assert.doesNotThrow(() => parseV2Registry(tier1));
+
+  const typo = shipped();
+  typo.v2.house.limits.NVDA!.maxDailyOutFlow = typo.v2.house.limits.NVDA!.maxDailyOutflow;
+  delete typo.v2.house.limits.NVDA!.maxDailyOutflow;
+  assert.match(refusal(typo).message, /Unrecognized key\(s\) in object: 'maxDailyOutFlow'/);
+
+  const zero = shipped();
+  zero.v2.house.limits.SPCX!.maxDailyOutflow = '0';
+  assert.match(refusal(zero).message, /v2\.house\.limits\.SPCX\.maxDailyOutflow.*must be > 0/);
+
+  // An Earn maxDailyOutflow of 0 LOADS, as build-markets, the launch tooling and registry-env.sh
+  // accept it (EarnVault reads it only for the quoter's Bid, never on a depositor's exit). The House 0 above does not.
+  const earnZero = shipped();
+  earnZero.v2.earn.limits.maxDailyOutflow = '0';
+  assert.doesNotThrow(() => parseV2Registry(earnZero));
+
+  const bps = shipped();
+  bps.v2.house.limits.NVDA!.maxBidBpsOfSpot = 10_001;
+  assert.match(refusal(bps).message, /v2\.house\.limits\.NVDA\.maxBidBpsOfSpot/);
+
+  const earnTypo = shipped();
+  earnTypo.v2.earn.limits.maxSeriesUnit = '1';
+  assert.match(refusal(earnTypo).message, /Unrecognized key\(s\) in object: 'maxSeriesUnit'/);
+
+  const earnWide = shipped();
+  earnWide.v2.earn.limits.maxSeriesUnits = (2n ** 64n).toString();
+  assert.match(refusal(earnWide).message, /v2\.earn\.limits\.maxSeriesUnits.*does not fit uint64/);
+});
+
+test('shared.safes.admin and v2.bots.guardian are read for the guardian mode (post-lock check); absent is null', () => {
+  const tier1 = JSON.parse(readFileSync(TIER1, 'utf8'));
+  const registry = parseV2Registry(tier1);
+  assert.equal(registry.adminSafe, getAddress(tier1.shared.safes.admin));
+  assert.equal(registry.guardianBot, getAddress(tier1.v2.bots.guardian));
+  const bare = structuredClone(tier1);
+  delete bare.shared.safes;
+  delete bare.v2.bots;
+  const none = parseV2Registry(bare);
+  assert.equal(none.adminSafe, null);
+  assert.equal(none.guardianBot, null);
+  const bad = structuredClone(tier1);
+  bad.v2.bots.guardian = '0x1234';
+  assert.throws(() => parseV2Registry(bad), /bots/);
 });

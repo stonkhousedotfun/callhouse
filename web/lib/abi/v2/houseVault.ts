@@ -82,6 +82,11 @@ export const houseVaultAbi = [
         "name": "symbol_",
         "type": "string",
         "internalType": "string"
+      },
+      {
+        "name": "weekly_",
+        "type": "bool",
+        "internalType": "bool"
       }
     ],
     "stateMutability": "nonpayable"
@@ -108,6 +113,19 @@ export const houseVaultAbi = [
         "name": "",
         "type": "uint256",
         "internalType": "uint256"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "MIN_ASK_BPS_OF_SPOT",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "uint16",
+        "internalType": "uint16"
       }
     ],
     "stateMutability": "view"
@@ -324,7 +342,23 @@ export const houseVaultAbi = [
     "type": "function",
     "name": "claim",
     "inputs": [],
-    "outputs": [],
+    "outputs": [
+      {
+        "name": "shares",
+        "type": "uint256",
+        "internalType": "uint256"
+      },
+      {
+        "name": "usdgAmount",
+        "type": "uint256",
+        "internalType": "uint256"
+      },
+      {
+        "name": "stockAmount",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ],
     "stateMutability": "nonpayable"
   },
   {
@@ -333,6 +367,35 @@ export const houseVaultAbi = [
     "inputs": [],
     "outputs": [],
     "stateMutability": "nonpayable"
+  },
+  {
+    "type": "function",
+    "name": "claimable",
+    "inputs": [
+      {
+        "name": "account",
+        "type": "address",
+        "internalType": "address"
+      }
+    ],
+    "outputs": [
+      {
+        "name": "shares",
+        "type": "uint256",
+        "internalType": "uint256"
+      },
+      {
+        "name": "usdgAmount",
+        "type": "uint256",
+        "internalType": "uint256"
+      },
+      {
+        "name": "stockAmount",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ],
+    "stateMutability": "view"
   },
   {
     "type": "function",
@@ -377,6 +440,30 @@ export const houseVaultAbi = [
       }
     ],
     "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "depositNow",
+    "inputs": [
+      {
+        "name": "usdgAmount",
+        "type": "uint256",
+        "internalType": "uint256"
+      },
+      {
+        "name": "minShares",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ],
+    "outputs": [
+      {
+        "name": "shares",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ],
+    "stateMutability": "nonpayable"
   },
   {
     "type": "function",
@@ -447,6 +534,80 @@ export const houseVaultAbi = [
         "name": "",
         "type": "uint64",
         "internalType": "uint64"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "epochPerformanceFeeBps",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "uint16",
+        "internalType": "uint16"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "epochRates",
+    "inputs": [
+      {
+        "name": "epoch",
+        "type": "uint64",
+        "internalType": "uint64"
+      }
+    ],
+    "outputs": [
+      {
+        "name": "",
+        "type": "tuple",
+        "internalType": "struct HouseVault.EpochRates",
+        "components": [
+          {
+            "name": "price",
+            "type": "uint128",
+            "internalType": "uint128"
+          },
+          {
+            "name": "depositRefused",
+            "type": "bool",
+            "internalType": "bool"
+          },
+          {
+            "name": "depositValue",
+            "type": "uint256",
+            "internalType": "uint256"
+          },
+          {
+            "name": "depositShares",
+            "type": "uint256",
+            "internalType": "uint256"
+          },
+          {
+            "name": "depositCount",
+            "type": "uint256",
+            "internalType": "uint256"
+          },
+          {
+            "name": "withdrawShares",
+            "type": "uint256",
+            "internalType": "uint256"
+          },
+          {
+            "name": "withdrawUsdg",
+            "type": "uint256",
+            "internalType": "uint256"
+          },
+          {
+            "name": "withdrawStock",
+            "type": "uint256",
+            "internalType": "uint256"
+          }
+        ]
       }
     ],
     "stateMutability": "view"
@@ -627,22 +788,22 @@ export const houseVaultAbi = [
     "name": "onERC1155BatchReceived",
     "inputs": [
       {
-        "name": "",
+        "name": "operator",
         "type": "address",
         "internalType": "address"
       },
       {
-        "name": "",
+        "name": "from",
         "type": "address",
         "internalType": "address"
       },
       {
-        "name": "",
+        "name": "ids",
         "type": "uint256[]",
         "internalType": "uint256[]"
       },
       {
-        "name": "",
+        "name": "values",
         "type": "uint256[]",
         "internalType": "uint256[]"
       },
@@ -659,29 +820,29 @@ export const houseVaultAbi = [
         "internalType": "bytes4"
       }
     ],
-    "stateMutability": "view"
+    "stateMutability": "nonpayable"
   },
   {
     "type": "function",
     "name": "onERC1155Received",
     "inputs": [
       {
-        "name": "",
+        "name": "operator",
         "type": "address",
         "internalType": "address"
       },
       {
-        "name": "",
+        "name": "from",
         "type": "address",
         "internalType": "address"
       },
       {
-        "name": "",
+        "name": "id",
         "type": "uint256",
         "internalType": "uint256"
       },
       {
-        "name": "",
+        "name": "value",
         "type": "uint256",
         "internalType": "uint256"
       },
@@ -698,7 +859,7 @@ export const houseVaultAbi = [
         "internalType": "bytes4"
       }
     ],
-    "stateMutability": "view"
+    "stateMutability": "nonpayable"
   },
   {
     "type": "function",
@@ -791,6 +952,19 @@ export const houseVaultAbi = [
   },
   {
     "type": "function",
+    "name": "pendingDepositCount",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
     "name": "pendingDepositStock",
     "inputs": [],
     "outputs": [
@@ -843,6 +1017,32 @@ export const houseVaultAbi = [
   },
   {
     "type": "function",
+    "name": "performanceFeeOwed",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "pinnedBoundary",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "uint40",
+        "internalType": "uint40"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
     "name": "place",
     "inputs": [
       {
@@ -879,6 +1079,215 @@ export const houseVaultAbi = [
       }
     ],
     "stateMutability": "nonpayable"
+  },
+  {
+    "type": "function",
+    "name": "previewBoundary",
+    "inputs": [
+      {
+        "name": "price",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ],
+    "outputs": [
+      {
+        "name": "b",
+        "type": "tuple",
+        "internalType": "struct HouseVault.Boundary",
+        "components": [
+          {
+            "name": "navBefore",
+            "type": "uint256",
+            "internalType": "uint256"
+          },
+          {
+            "name": "fee",
+            "type": "uint256",
+            "internalType": "uint256"
+          },
+          {
+            "name": "feeDue",
+            "type": "uint256",
+            "internalType": "uint256"
+          },
+          {
+            "name": "feePull",
+            "type": "uint256",
+            "internalType": "uint256"
+          },
+          {
+            "name": "feePaid",
+            "type": "uint256",
+            "internalType": "uint256"
+          },
+          {
+            "name": "feeOwedAfter",
+            "type": "uint256",
+            "internalType": "uint256"
+          },
+          {
+            "name": "withdrawn",
+            "type": "bool",
+            "internalType": "bool"
+          },
+          {
+            "name": "withdrawShares",
+            "type": "uint256",
+            "internalType": "uint256"
+          },
+          {
+            "name": "withdrawUsdg",
+            "type": "uint256",
+            "internalType": "uint256"
+          },
+          {
+            "name": "withdrawStock",
+            "type": "uint256",
+            "internalType": "uint256"
+          },
+          {
+            "name": "depositBatch",
+            "type": "bool",
+            "internalType": "bool"
+          },
+          {
+            "name": "firstMint",
+            "type": "bool",
+            "internalType": "bool"
+          },
+          {
+            "name": "depositUsdg",
+            "type": "uint256",
+            "internalType": "uint256"
+          },
+          {
+            "name": "depositStock",
+            "type": "uint256",
+            "internalType": "uint256"
+          },
+          {
+            "name": "depositValue",
+            "type": "uint256",
+            "internalType": "uint256"
+          },
+          {
+            "name": "depositCount",
+            "type": "uint256",
+            "internalType": "uint256"
+          },
+          {
+            "name": "minted",
+            "type": "uint256",
+            "internalType": "uint256"
+          },
+          {
+            "name": "depositRefused",
+            "type": "bool",
+            "internalType": "bool"
+          },
+          {
+            "name": "owedUsdgAfter",
+            "type": "uint256",
+            "internalType": "uint256"
+          },
+          {
+            "name": "owedStockAfter",
+            "type": "uint256",
+            "internalType": "uint256"
+          },
+          {
+            "name": "reservePullUsdg",
+            "type": "uint256",
+            "internalType": "uint256"
+          },
+          {
+            "name": "reservePullStock",
+            "type": "uint256",
+            "internalType": "uint256"
+          },
+          {
+            "name": "supplyAfter",
+            "type": "uint256",
+            "internalType": "uint256"
+          },
+          {
+            "name": "navAfter",
+            "type": "uint256",
+            "internalType": "uint256"
+          },
+          {
+            "name": "markAfter",
+            "type": "uint256",
+            "internalType": "uint256"
+          }
+        ]
+      },
+      {
+        "name": "exact",
+        "type": "bool",
+        "internalType": "bool"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "previewClaim",
+    "inputs": [
+      {
+        "name": "account",
+        "type": "address",
+        "internalType": "address"
+      },
+      {
+        "name": "price",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ],
+    "outputs": [
+      {
+        "name": "shares",
+        "type": "uint256",
+        "internalType": "uint256"
+      },
+      {
+        "name": "usdgAmount",
+        "type": "uint256",
+        "internalType": "uint256"
+      },
+      {
+        "name": "stockAmount",
+        "type": "uint256",
+        "internalType": "uint256"
+      },
+      {
+        "name": "exact",
+        "type": "bool",
+        "internalType": "bool"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "previewDepositNow",
+    "inputs": [
+      {
+        "name": "usdgAmount",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ],
+    "outputs": [
+      {
+        "name": "shares",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ],
+    "stateMutability": "view"
   },
   {
     "type": "function",
@@ -1091,6 +1500,19 @@ export const houseVaultAbi = [
   },
   {
     "type": "function",
+    "name": "setPayoutInKind",
+    "inputs": [
+      {
+        "name": "inKind",
+        "type": "bool",
+        "internalType": "bool"
+      }
+    ],
+    "outputs": [],
+    "stateMutability": "nonpayable"
+  },
+  {
+    "type": "function",
     "name": "setPerformanceFeeBps",
     "inputs": [
       {
@@ -1126,6 +1548,19 @@ export const houseVaultAbi = [
     "inputs": [
       {
         "name": "paused",
+        "type": "bool",
+        "internalType": "bool"
+      }
+    ],
+    "outputs": [],
+    "stateMutability": "nonpayable"
+  },
+  {
+    "type": "function",
+    "name": "setThirdPartyRedeem",
+    "inputs": [
+      {
+        "name": "allowed",
         "type": "bool",
         "internalType": "bool"
       }
@@ -1274,6 +1709,51 @@ export const houseVaultAbi = [
   },
   {
     "type": "function",
+    "name": "tightenLimits",
+    "inputs": [
+      {
+        "name": "limits_",
+        "type": "tuple",
+        "internalType": "struct HouseVault.Limits",
+        "components": [
+          {
+            "name": "maxSeriesUnits",
+            "type": "uint64",
+            "internalType": "uint64"
+          },
+          {
+            "name": "maxTotalNotional",
+            "type": "uint128",
+            "internalType": "uint128"
+          },
+          {
+            "name": "askToleranceBps",
+            "type": "uint16",
+            "internalType": "uint16"
+          },
+          {
+            "name": "maxBidBpsOfSpot",
+            "type": "uint16",
+            "internalType": "uint16"
+          },
+          {
+            "name": "maxOrderLifetime",
+            "type": "uint32",
+            "internalType": "uint32"
+          },
+          {
+            "name": "maxDailyOutflow",
+            "type": "uint128",
+            "internalType": "uint128"
+          }
+        ]
+      }
+    ],
+    "outputs": [],
+    "stateMutability": "nonpayable"
+  },
+  {
+    "type": "function",
     "name": "totalNotional",
     "inputs": [],
     "outputs": [
@@ -1392,6 +1872,19 @@ export const houseVaultAbi = [
   },
   {
     "type": "function",
+    "name": "weekly",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "bool",
+        "internalType": "bool"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
     "name": "withdrawFromClearinghouse",
     "inputs": [
       {
@@ -1465,6 +1958,25 @@ export const houseVaultAbi = [
         "name": "authority",
         "type": "address",
         "internalType": "address",
+        "indexed": false
+      }
+    ],
+    "anonymous": false
+  },
+  {
+    "type": "event",
+    "name": "BoundaryPinFailed",
+    "inputs": [
+      {
+        "name": "epochEnd",
+        "type": "uint40",
+        "internalType": "uint40",
+        "indexed": true
+      },
+      {
+        "name": "reason",
+        "type": "bytes",
+        "internalType": "bytes",
         "indexed": false
       }
     ],
@@ -1553,6 +2065,93 @@ export const houseVaultAbi = [
         "type": "uint64",
         "internalType": "uint64",
         "indexed": true
+      }
+    ],
+    "anonymous": false
+  },
+  {
+    "type": "event",
+    "name": "DepositedNow",
+    "inputs": [
+      {
+        "name": "account",
+        "type": "address",
+        "internalType": "address",
+        "indexed": true
+      },
+      {
+        "name": "usdgAmount",
+        "type": "uint256",
+        "internalType": "uint256",
+        "indexed": false
+      },
+      {
+        "name": "shares",
+        "type": "uint256",
+        "internalType": "uint256",
+        "indexed": false
+      },
+      {
+        "name": "epochId",
+        "type": "uint64",
+        "internalType": "uint64",
+        "indexed": true
+      }
+    ],
+    "anonymous": false
+  },
+  {
+    "type": "event",
+    "name": "EpochBatchesPriced",
+    "inputs": [
+      {
+        "name": "epochId",
+        "type": "uint64",
+        "internalType": "uint64",
+        "indexed": true
+      },
+      {
+        "name": "depositValue",
+        "type": "uint256",
+        "internalType": "uint256",
+        "indexed": false
+      },
+      {
+        "name": "depositRefused",
+        "type": "bool",
+        "internalType": "bool",
+        "indexed": false
+      },
+      {
+        "name": "withdrawUsdg",
+        "type": "uint256",
+        "internalType": "uint256",
+        "indexed": false
+      },
+      {
+        "name": "withdrawStock",
+        "type": "uint256",
+        "internalType": "uint256",
+        "indexed": false
+      }
+    ],
+    "anonymous": false
+  },
+  {
+    "type": "event",
+    "name": "EpochOpened",
+    "inputs": [
+      {
+        "name": "epochId",
+        "type": "uint64",
+        "internalType": "uint64",
+        "indexed": true
+      },
+      {
+        "name": "epochEnd",
+        "type": "uint40",
+        "internalType": "uint40",
+        "indexed": false
       }
     ],
     "anonymous": false
@@ -1709,12 +2308,56 @@ export const houseVaultAbi = [
   },
   {
     "type": "event",
+    "name": "PerformanceFeeBpsApplied",
+    "inputs": [
+      {
+        "name": "bps",
+        "type": "uint16",
+        "internalType": "uint16",
+        "indexed": false
+      },
+      {
+        "name": "epochId",
+        "type": "uint64",
+        "internalType": "uint64",
+        "indexed": false
+      }
+    ],
+    "anonymous": false
+  },
+  {
+    "type": "event",
     "name": "PerformanceFeeBpsSet",
     "inputs": [
       {
         "name": "bps",
         "type": "uint16",
         "internalType": "uint16",
+        "indexed": false
+      }
+    ],
+    "anonymous": false
+  },
+  {
+    "type": "event",
+    "name": "PerformanceFeePaid",
+    "inputs": [
+      {
+        "name": "epochId",
+        "type": "uint64",
+        "internalType": "uint64",
+        "indexed": true
+      },
+      {
+        "name": "paid",
+        "type": "uint256",
+        "internalType": "uint256",
+        "indexed": false
+      },
+      {
+        "name": "owed",
+        "type": "uint256",
+        "internalType": "uint256",
         "indexed": false
       }
     ],
@@ -1973,6 +2616,22 @@ export const houseVaultAbi = [
   },
   {
     "type": "error",
+    "name": "FeeAboveMax",
+    "inputs": [
+      {
+        "name": "fee",
+        "type": "uint256",
+        "internalType": "uint256"
+      },
+      {
+        "name": "max",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ]
+  },
+  {
+    "type": "error",
     "name": "InsufficientCollateral",
     "inputs": [
       {
@@ -2083,6 +2742,17 @@ export const houseVaultAbi = [
   },
   {
     "type": "error",
+    "name": "AlreadyListed",
+    "inputs": [
+      {
+        "name": "asset",
+        "type": "address",
+        "internalType": "address"
+      }
+    ]
+  },
+  {
+    "type": "error",
     "name": "AlreadySettled",
     "inputs": []
   },
@@ -2143,22 +2813,6 @@ export const houseVaultAbi = [
     "type": "error",
     "name": "DeadlinePassed",
     "inputs": []
-  },
-  {
-    "type": "error",
-    "name": "FeeAboveMax",
-    "inputs": [
-      {
-        "name": "fee",
-        "type": "uint256",
-        "internalType": "uint256"
-      },
-      {
-        "name": "max",
-        "type": "uint256",
-        "internalType": "uint256"
-      }
-    ]
   },
   {
     "type": "error",

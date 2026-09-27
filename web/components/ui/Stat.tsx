@@ -2,8 +2,10 @@ import type { ReactNode } from "react";
 
 import { cn } from "@/lib/cn";
 
+import { Panel } from "./Panel";
+
 /**
- * One headline figure: a small label, the value in Geist Mono, and a line under it. The app's
+ * One headline figure: a small label, the value in JetBrains Mono, and a line under it. The app's
  * counterpart of the site's <Figure>, sized for a dashboard ("Collateral 1.0600 NVDA").
  *
  *   <Stat label="Shares" value={fmtAsset(v.totalSupply)} unit="cNVDA" sub="1.000000 NVDA per share" />
@@ -12,9 +14,9 @@ import { cn } from "@/lib/cn";
  * `tone` colours the value only. `mono={false}` when the value is words ("open").
  *
  * The unit is a smaller, muted <small> after a space, exactly as the site's Figure renders it, so
- * the value's text reads "1.0600 NVDA" to a screen reader and to the W-13 run alike.
+ * the value's text reads "1.0600 NVDA" to a screen reader and to the run alike.
  *
- * TEST HOOKS: `data-slot` stat / stat-label / stat-value / stat-sub. W-13 reads figures by them.
+ * TEST HOOKS: `data-slot` stat / stat-label / stat-value / stat-sub. The fork acceptance run reads figures by them.
  */
 export type StatTone = "ink" | "accent" | "usdg" | "warn" | "danger";
 
@@ -69,5 +71,26 @@ export function Stat({ label, value, unit, sub, tone = "ink", size = "md", mono 
         </div>
       ) : null}
     </div>
+  );
+}
+
+/**
+ * A Stat in its own card, with an optional action slot under it: the Portfolio
+ * tiles (Realised P&L, Net maker premium, Fees paid, Fill rebates) each carry a "View rows" link to the ledger rows
+ * the figure is summed from, and the Wins tiles carry none.
+ *
+ *   <StatTile label="Fees paid" value="0.00" unit="USDG" action={<Button size="sm" variant="ghost" href="#fees">View rows</Button>} />
+ *
+ * The tile is a Panel, so it keeps the `card` test hook; the figure inside keeps the Stat hooks, and the action sits
+ * in `stat-tile-action`.
+ */
+export type StatTileProps = StatProps & { action?: ReactNode };
+
+export function StatTile({ action, className, ...stat }: StatTileProps) {
+  return (
+    <Panel pad="sm" data-tile="stat" className={cn("flex flex-col justify-between gap-4", className)}>
+      <Stat {...stat} />
+      {action ? <div data-slot="stat-tile-action">{action}</div> : null}
+    </Panel>
   );
 }

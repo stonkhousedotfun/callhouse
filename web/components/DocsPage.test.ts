@@ -12,9 +12,17 @@ describe("the docs entry page", () => {
     vi.stubEnv("NEXT_PUBLIC_V2", "1");
     const html = renderToStaticMarkup(createElement(DocsPage));
     expect(html).toContain("Current v2");
+    // Earn is the lending vault (/earn); selling options on your own Stock Tokens is Sell options (/sell).
     expect(html).toContain('href="/earn"');
+    expect(html).toContain('href="/sell"');
+    expect(html).toContain("Deposit USDG into the Earn vault. It&#x27;s lent out for interest.");
+    expect(html).not.toContain("In Earn, lock Stock Tokens");
     expect(html).toContain('href="/portfolio"');
-    expect(html).toContain("Expiry does not itself complete settlement");
+    // The settle step is one short line now; it still says expiry alone does not settle a series.
+    expect(html).toContain("After expiry, a separate on-chain step settles the series");
+    // The seller fees are on-chain settings (OrderBook setFeeParams), so the page says "currently".
+    expect(html).toContain("A first sale currently pays 5% of the premium; a resale currently pays nothing. Fees can change after a scheduled notice.");
+    expect(html).not.toContain("A first sale pays 5%");
     expect(html).toContain("Legacy v1 documentation");
     expect(html).toContain("Legacy v1 accounts and calls");
     expect(html).toContain('href="/legacy/nvda/account"');
@@ -34,6 +42,7 @@ describe("the docs entry page", () => {
     expect(html).toContain("The live market");
     expect(html).not.toContain("Legacy v1");
     expect(html).not.toContain('href="/earn"');
+    expect(html).not.toContain('href="/sell"');
 
     const footer = renderToStaticMarkup(createElement(Footer));
     expect(footer).toContain("docs.stonkhouse.fun");

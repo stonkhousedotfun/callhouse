@@ -46,7 +46,7 @@ const { describeError, revertName } = await import('./roll.js');
 
 /**
  * Every custom error in contracts/out/{Vault,SeaportOrderLib,ValoremLib}.json, as signatures,
- * generated 2026-09-13 from the write-on-fill redesign at ca0e985 (92 unique; Policy's are all
+ * generated 2026-09-13 from the write-on-fill redesign (92 unique; Policy's are all
  * inside Vault.json). SeaportOrderLib and ValoremLib are linked libraries, so their reverts
  * surface through the vault's calls; a decoder that only knew Vault.json's 56 would print
  * `BadZone` or `WriteReturnedWrongClaim` as an opaque selector.

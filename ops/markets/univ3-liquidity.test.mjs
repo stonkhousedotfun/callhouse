@@ -1,10 +1,10 @@
 /**
- * ops/markets/univ3-liquidity.test.mjs — T-216-O8-UNIV3-LIQUIDITY-INPUT-SET.
+ * ops/markets/univ3-liquidity.test.mjs — the Uniswap v3 liquidity input set.
  *
  *   node --test ops/markets/univ3-liquidity.test.mjs
  *
  * The green — all 13 rows reconcile — is the easy half and proves almost nothing on its own. What
- * these tests are really for is the two reds the task contract names: an ALTERED perClose value and
+ * these tests are really for is the two reds that matter: an ALTERED perClose value and
  * a DELETED perClose entry must each be caught, by ticker. A checker that sees the first and not the
  * second is the defect class this build has hit eleven times, and it is the likelier of the two to
  * ship, because recomputing from `perClose` catches a wrong number for free while a missing one
@@ -47,7 +47,7 @@ test("coverage is exactly the 13 measured tickers, by name", () => {
 test("a market outside the list is UNMEASURED, which is not a zero and not a default", () => {
   const d = load();
   for (const t of EXPECTED) assert.equal(isMeasured(d, t), true);
-  // Every other Tier-1 market OWN8-06 might register.
+  // Every other Tier-1 market the listing might register.
   for (const t of ["AMD", "CRWV", "ORCL", "SNDK", "META", "NFLX"]) {
     assert.equal(isMeasured(d, t), false, `${t} must be unmeasured`);
   }
@@ -138,9 +138,11 @@ test("the dataset carries its own provenance and says it is a snapshot", () => {
   assert.equal(d.asOf, "2026-09-17");
   assert.equal(d.isSnapshot, true);
   assert.match(d.snapshotWarning, /DOES NOT REFRESH ITSELF/);
-  assert.match(d.snapshotWarning, /owner RPC gate/);
-  assert.match(d.source.recon, /VENUE-RECON-2026-09-17\.md section 5\.1/);
-  assert.ok(d.source.originalPath.endsWith("16-minliquidity.json"));
+  assert.match(d.snapshotWarning, /archive RPC for historical reads/);
+  assert.match(d.source.recon, /venue recon report of 2026-09-17, section 5\.1/);
+  // The original local path of 16-minliquidity.json is replaced with this placeholder on purpose, and
+  // originalSha256 below still identifies the file.
+  assert.equal(d.source.originalPath, "(local measurement run)");
   assert.match(d.source.originalSha256, /^[0-9a-f]{64}$/);
   assert.equal(d.closes.length, 11);
   assert.equal(d.closes[0], "2026-09-17");
@@ -170,7 +172,7 @@ test("the derivation reads the upstream series rather than echoing the dataset b
 });
 
 test("floors are NOT derived here and the registry is NOT touched", () => {
-  // T-200 owns the floors. This row lands data only, and `floorSet` is the value the registry
+  // The floors are derived elsewhere. This lands data only, and `floorSet` is the value the registry
   // already carried at recon time — context for the fails count, never a recommendation.
   const d = load();
   const src = readFileSync(new URL("./univ3-liquidity.mjs", import.meta.url), "utf8");
@@ -180,7 +182,7 @@ test("floors are NOT derived here and the registry is NOT touched", () => {
 });
 
 /*//////////////////////////////////////////////////////////////
-        THE FRESHNESS GATE (T-234) — staleness must be VISIBLE
+        THE FRESHNESS GATE — staleness must be VISIBLE
 //////////////////////////////////////////////////////////////*/
 
 /**

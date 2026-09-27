@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // Regenerate web/lib/markets.generated.ts from the market registry, ops/markets/tier1.json.
 //
-// WHY THIS EXISTS: the registry is the one list of markets Stonkhouse runs (ops/markets/README.md),
+// WHY THIS EXISTS: the registry is the one list of markets Stonkhouse runs,
 // and the app must not hard-code a ticker, a token or a factory anywhere. But the app is built in
 // a Docker image whose build context is the REPO ROOT (the workspace install needs the lockfile)
 // with `ops/` excluded by the root .dockerignore, and web/Dockerfile copies only `scripts/` and
@@ -18,7 +18,7 @@
 // under its wave), the pricing mode and the Cboe root. The per-account deposit cap in USD rides
 // along as registry context for the landing and the docs; no page renders it today (the account
 // page shows the factory's own on-chain cap, which is the one that binds), so a cap change in the
-// registry needs no rebuild until something does. `v1FrozenAt` (unix seconds of the owner's v1
+// registry needs no rebuild until something does. `v1FrozenAt` (unix seconds of the admin's v1
 // freeze, null until then) is copied for the legacy v1 banner, which prints the date only when the
 // registry has one. Keeper knobs, verification records and keeper addresses stay in ops/: the
 // browser has no use for them and a smaller generated file is a smaller thing to review.
@@ -50,21 +50,22 @@ import { existsSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
-// T-OP-138. The six EXTERNAL v2 contracts' key list (houseVault, houseVaultFactory, hedger,
-// rewardsDistributorLender, earnVault, stockVenueAdapter) is imported from the builder that defined it
-// (T-OP-114), never re-typed here: a second copy agrees with the first right up to the day one of them
+// The EXTERNAL v2 contracts' key list (houseVault, houseVaultFactory, hedger,
+// rewardsDistributorLender, earnVault, stockVenueAdapter, and stockZap, which web/lib/v2/config.ts
+// reads from V2_CONTRACTS) is imported from the builder that defined it
+// never re-typed here: a second copy agrees with the first right up to the day one of them
 // changes. This script already reads ops/markets/tier1.json from the same checkout, so ops/ is present
 // wherever this runs (it is the Docker build that lacks ops/, and the Docker build never runs this
 // script). Importing the module runs no build: its `main()` is guarded by `isMain`.
-// T-OP-156. The per-market `v2` key set is imported the same way: this file's own copy (V2_MARKET_NAMES, twelve
-// names) threw on `markets[].v2.houseVault` the day the builder gained it, exactly the shape T-OP-138 removed for
+// The per-market `v2` key set is imported the same way: this file's own copy (V2_MARKET_NAMES, twelve
+// names) threw on `markets[].v2.houseVault` the day the builder gained it, exactly the shape removed for
 // the top-level block. One list, owned by the builder that closes the block.
-import { V2_EXTERNAL_CONTRACT_NAMES, V2_MARKET_KEYS } from "../../ops/markets/build-markets.mjs";
+import { CHAINLINK_NO_BAND, HOUSE_MARKET_KEYS, V2_EXTERNAL_CONTRACT_NAMES, V2_MARKET_KEYS } from "../../ops/markets/build-markets.mjs";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const pkgRoot = path.resolve(here, "..");
 const defaultRegistry = path.resolve(pkgRoot, "..", "ops", "markets", "tier1.json");
-// `--out <path>` (T-OP-138) writes the rendered file somewhere other than lib/markets.generated.ts: for a
+// `--out <path>` writes the rendered file somewhere other than lib/markets.generated.ts: for a
 // rehearsal against a scratch registry, and for web/scripts/gen-markets.test.mjs, which must never write
 // into the checkout. The committed file always comes from a run without it.
 const out = (() => {
@@ -97,9 +98,12 @@ const V2_CONTRACT_NAMES = [
   "autoRoller", "payoutAdapter", "makerVault", "makerRegistry", "rewardsDistributor", "accessManager",
 ];
 const V2_SOURCE_NAMES = ["chainlink", "univ3", "dataStreams"];
+// payoutSlippageBps is the Clearinghouse payout-conversion bound the deploy sets (V2_PAYOUT_SLIPPAGE_BPS).
+// Known so the exact-key check passes. lib/markets.generated.ts copies v2.fees and v2.defaults whole (V2_FEES,
+// V2_DEFAULTS), so it carries this and the four new defaults keys; nothing in the app reads them.
 const V2_FEE_NAMES = [
   "premiumFeeBps", "mintFeePpm", "allowRent", "resaleFeeBps", "takerFeeFlat",
-  "takerFeeCapBps", "makerRebateBps", "exerciseFeeBps",
+  "takerFeeCapBps", "makerRebateBps", "exerciseFeeBps", "payoutSlippageBps",
 ];
 const PAYOUT_ROUTE_NAMES = {
   v3: ["venue", "fee"],
@@ -108,6 +112,10 @@ const PAYOUT_ROUTE_NAMES = {
 const ADDRESS = /^0x[0-9a-fA-F]{40}$/;
 const BYTES32 = /^0x[0-9a-fA-F]{64}$/;
 const DECIMAL = /^(0|[1-9][0-9]*)$/;
+/** `setBand`'s bound on each side of a Chainlink band (uint128), as ops/markets/build-markets.mjs checks it. */
+const UINT128_MAX = (1n << 128n) - 1n;
+/** The keys of a `v2.chainlinkBand` object, in the order the registry writes them. */
+const CHAINLINK_BAND_KEYS = ["minPrice", "maxPrice"];
 const TICKER = /^[A-Z0-9.]{1,10}$/;
 const isObject = (v) => v !== null && typeof v === "object" && !Array.isArray(v);
 const nullOrAddress = (v) => v === null || (typeof v === "string" && ADDRESS.test(v));
@@ -143,7 +151,7 @@ function assertV2Top(v2) {
     throw new Error(`${where}.deployBlock is neither null nor a block number`);
   }
   if (!isObject(v2.contracts) || !isObject(v2.contracts.sources)) throw new Error(`${where}.contracts / .contracts.sources missing`);
-  // T-OP-138: the core eleven and `sources` are exact; an external key is known only when present (the
+  // The core eleven and `sources` are exact; an external key is known only when present (the
   // builder's rule), and is then held to null-or-address like the rest. Any other name still throws, and
   // V2_CONTRACT_NAMES stays eleven: this file's V2_CONTRACTS literal is `v2.contracts` verbatim, so an
   // external the registry carries is copied through, and one it does not carry is simply absent.
@@ -230,11 +238,18 @@ function assertV2Market(m, v2) {
   }
   const payoutRoute = assertPayoutRoute(b.payoutRoute, `${where}.payoutRoute`);
   if (!isObject(b.overrides)) throw new Error(`${where}.overrides is not an object`);
-  // T-OP-156: this market's HouseVault (owner ruling 2026-09-22, two vaults at launch), written back per ticker by
+  // This market's HouseVault (two vaults at launch), written back per ticker by
   // the broadcast's externals stage; null until then and for ever on a market outside the launch set. Shape only
   // here -- the launch-set rule, the zero-address refusal and the EIP-55 case are build-markets.mjs's (its --check
   // is the registry gate); this file copies what that gate accepted.
   if (!nullOrAddress(b.houseVault)) throw new Error(`${where}.houseVault is neither null nor an address`);
+  // This market's vault of each kind, { weekly, daily } (the builder's HOUSE_MARKET_KEYS), each null until
+  // written back. Shape only, as for houseVault above: weekly === houseVault, the daily-needs-a-pool rule and the
+  // zero-address refusal are build-markets.mjs --check's. The block was accepted by assertExactKeys but
+  // left out of the returned row, so markets.generated.ts dropped it and --check agreed with itself.
+  if (!isObject(b.house)) throw new Error(`${where}.house is not an object of { ${HOUSE_MARKET_KEYS.join(", ")} }`);
+  assertExactKeys(b.house, HOUSE_MARKET_KEYS, `${where}.house`);
+  for (const k of HOUSE_MARKET_KEYS) if (!nullOrAddress(b.house[k])) throw new Error(`${where}.house.${k} is neither null nor an address`);
   if (!(b.registeredAt === null || (Number.isSafeInteger(b.registeredAt) && b.registeredAt > 0))) throw new Error(`${where}.registeredAt is neither null nor unix seconds`);
   if (!(b.registerTx === null || (typeof b.registerTx === "string" && BYTES32.test(b.registerTx)))) throw new Error(`${where}.registerTx is neither null nor a transaction hash`);
   // A live v2 market with no clearinghouse would render a ticket that writes to address null.
@@ -244,8 +259,32 @@ function assertV2Market(m, v2) {
   return {
     status: b.status, wave: b.wave, strikeTick: b.strikeTick, puts: b.puts, mintFeePpm: b.mintFeePpm, univ3Pool: b.univ3Pool,
     univ3MinLiquidity: b.univ3MinLiquidity, dataStreamsFeedId: b.dataStreamsFeedId, payoutRoute, overrides: b.overrides,
-    houseVault: b.houseVault, registeredAt: b.registeredAt, registerTx: b.registerTx,
+    houseVault: b.houseVault, house: Object.fromEntries(HOUSE_MARKET_KEYS.map((k) => [k, b.house[k]])),
+    registeredAt: b.registeredAt, registerTx: b.registerTx,
+    // Accepted by assertExactKeys (V2_MARKET_KEYS lists it) and, like `house`,
+    // dropped from this return, so markets.generated.ts lost it and --check agreed with itself.
+    chainlinkBand: assertChainlinkBand(b.chainlinkBand, `${where}.chainlinkBand`),
   };
+}
+
+/**
+ * `v2.chainlinkBand`: the market's intended Chainlink price band, or the builder's explicit no-band marker
+ * (CHAINLINK_NO_BAND, imported, never re-typed). Shape only, the two forms ops/markets/build-markets.mjs accepts: an
+ * object of exactly { minPrice, maxPrice }, each a uint128 decimal string above 0, maxPrice above minPrice; or the
+ * marker. Which band a ticker must carry is build-markets.mjs --check's (validateChainlinkBands), not this file's.
+ */
+function assertChainlinkBand(band, where) {
+  if (band === CHAINLINK_NO_BAND) return band;
+  if (!isObject(band)) throw new Error(`${where} is neither ${JSON.stringify(CHAINLINK_NO_BAND)} nor { ${CHAINLINK_BAND_KEYS.join(", ")} }`);
+  assertExactKeys(band, CHAINLINK_BAND_KEYS, where);
+  for (const k of CHAINLINK_BAND_KEYS) {
+    const v = band[k];
+    if (!(typeof v === "string" && DECIMAL.test(v) && BigInt(v) > 0n && BigInt(v) <= UINT128_MAX)) {
+      throw new Error(`${where}.${k} ${JSON.stringify(v)} is not a uint128 decimal string above 0`);
+    }
+  }
+  if (BigInt(band.maxPrice) <= BigInt(band.minPrice)) throw new Error(`${where}.maxPrice is not above minPrice`);
+  return { minPrice: band.minPrice, maxPrice: band.maxPrice };
 }
 
 /** Every check here is one the app would otherwise discover as a broken page. Fail the generate. */
@@ -314,10 +353,10 @@ for (const m of markets) {
 }
 
 /**
- * T-OP-099. The registry's `launchSet` block: the owner's launch set (2026-09-21: NVDA and SPCX), AUTHORITATIVE and
+ * The registry's `launchSet` block: the launch set (NVDA and SPCX), AUTHORITATIVE and
  * deliberately not derived from `wave` or `status` (the block's own note says why). Rendered so lib/markets.ts can
  * answer "is this market in the launch?" without tier1.json, which the Docker build context does not carry, and so
- * the directory can never promise a market the owner scoped out. Same validation as ops/markets/build-markets.mjs:
+ * the directory can never promise a market the launch scoped out. Same validation as ops/markets/build-markets.mjs:
  * { note, markets }, a non-empty note, a non-empty array of tickers each naming a market here, no duplicates. Missing
  * is an error: a projection without a launch set would either hide every market or promise every market.
  */
@@ -408,7 +447,7 @@ lines.push(
   "/** Market defaults: oracle bounds, strike ladders per tenor, expiries listed ahead. A market's v2.overrides replaces keys of these. */",
   `export const V2_DEFAULTS = ${lit(v2.defaults, "")} as const;`,
   "",
-  "/** The owner's launch set (T-OP-099): the ONLY markets the app may present as launching. Not derived from wave or status; see the note. */",
+  "/** The launch set: the ONLY markets the app may present as launching. Not derived from wave or status; see the note. */",
   `export const LAUNCH_SET = ${lit(launchSet, "")} as const;`,
   "",
 );

@@ -11,9 +11,12 @@ import { writerAccountAbi } from "./abis/writerAccount";
 import { accessManagerAbi } from "./abis/v2/accessManager";
 import { autoRollerAbi } from "./abis/v2/autoRoller";
 import { buybackExecutorAbi } from "./abis/v2/buybackExecutor";
+import { chainlinkFeedSourceAbi } from "./abis/v2/chainlinkFeedSource";
+import { dataStreamsSourceAbi } from "./abis/v2/dataStreamsSource";
 import { earnVaultAbi } from "./abis/v2/earnVault";
 import { houseVaultAbi } from "./abis/v2/houseVault";
 import { houseVaultFactoryAbi } from "./abis/v2/houseVaultFactory";
+import { houseVaultFactoryIndexingAbi } from "./lib/v2/houseVaultEvents";
 import { stockZapAbi } from "./abis/v2/stockZap";
 import { clearinghouseAbi } from "./abis/v2/clearinghouse";
 import { expiryCalendarAbi } from "./abis/v2/expiryCalendar";
@@ -25,11 +28,13 @@ import { orderBookAbi } from "./abis/v2/orderBook";
 import { payoutAdapterAbi } from "./abis/v2/payoutAdapter";
 import { rewardsDistributorAbi } from "./abis/v2/rewardsDistributor";
 import { settlementOracleAbi } from "./abis/v2/settlementOracle";
+import { uniV3TwapSourceAbi } from "./abis/v2/uniV3TwapSource";
 import {
   ASSET,
   CHAIN_ID,
   CLEARINGHOUSE,
   END_BLOCK,
+  ETH_GET_LOGS_BLOCK_RANGE,
   FACTORY,
   PGLITE_DIRECTORY,
   RPC_URL,
@@ -53,11 +58,17 @@ import {
   V2_MAKER_REGISTRY,
   V2_ORDER_BOOK,
   V2_PAYOUT_ROUTER,
+  V2_PRODUCTION,
   V2_ZAP_HELPER,
   V2_REWARDS_DISTRIBUTORS,
   V2_SETTLEMENT_ORACLE,
   V2_START_BLOCK,
 } from "./lib/env";
+import { ethGetLogsBlockRange, maxAddressesPerGetLogs } from "./lib/getLogsRange";
+import { v2AssertProductionHouseFactory, v2HouseVaultSource } from "./lib/v2/houseVaultSource";
+import { houseDiscoveryEvent, houseSourceAnchor, v2KindedHouseFactorySources, type KindedHouseFactorySources } from "./src/v2/houseVaultKind";
+import { v2PriceSources } from "./src/v2/priceSourceRegistry";
+import { v2AssertRegistryClearinghouse } from "./src/v2/registryClearinghouse";
 
 /**
  * Stonkhouse indexer — chain 4663 (Robinhood Chain mainnet). V2 indexes all markets through
@@ -328,29 +339,50 @@ function rewardsDistributorContract(addresses: readonly Address[]) {
   return { RewardsDistributor: { abi: rewardsDistributorAbi, chain, address: [...addresses], startBlock: V2_START_BLOCK!, endBlock: END_BLOCK } };
 }
 
-/** P8-06 House vaults: one factory plus clones discovered from VaultCreated.vault. */
-function houseVaultContracts(factoryAddress: Address) {
+/**
+ * The HouseVaultFactory ABI the configured factory is indexed with: the generated ABI with its
+ * `VaultCreated` swapped for the LEGACY 4-field fragment (lib/v2/houseVaultEvents.ts).
+ *
+ * WHY. A change appended `bool weekly` to `VaultCreated`, which changes the event's topic, and the generated
+ * abis/v2/houseVaultFactory.ts follows the contracts. V2_HOUSE_VAULT_FACTORY is the launch factory
+ * (registry `v2.contracts.houseVaultFactory`), compiled BEFORE kinding: it emits the 4-field event. Indexed
+ * with the generated ABI, `factory()` below would watch a topic that factory never emits, and on any resync
+ * the indexer would discover ZERO House vaults -- while abi.test and eventCoverage stayed green, because they
+ * compare the generated file with ops/abis rather than with the live topic (houseVault.handler.test.ts pins
+ * both topics and this choice). A kinded factory needs the generated event and its own source: that is
+ * HouseVaultFactoryKinded below, addressed from the registry's v2.house.factories, not from env.
+ * Without them a daily factory's VaultCreated was never indexed, so its vaults got
+ * no v2HouseVault row. It is a second source rather than an addition to this ABI because two VaultCreated
+ * overloads make Ponder demand full-signature handler names (ponder utils/abi.js toSafeName).
+ */
+const legacyHouseVaultFactoryAbi = [
+  // An explicit tuple, not a `.filter()` of the generated ABI: a filtered array loses the literal types the
+  // virtual `ponder:registry` event typing is derived from. The source indexes events only; the factory's
+  // two events are both here (eventCoverage compares this list with the export).
+  getAbiItem({ abi: houseVaultFactoryAbi, name: "AuthorityUpdated" }),
+  ...houseVaultFactoryIndexingAbi,
+] as const;
+
+/**
+ * House vaults: the launch factory (HouseVaultFactory, legacy event), the kinded factories
+ * (HouseVaultFactoryKinded), and the vaults (HouseVault). Each registers only when configured, and
+ * lib/registry.ts gates the handlers on the same three decisions.
+ *
+ * The vaults are a plain address list from the generated registry (lib/v2/houseVaultSource.ts says why):
+ * with `factory()` Ponder could bloom-test only the topics, and the HouseVault `Transfer` topic is in almost every
+ * block on 4663, so realtime paid an `eth_getLogs` per block. The factory stays a source so `VaultCreated` still
+ * fires for a vault the registry lacks; the handler raises HOUSE_VAULT_UNREGISTERED for it. A factory the registry
+ * does not name (dev, rehearsal, fork) or a registry with no vault yet keeps `factory()` discovery, and says so here.
+ */
+function houseVaultFactoryContract(factoryAddress: Address) {
   if (V2_HOUSE_START_BLOCK === undefined) {
-    throw new Error("[callhouse/indexer] houseVaultContracts called without V2_HOUSE_START_BLOCK");
+    throw new Error("[callhouse/indexer] houseVaultFactoryContract called without V2_HOUSE_START_BLOCK");
   }
   return {
     HouseVaultFactory: {
-      abi: houseVaultFactoryAbi,
+      abi: legacyHouseVaultFactoryAbi,
       chain,
       address: factoryAddress,
-      startBlock: V2_HOUSE_START_BLOCK,
-      endBlock: END_BLOCK,
-    },
-    HouseVault: {
-      abi: houseVaultAbi,
-      chain,
-      address: factory({
-        address: factoryAddress,
-        event: getAbiItem({ abi: houseVaultFactoryAbi, name: "VaultCreated" }),
-        parameter: "vault",
-        startBlock: V2_HOUSE_START_BLOCK,
-        endBlock: END_BLOCK,
-      }),
       startBlock: V2_HOUSE_START_BLOCK,
       endBlock: END_BLOCK,
     },
@@ -358,11 +390,125 @@ function houseVaultContracts(factoryAddress: Address) {
 }
 
 /**
- * P8-01/P8-02 lending periphery: the Earn vault and the stateless zap helper. Each is a single
+ * The (daily) factories: their own source, with the GENERATED 5-field `VaultCreated`, because the
+ * launch source above watches the legacy topic and these factories never emit it. Addresses and start block come from
+ * the registry's `v2.house.factories` (src/v2/houseVaultKind.ts v2KindedHouseFactorySources), never from env, so a
+ * daily-only registry (`v2.contracts.houseVaultFactory` null, no V2_HOUSE_VAULT_FACTORY) still indexes its vaults.
+ * Both factory events are here, as on the launch source (eventCoverage compares this list with the export).
+ *
+ * (v9). The registry's LAUNCH factory is in this list too whenever the launch source is configured, at
+ * V2_HOUSE_START_BLOCK: the v9 launch factory is compiled after kinding and emits only the 5-field event, which the
+ * launch source never matches. A legacy launch factory never emits it, so the two sources never both match a log.
+ *
+ * And V2_HOUSE_VAULT_FACTORY itself, at V2_HOUSE_START_BLOCK, when the registry names no such House factory
+ * (dev, rehearsal, a fork; any Clearinghouse): a v9 factory there has its vaults discovered by the HouseVault factory()
+ * fallback on the 5-field topic, and without this entry that same event reached no handler, so none of its vaults got
+ * a v2HouseVault row.
+ */
+const kindedHouseVaultFactoryAbi = [
+  getAbiItem({ abi: houseVaultFactoryAbi, name: "AuthorityUpdated" }),
+  getAbiItem({ abi: houseVaultFactoryAbi, name: "VaultCreated" }),
+] as const;
+
+function houseVaultKindedFactoryContract(kinded: KindedHouseFactorySources) {
+  return {
+    HouseVaultFactoryKinded: {
+      abi: kindedHouseVaultFactoryAbi,
+      chain,
+      address: [...kinded.addresses],
+      startBlock: kinded.startBlock,
+      endBlock: END_BLOCK,
+    },
+  };
+}
+
+/**
+ * The HouseVault source, decided from the launch factory when it is configured and otherwise from the kinded one
+ * (houseSourceAnchor). In registry mode the address list is every vault the registry names, weekly and daily alike.
+ * The factory() fallback discovers with the event the anchoring factory emits (houseVaultDiscovery).
+ */
+function houseVaultContract(anchor: NonNullable<ReturnType<typeof houseSourceAnchor>>, kinded: KindedHouseFactorySources | undefined) {
+  const source = v2HouseVaultSource(anchor.factory, anchor.startBlock);
+  if (source.mode === "factory") {
+    console.warn(
+      `[callhouse/indexer] HouseVault source: factory() discovery, not the registry list (${source.reason}). ` +
+        "Every block with an ERC-20 Transfer costs a realtime eth_getLogs in this mode.",
+    );
+  }
+  return {
+    HouseVault: {
+      abi: houseVaultAbi,
+      chain,
+      address: source.mode === "registry" ? [...source.addresses] : houseVaultDiscovery(anchor, kinded),
+      startBlock: source.startBlock,
+      endBlock: END_BLOCK,
+    },
+  };
+}
+
+/**
+ * The factory() fallback's filter. The event is the one the anchoring factory EMITS, decided from the registry
+ * by houseDiscoveryEvent (src/v2/houseVaultKind.ts, tested there): the legacy 4-field topic only for the factory the
+ * registry records as legacy (the v8 weekly launch factory), the generated 5-field topic for the kinded anchor,
+ * a v9 (daily) launch factory and a factory the registry does not name. Earlier every launch anchor used the
+ * legacy topic, so a v9 launch factory in this mode (a fork, a rehearsal, the window before the vault write-back)
+ * discovered zero House vaults. Called only in factory mode: a registry the event form cannot be read from throws there.
+ */
+function houseVaultDiscovery(anchor: NonNullable<ReturnType<typeof houseSourceAnchor>>, kinded: KindedHouseFactorySources | undefined) {
+  if (houseDiscoveryEvent(anchor) === "legacy") {
+    return factory({
+      address: anchor.factory,
+      event: getAbiItem({ abi: legacyHouseVaultFactoryAbi, name: "VaultCreated" }),
+      parameter: "vault",
+      startBlock: anchor.startBlock,
+      endBlock: END_BLOCK,
+    });
+  }
+  return factory({
+    address: anchor.kind === "kinded" ? [...(kinded?.addresses ?? [anchor.factory])] : anchor.factory,
+    event: getAbiItem({ abi: kindedHouseVaultFactoryAbi, name: "VaultCreated" }),
+    parameter: "vault",
+    startBlock: anchor.startBlock,
+    endBlock: END_BLOCK,
+  });
+}
+
+/**
+ * Before any House source: a V2_PRODUCTION=1 process whose V2_HOUSE_VAULT_FACTORY is not the baked registry's
+ * v2.contracts.houseVaultFactory refuses boot by name (HOUSE_FACTORY_NOT_REGISTRY). Without this, the v9 env on an image
+ * built before the registry regen made the launch factory "another deployment": KINDED_HOUSE left it out (the registry's
+ * Clearinghouse is not env's), and houseVaultContract's factory() fallback watched the legacy topic the v9 factory never
+ * emits, so zero House vaults were found while /v2/health/house-registry said ok (on a v9 fork). The fix makes
+ * that fallback watch the 5-field topic (houseVaultDiscovery), and put a factory the registry does not name
+ * into KINDED_HOUSE, so its VaultCreated reaches its handler; the refusal stays, since the vault list is still not the
+ * registry's and factory() mode pays an eth_getLogs per block.
+ */
+v2AssertProductionHouseFactory(V2_PRODUCTION, V2_HOUSE_VAULT_FACTORY);
+
+/**
+ * Also before any source: a V2_PRODUCTION=1 process whose V2_CLEARINGHOUSE is not the baked registry's
+ * v2.contracts.clearinghouse refuses boot by name (REGISTRY_CLEARINGHOUSE_MISMATCH). KINDED_HOUSE and PRICE_SOURCES
+ * below each drop themselves for another Clearinghouse, which is the dev footing and was silent in production: the v9
+ * env on a v8-era image fetched no House vault event and no Chainlink/UniV3/DataStreams source event, with no warning
+ * (on a v9 fork). Outside production it warns and both groups stay absent, as before. After the House
+ * factory check above, so the launch-factory case keeps its own, more specific name.
+ */
+v2AssertRegistryClearinghouse(V2_PRODUCTION, V2_CLEARINGHOUSE);
+
+/**
+ * The same three values lib/registry.ts gates the House handlers on and src/v2/houseVault.ts reads for its alert.
+ * KINDED_HOUSE is undefined unless V2_CLEARINGHOUSE is the registry's own (and it records a daily factory or the launch
+ * source is configured), or V2_HOUSE_VAULT_FACTORY is a factory the registry does not name.
+ */
+const KINDED_HOUSE = v2KindedHouseFactorySources(V2_CLEARINGHOUSE, V2_HOUSE_START_BLOCK, V2_HOUSE_VAULT_FACTORY);
+const HOUSE_ANCHOR = houseSourceAnchor(V2_HOUSE_VAULT_FACTORY, V2_HOUSE_START_BLOCK, KINDED_HOUSE);
+
+/**
+ * Lending periphery: the Earn vault and the stateless zap helper. Each is a single
  * deployed address rather than a factory, so neither needs the `factory()` discovery the House
  * vaults use.
  *
- * X8-06. These sources are the thing that was missing: `src/v2/earn.ts` carried its registrations
+ * These sources are the thing that was missing: `src/v2/earn.ts` carried its registrations
  * as PROSE because registering a handler for a contract this config does not have breaks the
  * virtual `ponder:registry` types for every handler file in the package. The generated ABI modules
  * it was waiting for now exist (`abis/v2/earnVault.ts`, `abis/v2/stockZap.ts`), so the block below
@@ -371,7 +517,7 @@ function houseVaultContracts(factoryAddress: Address) {
  * Both share `V2_EARN_START_BLOCK`, which lib/env.ts already refuses to accept without one of the
  * two addresses and refuses to omit when either is set.
  *
- * T-532 (X8-06A's suspicion, checked). ONE BLOCK FOR TWO CONTRACTS IS SAFE ONLY IN ONE DIRECTION, and
+ * ONE BLOCK FOR TWO CONTRACTS IS SAFE ONLY IN ONE DIRECTION, and
  * nothing here can check the direction. Ponder starts each source at `startBlock`; a source that starts
  * BEFORE its creation block merely backfills empty blocks, a source that starts AFTER it silently drops
  * every log in between and nothing downstream can tell a quiet contract from a late start. So the value
@@ -401,6 +547,27 @@ function stockZapContract(address: Address) {
 }
 
 /**
+ * A change shared price sources. Addresses and the start block come from the compiled registry
+ * (ops/markets/tier1.json v2.contracts.sources and v2.deployBlock), never from env and never typed
+ * here; src/v2/priceSourceRegistry.ts says why the deploy block is a safe start and why a process
+ * indexing another Clearinghouse registers none of them. Each source registers on its own, so a
+ * null registry entry leaves only that one absent.
+ */
+const PRICE_SOURCES = v2PriceSources(V2_CLEARINGHOUSE);
+
+function chainlinkFeedSourceContract(address: Address, startBlock: number) {
+  return { ChainlinkFeedSource: { abi: chainlinkFeedSourceAbi, chain, address, startBlock, endBlock: END_BLOCK } };
+}
+
+function uniV3TwapSourceContract(address: Address, startBlock: number) {
+  return { UniV3TwapSource: { abi: uniV3TwapSourceAbi, chain, address, startBlock, endBlock: END_BLOCK } };
+}
+
+function dataStreamsSourceContract(address: Address, startBlock: number) {
+  return { DataStreamsSource: { abi: dataStreamsSourceAbi, chain, address, startBlock, endBlock: END_BLOCK } };
+}
+
+/**
  * The full set of sources, as the types see it. At runtime a group is present only when its
  * address is set; the cast is what lets `ponder.on("Vault:…")` and `ponder.on("Factory:…")` both
  * type-check in one codebase (the virtual `ponder:registry` types derive from this config), and
@@ -411,8 +578,11 @@ type Contracts = ReturnType<typeof vaultContracts> & ReturnType<typeof factoryCo
   & ReturnType<typeof accessManagerContract> & ReturnType<typeof payoutRouterContract>
   & ReturnType<typeof feeSplitterContract> & ReturnType<typeof buybackExecutorContract>
   & ReturnType<typeof makerVaultContract> & ReturnType<typeof rewardsDistributorContract>
-  & ReturnType<typeof houseVaultContracts>
-  & ReturnType<typeof earnVaultContract> & ReturnType<typeof stockZapContract>;
+  & ReturnType<typeof houseVaultFactoryContract> & ReturnType<typeof houseVaultKindedFactoryContract>
+  & ReturnType<typeof houseVaultContract>
+  & ReturnType<typeof earnVaultContract> & ReturnType<typeof stockZapContract>
+  & ReturnType<typeof chainlinkFeedSourceContract> & ReturnType<typeof uniV3TwapSourceContract>
+  & ReturnType<typeof dataStreamsSourceContract>;
 
 const contracts = {
   ...(VAULT === undefined ? {} : vaultContracts(VAULT)),
@@ -428,10 +598,36 @@ const contracts = {
   ...(V2_REWARDS_DISTRIBUTORS.length === 0 ? {} : rewardsDistributorContract(
     V2_REWARDS_DISTRIBUTORS.map((item) => item.address),
   )),
-  ...(V2_HOUSE_VAULT_FACTORY === undefined ? {} : houseVaultContracts(V2_HOUSE_VAULT_FACTORY)),
+  ...(V2_HOUSE_VAULT_FACTORY === undefined ? {} : houseVaultFactoryContract(V2_HOUSE_VAULT_FACTORY)),
+  ...(KINDED_HOUSE === undefined ? {} : houseVaultKindedFactoryContract(KINDED_HOUSE)),
+  ...(HOUSE_ANCHOR === undefined ? {} : houseVaultContract(HOUSE_ANCHOR, KINDED_HOUSE)),
   ...(V2_EARN_VAULT === undefined ? {} : earnVaultContract(V2_EARN_VAULT)),
   ...(V2_ZAP_HELPER === undefined ? {} : stockZapContract(V2_ZAP_HELPER)),
+  ...(PRICE_SOURCES?.addresses.ChainlinkFeedSource === undefined ? {} : chainlinkFeedSourceContract(
+    PRICE_SOURCES.addresses.ChainlinkFeedSource, PRICE_SOURCES.startBlock,
+  )),
+  ...(PRICE_SOURCES?.addresses.UniV3TwapSource === undefined ? {} : uniV3TwapSourceContract(
+    PRICE_SOURCES.addresses.UniV3TwapSource, PRICE_SOURCES.startBlock,
+  )),
+  ...(PRICE_SOURCES?.addresses.DataStreamsSource === undefined ? {} : dataStreamsSourceContract(
+    PRICE_SOURCES.addresses.DataStreamsSource, PRICE_SOURCES.startBlock,
+  )),
 } as Contracts;
+
+/**
+ * The historical `eth_getLogs` range, from the most addresses one request can carry (lib/getLogsRange.ts):
+ * the dRPC backup answers at most 200,000 addresses x blocks. A `factory()` source's children are not countable here
+ * (dev, rehearsal, a fork, or production before the House vault write-back); it says so rather than guessing.
+ */
+const GET_LOGS_ADDRESSES = maxAddressesPerGetLogs(contracts);
+if (GET_LOGS_ADDRESSES.unbounded.length > 0) {
+  console.warn(
+    `[callhouse/indexer] eth_getLogs range sized for ${GET_LOGS_ADDRESSES.max} addresses; the factory() children of ` +
+      `${GET_LOGS_ADDRESSES.unbounded.join(", ")} are not counted, so a backup RPC that limits addresses x blocks ` +
+      "can refuse their requests once enough children exist.",
+  );
+}
+const GET_LOGS_BLOCK_RANGE = ethGetLogsBlockRange(GET_LOGS_ADDRESSES.max, ETH_GET_LOGS_BLOCK_RANGE);
 
 /** Periodic maintenance for order expiry and series cutoff. Like contracts, this source is
  * registered only when the v2 deployment is configured; the cast preserves registry types for
@@ -466,9 +662,14 @@ export default createConfig({
   chains: {
     robinhood: {
       id: CHAIN_ID,
+      // One URL, or an array when PONDER_RPC_URL_4663 lists several: Ponder gives each array
+      // entry its own transport and its own adaptive rate limit (lib/env.ts RPC_URL).
       rpc: RPC_URL,
       // 4663 is an Orbit L2 with sub-second blocks; poll a little faster than the default.
       pollingInterval: 2_000,
+      // Under the dRPC backup's addresses x blocks limit, which Ponder cannot narrow on by
+      // itself. This also turns Ponder's range retry off (lib/env.ts ETH_GET_LOGS_BLOCK_RANGE says why).
+      ethGetLogsBlockRange: GET_LOGS_BLOCK_RANGE,
     },
   },
   contracts,

@@ -702,6 +702,17 @@
   },
   {
     "type": "error",
+    "name": "RouteRejected",
+    "inputs": [
+      {
+        "name": "reason",
+        "type": "bytes32",
+        "internalType": "bytes32"
+      }
+    ]
+  },
+  {
+    "type": "error",
     "name": "SafeERC20FailedOperation",
     "inputs": [
       {

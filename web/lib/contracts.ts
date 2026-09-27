@@ -23,7 +23,7 @@ export { valoremClearAbi, erc20Abi, stockTokenAbi, seaportAbi, vaultAbi, account
  *
  * There is no option registry and no third-party fee recipient any more. The vault reads the
  * weekly option type from the clearinghouse itself, numbers its own cycles, and every listing pays
- * ONE USDG leg to the vault (contracts/README.md "No registry"). The clearinghouse is a deploy-time
+ * ONE USDG leg to the vault (there is no registry). The clearinghouse is a deploy-time
  * choice: `vault.clear()` is the authority, and NEXT_PUBLIC_CLEARINGHOUSE must agree with it.
  *
  * MARKETS ARE NOT HERE. The per-market addresses (Stock Token, feed, factory) come from the market
@@ -134,7 +134,7 @@ export const SHARE_TICKER = "cNVDA";
 
 /**
  * First block worth scanning for vault logs. Defaults to 0 because the primary RPC accepts a
- * full-range eth_getLogs for a single address (recon R2 §3); set it to the deploy block to make
+ * full-range eth_getLogs for a single address; set it to the deploy block to make
  * /activity's fallback path cheaper.
  */
 export const VAULT_FROM_BLOCK = (() => {

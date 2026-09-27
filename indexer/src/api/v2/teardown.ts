@@ -5,7 +5,7 @@
  * the way in (`PgHex.mapToDriverValue`). A raw `DELETE ... WHERE vault = $1` given the CHECKSUMMED value
  * from getAddress() matches nothing, and `pg.query` reports that as success. The seed then outlives its
  * test and every later test that lists the entity sees a row it never created: the later test fails, and
- * passes in isolation. T-452 found fifteen of these by probe (`rows deleted: 0`).
+ * passes in isolation. A change found fifteen of these by probe (`rows deleted: 0`).
  *
  * THE RULE. Every step names how many rows its test seeded, and the teardown FAILS unless it removed
  * exactly that many. Fewer is the silent miss above. More means the predicate reached rows this test did

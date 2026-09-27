@@ -1,5 +1,5 @@
 /**
- * X-11: the indexer, synced against a mainnet fork the keeper dry run has driven through three
+ * The indexer, synced against a mainnet fork the keeper dry run has driven through three
  * weeks, with every API figure asserted against what the chain and the dry run say happened.
  *
  *   pnpm --filter @callhouse/indexer fork:sync
@@ -36,7 +36,7 @@
  *   FORK_SYNC_TIMEOUT_MS   how long the indexer may take to reach END_BLOCK. Default 180000.
  *
  * WHY START ANVIL HERE. The public RPC serves historical state for only a few thousand trailing
- * blocks (keeper/DRYRUN.md, "Two failures first"). Anvil fetches untouched slots at the fork block
+ * blocks. Anvil fetches untouched slots at the fork block
  * lazily, so the fork must be used within minutes of starting it. Starting it in the same process
  * as the run is the only way to guarantee that.
  *
@@ -59,7 +59,7 @@ import { buildExpectations, graphqlQuery, routesFor, runBlocks, runCycles, runVa
 const INDEXER_DIR = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const REPO_ROOT = resolve(INDEXER_DIR, "..");
 const CHAIN_ID = 4663;
-/** Chain 4663's real contract code limit (decision D17). anvil defaults to EIP-170's 24,576 and would refuse the Vault. */
+/** Chain 4663's real contract code limit. anvil defaults to EIP-170's 24,576 and would refuse the Vault. */
 const CODE_SIZE_LIMIT = 98_304;
 const MULTICALL3 = "0xcA11bde05977b3631167028862bE2a173976CA11";
 

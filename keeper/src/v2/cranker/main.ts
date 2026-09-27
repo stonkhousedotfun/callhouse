@@ -1,5 +1,5 @@
 /**
- * V2_MODE=cranker: the permissionless lifecycle loop (K2-03). Ladders, snapshot at expiry, finalize,
+ * V2_MODE=cranker: the permissionless lifecycle loop. Ladders, snapshot at expiry, finalize,
  * settle, prune then redeem, rolls, housekeeping; one loop (POLL_INTERVAL_MS) plus precise wake-ups,
  * every step bounded per tick and idempotent. It holds no protocol role: CRANKER_PK is any funded key
  * (its bounties come from KeeperRewards).
@@ -30,7 +30,7 @@ export function createCranker(runtime: ModeRuntime<CrankerConfig>, options: { dr
     autoRoller: config.contracts.autoRoller,
   });
   if (wiped) runtime.log.warn({}, 'the cranker index described another deployment; it was cleared and rescans from the deploy block');
-  const sender: CrankSender = options.dryRun ? drySender(runtime.clients.publicClient, runtime.signer.account.address) : liveSender(runtime.sender);
+  const sender: CrankSender = options.dryRun ? drySender(runtime.clients.publicClient, runtime.signer.account.address, config.gasScalePct) : liveSender(runtime.sender);
   const ctx: CrankContext = {
     config,
     log: runtime.log.child({ mod: 'cranker' }),

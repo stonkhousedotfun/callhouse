@@ -1,5 +1,5 @@
 /**
- * W2-14: browser transactions against a freshly seeded Stonkhouse v2 devnet.
+ * browser transactions against a freshly seeded Stonkhouse v2 devnet.
  * Run `ops/devnet/up.sh` first, then `pnpm --filter @callhouse/web acceptance:v2`.
  * This starts an isolated Ponder database and a devnet-address Next build. It never
  * sends to a non-local RPC and restores the committed markets generator output.
@@ -10,7 +10,7 @@ import { appendFileSync, mkdtempSync, readFileSync, writeFileSync } from "node:f
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { chromium, type BrowserContext, type Page } from "playwright-core";
+import { chromium, type BrowserContext, type Locator, type Page } from "playwright-core";
 import { createPublicClient, decodeFunctionData, encodeAbiParameters, encodeFunctionData, formatUnits, getAddress, http, keccak256, pad, parseEventLogs,
   toFunctionSelector, toHex, type Address, type Hex } from "viem";
 
@@ -36,20 +36,20 @@ const MARKET_FILE = join(WEB, "lib/markets.generated.ts");
 const INDEXER_MARKET_FILE = join(ROOT, "indexer/lib/v2/marketRegistry.generated.ts");
 // Mirrors TakeParams.maxTotalFee's uint128 width in contracts/src/v2/interfaces/V2Types.sol.
 const MAX_UINT128 = (1n << 128n) - 1n;
-// Mirrors FEE_CHANGE_DELAY in contracts/src/v2/interfaces/V2Constants.sol:60
+// Mirrors FEE_CHANGE_DELAY in contracts/src/v2/interfaces/V2Constants.sol
 // (`uint40 internal constant FEE_CHANGE_DELAY = 48 hours;`). INTERFACE_VERSION 8 raised it from 24 h
-// (owner decision V3-D13), so OrderBook.setFeeParams records
+// so OrderBook.setFeeParams records
 // effectiveAt = the timestamp of the block that EXECUTED it + this. Distinct from the AccessManager's
 // own FEE_MANAGER execution delay, which the admin driver waits out before the call is even sent.
 const FEE_CHANGE_DELAY_S = 48 * 60 * 60;
 // Mirrors type(IClearinghouse).interfaceId at INTERFACE_VERSION 8, pinned in the contracts repo at
-// test/v2/InterfaceIds.t.sol:960 ("IClearinghouse 0xf9e1eb5d -> 0x9b75eeed").
+// test/v2/InterfaceIds.t.sol ("IClearinghouse 0xf9e1eb5d -> 0x9b75eeed").
 const CLEARINGHOUSE_INTERFACE_ID_V8 = "0x9b75eeed";
 // The v7 id the same test records as superseded; a v8 deployment must no longer answer it.
 const CLEARINGHOUSE_INTERFACE_ID_V7 = "0xf9e1eb5d";
 // V2Types.OrderKind: 0 Bid, 1 AskResale, 2 AskWrite. Only an AskWrite fill mints in v8.
 const ASK_WRITE = 2;
-// IPayoutRouter.Venue in contracts/src/v2/interfaces/IPayoutRouter.sol:41-45 — None, V3, V4.
+// IPayoutRouter.Venue in contracts/src/v2/interfaces/IPayoutRouter.sol — None, V3, V4.
 const VENUE_V4 = 2;
 // routes(address) keeps this selector across v7 -> v8 while its tuple gained `tickSpacing`
 // (INTERFACE-CHANGES-V8 entry 1, "What deliberately did NOT move"), so the selector can never tell
@@ -220,12 +220,15 @@ class BrowserWallet {
 
 async function connect(page: Page, wallet: BrowserWallet) {
   await page.locator("header").getByRole("button", { name: "Connect", exact: true }).click();
-  log(`wallet options: ${JSON.stringify(await page.locator("header").getByRole("group", { name: "Wallets" }).getByRole("button").allTextContents())}`);
+  const picker = page.getByRole("dialog", { name: "Connect a wallet" });
+  const phantom = picker.getByRole("button", { name: /^Phantom/ });
+  await phantom.waitFor({ state: "visible" });
+  log(`wallet options: ${JSON.stringify(await picker.getByRole("button").allTextContents())}`);
   log(`injected provider: ${JSON.stringify(await page.evaluate(() => {
     const provider = (window as unknown as { ethereum?: { isMetaMask?: boolean; isCallhouseAcceptanceWallet?: boolean } }).ethereum;
     return { metaMask: Boolean(provider?.isMetaMask), acceptance: Boolean(provider?.isCallhouseAcceptanceWallet) };
   }))}`);
-  await page.locator("header").getByRole("button", { name: "Phantom", exact: true }).click();
+  await phantom.click();
   try {
     await until("wallet connection", async () => (await page.locator("header").innerText()).toLowerCase()
       .includes(wallet.account.slice(0, 6).toLowerCase()), 20_000);
@@ -234,6 +237,34 @@ async function connect(page: Page, wallet: BrowserWallet) {
       `alerts=${JSON.stringify(await page.getByRole("alert").allTextContents())} ` +
       `toasts=${JSON.stringify(await page.getByRole("status").allTextContents())}`);
   }
+}
+
+async function openSellTab(page: Page, tab: "Auto-roll" | "Sell once", region: string) {
+  const control = page.getByRole("tab", { name: new RegExp(`^${tab}`) });
+  if (await control.getAttribute("aria-selected") !== "true") await control.click();
+  await page.getByRole("region", { name: region }).waitFor({ state: "visible" });
+}
+
+async function openCustomizePlan(page: Page) {
+  const plan = page.locator("details").filter({ has: page.locator("#auto-roll") });
+  if (await plan.getAttribute("open") === null) await plan.locator(":scope > summary").click();
+  await page.getByRole("region", { name: "Auto-roll settings" }).waitFor({ state: "visible" });
+}
+
+async function optionLabel(longId: bigint) {
+  const terms = await chain.readContract({ address: D.contracts.clearinghouse, abi: clearinghouseAbi,
+    functionName: "series", args: [longId] });
+  return `NVDA $${formatUnits(terms.strike, 6)} ${terms.isPut ? "put" : "call"}`;
+}
+
+async function openPortfolioRow(page: Page, rowName: string, card: Locator) {
+  const rows = page.getByRole("button", { name: rowName, exact: true });
+  await rows.first().waitFor({ state: "visible", timeout: 60_000 });
+  for (let index = 0; index < await rows.count(); index++) {
+    if (await rows.nth(index).getAttribute("aria-expanded") !== "true") await rows.nth(index).click();
+    if (await card.waitFor({ state: "visible", timeout: 15_000 }).then(() => true, () => false)) return;
+  }
+  throw new Error(`no Portfolio row named ${rowName} opens the expected card`);
 }
 
 async function tokenBalance(token: Address, holder: Address) {
@@ -395,63 +426,44 @@ async function main() {
     await deal(usdg, buyer.account, 10_000n * 10n ** 6n);
     if (await tokenBalance(nvda, writer.account) < 10n ** 18n) await deal(nvda, writer.account, 2n * 10n ** 18n);
 
-    // The market search popup participates in the tab order. Moving focus into its
-    // footer must not unmount it; moving onward must close it without losing focus.
+    // The home chain is the entry point; a strike row opens the ticket for keyboard users.
     await buyerPage.goto(SITE);
-    const marketSearch = buyerPage.getByRole("combobox", { name: "Search markets" });
-    await marketSearch.focus();
-    const browseMarkets = buyerPage.getByRole("link", { name: "Browse all markets" });
-    await browseMarkets.waitFor({ state: "visible" });
-    await buyerPage.keyboard.press("Tab");
-    assert(await browseMarkets.evaluate((element) => element === document.activeElement),
-      "Tab from market search reaches Browse all markets");
-    await buyerPage.keyboard.press("Tab");
-    const connectButton = buyerPage.locator("header").getByRole("button", { name: "Connect", exact: true });
-    await until("market search exits without focus loss", async () =>
-      await connectButton.evaluate((element) => element === document.activeElement), 10_000);
-    await browseMarkets.waitFor({ state: "hidden" });
-    log("market search tabs through Browse all markets and onward without focus loss");
-
-    // A pointer press on the footer link must not let the search input's blur close the popup
-    // before the click lands (WebKit does not focus a link on mousedown); the click navigates.
-    await marketSearch.focus();
-    await browseMarkets.waitFor({ state: "visible" });
-    await browseMarkets.click();
-    await buyerPage.waitForURL(/\/markets(?:[?#]|$)/, { timeout: 30_000 });
-    log("a pointer press on Browse all markets opens the directory");
-    await buyerPage.goto(SITE);
-
-    // The landing card is the entry point; activation must focus the ticket for keyboard users.
     await connect(buyerPage, buyer);
-    await buyerPage.getByText(/max loss/i).first().waitFor({ state: "visible" });
-    const firstBuy = buyerPage.getByRole("link", { name: "Buy 0.01 shares", exact: true }).first();
+    await buyerPage.getByRole("heading", { level: 1, name: /On-Chain/i }).waitFor({ state: "visible" });
+    const nvdaCard = buyerPage.getByRole("list", { name: "Launch markets" }).getByRole("button").filter({ hasText: "NVDA" });
+    if (await nvdaCard.getAttribute("aria-pressed") !== "true") await nvdaCard.click();
+    const firstBuy = buyerPage.locator('[data-slot="option-chain"] button[data-long-id]').filter({ hasText: "for sale" }).first();
     await firstBuy.waitFor({ state: "visible", timeout: 60_000 });
-    await firstBuy.focus(); await buyerPage.keyboard.press("Enter");
-    await buyerPage.locator("#ticket-shares").waitFor({ state: "visible" });
-    await until("keyboard card entry focuses trade size", async () =>
-      await buyerPage.evaluate(() => document.activeElement?.id === "ticket-shares"), 10_000);
-    const slider = buyerPage.getByRole("slider", { name: /price at expiry/ });
+    const cardId = (await firstBuy.getAttribute("data-long-id"))!;
+    const cardRow = buyerPage.locator(`[data-slot="option-chain"] button[data-long-id="${cardId}"]`);
+    await cardRow.focus(); await buyerPage.keyboard.press("Enter");
+    await until("keyboard strike row selects its ticket", async () =>
+      await cardRow.getAttribute("aria-pressed") === "true", 10_000);
+    const ticket = buyerPage.locator("#ticket");
+    await ticket.locator("#ticket-shares").fill("0.01");
+    await ticket.locator('details[data-slot="payoff-explorer"] > summary').click();
+    const slider = ticket.getByRole("slider", { name: /price at expiry/ });
     await slider.focus(); await buyerPage.keyboard.press("Home");
     const minimum = await slider.getAttribute("aria-valuenow");
     await buyerPage.keyboard.press("ArrowRight");
     assert.notEqual(await slider.getAttribute("aria-valuenow"), minimum, "slider arrow key changes target price");
-    assert.match(await slider.getAttribute("aria-valuetext") ?? "", /Max loss:/, "slider announces max loss");
-    const cardId = new URL(buyerPage.url()).pathname.split("/")[2]!;
+    assert.match(await slider.getAttribute("aria-valuetext") ?? "", /after the .+ paid$/, "slider announces the result against what was paid");
     const beforeTiny = await chain.readContract({ address: D.contracts.clearinghouse, abi: clearinghouseAbi,
       functionName: "balanceOf", args: [buyer.account, BigInt(cardId)] });
     const nTiny = buyer.calls.length;
-    await buyerPage.locator("#ticket").getByRole("button", { name: "Buy now", exact: true }).last().focus();
+    await ticket.getByRole("button", { name: "Review order", exact: true }).click();
+    await ticket.getByRole("button", { name: "Buy now", exact: true }).focus();
     await buyerPage.keyboard.press("Enter");
     await buyer.signed("take", nTiny);
     assert.equal(await chain.readContract({ address: D.contracts.clearinghouse, abi: clearinghouseAbi,
       functionName: "balanceOf", args: [buyer.account, BigInt(cardId)] }), beforeTiny + 1n, "card buy minted 0.01 share");
-    log("card → keyboard ticket → 0.01 share buy confirmed on chain");
+    log("home chain → keyboard ticket → 0.01 share buy confirmed on chain");
 
     // A bid must rest in the book, then a long can be listed for resale from Portfolio.
-    await buyerPage.locator("#ticket").getByRole("button", { name: "Place a bid" }).click();
-    await buyerPage.getByLabel("Your bid price per share (USDG)").fill("0.0001");
+    await ticket.getByLabel("Limit price", { exact: true }).fill("0.0001");
+    await ticket.getByRole("button", { name: "Review order", exact: true }).click();
     const nBid = buyer.calls.length;
-    await buyerPage.locator("#ticket").getByRole("button", { name: "Place bid", exact: true }).click();
+    await ticket.getByRole("button", { name: "Place bid", exact: true }).click();
     const bidTx = await buyer.signed("place", nBid);
     const bidEvents = parseEventLogs({ abi: orderBookAbi, eventName: "OrderPlaced",
       logs: (await chain.getTransactionReceipt({ hash: bidTx.hash })).logs });
@@ -465,10 +477,11 @@ async function main() {
       return positions.longs.some((item) => item.series.longId === cardId);
     }, 120_000);
     await buyerPage.goto(`${SITE}/portfolio`);
-    await buyerPage.getByRole("heading", { name: "Portfolio" }).waitFor();
+    await buyerPage.getByRole("heading", { name: "Portfolio", exact: true }).waitFor();
     const longCard = buyerPage.locator("article").filter({ has: buyerPage.locator(`input[id="sell-size-${cardId}"]`) });
-    await longCard.getByRole("button", { name: "List for sale" }).click();
-    await longCard.getByLabel("Ask price per share (USDG)").fill("100");
+    await openPortfolioRow(buyerPage, `Sell ${await optionLabel(BigInt(cardId))}`, longCard);
+    await longCard.getByRole("button", { name: "List for sale", exact: true }).click();
+    await longCard.getByLabel("Ask price per share", { exact: true }).fill("100");
     const nResale = buyer.calls.length;
     await longCard.getByRole("button", { name: "Sell crossing bids and list remainder" }).click();
     const resaleTx = await buyer.signed("place", nResale);
@@ -498,7 +511,8 @@ async function main() {
     const resaleQuoteParams = { longId: BigInt(cardId), buying: true, orderIds: [resaleId], units: 1n,
       minUnits: 1n, limitPrice: resaleOrder.price, writeToSell: false, recipient: resaleBuyer,
       deadline: Number((await chain.getBlock()).timestamp) + 300, maxTotalFee: MAX_UINT128 };
-    const [quotedUnits, quotedPremium, quotedFee, quotedSellerFees] = await chain.readContract({ account: resaleBuyer,
+    // quoteTake is simulated from the taker (not a view; no `from` reverts NotAuthorized).
+    const { result: [quotedUnits, quotedPremium, quotedFee, quotedSellerFees] } = await chain.simulateContract({ account: resaleBuyer,
       address: D.contracts.orderBook, abi: orderBookAbi, functionName: "quoteTake", args: [resaleQuoteParams] });
     assert.equal(quotedUnits, 1n, "listed resale is fillable by another wallet");
     const resaleParams = { ...resaleQuoteParams, maxTotalFee: quotedFee + quotedSellerFees };
@@ -540,46 +554,60 @@ async function main() {
     // A writer deposits collateral and posts a cheaper 0.40-share AskWrite. The next
     // one-share buy must consume this level and an existing seeded level.
     const target = seriesTag("weekly1-r0");
-    await writerPage.goto(`${SITE}/earn/nvda`);
+    const targetTerms = await chain.readContract({ address: D.contracts.clearinghouse, abi: clearinghouseAbi,
+      functionName: "series", args: [BigInt(target.longId)] });
+    await writerPage.goto(`${SITE}/sell/nvda`);
     await connect(writerPage, writer);
     const freeBefore = await chain.readContract({ address: D.contracts.clearinghouse, abi: clearinghouseAbi,
       functionName: "free", args: [writer.account, nvda] });
     await writerPage.locator("#writer-deposit").fill("1");
     const nDeposit = writer.calls.length;
-    await writerPage.getByRole("region", { name: "Writer balance" }).getByRole("button", { name: "Deposit" }).click();
+    await writerPage.getByRole("complementary", { name: "Writer balance" }).getByRole("button", { name: "Deposit", exact: true }).click();
     await writer.signed("deposit", nDeposit);
     assert.equal(await chain.readContract({ address: D.contracts.clearinghouse, abi: clearinghouseAbi,
       functionName: "free", args: [writer.account, nvda] }), freeBefore + 10n ** 18n, "writer collateral credited");
+    await openSellTab(writerPage, "Sell once", "Manual ask");
     const ask = writerPage.getByRole("region", { name: "Manual ask" });
-    await ask.getByLabel("Expiry").selectOption(String(target.expiry));
-    await ask.getByLabel("Strike").selectOption(target.longId);
-    await ask.getByLabel("Size in shares").fill("0.40");
-    await ask.getByLabel("Your price / share · USDG").fill("0.0001");
+    const targetDay = await writerPage.evaluate((at) => new Intl.DateTimeFormat("en-US", { weekday: "short", month: "short",
+      day: "numeric", timeZone: "America/New_York" }).format(new Date(at * 1000)), target.expiry);
+    await ask.getByRole("group", { name: "Expiry", exact: true }).getByRole("button", { name: targetDay, exact: true }).first().click();
+    const targetStrikeRow = ask.getByRole("group", { name: "Strike", exact: true }).getByRole("button")
+      .filter({ hasText: `$${formatUnits(targetTerms.strike, 6)} Call` });
+    await targetStrikeRow.click();
+    await until("sell ticket follows the chosen strike", async () =>
+      await targetStrikeRow.getAttribute("aria-pressed") === "true", 10_000);
+    await ask.getByLabel("Shares", { exact: true }).fill("0.40");
+    await ask.getByLabel("Limit price", { exact: true }).fill("0.0001");
+    await ask.getByRole("button", { name: "Review order", exact: true }).click();
     const nAsk = writer.calls.length;
-    await ask.getByRole("button", { name: "Place AskWrite order" }).click();
+    await ask.getByRole("button", { name: "Place ask", exact: true }).click();
     await writer.signed("place", nAsk);
     log("writer deposit and manual AskWrite confirmed on chain");
 
     if (D.contracts.autoRoller) {
+      await openSellTab(writerPage, "Auto-roll", "Auto-roll strategy");
       const roll = writerPage.getByRole("region", { name: "Auto-roll strategy" });
-      const action = roll.getByRole("button", { name: /Enable auto-roll|Update strategy/ });
+      const action = roll.getByRole("button", { name: /Enable auto-roll|Update strategy|Finish setup/ });
       await action.waitFor({ state: "visible" });
       const saved = roll.getByRole("button", { name: "Load saved strategy into form" });
       if (await saved.isVisible()) await saved.click();
+      // The knobs live in the collapsed "Customize plan"; the action and the saved-strategy button sit outside it.
+      await openCustomizePlan(writerPage);
+      const settings = writerPage.getByRole("region", { name: "Auto-roll settings" });
       const [strategySpotOk, strategySpot] = await chain.readContract({ address: D.contracts.settlementOracle,
         abi: settlementOracleAbi, functionName: "trySpot", args: [nvda] });
       assert(strategySpotOk, "smart-pricing acceptance has a fresh oracle spot");
-      const bandPrices = smartPricingPrices(strategySpot, { askBps: 300, minAskBps: 25, maxAskBps: 300 });
+      const bandPrices = smartPricingPrices(strategySpot, { askBps: 300, minAskBps: 50, maxAskBps: 300 });
       assert(bandPrices, "smart-pricing acceptance band has valid USDG ticks");
-      const startingAsk = roll.getByLabel("Starting ask · USDG / share");
+      const startingAsk = settings.getByLabel("Starting ask", { exact: true });
       await startingAsk.fill(formatUsdgTick(bandPrices.start));
       await startingAsk.blur();
-      const smartPricing = roll.getByRole("checkbox", { name: "Smart pricing within my limits" });
+      const smartPricing = settings.getByRole("checkbox", { name: "Smart pricing within my limits" });
       if (!await smartPricing.isChecked()) await smartPricing.check();
-      const minimumAsk = roll.getByLabel("Minimum ask · USDG / share");
+      const minimumAsk = settings.getByLabel("Minimum ask", { exact: true });
       await minimumAsk.fill(formatUsdgTick(bandPrices.min));
       await minimumAsk.blur();
-      const maximumAsk = roll.getByLabel("Maximum ask · USDG / share");
+      const maximumAsk = settings.getByLabel("Maximum ask", { exact: true });
       await maximumAsk.fill(formatUsdgTick(bandPrices.max));
       await maximumAsk.blur();
       assert(await action.isEnabled(), "auto-roll action is disabled on a configured devnet");
@@ -592,7 +620,7 @@ async function main() {
       assert(strategy.active, "writer strategy should be active on chain");
       assert(strategy.smartPricing, "writer strategy should opt into smart pricing on chain");
       assert.equal(Number(strategy.askBps), 300, "writer strategy starts at the selected ceiling");
-      assert.equal(Number(strategy.minAskBps), 25, "writer strategy saves the selected floor");
+      assert.equal(Number(strategy.minAskBps), 50, "writer strategy saves the selected floor");
       assert.equal(Number(strategy.maxAskBps), 300, "writer strategy saves the selected ceiling");
       log("auto-roll strategy and editable smart-pricing band active on chain");
     } else {
@@ -606,16 +634,22 @@ async function main() {
         `/v2/series/${target.longId}/book?depth=20`);
       return book.asks.some((level) => level.price.raw === "100" && level.orders.some((order) => Number(order.units) >= 40));
     }, 120_000);
+    const targetBook = await json<{ asks: { price: { raw: string } }[] }>(`/v2/series/${target.longId}/book?depth=20`);
+    const sweepLimit = targetBook.asks.reduce((high, level) => BigInt(level.price.raw) > high ? BigInt(level.price.raw) : high, 0n);
     await buyerPage.goto(`${SITE}/nvda/${target.longId}?buy=1&shares=1`);
     await buyerPage.locator("#ticket-shares").waitFor({ state: "visible" });
+    await until("a ?buy=1 link focuses the trade size", async () =>
+      await buyerPage.evaluate(() => document.activeElement?.id === "ticket-shares"), 10_000);
     await buyerPage.locator("#ticket-shares").fill("1");
+    await buyerPage.locator("#ticket").getByLabel("Limit price", { exact: true }).fill(formatUnits(sweepLimit, 6));
     const nFull = buyer.calls.length;
-    await buyerPage.locator("#ticket").getByRole("button", { name: "Buy now", exact: true }).last().click();
+    await buyerPage.locator("#ticket").getByRole("button", { name: "Review order", exact: true }).click();
+    await buyerPage.locator("#ticket").getByRole("button", { name: "Buy now", exact: true }).click();
     const full = await buyer.signed("take", nFull);
     const receipt = await chain.getTransactionReceipt({ hash: full.hash });
     const fills = parseEventLogs({ abi: orderBookAbi, eventName: "OrderFilled", logs: receipt.logs });
     const rents = parseEventLogs({ abi: clearinghouseAbi, eventName: "Minted", logs: receipt.logs });
-    // 06-QUIRKS.md B.7: the book's two `mint` calls sit inside `try … {gas: 500_000}`, so a mint that
+    // A known quirk: the book's two `mint` calls sit inside `try … {gas: 500_000}`, so a mint that
     // reverts is a SILENT SKIP that still returns a green receipt. Every take whose units come from a
     // fresh mint therefore asserts the Minted events and the minted unit count, never the status.
     const primaryFills = fills.filter((fill) => fill.args.primary);
@@ -625,7 +659,7 @@ async function main() {
     assert.equal(rents.reduce((sum, event) => sum + event.args.units, 0n),
       primaryFills.reduce((sum, fill) => sum + fill.args.units, 0n),
       "minted units equal the units the primary fills reported");
-    // INVERTED for v8 (was `event.args.fee > 0n`): X8-05's devnet seeds premium 500 / rent 0, so a
+    // INVERTED for v8 (was `event.args.fee > 0n`): the devnet seeds premium 500 / rent 0, so a
     // primary fill charges no collateral rent. Asserted rather than deleted, so a devnet that
     // accidentally re-enables rent still fails here.
     assert(rents.every((event) => event.args.fee === 0n), "a v8 primary fill charges no collateral rent");
@@ -648,16 +682,18 @@ async function main() {
       const beforeFallback = await chain.readContract({ address: D.contracts.clearinghouse, abi: clearinghouseAbi,
         functionName: "balanceOf", args: [buyer.account, BigInt(target.longId)] });
       await buyerPage.goto(`${SITE}/nvda/${target.longId}?buy=1&shares=0.01`);
-      await buyerPage.getByText("Indexer book unavailable.", { exact: false }).waitFor({ state: "visible" });
+      await buyerPage.locator("#ticket").getByText("Quote built from on-chain orders.", { exact: false }).waitFor({ state: "visible" });
       assert(blockedBookRequests > 0, "fallback acceptance must actually interrupt the API book");
       await buyerPage.locator("#ticket-shares").fill("0.01");
+      await buyerPage.locator("#ticket").getByLabel("Limit price", { exact: true }).fill(formatUnits(sweepLimit, 6));
       const nFallback = buyer.calls.length;
-      await buyerPage.locator("#ticket").getByRole("button", { name: "Buy now", exact: true }).last().click();
+      await buyerPage.locator("#ticket").getByRole("button", { name: "Review order", exact: true }).click();
+      await buyerPage.locator("#ticket").getByRole("button", { name: "Buy now", exact: true }).click();
       const fallback = await buyer.signed("take", nFallback);
       const fallbackReceipt = await chain.getTransactionReceipt({ hash: fallback.hash });
       const fallbackFills = parseEventLogs({ abi: orderBookAbi, eventName: "OrderFilled", logs: fallbackReceipt.logs });
       const fallbackRents = parseEventLogs({ abi: clearinghouseAbi, eventName: "Minted", logs: fallbackReceipt.logs });
-      // 06-QUIRKS.md B.7 again: prove the mint by its event and its unit count, not by the receipt.
+      // The same quirk again: prove the mint by its event and its unit count, not by the receipt.
       assert(fallbackRents.length > 0, "the chain-snapshot fallback bought from a minting AskWrite");
       assert.equal(fallbackRents.length, fallbackFills.filter((fill) => fill.args.primary).length,
         "every primary fallback fill emitted its own Minted event");
@@ -691,10 +727,11 @@ async function main() {
     assert(history.items.some((item) => item.kind === "redemption" &&
       BigInt(item.data.amount?.raw ?? "1") === 0n), "winner history has a worthless redemption");
     await winnerPage.goto(`${SITE}/portfolio`); await connect(winnerPage, winner);
-    await winnerPage.getByRole("button", { name: "History" }).click();
-    const redemption = winnerPage.locator("article").filter({ hasText: /redemption/i }).filter({ hasText: itmLabel });
+    await winnerPage.getByRole("tab", { name: "History", exact: true }).click();
+    const redemption = winnerPage.getByRole("tabpanel").locator("li").filter({ hasText: /redemption/i })
+      .filter({ hasText: `${itmLabel} call` });
     await redemption.getByText("Paid", { exact: true }).waitFor({ state: "visible", timeout: 60_000 });
-    await winnerPage.getByText("Expired without payout", { exact: true }).waitFor({ state: "visible" });
+    await winnerPage.getByText("Expired without payout", { exact: true }).first().waitFor({ state: "visible" });
     const pnlId = `${itmId}-${winner.account.toLowerCase()}`;
     const pnl = await json<{ holder: string; series: { longId: string }; payout: { raw: string };
       settlementPrice: { raw: string } }>(`/v2/pnl/${pnlId}`);
@@ -703,8 +740,8 @@ async function main() {
     assert(BigInt(pnl.payout.raw) > 0n, "share receipt has positive payout");
     assert.equal(pnl.settlementPrice.raw, String(settled.settlementPrice));
     await winnerPage.goto(`${SITE}/pnl/${pnlId}`);
-    await winnerPage.getByText("Paid → value received", { exact: true }).waitFor({ state: "visible" });
-    await winnerPage.getByText(winner.account, { exact: true }).waitFor({ state: "visible" });
+    await winnerPage.getByText(/^Paid .+ USDG → got .+ USDG value$/).waitFor({ state: "visible" });
+    await winnerPage.getByTitle(pnl.holder, { exact: true }).waitFor({ state: "visible" });
     log("settled payout visible in Portfolio; share page rendered");
 
     // The v8 payout route, read BY FIELD from the regenerated ABI. INTERFACE-CHANGES-V8 entry 1
@@ -735,7 +772,7 @@ async function main() {
     ]);
     const expectedFloorBps = conversionFloorBps(Number(payoutSlippageBps), Number(routeFeeBps));
 
-    // Redeem that route to USDG in the browser, on the default payout preference. X8-05's seed must
+    // Redeem that route to USDG in the browser, on the default payout preference. The devnet seed must
     // leave one settled ITM long unredeemed for a wallet other than Eve's, the same way
     // ops/devnet/seed.mjs already skips Eve in its redeemBatch pass so the in-kind Collect below has
     // a unit to spend.
@@ -756,17 +793,19 @@ async function main() {
     await usdgCollectorPage.clock.setFixedTime(chainNow);
     const usdgBefore = await tokenBalance(usdg, usdgCollector.account);
     await usdgCollectorPage.goto(`${SITE}/portfolio`); await connect(usdgCollectorPage, usdgCollector);
-    const usdgChoice = usdgCollectorPage.getByRole("button", { name: "USDG (default)", exact: true });
+    const usdgChoice = usdgCollectorPage.getByRole("group", { name: "Payout preference", exact: true })
+      .getByRole("button", { name: "USDG", exact: true });
     await usdgChoice.waitFor({ state: "visible", timeout: 60_000 });
     assert.equal(await usdgChoice.getAttribute("aria-pressed"), "true",
       "USDG over the route is the default payout preference in v8");
+    const usdgCard = usdgCollectorPage.getByRole("article", { name: `Manage ${itmLabel} call`, exact: true });
+    await openPortfolioRow(usdgCollectorPage, `Collect ${itmLabel} call`, usdgCard);
     // The route preview the long card renders, from the same floor the chain reports.
-    const floorCopy = usdgCollectorPage.getByText(/conversion floor is/i).first();
+    await usdgCard.getByRole("button", { name: "How this option pays", exact: true }).focus();
+    const floorCopy = usdgCard.getByText(/USDG conversion pays at least/);
     await floorCopy.waitFor({ state: "visible", timeout: 60_000 });
-    assert.match(await floorCopy.innerText(), new RegExp(`${(expectedFloorBps / 100).toFixed(2)}%`),
+    assert((await floorCopy.innerText()).includes(`at least ${expectedFloorBps / 100}%`),
       "the long card previews the v4 route's conversion floor, including its route fee");
-    const usdgCard = usdgCollectorPage.locator("article").filter({ hasText: "Long position" })
-      .filter({ hasText: itmLabel });
     const usdgCollectButton = usdgCard.getByRole("button", { name: "Collect", exact: true });
     await usdgCollectButton.waitFor({ state: "visible", timeout: 60_000 });
     const nUsdgCollect = usdgCollector.calls.length;
@@ -808,7 +847,8 @@ async function main() {
     "seed must reserve Eve's winning long for browser Collect");
     const stockBefore = await tokenBalance(nvda, collector.account);
     await collectorPage.goto(`${SITE}/portfolio`); await connect(collectorPage, collector);
-    const stockChoice = collectorPage.getByRole("button", { name: "Stock Tokens", exact: true });
+    const stockChoice = collectorPage.getByRole("group", { name: "Payout preference", exact: true })
+      .getByRole("button", { name: "Stock Tokens", exact: true });
     await stockChoice.waitFor({ state: "visible" });
     const nPreference = collector.calls.length;
     await stockChoice.click();
@@ -818,8 +858,8 @@ async function main() {
       return positions.prefs.inKind;
     }, 120_000);
     await collectorPage.reload();
-    const collectCard = collectorPage.locator("article").filter({ hasText: "Long position" })
-      .filter({ hasText: itmLabel });
+    const collectCard = collectorPage.getByRole("article", { name: `Manage ${itmLabel} call`, exact: true });
+    await openPortfolioRow(collectorPage, `Collect ${itmLabel} call`, collectCard);
     const collectButton = collectCard.getByRole("button", { name: "Collect", exact: true });
     await collectButton.waitFor({ state: "visible", timeout: 60_000 });
     assert(await collectButton.isEnabled(), "settled winning long can be collected from Portfolio");
@@ -852,18 +892,18 @@ async function main() {
         !positions.longs.some((position) => position.series.longId === itmId);
     }, 120_000);
     await collectorPage.goto(`${SITE}/portfolio`);
-    await collectorPage.getByRole("button", { name: "History" }).click();
-    await collectorPage.locator("article").filter({ hasText: /redemption/i })
-      .filter({ hasText: itmLabel }).getByText("Paid", { exact: true }).waitFor({ state: "visible" });
+    await collectorPage.getByRole("tab", { name: "History", exact: true }).click();
+    await collectorPage.getByRole("tabpanel").locator("li").filter({ hasText: /redemption/i })
+      .filter({ hasText: `${itmLabel} call` }).getByText("Paid", { exact: true }).waitFor({ state: "visible" });
     log("Portfolio in-kind fallback: Collect paid Stock Tokens, with indexed redemption history");
 
     // Accessibility and performance, in both themes, over every v8 surface this run exercises: the
     // marketplace, the trade ticket and the Portfolio. The last two are where the v4 route preview
-    // (ConversionFloor, Portfolio.tsx:180 and TradeTicket.tsx:250) and the pending-fee /
-    // pending-admin-operation notices render. Add W8-02's trust and fees page to this list when it
+    // (ConversionFloor, Portfolio.tsx:305 and TradeTicket.tsx:523) and the pending-fee /
+    // pending-admin-operation notices render. Add trust and fees page to this list when it
     // lands; the loop then covers it with no other change.
     const themedPages = [
-      { label: "home", url: SITE, heading: "#marketplace-title" },
+      { label: "home", url: SITE, heading: "#buy-title" },
       { label: "trade ticket", url: `${SITE}/nvda/${target.longId}?buy=1&shares=0.01`, heading: "h1" },
       { label: "portfolio", url: `${SITE}/portfolio`, heading: "h1" },
     ] as const;
@@ -876,7 +916,7 @@ async function main() {
         await buyerPage.goto(surface.url);
         if (surface.label === "home") {
           homeNavigationMs = Date.now() - navigationStart;
-          await buyerPage.getByRole("heading", { name: /money|upside/i }).waitFor({ state: "visible" });
+          await buyerPage.getByRole("heading", { level: 1, name: /On-Chain/i }).waitFor({ state: "visible" });
           homeResponseMs = await buyerPage.evaluate(() => {
             const navigation = performance.getEntriesByType("navigation")[0] as PerformanceNavigationTiming | undefined;
             return navigation ? navigation.responseEnd - navigation.startTime : null;
@@ -889,9 +929,9 @@ async function main() {
         const overflow = await buyerPage.evaluate(() => document.documentElement.scrollWidth - innerWidth);
         assert(overflow <= 1, `${theme} ${surface.label} 390px horizontal overflow ${overflow}px`);
         if (surface.label === "home") {
-          const cards = await buyerPage.locator("#options article").count();
-          assert(cards <= 200, `marketplace rendered ${cards} cards; page limit is 200`);
-          log(`${theme} home: hero contrast ${ratio.toFixed(2)}:1, mobile overflow ${overflow}px, ${cards} cards`);
+          const rows = await buyerPage.locator('[data-slot="option-chain"] button[data-long-id]').count();
+          assert(rows <= 50, `home chain rendered ${rows} strike rows; one series page is 50`);
+          log(`${theme} home: hero contrast ${ratio.toFixed(2)}:1, mobile overflow ${overflow}px, ${rows} strike rows`);
         } else {
           log(`${theme} ${surface.label}: heading contrast ${ratio.toFixed(2)}:1, mobile overflow ${overflow}px`);
         }
@@ -906,7 +946,7 @@ async function main() {
     //       V2Errors.NotMinter();`, and DevDeploy allowlists only the book
     //       (`d.clearinghouse.setMinter(address(d.orderBook), true)`). The direct mint is therefore
     //       asserted to REVERT and the same matched position is acquired through an AskWrite fill.
-    //   (2) rent is 0 (X8-05 seeds premium 500 / rent 0). Every rent assertion is inverted to zero
+    //   (2) rent is 0 (seeds premium 500 / rent 0). Every rent assertion is inverted to zero
     //       rather than deleted, so a devnet that accidentally re-enables rent still fails here.
     // The browser-driven Portfolio close below is unchanged and is the only browser proof of a close.
     const rentTemplate = await chain.readContract({ address: D.contracts.clearinghouse, abi: clearinghouseAbi,
@@ -981,7 +1021,7 @@ async function main() {
       const lifecycleQuoteParams = { longId: id, buying: true, orderIds: [placed.args.orderId], units: 1n,
         minUnits: 1n, limitPrice: askPrice, writeToSell: false, recipient: writer.account,
         deadline: Number((await chain.getBlock()).timestamp) + 300, maxTotalFee: MAX_UINT128 };
-      const lifecycleQuote = await chain.readContract({ account: lifecycleTaker, address: D.contracts.orderBook,
+      const { result: lifecycleQuote } = await chain.simulateContract({ account: lifecycleTaker, address: D.contracts.orderBook,
         abi: orderBookAbi, functionName: "quoteTake", args: [lifecycleQuoteParams] });
       assert.equal(lifecycleQuote[0], 1n, "the writer's AskWrite quotes one fillable unit");
       const lifecycleCost = lifecycleQuote[1] + lifecycleQuote[2] + lifecycleQuote[3];
@@ -992,7 +1032,7 @@ async function main() {
         encodeFunctionData({ abi: orderBookAbi, functionName: "take",
           args: [{ ...lifecycleQuoteParams, maxTotalFee: lifecycleQuote[2] + lifecycleQuote[3] }] }),
         "lifecycle AskWrite fill");
-      // 06-QUIRKS.md B.7: the book's mint sits inside `try … {gas: 500_000}`. A reverted mint is a
+      // The same quirk: the book's mint sits inside `try … {gas: 500_000}`. A reverted mint is a
       // silent skip on a green receipt, so the Minted event and its unit count are the only proof.
       const lifecycleFills = parseEventLogs({ abi: orderBookAbi, eventName: "OrderFilled", logs: mintedReceipt.logs });
       const minted = parseEventLogs({ abi: clearinghouseAbi, eventName: "Minted", logs: mintedReceipt.logs })[0]!;
@@ -1026,8 +1066,10 @@ async function main() {
       await until("v8 mint API free balance and held rent", () =>
         apiRentStateMatches(freeAfterMint, heldBefore), 120_000);
       await writerPage.goto(`${SITE}/portfolio`);
+      await writerPage.getByRole("tab", { name: /^Selling/ }).click();
       const shortCard = writerPage.locator("article").filter({ has: writerPage.locator(`input[id="buyback-size-${id}"]`) });
-      await shortCard.getByLabel("Size to close in shares").fill("0.01");
+      await openPortfolioRow(writerPage, `Manage ${await optionLabel(id)} (written)`, shortCard);
+      await shortCard.getByLabel("Size to close", { exact: true }).fill("0.01");
       // INVERTED (was `assert.match(..., /rent/i, "writer economics disclose native-asset rent")`).
       // Word-bounded on purpose: the unbounded /rent/i this replaces also matches "current".
       assert.doesNotMatch(await shortCard.innerText(), /\brent\b/i, "v8 writer economics disclose no rent");
@@ -1094,7 +1136,7 @@ async function main() {
         return state.strategies.some((entry) => entry.orderId === null && entry.currentSeries?.longId === String(position[0]) &&
           entry.strategy.active && entry.lastStaleCancelAt !== null && entry.staleSpot?.raw === String(stale.args.spot));
       }, 120_000);
-      await writerPage.goto(`${SITE}/earn/nvda`);
+      await writerPage.goto(`${SITE}/sell/nvda`);
       await writerPage.getByText(/Ask withdrawn/i).first().waitFor({ state: "visible", timeout: 60_000 });
       await moveSpot(series.strike, originalSpot);
       log("permissionless stale cancel indexed; writer sees withdrawn ask with current period retained");
@@ -1116,8 +1158,8 @@ async function main() {
     assert.equal(beforeConfig.fees.premiumFeeBps, beforeFees.premiumFeeBps);
     // INVERTED: the v7 drill sent setFeeParams as a bare eth_sendTransaction from D.accounts.admin.
     // Under v8 AccessManager delays that is schedule -> warp -> execute as the impersonated Admin
-    // Safe, and 06-QUIRKS.md D.8 says every devnet, rehearsal and acceptance script goes through the
-    // one admin driver F8-03 landed, which reads the role and the delay from ops/abis/v2/roles.json
+    // Safe, and every devnet, rehearsal and acceptance script goes through the
+    // one admin driver, which reads the role and the delay from ops/abis/v2/roles.json
     // and never writes either down. Field order mirrors V2Types.FeeParams in the OrderBook ABI --
     // the order roles.json spells as setFeeParams((uint16,uint16,uint32,uint16,uint16)).
     const nextFeeArgs = [nextFees.premiumFeeBps, nextFees.resaleFeeBps, nextFees.takerFeeFlat,
@@ -1161,18 +1203,19 @@ async function main() {
     await buyerPage.goto(`${SITE}/nvda/${feeTarget.longId}?buy=1&shares=1`);
     const feeNotice = buyerPage.getByRole("status").filter({ hasText: "Fee change scheduled" });
     await feeNotice.waitFor({ state: "visible", timeout: 60_000 });
-    assert.match(await feeNotice.innerText(), /Scheduled taker fee:/);
+    assert.match(await feeNotice.innerText(), /New taker fee:/);
     assert.equal(await feeNotice.locator("time").getAttribute("datetime"),
       new Date(effectiveAt * 1000).toISOString(), "ticket announces the on-chain activation time");
 
-    // The pending-ADMIN-OPERATION notice, beside the pending-FEE notice above. They are two
-    // different clocks and both must render their on-chain instant in <time datetime>: the fee
-    // notice counts the OrderBook's own FEE_CHANGE_DELAY after a change was scheduled; this one
-    // counts an AccessManager operation's execution delay (roles.json delaysS) before the call is
-    // even sent. The waiting operation comes from the devnet, not from this file: the admin driver
-    // performs schedule -> warp -> execute in a single invocation (ops/v2/lib/admin.mjs adminCall)
-    // and so cannot leave one waiting, and 06-QUIRKS.md D.8 forbids hand-rolling `schedule` here.
-    // X8-05's devnet leaves one scheduled and unexecuted; W8-02 renders the notice.
+    // The pending-ADMIN-OPERATION notice, on the sell ticket's review step. It and the pending-FEE
+    // notice above are two different clocks and both must render their on-chain instant in
+    // <time datetime>: the fee notice counts the OrderBook's own FEE_CHANGE_DELAY after a change
+    // was scheduled; this one counts an AccessManager operation's execution delay (roles.json
+    // delaysS) before the call is even sent. The waiting operation comes from the devnet, not from
+    // this file: the admin driver performs schedule -> warp -> execute in a single invocation
+    // (ops/v2/lib/admin.mjs adminCall) and so cannot leave one waiting, and the devnet rules forbid
+    // hand-rolling `schedule` here. The devnet leaves one scheduled and unexecuted
+    // renders the notice.
     const adminConfig = await json<{ contracts: { accessManager: string | null };
       pendingOperations?: { id: string; label: string; role: string; target: string; selector: string;
         caller: string; scheduledAt: number; readyAt: number }[] }>("/v2/config");
@@ -1190,7 +1233,13 @@ async function main() {
       "the API's pending-operation ETA is the manager's own getSchedule");
     assert(onchainReadyAt > Number((await chain.getBlock()).timestamp),
       "the announced operation is still waiting out its execution delay");
-    const adminNotice = buyerPage.getByRole("status").filter({ hasText: "Admin change scheduled" });
+    await writerPage.goto(`${SITE}/sell/nvda?series=${feeTarget.longId}`);
+    const reviewAsk = writerPage.getByRole("region", { name: "Manual ask" });
+    await reviewAsk.getByRole("group", { name: "Strike", exact: true }).getByRole("button", { pressed: true })
+      .waitFor({ state: "visible", timeout: 60_000 });
+    await reviewAsk.getByLabel("Limit price", { exact: true }).fill("0.0001");
+    await reviewAsk.getByRole("button", { name: "Review order", exact: true }).click();
+    const adminNotice = reviewAsk.getByRole("status").filter({ hasText: "Admin change scheduled" });
     await adminNotice.waitFor({ state: "visible", timeout: 60_000 });
     assert((await adminNotice.innerText()).includes(pendingOperation.label),
       "the notice names the scheduled action the API reports");
@@ -1211,7 +1260,7 @@ async function main() {
     const feeTakeBase = { longId: BigInt(feeTarget.longId), buying: true, orderIds: [feeOrderIds[feeAskIndex]!],
       units: 100n, minUnits: 100n, limitPrice: feeAsk.price, writeToSell: false, recipient: feeTaker };
     const oldQuoteParams = { ...feeTakeBase, deadline: effectiveAt + 300, maxTotalFee: MAX_UINT128 };
-    const oldQuote = await chain.readContract({ account: feeTaker, address: D.contracts.orderBook,
+    const { result: oldQuote } = await chain.simulateContract({ account: feeTaker, address: D.contracts.orderBook,
       abi: orderBookAbi, functionName: "quoteTake", args: [oldQuoteParams] });
     assert.equal(oldQuote[0], 100n, "resting ask quotes before activation");
     const oldTake = { ...oldQuoteParams, maxTotalFee: oldQuote[2] + oldQuote[3] };
@@ -1248,7 +1297,7 @@ async function main() {
     "an exact fee cap rejects a take after fees increase");
     const newQuoteParams = { ...feeTakeBase, deadline: Number((await chain.getBlock()).timestamp) + 300,
       maxTotalFee: MAX_UINT128 };
-    const newQuote = await chain.readContract({ account: feeTaker, address: D.contracts.orderBook,
+    const { result: newQuote } = await chain.simulateContract({ account: feeTaker, address: D.contracts.orderBook,
       abi: orderBookAbi, functionName: "quoteTake", args: [newQuoteParams] });
     assert.equal(newQuote[0], oldQuote[0]);
     assert.equal(newQuote[1], oldQuote[1], "premium unchanged while the fee schedule activated");

@@ -1,15 +1,15 @@
 /**
  * The event kinds and the payload each one carries into enqueue().
  *
- * These schemas are the contract with the rules engine (N2-02): it builds a payload from indexer
+ * These schemas are the contract with the rules engine: it builds a payload from indexer
  * objects and enqueue() validates it here, synchronously, so a malformed payload is a thrown error
  * in the rules engine's tests rather than a dead letter at 3 a.m. Payloads are stored with the
  * delivery and rendered at send time (templates.ts), so a template fix applies to retries.
  *
- * SHAPES FOLLOW THE INDEXER API (§4) so N2-02 can pass its objects straight through: `Money` is
+ * SHAPES FOLLOW THE INDEXER API (indexer/src/api/v2/schema.ts) so the rules engine can pass its objects straight through: `Money` is
  * `{ raw, decimals, formatted? }` (formatted is ignored: templates format `raw` themselves), and
  * `series` accepts a full `SeriesRef` (extra keys are stripped before storage). Units are decimal
- * strings (1 unit = 0.01 share, ADR-04). Prices and strikes are USDG base units per whole share.
+ * strings (1 unit = 0.01 share). Prices and strikes are USDG base units per whole share.
  *
  * WHO IS A "LONG" MESSAGE FOR: a long position is a payoff the holder paid for, so every payload
  * about one carries `cost` (FIFO cost including taker fees: /v2/accounts/:address/positions
@@ -30,6 +30,7 @@ export const EVENT_KINDS = [
   'payout_failed_to_ledger',
   'fee_notice',
   'admin_operation',
+  'market_live',
 ] as const;
 
 export type EventKind = (typeof EVENT_KINDS)[number];
@@ -58,7 +59,7 @@ const txSchema = z.string().regex(/^0x[0-9a-fA-F]{64}$/, 'a transaction hash');
 
 const walletSchema = z.string().regex(/^0x[0-9a-fA-F]{40}$/, 'a 20-byte hex address');
 
-/** The part of §4 `SeriesRef` a message needs. A full SeriesRef validates; the rest is stripped. */
+/** The part of the API's `SeriesRef` a message needs. A full SeriesRef validates; the rest is stripped. */
 export const seriesSchema = z.object({
   longId: z.string().regex(/^\d{1,78}$/, 'longId: a decimal string'),
   ticker: tickerSchema,
@@ -73,7 +74,7 @@ const direction = z.enum(['above', 'below']);
 
 /**
  * When the oracle last updated the spot in the same payload (`/v2/markets[].spotUpdatedAt`), so a
- * price-driven message can say "as of <New York time>" (F4 D8). OPTIONAL, and a template must omit
+ * price-driven message can say "as of <New York time>". OPTIONAL, and a template must omit
  * the phrase when it is absent rather than fall back to a clock: the on-chain spot is stale from
  * about 17:00 New York on Friday until Monday's first print, which is the very case where an
  * invented observation time would mislead. A payload queued before this field existed has none.
@@ -95,7 +96,7 @@ const expiryPayloadSchema = z
     units: unitsSchema,
     spot: usdgSchema.optional(),
     cost: usdgSchema.optional(),
-    /** Digest only (N3-404): 4–10 of the positions that entered this window together. */
+    /** Digest only: 4–10 of the positions that entered this window together. */
     positions: z.array(expiryLineSchema).min(4).max(10).optional(),
     /** Digest only: positions past the 10 listed. */
     more: z.number().int().min(1).optional(),
@@ -123,7 +124,7 @@ export const payloadSchemas = {
       primary: z.boolean(),
       tx: txSchema.optional(),
       /**
-       * N2-02, interface v4 (`OrderFilled.recipient`: the longs on an ask hit, the taker's USDG
+       * interface v4 (`OrderFilled.recipient`: the longs on an ask hit, the taker's USDG
        * on a bid hit). Absent = taker or maker, as before. `recipient`: the subscriber is that
        * wallet and another wallet traded (`payer` on a buy, `seller` on a sale).
        */
@@ -151,7 +152,7 @@ export const payloadSchemas = {
       message: 'payer goes with a buy, seller with a sale',
     }),
 
-  /** Spot crossed a held series' strike (N2-02 applies the hysteresis). */
+  /** Spot crossed a held series' strike (the rules engine applies the hysteresis). */
   strike_cross: z
     .object({
       series: seriesSchema,
@@ -174,9 +175,9 @@ export const payloadSchemas = {
   }),
 
   /**
-   * One position entering an expiry window, or an N3-404 digest of more than 3. `positions` is
+   * One position entering an expiry window, or a digest of more than 3. `positions` is
    * present only on a digest (4–10 lines); `more` is how many further positions the list omitted.
-   * Kinds stay `expiry_24h` / `expiry_1h` (F4 D7: no prefs or kind change).
+   * Kinds stay `expiry_24h` / `expiry_1h` (no prefs or kind change).
    */
   expiry_24h: expiryPayloadSchema,
   expiry_1h: expiryPayloadSchema,
@@ -184,7 +185,7 @@ export const payloadSchemas = {
   /**
    * The holder's side of a settled series. `payout` is what `Redeemed` delivered (null when
    * nothing was: an OTM long, or a short whose whole collateral went to holders). `payoutValue`
-   * is the in-kind amount valued at the settlement price (§4 wins rule), for a stock payout.
+   * is the in-kind amount valued at the settlement price (the API's wins rule), for a stock payout.
    */
   settlement_receipt: z
     .object({
@@ -266,13 +267,22 @@ export const payloadSchemas = {
   /**
    * AccessManager operation. status mirrors /v2/admin/operations (pending, executed, canceled).
    * `id` is the operation id and repeats across reschedules; `key` (`<operationId>:<nonce>`) is the
-   * one operation this notice is about. Optional only so rows queued before T-435 still parse.
+   * one operation this notice is about. Optional only so rows queued before the field existed still parse.
    */
   admin_operation: z.object({
     id: z.string().min(1),
     key: z.string().min(1).optional(),
     status: z.enum(['pending', 'executed', 'canceled']),
     label: z.string().min(1),
+  }),
+
+  /**
+   * A market's listing went live: its `/v2/markets` status became `live` (the indexer's
+   * `marketStatus(config.enabled)`, so a MarketRegistered or MarketConfigSet with `enabled` true) where
+   * the previous tick saw it not live or not listed. Protocol-wide, one per watched wallet, default off.
+   */
+  market_live: z.object({
+    ticker: tickerSchema,
   }),
 } satisfies Record<EventKind, z.ZodTypeAny>;
 

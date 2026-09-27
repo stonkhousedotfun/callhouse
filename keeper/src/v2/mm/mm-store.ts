@@ -75,7 +75,7 @@ export const MM_META = {
   killedVault: 'mm:killedVault:',
   /**
    * The vault the pre-vault-column rows were attributed to, written by `migrateLegacy` the first time it runs. Since
-   * T-OP-132 it is a FAST PATH, not the guard: with it set, a migrated file does no attribution writes at bind, but a
+   * it is a FAST PATH, not the guard: with it set, a migrated file does no attribution writes at bind, but a
    * legacy-shaped row that appears later is still attributed (see the comment on `migrateLegacy`).
    */
   legacyVault: 'mm:legacyVault',
@@ -174,7 +174,7 @@ export class MmStore {
     const current = this.store.getMeta(MM_META.deployment);
     if (current === id) {
       // The same set as last boot, which is every production restart. The probe inside does no writes on a migrated
-      // file, and it is the only thing that sees the rows a rolled-back binary left (migrateLegacy, T-OP-132).
+      // file, and it is the only thing that sees the rows a rolled-back binary left (migrateLegacy).
       this.migrateLegacy(treasuryOf(deployment));
       return false;
     }
@@ -230,7 +230,7 @@ export class MmStore {
    *
    * So the legacy rows are attributed here, and every read afterwards is strict.
    *
-   * IDEMPOTENT PER ROW, PROBED AT EVERY BIND (T-OP-132; K8-05 suspicion 2). This used to run once, gated on the
+   * IDEMPOTENT PER ROW, PROBED AT EVERY BIND. This used to run once, gated on the
    * `legacyVault` meta key alone, and a bind to the same set returned before reaching it. That gate could not see the
    * store's shape, and there is one plain way legacy-shaped rows appear AFTER the key is set: the pre-vault-column
    * binary rolled back over a migrated file. Its bind id for a treasury-only set is the SAME string as today's
@@ -250,7 +250,7 @@ export class MmStore {
     this.store.db.transaction(() => {
       this.store.db.prepare("UPDATE v2_mm_orders SET vault = ? WHERE vault = ''").run(treasury);
       this.store.db.prepare("UPDATE v2_mm_ledger SET vault = ? WHERE vault = ''").run(treasury);
-      // The settlement uniq gained the vault (F-DAPP-01), so the legacy `settle:<longId>` rows must be rewritten
+      // The settlement uniq gained the vault, so the legacy `settle:<longId>` rows must be rewritten
       // to the treasury's form or {hasSettlement} would not find them and the live vault would settle twice. A legacy
       // row whose treasury-form twin already exists IS that settlement, recorded a second time by the older binary:
       // it is dropped, not kept beside its twin, or {ledger} would carry two settlements of one series (replay tolerates
@@ -386,7 +386,7 @@ export class MmStore {
   }
 
   /**
-   * THE WORST BUG THE MULTI-VAULT REWRITE LEFT BEHIND (F-DAPP-01), and it is mine.
+   * THE WORST BUG THE MULTI-VAULT REWRITE LEFT BEHIND, and it is mine.
    *
    * `uniq` is a globally UNIQUE column and this key used to be `settle:<longId>` with no vault in it, while the
    * vault travelled alongside as an ordinary COLUMN. That is what made it look finished. Two vaults holding the
@@ -426,7 +426,7 @@ export class MmStore {
   /**
    * The last complete look at the open orders, or null before one (or on a store written before checkpoints).
    *
-   * PER VAULT (F-DAPP-02). One global checkpoint meant every vault after the first resumed from a block another
+   * PER VAULT. One global checkpoint meant every vault after the first resumed from a block another
    * vault had already advanced past, so it scanned a few blocks instead of its own range and booked its sales
    * against whatever fee regime that window carried - silently wrong across a scheduled fee change.
    */
@@ -468,12 +468,17 @@ export class MmStore {
   private readKilled(key: string): KilledState | null {
     const raw = this.store.getMeta(key);
     if (raw === null) return null;
+    // A kill is never forgotten: `setKilled(null)` stores "null", which is the only "not killed". A stored row
+    // that does not parse, or parses to something that is not a kill, stays KILLED until POST /resume writes "null".
+    let parsed: unknown;
     try {
-      const parsed = JSON.parse(raw) as KilledState | null;
-      return parsed && typeof parsed.at === 'number' ? parsed : null;
+      parsed = JSON.parse(raw);
     } catch {
-      return null;
+      return { at: 0, reason: `the stored kill record ${key} is unreadable: kept killed until POST /resume` };
     }
+    if (parsed === null) return null;
+    const state = parsed as Partial<KilledState>;
+    return typeof state.at === 'number' ? (parsed as KilledState) : { at: 0, reason: `the stored kill record ${key} is malformed: kept killed until POST /resume` };
   }
 
   lastSync(vault?: string): number | null {

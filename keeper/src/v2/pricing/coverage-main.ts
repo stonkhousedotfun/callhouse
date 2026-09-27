@@ -64,8 +64,13 @@ pricing service. Derived report only: it never writes the registry and sends not
   --floor 0.05                       house floor, USDG fair (default 0.05: the F3 D9 PROPOSAL, not approved)
   --calendar chain|local             expiries from the on-chain ExpiryCalendar (default when the registry has its
                                      address) or a local mirror of its grid on the NYSE holiday table
-  --events <file.json>               event calendar, e.g. {"NVDA":[{"kind":"earnings","date":"YYYY-MM-DD",
-                                     "session":"after-close"}]} or {"at":<unix s>}; flags event-uncertainty
+  --events <file.json>               event calendar, per ticker a list of events, or {"events":[...],
+                                     "through":"YYYY-MM-DD"} when the list is complete only through that New
+                                     York day (a rung exposed past it is event-uncertain). An event is
+                                     {"kind":"earnings","date":"YYYY-MM-DD","session":"after-close"} (or
+                                     "before-open"), or {"kind":"earnings","at":<unix s>}. e.g. {"NVDA":
+                                     {"events":[{"date":"2026-11-18","session":"after-close"}],"through":
+                                     "2026-12-31"}}; flags event-uncertainty
   --suggest                          derived overrides.ladder and strike-tick flags (printed, never written;
                                      never an expiriesAhead change, so never a daily turned off)
   --format table|jsonl               stdout format (default table)
@@ -288,7 +293,7 @@ export async function runCoverageCli(argv: readonly string[], deps: CoverageCliD
       spotReader,
       chains: { provider },
       // The --events calendar is the single source of truth for event-uncertainty: the service
-      // flags and bounds it (K3-312); the rungs report the service's reasons verbatim and only add
+      // flags and bounds it; the rungs report the service's reasons verbatim and only add
       // which events a rung spans and its early-close day, which the service does not say.
       ...(events === null ? {} : { events: toServiceEventCalendar(events) }),
       settings: {

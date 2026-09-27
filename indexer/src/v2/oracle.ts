@@ -3,8 +3,9 @@ import schema from "ponder:schema";
 import type { Address } from "viem";
 
 import type { DB, EventMeta } from "../../lib/indexing";
-import { emptySettlement, oracleSeriesStatus, reduceOracle, settlementId, type OracleEvent } from "../../lib/v2/oracle";
+import { emptySettlement, reduceOracle, seriesStatusOnVerdict, settlementId, type OracleEvent } from "../../lib/v2/oracle";
 import { v2Ponder as ponder } from "../../lib/registry";
+import { markPnlInput } from "./pnlInput";
 
 async function getSettlement(db: DB, underlying: Address, expiry: bigint) {
   const id = settlementId(underlying, expiry);
@@ -27,8 +28,10 @@ async function record(event: EventMeta, db: DB, underlying: Address, expiry: big
     eq(schema.v2Series.expiry, expiry),
   ));
   for (const row of series) {
+    await markPnlInput(db, event.block.number);
     await db.update(schema.v2Series, { longId: row.longId }).set({
-      status: oracleSeriesStatus(row.status, next.status),
+      // A verdict before expiry (a pre-emptive veto, or its unveto) does not stop the series trading.
+      status: seriesStatusOnVerdict(row.status, next.status, row.expiry, event.block.timestamp),
       ...(next.status === "Finalized" ? { settlementPrice: next.price } : {}),
     });
   }

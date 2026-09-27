@@ -112,4 +112,20 @@ describe("maker epoch CLI", () => {
       await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
     }
   });
+
+  /**
+   * `lib/epoch-merkle.mjs`
+   * says the maker and lender programs share ONE copy of the leaf, node hash and tree layout, but this CLI kept its
+   * own. The copies were identical, so every output test above passed either way: a drift would have shown only as a
+   * root mismatch at post time. So this reads the CLI's source. It must take `merkle` from the shared module and must
+   * not define a leaf, pair, tree or leaf-type table of its own.
+   */
+  it("builds its tree with the shared lib/epoch-merkle.mjs, not a copy of its own", () => {
+    const source = readFileSync(script, "utf8");
+    expect(source).toMatch(/import\s*\{[^}]*\bmerkle\b[^}]*\}\s*from\s*"\.\/lib\/epoch-merkle\.mjs"/);
+    for (const own of [/function\s+leaf\s*\(/, /function\s+pair\s*\(/, /function\s+merkle\s*\(/, /\bleafTypes\s*=/,
+      /const\s+WEEK_SECONDS\b/, /const\s+FIRST_MONDAY_SECONDS\b/]) {
+      expect(source, `maker-epoch.mjs defines ${own.source} itself`).not.toMatch(own);
+    }
+  });
 });

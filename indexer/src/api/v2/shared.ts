@@ -24,6 +24,8 @@ export function seriesWire(row: SeriesRow) {
     longId: row.longId.toString(), shortId: (row.longId + 1n).toString(), ticker: row.ticker,
     underlying: address(row.underlying), isPut: row.isPut, strike: money(row.strike),
     expiry: Number(row.expiry), tenor: row.tenor as "daily" | "weekly" | "special",
+    // The fee PINNED on this series at SeriesCreated (clearinghouse.ts), not the market default.
+    exerciseFeeBps: row.exerciseFeeBps,
     mintFeePpm: row.mintFeePpm, mintFeesHeld: money(row.mintFeesHeld, row.isPut ? 6 : 18),
     mintFeesAccrued: money(row.mintFeesAccrued, row.isPut ? 6 : 18),
     mintCutoff: Number(row.mintCutoff), status: row.status,

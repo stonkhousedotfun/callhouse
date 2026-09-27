@@ -321,7 +321,7 @@ test('no deep link while the bot cannot learn its username', async () => {
 
 /* ------------------------------------------------------------------ channel */
 
-const MESSAGE: Rendered = { title: 'Bought NVDA 221.00 call', body: 'Line one.\nLine two.', url: 'https://app.stonkhouse.test/NVDA/1' };
+const MESSAGE: Rendered = { title: 'Bought NVDA 221.00 call', body: 'Line one.\nLine two.', url: 'https://app.stonkhouse.test/nvda/1' };
 
 test('delivery: sendMessage carries the chat, the framed text and no link preview', async () => {
   const channel = telegramChannel(createTelegramApi({ botToken: TEST_BOT_TOKEN, apiBase }), links);
@@ -335,7 +335,7 @@ test('delivery: sendMessage carries the chat, the framed text and no link previe
   });
   assert.equal(
     formatTelegram(MESSAGE, links.settings()),
-    'Bought NVDA 221.00 call\n\nLine one.\nLine two.\n\nhttps://app.stonkhouse.test/NVDA/1\n\nAlert settings: https://app.stonkhouse.test/settings/notifications',
+    'Bought NVDA 221.00 call\n\nLine one.\nLine two.\n\nhttps://app.stonkhouse.test/nvda/1\n\nAlert settings: https://app.stonkhouse.test/settings/notifications',
   );
   const long = formatTelegram({ ...MESSAGE, body: 'x'.repeat(10_000) }, links.settings());
   assert.equal(long.length, 4096);

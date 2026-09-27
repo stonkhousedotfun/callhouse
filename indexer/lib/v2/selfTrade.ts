@@ -7,7 +7,7 @@ const PRICE_TICK = 100n; // mirrors callhouse-contracts src/v2/interfaces/V2Cons
 export const SELF_TRADE_MIN_PRICE_TICKS = 1n;
 
 /**
- * The band that is SUSPECTED but not counted. D18 accepted the self-trade loophole on condition
+ * The band that is SUSPECTED but not counted. The design accepted the self-trade loophole on condition
  * that the indexer flags the pattern, and the counted band alone does not satisfy that: the
  * attribution below fires only on the conjunction `takerIsBuyer && minimumPrice && linked`, so
  * the two cheapest evasions both produce a counted total of exactly 0 -
@@ -129,12 +129,12 @@ export type SelfTradeState = {
    * into `makers`: a suspicion is not a measurement, and counting it would overstate the metric
    * exactly as surely as dropping it understates the detector's blindness.
    *
-   * OPTIONAL ON INPUT, ALWAYS PRESENT ON OUTPUT, and the reason is a gap this row could not close:
+   * OPTIONAL ON INPUT, ALWAYS PRESENT ON OUTPUT, and the reason is a gap still open here:
    * the persistence layer rebuilds this state from the v2SelfTrade* tables (indexer/src/v2/pnl.ts,
    * the object literal passed to `reduceSelfTrade`), and THERE IS NO TABLE FOR THIS FIELD. So a
    * reduction accumulates it within a run and the next run starts from undefined. Making it
    * required here would not fix that - it would only fail to compile at that call site, which is
-   * outside this task's fence. Until a table and an API field exist, treat this as within-run
+   * outside this module. Until a table and an API field exist, treat this as within-run
    * evidence, not a durable metric.
    */
   unseen?: SelfTradeUnseen[];
@@ -394,7 +394,7 @@ export function totalSelfTradeUnseenUnits(state: Readonly<SelfTradeState>): bigi
  *              The zero is an artefact of the detector, not a statement about the market.
  *
  * A caller that renders `units` without consulting this is publishing "no self-trading" on
- * evidence that cannot distinguish absence from blindness. That is the condition D18 attached to
+ * evidence that cannot distinguish absence from blindness. That is the condition attached to
  * leaving the loophole open, so it is returned as data rather than described in a comment.
  */
 export function selfTradeCoverage(state: Readonly<SelfTradeState>): {

@@ -1,5 +1,5 @@
 /**
- * O3-405: the notifier smoke test, against a fake notifier.
+ * The notifier smoke test, against a fake notifier.
  *
  * WHY THIS FILE EXISTS: a smoke test that cannot fail is worse than none — it is a green line that
  * says a broken deployment is fine. Every check in notifier-smoke.mjs is exercised twice here: once
@@ -52,8 +52,8 @@ const SIGNER = {
  * A notifier that answers the way notifier/src/server.ts answers. `broken` turns exactly one
  * behaviour off; everything else stays correct.
  */
-// T-518 checked the O3-405 suspicion against this suite: "a lot of machinery that has never been
-// executed once". It has now been executed. At c0c5c6a0af5694673495c63e264c9585ab854f0a: 27 tests,
+// An audit checked one suspicion against this suite: "a lot of machinery that has never been
+// executed once". It has now been executed: 27 tests,
 // 27 pass, 0 fail. The suite needs nothing to run it - the fake listens on 127.0.0.1 on an OS-picked
 // port and reaches no network - so the author's reason for never running it no longer holds.
 // THE GREEN IS LOAD-BEARING, AND THAT IS THE POINT RATHER THAN THE PASS COUNT. Neutering the `broken`
@@ -122,9 +122,11 @@ function fakeNotifier(broken = {}) {
           database: broken.databaseDown === true ? "unavailable" : "ok",
           channels: { telegram: "closed", webpush: "closed", email: "off" },
           telegramBot: broken.telegramDown === true ? "unknown" : "ok",
-          rules: broken.rulesFailing === true
-            ? { status: "failing", lastSuccessAt: null, consecutiveFailures: 9 }
-            : { status: "ok", lastSuccessAt: Math.floor(Date.now() / 1000), consecutiveFailures: 0 },
+          ...(broken.noRulesBlock === true ? {} : {
+            rules: broken.rulesFailing === true
+              ? { status: "failing", lastSuccessAt: null, consecutiveFailures: 9 }
+              : { status: "ok", lastSuccessAt: Math.floor(Date.now() / 1000), consecutiveFailures: 0 },
+          }),
         });
       }
       if (req.method === "GET" && url.pathname === "/v1/webpush/key") return send(200, { publicKey: state.publicKey });
@@ -163,6 +165,7 @@ function fakeNotifier(broken = {}) {
         return send(201, { id });
       }
       if (url.pathname === "/v1/subscriptions" && req.method === "GET") {
+        if (broken.listFailsAfterDelete === true && state.deleted === true) return fail(500, "internal", "database unavailable");
         const who = session();
         if (!who.ok && broken.listsWithoutCredentials !== true) return fail(who.status, who.code, who.message);
         const items = [...state.subscriptions.values()]
@@ -181,6 +184,7 @@ function fakeNotifier(broken = {}) {
         return send(200, { items });
       }
       if (url.pathname.startsWith("/v1/subscriptions/") && req.method === "DELETE") {
+        state.deleted = true;
         const who = session();
         if (!who.ok) return fail(who.status, who.code, who.message);
         const id = decodeURIComponent(url.pathname.slice("/v1/subscriptions/".length));
@@ -393,6 +397,16 @@ test("the already-true alert is the one that is sent and read back", async () =>
 test("an unreachable Telegram bot fails telegram-link", async () => {
   const failure = await onlyFails("telegram-link", { telegramLinkUnavailable: true });
   assert.match(failure.detail, /503/);
+});
+
+test("A /health with no rules block fails health: an unreported rules engine is unknown, not off", async () => {
+  const failure = await onlyFails("health", { noRulesBlock: true });
+  assert.match(failure.detail, /did not report its rules engine/);
+});
+
+test("A list read that fails after the DELETE fails subscription-delete: an unread list is not an empty one", async () => {
+  const failure = await onlyFails("subscription-delete", { listFailsAfterDelete: true });
+  assert.match(failure.detail, /after the DELETE answered 500.*whether .* is gone is unknown/);
 });
 
 test("a DELETE that leaves the row behind fails subscription-delete", async () => {

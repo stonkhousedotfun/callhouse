@@ -1,5 +1,5 @@
 /**
- * K3-304 replay: committed neutral fixtures and (env-gated) private Cboe fixtures through the
+ * Replay: committed neutral fixtures and (env-gated) private Cboe fixtures through the
  * real PricingService onto the cranker's ladder (replay.ts). No network, no credential, no
  * provider contact; nothing private is committed.
  *
@@ -56,6 +56,8 @@ const NVDA = cboeToNormalized(syntheticNvdaChain(), 0);
 const AS_OF = Date.UTC(2026, 8, 14, 19, 59, 59) / 1000;
 const NOW_S = Date.UTC(2026, 8, 15, 8, 30) / 1000;
 const closeOf = (day: number) => Date.UTC(2026, 8, day, 20) / 1000;
+/** Two weekly and three daily expiries: the ladder shape these fixtures were captured for, before the ladder went 0DTE only. */
+const WEEKLY_ON = { weekly: 2, daily: 3 } as const;
 
 const NVDA_FEED: Address = '0x379EC4f7C378F34a1B47E4F3cbeBCbAC3E8E9F15';
 const NVDA_TOKEN = { chainId: 4663, address: '0xd0601CE157Db5bdC3162BbaC2a2C8aF5320D9EEC' as Address, uiMultiplier: '1000775159164630595' };
@@ -116,16 +118,20 @@ test('ladder: weekly and daily closes follow the NYSE calendar (Fridays walked b
 test('ladder: the registry NVDA ladder is the cranker\'s: tenor rungs at the strike tick, ahead expiries only', () => {
   const market = v2Markets(loadV2Registry(TIER1), LADDER_STATUSES).find((m) => m.ticker === 'NVDA');
   assert.ok(market !== undefined, 'NVDA carries a v2 block in the committed registry');
+  // The committed registry lists six daily closes and no weekly (daily-only, six ahead).
+  assert.deepEqual(market.v2.params.expiriesAhead, { weekly: 0, daily: 6 }, 'the shipped registry lists six dailies, no weeklies');
   const rungs = crankerLadderRungs(NVDA, {
     ladder: market.v2.params.ladder,
-    expiriesAhead: market.v2.params.expiriesAhead,
+    // The registry's rungs and tick, over both tenors: this case pins the weekly rung the 2026-09-18 Cboe file lists, so
+    // it states the weekly-on expiry counts instead of inheriting the registry's weekly 0.
+    expiriesAhead: WEEKLY_ON,
     strikeTick: market.v2.strikeTick,
     fromUnix: NOW_S,
   });
   const weekly = rungs.filter((r) => r.tenor === 'weekly');
   const daily = rungs.filter((r) => r.tenor === 'daily');
-  assert.equal(weekly.length, market.v2.params.ladder.weekly.rungs * market.v2.params.expiriesAhead.weekly);
-  assert.equal(daily.length, market.v2.params.ladder.daily.rungs * market.v2.params.expiriesAhead.daily);
+  assert.equal(weekly.length, market.v2.params.ladder.weekly.rungs * WEEKLY_ON.weekly);
+  assert.equal(daily.length, market.v2.params.ladder.daily.rungs * WEEKLY_ON.daily);
   for (const rung of rungs) {
     assert.equal(rung.strike % market.v2.strikeTick, 0n, `rung ${rung.strike} is on the ${market.v2.strikeTick} tick`);
     assert.ok(rung.expiry > NOW_S, 'only expiries ahead of now');
@@ -145,7 +151,7 @@ test('replay: the real NVDA ladder prices through the seam; the listed rung is l
   assert.ok(market !== undefined, 'NVDA carries a v2 block in the committed registry');
   const rungs = crankerLadderRungs(NVDA, {
     ladder: market.v2.params.ladder,
-    expiriesAhead: market.v2.params.expiriesAhead,
+    expiriesAhead: WEEKLY_ON, // both tenors, as in the ladder case above
     strikeTick: market.v2.strikeTick,
     fromUnix: NOW_S,
   });
@@ -198,6 +204,51 @@ test('theoretical: a vendor estimate never prices as listed; mixed chains keep b
   assert.ok(m.provenance.observations.vendorTheoretical.length > 0, 'the vendor value is reported as theoretical');
   assert.ok(m.provenance.observations.listedQuotes.length > 0, 'the listed quote is reported as a quote');
   assert.equal(m.provenance.observations.vendorTheoretical[0]!.observedAt, AS_OF);
+});
+
+/**
+ * An independent value for a listed rung. Every other neutral assertion is satisfied by an
+ * identity service (one that echoes the seed's mid) or by any fixed positive number: `source cboe` is
+ * the harness's own descriptor echoed back, and the only numeric pins are a deep-OTM zero and two runs of
+ * one service agreeing with each other. This one derives the answer outside the service.
+ *
+ * The synthetic NVDA chain is Black-Scholes at vol 0.43 (fixtures/synthetic-chains.ts, the `nvda`
+ * recipe), quoted a cent either side of theoretical, so an exact listed contract's implied vol is 0.43
+ * up to cent rounding, and its fair is Black-Scholes at that vol ON THE TOKEN SPOT and the service's
+ * trading clock, not the listed mid (fair.ts, CARRYING A MID TO THE TOKEN). The normal CDF below is
+ * Abramowitz-Stegun 7.1.26 (|error| < 1.5e-7), deliberately not bs.ts, so a defect in the service's own
+ * pricing cannot cancel against its expectation.
+ */
+function normCdf(x: number): number {
+  const z = Math.abs(x) / Math.SQRT2;
+  const t = 1 / (1 + 0.3275911 * z);
+  const erf = 1 - (((((1.061405429 * t - 1.453152027) * t) + 1.421413741) * t - 0.284496736) * t + 0.254829592) * t * Math.exp(-z * z);
+  return x >= 0 ? 0.5 * (1 + erf) : 0.5 * (1 - erf);
+}
+
+function independentCall(spot: number, strike: number, vol: number, years: number): number {
+  const d1 = (Math.log(spot / strike) + 0.5 * vol * vol * years) / (vol * Math.sqrt(years));
+  return spot * normCdf(d1) - strike * normCdf(d1 - vol * Math.sqrt(years));
+}
+
+test('replay value: an exact listed rung prices at the seed vol on the token spot, not the echoed mid', async () => {
+  const SEED_VOL = 0.43;
+  const strike = 212.5;
+  const q = priced(await serviceWith(NVDA).fair(request(strike, closeOf(25))));
+  assert.equal(q.method, 'listed-contract', 'an exact listed contract on the 25 Sep listing');
+  assert.ok(Math.abs(q.iv - SEED_VOL) < 0.005, `implied vol ${q.iv} recovers the seed's ${SEED_VOL}`);
+
+  const spot = Number(q.spotUsdg6) / 1e6;
+  const expected = independentCall(spot, strike, q.iv, q.yearsToExpiry);
+  const got = Number(q.fairUsdg6) / 1e6;
+  assert.ok(expected > 1, `a near-the-money weekly is worth dollars, not a rounding (${expected})`);
+  assert.ok(Math.abs(got - expected) < 1e-4, `fair ${got} equals Black-Scholes(iv, token spot, trading clock) ${expected}`);
+
+  // The negative half: the listed mid itself is NOT the answer, so an identity replay cannot pass.
+  const row = NVDA.rows.find((r) => r.instrument.expiryDay === '2026-09-25' && r.instrument.side === 'C' && r.instrument.strike === strike);
+  assert.ok(row?.quote?.bid != null && row.quote.ask != null, 'the chain lists the contract');
+  const listedMid = (row.quote.bid + row.quote.ask) / 2;
+  assert.ok(Math.abs(got - listedMid) > 0.01, `fair ${got} is carried to the token, not the listed mid ${listedMid}`);
 });
 
 /*//////////////////////////////////////////////////////////////
@@ -263,7 +314,7 @@ test('missing timestamps: unknown clocks stay null and the estimate is never rea
   assert.notEqual(q.provenance.quality.readiness, 'ready');
 
   // An untimed underlying next to timed quotes: priced on the quote, the underlying clock stays
-  // null and carries the K3-311 reason code.
+  // null and carries the reason code.
   const noUnderlyingTime = fakeListedChain(NVDA, { quoteObservedAt: AS_OF, underlyingObservedAt: null });
   const u = priced(await serviceWith(noUnderlyingTime).fair(request(220, closeOf(18))));
   assert.equal(u.provenance.clocks.underlyingObservedAt, null);

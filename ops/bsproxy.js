@@ -10,7 +10,7 @@
 // "Failed to deserialize content: expected value at line 1 column 1" rather than as a 403. Plain curl
 // and any fetch-based indexer hit the same wall.
 //
-// Isolated deterministically in ops/recon/R7-R8-testnet-explorer.md B.3: 5/5 challenged without a
+// Isolated deterministically in the explorer recon: 5/5 challenged without a
 // Referer (bare, browser UA, foundry UA); 5/5 passed with one. Origin and sec-fetch-mode do not help.
 //
 // USAGE

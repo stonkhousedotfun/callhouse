@@ -8,7 +8,7 @@
  */
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { applyFill, applySettlement, dayOf, fillOf, intrinsicAt, lossStop, netSalePrice, replayLedger, type Position, type TrackedOrder } from './pnl.js';
+import { applyFill, applySettlement, dayOf, fillOf, intrinsicAt, lossStop, netSalePrice, replayLedger, type Position, type TrackedOrder, mtmLossStop, unrealisedAt } from './pnl.js';
 
 const DAY = 20_700; // a UTC day index
 const T = DAY * 86_400 + 50_000;
@@ -55,7 +55,8 @@ test('replayLedger and lossStop: realised by UTC day; the stop trips at the limi
   assert.equal(ledger.realisedByDay.get(DAY + 1), -100_000n, 'day two: sold at 1.90 net of the 5 % fee, settled 2.00 in the money');
   assert.equal(ledger.positions.get(id)!.units, 0n);
 
-  assert.deepEqual(lossStop(ledger, T + 86_400, 100_000n), { day: DAY + 1, realised: -100_000n, limit: 100_000n, tripped: true });
+  // The stop also carries the ledger's OPEN positions for the mark-to-market stop; here none is open.
+  assert.deepEqual(lossStop(ledger, T + 86_400, 100_000n), { day: DAY + 1, realised: -100_000n, limit: 100_000n, tripped: true, positions: new Map() });
   assert.equal(lossStop(ledger, T + 86_400, 100_001n).tripped, false);
   assert.equal(lossStop(ledger, T, 1n).tripped, false, 'a profitable day');
   assert.equal(lossStop(ledger, T + 2 * 86_400, 1n).tripped, false, 'a new day starts at zero');
@@ -89,4 +90,44 @@ test('settlement of a LONG position is booked net of the series\' exercise fee (
     { ...events[1]! },
   ];
   assert.equal(replayLedger(short).realisedByDay.get(dayOf(T + 86_400)), -1_000_000n, 'sold at 1.00, owes the full 2.00');
+});
+
+/*//////////////////////////////////////////////////////////////
+          P18: THE MARK-TO-MARKET (EXPECTED-SETTLEMENT) STOP
+//////////////////////////////////////////////////////////////*/
+
+test('P18 unrealisedAt: a long gains mark x units − basis, a short basis − mark x |units|, per 100 units a share', () => {
+  // Short 2 shares sold at 1.00 net: basis 2 x 100 units x 1.00.
+  assert.equal(unrealisedAt({ units: -200n, basis: 200n * 1_000_000n }, 3_000_000n), -4_000_000n, 'marked at 3.00: 2 x (1 − 3) = −4 USDG');
+  assert.equal(unrealisedAt({ units: 100n, basis: 100n * 1_000_000n }, 1_500_000n), 500_000n);
+  assert.equal(unrealisedAt({ units: 0n, basis: 0n }, 9n), 0n);
+});
+
+test('P18 mtmLossStop: trips on an open short marked against it while the realised stop has nothing to see; 0 is off; unmarked positions are named, never read as flat', () => {
+  const day = Math.floor(1_790_000_000 / 86_400);
+  const positions = new Map([['7', { units: -500n, basis: 500n * 400_000n }]]); // 5 shares short at 0.40
+  const stop = { day, realised: 0n, limit: 1_000_000_000n, tripped: false, positions };
+  // Marked at 2.50 after a rally: 5 x (0.40 − 2.50) = −10.50 USDG.
+  const hit = mtmLossStop(stop, new Map([['7', 2_500_000n]]), 10_000_000n);
+  assert.deepEqual([hit.unrealised, hit.total, hit.tripped], [-10_500_000n, -10_500_000n, true]);
+  assert.equal(stop.tripped, false, 'the realised stop alone would keep quoting');
+  assert.equal(mtmLossStop(stop, new Map([['7', 2_500_000n]]), 11_000_000n).tripped, false, 'inside the limit');
+  assert.equal(mtmLossStop(stop, new Map([['7', 2_500_000n]]), 0n).tripped, false, 'limit 0 is off');
+  // Realised and unrealised add up.
+  assert.equal(mtmLossStop({ ...stop, realised: -600_000n }, new Map([['7', 2_500_000n]]), 11_000_000n).tripped, true);
+  const unmarked = mtmLossStop(stop, new Map([['7', null]]), 1n);
+  assert.deepEqual([unmarked.unmarked, unmarked.unrealised, unmarked.tripped], [['7'], 0n, false]);
+  const noPositions = mtmLossStop({ day, realised: 0n, limit: 1n, tripped: false }, new Map(), 1n);
+  assert.deepEqual(noPositions.unmarked, ['ledger positions not supplied']);
+});
+
+test('P18 lossStop carries only the OPEN ledger positions, copied', () => {
+  const ledger = replayLedger([
+    { type: 'fill', longId: '1', side: 'sell', units: 100n, price: 1_000_000n, feeBps: 0, at: 1_790_000_000 },
+    { type: 'fill', longId: '2', side: 'sell', units: 100n, price: 1_000_000n, feeBps: 0, at: 1_790_000_000 },
+    { type: 'fill', longId: '2', side: 'buy', units: 100n, price: 1_000_000n, feeBps: 0, at: 1_790_000_000 },
+  ]);
+  const stop = lossStop(ledger, 1_790_000_000, 1n);
+  assert.deepEqual([...stop.positions!.keys()], ['1']);
+  assert.notEqual(stop.positions!.get('1'), ledger.positions.get('1'), 'a copy: the planner cannot mutate the ledger');
 });

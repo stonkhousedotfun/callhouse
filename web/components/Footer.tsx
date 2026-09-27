@@ -3,14 +3,13 @@
  * Server component apart from one island: the first line's market count and factory link follow
  * the URL (components/FooterMarket.tsx), and nothing else here hydrates.
  *
- * Three rows, in this order:
+ * Two rows, in this order:
  *   1. what this is: v1 shows its market count and factory; v2 names the chain and product.
  *   2. where to go: the in-app pages first, then the links that leave the app, each marked ↗ and
  *      opening a new tab. Terms and Privacy are external: the documents live on the marketing site
  *      only (lib/site.ts). stonkhouse.fun sits last because it leaves the app entirely.
- *   3. the standing disclaimers. "Not affiliated with Robinhood Markets, Robinhood Assets (Jersey)
- *      Limited or Valorem" is carried word for word on stonkhouse.fun too; if it is reworded,
- *      reword both in paired commits across the two repos.
+ * No disclaimer paragraph, matching stonkhouse.fun's footer. The "not
+ * affiliated" and "not advice" statements live on /legal.
  */
 import Link from "next/link";
 
@@ -46,18 +45,6 @@ export function Footer() {
                   Docs
                 </Link>
               </li>
-              {process.env.NEXT_PUBLIC_V2 === "1" ? <>
-                {process.env.NEXT_PUBLIC_V7_API_URL?.trim() ? <li>
-                  <Link href="/v7" className={LINK}>
-                    Legacy v7
-                  </Link>
-                </li> : null}
-                <li>
-                  <Link href="/legacy" className={LINK}>
-                    Legacy v1
-                  </Link>
-                </li>
-              </> : null}
               <li>
                 <ExternalLink href={TERMS_URL} arrow className={LINK}>
                   Terms
@@ -85,12 +72,15 @@ export function Footer() {
               </li>
             </ul>
           </nav>
-          <p className="max-w-[70em]">
-            Not affiliated with Robinhood Markets, Robinhood Assets (Jersey) Limited or Valorem. Nothing here is
-            financial advice or an offer of securities.
-          </p>
         </div>
       </Container>
+      {/*
+        The phone tab bar (components/TabBar.tsx, v2 only, below 1024px) is fixed over the bottom of the screen. This
+        spacer is its height plus the safe area, so the footer links scroll clear of it instead of ending under it.
+      */}
+      {process.env.NEXT_PUBLIC_V2 === "1" ? (
+        <div aria-hidden="true" data-slot="tab-bar-spacer" className="h-[calc(80px+env(safe-area-inset-bottom))] lg:hidden" />
+      ) : null}
     </footer>
   );
 }

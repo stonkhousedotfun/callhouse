@@ -10,8 +10,12 @@ describe("ConversionFloor copy", () => {
 
   it("shows the route-aware floor only for a routed market", () => {
     const html = render({ state: { kind: "routed", floorBps: 9_920 } });
-    expect(html).toContain("99.20%");
-    expect(html).toContain("including the route fee");
+    // No zero tail on the percent, and the rule in one plain line (the floor already includes the route fee).
+    expect(html).toContain("at least 99.2% of the tokens&#x27; value at settlement");
+    expect(html).not.toContain("99.20%");
+    expect(render({ state: { kind: "routed", floorBps: 9_915 } })).toContain("99.15%");
+    expect(render({ state: { kind: "routed", floorBps: 9_700 } })).toContain("at least 97% of");
+    expect(html).toContain("or you get the tokens");
   });
 
   it("says winning calls are paid in Stock Tokens for an unrouted market", () => {

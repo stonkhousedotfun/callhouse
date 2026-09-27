@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # ---------------------------------------------------------------------------------------------
-# ops/v2/notifier-backup.sh — O3-409: a verified `pg_dump --schema=notifier`, and the drill that
-# proves it can be restored (ops/runbooks/notifier-restore.md).
+# ops/v2/notifier-backup.sh — a verified `pg_dump --schema=notifier`, and the drill that
+# proves it can be restored.
 #
 # The notifier schema is the only user data Stonkhouse keeps: who asked to be told what, and where.
 # It is not reconstructible from the chain. The indexer can be rebuilt by replaying blocks; this
@@ -9,7 +9,7 @@
 # `notifier.delivery` is every alert those wallets already received arriving a second time.
 #
 #   ops/v2/notifier-backup.sh --out ~/backups                 # DATABASE_URL from the environment
-#   ops/v2/notifier-backup.sh --out ~/backups --url-file ~/.callhouse-keys/notifier-db.url
+#   ops/v2/notifier-backup.sh --out ~/backups --url-file <url file>   # a mode-600 file holding the URL
 #   ops/v2/notifier-backup.sh --out ~/backups --url-stdin     # the URL on standard input
 #   ops/v2/notifier-backup.sh --out ~/backups --dry-run       # print the plan, connect to nothing
 #

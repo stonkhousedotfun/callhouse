@@ -2,16 +2,19 @@
 // file (unlike vault.ts, which scripts/gen-abis.mjs produces). Re-check it against the canonical
 // artifact whenever ops/abis changes.
 //
-// The deployed 0x9a7b40e5c1dB1Af822ef091c990b58b02C78C0C0 is the exact upstream
-// ValoremOptionsClearinghouse (valorem-core @6436c823, solc 0.8.16). A read surface, plus ONE
-// write: `exercise(optionId, amount)`, which the cycle page's Exercise card sends for a holder of
-// this week's option (components/ExercisePanel.tsx). The app never writes, redeems or transfers
-// on the clearinghouse. `exercise` and the four errors it can raise (clearExerciseErrorsAbi, just
-// below) were copied from the Clear artifact's ABI
+// The app calls the Clear at 0x53d7A6d0489Daf3d67b9A314e0eAB2B78Acab9C6 (lib/contracts.ts
+// CLEARINGHOUSE, NEXT_PUBLIC_CLEARINGHOUSE): our own deployment from contracts/script/DeployClear.s.sol,
+// the one the live v1 vault was constructed with. Its runtime is the upstream
+// ValoremOptionsClearinghouse (valorem-core @6436c823, solc 0.8.16), byte-identical to Overcall's
+// instance at 0x9a7b…C0C0 except the CBOR metadata hash. A read surface, plus ONE write:
+// `exercise(optionId, amount)`, which the book's Exercise card sends for a holder of a v1 option
+// (components/legacy/ExercisePanel.tsx, rendered by components/BookView.tsx). The app never
+// writes, redeems or transfers on the clearinghouse. `exercise` and the four errors it can raise
+// (clearExerciseErrorsAbi, just below) were copied from the Clear artifact's ABI
 // (callhouse-contracts/script/artifacts/ValoremOptionsClearinghouse.json) and checked against
 // ValoremOptionsClearinghouse.exercise at 6436c823.
 //
-// TRAP, from ops/recon/R4-valorem-abi.md: `claim(claimId)` returns amountWritten and
+// TRAP, from the Valorem ABI review: `claim(claimId)` returns amountWritten and
 // amountExercised as 1e18-SCALED SCALARS, not contract counts. Divide by 1e18 before you
 // show a number to a human. See scaleToContracts() in lib/format.ts.
 

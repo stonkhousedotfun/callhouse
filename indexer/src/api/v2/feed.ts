@@ -58,7 +58,7 @@ async function biggestWin(start: bigint, end: bigint) {
 /**
  * The epoch object carries the scoring policy its figures were produced under. `band` is additive, and it
  * is emitted because this producer DOES compute against a band: publishing the policy is what lets a
- * consumer tell a 1000 bps figure from a 100 bps one without guessing (02-interfaces.md:886-899).
+ * consumer tell a 1000 bps figure from a 100 bps one without guessing.
  */
 function epochWire(start: bigint) {
   const end = makerEpoch(start + 8n * 86_400n);
@@ -78,7 +78,7 @@ type UnseenRow = typeof schema.v2SelfTradeUnseen.$inferSelect;
  *
  * `selfTradeUnits` alone cannot say whether a 0 is an honest market or a blind detector: the
  * attribution needs `takerIsBuyer && minimumPrice && linked` all at once, so one extra price tick
- * or an off-chain-funded second wallet produces exactly 0. D18 left the loophole open ON
+ * or an off-chain-funded second wallet produces exactly 0. The design left the loophole open ON
  * CONDITION that the indexer flags the pattern, so the refused legs are published beside the
  * count rather than folded into it.
  *
@@ -113,10 +113,10 @@ export function registerFeedRoutes(app: Hono) {
   app.get("/feed/wins", async (c) => {
     const window = c.req.query("window") ?? "all";
     if (!["day", "week", "all"].includes(window)) return error(c, "bad_window", "Window must be day, week, or all.");
-    // F-APP-INDEXER-05: "today" and "this week" are windows over INDEXED settlements, so they end at
+    // "today" and "this week" are windows over INDEXED settlements, so they end at
     // the indexed head, exactly like /stats's biggestWinDay and biggestWinWeek. On the host clock the
     // two routes disagree during lag - /stats names yesterday's best win while /feed/wins?window=day
-    // reports an empty today, which is the two-different-numbers failure this row exists to prevent.
+    // reports an empty today, which is the two-different-numbers failure this anchor exists to prevent.
     // `all` spans every settlement and needs no anchor.
     let bounds: { start: bigint; end: bigint } | null = null;
     if (window !== "all") {
@@ -143,7 +143,7 @@ export function registerFeedRoutes(app: Hono) {
     const window = c.req.query("window") ?? "week";
     if (!["multiple", "absolute", "streak"].includes(metric)) return error(c, "bad_metric", "Unknown leaderboard metric.");
     if (!["week", "month", "all"].includes(window)) return error(c, "bad_window", "Unknown leaderboard window.");
-    // F-APP-INDEXER-05: the leaderboard rows are materialized per indexed window, so the window to
+    // The leaderboard rows are materialized per indexed window, so the window to
     // read is chosen by the indexed head. On the host clock a lagging index is asked for a window it
     // has not written yet and the board reads as empty rather than as stale. The "all" window starts
     // at 0 for every anchor, so it stays answerable with no checkpoint.
@@ -216,7 +216,7 @@ export function registerFeedRoutes(app: Hono) {
       asOf === null ? null : biggestWin(weekBounds(asOf).start, weekBounds(asOf).end),
     ]);
     const sum = (field: "volumeUsdg" | "premiumUsdg" | "feesUsdg") => markets.reduce((v, row) => v + row[field], 0n);
-    // T-425. The same head the windows above end at, on the wire. volume24h, biggestWinDay and
+    // The same head the windows above end at, on the wire. volume24h, biggestWinDay and
     // biggestWinWeek are all measured against it, and /v2/markets publishes the identical value from
     // its own read, so the two routes state one instant. 0 when no checkpoint was readable, which is
     // the same condition that makes volume24h 0 and both biggest-win fields null.

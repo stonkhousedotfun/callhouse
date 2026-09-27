@@ -41,3 +41,27 @@ describe("parseFactoryWeek", () => {
     expect(parseFactoryWeek({ ...NAMED, id: 0 })?.id).toBe(0);
   });
 });
+
+describe("parseFactoryWeek string and malformed fields", () => {
+  it("reads decimal strings as returned by a JSON transport", () => {
+    expect(
+      parseFactoryWeek({ id: "1", strikeUsdg: "223000000", exerciseTs: "1789761600", baseExpiryTs: "1789848000", askUsdg: "1000000" }),
+    ).toEqual(NAMED);
+  });
+
+  it("reads a finite number as a bigint amount", () => {
+    expect(parseFactoryWeek({ ...NAMED, strikeUsdg: 223_000_000 })?.strikeUsdg).toBe(223_000_000n);
+  });
+
+  it("refuses non-numeric, empty, non-finite and wrong-typed fields", () => {
+    expect(parseFactoryWeek({ ...NAMED, strikeUsdg: "2.5" })).toBeUndefined();
+    expect(parseFactoryWeek({ ...NAMED, strikeUsdg: "" })).toBeUndefined();
+    expect(parseFactoryWeek({ ...NAMED, askUsdg: Number.NaN })).toBeUndefined();
+    expect(parseFactoryWeek({ ...NAMED, askUsdg: true })).toBeUndefined();
+    expect(parseFactoryWeek({ ...NAMED, id: "abc" })).toBeUndefined();
+    expect(parseFactoryWeek({ ...NAMED, id: "" })).toBeUndefined();
+    expect(parseFactoryWeek({ ...NAMED, exerciseTs: Number.POSITIVE_INFINITY })).toBeUndefined();
+    expect(parseFactoryWeek({ ...NAMED, baseExpiryTs: {} })).toBeUndefined();
+    expect(parseFactoryWeek("week")).toBeUndefined();
+  });
+});

@@ -96,15 +96,39 @@ export type HouseFillArgs = {
   makerRebate: bigint;
 };
 
+/**
+ * One `v2HouseFill` row (ponder.schema.ts). Typed field by field rather than `Record<string, unknown>`: the insert in
+ * src/v2/houseVault.ts recordHouseFills is checked against the table's own type, and the loose record failed tsc there
+ * (TS2345, found while typechecking).
+ */
+export type HouseFillRow = {
+  id: string;
+  vault: Address;
+  side: "maker" | "taker";
+  orderId: bigint;
+  longId: bigint;
+  maker: Address;
+  taker: Address;
+  units: bigint;
+  price: bigint;
+  premium: bigint;
+  sellerFee: bigint;
+  makerRebate: bigint;
+  ts: bigint;
+  block: bigint;
+  logIndex: number;
+  tx: Hex;
+};
+
 export function houseFillRows(
   event: Parameters<typeof meta>[0] & { args: HouseFillArgs },
   vaults: Set<string>,
-) {
+): HouseFillRow[] {
   const provenance = meta(event);
   const maker = lower(event.args.maker);
   const taker = lower(event.args.taker);
-  const rows: Array<Record<string, unknown>> = [];
-  const push = (vault: string, side: string) => {
+  const rows: HouseFillRow[] = [];
+  const push = (vault: Address, side: "maker" | "taker") => {
     rows.push({
       id: `${provenance.id}-${side}`,
       vault,

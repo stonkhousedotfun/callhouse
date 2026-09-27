@@ -2,11 +2,17 @@ import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
 
-import { HOUSE_DISCLOSURE_WEEKLY_WITHDRAWALS } from "@/lib/v2/houseCopy";
+import { HOUSE_DISCLOSURE_DAILY_WITHDRAWALS, HOUSE_DISCLOSURE_WEEKLY_WITHDRAWALS } from "@/lib/v2/houseCopy";
+import { formatNewYork } from "@/lib/v2/houseEpoch";
+import { EARN_QUEUE_PRICING } from "@/lib/v2/vaultCopy";
 import {
-  WithdrawalTerms, newYorkWithdrawalTime, settlementWithdrawalTimes, withdrawalCountdown,
+  WithdrawalTerms, settlementWithdrawalTimes, withdrawalCountdown,
   type WithdrawalTiming,
 } from "./WithdrawalTerms";
+import { timeText } from "@/components/ui/Time";
+
+/** What <Time market> renders on the server (and during hydration): New York, zone named. */
+const serverTime = (at: number) => timeText({ at, market: true }, null);
 
 /**
  * React escapes text when it renders, so an approved copy string containing an apostrophe never appears
@@ -32,29 +38,70 @@ describe("WithdrawalTerms", () => {
     expect(html).toContain("Free now");
     expect(html).toContain("12.5");
     expect(html).toContain("USDG");
-    expect(html).toContain("Locked in shorts");
-    expect(html).toContain(newYorkWithdrawalTime(expiry + timing.finalizeDelay));
+    // plain words, same statement. 
+    expect(html).toContain("Locked in sold options");
+    expect(html).toContain(serverTime(expiry + timing.finalizeDelay));
     expect(html).toContain("earliest routine settlement time");
-    expect(html).toContain(newYorkWithdrawalTime(expiry + timing.resolveDelay));
+    expect(html).toContain(serverTime(expiry + timing.resolveDelay));
   });
 
   it("refuses to invent a lending queue ETA", () => {
     const html = renderToStaticMarkup(createElement(WithdrawalTerms, { surface: "lending", now }));
     expect(html).toContain("queued request");
-    expect(html).toContain("submitting a request is not an instant withdrawal");
+    // plain words, same statement. 
+    expect(html).toContain("It isn&#x27;t an instant withdrawal");
+    expect(html).not.toContain("processQueue()");
     expect(html).toContain("No fixed time — it depends on available liquidity");
     expect(html).not.toContain("Withdraw from");
   });
 
   it("reuses the approved house copy and degrades when the nullable boundary is absent", () => {
     const available = renderToStaticMarkup(createElement(WithdrawalTerms,
-      { surface: "house", boundaryAt: expiry, now }));
+      { surface: "house", boundaryAt: expiry, now, cadence: "weekly" }));
     expect(available).toContain(asRendered(HOUSE_DISCLOSURE_WEEKLY_WITHDRAWALS));
-    expect(available).toContain(newYorkWithdrawalTime(expiry));
+    expect(available).toContain(serverTime(expiry));
     expect(available).toContain("1h 0m");
     const unavailable = renderToStaticMarkup(createElement(WithdrawalTerms,
-      { surface: "house", boundaryAt: null, now }));
-    expect(unavailable).toContain("Boundary timing is unavailable");
+      { surface: "house", boundaryAt: null, now, cadence: "daily" }));
+    // plain words, same statement. 
+    expect(unavailable).toContain("Close timing is unavailable");
+  });
+
+  it("states the deposit and withdrawal cutoffs separately, and follows the vault's cadence", () => {
+    // The chain's SETTLEMENT_WINDOW() read (a fixture here); requests stop that long before the close.
+    const weekly = renderToStaticMarkup(createElement(WithdrawalTerms,
+      { surface: "house", boundaryAt: expiry, now, cadence: "weekly", settlementWindow: 1_800 }));
+    // The cutoff sentences (lib/v2/houseEpoch.ts cutoffSentences), exact: the vault's own close
+    // time, never "Fri 4:00 pm ET".
+    expect(weekly).toContain(asRendered(
+      `Deposit before ${formatNewYork(expiry - 1_800)} to be priced at this week's close (${formatNewYork(expiry)}).`));
+    expect(weekly).toContain(asRendered(
+      `Withdrawal requests are taken until ${formatNewYork(expiry - 1_800)}, 30 minutes before the close, and are priced at that close.`));
+    expect(weekly).not.toMatch(/Fri 4:00 pm ET|boundary/);
+    // An unread window states no cutoff rather than the close: the sentences wait for the read.
+    const unread = renderToStaticMarkup(createElement(WithdrawalTerms, { surface: "house", boundaryAt: expiry, now, cadence: "weekly" }));
+    expect(unread).not.toContain("Withdrawal requests are taken until");
+    expect(unread).not.toContain("Deposit before");
+    const daily = renderToStaticMarkup(createElement(WithdrawalTerms, { surface: "house", boundaryAt: expiry, now, cadence: "daily" }));
+    expect(daily).toContain(asRendered(HOUSE_DISCLOSURE_DAILY_WITHDRAWALS));
+    expect(daily).not.toContain(asRendered(HOUSE_DISCLOSURE_WEEKLY_WITHDRAWALS));
+    expect(daily).not.toMatch(/Fri |once a week/);
+  });
+
+  it("the house surface has no weekly default; the cadence is a required prop", () => {
+    // Before an omitted cadence rendered the weekly disclosure. The prop is now required, so omitting it is
+    // a type error (tsc --noEmit checks this file); if `cadence?` comes back, this directive goes unused and tsc fails.
+    // @ts-expect-error cadence is required on the house surface
+    const props: Parameters<typeof WithdrawalTerms>[0] = { surface: "house", boundaryAt: expiry, now };
+    expect(props.surface).toBe("house");
+    const daily = renderToStaticMarkup(createElement(WithdrawalTerms, { surface: "house", boundaryAt: expiry, now, cadence: "daily" }));
+    expect(daily).toContain(asRendered(HOUSE_DISCLOSURE_DAILY_WITHDRAWALS));
+    expect(daily).not.toContain(asRendered(HOUSE_DISCLOSURE_WEEKLY_WITHDRAWALS));
+  });
+
+  it("the lending surface says a queued exit is priced when served", () => {
+    const html = renderToStaticMarkup(createElement(WithdrawalTerms, { surface: "lending", now }));
+    expect(html).toContain(asRendered(EARN_QUEUE_PRICING));
   });
 
   it("uses a live candidate time and describes every settlement constant by its real role", () => {
@@ -63,11 +110,11 @@ describe("WithdrawalTerms", () => {
       surface: "redemption", expiry, status: "settling", timing, candidateFinalizableAt, now,
     }));
     const times = settlementWithdrawalTimes(expiry, timing);
-    expect(html).toContain(newYorkWithdrawalTime(candidateFinalizableAt));
+    expect(html).toContain(serverTime(candidateFinalizableAt));
     expect(html).toContain("live settlement candidate time");
-    expect(html).toContain(newYorkWithdrawalTime(times.windowStartsAt));
-    expect(html).toContain(newYorkWithdrawalTime(times.snapshotClosesAt));
-    expect(html).toContain(newYorkWithdrawalTime(times.adminEligibleAt));
+    expect(html).toContain(serverTime(times.windowStartsAt));
+    expect(html).toContain(serverTime(times.snapshotClosesAt));
+    expect(html).toContain(serverTime(times.adminEligibleAt));
   });
 
   it("labels held-series admin eligibility without promising withdrawal", () => {

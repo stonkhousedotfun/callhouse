@@ -3,7 +3,8 @@
 import { useQuery } from "@tanstack/react-query";
 import type { Hex } from "viem";
 
-import { Card, CardHead, CardMeta, CardTitle, Notice, Row, Rows, Unit } from "@/components/ui";
+import { Card, CardHead, CardMeta, CardTitle, InfoTip, Notice, Row, Rows, Unit } from "@/components/ui";
+import { Time } from "@/components/ui/Time";
 import { fetchKeeperOrderBook } from "@/lib/api";
 import { VAULT } from "@/lib/contracts";
 import { keeperPricingFigures, type ReportedTime } from "@/lib/cycleTerms";
@@ -78,15 +79,17 @@ function usdg(fmt: string) {
   );
 }
 
-function when(t: ReportedTime) {
+/**
+ * A keeper-reported time in the reader's zone, zone named. New York in the server render, the reader's
+ * zone once mounted (components/ui/Time.tsx). Not a market deadline, so no ET time beside it.
+ */
+export function reportedWhen(t: ReportedTime) {
   return t.ts === undefined ? (
     <>
       {t.raw} <Unit>as reported, zone unknown</Unit>
     </>
   ) : (
-    <>
-      <span className="whitespace-nowrap">{t.utc}</span> · <span className="whitespace-nowrap">{t.eastern}</span>
-    </>
+    <Time at={t.ts} className="whitespace-nowrap" />
   );
 }
 
@@ -113,8 +116,7 @@ export function CyclePricing({ listing, feed, vaultStrike6, vaultUnitPrice6 }: C
           {disagrees ? (
             <Notice tone="warn" className="mb-4" title="This report does not match the vault's order.">
               <span data-slot="pricing-mismatch">
-                The strike or price the keeper reports differs from the vault&apos;s own figures. The vault&apos;s figures
-                are what a buyer pays; this report is out of date or wrong.
+                The vault&apos;s own strike and price are what a buyer pays. This report is out of date or wrong.
               </span>
             </Notice>
           ) : null}
@@ -147,16 +149,18 @@ export function CyclePricing({ listing, feed, vaultStrike6, vaultUnitPrice6 }: C
               <Row k="Vault floor plus the keeper's margin" v={usdg(f.marginUnitFmt)} />
               <Row k="Ask per contract" v={usdg(f.unitPriceFmt)} />
               {f.expiryDate !== undefined ? <Row k="Option expiry priced against" v={f.expiryDate} /> : null}
-              {f.chainTime !== undefined ? <Row k={chainTimeLabel(f)} v={when(f.chainTime)} /> : null}
-              {f.lastTradeTime !== undefined ? <Row k="Last trade" v={when(f.lastTradeTime)} /> : null}
+              {f.chainTime !== undefined ? <Row k={chainTimeLabel(f)} v={reportedWhen(f.chainTime)} /> : null}
+              {f.lastTradeTime !== undefined ? <Row k="Last trade" v={reportedWhen(f.lastTradeTime)} /> : null}
             </Rows>
           </div>
 
           <p data-slot="pricing-note" className={NOTE}>
-            Reported by the keeper with its order, not read from the chain, and shown for information only.
-            {` ${pricingSourceNote(f)} `}
-            The vault itself enforces only its premium floor and its strike band: it refuses a strike outside the band
-            and a price below the floor, whatever this report says.
+            Reported by the keeper, not read from the chain. For information only.{" "}
+            <InfoTip label="About this report">
+              {`${pricingSourceNote(f)} `}
+              The vault enforces only its premium floor and its strike band: it refuses a strike outside the band and a
+              price below the floor, whatever this report says.
+            </InfoTip>
           </p>
         </>
       )}

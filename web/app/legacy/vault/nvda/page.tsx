@@ -11,7 +11,8 @@ import { PositionSplit } from "@/components/PositionSplit";
 import { RedeemQueue } from "@/components/RedeemQueue";
 import { StrandedBanner } from "@/components/StrandedBanner";
 import { UsdgClaim } from "@/components/UsdgClaim";
-import { Card, CardHead, CardMeta, CardTitle, ExternalLink, Notice, PageHead, Row, Rows, Stat, Unit } from "@/components/ui";
+import { Card, CardHead, CardMeta, CardTitle, ExternalLink, InfoTip, Notice, PageHead, Row, Rows, Stat, Unit } from "@/components/ui";
+import { Time } from "@/components/ui/Time";
 import { addressUrl } from "@/lib/chain";
 import { ASSET, MARKET, SHARE_TICKER, VAULT } from "@/lib/contracts";
 import {
@@ -20,7 +21,6 @@ import {
   fmtMultiplier,
   fmtRealizedWeek,
   fmtUsdg,
-  fmtUtcDate,
   maxContracts,
   premiumPerShare,
   toStockEq,
@@ -28,6 +28,7 @@ import {
 } from "@/lib/format";
 import { lastSettled, unfilledWeekResult, useCycleHistory } from "@/lib/history";
 import { collateralSplit, useAccountPosition, useNow, useVaultSnapshot } from "@/lib/hooks";
+import { displayRatioPercent } from "@/lib/numberFormat";
 
 export default function VaultPage() {
   const { address } = useAccount();
@@ -49,7 +50,7 @@ export default function VaultPage() {
   const split = collateralSplit(v);
   const cap = maxContracts(v.totalAssets, v.policy);
 
-  // Premium only (W-21). On an assigned week the harvest also carried the strike proceeds —
+  // Premium only. On an assigned week the harvest also carried the strike proceeds —
   // collateral sold at the strike — which are shown on their own line and in no premium figure.
   const lastPerShare = last ? premiumPerShare(last) : undefined;
   const lastTvl = tvlUsdg(last?.assetsAtHarvest, last?.spotUsdgAtHarvest);
@@ -65,50 +66,28 @@ export default function VaultPage() {
             Collect your queued {SHARE_TICKER}
           </>
         }
-        lede={
-          <p>
-            The pooled vault is wound down. New covered calls are 1-lot accounts on{" "}
-            <Link href="/account" className="link">
-              Account
-            </Link>
-            . If you queued a redemption, collect it here after Saturday 4:00pm New York.
-          </p>
-        }
+        lede={<p>The pooled vault is closed. Collect a queued redemption here.</p>}
       />
 
       <div className="grid gap-4 sm:gap-5">
-        {/* The three disclosures below are required, verbatim, by disclosure policy (copy-lint enforced this until it was removed on 2026-09-21; nothing checks it now). They are
-            compliance text from README "Frontend copy" and TECHSPEC 7.3 — do not reword them. */}
-        <Notice
-          tone="warn"
-          className="lg:[&>div]:max-w-[88ch]"
-          title={<>Premium is paid only if a buyer fills the vault&apos;s listing.</>}
-        >
-          Nothing is written until someone buys, so an empty week means zero for the week. Assignment can take your
-          tokens at the strike, and the upside above it is gone for that week. Stock Tokens are debt securities issued
-          by Robinhood Assets (Jersey) Limited, not equity in the underlying company: no vote, no claim on the company,
-          and the issuer can freeze transfers. The vault is unaudited. See{" "}
+        {/* Cut to one line: the vault arms no new week, so the premium and assignment lines no longer
+            apply. The full Stock Token disclosure is on /legal. */}
+        <Notice tone="warn" className="lg:[&>div]:max-w-[88ch]">
+          Stock Tokens are debt securities, not shares, and the issuer can freeze transfers.{" "}
           <Link href="/legal" className="link">
             Legal
-          </Link>{" "}
-          and{" "}
-          <Link href="/docs" className="link">
-            Docs
-          </Link>{" "}
-          for the full risk list.
+          </Link>
         </Notice>
 
         {!VAULT ? (
           <Notice tone="danger" title="No vault address configured.">
-            Set <code className="num text-[0.95em] text-ink">NEXT_PUBLIC_VAULT</code> before this page can read or
-            write anything.
+            Set <code className="num text-[0.95em] text-ink">NEXT_PUBLIC_VAULT</code>.
           </Notice>
         ) : null}
 
         {chainReadFailed ? (
-          <Notice tone="warn" title="Chain reads are failing right now.">
-            The vault could not be read from the RPC. Balances and phase below are missing rather
-            than zero, and a transaction sent now may revert on a rule this page could not check.
+          <Notice tone="warn" title="Can't read the vault right now.">
+            Figures below may be missing, and a transaction may fail.
           </Notice>
         ) : null}
 
@@ -118,13 +97,20 @@ export default function VaultPage() {
 
         <Card>
           <CardHead>
-            <CardTitle>Your position</CardTitle>
+            {/* Tips sit beside card titles, not in them: the fork acceptance run matches title text exactly. */}
+            <div className="flex items-center gap-2">
+              <CardTitle>Your position</CardTitle>
+              <InfoTip label="About your position">
+                Claimable USDG is premium plus any strike proceeds. The -eq figures apply the token&apos;s display
+                multiplier; transactions use the raw amount.
+              </InfoTip>
+            </div>
             <VaultPhaseBadge snapshot={v} nowSeconds={nowSeconds} />
           </CardHead>
 
           {!address ? (
             <p className="rounded-md bg-surface-2 px-4 py-3.5 text-[14.5px] leading-[1.55] text-ink-2">
-              Connect a wallet to see your shares, your queued redemption and your claimable USDG.
+              Connect a wallet to see your position.
             </p>
           ) : (
             <>
@@ -145,7 +131,6 @@ export default function VaultPage() {
                   label="Claimable USDG"
                   value={fmtUsdg(position.claimableUsdg)}
                   tone="usdg"
-                  sub="premium on filled weeks, strike proceeds on assigned weeks"
                 />
                 <Stat
                   className="rounded-md bg-surface-2 p-4 sm:p-5"
@@ -159,28 +144,20 @@ export default function VaultPage() {
                 />
               </div>
 
-              {/* Raw vs display-adjusted. The uiMultiplier line is labelled display-only because
+              {/* Raw vs display-adjusted. The -eq rows are display only (the card's tip says so):
                   nothing in the vault's maths, and nothing in a transaction built on this page,
-                  ever uses it. */}
+                  ever uses uiMultiplier. */}
               <Rows className="mt-4 lg:grid-cols-2 lg:gap-x-10 lg:[&>[data-slot=row]:nth-last-child(2)]:border-b-0">
                 <Row k={<>Wallet {MARKET}, raw</>} v={fmtAsset(position.assetBalance)} />
                 <Row
                   k={
                     <>
-                      Wallet {MARKET}-eq{" "}
-                      <span className="text-ink-3">(display only, ×{fmtMultiplier(v.uiMultiplier)})</span>
+                      Wallet {MARKET}-eq <span className="text-ink-3">×{fmtMultiplier(v.uiMultiplier)}</span>
                     </>
                   }
                   v={fmtAsset(toStockEq(position.assetBalance, v.uiMultiplier))}
                 />
-                <Row
-                  k={
-                    <>
-                      Share value {MARKET}-eq <span className="text-ink-3">(display only)</span>
-                    </>
-                  }
-                  v={fmtAsset(toStockEq(position.sharesValueAssets, v.uiMultiplier))}
-                />
+                <Row k={<>Share value {MARKET}-eq</>} v={fmtAsset(toStockEq(position.sharesValueAssets, v.uiMultiplier))} />
                 <Row k="Wallet USDG" v={fmtUsdg(position.usdgBalance)} />
               </Rows>
             </>
@@ -189,8 +166,7 @@ export default function VaultPage() {
 
         <div className="grid grid-cols-1 items-start gap-4 sm:gap-5 lg:grid-cols-2">
           <Notice tone="warn" title="Deposits are closed.">
-            This vault will not arm another week. Queued redemptions pay at <code className="num">rollClose</code> after
-            expiry (Saturday 4:00pm New York). Then use Complete redeem below.
+            Collect a queued redemption in Withdraw.
           </Notice>
           <RedeemQueue snapshot={v} position={position} onDone={refresh} />
         </div>
@@ -200,7 +176,13 @@ export default function VaultPage() {
 
           <Card>
             <CardHead>
-              <CardTitle>Last week realized</CardTitle>
+              <div className="flex items-center gap-2">
+                <CardTitle>Last week realized</CardTitle>
+                <InfoTip label="About last week">
+                  Strike proceeds are what the vault&apos;s {MARKET} sold for at the strike. They are returned
+                  collateral, not premium.
+                </InfoTip>
+              </div>
               <CardMeta>{last ? `cycle #${last.cycle}` : "no closed week"}</CardMeta>
             </CardHead>
             {last ? (
@@ -216,49 +198,31 @@ export default function VaultPage() {
                         ? `${(last.contractsSold ?? last.contracts ?? 0n).toString()} calls sold`
                         : unfilledWeekResult(last).short}
                       {last.stranded ? (last.strandRecovered === true ? " · claim stranded at the close, since recovered" : " · claim stranded at the close") : ""} ·{" "}
-                      {fmtUtcDate(last.closedAt)}
+                      {last.closedAt ? <Time at={Number(last.closedAt)} dateOnly /> : "—"}
                     </>
                   }
                 />
                 <Rows className="mt-4">
                   <Row
-                    title="USDG buyers paid the vault for this week's calls, before the protocol fee. Strike proceeds excluded."
+                    title="Before the protocol fee. Strike proceeds excluded."
                     k="Premium received"
                     v={fmtUsdg(last.premiumGrossUsdg)}
                   />
                   <Row k="Protocol fee" v={fmtUsdg(last.feeUsdg ?? 0n)} />
                   <Row k="Net premium to depositors" v={fmtUsdg(last.premiumNetUsdg)} />
-                  <Row k="Net premium / collateral at harvest" v={fmtRealizedWeek(last.premiumNetUsdg, lastTvl)} />
+                  <Row k="Net premium / collateral" v={fmtRealizedWeek(last.premiumNetUsdg, lastTvl)} />
                   <Row k="Contracts assigned" v={(last.contractsAssigned ?? 0n).toString()} />
-                  {lastWasAssigned ? (
-                    <Row
-                      title="USDG received for collateral taken at the strike. Returned principal, not premium."
-                      k="Strike proceeds (assignment)"
-                      v={fmtUsdg(last.strikeProceedsUsdg)}
-                    />
-                  ) : null}
+                  {lastWasAssigned ? <Row k="Strike proceeds" v={fmtUsdg(last.strikeProceedsUsdg)} /> : null}
                 </Rows>
                 <p className="mt-3 text-[12.5px] leading-[1.55] text-ink-3">
-                  One week is one week. This figure is never multiplied out to a longer period
-                  anywhere on this site.{" "}
                   <Link href="/activity" className="link">
                     See every week
                   </Link>
-                  .
                 </p>
-                {lastWasAssigned ? (
-                  <p className="mt-2 text-[12.5px] leading-[1.55] text-ink-3">
-                    Strike proceeds are the USDG your {MARKET} was sold for at the strike when the
-                    calls were exercised. They are credited to holders and claimable with the
-                    premium, but they are returned collateral, not earnings, and no premium figure
-                    above includes them.
-                  </p>
-                ) : null}
               </>
             ) : (
               <p className="rounded-md bg-surface-2 px-4 py-3.5 text-[14.5px] leading-[1.55] text-ink-2">
-                No week has closed yet. The first result — filled or zero — publishes after the first
-                expiry.
+                No week has closed yet.
               </p>
             )}
           </Card>
@@ -277,7 +241,6 @@ export default function VaultPage() {
             </div>
             <Rows className="mt-4 lg:col-start-2 lg:row-span-2 lg:row-start-1 lg:mt-0">
               <Row
-                title="Contracts written this cycle. Every one was sold in the transaction that wrote it."
                 k="Calls sold this week"
                 v={
                   <>
@@ -294,7 +257,7 @@ export default function VaultPage() {
                 }
               />
               <Row
-                title="Policy.maxContracts(totalAssets) − contractsWritten: what the vault can still write this cycle. Re-sized at every fill."
+                title="Calls the vault can still sell this week."
                 k="Capacity remaining"
                 v={
                   v.capacity === undefined ? (
@@ -328,8 +291,8 @@ export default function VaultPage() {
                 v={deposits.kind === "unknown" ? "—" : deposits.kind === "capFull" ? "cap full" : deposits.kind}
               />
               <Row
-                k="Protocol fee on harvested premium"
-                v={v.policy ? `${(v.policy.protocolFeeBps / 100).toFixed(2)}%` : "—"}
+                k="Protocol fee"
+                v={v.policy ? displayRatioPercent(BigInt(v.policy.protocolFeeBps), 10_000n) : "—"}
               />
             </Rows>
             <p className="mt-4 grid gap-1 border-t border-line pt-4 text-[12.5px] leading-[1.55] text-ink-3 sm:block lg:col-start-1 lg:row-start-2 lg:grid lg:self-end">

@@ -78,3 +78,41 @@ test('fairMany: answers in request order, at most PRICING_CONCURRENCY in flight'
   assert.equal(seen.length, 20);
   assert.deepEqual(await client.fairMany([]), []);
 });
+
+// P9. The quality fields the service serializes, TOP-LEVEL (pricing never emits a
+// `provenance` key, which the indexer would validate as the full O3-307/1 provenance and discard the quote on). A
+// `provenance.quality` / `provenance.event` is still read as a fallback. Absent = an older service, parsed exactly as
+// before; present = carried to the engine, which halts event-uncertainty on it (engine.test.ts); present but malformed =
+// a bad body, never a silently dropped flag.
+test('parseFairResponse: top-level quality.reasons and event.{inWindow,input} reach the FairInput; provenance.* is a fallback; absent adds nothing; malformed is a bad body', () => {
+  const flagged = parseFairResponse(200, { ...PRICED, vega: 0.1, gamma: 0.01, askIv: 0.4, realizedVol: null, quality: { readiness: 'degraded', reasons: ['event-uncertainty', 'extrapolated'], uncertainty: null }, event: { input: 'supplied', inWindow: true } });
+  assert.equal(flagged.ok, true);
+  assert.deepEqual(flagged.ok && flagged.quality, { reasons: ['event-uncertainty', 'extrapolated'], eventInWindow: true, eventInput: 'supplied' });
+
+  const missing = parseFairResponse(200, { ...PRICED, quality: { readiness: 'ready', reasons: [] }, event: { input: 'missing', inWindow: false } });
+  assert.deepEqual(missing.ok && missing.quality, { reasons: [], eventInWindow: false, eventInput: 'missing' }, 'an unknown calendar is carried as unknown, not dropped');
+
+  const nested = parseFairResponse(200, { ...PRICED, provenance: { quality: { readiness: 'degraded', reasons: ['model-uncertainty'] } } });
+  assert.deepEqual(nested.ok && nested.quality, { reasons: ['model-uncertainty'] }, 'the provenance.* shape still reads');
+  const both = parseFairResponse(200, { ...PRICED, quality: { reasons: ['event-uncertainty'] }, provenance: { quality: { reasons: [] } } });
+  assert.deepEqual(both.ok && both.quality, { reasons: ['event-uncertainty'] }, 'top-level wins');
+
+  assert.equal('quality' in parseFairResponse(200, PRICED), false, 'neither: nothing added (an older service)');
+  assert.deepEqual(parseFairResponse(200, PRICED), { ok: true, fair: 816_164n, delta: 0.183571, iv: 0.310557, asOf: 1789415999, source: 'cboe', spot: 212_210_000n });
+
+  for (const extra of [{ quality: { reasons: 'event-uncertainty' } }, { quality: { reasons: [1] } }, { event: { inWindow: 'yes' } }, { event: { inWindow: false, input: 'maybe' } }, { provenance: { quality: { reasons: 'x' } } }]) {
+    assert.deepEqual(parseFairResponse(200, { ...PRICED, ...extra }), { ok: false, reason: 'pricing-bad-body' }, JSON.stringify(extra));
+  }
+});
+
+test('askIv, vega and gamma are carried to the engine when sent, absent when not; a present one that is not a finite non-negative number is a bad body', () => {
+  const full = parseFairResponse(200, { ...PRICED, askIv: 0.35, vega: 0.12, gamma: 0.04 });
+  assert.ok(full.ok);
+  assert.deepEqual([full.askIv, full.vega, full.gamma], [0.35, 0.12, 0.04]);
+  const bare = parseFairResponse(200, PRICED);
+  assert.ok(bare.ok);
+  assert.equal('askIv' in bare || 'vega' in bare || 'gamma' in bare, false, 'an older service: nothing invented');
+  for (const bad of [{ vega: -0.1 }, { askIv: 'x' }, { gamma: null }]) {
+    assert.deepEqual(parseFairResponse(200, { ...PRICED, ...bad }), { ok: false, reason: 'pricing-bad-body' }, JSON.stringify(bad));
+  }
+});

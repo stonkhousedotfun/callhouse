@@ -81,3 +81,50 @@ test('parseFairBody: extra provenance is optional; unknown keys are ignored; a m
     assert.equal(withProv.provenance?.identity?.market, 'NVDA');
   }
 });
+
+/* The service sends quality and event at the TOP LEVEL, never under provenance. */
+
+const LEGACY = { ok: true as const, fairUsdg6: 816_164n, iv: 0.310557, delta: 0.183571, source: 'model' as const, method: 'listed-contract' as const, days: ['2026-09-18'], spotUsdg6: 212_210_000n, asOf: 1_789_415_999 };
+const served = (reasons: string[], event?: { input: 'supplied' | 'missing' | 'short'; inWindow: boolean }) =>
+  fairResponse({
+    ...LEGACY,
+    provenance: { quality: { readiness: reasons.length === 0 ? 'ready' : 'degraded', reasons, uncertainty: null, disagreement: null, fallback: null } },
+    ...(event === undefined ? {} : { event: { ...event, events: [] } }),
+  });
+
+test('the service\'s own body carries quality and event at the top level, and the pricer reads them there', () => {
+  const { status, body } = served(['model-uncertainty', 'extrapolated'], { input: 'supplied', inWindow: true });
+  assert.equal('provenance' in body, false, 'control: the service never sends a provenance key');
+  const parsed = parseFairBody(status, body);
+  assert.equal(parsed.ok, true);
+  if (!parsed.ok) return;
+  assert.deepEqual(parsed.quality, { reasons: ['model-uncertainty', 'extrapolated'], eventInWindow: true, eventInput: 'supplied' });
+  assert.equal(parsed.provenance, undefined);
+  const noEvent = parseFairBody(200, served(['quote-age-unknown']).body);
+  assert.deepEqual(noEvent.ok && noEvent.quality, { reasons: ['quote-age-unknown'] }, 'quality alone, no event block');
+  const eventOnly = parseFairBody(200, { ...served([]).body, quality: undefined, event: { input: 'missing', inWindow: false } });
+  assert.deepEqual(eventOnly.ok && eventOnly.quality, { reasons: [], eventInWindow: false, eventInput: 'missing' }, 'event alone, no quality block');
+});
+
+test('provenance.quality / provenance.event are read only as a fallback; the top-level block wins', () => {
+  const legacy = { fair: { raw: '2000000' }, source: 'cboe', asOf: 1_789_415_999 };
+  const fallback = parseFairBody(200, { ...legacy, provenance: { quality: { readiness: 'degraded', reasons: ['event-uncertainty'] }, event: { inWindow: true } } });
+  assert.deepEqual(fallback.ok && fallback.quality, { reasons: ['event-uncertainty'], eventInWindow: true });
+  const both = parseFairBody(200, { ...legacy, quality: { reasons: [] }, event: { inWindow: false, input: 'supplied' }, provenance: { quality: { reasons: ['model-uncertainty'] }, event: { inWindow: true } } });
+  assert.deepEqual(both.ok && both.quality, { reasons: [], eventInWindow: false, eventInput: 'supplied' });
+});
+
+test('a quality or event block that is present in the wrong shape refuses the answer (it is never silently dropped)', () => {
+  const legacy = { fair: { raw: '2000000' }, source: 'cboe', asOf: 1_789_415_999 };
+  const cases: Array<[Record<string, unknown>, string]> = [
+    [{ quality: null }, 'quality is not { reasons: string[] }'],
+    [{ quality: { readiness: 'degraded' } }, 'quality is not { reasons: string[] }'],
+    [{ quality: { reasons: 'model-uncertainty' } }, 'quality is not { reasons: string[] }'],
+    [{ quality: { reasons: ['model-uncertainty', 7] } }, 'quality is not { reasons: string[] }'],
+    [{ event: { inWindow: 'yes' } }, 'event is not { inWindow: boolean }'],
+    [{ event: null }, 'event is not { inWindow: boolean }'],
+    [{ event: { inWindow: false, input: 'maybe' } }, 'event.input is not supplied | missing | short'],
+    [{ provenance: { quality: { reasons: 'event-uncertainty' } } }, 'quality is not { reasons: string[] }'],
+  ];
+  for (const [extra, reason] of cases) assert.deepEqual(parseFairBody(200, { ...legacy, ...extra }), { ok: false, reason }, JSON.stringify(extra));
+});

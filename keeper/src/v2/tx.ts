@@ -56,6 +56,7 @@ import {
 } from 'viem';
 import type { PrivateKeyAccount } from 'viem/accounts';
 import type { Logger } from './logger.js';
+import { redactUrls } from './redact.js';
 import type { V2Store } from './store.js';
 
 /*//////////////////////////////////////////////////////////////
@@ -75,7 +76,7 @@ export interface WriteCall<TAbi extends Abi = Abi, TName extends WriteFunctionNa
    * A FIXED gas limit, used for the simulation and the send. Required in practice for every call
    * that wraps an inner call in try/catch or a raw call (snapshot, finalize, settle, redeemBatch,
    * roll): eth_estimateGas finds the smallest limit at which the OUTER call succeeds, which is one
-   * where the inner call ran out of gas and silently did nothing (F2-04). Unset: the node estimates.
+   * where the inner call ran out of gas and silently did nothing. Unset: the node estimates.
    */
   gas?: bigint;
 }
@@ -230,19 +231,11 @@ export function describeError(error: unknown): string {
 }
 
 /**
- * Every http(s) URL in `text` reduced to its origin. Provider RPC URLs carry their API key in the path or the query
- * (`/v2/<key>`), and viem's error messages print the request URL whole (only basic-auth credentials are stripped).
+ * Every URL in `text` whose path, query or userinfo could carry a key, reduced to scheme://host/…. The rule moved to
+ * /redact.ts so the loggers apply the same one to every line; re-exported here for the call sites that
+ * already import it from this module.
  */
-export function redactUrls(text: string): string {
-  return text.replace(/https?:\/\/[^\s"'<>`]+/g, (raw) => {
-    try {
-      const url = new URL(raw);
-      return url.pathname === '/' && url.search === '' && url.username === '' ? raw : `${url.origin}/…`;
-    } catch {
-      return '[url]';
-    }
-  });
-}
+export { redactUrls };
 
 /*//////////////////////////////////////////////////////////////
                              SENDER
@@ -292,9 +285,38 @@ export interface TxSenderOptions {
    * sends is alive; without it /health would read it as wedged once the tick outlived KEEPER_TX_TIMEOUT_MS + 60 s.
    */
   onProgress?: () => void;
+  /** CRANKER_GAS_SCALE_PCT (config.ts): every fixed gas limit is sent at this percent of itself (scaleGas). Default 100. */
+  gasScalePct?: number;
 }
 
 export const DEFAULT_IN_FLIGHT_TTL_MS = 10 * 60_000;
+
+/** CRANKER_GAS_SCALE_PCT's default and bounds (config.ts parses it with these; config.test.ts pins them equal). */
+export const GAS_SCALE_PCT_DEFAULT = 100;
+export const GAS_SCALE_PCT_MIN = 100;
+export const GAS_SCALE_PCT_MAX = 300;
+/**
+ * The most a scaled limit may reach: 4663's per-transaction cap (cranker/steps.ts CHAIN_MAX_TX_GAS, 32,000,000) less the
+ * 2,000,000 headroom the cranker already keeps under it (HOUSE_ROLL_GAS_HEADROOM). A send above the chain cap is not
+ * included at all, so the scale may never take a limit there. Mirrored here so this module imports nothing from the
+ * cranker; tx.test.ts pins it equal to those two constants.
+ */
+export const GAS_SCALE_CAP = 30_000_000n;
+
+/**
+ * The limit a fixed-gas call is
+ * simulated and sent with: `gas` x `pct` / 100, rounded up, at most GAS_SCALE_CAP, and never below `gas` (a limit the
+ * code already set above the cap, or a scale of 100, is left exactly as it is). Scaling UP only moves every call further
+ * above the ceilings the contracts' starved-call guards test (StarvedCall.belowCeiling), so it cannot make a guarded
+ * call re-throw that did not before. A tool for the operator when a contract has grown past a budget: raise the setting,
+ * restart the service, and fix the budget in code after.
+ */
+export function scaleGas(gas: bigint, pct: number, cap: bigint = GAS_SCALE_CAP): bigint {
+  if (pct === 100) return gas;
+  const scaled = (gas * BigInt(pct) + 99n) / 100n;
+  const capped = scaled < cap ? scaled : cap;
+  return capped > gas ? capped : gas;
+}
 
 export class TxSender {
   readonly nonces = new NonceTracker();
@@ -306,6 +328,7 @@ export class TxSender {
   private readonly inFlightTtlMs: number;
   private readonly now: () => number;
   private readonly onProgress: (() => void) | undefined;
+  private readonly gasScalePct: number;
 
   constructor(options: TxSenderOptions) {
     this.chain = options.chain;
@@ -315,6 +338,7 @@ export class TxSender {
     this.inFlightTtlMs = options.inFlightTtlMs ?? DEFAULT_IN_FLIGHT_TTL_MS;
     this.now = options.now ?? Date.now;
     this.onProgress = options.onProgress;
+    this.gasScalePct = options.gasScalePct ?? GAS_SCALE_PCT_DEFAULT;
   }
 
   get account(): Address {
@@ -335,7 +359,9 @@ export class TxSender {
     });
   }
 
-  private async executeNow(call: WriteCall, options: ExecuteOptions<unknown>): Promise<TxOutcome> {
+  private async executeNow(unscaled: WriteCall, options: ExecuteOptions<unknown>): Promise<TxOutcome> {
+    // A fixed limit is simulated AND sent at CRANKER_GAS_SCALE_PCT of itself (scaleGas); an estimated call is left alone.
+    const call = unscaled.gas === undefined ? unscaled : { ...unscaled, gas: scaleGas(unscaled.gas, this.gasScalePct) };
     const { kind, key } = options;
     const ctx = { kind, key, fn: call.functionName, to: call.address };
 

@@ -144,13 +144,76 @@ export interface LossStop {
   realised: bigint;
   limit: bigint;
   tripped: boolean;
+  /**
+   * P18: the ledger's open positions (decimal longId -> Position) as {lossStop} saw them, so the planner can mark
+   * them to market without the quoter handing it the ledger. Absent on a LossStop built elsewhere: the MTM stop then
+   * marks nothing and says so (`unmarked`), it never reads "no positions" as "no loss".
+   */
+  positions?: ReadonlyMap<string, Position>;
 }
 
 /** The stop for the head's day: tripped once that day's realised result is at or below −limit. */
 export function lossStop(ledger: Ledger, now: number, limit: bigint): LossStop {
   const day = dayOf(now);
   const realised = ledger.realisedByDay.get(day) ?? 0n;
-  return { day, realised, limit, tripped: realised <= -limit };
+  const open = new Map([...ledger.positions].filter(([, p]) => p.units !== 0n).map(([id, p]) => [id, { units: p.units, basis: p.basis }]));
+  return { day, realised, limit, tripped: realised <= -limit, positions: open };
+}
+
+/*//////////////////////////////////////////////////////////////
+               MARK-TO-MARKET STOP (P18)
+//////////////////////////////////////////////////////////////*/
+
+/**
+ * What an open position would realise if it closed at `mark` (USDG base units per share), USDG base units: a long
+ * (mark × units − basis) / 100, a short (basis − mark × |units|) / 100. The same arithmetic as {applySettlement}, at a mark
+ * instead of a settlement value.
+ */
+export function unrealisedAt(position: Position, mark: bigint): bigint {
+  if (position.units === 0n) return 0n;
+  const size = abs(position.units);
+  return position.units > 0n ? (mark * size - position.basis) / UNITS_PER_SHARE : (position.basis - mark * size) / UNITS_PER_SHARE;
+}
+
+export interface MtmStop {
+  day: number;
+  /** Today's realised result (the realised stop's). */
+  realised: bigint;
+  /** Σ unrealisedAt over the open positions that had a mark. */
+  unrealised: bigint;
+  /** realised + unrealised: the expected result of the day if everything settled at its mark. */
+  total: bigint;
+  limit: bigint;
+  tripped: boolean;
+  /** Open positions with no mark (no fair, no spot): counted as 0, named so /state shows the hole. */
+  unmarked: string[];
+}
+
+/**
+ * P18: the realised stop cannot stop a 0DTE book, because short calls realise at 16:00, after the
+ * day's writes are done. This one trips on today's realised result PLUS the mark-to-market of every open position, at
+ * or below −limit. `marks` are USDG base units per share by decimal longId (the planner passes the quoted fair, or the
+ * intrinsic value at the oracle's spot when there is no fair: a floor on a short's liability, never above it).
+ * limit <= 0 = off (explicit opt-out).
+ */
+export function mtmLossStop(stop: LossStop, marks: ReadonlyMap<string, bigint | null>, limit: bigint): MtmStop {
+  let unrealised = 0n;
+  const unmarked: string[] = [];
+  const positions = stop.positions;
+  if (positions === undefined) unmarked.push('ledger positions not supplied');
+  else {
+    for (const [id, p] of positions) {
+      if (p.units === 0n) continue;
+      const mark = marks.get(id);
+      if (mark === undefined || mark === null) {
+        unmarked.push(id);
+        continue;
+      }
+      unrealised += unrealisedAt(p, mark);
+    }
+  }
+  const total = stop.realised + unrealised;
+  return { day: stop.day, realised: stop.realised, unrealised, total, limit, tripped: limit > 0n && total <= -limit, unmarked };
 }
 
 /*//////////////////////////////////////////////////////////////

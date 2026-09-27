@@ -104,7 +104,7 @@ describe("fillableContracts", () => {
   const OPEN = { isCancelled: false, totalFilled: 0n, totalSize: 0n };
 
   it("takes Seaport's count over a row that says none are left (a stale feed)", () => {
-    // Before: OrderPayload capped the input at the row's "0", so the Fill button stayed disabled
+    // Before: OrderPayload (the fill card, since deleted) capped the input at the row's "0", so the Fill button stayed disabled
     // for an order Seaport held fully open.
     expect(fillableContracts({ orderHash: HASH, remaining: "0" }, 23n, HASH, OPEN)).toBe(23n);
     expect(fillableContracts({ orderHash: HASH.toUpperCase().replace("0X", "0x"), remaining: "0" }, 23n, HASH, OPEN)).toBe(23n);

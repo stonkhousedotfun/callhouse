@@ -81,7 +81,7 @@ ponder.on("StockToken:OraclePaused", async ({ event, context }) => {
     lastBlock: event.block.number,
     lastTimestamp: event.block.timestamp,
   });
-  // ORACLE_PAUSED from ops/alerts.md: every rollOpen reverts until this lifts.
+  // ORACLE_PAUSED alert: every rollOpen reverts until this lifts.
   log.warn({ txHash: event.transaction.hash }, "stock token oracle paused");
   await snapshot(context.db, event, "OraclePaused");
 });

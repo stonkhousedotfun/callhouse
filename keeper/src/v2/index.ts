@@ -1,10 +1,11 @@
 /**
- * The v2 process: V2_MODE picks one of four modes, each behind one start function.
+ * The v2 process: V2_MODE picks one of five modes, each behind one start function.
  *
- *   pricing  pricing/main.ts startPricingService (K2-02): no key, HTTP on PRICING_PORT.
- *   cranker  cranker/main.ts startCranker (K2-03)
- *   mm       mm/main.ts startMm (K2-04)
- *   pricer   pricer/main.ts startPricer (K2-05)
+ *   pricing  pricing/main.ts startPricingService: no key, HTTP on PRICING_PORT.
+ *   cranker  cranker/main.ts startCranker
+ *   mm       mm/main.ts startMm
+ *   pricer   pricer/main.ts startPricer
+ *   guardian guardian/main.ts startGuardian: pages uncorroborated candidates, vetoes a scale fault
  * A mode whose task has not landed throws ModeNotImplementedError and the process exits 1 saying
  * which task builds it, after the configuration has been validated (so an environment can be
  * prepared and checked before the code that uses it ships).
@@ -16,8 +17,9 @@
  */
 import { startPricingService } from './pricing/main.js';
 import { redactUrls } from './tx.js';
-import { V2ConfigError, loadV2Config, type CrankerConfig, type MmConfig, type PricerConfig, type PricingModeConfig, type V2Config } from './config.js';
+import { V2ConfigError, loadV2Config, type CrankerConfig, type GuardianConfig, type MmConfig, type PricerConfig, type PricingModeConfig, type V2Config } from './config.js';
 import { startCranker } from './cranker/main.js';
+import { startGuardian } from './guardian/main.js';
 import { startMm } from './mm/main.js';
 import { ModeNotImplementedError, requestedV2Mode, type RunningMode } from './mode.js';
 import { startPricer } from './pricer/main.js';
@@ -26,6 +28,7 @@ export interface ModeStarters {
   cranker: (config: CrankerConfig) => Promise<RunningMode>;
   mm: (config: MmConfig) => Promise<RunningMode>;
   pricer: (config: PricerConfig) => Promise<RunningMode>;
+  guardian: (config: GuardianConfig) => Promise<RunningMode>;
   pricing: (config: PricingModeConfig, env: NodeJS.ProcessEnv) => Promise<RunningMode>;
 }
 
@@ -39,6 +42,7 @@ export const MODE_STARTERS: ModeStarters = {
   cranker: startCranker,
   mm: startMm,
   pricer: startPricer,
+  guardian: startGuardian,
   pricing: startPricingMode,
 };
 
@@ -52,6 +56,8 @@ export async function startV2(env: NodeJS.ProcessEnv = process.env, starters: Mo
       return starters.mm(config);
     case 'pricer':
       return starters.pricer(config);
+    case 'guardian':
+      return starters.guardian(config);
     case 'pricing':
       return starters.pricing(config, env);
   }
@@ -65,6 +71,11 @@ export function bootFailureMessage(error: unknown, mode: string | undefined): st
   // Printed to stderr on every crash-looping restart: a provider key in an RPC URL must not be (tx.ts redactUrls).
   const reason = redactUrls(error instanceof Error ? error.message : String(error));
   return error instanceof V2ConfigError ? reason : `v2 ${mode ?? 'mode'} failed to start: ${reason}`;
+}
+
+/** The line a rejected close() prints on SIGTERM/SIGINT. Railway keeps it, so a keyed RPC URL is redacted (tx.ts redactUrls). */
+export function shutdownFailureMessage(error: unknown, mode: string): string {
+  return `${mode}: unclean shutdown: ${redactUrls(error instanceof Error ? error.message : String(error))}`;
 }
 
 /** Process entry, called by src/index.ts when V2_MODE is set. Owns exit codes and signals. */
@@ -85,7 +96,7 @@ export async function main(env: NodeJS.ProcessEnv = process.env): Promise<void> 
     running.close().then(
       () => process.exit(0),
       (error: unknown) => {
-        process.stderr.write(`${running.mode}: unclean shutdown: ${error instanceof Error ? error.message : String(error)}\n`);
+        process.stderr.write(`${shutdownFailureMessage(error, running.mode)}\n`);
         process.exit(1);
       },
     );

@@ -74,7 +74,7 @@ function harness() {
   const place = (orderId: bigint, row: ChainOrderRow, filledSeen = 0n) => {
     orders.set(orderId, row);
     // WITH THE VAULT. Production ingests per vault (quoter.ts ingestOrders passes a.vault) and
-    // openOrders(vault) has been strict since T-124, so a vault-less ingest here seeded rows the code under
+    // openOrders(vault) has been strict, so a vault-less ingest here seeded rows the code under
     // test could never see - which is why this file went red the moment anyone ran it again.
     mm.ingestOrders([{ order: { orderId, longId: LONG, kind: row.kind, price: row.price, units: row.units, filledSeen }, closed: false }], orderId, 0, VAULT);
   };
@@ -276,7 +276,7 @@ test('the store keeps a sale\'s exact premium and fee and the checkpoint; a rebi
   assert.equal(mm.fillCheckpoint(VAULT), null);
 });
 
-test('the fill checkpoint is PER VAULT: one vault advancing it does not move another (F-DAPP-02)', () => {
+test('the fill checkpoint is PER VAULT: one vault advancing it does not move another', () => {
   const mm = new MmStore(new V2Store(':memory:'));
   const vaultB = '0x00000000000000000000000000000000000000fb' as Address;
   mm.setFillCheckpoint({ block: 500n, at: T, premiumFeeBps: 500, resaleFeeBps: 0 }, VAULT);

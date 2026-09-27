@@ -1,10 +1,10 @@
 /**
- * W-13: the dapp, driven in a real browser by a fresh wallet, against an anvil fork of Robinhood
+ * The dapp, driven in a real browser by a fresh wallet, against an anvil fork of Robinhood
  * Chain 4663, with the keeper running for real beside it. Write on fill: the fill page is the
  * venue.
  *
  * WHAT RUNS
- *   - anvil, forked from mainnet (started by you, see web/README.md "Fork acceptance (W-13)").
+ *   - anvil, forked from mainnet (started by you).
  *   - A Vault deployed from contracts/out with MockFeed, exactly as keeper/src/dryrun.ts deploys
  *     it: no registry, no Overcall, the REAL Valorem Clear and Seaport 1.6. The keeper creates
  *     the week's option type itself (`newOptionType`) and arms it with `rollOpen(id)`.
@@ -19,25 +19,34 @@
  * THE SCENARIO. The keeper authorises a PARTIAL_RESTRICTED order (vault as zone, one USDG leg,
  * empty signature). Seaport's counter for the vault is set non-zero before the listing so a
  * route that assumed 0 would hash a different order and fail here. First the keeper is made to
- * serve the order with its premium leg redirected: `/api/keeper/orders` rejects it and the cycle
- * page offers no fill. Then the row is restored, a fresh wallet fills 2 contracts from the page's
- * own button, and a raw Seaport client fills 3 more from /orders with no web code. Each fill
- * writes exactly those contracts (`CallsWritten`); the vault's option balance is 0 after each.
- * The buyer exercises 2 inside the window from the cycle page's Exercise button. lockBook,
- * rollClose (assigned 2), completeRedeem and claimUsdg from the page; /activity agrees with the
- * chain.
+ * serve the order with its premium leg redirected: `/api/keeper/orders` rejects it. Then the row
+ * is restored, 2 contracts are filled from the ROUTE's row through the web lib's `advancedOrderFor`,
+ * and a raw Seaport client fills 3 more from /orders with no web code. Each fill writes exactly
+ * those contracts (`CallsWritten`); the vault's option balance is 0 after each. The buyer
+ * exercises 2 inside the window. lockBook, rollClose (assigned 2), completeRedeem and claimUsdg
+ * from /vault/nvda; /activity agrees with the chain.
+ *
+ * THE CYCLE PAGE IS RETIRED. app/vault/nvda/cycle redirects to /book, and a later change deleted
+ * its fill card (components/OrderPayload.tsx). /book cannot stand in for it: BookView lists only the
+ * market FACTORY's writer-account lots and the options held from them (components/BookView.tsx
+ * :195-237, :314-380), and this pooled Vault is not a factory account, so no page offers its order
+ * or lists the buyer's option from it. The steps that drove the cycle page now drive the same chain
+ * calls from the harness wallet, through the same web lib where the page used one, and keep every
+ * on-chain assertion; the cycle page's rendered cards are no longer asserted because nothing renders
+ * them.
  *
  * FLOWS, each asserted to the base unit on chain and on the rendered page:
- *   (a) depositor: approve + deposit 25 NVDA from /vault/nvda; shares and their NAV render.
- *   (b) buyer: a tampered keeper order is refused by the route and not offered; then fill 2 of N
- *       from /vault/nvda/cycle; then 3 more from the raw payload.
- *       While still Listed, the cycle page and the home page show this week's terms (strike,
- *       deadlines, price per contract, contracts left to buy, the order total if every remaining
- *       contract sells and the protocol fee on it) equal to figures computed here from vault reads
- *       and Seaport's status, and the cycle page shows the keeper's fixed-mode pricing report.
+ *   (a) depositor: approve + deposit 25 NVDA on chain from its own key (the run-off v1 page has had no deposit
+ *       form); /vault/nvda shows no Deposit card, and the shares and their NAV render.
+ *   (b) buyer: a tampered keeper order is refused by the route; then fill 2 of N from the route's
+ *       row (web lib advancedOrderFor); then 3 more from the raw payload.
+ *       While still Listed, /vault/nvda shows this week's terms (strike, deadlines, price per
+ *       contract, contracts left to buy, the order total if every remaining contract sells and the
+ *       protocol fee on it) equal to figures computed here from vault reads and Seaport's status, and
+ *       the keeper's stored fixed-mode pricing report matches the vault.
  *   (c) depositor: queue 10 shares while the vault is Listed.
- *   (d) warp to exercise; the buyer exercises 2 from the cycle page's Exercise card (approve
- *       exactly the strike cost plus the Clear's fee to the Clear, then exercise(optionId, 2));
+ *   (d) warp to exercise; the buyer exercises 2 (approve exactly the strike cost plus the Clear's
+ *       fee to the Clear, then exercise(optionId, 2));
  *       warp to expiry; keeper ticks lockBook and rollClose; the depositor completes the redeem
  *       and claims USDG from the page.
  *   (e) /vault/nvda and /activity show the assigned week, premium and strike proceeds apart.
@@ -92,6 +101,7 @@ import type { KeeperOrderBook } from "../../lib/api";
 import { CYCLE_TERMS_LABELS, cycleTerms } from "../../lib/cycleTerms";
 import { fmtAsset, fmtEastern, fmtUsdg, fmtUtc, fmtUtcDate, premiumPerShare, shortAddress } from "../../lib/format";
 import { KEEPER_REASONS, componentsStruct, seaportOrderHash } from "../../lib/keeperOrders";
+import { advancedOrderFor } from "../../lib/seaportOrder";
 import { REASONS, checkListingIsOurs, type ListingRow as FeedListing } from "../../lib/listing";
 import type { CycleRow, ListingRow } from "../../../keeper/src/state.js";
 
@@ -141,7 +151,7 @@ const LAUNCH_POLICY = { minOtmBps: 300, maxOtmBps: 1200, protocolFeeBps: 500 } a
 /**
  * Operator actors are derived from a label; anvil's well-known accounts carry an EIP-7702
  * delegation on 4663 and break ERC-1155 receipts (keeper/src/dryrun.ts, derivedActor). The two
- * users are brand-new keys generated for this run: a fresh wallet is the point of W-13.
+ * users are brand-new keys generated for this run: a fresh wallet is the point of this run.
  */
 function operator(label: string): PrivateKeyAccount {
   return privateKeyToAccount(keccak256(toHex(`callhouse-w13:${label}`)));
@@ -1011,7 +1021,7 @@ async function main(): Promise<void> {
 
     /* ---------- (a) deposit ---------- */
 
-    await step("(a) depositor: approve + deposit 25 NVDA from /vault/nvda; shares and NAV render", async () => {
+    await step("(a) depositor: approve + deposit 25 NVDA on chain; /vault/nvda shows no Deposit card, then the shares and NAV", async () => {
       await deal(ASSET, DEPOSITOR.address, DEPOSIT);
       assertEq(await erc20Balance(ASSET, DEPOSITOR.address), DEPOSIT, "the fresh wallet holds 25 NVDA");
       const page = depositorPage;
@@ -1022,17 +1032,13 @@ async function main(): Promise<void> {
       await expectText("position: Wallet NVDA, raw", rowValue(position, /^Wallet NVDA, raw$/), fmtAsset(DEPOSIT));
       await expectText("position: Shares", stat(position, /^Shares$/).value, "0.0000 cNVDA");
 
-      const deposit = card(page, exactly("Deposit"));
-      await deposit.locator("#deposit-amount").fill(DEPOSIT_INPUT);
-      await expectText("deposit: You receive", rowValue(deposit, /^You receive$/), `${fmtAsset(DEPOSIT)} cNVDA`);
-      const from = depositorWallet.sent.length;
-      await deposit.getByRole("button", { name: "Approve and deposit", exact: true }).click();
-      const approve = await depositorWallet.waitFor("approve", from);
-      const depositTx = await depositorWallet.waitFor("deposit", from);
-      assertEq(approve.to, ASSET, "approve is sent to the NVDA token");
-      assertEq(jsonish(approve.args), jsonish([vault, DEPOSIT]), "approve(vault, exactly 25e18): exact-amount approval");
-      assertEq(depositTx.to, vault, "deposit is sent to the vault");
-      assertEq(jsonish(depositTx.args), jsonish([DEPOSIT, DEPOSITOR.address]), "deposit(25e18, depositor)");
+      // The v1 vault is run-off. Its unreachable DepositForm was deleted (the page had stopped rendering
+      // it), so the page has no Deposit card and the deposit is made by the harness from the depositor's own key.
+      await expectAbsent("/vault/nvda Deposit card (v1 run-off)", card(page, exactly("Deposit")));
+      await harnessTx("depositor: NVDA.approve(vault, exactly 25e18)", DEPOSITOR, () =>
+        walletClient.writeContract({ account: DEPOSITOR, chain: forkChain, address: ASSET, abi: stockTokenAbi, functionName: "approve", args: [vault, DEPOSIT] }));
+      await harnessTx("depositor: vault.deposit(25e18, depositor)", DEPOSITOR, () =>
+        walletClient.writeContract({ account: DEPOSITOR, chain: forkChain, address: vault, abi: vaultAbi, functionName: "deposit", args: [DEPOSIT, DEPOSITOR.address] }));
 
       assertEq(await read<bigint>(vault, vaultAbi, "balanceOf", [DEPOSITOR.address]), DEPOSIT, "shares minted 1:1 on the first deposit");
       assertEq(await erc20Balance(ASSET, DEPOSITOR.address), 0n, "the wallet's NVDA moved");
@@ -1040,6 +1046,7 @@ async function main(): Promise<void> {
       assertEq(await read<bigint>(vault, vaultAbi, "totalAssets"), DEPOSIT, "totalAssets");
       assertEq(await read<bigint>(vault, vaultAbi, "convertToAssets", [DEPOSIT]), DEPOSIT, "NAV: 25 shares are worth 25 NVDA");
 
+      // The page's position and vault reads poll (lib/hooks.ts REFRESH_MS); expectText waits up to 60 s for them.
       await expectText("position: Shares", stat(position, /^Shares$/).value, `${fmtAsset(DEPOSIT)} cNVDA`);
       await expectText("position: Shares NAV", stat(position, /^Shares$/).sub, `worth ${fmtAsset(DEPOSIT)} NVDA raw`);
       await expectText("position: Wallet NVDA, raw", rowValue(position, /^Wallet NVDA, raw$/), fmtAsset(0n));
@@ -1103,7 +1110,7 @@ async function main(): Promise<void> {
 
     /* ---------- (b) the fill from the keeper's /orders, through the web app's own route ---------- */
 
-    await step("(b) tamper: the keeper serves the order with its premium leg redirected; the route rejects it and the cycle page offers no fill", async () => {
+    await step("(b) tamper: the keeper serves the order with its premium leg redirected; the route rejects it", async () => {
       const row = store.getListing(listed.order.orderHash);
       assert(row !== null, "keeper listing row");
       const original = row.components_json;
@@ -1131,24 +1138,8 @@ async function main(): Promise<void> {
         }
         note(`route rejected the tampered order: ${rejected.reasons.join(" | ")}`);
 
-        const page = buyerPage;
-        await page.goto(`${web.url}/vault/nvda/cycle`);
-        const onChain = card(page, exactly("The vault's order, on chain"));
-        await expectText("cycle: Seaport order hash", rowValue(onChain, /^Seaport order hash$/), listed.order.orderHash);
-        await expectText("cycle: Contracts offered", rowValue(onChain, /^Contracts offered$/), listed.contracts.toString());
-        await expectText("cycle: Seaport validated", rowValue(onChain, /^Seaport validated$/), "validated (empty signature fills)");
-        await expectText(
-          "cycle: keeper rejection notice",
-          page.locator(`${SLOT.notice} strong`, { hasText: "The keeper served" }),
-          "The keeper served an order that did not check out against the chain, so nothing is offered here.",
-        );
-        await expectText(
-          "cycle: keeper rejection names the redirected premium leg",
-          page.locator(SLOT.notice, { hasText: "The keeper served" }).locator("li").first(),
-          new RegExp(REASONS.writerRecipient.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")),
-        );
-        await expectAbsent("cycle: a fillable order card", card(page, /^The vault's order · fill from here$/));
-        await expectAbsent("cycle: a contracts input", page.locator("#fill-qty"));
+        // The cycle page that also refused to offer this order is retired and no page offers the pooled
+        // vault's order (file header), so the route's rejection above is the whole check that it is not fillable.
       } finally {
         store.db.prepare("UPDATE listings SET components_json = ? WHERE order_hash = ?").run(original, row.order_hash);
       }
@@ -1156,7 +1147,7 @@ async function main(): Promise<void> {
       assertEq(getAddress(orders[0]?.parameters.consideration[0]?.recipient ?? ""), vault, "keeper row restored: the premium leg pays the vault again");
     });
 
-    const pageFill = await step("(b) the route serves the keeper's order with Seaport's counter restored; the cycle page labels it and fills 2 contracts", async () => {
+    const pageFill = await step("(b) the route serves the keeper's order with Seaport's counter restored; 2 contracts filled from the route's row via lib advancedOrderFor", async () => {
       const body = await keeperRoute(web.url, "restored", (b, status) => status === 200 && b.orders.length === 1);
       assertEq(body.rejected.length, 0, "route: nothing rejected");
       assertEq(body.closed.length + body.unchecked.length, 0, "route: nothing closed or unchecked (one-block Multicall3 read against the fork)");
@@ -1205,44 +1196,26 @@ async function main(): Promise<void> {
         buyer: await erc20Balance(USDG, BUYER.address),
       };
 
-      const page = buyerPage;
-      await page.reload();
-      const orderCard = card(page, /^The vault's order · fill from here$/);
-      await expectText("fill card: title", orderCard.locator(SLOT.cardTitle), "The vault's order · fill from here");
-      await expectText("fill card: status", orderCard.locator(SLOT.cardMeta), "status open");
-      await expectAbsent("cycle: keeper rejection notice", page.locator(SLOT.notice, { hasText: "The keeper served" }));
-      await expectText(
-        "fill card: Contracts",
-        rowValue(orderCard, /^Contracts$/),
-        new RegExp(`^${listed.contracts.toString()} buyable now`),
-      );
-      await expectText("fill card: Unit price", rowValue(orderCard, /^Unit price$/), `${fmtUsdg(listed.unitPrice6, 6)} USDG per contract`);
-      await connectWallet(page, BUYER.address);
-      await orderCard.locator("#fill-qty").fill(FILL_FROM_PAGE.toString());
-      await expectText("fill card: You pay", rowValue(orderCard, /^You pay$/), `${fmtUsdg(cost)} USDG`);
-
-      const from = buyerWallet.sent.length;
-      await orderCard.getByRole("button", { name: `Fill ${FILL_FROM_PAGE} contracts`, exact: true }).click();
-      const approve = await buyerWallet.waitFor("approve", from);
-      const fulfil = await buyerWallet.waitFor("fulfillAdvancedOrder", from);
-      assertEq(approve.to, USDG, "approve goes to USDG");
-      assertEq(jsonish(approve.args), jsonish([SEAPORT, cost]), "approve(Seaport, exactly the cost)");
-      assertEq(fulfil.to, SEAPORT, "the fill goes to Seaport 1.6");
-      const [advanced, resolvers, conduitKey, recipient] = fulfil.args as readonly [
-        { parameters: Record<string, unknown>; numerator: bigint; denominator: bigint; signature: Hex; extraData: Hex },
-        readonly unknown[],
-        Hex,
-        Address,
-      ];
+      // The fill card is retired (file header). The harness sends the fill the card sent, built the way it
+      // built it: from the ROUTE's row through lib/seaportOrder.ts advancedOrderFor, with an exact-cost approval.
+      const advanced = advancedOrderFor(row.components as never, FILL_FROM_PAGE, listed.contracts);
       assertEq(advanced.numerator, FILL_FROM_PAGE, "numerator = contracts wanted");
       assertEq(advanced.denominator, listed.contracts, "denominator = offer[0].startAmount");
       assertEq(advanced.signature, EMPTY_SIGNATURE, "signature is empty");
       assertEq(advanced.extraData, "0x", "extraData empty");
-      assertEq(resolvers.length, 0, "no criteria resolvers");
-      assertEq(conduitKey, ZERO_CONDUIT_KEY, "no conduit");
-      assertEq(getAddress(recipient), BUYER.address, "recipient is the buyer");
-
-      const pageFillReceipt = await pub.getTransactionReceipt({ hash: fulfil.hash });
+      const approveReceipt = await harnessTx("buyer: USDG.approve(Seaport, exactly the cost)", BUYER, () =>
+        walletClient.writeContract({ account: BUYER, chain: forkChain, address: USDG, abi: stockTokenAbi, functionName: "approve", args: [SEAPORT, cost] }),
+      );
+      const pageFillReceipt = await harnessTx("buyer: seaport.fulfillAdvancedOrder from the route's row (lib advancedOrderFor)", BUYER, () =>
+        walletClient.writeContract({
+          account: BUYER,
+          chain: forkChain,
+          address: SEAPORT,
+          abi: seaportAbi,
+          functionName: "fulfillAdvancedOrder",
+          args: [advanced as never, [], ZERO_CONDUIT_KEY, BUYER.address],
+        }),
+      );
       const written = parseEventLogs({ abi: vaultAbi as unknown as Abi, eventName: "CallsWritten", logs: pageFillReceipt.logs }).filter(
         (l) => l.address.toLowerCase() === vault.toLowerCase(),
       );
@@ -1254,16 +1227,11 @@ async function main(): Promise<void> {
       assertEq(await read<bigint>(CLEARINGHOUSE, clearBalanceAbi, "balanceOf", [vault, optionId]), 0n, "the vault holds 0 option tokens after the fill: written == sold");
       assertEq(await read<bigint>(vault, vaultAbi, "contractsWritten"), FILL_FROM_PAGE, "contractsWritten = 2");
       const [, , filled, size] = await read<readonly [boolean, boolean, bigint, bigint]>(SEAPORT, seaportAbi, "getOrderStatus", [listed.order.orderHash]);
-      assertEq(`${filled}/${size}`, `${FILL_FROM_PAGE}/${listed.contracts}`, "Seaport getOrderStatus after the page fill");
-      await page.reload();
-      await expectText(
-        "fill card: Contracts after reload",
-        rowValue(card(page, /^The vault's order · fill from here$/), /^Contracts$/),
-        new RegExp(`${(listed.contracts - FILL_FROM_PAGE).toString()} buyable now`),
-      );
-      record.amounts.pageFillTx = fulfil.hash;
-      record.amounts.pageFillCost6 = cost.toString();
-      record.amounts.pageFillToVault6 = cost.toString();
+      assertEq(`${filled}/${size}`, `${FILL_FROM_PAGE}/${listed.contracts}`, "Seaport getOrderStatus after the route-row fill");
+      record.amounts.routeFillApproveTx = approveReceipt.transactionHash;
+      record.amounts.routeFillTx = pageFillReceipt.transactionHash;
+      record.amounts.routeFillCost6 = cost.toString();
+      record.amounts.routeFillToVault6 = cost.toString();
       return { parameters: advanced.parameters };
     });
 
@@ -1285,9 +1253,9 @@ async function main(): Promise<void> {
         conduitKey: p.conduitKey as Hex,
         totalOriginalConsiderationItems: BigInt(p.totalOriginalConsiderationItems),
       };
-      // The page rebuilt OrderParameters from the route's components; a raw client takes them
+      // The web lib rebuilt OrderParameters from the route's components; a raw client takes them
       // from /orders as served. They must be the same struct, field for field.
-      assertEq(jsonish(pageFill.parameters), jsonish(parameters), "the parameters the page sent = the /orders parameters as served");
+      assertEq(jsonish(pageFill.parameters), jsonish(parameters), "the parameters built from the route's row = the /orders parameters as served");
       const cost = listed.unitPrice6 * FILL_FROM_RAW_PAYLOAD;
       const vaultBefore = await erc20Balance(USDG, vault);
       await harnessTx("buyer (raw client): USDG.approve(Seaport)", BUYER, () =>
@@ -1335,7 +1303,7 @@ async function main(): Promise<void> {
       assertEq(orders.length, 1, "/orders still serves it");
     });
 
-    await step("(b) while Listed: the cycle page and the home page show this week's terms and order figures, from the chain; the keeper's fixed-mode pricing report", async () => {
+    await step("(b) while Listed: /vault/nvda shows this week's terms and order figures, from the chain; the keeper's stored fixed-mode pricing report", async () => {
       assertEq(await read<number>(vault, vaultAbi, "phase"), roll.Phase.Listed, "vault is Listed");
       // Everything below is computed here from the vault's slots and Seaport's status, not from the web lib.
       const [strike, exerciseRaw, expiryRaw, listingAmount, listingGross, written, totalAssets, spot, policyTuple, listingHash] = await Promise.all([
@@ -1408,18 +1376,7 @@ async function main(): Promise<void> {
       assertEq(terms.orderFeeIfAllFill6 ?? -1n, fee, "cycleTerms fee = floor(total x feeBps / 10000)");
       assertEq(`${terms.orderGrossIfAllFillFmt} USDG`, expected.gross, "cycleTerms formats the order total the same way");
 
-      const page = buyerPage;
-      await page.goto(`${web.url}/vault/nvda/cycle`);
-      const option = card(page, /^This week's option · vault cycle #1$/);
-      // The strike row is the strike alone: no distance from spot as a percentage.
-      await expectText("cycle terms: strike", rowValue(option, /^Strike, per contract$/), exactly(expected.strike));
-      await expectText("cycle terms: strike minus spot, in USDG", rowValue(option, exactly(CYCLE_TERMS_LABELS.strikeAboveSpot)), expected.strikeAboveSpot);
-      await expectText("cycle terms: expiry (UTC · Eastern)", rowValue(option, /^Expiry$/), expected.expiry);
-      const onChain = card(page, exactly("The vault's order, on chain"));
-      await expectText("cycle terms: price per contract", rowValue(onChain, exactly(CYCLE_TERMS_LABELS.unitPrice)), expected.unitPrice);
-      await expectText("cycle terms: contracts left to buy", rowValue(onChain, exactly(CYCLE_TERMS_LABELS.fillableContracts)), expected.left);
-      await expectText("cycle terms: order total", rowValue(onChain, exactly(CYCLE_TERMS_LABELS.orderGrossIfAllFill)), expected.gross);
-      await expectText("cycle terms: protocol fee on it", rowValue(onChain, exactly(CYCLE_TERMS_LABELS.orderFeeIfAllFill)), expected.fee);
+      // The cycle page's option and order cards are retired (file header); /vault/nvda below shows the same terms.
 
       // The keeper's own report, as stored with the listing and served through the route.
       const keeperRow = store.getListing(listed.order.orderHash);
@@ -1429,22 +1386,10 @@ async function main(): Promise<void> {
       assertEq(report.priceSource, "fill-floor", "keeper price source");
       assertEq(BigInt(report.unitPrice6), unit, "the report's ask is the vault's unit price");
       assertEq(BigInt(report.strikeUsdg6), strike, "the report's strike is the vault's strike");
-      const pricing = card(page, exactly("How the keeper priced this week"));
-      await expectText("pricing: meta", pricing.locator(SLOT.cardMeta), "keeper-reported");
-      await expectText("pricing: mode", rowValue(pricing, /^Pricing mode$/), "fixed · strike a set distance above spot, ask at the vault floor plus margin");
-      await expectText("pricing: what set the ask", rowValue(pricing, /^What set the ask$/), "The vault floor plus the keeper's margin");
-      await expectText("pricing: strike", rowValue(pricing, /^Strike$/), expected.strike);
-      await expectText("pricing: vault floor", rowValue(pricing, /^Vault floor per contract$/), `${exactUsdg(BigInt(report.floorUnit6))} USDG`);
-      await expectText("pricing: floor plus margin", rowValue(pricing, /^Vault floor plus the keeper's margin$/), `${exactUsdg(BigInt(report.marginUnit6))} USDG`);
-      await expectText("pricing: ask", rowValue(pricing, /^Ask per contract$/), expected.unitPrice);
-      await expectText(
-        "pricing: note",
-        pricing.locator('[data-slot="pricing-note"]'),
-        /^Reported by the keeper with its order, not read from the chain, and shown for information only\. In fixed mode no market data is used\. The vault itself enforces only its premium floor and its strike band/,
-      );
-      await expectAbsent("pricing: implied volatility row", pricing.locator(SLOT.k, { hasText: /^Implied volatility at the strike$/ }));
-      await expectAbsent("pricing: target delta row", pricing.locator(SLOT.k, { hasText: /^Target delta$/ }));
-      await expectAbsent("pricing: mismatch notice", pricing.locator('[data-slot="pricing-mismatch"]'));
+      // The "How the keeper priced this week" card (components/CyclePricing.tsx) was rendered only by the retired
+      // cycle page and is mounted nowhere now, so the stored report is asserted against the vault above and not on a page.
+
+      const page = buyerPage;
 
       await page.goto(`${web.url}/vault/nvda`);
       await expectText("vault: This week's strike", stat(page.locator("main"), /^This week's strike$/).value, expected.strike);
@@ -1516,7 +1461,7 @@ async function main(): Promise<void> {
       );
     }
 
-    await step("(d) warp to exerciseTimestamp; keeper tick -> lockBook; buyer exercises 2 from the cycle page's Exercise button", async () => {
+    await step("(d) warp to exerciseTimestamp; keeper tick -> lockBook; buyer exercises 2 (exact approval, then exercise)", async () => {
       const exerciseTs = listed.exercise;
       await warpTo(exerciseTs, "exerciseTimestamp");
       const spot = await read<bigint>(vault, vaultAbi, "spotUsdg");
@@ -1560,59 +1505,20 @@ async function main(): Promise<void> {
       const usdgBefore = await erc20Balance(USDG, BUYER.address);
       const nvdaBefore = await erc20Balance(ASSET, BUYER.address);
 
-      const page = buyerPage;
-      await page.goto(`${web.url}/vault/nvda/cycle`);
-      const exerciseCard = card(page, exactly("Exercise"));
-      /** The whole trimmed decimal of an 18-decimal amount, as the card prints NVDA. */
-      const nvda = (value: bigint): string => {
-        const whole = (value / LOT).toString().replace(/\B(?=(\d{3})+(?!\d))/g, ",");
-        const frac = (value % LOT).toString().padStart(18, "0").replace(/0+$/, "");
-        return frac === "" ? whole : `${whole}.${frac}`;
-      };
-      await expectText("exercise: meta", exerciseCard.locator(SLOT.cardMeta), "window open");
-      await expectText("exercise: Options in this wallet", rowValue(exerciseCard, /^Options in this wallet$/), `${held} contracts`);
-      await expectText("exercise: Strike, per contract", rowValue(exerciseCard, /^Strike, per contract$/), `${fmtUsdg(tuple.exerciseAmount, 6)} USDG`);
-      await expectText("exercise: NVDA received per contract", rowValue(exerciseCard, /^NVDA received per contract$/), `${nvda(tuple.underlyingAmount)} NVDA`);
-      await expectText("exercise: Exercise opens", rowValue(exerciseCard, /^Exercise opens$/), `${fmtUtc(tuple.exerciseTimestamp)} · ${fmtEastern(tuple.exerciseTimestamp)}`);
-      await expectText("exercise: Expires", rowValue(exerciseCard, /^Expires$/), `${fmtUtc(tuple.expiryTimestamp)} · ${fmtEastern(tuple.expiryTimestamp)}`);
-      await exerciseCard.locator("#exercise-amount").fill(EXERCISE_W.toString());
-      await expectText("exercise: You pay", rowValue(exerciseCard, /^You pay$/), `${fmtUsdg(exerciseCost, 6)} USDG`);
-      await expectText("exercise: Strike cost", rowValue(exerciseCard, /^Strike cost$/), `${fmtUsdg(strikeCost, 6)} USDG`);
-      await expectText("exercise: Clearinghouse fee", rowValue(exerciseCard, /^Clearinghouse fee$/), `${fmtUsdg(clearFeeUsdg, 6)} USDG`);
-      await expectText("exercise: You receive", rowValue(exerciseCard, /^You receive$/), `${nvda(nvdaOut)} NVDA`);
-      await expectText("exercise: USDG approved", rowValue(exerciseCard, /^USDG approved to the clearinghouse$/), `${fmtUsdg(0n, 6)} USDG`);
-      await expectText("exercise: Your USDG", rowValue(exerciseCard, /^Your USDG$/), `${fmtUsdg(exerciseCost, 6)} USDG`);
-      // Spot is $5 above the strike, so there is no warning and no confirmation to tick; the
-      // simulation passes the Clear's checks and says only the approval is missing.
-      await expectText(
-        "exercise: simulation notice",
-        exerciseCard.locator(`${SLOT.notice} strong`, { hasText: "checks pass" }),
-        "The clearinghouse's checks pass.",
+      // The cycle page's Exercise card is retired, and /book's legacy ExercisePanel lists only options held from
+      // the market factory's writer accounts, not this pooled Vault's (file header). The harness sends what the card sent:
+      // an approval of exactly the strike cost plus the Clear's fee, then exercise(optionId, 2).
+      const approveReceipt = await harnessTx("buyer: USDG.approve(Clear, exactly 2 x strike + the Clear's fee)", BUYER, () =>
+        walletClient.writeContract({ account: BUYER, chain: forkChain, address: USDG, abi: stockTokenAbi, functionName: "approve", args: [CLEARINGHOUSE, exerciseCost] }),
       );
-      await expectAbsent("exercise: spot warning", exerciseCard.locator(SLOT.notice, { hasText: /Spot is at or below|Spot could not be read|worth at spot/ }));
-      await expectAbsent("exercise: confirmation", exerciseCard.locator("#exercise-confirm"));
-      const submit = exerciseCard.getByRole("button", { name: `Exercise ${EXERCISE_W} contracts`, exact: true });
-      await expectText("exercise: button id", exerciseCard.locator("#exercise-submit"), `Exercise ${EXERCISE_W} contracts`);
-
-      const from = buyerWallet.sent.length;
-      await submit.click({ timeout: 60_000 });
-      const approve = await buyerWallet.waitFor("approve", from);
-      const exercised = await buyerWallet.waitFor("exercise", from);
-      assertEq(approve.to, USDG, "approve goes to USDG");
-      assertEq(jsonish(approve.args), jsonish([CLEARINGHOUSE, exerciseCost]), "approve(Clear, exactly 2 x strike + the Clear's fee): exact-amount approval");
-      assertEq(exercised.to, CLEARINGHOUSE, "exercise goes to the vault's Clear");
-      assertEq(jsonish(exercised.args), jsonish([optionId, EXERCISE_W]), "exercise(optionId, 2)");
-      assert(approve.block <= exercised.block, "the approval landed before the exercise");
-      assertEq(
-        buyerWallet.sent.slice(from).map((t) => t.functionName).join(","),
-        "approve,exercise",
-        "the button sent exactly one approval and one exercise",
+      const exerciseReceipt = await harnessTx("buyer: Clear.exercise(optionId, 2)", BUYER, () =>
+        walletClient.writeContract({ account: BUYER, chain: forkChain, address: CLEARINGHOUSE, abi: valoremClearAbi as unknown as Abi, functionName: "exercise", args: [optionId, EXERCISE_W] }),
       );
-      const exerciseReceipt = await pub.getTransactionReceipt({ hash: exercised.hash });
+      assert(approveReceipt.blockNumber <= exerciseReceipt.blockNumber, "the approval landed before the exercise");
       const exercisedLogs = parseEventLogs({ abi: valoremClearAbi as unknown as Abi, eventName: "OptionsExercised", logs: exerciseReceipt.logs }).filter(
         (l) => l.address.toLowerCase() === CLEARINGHOUSE.toLowerCase(),
       ) as unknown as Array<{ args: { optionId: bigint; exerciser: Address; amount: bigint } }>;
-      assertEq(exercisedLogs.length, 1, "one OptionsExercised in the page's exercise");
+      assertEq(exercisedLogs.length, 1, "one OptionsExercised in the exercise");
       assertEq((exercisedLogs[0] as { args: { amount: bigint } }).args.amount, EXERCISE_W, "OptionsExercised.amount = 2");
       assertEq(getAddress((exercisedLogs[0] as { args: { exerciser: Address } }).args.exerciser), BUYER.address, "OptionsExercised.exerciser = the buyer");
 
@@ -1620,12 +1526,11 @@ async function main(): Promise<void> {
       assertEq(usdgBefore - (await erc20Balance(USDG, BUYER.address)), exerciseCost, "the buyer paid exactly the strike cost plus the Clear's fee");
       assertEq((await erc20Balance(ASSET, BUYER.address)) - nvdaBefore, nvdaOut, "the buyer received exactly 2 lots of NVDA");
       assertEq(await read<bigint>(USDG, stockTokenAbi, "allowance", [BUYER.address, CLEARINGHOUSE]), 0n, "no USDG allowance to the Clear is left over");
-      await expectText("exercise: Options in this wallet after", rowValue(exerciseCard, /^Options in this wallet$/), `${held - EXERCISE_W} contracts`);
-      record.amounts.exerciseApproveTx = approve.hash;
-      record.amounts.exerciseTx = exercised.hash;
+      record.amounts.exerciseApproveTx = approveReceipt.transactionHash;
+      record.amounts.exerciseTx = exerciseReceipt.transactionHash;
       record.amounts.exerciseCost6 = exerciseCost.toString();
       record.amounts.exerciseClearFee6 = clearFeeUsdg.toString();
-      note(`buyer exercised ${EXERCISE_W} at strike ${listed.strike} from the page (spot was ${spot}; paid ${exerciseCost} USDG6 incl. Clear fee ${clearFeeUsdg})`);
+      note(`buyer exercised ${EXERCISE_W} at strike ${listed.strike} (spot was ${spot}; paid ${exerciseCost} USDG6 incl. Clear fee ${clearFeeUsdg})`);
     });
 
     const closed = await step("(d) warp to expiryTimestamp; keeper tick -> rollClose: harvest premium + strike proceeds, settle the queue", async () => {
@@ -1785,7 +1690,7 @@ async function main(): Promise<void> {
       await expectText("position: Wallet USDG", rowValue(position, /^Wallet USDG$/), fmtUsdg(collected.usdg));
       const claimCard = card(page, exactly("USDG"));
       await expectText("usdg: Vault total distributed", rowValue(claimCard, /^Vault total distributed$/), `${fmtUsdg(await read<bigint>(vault, vaultAbi, "totalUsdgDistributed"))} USDG`);
-      // W-3: the distributor's own index (1e27 per share base unit) per whole share, not lifetime
+      // The distributor's own index (1e27 per share base unit) per whole share, not lifetime
       // distribution over the supply left after the queue burned its shares.
       await expectText(
         "usdg: Distributed to date, per cNVDA",

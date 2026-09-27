@@ -124,7 +124,7 @@ export function browserSubscription(endpoint: string): { endpoint: string; expir
 
 const usdg = (raw: string) => ({ raw, decimals: 6, formatted: String(Number(raw) / 1e6) });
 
-/** A full §4 SeriesRef (from ops/fixtures/api/v2): NVDA 221 call, Fri 25 Sep 2026 16:00 New York. */
+/** A full API SeriesRef (from ops/fixtures/api/v2): NVDA 221 call, Fri 25 Sep 2026 16:00 New York. */
 export const SERIES_221 = {
   longId: '29578741721805883636096061263188069692265858688783836537835344212255512771642',
   shortId: '29578741721805883636096061263188069692265858688783836537835344212255512771643',
@@ -149,7 +149,7 @@ export const SERIES_216 = {
 
 export const SAMPLE_ADDRESS = '0xE37876AcBfbA6186E4687f4ef465D9AC21558De3';
 
-/** One valid payload per §6 event kind. */
+/** One valid payload per event kind. */
 export const SAMPLE_PAYLOADS = {
   fill_receipt: { series: SERIES_221, side: 'buy', units: '50', price: usdg('3600000'), total: usdg('1900000'), fee: usdg('100000'), primary: true },
   strike_cross: { series: SERIES_221, position: 'long', direction: 'above', spot: usdg('221400000'), units: '50', cost: usdg('1900000') },
@@ -175,6 +175,7 @@ export const SAMPLE_PAYLOADS = {
   payout_failed_to_ledger: { series: SERIES_216, asset: 'usdg', amount: usdg('1360000') },
   fee_notice: { phase: 'scheduled', effectiveAt: 1789896000 },
   admin_operation: { id: `0x${'ab'.repeat(32)}`, status: 'pending', label: 'setMarketFees' },
+  market_live: { ticker: 'SPCX' },
 } as const;
 
 /* ------------------------------------------------------------------ fake http services */

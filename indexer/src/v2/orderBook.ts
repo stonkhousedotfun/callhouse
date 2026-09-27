@@ -2,6 +2,7 @@ import { and, desc, eq, isNull, lt } from "ponder";
 import schema from "ponder:schema";
 
 import { v2Ponder as ponder } from "../../lib/registry";
+import { markPnlInput } from "./pnlInput";
 import { recordHouseFills } from "./houseVault";
 import { scheduledFeeColumns, type OrderBookFees } from "../../lib/v2/fees";
 import { V2_REGISTRY } from "../../lib/v2/marketRegistry.generated";
@@ -34,6 +35,8 @@ ponder.on("OrderBook:OrderPlaced", async ({ event, context }) => {
     validUntil: orderValidUntil(kind, BigInt(validUntil), series.mintCutoff, series.expiry),
     status: initial.status, placedAt: event.block.timestamp, placedBlock: event.block.number,
     placedTx: event.transaction.hash, updatedAt: event.block.timestamp,
+    // OrderPlacedBy, when the placer is a delegate, follows this log and sets placedBy.
+    placedBy: null,
   });
 
   // replace() has no distinct event. It emits Cancelled then Placed in the same transaction.
@@ -51,6 +54,20 @@ ponder.on("OrderBook:OrderPlaced", async ({ event, context }) => {
   }
 });
 
+/**
+ * A delegate placed this order (placeFor, or a replace that inherits the delegate mark).
+ * The log is emitted right after that order's OrderPlaced and names the new order id, so a replace
+ * does not keep the predecessor's placer by copying: the book emits this event for the new id.
+ */
+ponder.on("OrderBook:OrderPlacedBy", async ({ event, context }) => {
+  const { orderId, placer } = event.args;
+  const order = await context.db.find(schema.v2Order, { orderId });
+  if (order === null) throw new Error(`OrderPlacedBy ${orderId}: unknown order`);
+  await context.db.update(schema.v2Order, { orderId }).set({
+    placedBy: placer, updatedAt: event.block.timestamp,
+  });
+});
+
 ponder.on("OrderBook:OrderFilled", async ({ event, context }) => {
   const { orderId, longId, taker, maker, units, price, premium, sellerFee, makerRebate, primary, takerIsBuyer, recipient } = event.args;
   const order = await context.db.find(schema.v2Order, { orderId });
@@ -63,6 +80,7 @@ ponder.on("OrderBook:OrderFilled", async ({ event, context }) => {
   });
 
   const { buyer, seller } = fillParties(maker, taker, recipient, takerIsBuyer);
+  await markPnlInput(context.db, event.block.number);
   await context.db.insert(schema.v2Fill).values({
     id: `${event.transaction.hash}-${event.log.logIndex}`,
     orderId, longId, maker, taker, recipient, units, price, premium, sellerFee, makerRebate,
@@ -90,7 +108,7 @@ ponder.on("OrderBook:OrderFilled", async ({ event, context }) => {
   });
 
   /**
-   * F-APP-INDEXER-03. `recordHouseFills` existed, was exported, and was called by NOTHING: the whole
+   * `recordHouseFills` existed, was exported, and was called by NOTHING: the whole
    * repository held exactly one occurrence of the name, its own definition. So `v2_house_fill` was
    * silently always empty wherever House fills happened, with no error of any kind, and Ponder has no
    * partial replay — recovery is a full re-index.
@@ -117,6 +135,7 @@ ponder.on("OrderBook:OrderCancelled", async ({ event, context }) => {
 
 ponder.on("OrderBook:Taken", async ({ event, context }) => {
   const { taker, longId, buying, units, premium, takerFee } = event.args;
+  await markPnlInput(context.db, event.block.number);
   await context.db.insert(schema.v2Take).values({
     id: `${event.transaction.hash}-${event.log.logIndex}`,
     taker, longId, buying, units, premium, takerFee,
@@ -136,6 +155,7 @@ ponder.on("OrderBook:Taken", async ({ event, context }) => {
 ponder.on("OrderBook:DelegateSet", async ({ event, context }) => {
   const { maker, delegate, approved } = event.args;
   const current = await context.db.find(schema.v2Account, { account: maker });
+  await markPnlInput(context.db, event.block.number);
   if (current === null) {
     await context.db.insert(schema.v2Account).values({
       account: maker, delegates: withDelegate("{}", delegate, approved),
@@ -208,7 +228,7 @@ ponder.on("OrderBook:FundingAllowedSet", async ({ event, context }) => {
 });
 
 /**
- * F-APP-INDEXER-04: THIS THROWS ON PURPOSE, and the choice was made, not inherited (T-188).
+ * THIS THROWS ON PURPOSE, and the choice was made, not inherited.
  *
  * `OrderBook.setFunding` reverts NotAuthorized unless `_funding[maker].allowed`, so the chain cannot
  * emit this event for a maker it has not allowed. Reaching here without an allowed row therefore

@@ -6,15 +6,39 @@ import { afterEach, expect, it } from "vitest";
 
 const SCRIPT = path.resolve(import.meta.dirname, "..", "scripts", "gen-markets.mjs");
 const REGISTRY = path.resolve(import.meta.dirname, "..", "..", "ops", "markets", "tier1.json");
-// T-OP-170. Since T-OP-138 the generator imports the REAL builder (`../../ops/markets/build-markets.mjs`, for
+// Since the generator imports the REAL builder (`../../ops/markets/build-markets.mjs`, for
 // V2_MARKET_KEYS / V2_EXTERNAL_CONTRACT_NAMES: one key list, never a copy), so the temp root must carry that
 // module at the same relative path or every spawn dies ERR_MODULE_NOT_FOUND before it reads a byte -- which is
 // how 7 of these 8 cases were red at the tip while the generator itself was fine. The builder is COPIED from the
 // checkout, never stubbed: a hand-written stand-in exporting a shorter key list would pass every case here and
-// prove nothing about the file the app is generated from (the T-OP-123 lesson). It imports only node builtins
+// prove nothing about the file the app is generated from (the lesson). It imports only node builtins
 // (checked below), so nothing under node_modules is copied or linked.
 const BUILDER = path.resolve(import.meta.dirname, "..", "..", "ops", "markets", "build-markets.mjs");
+const REPO = path.resolve(import.meta.dirname, "..", "..");
 const temporaryRoots: string[] = [];
+
+/** Every static import / re-export specifier in a module, single- or multi-line, including bare `import "x";`. */
+function moduleSpecifiers(file: string): string[] {
+  const source = readFileSync(file, "utf8");
+  return [...source.matchAll(/^(?:import|export)\s(?:[^;]*?\sfrom\s)?\s*"([^"]+)";/gm)].map((m) => m[1]!);
+}
+
+// The builder stopped being one file when it began to import ./route-liquidity.mjs: a root carrying
+// build-markets.mjs alone died ERR_MODULE_NOT_FOUND on every spawn, and 8 cases here were once red with the
+// generator fine -- the shape again, one module further down. So the copy set is the builder's
+// relative-import closure, read from the sources rather than listed: the next sibling it imports is carried with no
+// edit here. Builder first.
+function builderClosure(): string[] {
+  const seen = new Set<string>();
+  const visit = (file: string) => {
+    if (seen.has(file)) return;
+    seen.add(file);
+    for (const spec of moduleSpecifiers(file)) if (spec.startsWith(".")) visit(path.resolve(path.dirname(file), spec));
+  };
+  visit(BUILDER);
+  return [...seen];
+}
+const BUILDER_CLOSURE = builderClosure();
 
 type FixtureRegistry = {
   v2: {
@@ -28,20 +52,24 @@ afterEach(() => {
   for (const root of temporaryRoots.splice(0)) rmSync(root, { recursive: true, force: true });
 });
 
-function fixture({ withBuilder = true }: { withBuilder?: boolean } = {}) {
+function fixture({ omit }: { omit?: string } = {}) {
   const root = mkdtempSync(path.join(tmpdir(), "callhouse-gen-markets-"));
   temporaryRoots.push(root);
   const script = path.join(root, "web", "scripts", "gen-markets.mjs");
   const registry = path.join(root, "ops", "markets", "tier1.json");
-  const builder = path.join(root, "ops", "markets", "build-markets.mjs");
   const output = path.join(root, "web", "lib", "markets.generated.ts");
   mkdirSync(path.dirname(script), { recursive: true });
   mkdirSync(path.dirname(registry), { recursive: true });
   mkdirSync(path.dirname(output), { recursive: true });
   copyFileSync(SCRIPT, script);
   copyFileSync(REGISTRY, registry);
-  // `withBuilder: false` is the positive control below: the fixture WITHOUT the module is what was red.
-  if (withBuilder) copyFileSync(BUILDER, builder);
+  // `omit` is the positive control below: a root WITHOUT one module of the closure is what was red.
+  for (const file of BUILDER_CLOSURE) {
+    if (file === omit) continue;
+    const copy = path.join(root, path.relative(REPO, file));
+    mkdirSync(path.dirname(copy), { recursive: true });
+    copyFileSync(file, copy);
+  }
   const run = (...args: string[]) =>
     spawnSync(process.execPath, [script, ...args], {
       cwd: root,
@@ -115,6 +143,38 @@ it("rejects unknown or missing keys in the v8 contract, source and market blocks
   }
 });
 
+it("carries markets[].v2.house into every row and refuses a malformed one", () => {
+  // Every market's v2 block has { weekly, daily }. The generator accepted the key (assertExactKeys) and then
+  // left it out of the row it returned, so lib/markets.generated.ts dropped it while --check agreed with itself.
+  const plain = fixture();
+  const rows = (JSON.parse(readFileSync(plain.registry, "utf8")) as FixtureRegistry).markets.length;
+  expect(plain.run().status).toBe(0);
+  expect(readFileSync(plain.output, "utf8").match(/^ {6}house: \{$/gm)?.length).toBe(rows);
+
+  const daily = `0x${"a".repeat(40)}`;
+  const projected = fixture();
+  mutateRegistry(projected.registry, (source) => { source.markets[0]!.v2.house = { weekly: null, daily }; });
+  const accepted = projected.run();
+  expect(accepted.status, `${accepted.stdout}${accepted.stderr}`).toBe(0);
+  expect(readFileSync(projected.output, "utf8")).toContain(`daily: "${daily}",`);
+
+  const refused: Array<[unknown, string]> = [
+    [null, ".house is not an object"],
+    [{ weekly: null }, "keys differ from the v8 registry schema"],
+    [{ weekly: null, daily: null, monthly: null }, "keys differ from the v8 registry schema"],
+    [{ weekly: null, daily: "0x1234" }, ".house.daily is neither null nor an address"],
+    [{ weekly: 7, daily: null }, ".house.weekly is neither null nor an address"],
+  ];
+  for (const [house, message] of refused) {
+    const { output, registry, run } = fixture();
+    mutateRegistry(registry, (source) => { source.markets[0]!.v2.house = house; });
+    const result = run();
+    expect(result.status, JSON.stringify(house)).toBe(1);
+    expect(result.stderr, JSON.stringify(house)).toContain(message);
+    expect(existsSync(output), JSON.stringify(house)).toBe(false);
+  }
+});
+
 it.each([
   { venue: "v3", fee: 3_000 },
   { venue: "v4", fee: 3_000, tickSpacing: 60, poolId: `0x${"1".repeat(64)}` },
@@ -168,23 +228,39 @@ it("requires zero shared and market rent unless allowRent explicitly opts in", (
   expect(aboveCeiling.run().status).toBe(1);
 });
 
-it("T-OP-170: the fixture carries the real builder module; without it the generator cannot even start", () => {
-  // The builder's own imports are node builtins only, so the copy is self-contained (no node_modules in the root).
-  const source = readFileSync(BUILDER, "utf8");
-  const imports = [...source.matchAll(/^import .* from "([^"]+)";$/gm)].map((m) => m[1]);
-  expect(imports.length).toBeGreaterThan(0);
-  expect(imports.every((s) => s.startsWith("node:"))).toBe(true);
+it("the fixture carries the real builder module and its import closure; without any of it the generator cannot even start", () => {
+  // Every carried module imports only node builtins or another carried module, so the copy is self-contained (no
+  // node_modules in the root). A bare package import anywhere in the closure fails here, by name.
+  expect(BUILDER_CLOSURE[0]).toBe(BUILDER);
+  expect(moduleSpecifiers(BUILDER).length).toBeGreaterThan(0);
+  for (const file of BUILDER_CLOSURE) {
+    for (const spec of moduleSpecifiers(file)) {
+      if (spec.startsWith("node:")) continue;
+      const where = `${path.relative(REPO, file)} imports ${spec}`;
+      expect(spec.startsWith("."), where).toBe(true);
+      expect(BUILDER_CLOSURE, where).toContain(path.resolve(path.dirname(file), spec));
+    }
+  }
 
-  // With the builder: the generator runs (the eight cases above prove what it does with the registry).
+  // With the whole closure: the generator runs (the cases above prove what it does with the registry).
   const ok = fixture();
   const good = ok.run("--check");
   expect(good.stderr).not.toContain("ERR_MODULE_NOT_FOUND");
 
   // Without it: ERR_MODULE_NOT_FOUND naming the builder, before any registry byte is read -- the shape that hid
   // seven red cases behind a spawn that died on import.
-  const bare = fixture({ withBuilder: false });
+  const bare = fixture({ omit: BUILDER });
   const dead = bare.run("--check");
   expect(dead.status).not.toBe(0);
   expect(dead.stderr).toContain("ERR_MODULE_NOT_FOUND");
   expect(dead.stderr).toContain("ops/markets/build-markets.mjs");
+
+  // Without one of the builder's own imports: the shape, the builder present and a module it needs absent.
+  for (const sibling of BUILDER_CLOSURE.slice(1)) {
+    const partial = fixture({ omit: sibling });
+    const died = partial.run("--check");
+    expect(died.status, sibling).not.toBe(0);
+    expect(died.stderr, sibling).toContain("ERR_MODULE_NOT_FOUND");
+    expect(died.stderr, sibling).toContain(path.relative(REPO, sibling));
+  }
 });

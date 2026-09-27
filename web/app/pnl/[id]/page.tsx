@@ -14,7 +14,7 @@ export async function generateMetadata({ params }: { params: Promise<Params> }):
   const pnl = await loadPnl(id);
   const copy = pnl ? receiptImageCopy(pnl) : null;
   const title = copy ? `${copy.multiple} ${pnl?.ticker} outcome — StonkHouse` : "StonkHouse outcome";
-  return { title, description: copy ? `${copy.headline}. ${copy.maxLoss}. Inspect the closing transaction.`
+  return { title, description: copy ? `${copy.headline}. ${copy.maxLoss}.`
     : "Explore verifiable option outcomes on Robinhood Chain.",
     alternates: { canonical: `/pnl/${encodeURIComponent(id)}` },
     openGraph: { title, images: [{ url: `/pnl/${encodeURIComponent(id)}/opengraph-image`, width: 1200, height: 630 }] },

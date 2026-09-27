@@ -84,10 +84,8 @@ describe("cycleTerms: an armed week", () => {
     expect(t.strikeAboveSpotUsdg).toBe(9_654_322n);
     expect(t.strikeAboveSpotFmt).toBe("9.654322");
     expect(t.exerciseTs).toBe(SEP_EXERCISE);
-    expect(t.exerciseUtc).toBe("Fri 18 Sep, 8:00pm UTC");
     expect(t.exerciseEastern).toBe("Fri 18 Sep, 4:00pm EDT");
     expect(t.expiryTs).toBe(SEP_EXPIRY);
-    expect(t.expiryUtc).toBe("Sat 19 Sep, 8:00pm UTC");
     expect(t.expiryEastern).toBe("Sat 19 Sep, 4:00pm EDT");
     expect(t.contractsSold).toBe(6n);
     expect(t.contractsSoldFmt).toBe("6");
@@ -125,18 +123,15 @@ describe("cycleTerms: an armed week", () => {
     expect(cycleTerms(armed({ cycleStrikeUsdg: 222_500_001n }))!.strikeFmt).toBe("222.500001");
   });
 
-  it("deadlines across the end of daylight time: the Eastern hour holds, the UTC hour moves", () => {
+  it("deadlines across the end of daylight time: the Eastern hour holds", () => {
+    // The UTC fields are gone (no UTC line is shown); the page renders these instants with <Time market>.
     // Friday 2026-10-30 close, still EDT (daylight time ends Sunday 2026-11-01).
     const before = cycleTerms(armed({ cycleExerciseTs: 1793390400, cycleExpiryTs: 1793476800 }))!;
-    expect(before.exerciseUtc).toBe("Fri 30 Oct, 8:00pm UTC");
     expect(before.exerciseEastern).toBe("Fri 30 Oct, 4:00pm EDT");
-    expect(before.expiryUtc).toBe("Sat 31 Oct, 8:00pm UTC");
     expect(before.expiryEastern).toBe("Sat 31 Oct, 4:00pm EDT");
     // Friday 2026-11-06 close, EST.
     const after = cycleTerms(armed({ cycleExerciseTs: 1793998800, cycleExpiryTs: 1794085200 }))!;
-    expect(after.exerciseUtc).toBe("Fri 6 Nov, 9:00pm UTC");
     expect(after.exerciseEastern).toBe("Fri 6 Nov, 4:00pm EST");
-    expect(after.expiryUtc).toBe("Sat 7 Nov, 9:00pm UTC");
     expect(after.expiryEastern).toBe("Sat 7 Nov, 4:00pm EST");
   });
 });
@@ -248,7 +243,7 @@ describe("cycleTerms: the order if every fillable contract sells", () => {
 /* ------------------------------------------------------------------ keeper pricing report --- */
 
 /**
- * The sample record in keeper/README.md ("Market data (vol mode)"), verbatim: the 25 Sep arm on the
+ * The keeper's documented sample record ("Market data (vol mode)"), verbatim: the 25 Sep arm on the
  * Cboe chain of Monday 2026-09-14 after the close.
  */
 const README_RECORD = {
@@ -297,7 +292,7 @@ describe("keeperPricingFigures: the keeper's documented record", () => {
     expect(f.strikeAboveSpotFmt).toBe("12.79");
     expect(f.fairUnitFmt).toBe("0.860864");
     expect(f.volUnitFmt).toBe("0.946951");
-    expect(f.floorUnitFmt).toBe("0.848840");
+    expect(f.floorUnitFmt).toBe("0.84884"); // exact, trailing zero dropped
     expect(f.marginUnitFmt).toBe("0.857329");
     expect(f.unitPrice6).toBe(946_951n);
     expect(f.unitPriceFmt).toBe("0.946951");
@@ -306,9 +301,9 @@ describe("keeperPricingFigures: the keeper's documented record", () => {
     expect(f.shareSpotFmt).toBe("212.0404");
     expect(f.expiryDate).toBe("2026-09-25");
     // Cboe's file timestamp is UTC, its last trade time the New York wall clock (measured,
-    // keeper/README.md): both are converted, not left as two unzoned strings.
-    expect(f.chainTime).toEqual({ raw: "2026-09-15 05:57:42", ts: CHAIN_TS, utc: "Tue 15 Sep, 5:57am UTC", eastern: "Tue 15 Sep, 1:57am EDT" });
-    expect(f.lastTradeTime).toEqual({ raw: "2026-09-14T15:59:59", ts: LAST_TRADE_TS, utc: "Mon 14 Sep, 7:59pm UTC", eastern: "Mon 14 Sep, 3:59pm EDT" });
+    // by the keeper): both are converted, not left as two unzoned strings.
+    expect(f.chainTime).toEqual({ raw: "2026-09-15 05:57:42", ts: CHAIN_TS, eastern: "Tue 15 Sep, 1:57am EDT" });
+    expect(f.lastTradeTime).toEqual({ raw: "2026-09-14T15:59:59", ts: LAST_TRADE_TS, eastern: "Mon 14 Sep, 3:59pm EDT" });
     // No figure is a percent string.
     for (const value of Object.values(f)) if (typeof value === "string") expect(value).not.toMatch(/%/);
   });
@@ -328,14 +323,16 @@ describe("keeperPricingFigures: the keeper's documented record", () => {
 
   it("a New York last trade under standard time converts with the EST offset", () => {
     const f = parsed({ ...README_RECORD, lastTradeTime: "2026-11-06T15:59:59", chainTimestamp: "2026-11-07 05:57:42" });
-    expect(f.lastTradeTime?.utc).toBe("Fri 6 Nov, 8:59pm UTC");
+    // 1793998799 = 2026-11-06T20:59:59Z: 15:59:59 New York under EST (UTC-5). The app no longer shows the UTC string this
+    // was pinned through; the instant itself is the stronger pin.
+    expect(f.lastTradeTime?.ts).toBe(1_793_998_799);
     expect(f.lastTradeTime?.eastern).toBe("Fri 6 Nov, 3:59pm EST");
   });
 
   it("a zone-less time from another source is kept as reported, never converted on a guess", () => {
     const f = parsed({ ...README_RECORD, source: "another feed" });
-    expect(f.chainTime).toEqual({ raw: "2026-09-15 05:57:42", ts: undefined, utc: "—", eastern: "—" });
-    expect(f.lastTradeTime).toEqual({ raw: "2026-09-14T15:59:59", ts: undefined, utc: "—", eastern: "—" });
+    expect(f.chainTime).toEqual({ raw: "2026-09-15 05:57:42", ts: undefined, eastern: "—" });
+    expect(f.lastTradeTime).toEqual({ raw: "2026-09-14T15:59:59", ts: undefined, eastern: "—" });
   });
 
   it("tokenSpot and strikeOtmBps are not read: spotUsdg6 is the spot, the distance is in USDG", () => {
@@ -658,7 +655,7 @@ describe("keeperPricingFigures on records the keeper produces", () => {
 /* ---------------------------------------------------------------------------------- copy --- */
 
 /**
- * These were copy-lint's FORBIDDEN rules. copy-lint was removed on 2026-09-21 by owner
+ * These were copy-lint's FORBIDDEN rules. copy-lint was removed
  * instruction, so they are INLINED here rather than read out of the script. They are no longer a
  * live mirror of anything: this is now the only copy, and nothing scans web/ copy any more.
  */

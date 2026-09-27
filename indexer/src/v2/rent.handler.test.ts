@@ -34,7 +34,7 @@ beforeAll(async () => {
   pg = new PGlite();
   for (const table of [schema.v2Market, schema.v2Series, schema.v2Account, schema.v2Ledger,
     schema.v2Mint, schema.v2Close, schema.v2MintFeeAccrual, schema.v2SpecialExpiry, schema.v2CashFlow,
-    schema.v2Order, schema.v2Strategy, schema.v2Roll, schema.v2StaleCancel]) {
+    schema.v2Order, schema.v2Strategy, schema.v2Roll, schema.v2StaleCancel, schema.v2PnlInput]) {
     const config = getTableConfig(table);
     const columns = config.columns.map((c) => {
       const value = typeof c.default === "string" ? "'" + c.default.replaceAll("'", "''") + "'" : String(c.default);
@@ -128,4 +128,24 @@ it("records multiple reprices before a permissionless stale withdrawal", async (
   const [record] = await sql.select().from(schema.v2StaleCancel);
   expect(record).toMatchObject({ writer, underlying: asset, longId: 2n, orderId: 9n,
     spot: 210_000_000n, spotUpdatedAt: 190n, ts: 200n });
+});
+
+it("closes the rolled position through the real PositionClosed handler and SQL row", async () => {
+  const closer = "0x0000000000000000000000000000000000000806" as const;
+  await send("AutoRoller:StrategySet", { writer: closer, underlying: asset, strategy: {
+    active: true, weekly: true, smartPricing: true, otmBps: 200, askBps: 100,
+    minAskBps: 50, maxAskBps: 200, maxUnits: 100n,
+  } });
+  await send("AutoRoller:Rolled", { writer: closer, underlying: asset, longId: 2n, orderId: 17n,
+    strike: 200_000_000n, expiry: 604_900, price: 1_000_000n, units: 100n });
+  await send("AutoRoller:Repriced", { writer: closer, underlying: asset, oldOrderId: 17n, newOrderId: 18n,
+    price: 1_100_000n }, 120n);
+  const row = async () => (await sql.select().from(schema.v2Strategy)
+    .where(eq(schema.v2Strategy.writer, closer)))[0];
+  expect(await row()).toMatchObject({ currentLongId: 2n, orderId: 18n, lastClosedAt: null });
+  await send("AutoRoller:PositionClosed", { writer: closer, underlying: asset, longId: 2n, orderId: 18n,
+    redeemed: true }, 604_960n);
+  expect(await row()).toMatchObject({ active: true, currentLongId: null, orderId: null, expiry: null,
+    repriceCount: 0, lastRepricedAt: null, lastClosedAt: 604_960n, lastClosedLongId: 2n, lastClosedOrderId: 18n,
+    lastCloseRedeemed: true, updatedAt: 604_960n });
 });

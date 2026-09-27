@@ -29,6 +29,19 @@ export const feeSplitterAbi = [
   },
   {
     "type": "function",
+    "name": "SPOT_MAX_AGE",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "uint32",
+        "internalType": "uint32"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
     "name": "authority",
     "inputs": [],
     "outputs": [
@@ -58,19 +71,19 @@ export const feeSplitterAbi = [
     "name": "buyback",
     "inputs": [
       {
-        "name": "minTokenOut",
+        "name": "",
         "type": "uint256",
         "internalType": "uint256"
       }
     ],
     "outputs": [
       {
-        "name": "usdgIn",
+        "name": "",
         "type": "uint256",
         "internalType": "uint256"
       },
       {
-        "name": "burned",
+        "name": "",
         "type": "uint256",
         "internalType": "uint256"
       }
@@ -102,6 +115,61 @@ export const feeSplitterAbi = [
       }
     ],
     "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "buybackCapCeiling",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "buybackCooldown",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "uint40",
+        "internalType": "uint40"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "buybackWithDeadline",
+    "inputs": [
+      {
+        "name": "minTokenOut",
+        "type": "uint256",
+        "internalType": "uint256"
+      },
+      {
+        "name": "deadline",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ],
+    "outputs": [
+      {
+        "name": "usdgIn",
+        "type": "uint256",
+        "internalType": "uint256"
+      },
+      {
+        "name": "burned",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ],
+    "stateMutability": "nonpayable"
   },
   {
     "type": "function",
@@ -252,6 +320,25 @@ export const feeSplitterAbi = [
   },
   {
     "type": "function",
+    "name": "recoverUnrouted",
+    "inputs": [
+      {
+        "name": "asset",
+        "type": "address",
+        "internalType": "address"
+      }
+    ],
+    "outputs": [
+      {
+        "name": "amount",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ],
+    "stateMutability": "nonpayable"
+  },
+  {
+    "type": "function",
     "name": "router",
     "inputs": [],
     "outputs": [
@@ -297,6 +384,32 @@ export const feeSplitterAbi = [
         "name": "perCallUsdg",
         "type": "uint256",
         "internalType": "uint256"
+      }
+    ],
+    "outputs": [],
+    "stateMutability": "nonpayable"
+  },
+  {
+    "type": "function",
+    "name": "setBuybackCapCeiling",
+    "inputs": [
+      {
+        "name": "ceiling",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ],
+    "outputs": [],
+    "stateMutability": "nonpayable"
+  },
+  {
+    "type": "function",
+    "name": "setBuybackCooldown",
+    "inputs": [
+      {
+        "name": "cooldown",
+        "type": "uint40",
+        "internalType": "uint40"
       }
     ],
     "outputs": [],
@@ -505,12 +618,57 @@ export const feeSplitterAbi = [
   },
   {
     "type": "event",
+    "name": "BuybackBalanceWrittenDown",
+    "inputs": [
+      {
+        "name": "previous",
+        "type": "uint256",
+        "internalType": "uint256",
+        "indexed": false
+      },
+      {
+        "name": "current",
+        "type": "uint256",
+        "internalType": "uint256",
+        "indexed": false
+      }
+    ],
+    "anonymous": false
+  },
+  {
+    "type": "event",
+    "name": "BuybackCapCeilingSet",
+    "inputs": [
+      {
+        "name": "ceiling",
+        "type": "uint256",
+        "internalType": "uint256",
+        "indexed": false
+      }
+    ],
+    "anonymous": false
+  },
+  {
+    "type": "event",
     "name": "BuybackCapSet",
     "inputs": [
       {
         "name": "perCallUsdg",
         "type": "uint256",
         "internalType": "uint256",
+        "indexed": false
+      }
+    ],
+    "anonymous": false
+  },
+  {
+    "type": "event",
+    "name": "BuybackCooldownSet",
+    "inputs": [
+      {
+        "name": "cooldown",
+        "type": "uint40",
+        "internalType": "uint40",
         "indexed": false
       }
     ],
@@ -709,6 +867,31 @@ export const feeSplitterAbi = [
     "anonymous": false
   },
   {
+    "type": "event",
+    "name": "UnroutedAssetRecovered",
+    "inputs": [
+      {
+        "name": "asset",
+        "type": "address",
+        "internalType": "address",
+        "indexed": true
+      },
+      {
+        "name": "treasury",
+        "type": "address",
+        "internalType": "address",
+        "indexed": true
+      },
+      {
+        "name": "amount",
+        "type": "uint256",
+        "internalType": "uint256",
+        "indexed": false
+      }
+    ],
+    "anonymous": false
+  },
+  {
     "type": "error",
     "name": "AccessManagedInvalidAuthority",
     "inputs": [
@@ -748,12 +931,28 @@ export const feeSplitterAbi = [
   },
   {
     "type": "error",
+    "name": "AssetIsRouted",
+    "inputs": [
+      {
+        "name": "asset",
+        "type": "address",
+        "internalType": "address"
+      }
+    ]
+  },
+  {
+    "type": "error",
     "name": "BadPrice",
     "inputs": []
   },
   {
     "type": "error",
     "name": "BadUnits",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "BuybackDeadlineRequired",
     "inputs": []
   },
   {
@@ -771,6 +970,11 @@ export const feeSplitterAbi = [
         "internalType": "uint40"
       }
     ]
+  },
+  {
+    "type": "error",
+    "name": "DeadlinePassed",
+    "inputs": []
   },
   {
     "type": "error",
@@ -812,6 +1016,17 @@ export const feeSplitterAbi = [
     "type": "error",
     "name": "AlreadyFinal",
     "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "AlreadyListed",
+    "inputs": [
+      {
+        "name": "asset",
+        "type": "address",
+        "internalType": "address"
+      }
+    ]
   },
   {
     "type": "error",
@@ -863,11 +1078,6 @@ export const feeSplitterAbi = [
   {
     "type": "error",
     "name": "CreatePaused",
-    "inputs": []
-  },
-  {
-    "type": "error",
-    "name": "DeadlinePassed",
     "inputs": []
   },
   {

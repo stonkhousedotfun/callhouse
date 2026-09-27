@@ -5,6 +5,8 @@
     "underlying": "0xd0601CE157Db5bdC3162BbaC2a2C8aF5320D9EEC",
     "status": "live",
     "launch": true,
+    "tradingPaused": false,
+    "mintPaused": false,
     "spot": {
       "raw": "215500000",
       "decimals": 6,
@@ -31,6 +33,7 @@
       1789761600,
       1790366400
     ],
+    "cutoffExpiries": [],
     "stats": {
       "volume24h": {
         "raw": "4306400",
@@ -53,6 +56,8 @@
     "underlying": "0x322F0929c4625eD5bAd873c95208D54E1c003b2d",
     "status": "live",
     "launch": false,
+    "tradingPaused": false,
+    "mintPaused": false,
     "spot": {
       "raw": "355850000",
       "decimals": 6,
@@ -75,6 +80,7 @@
       1789761600,
       1790366400
     ],
+    "cutoffExpiries": [],
     "stats": {
       "volume24h": {
         "raw": "824500",

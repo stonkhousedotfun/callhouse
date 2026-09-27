@@ -4,7 +4,7 @@
 // slice is ever used. Every signature below was confirmed against the deployed bytecode on
 // chain 4663 (0x0000000000000068F116a894984e2DB1123eB395, canonical Seaport 1.6, domain
 // separator 0xa6b20d2b6f71c703cd333de0c921d303988fb481ff2982df74a21e19af3730b0) — see
-// ops/recon/R2-R9-seaport-order-shape.md. The OrderFulfilled topic0 is
+// Seaport 1.6's order shape. The OrderFulfilled topic0 is
 // 0x9d9af8e38d66c62e2c12f0225249fd9d721c54b83f48d9352c97c6cacdcb6f31.
 export const seaportAbi = [
   {

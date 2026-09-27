@@ -6,6 +6,8 @@
  */
 import { pino, type Logger } from 'pino';
 import { config } from './config.js';
+// The one URL rule the v2 loggers use (a pure module; it imports nothing from v2's config).
+import { redactUrls } from './v2/redact.js';
 
 const isTty = process.stdout.isTTY === true;
 
@@ -28,6 +30,8 @@ export const logger: Logger = pino({
     logMethod(args, method) {
       method.apply(this, args.map(scrubBigints) as Parameters<typeof method>);
     },
+    // Every finished line: an RPC URL's key (path or query) never reaches the log, whatever a call site passed.
+    streamWrite: redactUrls,
   },
   ...(isTty
     ? { transport: { target: 'pino-pretty', options: { colorize: true, translateTime: 'SYS:HH:MM:ss' } } }

@@ -399,7 +399,13 @@ export const clearinghouseAbi = [
         "internalType": "address"
       }
     ],
-    "outputs": [],
+    "outputs": [
+      {
+        "name": "received",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ],
     "stateMutability": "nonpayable"
   },
   {
@@ -834,6 +840,50 @@ export const clearinghouseAbi = [
   },
   {
     "type": "function",
+    "name": "previewRedeem",
+    "inputs": [
+      {
+        "name": "tokenId",
+        "type": "uint256",
+        "internalType": "uint256"
+      },
+      {
+        "name": "holder",
+        "type": "address",
+        "internalType": "address"
+      },
+      {
+        "name": "caller",
+        "type": "address",
+        "internalType": "address"
+      }
+    ],
+    "outputs": [
+      {
+        "name": "units",
+        "type": "uint256",
+        "internalType": "uint256"
+      },
+      {
+        "name": "asset",
+        "type": "address",
+        "internalType": "address"
+      },
+      {
+        "name": "owed",
+        "type": "uint256",
+        "internalType": "uint256"
+      },
+      {
+        "name": "minUsdgOut",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
     "name": "previewSettlement",
     "inputs": [
       {
@@ -913,6 +963,16 @@ export const clearinghouseAbi = [
     "outputs": [
       {
         "name": "redeemed",
+        "type": "uint256",
+        "internalType": "uint256"
+      },
+      {
+        "name": "paidUsdg",
+        "type": "uint256",
+        "internalType": "uint256"
+      },
+      {
+        "name": "paidInKind",
         "type": "uint256",
         "internalType": "uint256"
       }
@@ -2683,6 +2743,17 @@ export const clearinghouseAbi = [
     "type": "error",
     "name": "AlreadyFinal",
     "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "AlreadyListed",
+    "inputs": [
+      {
+        "name": "asset",
+        "type": "address",
+        "internalType": "address"
+      }
+    ]
   },
   {
     "type": "error",

@@ -1,11 +1,12 @@
 #!/usr/bin/env node
 /* -------------------------------------------------------------------------------------------------
- * Step 2 of the O2-03 rehearsal: every v2 service against the detached fork, each health-checked.
+ * Step 2 of the v7 rehearsal: every v2 service against the detached fork, each health-checked.
  *
  *   a. market open: the rehearsal's price operator prints the session's rounds on the etched feeds, BEFORE any bot
- *      reads spot: NVDA and TSLA at 97 % of their pool's price (the pools do not move until settlement, when the feed
- *      prints the pool's price: a +3.1 % close that puts the first two daily rungs in the money and lets both sources
- *      agree), META at its real last answer (settles +3 % on Chainlink alone)
+ *      reads spot: the dual-source market (NVDA) 280 bps under its pool's price (DUAL_OPEN_BELOW_POOL_BPS: far enough
+ *      that r0 finishes in the money; 3-story.mjs's feed heartbeat, not the pool, keeps the mm-bot's spot clock fresh;
+ *      the pool does not move until settlement, when the feed prints the pool's price and both sources agree), the single-source market (SPCX,
+ *      its pool nulled on the rehearsal copy) at its real last answer (settles +3 % on Chainlink alone). The markets are the registry's launch set, state.roles.
  *   b. Telegram stand-in (fake-telegram.mjs), the REAL relay (relay/src/index.ts) in front of it, Postgres for the
  *      notifier (a throwaway cluster under out/pg)
  *   c. pricing stand-in (pricing-standin.mjs: Black-Scholes at the fork oracle's spot; the real service needs Cboe)
@@ -29,16 +30,34 @@ import {
   loadState, now, nyTime, patchState, portFree, pub, pushRound, read, readJson, say, setStage, startService, step, until, usd, writeJson, accountOf,
 } from "./lib.mjs";
 import { GIT, INDEXER_GENERATED, TSX_KEEPER, WEB_GENERATED, restoreGenerated, run, startBot, startIndexer } from "./stack.mjs";
+import { MM_FAIR_SPOT_TOLERANCE_BPS } from "./keeper-defaults.mjs";
+import { dualOpen } from "./launch-set.mjs";
 
 setStage("2-services");
 const SKIP_WEB = process.argv.includes("--skip-web");
 const TSX_RELAY = path.join(ROOT, "relay", "node_modules", ".bin", "tsx");
 const TSX_NOTIFIER = path.join(ROOT, "notifier", "node_modules", ".bin", "tsx");
 const telegramMessages = () => getJson(`${TELEGRAM_URL}/_control/messages`);
+/**
+ * How far under its pool's price the dual-source market opens, in bps of the pool's price. 2a asserts on the
+ * fork's own prices that r0's strike is under the pool's price, so the settlement close (the feed prints the pool's
+ * TWAP) finishes r0 in the money. 3h guarantees payouts on r0 only.
+ *
+ * The open deliberately does NOT rely on the mm-bot's pool corroboration. That needs the gap, in bps of the
+ * OPEN price, at most MM_FAIR_SPOT_TOLERANCE_BPS, whose shipped default is 50 (keeper/src/v2/config.ts).
+ * With NVDA's daily firstOtmBps 100 and its 2.5 USDG tick no offset satisfies both bounds: the largest corroborating
+ * offset is 50 bps, the smallest that leaves r0 in the money is 100 (dualOpen over 6,020,301 pool/offset cases, none
+ * both). So 3-story.mjs's feed heartbeat keeps the dual market's spot clock fresh, as Chainlink's heartbeat does in
+ * production, and the spot-age halt (MM_MAX_SPOT_AGE_S, 120 s) never fires. The bot runs the shipped tolerance:
+ * no MM_FAIR_SPOT_TOLERANCE_BPS override in its env. On the 2026-09-23 run the spot-age halt pulled every quote two
+ * minutes after the open round and step 3d timed out.
+ */
+const DUAL_OPEN_BELOW_POOL_BPS = 280n;
 
 async function main() {
   const S = loadState();
   if (!S.detached) fail("step 1 has not passed (state.json detached is not true)");
+  if (!S.roles || !S.launchSet) fail("state.json has no roles/launchSet: step 1 predates T-OP-247 (INTERFACE_VERSION 8); run step 1 again");
   const C = S.contracts;
   const M = S.markets;
   // Resumable: a service already recorded and alive is kept (a re-run after a fix starts only what is missing).
@@ -77,9 +96,14 @@ async function main() {
     let why;
     if (M[T].pool) {
       const p6 = await poolPrice(T);
-      answer = (p6 * 97n) / 100n * 100n; // 6 dp -> the feed's 8 dp
-      why = `97 % of the pool's ${usd(p6)}`;
-      open[T] = { poolPrice6: p6.toString(), openAnswer8: answer.toString(), plan: "settles at the pool's TWAP, corroborated" };
+      const daily = readJson(S.registryCopy).v2.defaults.ladder.daily;
+      const o = dualOpen({ pool6: p6, belowBps: DUAL_OPEN_BELOW_POOL_BPS, firstOtmBps: daily.firstOtmBps, strikeTick: BigInt(M[T].strikeTick), toleranceBps: MM_FAIR_SPOT_TOLERANCE_BPS });
+      answer = o.spot6 * 100n; // 6 dp -> the feed's 8 dp
+      why = `${DUAL_OPEN_BELOW_POOL_BPS} bps under the pool's ${usd(p6)}`;
+      // r0 in the money only. The gap (o.gapBps) is outside the mm-bot's MM_FAIR_SPOT_TOLERANCE_BPS by design;
+      // 3-story.mjs's feed heartbeat keeps the spot clock fresh instead (see DUAL_OPEN_BELOW_POOL_BPS).
+      expect(o.r0InTheMoney, `${T} opens ${o.gapBps} bps under its pool (outside the mm-bot's ${MM_FAIR_SPOT_TOLERANCE_BPS} bps pool corroboration: 3-story's feed heartbeat keeps its spot clock fresh); r0 strike ${usd(o.r0)} < the pool's ${usd(p6)}, so the close at the pool finishes r0 in the money`);
+      open[T] = { poolPrice6: p6.toString(), openAnswer8: answer.toString(), gapBps: o.gapBps.toString(), plan: "settles at the pool's TWAP, corroborated" };
     } else {
       answer = realAnswer;
       why = "the real last answer";
@@ -118,23 +142,34 @@ async function main() {
   if (!running("pricing")) startService("pricing", TSX_KEEPER, [path.join(ROOT, "ops/v2/rehearse/pricing-standin.mjs")], { cwd: path.join(ROOT, "keeper"), port: PORTS.pricing, env: { PORT: String(PORTS.pricing), RH_RPC: RPC, V2_REGISTRY_PATH: S.registryCopy } });
   await until("pricing stand-in /health", async () => (await getJson(`${PRICING_URL}/health`)).status === "ok", { service: "pricing", timeoutMs: 60_000 });
   const probeExpiry = Number(await read(C.expiryCalendar, ABI.calendar, "nextExpiry", [BigInt(t + 3600), false]));
-  const fairProbe = await getJson(`${PRICING_URL}/fair?ticker=NVDA&strike=${(BigInt(loadState().open.NVDA.openAnswer8) / 100n / 2_500_000n + 1n) * 2_500_000n}&expiry=${probeExpiry}&type=call`);
-  expect(fairProbe.fair !== null && BigInt(fairProbe.fair.raw) > 0n, `pricing stand-in /fair NVDA ~ATM call ${nyTime(probeExpiry)}: ${fairProbe.fair?.formatted} USDG (source ${fairProbe.source})`);
+  const D = S.roles.dual;
+  const tick = BigInt(M[D].strikeTick);
+  const fairProbe = await getJson(`${PRICING_URL}/fair?ticker=${D}&strike=${(BigInt(loadState().open[D].openAnswer8) / 100n / tick + 1n) * tick}&expiry=${probeExpiry}&type=call`);
+  expect(fairProbe.fair !== null && BigInt(fairProbe.fair.raw) > 0n, `pricing stand-in /fair ${D} ~ATM call ${nyTime(probeExpiry)}: ${fairProbe.fair?.formatted} USDG (source ${fairProbe.source})`);
 
   step("2d. indexer-v2 (Ponder) on the fork");
+  // The web's "Smart pricing within my limits" is offered only when the indexer's /v2/services reports the
+  // pricer healthy (web/lib/v2/smartPricing.ts smartPricingOffer), and the indexer can vouch for the pricer only through
+  // PRICER_READY_URL (indexer/src/api/v2/services.ts; unset answers `not_configured`, never healthy). The rehearsal
+  // never set it, so 3c's writer flow found the checkbox disabled. startIndexer (stack.mjs) passes this process's
+  // environment through to Ponder, so it is set here. The pricer only starts in 2e, which is fine: services.ts reads
+  // the variable and fetches /ready per request, not at boot. 2e below requires the answer to be healthy.
+  process.env.PRICER_READY_URL = `http://127.0.0.1:${PORTS.pricer}/ready`;
   if (!running("indexer")) await startIndexer(S, { fresh: true });
   const head = await pub.getBlockNumber();
   const health = await until("indexer /v2/health near the head", async () => {
     const h = await getJson(`${INDEXER_URL}/v2/health`);
     return BigInt(h.block) + 10n >= head ? h : null;
   }, { service: "indexer", timeoutMs: 180_000 });
-  expect(Number(health.interfaceVersion) === 7, `indexer /v2/health ${health.status} at block ${health.block} (head ${head}), interfaceVersion ${health.interfaceVersion}`);
+  // INTERFACE_VERSION 8: the indexer is built from the rehearsal copy, which DeployV2Batch.sh only writes
+  // for a v8 registry; a 7 here would mean an indexer built against another interface than the contracts it reads.
+  expect(Number(health.interfaceVersion) === 8, `indexer /v2/health ${health.status} at block ${health.block} (head ${head}), interfaceVersion ${health.interfaceVersion}`);
   const config = await getJson(`${INDEXER_URL}/v2/config`);
   const cfgText = JSON.stringify(config).toLowerCase();
   expect([C.clearinghouse, C.orderBook, C.settlementOracle, C.autoRoller].every((a) => cfgText.includes(a.toLowerCase())), "indexer /v2/config names the rehearsal's Clearinghouse, OrderBook, SettlementOracle and AutoRoller");
   const mk = await getJson(`${INDEXER_URL}/v2/markets`);
   const listed = (Array.isArray(mk) ? mk : mk.items ?? []).map((m) => m.ticker);
-  expect(["NVDA", "TSLA", "META"].every((T) => listed.includes(T)), `indexer /v2/markets lists ${listed.join(", ")}`);
+  expect(S.launchSet.every((T) => listed.includes(T)), `indexer /v2/markets lists ${listed.join(", ")} (launch set ${S.launchSet.join(", ")})`);
   expect(execFileSync(GIT, ["-C", ROOT, "status", "--porcelain", "--", INDEXER_GENERATED]).toString().trim() === "", `${INDEXER_GENERATED} restored after Ponder built`);
 
   step("2e. cranker, mm-bot, pricer (keeper/src/index.ts, V2_MODE)");
@@ -155,6 +190,14 @@ async function main() {
     return msgs.length >= 3 ? msgs : null;
   }, { timeoutMs: 60_000 });
   expect(["cranker", "mm", "pricer"].every((mode) => boots.some((m) => m.text.includes(`${mode} online`))), `relay forwarded v2_boot for cranker, mm and pricer to the Telegram stand-in (${boots.length} messages)`);
+  // What 3c's smart-pricing checkbox waits for, asserted here where a failure is cheap to read. A resumed
+  // indexer from an older build has no PRICER_READY_URL and answers `not_configured`: restart it (step 2 again).
+  let services = null;
+  const pricerReady = await until("indexer /v2/services reports the pricer healthy", async () => {
+    services = await getJson(`${INDEXER_URL}/v2/services`);
+    return services?.pricer?.healthy === true ? services.pricer : null;
+  }, { service: "indexer", timeoutMs: 180_000 }).catch(() => null);
+  expect(pricerReady !== null, `indexer /v2/services pricer ${pricerReady ? "healthy" : `NOT healthy: ${JSON.stringify(services?.pricer ?? services)}`} (PRICER_READY_URL ${process.env.PRICER_READY_URL})`);
 
   step("2f. notifier (Postgres, Telegram stand-in, rules over the indexer)");
   const notifierEnv = {
@@ -190,7 +233,7 @@ async function main() {
     startService("web", path.join(ROOT, "web/node_modules/.bin/next"), ["start", "-p", String(PORTS.web), "-H", "127.0.0.1"], { cwd: path.join(ROOT, "web"), port: PORTS.web, env: webEnv });
     }
     await until("web / 200", async () => (await fetch(WEB_URL)).ok, { service: "web", timeoutMs: 180_000, intervalMs: 2_000 });
-    const page = await (await fetch(`${WEB_URL}/nvda`)).text();
+    const page = await (await fetch(`${WEB_URL}/${S.roles.dual.toLowerCase()}`)).text();
     expect(page.length > 0, `web up on ${WEB_URL} (built against the rehearsal registry copy)`);
   }
   patchState({ services: { indexer: INDEXER_URL, pricing: PRICING_URL, relay: RELAY_URL, telegram: TELEGRAM_URL, notifier: NOTIFIER_URL, web: SKIP_WEB ? null : WEB_URL }, skipWeb: SKIP_WEB, servicesAt: await now() });

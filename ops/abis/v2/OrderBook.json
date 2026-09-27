@@ -301,6 +301,19 @@
   },
   {
     "type": "function",
+    "name": "locked",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "bool",
+        "internalType": "bool"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
     "name": "makerOrderCount",
     "inputs": [
       {
@@ -727,7 +740,7 @@
         "internalType": "uint256"
       }
     ],
-    "stateMutability": "view"
+    "stateMutability": "nonpayable"
   },
   {
     "type": "function",
@@ -1469,7 +1482,45 @@
   },
   {
     "type": "event",
+    "name": "OrderPlacedBy",
+    "inputs": [
+      {
+        "name": "orderId",
+        "type": "uint256",
+        "indexed": true,
+        "internalType": "uint256"
+      },
+      {
+        "name": "placer",
+        "type": "address",
+        "indexed": true,
+        "internalType": "address"
+      }
+    ],
+    "anonymous": false
+  },
+  {
+    "type": "event",
     "name": "OwedClaimed",
+    "inputs": [
+      {
+        "name": "account",
+        "type": "address",
+        "indexed": true,
+        "internalType": "address"
+      },
+      {
+        "name": "amount",
+        "type": "uint256",
+        "indexed": false,
+        "internalType": "uint256"
+      }
+    ],
+    "anonymous": false
+  },
+  {
+    "type": "event",
+    "name": "OwedCredited",
     "inputs": [
       {
         "name": "account",
@@ -1657,6 +1708,32 @@
     "type": "error",
     "name": "PastCutoff",
     "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "QuoteLeg",
+    "inputs": [
+      {
+        "name": "unitsFilled",
+        "type": "uint64",
+        "internalType": "uint64"
+      },
+      {
+        "name": "premium",
+        "type": "uint256",
+        "internalType": "uint256"
+      },
+      {
+        "name": "takerFee",
+        "type": "uint256",
+        "internalType": "uint256"
+      },
+      {
+        "name": "sellerFees",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ]
   },
   {
     "type": "error",

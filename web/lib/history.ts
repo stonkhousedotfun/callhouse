@@ -10,7 +10,7 @@ import { VAULT, VAULT_FROM_BLOCK, vaultAbi } from "./contracts";
 /**
  * Weekly history.
  *
- * Preferred source is the indexer (plan §6). But history is the one thing a user cannot check
+ * Preferred source is the indexer. But history is the one thing a user cannot check
  * for themselves from a single chain read, and "the indexer is down" must never look the same as
  * "the vault has never earned anything". So when the indexer is unreachable this falls back to
  * reading the vault's own logs directly.
@@ -98,7 +98,7 @@ export type ChainDraft = CycleRow & { openBlock?: bigint; closeBlock?: bigint };
  * WRITE ON FILL. `RollOpen.contractsCount` is always 0: the vault arms an option type and writes
  * nothing. Every Seaport fill then emits one `CallsWritten` from inside `authorizeOrder` with the
  * contracts that fill sold, so the week's size is the SUM of its `CallsWritten`, and written
- * equals sold by construction (contracts/README.md "Write on fill").
+ * equals sold by construction (write on fill).
  *
  * A STRANDED CLOSE. `rollClose` whose Valorem redeem reverts emits `ClaimStranded` beside a
  * `RollClose` with zero legs; the week is closed and harvested (premium only) but the claim's
@@ -125,7 +125,7 @@ export function foldVaultLogs(logs: LooseLog[]): ChainDraft[] {
   // paired to its Harvest by transaction hash: `_accrueHarvest` calls `_distributeUsdg`, which
   // emits it, inside the same call that then emits Harvest.
   const supplyByTx = new Map<string, bigint>();
-  // Also pass one: the strike proceeds of each close, by transaction (W-21). `rollClose` emits
+  // Also pass one: the strike proceeds of each close, by transaction. `rollClose` emits
   // `RollClose(…, usdgFromAssignment, …)` and then, in the same transaction, the terminal
   // `Harvest` whose `grossUsdg` INCLUDES that amount — and whose fee was charged on
   // `grossUsdg − usdgFromAssignment` alone. So that harvest is split here into premium and

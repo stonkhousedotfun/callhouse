@@ -8,7 +8,7 @@
  *                                       MAX LOSS rounds UP to the cent. 0.0825 USDG shows as
  *                                       0.09, never as an understated 0.08.
  *   fmtEastern                          web/lib/format.ts: "Fri 18 Sep, 4:00pm EDT". Expiries are
- *                                       16:00 New York (ADR-07), so the New York clock is the one
+ *                                       16:00 New York, so the New York clock is the one
  *                                       that reads right; the zone name is always shown.
  *
  * Copied rather than imported: web/ is a Next app with its own module graph, and this package
@@ -53,7 +53,7 @@ export function fmtAsset(raw: bigint, displayDecimals = 4): string {
   return formatAmount(raw, 18, displayDecimals);
 }
 
-/** Units to shares: 1 unit = 0.01 share (ADR-04), so 40 units → "0.40". */
+/** Units to shares: 1 unit = 0.01 share, so 40 units → "0.40". */
 export function fmtShares(units: bigint): string {
   return formatAmount(units, 2, 2);
 }

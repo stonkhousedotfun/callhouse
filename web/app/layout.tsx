@@ -1,5 +1,5 @@
 import type { Metadata, Viewport } from "next";
-import { Figtree, Geist_Mono, Schibsted_Grotesk } from "next/font/google";
+import { JetBrains_Mono, Plus_Jakarta_Sans } from "next/font/google";
 
 import { Footer } from "@/components/Footer";
 import { Nav } from "@/components/Nav";
@@ -7,35 +7,32 @@ import { Container } from "@/components/ui";
 import { V2ConfigNotice } from "@/components/v2/RouteViews";
 import { DEV_PREVIEW } from "@/lib/devPreview";
 import { APP_URL } from "@/lib/site";
+import { THEME_INIT_SCRIPT } from "@/lib/theme";
 import { Providers } from "./providers";
 import "./globals.css";
 
 /**
- * Daylight type, the same three faces as stonkhouse.fun (stonkhousedotfun/callhouse-site:
- * app/layout.tsx). next/font downloads them at BUILD time and serves them from this origin, so a
- * visitor's browser never contacts Google; the build itself does need to reach Google Fonts. Each
- * exposes a CSS variable on <html> that app/globals.css maps into font-display / font-body /
- * font-mono.
+ * Neon type, the same two faces as stonkhouse.fun. next/font downloads them
+ * at BUILD time and serves them from this origin, so a visitor's browser never contacts Google; the build itself does
+ * need to reach Google Fonts. Each exposes a CSS variable on <html> that app/globals.css maps into font-display /
+ * font-body / font-sans (Plus Jakarta Sans) and font-mono (JetBrains Mono).
  *
- * Schibsted Grotesk 500–800 for display, Figtree 400–700 for body, Geist Mono 400–600 for every
- * number; stay inside those weights.
+ * Plus Jakarta Sans 400–800 for all text and headline numbers, JetBrains Mono 400–600 for tabular figures; stay
+ * inside those weights. A number people compare down a column uses mono; a number that is the point of the screen
+ * uses heavy sans (spec 4).
  */
-const display = Schibsted_Grotesk({
+const sans = Plus_Jakarta_Sans({
   subsets: ["latin"],
+  weight: ["400", "500", "600", "700", "800"],
   display: "swap",
-  variable: "--font-schibsted-grotesk",
+  variable: "--font-plus-jakarta-sans",
 });
 
-const body = Figtree({
+const mono = JetBrains_Mono({
   subsets: ["latin"],
+  weight: ["400", "500", "600"],
   display: "swap",
-  variable: "--font-figtree",
-});
-
-const mono = Geist_Mono({
-  subsets: ["latin"],
-  display: "swap",
-  variable: "--font-geist-mono",
+  variable: "--font-jetbrains-mono",
 });
 
 /**
@@ -50,7 +47,7 @@ const mono = Geist_Mono({
  *      content splits which of the two a search engine decides to show. The disclosures should
  *      have one address.
  *   2. This is a restricted perimeter, and the marketing surface is the one whose copy is gated
- *      by disclosure policy (copy-lint enforced this until it was removed on 2026-09-21; nothing checks it now). The page a stranger finds first should be the
+ *      by disclosure policy (nothing checks it automatically now). The page a stranger finds first should be the
  *      page whose wording is checked before it ships.
  *
  * With NEXT_PUBLIC_V2=1 outside a dev preview, public buyer pages opt into indexing in their
@@ -80,22 +77,29 @@ export const metadata: Metadata = {
 };
 
 /**
- * Browser chrome follows the page ground in each colour scheme: the --ground token in
- * app/globals.css, light and dark, the same pair stonkhouse.fun declares, so moving between the
- * two domains does not flash a different chrome colour. Change them together.
+ * Browser chrome follows the page ground in each colour scheme: the --ground token in app/globals.css, DAY #ffffff
+ * and NIGHT #000000, the same pair stonkhouse.fun declares, so moving between the two domains does not flash a
+ * different chrome colour. Change them together. (Chrome follows the SYSTEM setting; the in-page toggle cannot move
+ * a meta tag the browser has already read.)
  */
 export const viewport: Viewport = {
   width: "device-width",
   initialScale: 1,
   themeColor: [
-    { media: "(prefers-color-scheme: light)", color: "#f5f8f6" },
-    { media: "(prefers-color-scheme: dark)", color: "#0b1511" },
+    { media: "(prefers-color-scheme: light)", color: "#ffffff" },
+    { media: "(prefers-color-scheme: dark)", color: "#000000" },
   ],
 };
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {
   return (
-    <html lang="en" className={`${display.variable} ${body.variable} ${mono.variable}`}>
+    // suppressHydrationWarning: THEME_INIT_SCRIPT sets data-theme on <html> before React hydrates, on purpose, so the
+    // server markup (no attribute) and the client DOM differ in exactly that one attribute.
+    <html lang="en" className={`${sans.variable} ${mono.variable}`} suppressHydrationWarning>
+      <head>
+        {/* Night/day before first paint (spec 3.1): the stored choice, else the system setting. lib/theme.ts. */}
+        <script dangerouslySetInnerHTML={{ __html: THEME_INIT_SCRIPT }} />
+      </head>
       <body className="flex min-h-dvh flex-col">
         <a
           href="#main"
@@ -103,17 +107,9 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
         >
           Skip to content
         </a>
-        {DEV_PREVIEW ? (
-          <aside aria-label="Development preview" className="border-b border-amber-400 bg-amber-100 text-amber-950">
-            <Container className="flex flex-wrap items-center gap-x-3 gap-y-1 py-2 text-sm">
-              <strong className="shrink-0 rounded-full bg-amber-950 px-2.5 py-0.5 text-xs tracking-wide text-amber-50">DEV PREVIEW</strong>
-              <span>Testing environment. Transactions may use real assets on Robinhood Chain. Review before signing.</span>
-            </Container>
-          </aside>
-        ) : null}
         <Providers>
           <Nav />
-          {/* One 1160px column for every route, the same width as the site's chrome. Pages lay out
+          {/* One 1200px content column for every route (Container). Pages lay out
               their own head and cards inside it. */}
           <main id="main" className="flex-1">
             <Container className="pb-16 sm:pb-24">

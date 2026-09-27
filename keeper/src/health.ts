@@ -33,7 +33,7 @@
  * No host is passed to listen(): Node then binds `::` where IPv6 exists (which also accepts IPv4)
  * and `0.0.0.0` where it does not, the same as the relay and the indexer. That covers a container
  * healthcheck and Railway's IPv6 private network, where the web app reads /orders at
- * keeper.railway.internal (ops/deploy.md §3). Pinning `0.0.0.0` would cut that off.
+ * keeper.railway.internal. Pinning `0.0.0.0` would cut that off.
  * Put it behind your own network boundary. Nothing here is a write endpoint and nothing here
  * needs a secret — which is also why the RPC URLs below are served origin-only: production
  * endpoints routinely embed keys.

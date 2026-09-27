@@ -57,7 +57,7 @@
  * under a lot, writes halted) burnt 25 reverts of gas a minute. Nothing is sent while
  * `factory.writesHalted()`.
  *
- * V1 RUN-OFF (SOLO_WIND_DOWN=1, ADR-10). The factory has been frozen (guardian `setWritesHalted`,
+ * V1 RUN-OFF (SOLO_WIND_DOWN=1). The factory has been frozen (guardian `setWritesHalted`,
  * admin `setDepositCap(0)`) and its listed weeks are left to expire. The tick then sends neither
  * `setWeek` nor `listFor`: a fresh week on a frozen factory is a market on /state nobody can list
  * into, and every list would revert WritesAreHalted anyway. It still settles every expired account,
@@ -69,7 +69,7 @@
  * call, and a redeem the token issuers refuse does not fail the settle: it zeroes `listedExpiryTs`
  * and keeps the claim for good (a second settle() reverts TooEarly; the account has no other
  * redeem). So before sending settle() for an account with `claimKey() != 0`, the keeper reads the
- * six transfer gates of ops/runbooks/v1-runoff.md step 8 (`settle_safe`) in one multicall, and holds
+ * six transfer gates of the v1 run-off's `settle_safe` check in one multicall, and holds
  * the settle while any is true or any read fails: `v1_settle_held` (warn) once per account per
  * reason, retried every tick, sent normally on the first tick they are all false again. An account
  * with `claimKey() == 0` sold nothing, has no redeem, and settles regardless. Details at
@@ -848,8 +848,8 @@ async function settleExpired(snap: SoloSnapshot): Promise<void> {
 /**
  * One gate `settle()`'s Valorem redeem needs open. The redeem moves USDG and the Stock Token from
  * the Clear to the account, so it reverts while any of these is true, and a reverted redeem inside
- * settle() strands the claim (callhouse-contracts docs/V1-RUNOFF.md). The same six reads, in the
- * same order and under the same labels, as `settle_safe` in ops/runbooks/v1-runoff.md step 8:
+ * settle() strands the claim. The same six reads, in the
+ * same order and under the same labels, as the v1 run-off's `settle_safe` check:
  *
  *   USDG.paused             usdg_paused           USDG `paused()`
  *   USDG.isFrozen(account)  usdg_frozen           USDG `isFrozen(account)`
@@ -1050,7 +1050,7 @@ function releaseHold(writer: Address, safety: SettleSafety): void {
 
 /** A held account that has left the live set was settled by someone else (settle() is
  *  permissionless). Forgotten, with a warning: if its claimKey is still non-zero, that settle
- *  stranded the claim (ops/runbooks/v1-runoff.md step 8, "claimKey still non-zero"). */
+ *  stranded the claim. */
 function dropGoneHolds(live: readonly Address[]): void {
   if (settleHolds.size === 0) return;
   const still = new Set(live.map((w) => w.toLowerCase()));

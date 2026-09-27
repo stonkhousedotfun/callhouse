@@ -1,5 +1,5 @@
 /**
- * The collateral rent of INTERFACE_VERSION 7 (c05), against the contracts' own arithmetic.
+ * The collateral rent of INTERFACE_VERSION 7, against the contracts' own arithmetic.
  *
  * WHY THIS FILE EXISTS: `OrderBook._reserveCollateral` budgets collateral PLUS
  * `ceil(collateral × mintFeePpm × (expiry − now) / (1e6 × 7 days))` and SKIPS a write-on-fill order the writer
@@ -81,7 +81,7 @@ test('maxWriteUnits is exact: its answer fits in the free balance and one more u
     assert.ok(collateralNeeded(n, cpu, ppm, rem) <= free, `${n} units do not fit in ${free}`);
     assert.ok(collateralNeeded(n + 1n, cpu, ppm, rem) > free, `${n + 1n} units would also fit in ${free}`);
   }
-  // A whole share's collateral at the launch rate buys 99 units, not 100: the "N × 100 − 1" sizing of v7 §4.5.4.
+  // A whole share's collateral at the launch rate buys 99 units, not 100: the "N × 100 − 1" sizing rule.
   assert.equal(maxWriteUnits(100n * UNIT, UNIT, 80, MINT_FEE_PERIOD_S), 99n);
   assert.equal(maxWriteUnits(100n * UNIT, UNIT, 0, MINT_FEE_PERIOD_S), 100n, 'a 0 ppm market is the v6 answer');
   assert.equal(maxWriteUnits(100n * UNIT, UNIT, 80, 0), 100n, 'at expiry there is no rent to reserve');

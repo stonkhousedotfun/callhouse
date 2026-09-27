@@ -16,7 +16,7 @@ vi.mock("../../lib/env", () => ({
   V2_EXPIRY_CALENDAR: undefined, V2_KEEPER_REWARDS: undefined, V2_AUTO_ROLLER: undefined,
   V2_MAKER_VAULT: undefined, V2_MAKER_REGISTRY: undefined, V2_REWARDS_DISTRIBUTOR: undefined,
   V2_PAYOUT_ROUTER: undefined, V2_FEE_SPLITTER: undefined, V2_BUYBACK_EXECUTOR: undefined,
-  V2_HOUSE_VAULT_FACTORY: undefined,
+  V2_HOUSE_VAULT_FACTORY: undefined, V2_EARN_VAULT: undefined,
 }));
 
 vi.mock("../../lib/v2/marketRegistry.generated", () => ({
@@ -112,6 +112,38 @@ describe("AccessManager event reducers", () => {
     });
     expect(db.rows.get("v2AccessRoleMember")?.get(id)).toMatchObject({
       granted: false, memberSince: 120n, pendingExecutionDelayS: null,
+    });
+  });
+
+  // Role 11 is NEW_LISTING, the zero-delay first-listing lane, and registerMarket
+  // moved onto it. Before the regenerated manifest the indexer stored role 11 as "ROLE_11" with no expected delay,
+  // and registerMarket's expected role as LISTING (5), so /v2/markets and /v2/admin showed an unnamed lane.
+  it("names role 11 NEW_LISTING with expected delay 0, and expects registerMarket on it", async () => {
+    const db = memoryDb();
+    const context = { db };
+    const safe = "0x000000000000000000000000000000000000a004";
+    await handlers.get("AccessManager:RoleGranted")!({
+      event: event({ roleId: 11n, account: safe, delay: 0, since: 120, newMember: true }, 100n), context,
+    });
+    expect(db.rows.get("v2AccessRoleMember")?.get(`11:${safe}`)).toMatchObject({
+      roleId: 11n, roleName: "NEW_LISTING", granted: true, executionDelayS: 0n,
+    });
+    await handlers.get("AccessManager:RoleGrantDelayChanged")!({
+      event: event({ roleId: 11n, delay: 0, since: 120 }, 100n), context,
+    });
+    expect(db.rows.get("v2AccessRole")?.get("11")).toMatchObject({
+      roleId: 11n, name: "NEW_LISTING", expectedExecutionDelayS: 0n,
+    });
+    const target = "0x000000000000000000000000000000000000c011";
+    const selector = toFunctionSelector("registerMarket(address,uint64,bool)");
+    expect(selector).toBe("0x9ae621ee");
+    await handlers.get("AccessManager:TargetFunctionRoleUpdated")!({
+      event: event({ target, selector, roleId: 11n }), context,
+    });
+    expect(db.rows.get("v2AccessTargetFunction")?.get(`${target}:${selector}`)).toMatchObject({
+      targetName: "Clearinghouse", functionSignature: "registerMarket(address,uint64,bool)",
+      label: "Clearinghouse.registerMarket(address,uint64,bool)",
+      roleId: 11n, roleName: "NEW_LISTING", expectedRoleId: 11n,
     });
   });
 

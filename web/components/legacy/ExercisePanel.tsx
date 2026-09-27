@@ -7,9 +7,9 @@ import { useAccount, usePublicClient, useWriteContract } from "wagmi";
 import { useNotice, useTxRunner } from "@/components/TxToast";
 import { Button, Card, CardHead, CardTitle } from "@/components/ui";
 import { CHAIN_ID } from "@/lib/chain";
-import { CLEARINGHOUSE, USDG, stockTokenAbi, valoremClearAbi } from "@/lib/contracts";
+import { CLEARINGHOUSE, USDG, USDG_DECIMALS, stockTokenAbi, valoremClearAbi } from "@/lib/contracts";
 import { approvalFor, exerciseAmounts, exerciseWindow } from "@/lib/exercise";
-import { fmtUsdg } from "@/lib/format";
+import { displayExact } from "@/lib/numberFormat";
 
 export type LegacyHeldCall = {
   optionId: bigint;
@@ -45,24 +45,24 @@ export function ExercisePanel({ rows, ticker, onDone }: { rows: readonly LegacyH
       const raw = await client.readContract({ address: CLEARINGHOUSE, abi: valoremClearAbi as unknown as Abi,
         functionName: "option", args: [optionId] });
       const option = optionTuple(raw);
-      if (!option) throw new Error("Could not read this v1 call from Valorem.");
+      if (!option) throw new Error("Could not read this call.");
       const now = Number((await client.getBlock()).timestamp);
       if (exerciseWindow(option, now) !== "open") throw new Error("This call is outside its exercise window.");
       const held = await client.readContract({ address: CLEARINGHOUSE, abi: valoremClearAbi as unknown as Abi,
         functionName: "balanceOf", args: [address, optionId] }) as bigint;
-      if (requested <= 0n || held < requested) throw new Error("Your v1 call balance changed. Refresh this page.");
+      if (requested <= 0n || held < requested) throw new Error("Your call balance changed. Refresh the page.");
       const [feesEnabled, feeBps] = await Promise.all([
         client.readContract({ address: CLEARINGHOUSE, abi: valoremClearAbi as unknown as Abi, functionName: "feesEnabled" }),
         client.readContract({ address: CLEARINGHOUSE, abi: valoremClearAbi as unknown as Abi, functionName: "feeBps" }),
       ]);
       const amounts = exerciseAmounts({ amount: requested, strikeUsdg: option.exerciseAmount,
         underlyingAmount: option.underlyingAmount, feesEnabled: Boolean(feesEnabled), feeBps: Number(feeBps) });
-      if (!amounts) throw new Error("Could not calculate the exact v1 exercise cost.");
+      if (!amounts) throw new Error("Could not work out the exercise cost.");
       const [balance, allowance] = await Promise.all([
         client.readContract({ address: USDG, abi: stockTokenAbi as unknown as Abi, functionName: "balanceOf", args: [address] }) as Promise<bigint>,
         client.readContract({ address: USDG, abi: stockTokenAbi as unknown as Abi, functionName: "allowance", args: [address, CLEARINGHOUSE] }) as Promise<bigint>,
       ]);
-      if (balance < amounts.total) throw new Error(`You need ${fmtUsdg(amounts.total)} USDG to exercise these calls.`);
+      if (balance < amounts.total) throw new Error(`You need ${displayExact(amounts.total, USDG_DECIMALS)} USDG to exercise.`);
       const approval = approvalFor(allowance, amounts.total);
       if (approval === undefined) throw new Error("Could not calculate the USDG approval.");
       if (approval > 0n) {

@@ -3,7 +3,7 @@
  *   GET /v2/series/:longId/holders?side=long|short&limit=&cursor=  { items: [{ holder, units }], nextCursor }
  *   GET /v2/strategies?active=1&limit=&cursor=                     { items: [{ writer, underlying, ... }], nextCursor }
  *
- * The indexer is a convenience here, never a dependency (ADR-13 for writes, K2-03 "fall back to log
+ * The indexer is a convenience here, never a dependency (for writes, "fall back to log
  * scans when the indexer is down"): every call resolves to `{ ok: false, reason }` on a network
  * error, a timeout, a non-200 or a body of the wrong shape, and the cranker then uses its own log
  * index alone. What an answer contributes is a list of CANDIDATES: balances and strategies are

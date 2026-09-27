@@ -24,7 +24,7 @@ export const seriesInfoSchema = z.object({
   expiry: z.number().int().nonnegative(),
   status: z.enum(['open', 'cutoff', 'expired', 'settling', 'held', 'settled']),
 });
-/** The part of a §4 SeriesRef the rules and the payloads need. */
+/** The part of an API SeriesRef the rules and the payloads need. */
 export type SeriesInfo = z.infer<typeof seriesInfoSchema>;
 
 export const holdingsSchema = z.object({
@@ -140,7 +140,7 @@ export const snapshotStateSchema = z.object({
   spots: z.record(uint),
   /**
    * Ticker → when the oracle last updated that spot (`/v2/markets[].spotUpdatedAt`, unix seconds).
-   * Price-driven payloads carry it so their message can state the observation time (F4 D8). A
+   * Price-driven payloads carry it so their message can state the observation time. A
    * ticker is absent when the market gave no spot; snapshots stored before this field parse as {}.
    */
   spotTimes: z.record(z.number().int().nonnegative()).default({}),
@@ -166,10 +166,10 @@ export const snapshotStateSchema = z.object({
   /** Identity of the live fees block; null when /v2/config.fees was absent. */
   liveFeesKey: z.string().nullable().default(null),
   /**
-   * Operation `key` (`<operationId>:<nonce>`, T-434) → its operation id and status from
-   * /v2/admin/operations. Keyed on `key` and not `id` since T-435: a rescheduled operation reuses its
+   * Operation `key` (`<operationId>:<nonce>`) → its operation id and status from
+   * /v2/admin/operations. Keyed on `key` and not `id`: a rescheduled operation reuses its
    * id, and a map keyed on id let the second schedule overwrite the first and never be announced.
-   * Snapshots stored before T-435 are keyed by the bare id and carry no `id` field; they still parse
+   * Snapshots stored before this change are keyed by the bare id and carry no `id` field; they still parse
    * (`id` is optional) and rules.ts reads them once as the previous state, then drops them.
    */
   adminOperations: z.record(z.object({
@@ -177,6 +177,12 @@ export const snapshotStateSchema = z.object({
     status: z.enum(['pending', 'executed', 'canceled']),
     label: z.string().min(1),
   })).default({}),
+  /**
+   * Ticker → its `/v2/markets` status at `at`, for market_live. A failed markets read carries
+   * the previous tick's map forward (a read that failed is not a market that left). Snapshots stored
+   * before this field parse as {}, which the rule reads as "no baseline" and records without messaging.
+   */
+  marketStatuses: z.record(z.enum(['planned', 'live', 'paused'])).default({}),
 });
 export type SnapshotState = z.infer<typeof snapshotStateSchema>;
 
@@ -189,6 +195,7 @@ export function emptySnapshot(): Snapshot {
   return {
     at: 0, spots: {}, spotTimes: {}, alerts: {}, strikeSides: {}, alertStates: {}, settlements: {},
     holdings: {}, sessionDays: {}, pendingFeesEffectiveAt: null, liveFeesKey: null, adminOperations: {},
+    marketStatuses: {},
   };
 }
 

@@ -1,8 +1,8 @@
 /**
  * The card half of card-below-sm (UX review item 6).
  *
- * AUTHORED, NOT RUN — this worktree is not hydrated (no node_modules; vitest and tsc both exit
- * 127). Reported to the operator rather than repaired, and recorded in the ledger.
+ *
+ *
  *
  * WHAT THESE ASSERT, and why it is not "cards render": the whole risk in this change is that a
  * card silently carries fewer fields than the row it replaces. That failure looks fine on a phone

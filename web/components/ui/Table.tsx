@@ -4,7 +4,7 @@ import { cn } from "@/lib/cn";
 
 /**
  * A data table in its own horizontal scroll container, so a 13-column history never scrolls the
- * page body at 390px. Numbers are Geist Mono and right-aligned so columns compare at a glance; the
+ * page body at 390px. Numbers are JetBrains Mono and right-aligned so columns compare at a glance; the
  * first column is left-aligned. Cells do not wrap unless a cell opts in with `whitespace-normal`.
  *
  * Pass `<thead>` and `<tbody>` as children; the styling reaches them through the table's own

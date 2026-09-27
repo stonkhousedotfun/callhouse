@@ -1,5 +1,5 @@
 /**
- * Per-step metrics for the cranker's /state (K2-03 "per-step metrics on /state"): how often each
+ * Per-step metrics for the cranker's /state: how often each
  * step ran, how long it took, what it sent and what came back, its last error, and what its last
  * run saw (the step's notes: expiries and their phase, ladder plans, redeem counts, roll decisions).
  * In memory: /state describes this process; the durable record of every transaction is v2_txs.
@@ -36,8 +36,19 @@ const emptyStep = (): StepMetrics => ({
   lastNotes: {},
 });
 
+/**
+ * The firstmint step since boot: expiries it pinned with a one-unit take, and the USDG base units it spent.
+ * The day's spend against FIRST_MINT_DAILY_CAP is in the step's lastNotes (`spent`, `cap`); the durable count is store
+ * meta (firstmint.ts firstMintSpentMetaKey).
+ */
+export interface FirstMintMetrics {
+  pinned: number;
+  spent: string;
+}
+
 export class CrankerMetrics {
   readonly steps: Record<StepName, StepMetrics>;
+  readonly firstMint: FirstMintMetrics = { pinned: 0, spent: '0' };
   ticks = 0;
   lastTickAt: string | null = null;
   lastTickDurationMs: number | null = null;
@@ -56,6 +67,11 @@ export class CrankerMetrics {
     for (const a of report.actions) m.outcomes[a.status] = (m.outcomes[a.status] ?? 0) + 1;
     m.lastActions = report.actions.slice(-MAX_ACTIONS);
     m.lastNotes = report.notes;
+    if (report.step === 'firstmint') {
+      const { pinnedThisTick, spentThisTick } = report.notes;
+      if (typeof pinnedThisTick === 'number') this.firstMint.pinned += pinnedThisTick;
+      if (typeof spentThisTick === 'string' && /^\d+$/.test(spentThisTick)) this.firstMint.spent = (BigInt(this.firstMint.spent) + BigInt(spentThisTick)).toString();
+    }
   }
 
   recordStepError(step: StepName, startedAtMs: number, durationMs: number, message: string): void {

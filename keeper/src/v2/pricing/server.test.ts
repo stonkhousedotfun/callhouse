@@ -1,8 +1,8 @@
 /**
  * The pricing service over HTTP: its response shapes, the registry it boots from, and the
- * entry K2-01 wires to V2_MODE=pricing.
+ * entry wired to V2_MODE=pricing.
  *
- * WHY THIS FILE EXISTS: the indexer (X2-05), the MM bot and the pricer read this service by its
+ * WHY THIS FILE EXISTS: the indexer, the MM bot and the pricer read this service by its
  * JSON, not its types. The exact body for one synthetic contract is pinned here so a consumer
  * can build against it; so are the error shapes (a null with a reason is a 200, a caller's mistake
  * is a 400/404), the surface's share-space units, and a boot on the real registry that answers on a
@@ -21,6 +21,8 @@ import { syntheticNvdaChain } from '../../fixtures/synthetic-chains.js';
 import { PricingService } from './fair.js';
 import { DEFAULT_PRICING_PORT, KEEPER_PACKAGE_DIR, loadPricingEnv, startPricingService } from './main.js';
 import { loadPricingRegistry, parsePricingRegistry, type PricingMarket } from './markets.js';
+import { MASSIVE_PROVIDER } from './massive.js';
+import { parseEventCalendarFile } from './events.js';
 import { createPricingApp, parseFairQuery } from './server.js';
 import type { FeedRound, SpotReader } from './spot.js';
 
@@ -65,20 +67,27 @@ async function get(a: ReturnType<typeof app>, path: string): Promise<{ status: n
                                /fair
 //////////////////////////////////////////////////////////////*/
 
-test('GET /fair: the exact body for the NVDA 18 Sep 220 call (source cboe), the contract X2-05 builds on', async () => {
+test('GET /fair: the exact body for the NVDA 18 Sep 220 call (source cboe), the contract the pricing client builds on', async () => {
   const res = await app().request('/fair?ticker=NVDA&strike=220000000&expiry=1789761600&type=call');
   assert.equal(res.status, 200);
+  const text = await res.text();
+  // The legacy body is a byte-exact PREFIX: every field the old body had is unchanged, in its place, in its format.
+  const legacy = '{"fair":{"raw":"1772765","decimals":6,"formatted":"1.772765"},"iv":0.430071,"delta":0.261653,"source":"cboe","spot":{"raw":"212210000","decimals":6,"formatted":"212.21"},"asOf":1789415999';
+  assert.ok(text.startsWith(`${legacy},`), text);
+  // Appends, and only these. askIv = max(iv 0.430071, no realized, no floor) × 1.10.
   assert.equal(
-    await res.text(),
-    '{"fair":{"raw":"1772765","decimals":6,"formatted":"1.772765"},"iv":0.430071,"delta":0.261653,"source":"cboe","spot":{"raw":"212210000","decimals":6,"formatted":"212.21"},"asOf":1789415999}',
+    text.slice(legacy.length),
+    ',"gamma":0.028302,"vega":8.700528,"askIv":0.473078,"realizedVol":null,"quality":{"readiness":"degraded","reasons":["quote-age-unknown","identity-unmapped"],"uncertainty":null},"event":{"input":"missing","inWindow":false}}',
   );
 });
 
-test('GET /fair: the §5 example prices from the model; a put; case-insensitive ticker and type', async () => {
+test('GET /fair: the worked example prices from the model; a put; case-insensitive ticker and type', async () => {
   const a = app();
   const model = await get(a, '/fair?ticker=NVDA&strike=231000000&expiry=1790020800&type=call');
   assert.equal(model.status, 200);
-  assert.deepEqual(model.body, {
+  assert.deepEqual(Object.keys(model.body).slice(0, 6), ['fair', 'iv', 'delta', 'source', 'spot', 'asOf']);
+  const { gamma, vega, askIv, realizedVol, quality, event, ...legacy } = model.body;
+  assert.deepEqual(legacy, {
     fair: { raw: '491645', decimals: 6, formatted: '0.491645' },
     iv: 0.430184,
     delta: 0.08537,
@@ -86,6 +95,9 @@ test('GET /fair: the §5 example prices from the model; a put; case-insensitive 
     spot: { raw: '212210000', decimals: 6, formatted: '212.21' },
     asOf: 1789415999,
   });
+  assert.deepEqual({ gamma, vega, askIv, realizedVol }, { gamma: 0.012141, vega: 4.666558, askIv: 0.473203, realizedVol: null });
+  assert.equal(quality.readiness, 'degraded');
+  assert.deepEqual(event, { input: 'missing', inWindow: false });
   const put = await get(a, '/fair?ticker=nvda&strike=205000000&expiry=1789761600&type=PUT');
   assert.equal(put.status, 200);
   assert.ok(Number(put.body.fair.raw) > 0);
@@ -188,7 +200,9 @@ test('GET /health: 200 while serving; degraded once a chain download has failed,
   assert.equal(after.body.chains.NVDA.ok, true);
   assert.equal(after.body.chains.NVDA.lastTradeTime, '2026-09-14T15:59:59');
   assert.equal(after.body.chains.NVDA.options, NVDA.options.length);
-  assert.deepEqual({ ...after.body.chains.TSLA, fetchedAt: undefined }, { ok: false, usable: 'chain-unavailable', fetchedAt: undefined, error: 'http-status: HTTP 403', chainTimestamp: null, lastTradeTime: null, options: null });
+  assert.equal(after.body.chainProvider, 'cboe-delayed');
+  assert.equal(after.body.chains.NVDA.entitlement, 'delayed', 'what the chain states');
+  assert.deepEqual({ ...after.body.chains.TSLA, fetchedAt: undefined }, { ok: false, usable: 'chain-unavailable', fetchedAt: undefined, error: 'http-status: HTTP 403', chainTimestamp: null, lastTradeTime: null, options: null, entitlement: null });
   const index = await get(a, '/');
   assert.deepEqual(index.body.markets, ['NVDA', 'TSLA', 'SGOV']);
 });
@@ -199,15 +213,19 @@ test('GET /health: 200 while serving; degraded once a chain download has failed,
 
 test('the registry: every tier-1 market with its feed and Cboe chain, strict about what it cannot trust', () => {
   const registry = loadPricingRegistry(REGISTRY_PATH);
-  assert.equal(registry.markets.size, 35);
+  // The registry carries its launch set and nothing else, read here rather than typed.
+  const launch = (JSON.parse(readFileSync(REGISTRY_PATH, 'utf8')) as { launchSet: { markets: string[] } }).launchSet.markets;
+  assert.deepEqual([...registry.markets.keys()].sort(), [...launch].sort());
   assert.deepEqual(registry.markets.get('NVDA'), {
     ticker: 'NVDA',
     feed: NVDA_FEED,
     cboe: { root: 'NVDA', url: cboeUrl('NVDA') },
-    // The canonical Stock Token (K3-311 identity): the registry's asset, chain id and verified uiMultiplier.
+    // The canonical Stock Token (identity): the registry's asset, chain id and verified uiMultiplier.
     token: { chainId: 4663, address: '0xd0601CE157Db5bdC3162BbaC2a2C8aF5320D9EEC', uiMultiplier: '1000775159164630595' },
+    // The registry's v3 pool, its liquidity floor and shared.usdg, for the pool spot.
+    pool: { address: '0xd4EB21209C4D6093f80B5b84f5C45cc093EA14a3', minLiquidity: 1_700_000_000_000_000_000n, usdg: '0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168' },
   });
-  assert.deepEqual(registry.markets.get('TSLA')?.cboe, { root: 'TSLA', url: cboeUrl('TSLA') });
+  assert.deepEqual(registry.markets.get('SPCX')?.cboe, { root: 'SPCX', url: cboeUrl('SPCX') });
   assert.equal(registry.maxPriceAgeS, 345_600);
   assert.equal(registry.maxSpotDivergenceBps, 300);
 
@@ -221,21 +239,44 @@ test('the registry: every tier-1 market with its feed and Cboe chain, strict abo
   assert.throws(() => parsePricingRegistry(withMarkets([{ ...nvda, cboe: { root: 'NVDA', url: 'http://cdn.cboe.com/NVDA.json' } }])), /markets\.0\.cboe\.url: not an https URL/);
   assert.throws(() => parsePricingRegistry(withMarkets([])), /markets/);
   assert.throws(() => loadPricingRegistry('/nonexistent/tier1.json'), /cannot read the market registry/);
+
+  // Pools: exactly the markets whose registry row names a v2.univ3Pool, read from the file itself.
+  const withPools = doc.markets.filter((m) => (m.v2 as { univ3Pool?: unknown } | undefined)?.univ3Pool != null).map((m) => m.ticker as string).sort();
+  assert.deepEqual([...registry.markets.values()].filter((m) => m.pool !== undefined).map((m) => m.ticker).sort(), withPools);
+  assert.ok(withPools.includes('NVDA') && withPools.includes('SPCX'), 'the launch set has pools');
+  const v2 = nvda.v2 as Record<string, unknown>;
+  assert.equal(parsePricingRegistry(withMarkets([{ ...nvda, v2: { ...v2, univ3Pool: null, univ3MinLiquidity: null } }])).markets.get('NVDA')?.pool, undefined, 'no pool: Chainlink alone');
+  assert.throws(() => parsePricingRegistry(withMarkets([{ ...nvda, v2: { ...v2, univ3Pool: '0x1234' } }])), /NVDA\.v2\.univ3Pool/);
+  assert.throws(() => parsePricingRegistry(withMarkets([{ ...nvda, v2: { ...v2, univ3MinLiquidity: '0' } }])), /NVDA\.v2\.univ3MinLiquidity/);
+  assert.throws(() => parsePricingRegistry(withMarkets([{ ...nvda, v2: { ...v2, univ3MinLiquidity: null } }])), /univ3MinLiquidity/, 'a pool without its floor refuses the boot');
+  const noUsdg = { ...doc, shared: { ...(doc as { shared?: object }).shared, usdg: undefined }, markets: [nvda] };
+  assert.throws(() => parsePricingRegistry(noUsdg), /shared\.usdg/);
 });
 
+/** Massive is the default provider and needs a key; a synthetic one (never a real key). */
+const KEY_ENV = { MASSIVE_API_KEY: 'SYNTHETIC0000000000000000000000000' };
+
 test('loadPricingEnv: defaults, the registry path resolved against the keeper package, every problem listed', () => {
-  const env = loadPricingEnv({ RH_RPC: 'https://rpc.mainnet.chain.robinhood.com' });
+  const env = loadPricingEnv({ ...KEY_ENV, RH_RPC: 'https://rpc.mainnet.chain.robinhood.com' });
   assert.equal(env.port, DEFAULT_PRICING_PORT);
   assert.equal(DEFAULT_PRICING_PORT, 8790);
   assert.equal(env.registryPath, REGISTRY_PATH);
   assert.deepEqual(env.rpcUrls, ['https://rpc.mainnet.chain.robinhood.com']);
   assert.equal(env.logLevel, 'info');
-  const custom = loadPricingEnv({ RH_RPC: 'http://127.0.0.1:8545', RH_RPC_2: 'https://backup.example', PRICING_PORT: '9000', V2_REGISTRY_PATH: 'ops/x.json', KEEPER_LOG_LEVEL: 'warn' });
+  // Defaults: a 90 s pool TWAP, a 150 bps pool/Chainlink bound, the pool required, and the forward's filters.
+  assert.deepEqual(env.spot, { poolTwapS: 90, maxPoolChainlinkDivergenceBps: 150, poolRequired: true, forwardMaxQuoteAgeS: 120, forwardMaxPairSpreadBps: 100 });
+  assert.deepEqual(
+    loadPricingEnv({ ...KEY_ENV, RH_RPC: 'http://x', PRICING_POOL_TWAP_S: '30', PRICING_MAX_POOL_CHAINLINK_DIVERGENCE_BPS: '75', PRICING_POOL_REQUIRED: '0', PRICING_FORWARD_MAX_QUOTE_AGE_S: '60', PRICING_FORWARD_MAX_PAIR_SPREAD_BPS: '50' }).spot,
+    { poolTwapS: 30, maxPoolChainlinkDivergenceBps: 75, poolRequired: false, forwardMaxQuoteAgeS: 60, forwardMaxPairSpreadBps: 50 },
+  );
+  assert.throws(() => loadPricingEnv({ ...KEY_ENV, RH_RPC: 'http://x', PRICING_POOL_TWAP_S: '29' }), /PRICING_POOL_TWAP_S/, 'a TWAP under 30 s is refused');
+  assert.throws(() => loadPricingEnv({ ...KEY_ENV, RH_RPC: 'http://x', PRICING_POOL_REQUIRED: 'yes' }), /PRICING_POOL_REQUIRED/);
+  const custom = loadPricingEnv({ ...KEY_ENV, RH_RPC: 'http://127.0.0.1:8545', RH_RPC_2: 'https://backup.example', PRICING_PORT: '9000', V2_REGISTRY_PATH: 'ops/x.json', KEEPER_LOG_LEVEL: 'warn' });
   assert.equal(custom.port, 9000);
   assert.equal(custom.registryPath, join(KEEPER_PACKAGE_DIR, 'ops', 'x.json'));
   assert.deepEqual(custom.rpcUrls, ['http://127.0.0.1:8545', 'https://backup.example']);
-  assert.equal(loadPricingEnv({ RH_RPC: 'http://x', V2_REGISTRY_PATH: '/abs/tier1.json' }).registryPath, '/abs/tier1.json');
-  assert.equal(loadPricingEnv({ RH_RPC: 'http://x', PRICING_PORT: '  ' }).port, 8790, 'blank is unset');
+  assert.equal(loadPricingEnv({ ...KEY_ENV, RH_RPC: 'http://x', V2_REGISTRY_PATH: '/abs/tier1.json' }).registryPath, '/abs/tier1.json');
+  assert.equal(loadPricingEnv({ ...KEY_ENV, RH_RPC: 'http://x', PRICING_PORT: '  ' }).port, 8790, 'blank is unset');
   assert.throws(
     () => loadPricingEnv({ PRICING_PORT: '70000', RH_RPC_2: 'ftp://nope' }),
     (error: unknown) => error instanceof Error && /RH_RPC:/.test(error.message) && /PRICING_PORT/.test(error.message) && /RH_RPC_2/.test(error.message) && !/ftp:\/\/nope/.test(error.message),
@@ -245,11 +286,17 @@ test('loadPricingEnv: defaults, the registry path resolved against the keeper pa
 test('startPricingService: boots on the real registry with injected seams and answers on a socket', async () => {
   const fetched: string[] = [];
   const running = await startPricingService({
-    env: { RH_RPC: 'http://127.0.0.1:9', PRICING_PORT: '0', KEEPER_LOG_LEVEL: 'silent' },
+    env: { ...KEY_ENV, RH_RPC: 'http://127.0.0.1:9', PRICING_PORT: '0', KEEPER_LOG_LEVEL: 'silent' },
+    // The address the reads below use (cboe.test.ts shows why a no-host bind can be another's port).
+    hostname: '127.0.0.1',
     spotReader: async () => NVDA_ROUND,
-    fetchChain: async (url) => {
-      fetched.push(url);
-      throw new VolFetchError('network', 'offline in tests');
+    // The real registry is production, so the service runs on Massive; the seam is its provider.
+    provider: {
+      descriptor: MASSIVE_PROVIDER,
+      fetch: async (source) => {
+        fetched.push(source.url);
+        throw new Error('network: offline in tests');
+      },
     },
   });
   try {
@@ -257,12 +304,16 @@ test('startPricingService: boots on the real registry with injected seams and an
     const health = await fetch(`http://127.0.0.1:${running.port}/health`);
     assert.equal(health.status, 200);
     const body = (await health.json()) as { markets: number; marketsWithChain: number; settings: { maxChainAgeS: number } };
-    assert.equal(body.markets, 35);
-    assert.equal(body.marketsWithChain, 35);
+    // The two launch markets, both with a chain.
+    const launch = (JSON.parse(readFileSync(REGISTRY_PATH, 'utf8')) as { launchSet: { markets: string[] } }).launchSet.markets;
+    assert.equal(body.markets, launch.length);
+    assert.equal(body.marketsWithChain, launch.length);
     assert.equal(body.settings.maxChainAgeS, 345_600, "the registry's defaults");
-    const fair = await fetch(`http://127.0.0.1:${running.port}/fair?ticker=AMD&strike=500000000&expiry=4102444800&type=put`);
+    const fair = await fetch(`http://127.0.0.1:${running.port}/fair?ticker=SPCX&strike=150000000&expiry=4102444800&type=put`);
     assert.deepEqual(await fair.json(), { fair: null, reason: 'chain-unavailable', detail: { error: 'network: offline in tests' } });
-    assert.deepEqual(fetched, [cboeUrl('AMD')]);
+    assert.deepEqual(fetched, [cboeUrl('SPCX')]);
+    const gone = await fetch(`http://127.0.0.1:${running.port}/fair?ticker=AMD&strike=500000000&expiry=4102444800&type=put`);
+    assert.equal(gone.status, 404, 'a removed market is an unknown ticker');
   } finally {
     await running.close();
   }
@@ -285,8 +336,37 @@ test('GET /health: degraded when a downloaded chain no longer passes its own clo
   assert.equal(ok.body.chains.NVDA.usable, 'ok');
 });
 
+test('GET /health: eventRecheck serves each ticker\'s re-check day, overdue once the New York day is past it with nothing covering today', async () => {
+  // Without the calendar's re-check days the field is null: "not wired", never "nothing overdue".
+  assert.equal((await get(app(), '/health')).body.eventRecheck, null);
+
+  const calendar = parseEventCalendarFile(
+    { through: { TSLA: '2026-12-31' }, events: [{ ticker: 'NVDA', date: '2026-08-26', kind: 'earnings', timing: 'amc', source: 'https://nvidianews.nvidia.com/news/fixture' }] },
+    new Set(MARKETS.keys()),
+  );
+  const recheckBy = new Map([['NVDA', '2026-10-15'], ['TSLA', '2026-10-15']]);
+  const at = (nowMs: number) => {
+    const service = new PricingService({ markets: MARKETS, nowMs: () => NVDA_NOW_MS, spotReader: async () => NVDA_ROUND, chains: { fetchChain: async () => NVDA } });
+    return createPricingApp(service, undefined, { eventRecheck: { recheckBy, calendar }, nowMs: () => nowMs });
+  };
+
+  const before = await get(at(Date.UTC(2026, 9, 15, 16)), '/health');
+  assert.deepEqual(before.body.eventRecheck, {
+    NVDA: { recheckBy: '2026-10-15', overdue: false, coveredBy: null },
+    TSLA: { recheckBy: '2026-10-15', overdue: false, coveredBy: 'through' },
+  });
+  // 2026-10-16 03:59 UTC is still the 15th in New York; 04:01 UTC is the 16th.
+  assert.equal((await get(at(Date.UTC(2026, 9, 16, 3, 59)), '/health')).body.eventRecheck.NVDA.overdue, false);
+  const after = await get(at(Date.UTC(2026, 9, 16, 4, 1)), '/health');
+  assert.deepEqual(after.body.eventRecheck, {
+    NVDA: { recheckBy: '2026-10-15', overdue: true, coveredBy: null },
+    TSLA: { recheckBy: '2026-10-15', overdue: false, coveredBy: 'through' },
+  }, 'NVDA\'s only row is its last report; TSLA\'s list is complete through the year');
+  assert.equal(after.body.status, 'ok', 'an overdue re-check does not degrade the service: the monitor pages on it');
+});
+
 test('loadPricingEnv: PRICING_NYSE_HOLIDAYS replaces the built-in closure table (a year the code does not know yet); a malformed date is refused', () => {
-  assert.equal(loadPricingEnv({ RH_RPC: 'http://x' }).holidays, null, 'unset: the built-in table');
-  assert.deepEqual(loadPricingEnv({ RH_RPC: 'http://x', PRICING_NYSE_HOLIDAYS: '2029-01-15, 2029-02-19' }).holidays, ['2029-01-15', '2029-02-19']);
-  assert.throws(() => loadPricingEnv({ RH_RPC: 'http://x', PRICING_NYSE_HOLIDAYS: '2029-13-40' }), /PRICING_NYSE_HOLIDAYS/);
+  assert.equal(loadPricingEnv({ ...KEY_ENV, RH_RPC: 'http://x' }).holidays, null, 'unset: the built-in table');
+  assert.deepEqual(loadPricingEnv({ ...KEY_ENV, RH_RPC: 'http://x', PRICING_NYSE_HOLIDAYS: '2029-01-15, 2029-02-19' }).holidays, ['2029-01-15', '2029-02-19']);
+  assert.throws(() => loadPricingEnv({ ...KEY_ENV, RH_RPC: 'http://x', PRICING_NYSE_HOLIDAYS: '2029-13-40' }), /PRICING_NYSE_HOLIDAYS/);
 });

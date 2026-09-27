@@ -61,7 +61,7 @@ jobs:
       - name: notifier tests
         run: pnpm --filter @callhouse/notifier test
 
-  # ops/ had never been in CI (06-QUIRKS.md A5, now stale for three of the four checks it names), so a
+  # ops/ was once not in CI at all, so a
   # pull request could be green with a monitor whose
   # hand-written ABIs no longer match ops/abis/v2, a runbook pointing at an alert section that does not
   # exist, or a registry the generators disagree with. INTERFACE_VERSION 8 made that specific: the monitor
@@ -80,10 +80,18 @@ jobs:
       - run: pnpm install --frozen-lockfile
       - name: monitor tests (includes the hand-written ABI parity suite)
         run: node --test ops/v2/monitor.test.mjs
+      - name: monitor failed-read tests
+        run: node --test ops/v2/monitor-failed-reads.test.mjs
+      - name: one-pass monitor harnesses run with the alert grace at 0
+        run: node --test ops/v2/monitor-one-pass-runners.test.mjs
       - name: runbook and alert-document tests
         run: node --test ops/runbooks.test.mjs
       - name: v8 launch-verification harness tests
         run: node --test ops/v8/*.test.mjs
+      - name: go-live gating tests (the check order and the full health list the prelaunch gate hands the gate)
+        run: node --test ops/v2/go-live-gating.test.mjs
+      - name: no pipe into an early-exiting grep under pipefail
+        run: node --test ops/shell-pipefail-grep.test.mjs
       # wave.mjs is the one command that regenerates every registry projection; its suite is offline
       # (fake exec/git seams, temp roots) and includes the dev.json parity check against the committed
       # registries, so it catches a dev registry that has fallen behind tier1.json. `wave --check`

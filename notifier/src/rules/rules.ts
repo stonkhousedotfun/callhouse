@@ -12,6 +12,7 @@
  * | settlement_receipt       | a `redemption` item; or a held long whose series settled at 0    | holders                 | `<side>-<item id>`; worthless long `long-worthless`  |
  * | payout_failed_to_ledger  | a `redemption` item with toLedger for a holder whose pref is off | holder                  | `<item id>`                                          |
  * | auto_roll                | a `roll` item; or an active strategy not rolled 24 h after due   | writer                  | `rolled-<item id>`; `skipped` (seriesId = old series) |
+ * | market_live              | a ticker's /v2/markets status becomes `live` (was not, or absent) | every watched wallet    | seriesId = ticker, `live` (once per market per 30 d) |
  *
  * STATE RULES FIRE ON A TRANSITION between `before` and `after` (a window entered, a side flipped,
  * a series newly settled), so a condition that simply persists is not re-enqueued every tick; the
@@ -34,7 +35,7 @@
  *   - Expiry windows are narrow so the "24 hours" / "1 hour" in the message stays true: a
  *     position first seen with 10 h left gets no 24 h notice, only the 1 h one. More than 3
  *     positions of one wallet entering the same `expiry_24h` or `expiry_1h` window for the same
- *     expiry in one tick collapse to one digest (F4 D7 / N3-404): kinds unchanged, bucket `digest`,
+ *     expiry in one tick collapse to one digest: kinds unchanged, bucket `digest`,
  *     seriesId the expiry unix seconds, list capped at 10. Exactly 3 stay per-position.
  *   - "Inside the last trading day" is from 09:30 New York on the expiry date until expiry, and
  *     in the money is strictly beyond the strike (call: spot > strike, put: spot < strike).
@@ -42,9 +43,15 @@
  *     up to the base unit. A redemption's receipt needs the cost of a long the redemption burned,
  *     so it reads the holder's last-known longs; with none (never seen holding it) no receipt. Its
  *     settlement price is the redemption's own `settlementPrice` (never null on a redemption).
- *   - Receipts leave maker rebates out: a maker's sale is premium − seller fee, a bid maker's buy
- *     costs the premium. Rebates are small and paid separately; counting them would make "after
- *     fees" not add up in the message, and a cost may be overstated but never understated.
+ *   - Receipts count the maker rebate. Interface v8 OrderBook pays it in the same credit as
+ *     the fill (callhouse-contracts src/v2/OrderBook.sol, the maker's `_credit` call in `_execute`;
+ *     named, not a line number, because line numbers drift), not separately: an ask-hit maker
+ *     receives premium − seller fee + rebate, and its "fees" are the seller fee net of the rebate
+ *     (floored at 0); a bid-hit maker is credited the rebate, so its buy costs premium − rebate. The
+ *     rebate is the one OrderFilled emitted (already capped by the contract), never recomputed. When
+ *     the rebate exceeds the seller fee (a resale, seller fee 0) the received amount is above the
+ *     premium and the payload's fee is 0; templates.ts `makerCredit` recovers the difference from the
+ *     premium (price × units / 100) and names it as a maker rebate, as it does for a bid-hit maker.
  *   - The fill's `recipient` (interface v4 OrderFilled.recipient) is the wallet the take delivered
  *     to: the longs on an ask hit, the taker's USDG proceeds on a bid hit. When it is the taker
  *     there is nothing more to say. When it is not, the taker's receipt names it, and it gets a
@@ -89,7 +96,7 @@ export const RULE_TIMING = {
   hysteresisBps: 25n,
   expiry24h: { leadS: 24 * 3600, windowS: 3600 },
   expiry1h: { leadS: 3600, windowS: 15 * 60 },
-  /** N3-404: more than this many entering one (wallet, kind, expiry) window become one digest. */
+  /** More than this many entering one (wallet, kind, expiry) window become one digest. */
   expiryDigestAfter: 3,
   /** Digest body lists at most this many; the rest is `more`. */
   expiryDigestList: 10,
@@ -146,7 +153,7 @@ function findPosition(snapshot: Snapshot, address: string, side: 'long' | 'short
 const costOf = (p: Position) => (p.side === 'long' ? { cost: usdg(longCost(p.avgCost ?? '0', p.units)) } : {});
 
 /**
- * When the oracle last updated `ticker`'s spot, for the message's "as of" (F4 D8). A ticker whose
+ * When the oracle last updated `ticker`'s spot, for the message's "as of". A ticker whose
  * market gave no time (a snapshot from before the field existed, a spot read that failed) yields
  * NOTHING, never a substitute: the template then omits the phrase instead of stating a time the
  * notifier does not know.
@@ -203,6 +210,8 @@ export function fillReceipts(item: FillItem): EnqueueRequest[] {
   const premium = BigInt(d.premium.raw);
   const takerFee = BigInt(d.takerFee.raw);
   const sellerFee = BigInt(d.sellerFee.raw);
+  // The rebate OrderFilled emitted: already capped by the contract, so it is used as is, never recomputed.
+  const makerRebate = BigInt(d.makerRebate.raw);
   // Interface v4: where the take delivered (longs on an ask hit, USDG on a bid hit). The taker's
   // own receipt covers it when it is the taker, so the taker is never sent a second one.
   const recipient = d.recipient === d.taker ? undefined : d.recipient;
@@ -227,15 +236,23 @@ export function fillReceipts(item: FillItem): EnqueueRequest[] {
       bucket('taker'),
     ),
   );
-  // The maker, unless it filled its own order.
+  // The maker, unless it filled its own order. OrderBook credits the maker premium − seller fee + rebate on an ask hit
+  // and the rebate on a bid hit (callhouse-contracts src/v2/OrderBook.sol, the maker's `_credit` call in `_execute`), so
+  // an ask-hit maker received the premium less the net fee, and a bid-hit maker's cost is the premium less the rebate.
   if (d.maker !== d.taker) {
     out.push(
       request(
         'fill_receipt',
         d.maker,
         d.takerIsBuyer
-          ? { ...common, side: 'sell', role: 'maker', total: usdg(premium - sellerFee), fee: usdg(sellerFee) }
-          : { ...common, side: 'buy', role: 'maker', total: usdg(premium), fee: usdg(0n) },
+          ? {
+              ...common,
+              side: 'sell',
+              role: 'maker',
+              total: usdg(premium - sellerFee + makerRebate),
+              fee: usdg(sellerFee > makerRebate ? sellerFee - makerRebate : 0n),
+            }
+          : { ...common, side: 'buy', role: 'maker', total: usdg(premium - makerRebate), fee: usdg(0n) },
         item.longId,
         bucket('maker'),
       ),
@@ -312,7 +329,7 @@ export function rollReceipts(item: RollItem): EnqueueRequest[] {
 }
 
 /**
- * INTERFACE_VERSION 7 (c16): `cancelStale` withdrew the writer's live roll ask because the spot
+ * INTERFACE_VERSION 7: `cancelStale` withdrew the writer's live roll ask because the spot
  * reached its strike. The writer is told once, keyed on the item so a re-read of the feed cannot
  * repeat it. This is not a failed roll: `autoRollSkipped` stays the only overdue warning, and a
  * strategy whose `orderId` is now null is still active. Nothing is said to holders: no option
@@ -439,7 +456,7 @@ function expirySingle(kind: 'expiry_24h' | 'expiry_1h', p: Position, after: Snap
 }
 
 /**
- * X8-181, F-APP-OPS-06. Names WHICH positions a digest is about, so two digests for one
+ * Names WHICH positions a digest is about, so two digests for one
  * (wallet, kind, expiry) are the same delivery only when they carry the same batch.
  *
  * The bucket used to be the constant `digest`, so the key was `kind:address:<expiry>:digest` for every
@@ -663,13 +680,37 @@ export function feeNotices(before: Snapshot, after: Snapshot, watched: Iterable<
   return out;
 }
 
+/**
+ * A market's listing went live: its `/v2/markets` status is `live` now and was not at the
+ * previous tick (paused, planned, or not listed at all). Protocol-wide like fee_notice: one request per
+ * watched address, silent on first boot (at === 0) and silent while the previous tick has no statuses at
+ * all (a snapshot stored before this rule existed, or a first markets read that failed) - otherwise the
+ * upgrade tick would announce every market already live to every subscriber.
+ *
+ * Dedupe bucket `live` with seriesId = ticker: a crash that re-runs the tick (a different `at`) cannot
+ * send it twice, and a market paused and re-enabled within the delivery retention (store.ts
+ * DELIVERY_RETENTION_MS, 30 days) is not announced again. After that the dedupe row is gone and a
+ * re-enable is announced like a first listing.
+ */
+export function marketLiveNotices(before: Snapshot, after: Snapshot, watched: Iterable<string>): EnqueueRequest[] {
+  if (before.at === 0 || Object.keys(before.marketStatuses).length === 0) return [];
+  const out: EnqueueRequest[] = [];
+  const addresses = [...watched];
+  for (const [ticker, status] of Object.entries(after.marketStatuses)) {
+    if (status !== 'live') continue;
+    if (Object.hasOwn(before.marketStatuses, ticker) && before.marketStatuses[ticker] === 'live') continue;
+    for (const address of addresses) out.push(request('market_live', address, { ticker }, ticker, 'live'));
+  }
+  return out;
+}
+
 type AdminOperationState = Snapshot['adminOperations'][string];
 
 const ownOperation = (map: Snapshot['adminOperations'], key: string): AdminOperationState | undefined =>
   Object.hasOwn(map, key) ? map[key] : undefined;
 
 /**
- * T-435. What a snapshot stored before T-435 remembered about the operation now seen as `current`.
+ * What a snapshot stored before a change remembered about the operation now seen as `current`.
  *
  * Those snapshots keyed an operation by its bare `id`, so the first tick after the upgrade finds every
  * live operation under a key the previous tick never had. Read as new, every pending operation would
@@ -677,7 +718,7 @@ const ownOperation = (map: Snapshot['adminOperations'], key: string): AdminOpera
  * upgrade would say nothing at all (a first sighting that is not pending is recorded silently). The
  * id-keyed entry IS that operation's previous state - but only while exactly one current key carries
  * its id. With two, the entry cannot say which of them it described, and a repeated notice is the
- * lesser failure: silencing the other one is the defect T-435 exists to close.
+ * lesser failure: silencing the other one is the defect this keying exists to close.
  */
 function legacyPrevious(before: Snapshot, after: Snapshot, current: AdminOperationState): AdminOperationState | undefined {
   if (current.id === undefined) return undefined;
@@ -693,7 +734,7 @@ function legacyPrevious(before: Snapshot, after: Snapshot, current: AdminOperati
  * previously seen snapshot (at > 0) observes a new pending one. First boot (at === 0) records without
  * messaging.
  *
- * T-435. AN OPERATION IS ITS `key`, NEVER ITS `id`. Rescheduling reuses the id, so two pending
+ * AN OPERATION IS ITS `key`, NEVER ITS `id`. Rescheduling reuses the id, so two pending
  * operations can share it; keyed on id, the second one found the first one's `pending` already
  * remembered and was never announced, and both collapsed into one dedupe key so a later status of
  * either could be swallowed as a duplicate of the other. Both the state lookup and the dedupe key use
@@ -716,8 +757,8 @@ export function adminOperationNotices(before: Snapshot, after: Snapshot, watched
 }
 
 /**
- * X8-181, F-APP-OPS-02 and NOTE-1. Fold a read of `/v2/admin/operations` into the operations the
- * previous tick remembered, keyed by `key` (T-435: never by `id`, which a reschedule reuses).
+ * Fold a read of `/v2/admin/operations` into the operations the
+ * previous tick remembered, keyed by `key` (never by `id`, which a reschedule reuses).
  *
  * WHY A MERGE AND NOT A REBUILD. This used to be `adminOperations = {}` followed by a loop, so an
  * operation that was not on the page just read was ABSENT from the next snapshot rather than CHANGED -
@@ -733,7 +774,7 @@ export function adminOperationNotices(before: Snapshot, after: Snapshot, watched
  * remembered `pending` here and fires no notice, which is correct: there is no expired notice to send,
  * and treating the disappearance as `executed` would report a governance action that never happened.
  *
- * An entry a pre-T-435 snapshot stored under the bare `id` is dropped once an operation carrying that
+ * An entry an earlier snapshot stored under the bare `id` is dropped once an operation carrying that
  * id is read under its `key`: from then on the key entry is the state, and keeping both would leave
  * one operation remembered twice. `adminOperationNotices` reads the old entry from the previous
  * snapshot on that one tick (see legacyPrevious), so nothing it knew is lost by the drop.
@@ -765,5 +806,6 @@ export function stateRules(before: Snapshot, after: Snapshot, watched: Iterable<
     ...autoRollSkipped(before, after),
     ...feeNotices(before, after, watched),
     ...adminOperationNotices(before, after, watched),
+    ...marketLiveNotices(before, after, watched),
   ];
 }

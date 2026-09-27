@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 
 // This file tests how alert options are built FROM a registry, so it pins its own. It used to read the
-// real one and expect NVDA live there; the v8 registry (O8-01, a219a2ae) resets every v2 block to
+// real one and expect NVDA live there; the v8 registry resets every v2 block to
 // planned until the v8 broadcast, so that expectation became false while the logic stayed right.
 vi.mock("@/lib/markets", () => {
   const markets = [

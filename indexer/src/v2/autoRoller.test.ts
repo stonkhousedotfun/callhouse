@@ -13,7 +13,7 @@ import {
 describe("AutoRoller event reduction", () => {
   it("includes every indexed roller event", () => {
     expect(autoRollerAbi.filter((item) => item.type === "event").map((item) => item.name)).toEqual(expect.arrayContaining([
-      "Repriced", "Rolled", "StrategySet", "StrategyStopped", "StaleAskCancelled",
+      "Repriced", "Rolled", "StrategySet", "StrategyStopped", "StaleAskCancelled", "PositionClosed",
     ]));
   });
 
@@ -50,12 +50,42 @@ describe("AutoRoller event reduction", () => {
       lastRepricedAt: null, lastRepricedPrice: null, repriceCount: 0 });
   });
 
+  it("closes the position on PositionClosed, records what it closed, and keeps that record past the next roll", () => {
+    let row = { ...emptyStrategy(0n), active: true };
+    row = reduceStrategy(row, { kind: "Rolled", longId: 42n, orderId: 7n, expiry: 1000n }, 20n);
+    row = reduceStrategy(row, { kind: "Repriced", newOrderId: 9n, price: 2_200_000n }, 35n);
+    row = reduceStrategy(row, { kind: "StaleAskCancelled", longId: 42n, orderId: 9n, spot: 210_000_000n }, 40n);
+    // cancelStale dropped the ask, so the close-out carries orderId 0.
+    row = reduceStrategy(row, { kind: "PositionClosed", longId: 42n, orderId: 0n, redeemed: true }, 1100n);
+    expect(row).toMatchObject({ active: true, currentLongId: null, orderId: null, expiry: null, lastRolledAt: 20n,
+      lastRepricedAt: null, lastRepricedPrice: null, repriceCount: 0, lastStaleCancelAt: null, staleSpot: null,
+      lastClosedAt: 1100n, lastClosedLongId: 42n, lastClosedOrderId: null, lastCloseRedeemed: true, updatedAt: 1100n });
+    row = reduceStrategy(row, { kind: "Rolled", longId: 44n, orderId: 8n, expiry: 2000n }, 1200n);
+    expect(row).toMatchObject({ currentLongId: 44n, orderId: 8n, expiry: 2000n,
+      lastClosedAt: 1100n, lastClosedLongId: 42n, lastClosedOrderId: null, lastCloseRedeemed: true });
+    // A close that still tracked its ask names it; one whose asks never filled did not redeem.
+    row = reduceStrategy(row, { kind: "PositionClosed", longId: 44n, orderId: 8n, redeemed: false }, 2100n);
+    expect(row).toMatchObject({ currentLongId: null, orderId: null, expiry: null,
+      lastClosedAt: 2100n, lastClosedLongId: 44n, lastClosedOrderId: 8n, lastCloseRedeemed: false });
+  });
+
+  it("applies a PositionClosed whose Rolled predates a bounded replay instead of refusing it", () => {
+    // The contract has already cleared the position; refusing here would stall the indexer, not protect it.
+    const row = reduceStrategy(emptyStrategy(0n), { kind: "PositionClosed", longId: 42n, orderId: 7n, redeemed: true }, 50n);
+    expect(row).toMatchObject({ currentLongId: null, orderId: null, lastClosedAt: 50n, lastClosedLongId: 42n,
+      lastClosedOrderId: 7n, lastCloseRedeemed: true });
+  });
+
   it("expresses the inclusive contract band as exact inward-rounded USDG ticks", () => {
     expect(strategyPriceBand(212_210_000n, {
-      active: true, smartPricing: true, askBps: 150, minAskBps: 30, maxAskBps: 150,
-    })).toEqual({ min: 636_700n, max: 3_183_100n });
+      active: true, smartPricing: true, askBps: 150, minAskBps: 50, maxAskBps: 150,
+    })).toEqual({ min: 1_061_100n, max: 3_183_100n });
+    // AutoRoller.MIN_ASK_BPS = 50: a band under the floor is not one setStrategy accepts.
+    expect(strategyPriceBand(212_210_000n, {
+      active: true, smartPricing: true, askBps: 150, minAskBps: 49, maxAskBps: 150,
+    })).toBeNull();
     expect(strategyPriceBand(1_000_100n, {
-      active: true, smartPricing: true, askBps: 5, minAskBps: 5, maxAskBps: 5,
+      active: true, smartPricing: true, askBps: 50, minAskBps: 50, maxAskBps: 50,
     })).toBeNull();
     expect(strategyPriceBand(200_000_000n, {
       active: true, smartPricing: false, askBps: 100, minAskBps: 50, maxAskBps: 200,
@@ -72,7 +102,8 @@ describe("AutoRoller event reduction", () => {
       strategy: { active: true, smartPricing: true, askBps: 100, minAskBps: 50, maxAskBps: 200 },
       currentLongId: 42n,
       orderId: 7n,
-      order: { orderId: 7n, maker: writer, longId: 42n, kind: "AskWrite", status: "open",
+      // price: the ask being repriced; its drop floor (750_000) sits below this band's min, so the band is the spot band.
+      order: { orderId: 7n, maker: writer, longId: 42n, kind: "AskWrite", status: "open", price: 1_000_000n,
         units: 10n, filled: 0n, validUntil: 2_000n },
       series: { longId: 42n, isPut: false, strike: 220_000_000n },
       spot: 200_000_000n,

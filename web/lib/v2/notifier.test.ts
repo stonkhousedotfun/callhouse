@@ -1,8 +1,11 @@
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
+
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
   baseUnitsToPrice, createNotifierSession, listSubscriptions, notifierBase, priceToBaseUnits,
-  saveSubscription, sessionIsCurrent, telegramLink, DEFAULT_ALERT_PREFS, NotifierError,
+  saveSubscription, sessionIsCurrent, telegramLink, ALERT_TOGGLES, DEFAULT_ALERT_PREFS, NotifierError,
 } from "./notifier";
 
 afterEach(() => { vi.unstubAllGlobals(); vi.unstubAllEnvs(); });
@@ -91,5 +94,54 @@ describe("price alert amounts", () => {
   it("rejects zero, negative, rounded, and out-of-range thresholds", () => {
     for (const value of ["0", "-1", "1.0000001", "1e3", "1000000000000", "0.000000", "1,000"])
       expect(priceToBaseUnits(value)).toBeNull();
+  });
+});
+
+describe("alert toggles match the notifier's prefs contract", () => {
+  // The notifier refuses an unknown key (prefs.ts `.strict()`), and a key the dapp never sends takes the
+  // notifier's default. So the two lists must be the same set, with the same defaults. Read from the
+  // notifier's source rather than imported, because web does not depend on zod's notifier copy.
+  const prefsSource = readFileSync(fileURLToPath(new URL("../../../notifier/src/prefs.ts", import.meta.url)), "utf8");
+  const notifierDefaults = Object.fromEntries(
+    [...prefsSource.matchAll(/^\s+(\w+): z\.boolean\(\)\.default\((true|false)\),$/gm)].map(([, key, value]) => [key, value === "true"]),
+  );
+
+  it("reads the notifier's toggles (the parse is not vacuous)", () => {
+    expect(Object.keys(notifierDefaults).length).toBeGreaterThanOrEqual(10);
+    expect(notifierDefaults).toMatchObject({ strikeCross: true, feeNotice: false });
+  });
+
+  it("offers every notifier toggle, and no other", () => {
+    expect(ALERT_TOGGLES.map((toggle) => toggle.key).sort()).toEqual(Object.keys(notifierDefaults).sort());
+    const { priceAlerts, ...toggles } = DEFAULT_ALERT_PREFS;
+    expect(priceAlerts).toEqual([]);
+    expect(Object.keys(toggles).sort()).toEqual(Object.keys(notifierDefaults).sort());
+  });
+
+  it("defaults each toggle the way the notifier does", () => {
+    const { priceAlerts: _priceAlerts, ...toggles } = DEFAULT_ALERT_PREFS;
+    expect(toggles).toEqual(notifierDefaults);
+  });
+
+  it("keeps the three protocol-wide kinds off until the subscriber opts in", () => {
+    expect(DEFAULT_ALERT_PREFS.feeNotice).toBe(false);
+    expect(DEFAULT_ALERT_PREFS.adminOperation).toBe(false);
+    expect(DEFAULT_ALERT_PREFS.marketLive).toBe(false);
+    for (const key of ["feeNotice", "adminOperation", "marketLive"] as const) {
+      const toggle = ALERT_TOGGLES.find((entry) => entry.key === key);
+      expect(toggle?.label).toBeTruthy();
+      expect(toggle?.detail).toBeTruthy();
+    }
+  });
+
+  it("sends the three kinds explicitly on a first save", async () => {
+    const bodies: unknown[] = [];
+    vi.stubGlobal("fetch", vi.fn(async (_url: string, init: RequestInit) => {
+      bodies.push(JSON.parse(init.body as string));
+      return new Response(JSON.stringify({ id: "saved" }), { status: 200 });
+    }));
+    const session = { token: "private", address: "0x1111111111111111111111111111111111111111", expiresAt: 2_000_000_000 };
+    await saveSubscription("https://alerts.example", session, "telegram", DEFAULT_ALERT_PREFS);
+    expect(bodies[0]).toMatchObject({ prefs: { feeNotice: false, adminOperation: false, marketLive: false } });
   });
 });

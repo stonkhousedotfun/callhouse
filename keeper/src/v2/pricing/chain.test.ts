@@ -2,7 +2,7 @@
  * The provider-neutral contract's pure checks (chain.ts): what a book, a clock, two sources and an
  * identity are judged as, independent of any provider.
  *
- * WHY THIS FILE EXISTS: K3-311 must keep "no quote" apart from "a zero quote", "unknown time" apart
+ * WHY THIS FILE EXISTS: the chain snapshot must keep "no quote" apart from "a zero quote", "unknown time" apart
  * from "old time", a frozen underlying apart from stale option quotes, and a provider's model value
  * apart from a listed quote. Each is pinned here on hand-built rows; fake-provider.test.ts pins the
  * same through the service.

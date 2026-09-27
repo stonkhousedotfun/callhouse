@@ -6,7 +6,7 @@
  *   - an exact listed contract prices from its own mid (source "cboe"), and at the forward on the
  *     chain's own clock that price IS the mid, to the base unit, for calls and for puts;
  *   - a strike or an expiry Cboe does not list prices from the surface (source "model"), including
- *     02-interfaces §5's own example and a daily expiring hours after the fixture;
+ *     the worked example and a daily expiring hours after the fixture;
  *   - a daily decays with the session clock and lands on intrinsic at the close without a blow-up;
  *   - every degraded input is a null with its reason, and a dead chain costs no RPC call;
  *   - the feed read and the chain download are each cached.
@@ -185,7 +185,7 @@ test('cboe: at the expiry forward on the chain clock the price IS the mid, to th
                             SOURCE: MODEL
 //////////////////////////////////////////////////////////////*/
 
-test('model: an unlisted strike, an unlisted expiry (the §5 example), a put, and a daily Cboe never listed', async () => {
+test('model: an unlisted strike, an unlisted expiry (the worked example), a put, and a daily Cboe never listed', async () => {
   const { service } = harness({ nowMs: NVDA_NOW_MS });
   const strike = priced(await service.fair(request('NVDA', 221, closeOf(18), 'call')));
   assert.equal(strike.source, 'model');

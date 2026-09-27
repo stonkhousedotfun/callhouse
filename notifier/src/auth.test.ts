@@ -6,12 +6,17 @@
  *   - a contract wallet (ERC-1271) is judged by `publicClient.verifyMessage` (mocked here), and an
  *     unreachable RPC is a 503, not a 401;
  *   - nonces are single-use, bound to their address, and expire after 10 minutes;
- *   - a wrong signature burns the nonce too.
+ *   - a wrong signature burns the nonce too;
+ *   - with RH_RPC_2 set, the production transport (app.ts verifierTransport) asks RH_RPC first and the
+ *     backup only when RH_RPC fails, and with both down the answer is still 503, not 401. These run a
+ *     real viem client against local fake JSON-RPC servers: no network.
  */
 import assert from 'node:assert/strict';
+import { createServer } from 'node:http';
+import type { AddressInfo } from 'node:net';
 import { after, before, beforeEach, test } from 'node:test';
 import { privateKeyToAccount } from 'viem/accounts';
-import { getAddress, type Address, type Hex } from 'viem';
+import { createPublicClient, getAddress, type Address, type Hex } from 'viem';
 import { parseSiweMessage, validateSiweMessage } from 'viem/siwe';
 import {
   authenticate,
@@ -21,6 +26,7 @@ import {
   NONCE_TTL_MS,
   type VerifyArgs,
 } from './auth.js';
+import { verifierTransport } from './app.js';
 import { createTestDb, TestClock, type TestDb } from './testing.js';
 
 const APP_URL = 'https://app.stonkhouse.test';
@@ -206,4 +212,92 @@ test('malformed input is a 400 and spends no nonce', async () => {
     assert.equal(result.ok ? null : result.status, 400, JSON.stringify(input).slice(0, 80));
   }
   assert.equal((await auth({ address: alice.address, signature, nonce })).ok, true);
+});
+
+/**
+ * A local JSON-RPC endpoint that answers every contract-wallet check with "valid": code at every
+ * address, and 32-byte `true` for every eth_call (the ERC-6492 validator's return). It records the
+ * methods it was asked, which is how a test sees which endpoint answered.
+ */
+async function fakeRpc(): Promise<{ url: string; methods: string[]; close: () => Promise<void> }> {
+  const methods: string[] = [];
+  const results: Record<string, unknown> = {
+    eth_chainId: '0x1237',
+    eth_blockNumber: '0x1',
+    eth_getCode: '0x6080',
+    eth_call: `0x${'00'.repeat(31)}01`,
+  };
+  const server = createServer((req, res) => {
+    let body = '';
+    req.on('data', (chunk) => (body += chunk));
+    req.on('end', () => {
+      const answer = (r: { id: unknown; method: string }) => {
+        methods.push(r.method);
+        return { jsonrpc: '2.0', id: r.id, result: results[r.method] ?? null };
+      };
+      const parsed = JSON.parse(body);
+      res.setHeader('content-type', 'application/json');
+      res.end(JSON.stringify(Array.isArray(parsed) ? parsed.map(answer) : answer(parsed)));
+    });
+  });
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const { port } = server.address() as AddressInfo;
+  return {
+    url: `http://127.0.0.1:${port}`,
+    methods,
+    close: () => new Promise<void>((resolve) => server.close(() => resolve())),
+  };
+}
+
+/** A URL nothing listens on: bind a port, then release it, so a connection is refused at once. */
+async function deadRpc(): Promise<string> {
+  const server = createServer();
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const { port } = server.address() as AddressInfo;
+  await new Promise<void>((resolve) => server.close(() => resolve()));
+  return `http://127.0.0.1:${port}`;
+}
+
+/** Authenticate the Safe through the production transport over `rpcUrl` / `rpcBackupUrl`. */
+async function safeSignIn(rpcUrl: string, rpcBackupUrl: string | null) {
+  const productionVerify = createSignatureVerifier(
+    createPublicClient({ transport: verifierTransport({ rpcUrl, rpcBackupUrl }) }),
+  );
+  const { nonce } = await createChallenge(db, { appUrl: APP_URL, address: SAFE, now: clock.now() });
+  return authenticate({ db, verify: productionVerify, now: clock.now() }, { address: SAFE, signature: SAFE_SIGNATURE, nonce });
+}
+
+test('RH_RPC down, RH_RPC_2 up: the backup answers the ERC-1271 check', async () => {
+  const backup = await fakeRpc();
+  try {
+    const result = await safeSignIn(await deadRpc(), backup.url);
+    assert.deepEqual(result, { ok: true, address: SAFE });
+    assert.ok(backup.methods.includes('eth_call'), `backup was asked: ${backup.methods.join(',')}`);
+  } finally {
+    await backup.close();
+  }
+});
+
+test('RH_RPC up: RH_RPC_2 is never asked (the backup is a fallback, not a peer)', async () => {
+  const primary = await fakeRpc();
+  const backup = await fakeRpc();
+  try {
+    const result = await safeSignIn(primary.url, backup.url);
+    assert.deepEqual(result, { ok: true, address: SAFE });
+    assert.ok(primary.methods.includes('eth_call'), `primary answered: ${primary.methods.join(',')}`);
+    assert.deepEqual(backup.methods, []);
+  } finally {
+    await primary.close();
+    await backup.close();
+  }
+});
+
+test('RH_RPC and RH_RPC_2 both down: 503 verifier-unavailable, not a wrong signature', async () => {
+  const result = await safeSignIn(await deadRpc(), await deadRpc());
+  assert.deepEqual(result.ok ? null : [result.status, result.code], [503, 'verifier-unavailable']);
+});
+
+test('RH_RPC down and no RH_RPC_2: 503, as before the backup existed', async () => {
+  const result = await safeSignIn(await deadRpc(), null);
+  assert.deepEqual(result.ok ? null : [result.status, result.code], [503, 'verifier-unavailable']);
 });

@@ -120,6 +120,20 @@ export function tradingYears(fromUnix: number, toUnix: number, holidays: readonl
   return sessionSecondsBetween(fromUnix, toUnix, holidays) / TRADING_YEAR_SECONDS;
 }
 
+/**
+ * The 09:30 New York open of the New York calendar day `unixSeconds` falls on, or null when that day is a weekend or one
+ * of `holidays`. It says nothing about whether the session is still open at `unixSeconds`: the caller asks the calendar
+ * that (the MM reads ExpiryCalendar.isRegularSession) and uses this for WHEN the session it is in began.
+ */
+export function sessionOpenOf(unixSeconds: number, holidays: readonly string[] = NYSE_HOLIDAYS_2026_2028): number | null {
+  if (!Number.isFinite(unixSeconds)) throw new RangeError(`not an instant: ${unixSeconds}`);
+  const { year, month, day } = newYorkParts(unixSeconds);
+  const weekday = new Date(Date.UTC(year, month - 1, day)).getUTCDay();
+  if (weekday === 0 || weekday === 6) return null;
+  if (holidaySet(holidays).has(`${year}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}`)) return null;
+  return sessionBounds(year, month, day)[0];
+}
+
 /*//////////////////////////////////////////////////////////////
                          NORMAL DISTRIBUTION
 //////////////////////////////////////////////////////////////*/
@@ -223,6 +237,37 @@ export function bsDelta(input: BsInput): number {
     callDelta = normCdf((Math.log(spot / strike) + 0.5 * sd * sd) / sd);
   }
   return type === 'call' ? callDelta : callDelta - 1;
+}
+
+/** φ(x), the standard normal density. */
+function normPdf(x: number): number {
+  return Math.exp(-0.5 * x * x) / Math.sqrt(2 * Math.PI);
+}
+
+/**
+ * d²Price/dSpot², the same for a call and a put: φ(d1) / (spot·σ√t). 0 at expiry or zero vol, where
+ * delta is a step and has no finite curvature to report.
+ */
+export function bsGamma(input: BsInput): number {
+  assertInput(input);
+  const { spot, strike, vol, t } = input;
+  const sd = vol * Math.sqrt(t);
+  if (sd < MIN_STDDEV) return 0;
+  const d1 = (Math.log(spot / strike) + 0.5 * sd * sd) / sd;
+  return normPdf(d1) / (spot * sd);
+}
+
+/**
+ * dPrice/dVol per 1.00 of vol (not per vol point), the same for a call and a put: spot·φ(d1)·√t, with
+ * t in trading years like every vol here. 0 at expiry or zero vol.
+ */
+export function bsVega(input: BsInput): number {
+  assertInput(input);
+  const { spot, strike, vol, t } = input;
+  const sd = vol * Math.sqrt(t);
+  if (sd < MIN_STDDEV) return 0;
+  const d1 = (Math.log(spot / strike) + 0.5 * sd * sd) / sd;
+  return spot * normPdf(d1) * Math.sqrt(t);
 }
 
 /**

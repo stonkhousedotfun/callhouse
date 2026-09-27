@@ -3,7 +3,7 @@
  *
  * With no registry the keeper picks the tuple itself, and the tuple is immutable once created,
  * so this is the one place the week's timestamps are decided. The rule is Overcall's documented
- * one (projects/callhouse/integrations/overcall.md, "exerciseTimestamp is the NYSE Friday 16:00
+ * one (Overcall's integration guide: "exerciseTimestamp is the NYSE Friday 16:00
  * ET close"), reproduced rather than improvised so a buyer sees the same expiry convention on
  * every venue:
  *
@@ -77,6 +77,40 @@ export const NYSE_HOLIDAYS_2026_2028: readonly string[] = [...NYSE_HOLIDAYS_2026
  * expiry that falls on one.
  */
 export const NYSE_EARLY_CLOSES_2026_2028: readonly string[] = ['2026-11-27', '2026-12-24', '2027-11-26', '2028-07-03', '2028-11-24'];
+
+/** One quarter: {holidayHorizon} warns when this little of the last listed year is left. */
+export const HOLIDAY_HORIZON_WARN_DAYS = 92;
+
+export interface HolidayHorizon {
+  /** The latest date the table lists, or null for an empty table. */
+  lastListed: string | null;
+  /** 31 December of the last listed year: the table says nothing about any day after it. */
+  coveredThrough: string | null;
+  /** Whole days from `nowSeconds` to the end of coveredThrough (UTC), rounded up; 0 or less once past it. */
+  daysLeft: number | null;
+  warning: string | null;
+}
+
+/**
+ * How close a holiday table is to running out. After the last year it lists, every weekday is treated as a
+ * session (a closure nobody listed is priced and scheduled through), and only the exchange publishes new closures, so
+ * this warns while there is still a quarter left to add the next year's dates by hand. It never guesses a date.
+ * Pure: takes the head block's time like everything here (the MM's boot log passes the wall clock, having no head yet).
+ */
+export function holidayHorizon(nowSeconds: number, holidays: readonly string[] = NYSE_HOLIDAYS_2026_2028, warnDays: number = HOLIDAY_HORIZON_WARN_DAYS): HolidayHorizon {
+  const lastListed = [...holidays].sort().at(-1) ?? null;
+  if (lastListed === null) return { lastListed: null, coveredThrough: null, daysLeft: null, warning: 'the NYSE holiday table is empty: every weekday is treated as a session' };
+  const year = Number(lastListed.slice(0, 4));
+  const endSeconds = Date.UTC(year + 1, 0, 1) / 1000;
+  const left = endSeconds - nowSeconds;
+  const coveredThrough = `${year}-12-31`;
+  const daysLeft = Math.ceil(left / 86_400);
+  const warning =
+    left <= warnDays * 86_400
+      ? `the NYSE holiday table ends ${coveredThrough} (${daysLeft} days left): add the next year's full-day closures from the exchange's published calendar before then`
+      : null;
+  return { lastListed, coveredThrough, daysLeft, warning };
+}
 
 export const NEW_YORK = 'America/New_York';
 

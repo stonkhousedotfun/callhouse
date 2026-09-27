@@ -99,11 +99,18 @@ export function registerAccountRoutes(app: Hono) {
         const remainingCost = ownLots.reduce((sum, lot) => sum + lot.costRemainingUsdg, 0n);
         const avgCost = remainingUnits === 0n ? 0n : remainingCost * 100n / remainingUnits;
         const quote = await quoteFor(series);
-        const mark = series.status === "open" ? quote?.fair ?? quote?.bestBid ?? null : null;
+        // A `cutoff` series still trades until expiry (OrderBook._place: Bid and AskResale run to expiry, only
+        // AskWrite stops at the mint cutoff), so it keeps its mark; only a series past expiry has none.
+        const mark = series.status === "open" || series.status === "cutoff"
+          ? quote?.fair ?? quote?.bestBid ?? null : null;
         const markSource = mark === null ? null : quote?.fair !== null && quote?.fair !== undefined ? "fair" as const : "best-bid" as const;
         const unrealised = mark === null ? null : signedMoney(BigInt(mark.raw) * units / 100n -
           (remainingUnits === 0n ? 0n : remainingCost * units / remainingUnits));
-        const claimable = series.status === "settled" && prefs.inKind && series.longPayoutPerUnit !== null
+        // `Clearinghouse._redeem` owes a settled long `units x longPayoutPerUnit` of the collateral
+        // asset whatever the holder's payout preference: a put pays USDG, a call pays the underlying, which redeem
+        // converts to USDG at redemption unless the holder chose in kind. The preference changes how the claim is
+        // delivered, not whether there is one, so gating this on `prefs.inKind` showed USDG-paid winners 0.
+        const claimable = series.status === "settled" && series.longPayoutPerUnit !== null
           ? money(series.longPayoutPerUnit * walletUnits, series.isPut ? 6 : 18) : null;
         longs.push({ series: seriesWire(series), units: units.toString(), avgCost: money(avgCost),
           mark, markSource, unrealised, claimable });
@@ -198,10 +205,14 @@ export function registerAccountRoutes(app: Hono) {
       const takerSide = isTaker || isRecipient;
       const side = (isRecipient || (takerSide ? row.takerIsBuyer : !row.takerIsBuyer)) ? "buy" : "sell";
       const takerFee = isTaker ? takerFees.get(row.id) ?? 0n : 0n;
+      // Each fee belongs to the party that paid it. The taker pays the taker fee and the SELLER
+      // pays the seller fee: an ask's maker is paid premium - sellerFee, and a taker selling into a bid is paid
+      // premium - sellerFees - takerFee (OrderBook `_credit` and `take`). A bid maker is the buyer and pays neither.
+      const sellerFee = row.seller.toLowerCase() === key ? row.sellerFee : 0n;
       add(row.block, row.logIndex, row.id, { id: row.id, kind: "fill", ts: Number(row.ts), longId: row.longId.toString(),
         series: seriesWire(series), data: { orderId: row.orderId.toString(), side, role: takerSide ? "taker" : "maker",
           counterparty: address(takerSide ? row.maker : row.taker), units: row.units.toString(), price: money(row.price),
-          premium: money(row.premium), fee: money(isTaker ? takerFee : isMaker ? row.sellerFee : 0n),
+          premium: money(row.premium), fee: money(takerFee + sellerFee),
           rebate: money(isMaker ? row.makerRebate : 0n), primary: row.primary,
           realisedPnl: row.seller.toLowerCase() === key && row.realisedDeltaUsdg !== null
             ? signedMoney(row.realisedDeltaUsdg) : null, tx: row.tx } });

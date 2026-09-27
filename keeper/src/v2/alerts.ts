@@ -12,12 +12,15 @@
  * `source` is `callhouse-<mode>`, so the cranker, the MM bot and the pricer are told apart in one
  * channel. No `vault` field: the relay types it as a string and v2 has none.
  *
- * Kinds are `v2_*`. The scaffold raises the ones below; each mode adds its own (K2-03:
+ * Kinds are `v2_*`. The scaffold raises the ones below; each mode adds its own (cranker:
  * v2_sources_disagree, v2_settlement_held, v2_snapshot_missed, v2_settle_stuck, v2_redeem_backlog,
- * v2_pin_refused, v2_stale_cancel_failed; K2-04: v2_mm_killed, v2_mm_resumed, v2_mm_loss_stop, v2_mm_delta,
- * v2_mm_not_quoter, v2_mm_pricing, v2_mm_tx_rejected, v2_mm_funds, v2_mm_outflow, v2_mm_outflow_foreign;
- * K2-05: v2_pricer_no_role, v2_pricer_fair_unavailable,
- * v2_pricer_reprice_failed, v2_pricer_clamped) and a severity for it in ALERT_SEVERITY, else it goes out as `warn`.
+ * v2_pin_refused, v2_stale_cancel_failed; mm: v2_mm_killed, v2_mm_resumed, v2_mm_loss_stop, v2_mm_delta,
+ * v2_mm_not_quoter, v2_mm_pricing, v2_mm_tx_rejected, v2_mm_funds, v2_mm_outflow, v2_mm_outflow_foreign,
+ * v2_mm_spot_age, v2_mm_open_grace, v2_mm_spot_breaker, v2_mm_event_halt, v2_earn_queue_stuck, v2_mm_budget_short,
+ * v2_mm_slow_tick;
+ * pricer: v2_pricer_no_role, v2_pricer_fair_unavailable,
+ * v2_pricer_reprice_failed, v2_pricer_clamped; guardian: v2_guardian_candidate, v2_guardian_scale_fault,
+ * v2_guardian_stale_round, v2_guardian_vetoed, v2_guardian_veto_failed) and a severity for it in ALERT_SEVERITY, else it goes out as `warn`.
  *   v2_boot       the mode started (info)
  *   v2_error      a tick threw (error)
  *   v2_tx_revert  a transaction reverted on chain, was not confirmed, or could not be broadcast (error)
@@ -26,6 +29,7 @@
  */
 import type { Logger } from './logger.js';
 import { bigintReplacer, type V2Store } from './store.js';
+import { redactUrls } from './tx.js';
 
 export type AlertSeverity = 'info' | 'warn' | 'error';
 export type V2AlertKind = `v2_${string}`;
@@ -36,12 +40,18 @@ export const ALERT_SEVERITY: Record<string, AlertSeverity> = {
   v2_tx_revert: 'error',
   v2_low_gas: 'warn',
   v2_rpc_lag: 'warn',
-  /* ---- cranker (K2-03, cranker/steps.ts) ---- */
+  /* ---- cranker (cranker/steps.ts) ---- */
   /** Two ok sources disagree beyond maxDeviationBps: the expiry waits out the veto window on the first ok source. */
   v2_sources_disagree: 'warn',
   /** The guardian vetoed an expiry: nothing settles until unveto or adminResolve. */
   v2_settlement_held: 'error',
-  /** An expiry with open interest passed [expiry, expiry + 600] without a snapshot: the pool source cannot vote. */
+  /**
+   * An expiry with open interest passed [expiry, expiry + 600] without the pool's snapshot: none was sent, or every
+   * attempt inside the grace recorded nothing for it (steps.ts retries those, SNAPSHOT_RETRY_S apart). Since
+   * a later change, a finalize or Clearinghouse.settle inside the grace records too, so it also means none of those did. The
+   * pool source cannot vote: the expiry settles uncorroborated on its other source after the veto delay, or, if that
+   * one does not price the window either, only through adminResolve.
+   */
   v2_snapshot_missed: 'warn',
   /** No source prices an expiry for over an hour, a candidate is long past finalizableAt, or settle does not advance. */
   v2_settle_stuck: 'error',
@@ -53,7 +63,7 @@ export const ALERT_SEVERITY: Record<string, AlertSeverity> = {
    * series of that expiry can be created until the admin fixes the oracle or a source.
    */
   v2_pin_refused: 'error',
-  /* ---- MM bot (K2-04, mm/quoter.ts) ---- */
+  /* ---- MM bot (mm/quoter.ts) ---- */
   /** POST /kill: every vault order cancelled; nothing quotes until POST /resume. */
   v2_mm_killed: 'error',
   /** POST /resume: the kill switch released. */
@@ -62,6 +72,12 @@ export const ALERT_SEVERITY: Record<string, AlertSeverity> = {
   v2_mm_loss_stop: 'error',
   /** A market's net inventory delta is above MM_DELTA_ALERT_SHARES: hedge by hand. */
   v2_mm_delta: 'warn',
+  /**
+   * The notional-weighted mean 30-minute markout of the last MM_MARKOUT_ALERT_FILLS
+   * vault fills is below MM_MARKOUT_ALERT_BPS: the fills are systematically on the wrong side of where the option
+   * went next (stale or cheap asks being picked off). mm/markouts.ts. Paging needs the relay deployed.
+   */
+  v2_mm_markout_low: 'warn',
   /** INTERFACE_VERSION 8: the AccessManager refuses the MM signer `place` on the vault - not a QUOTER member,
    *  or a member whose calls must be scheduled. Either way it can neither quote nor cancel. */
   v2_mm_not_quoter: 'error',
@@ -72,7 +88,7 @@ export const ALERT_SEVERITY: Record<string, AlertSeverity> = {
   /** Quoted series lost a side to funds: no USDG for bids or no ledger collateral for write asks. */
   v2_mm_funds: 'warn',
   /**
-   * The MakerVault's daily outflow cap (INTERFACE_VERSION 7, c21) is binding: the bot trimmed its bids inside the
+   * The MakerVault's daily outflow cap (INTERFACE_VERSION 7) is binding: the bot trimmed its bids inside the
    * remaining allowance, or the vault refused a call with OutflowCapExceeded and no further bid grows this tick.
    * Once per UTC day.
    */
@@ -90,10 +106,34 @@ export const ALERT_SEVERITY: Record<string, AlertSeverity> = {
   /** A rest that would cross another protocol-owned maker was skipped. */
   v2_mm_protocol_cross: 'warn',
   /**
+   * A market-safety halt pulled a market's quotes, resting asks included. Warn, not error: each is
+   * the guard WORKING; the page is so an operator knows why a market is dark. One page per market per halt spell.
+   *   v2_mm_spot_age      P7: the oracle print is older than MM_MAX_SPOT_AGE_S in session (corroborated or not).
+   *   v2_mm_open_grace    P8: no in-session print today yet, or inside MM_OPEN_GRACE_S of the open.
+   *   v2_mm_spot_breaker  P15: the spot moved more than MM_BREAKER_BPS inside MM_BREAKER_WINDOW_S; halted MM_BREAKER_HALT_S.
+   *   v2_mm_event_halt    P9: the pricing service flagged the fair event- or model-uncertain (per series).
+   */
+  v2_mm_spot_age: 'warn',
+  v2_mm_open_grace: 'warn',
+  v2_mm_spot_breaker: 'warn',
+  v2_mm_event_halt: 'warn',
+  /**
    * One vault could not be read or failed mid-tick and was skipped; the others still quoted. Error, not warn:
    * a vault nobody is quoting is a vault whose epoch wind-down cancels are not being sent.
    */
   v2_mm_vault_unreadable: 'error',
+  /**
+   * A vault's routine sends were cut short by MM_MAX_TX_PER_TICK for mm/constants.ts BUDGET_SHORT_SENDS (3) in a
+   * row, so series it prices sit without an ask; the page carries how many. Warn: nothing is mispriced, a series is dark.
+   */
+  v2_mm_budget_short: 'warn',
+  v2_mm_slow_tick: 'warn',
+  /**
+   * A guard read (askFloorOf, bidCap, exposure) failed, so series were halted `guards-unreadable` and not
+   * quoted. Warn on the first tick (one RPC leg can fail and the next tick re-reads it); the quoter raises it as ERROR,
+   * under its own dedupe key, once it has held mm/quoter.ts GUARDS_UNREADABLE_ERROR_TICKS (3) ticks in a row.
+   */
+  v2_mm_guards_unreadable: 'warn',
   /**
    * The seller fee read was out of range, so the grossed ask could not be computed and those asks were NOT
    * rested. Error: quoting below the vault's intended net is a money-losing default, and the previous
@@ -102,31 +142,89 @@ export const ALERT_SEVERITY: Record<string, AlertSeverity> = {
   v2_mm_fee_unreadable: 'error',
   /**
    * MM_HOUSE_FACTORY is set but no House vault can be quoted: the factory cannot be enumerated
-   * (no ABI until T-78) or a discovered vault's epoch could not be read. Error, not warn: the
-   * operator configured House quoting and is not getting it, and the bot will not fake an epoch.
+   * (no ABI), a discovered vault's epoch could not be read, or its underlying() could not be
+   * read. Error, not warn: the operator configured House quoting and is not getting it, and the bot will not fake an
+   * epoch, nor quote a House vault on every market for want of its own.
    */
   v2_mm_house_unavailable: 'error',
+  /**
+   * An MM_VAULTS entry is a House vault (a configured factory enumerates it, or it answers epochEnd()), so it
+   * is NOT quoted: as a treasury vault it would have no epoch, which is permission to open risk past epochEnd on
+   * depositor money. Error: a configured vault is dark until MM_VAULTS stops listing it, and nothing fixes that itself.
+   */
+  v2_mm_vault_is_house: 'error',
+  /**
+   * The EarnVault's withdrawal queue has entries and its head has not moved for EARN_QUEUE_STUCK_S (the mm
+   * bot's Earn step, earn/keep.ts). The message names what holds it: an open position (processQueue serves nothing
+   * until the series settle or are closed), no venue adapter, or a venue with nothing left to pull. Error: depositors
+   * are waiting for their own money, and a vault short of cash does not refill itself.
+   */
+  v2_earn_queue_stuck: 'error',
+  /** EarnVault.skim() confirmed with the share price still above an unchanged mark: the fee was not taken. */
+  v2_earn_skim_refused: 'warn',
   /** The cranker's key does not hold BUYBACK on the FeeSplitter: the flywheel claims and distributes, and no
-   *  buyback can be sent. Raised only from the buyback probe, because `Managed` gives an unauthorised call the
-   *  same V2Errors.NotAuthorized that `distribute` raises for an unset treasury. */
+   *  buyback can be sent. Raised only from the buyback probe (`buybackWithDeadline`; the role check
+   *  runs before the deadline check), because `Managed` gives an unauthorised call the same V2Errors.NotAuthorized
+   *  that `distribute` raises for an unset treasury. */
   v2_cranker_no_buyback_role: 'error',
+  /** CRANKER_FLYWHEEL_ENABLED is off while V2_FEE_SPLITTER names a splitter: the flywheel step claims,
+   *  distributes and buys back nothing, and the protocol's fees pile up on the book and in the splitter. Raised by
+   *  the step's gate every tick it holds (the alerter's cooldown spaces the pages); earlier it skipped
+   *  silently. Error: nothing turns it on by itself, and ops/v2-env.mjs renders it on whenever the splitter exists. */
+  v2_cranker_flywheel_disabled: 'error',
+  /** CRANKER_BUYBACK_DRY_RUN is on and the flywheel just withheld a buyback the route would have taken
+   *  (reserve non-empty, cooldown elapsed, a non-zero quote): claims and distribution run, nothing is burned, and the
+   *  reserve grows. Raised on each withheld buyback; earlier it was a /state note only. Warn: the switch
+   *  exists to watch the route on purpose, and a watch has an end the page reminds somebody of. */
+  v2_cranker_buyback_dry_run: 'warn',
+  /** A House vault's weekly boundary has been due longer than its boundary expiry's uncorroborated delay + 1 h
+   *  (cranker/steps.ts houseRollOverdueS: read live, 7 h HOUSE_ROLL_OVERDUE_S when unreadable) and has not
+   *  rolled: the oracle is not Finalized, the vault is not flat, or nothing is sending `rollEpoch`. Error: until it
+   *  rolls the vault prices no deposit and no withdrawal (the step is `house`). */
+  v2_house_roll_overdue: 'error',
 
-  /* ---- pricer (K2-05, pricer/pricer.ts) ---- */
+  /* ---- pricer (pricer/pricer.ts) ---- */
   /** INTERFACE_VERSION 8: the AccessManager refuses the pricer's key `reprice` on the AutoRoller - not a PRICER
    *  member, or a member whose calls must be scheduled. No smart-pricing ask can be repriced. */
   v2_pricer_no_role: 'error',
   /** A live smart-pricing ask has had no fair value (pricing service down or `fair: null`) for PRICER_FAIR_ALERT_S. */
   v2_pricer_fair_unavailable: 'warn',
-  /** A due reprice did not go through: reverted on chain or not confirmed (error); a refused simulation is sent as warn. */
+  /** A due reprice did not go through: reverted on chain or not confirmed (error); a refused simulation, or a band ceiling
+   *  below AutoRoller.reprice's per-call drop floor so nothing can be sent, is sent as warn. */
   v2_pricer_reprice_failed: 'error',
   /** Four consecutive evaluations landed on the minAsk/maxAsk clamp; streak resets on an unclamped tick. */
   v2_pricer_clamped: 'warn',
-  /* ---- cranker, INTERFACE_VERSION 7 (c16, cranker/steps.ts stepStale) ---- */
+  /* ---- guardian (guardian/watch.ts) ---- */
+  /**
+   * An expiry is Pending on an UNCORROBORATED candidate: one ok source, or two that disagree. It finalizes at
+   * `finalizableAt` unless the GUARDIAN vetoes or the sources corroborate first. A person compares the candidate with
+   * an independent price before then. Warn: the watch pages every such
+   * candidate, and most are a pool hiccup, not a fault.
+   */
+  v2_guardian_candidate: 'warn',
+  /**
+   * The candidate is GUARDIAN_SCALE_FACTOR (default 10x) or more away from every reference the watch could read (the
+   * pool's window price or TWAP, and the market's last finalized price): a mis-scaled print. Error: if nothing vetoes
+   * it, it finalizes and cannot be undone.
+   */
+  v2_guardian_scale_fault: 'error',
+  /**
+   * The candidate came from a Chainlink round in force longer than GUARDIAN_FEED_HEARTBEAT_S + GUARDIAN_FEED_STALE_MARGIN_S
+   * at the expiry: the feed was down and the window was priced from a pre-outage round. Vetoed when the pool disagrees
+   * beyond the market's maxDeviationBps; otherwise a person checks it. Error: it finalizes unless someone acts.
+   */
+  v2_guardian_stale_round: 'error',
+  /** The watch vetoed a candidate (a scale fault, or a stale round the pool disagrees with): the expiry is Held until
+   *  a person unvetoes it or adminResolve runs. */
+  v2_guardian_vetoed: 'error',
+  /** A veto was refused in simulation, reverted, or not confirmed. The candidate can still finalize. */
+  v2_guardian_veto_failed: 'error',
+  /* ---- cranker, INTERFACE_VERSION 7 (cranker/steps.ts stepStale) ---- */
   /**
    * An AutoRoller ask the spot has overtaken (at or past its strike) could not be withdrawn: `cancelStale`'s
    * simulation is refused, so the writer's ask keeps resting below intrinsic value until it fills or expires.
    * Raised as `warn` when the cause is the writer revoking the roller's delegate (nobody but the writer can fix it),
-   * `error` otherwise (v7 design §7.4, the monitor's `v2_mon_roller_ask_overtaken` rule).
+   * `error` otherwise (the monitor's `v2_mon_roller_ask_overtaken` rule).
    */
   v2_stale_cancel_failed: 'error',
 };
@@ -161,6 +259,31 @@ export interface AlerterOptions {
   now?: () => number;
   /** Told the outcome of every webhook POST (the mode's /health: checks.alerting). */
   onDelivery?: (ok: boolean, error: string | null) => void;
+}
+
+/** The webhook's host, for messages and logs. Never its path or query: those carry the webhook's secret. */
+export function webhookHost(webhook: string): string {
+  try {
+    return new URL(webhook).host || 'unparseable webhook URL';
+  } catch {
+    return 'unparseable webhook URL';
+  }
+}
+
+/**
+ * Why a POST never got an answer: the system error code under fetch's TypeError ('ENOTFOUND': the host does not resolve,
+ * which is what a relay that was never deployed looks like; 'ECONNREFUSED': nothing listens), else the error's name
+ * ('TimeoutError' from the 10 s AbortSignal), else 'unknown'.
+ */
+export function unreachableReason(error: unknown): string {
+  let cur: unknown = error;
+  for (let depth = 0; depth < 6 && cur !== null && typeof cur === 'object'; depth += 1) {
+    const code = (cur as { code?: unknown }).code;
+    if (typeof code === 'string' && code !== '') return code;
+    cur = (cur as { cause?: unknown }).cause;
+  }
+  if (error instanceof Error && error.name !== 'Error' && error.name !== 'TypeError') return error.name;
+  return 'unknown';
 }
 
 export class Alerter {
@@ -265,15 +388,21 @@ export class Alerter {
       if (token !== null) headers.authorization = `Bearer ${token}`;
       const response = await this.fetchImpl(webhook, { method: 'POST', headers, body: JSON.stringify(payload, bigintReplacer), signal: AbortSignal.timeout(10_000) });
       if (!response.ok) {
-        log.error({ status: response.status, kind: alert.kind }, 'alert webhook rejected the POST');
-        this.options.onDelivery?.(false, `alert webhook rejected the POST (HTTP ${response.status})`);
+        const host = webhookHost(webhook);
+        log.error({ status: response.status, host, kind: alert.kind }, 'alert webhook rejected the POST');
+        this.options.onDelivery?.(false, `alert webhook rejected the POST (HTTP ${response.status} from ${host})`);
         return false;
       }
       this.options.onDelivery?.(true, null);
       return true;
     } catch (error) {
-      log.error({ err: String(error), kind: alert.kind }, 'alert webhook unreachable');
-      this.options.onDelivery?.(false, 'alert webhook unreachable');
+      // "unreachable" alone could not tell a relay that was never deployed (ENOTFOUND) from one that is down
+      // (ECONNREFUSED) or slow (TimeoutError). Say which, and where -- the HOST only: a Discord or Telegram webhook URL
+      // carries its token in the path.
+      const host = webhookHost(webhook);
+      const reason = unreachableReason(error);
+      log.error({ err: redactUrls(String(error)), host, reason, kind: alert.kind }, 'alert webhook unreachable');
+      this.options.onDelivery?.(false, `alert webhook unreachable (${host}: ${reason})`);
       return false;
     }
   }

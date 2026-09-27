@@ -1,10 +1,10 @@
 /**
- * Deterministic fake data providers for the provider-neutral seam (K3-311). No network, no
+ * Deterministic fake data providers for the provider-neutral seam. No network, no
  * credential, no provider contact: a fake serves NormalizedChains that tests build from committed
  * fixtures, through the same OptionChainProvider interface a real adapter implements, so the service
  * cannot tell a fake from Cboe except by what the chain states.
  *
- * Two shapes, the ones §5.1 keeps apart:
+ * Two shapes, the ones the /fair contract keeps apart:
  *   listed       raw bid/ask quotes with the provider's greeks, plus what a paid raw-quote feed
  *                states and Cboe's free file does not: a quote time, sizes, the contract multiplier
  *                and the exercise/settlement convention (fakeListedChain).

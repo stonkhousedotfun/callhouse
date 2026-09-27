@@ -6,7 +6,7 @@
  *   DEVNET_PORT=8552 CONTRACTS_DIR=/path/to/callhouse-contracts pnpm --filter @callhouse/keeper v2:devnet-cycle
  *
  * WHAT RUNS. ops/devnet/up.sh brings up the seeded devnet (the first daily expiry already settled for
- * NVDA by the seed; TSLA's a pending single-source candidate). The cranker is started IN PROCESS with
+ * NVDA by the seed; the Chainlink-only market's is a pending single-source candidate). The cranker is started IN PROCESS with
  * startCranker (the same entry V2_MODE=cranker boots), on the devnet's env/cranker.env, with a dead
  * INDEXER_URL (so every holder and strategy list comes from its own log index: the fallback path)
  * and a 5-minute poll, so anything that happens between the harness's wake() calls is the cranker's
@@ -16,22 +16,22 @@
  * the cranker's.
  *
  *   A  boot            ladders for the next expiries of both markets and tenors exist at spot; the
- *                      seed's settled NVDA expiry is done; TSLA's candidate waits; its orders pruned;
+ *                      seed's settled NVDA expiry is done; the single-source market's candidate waits; its orders pruned;
  *                      the settlement pin's gas per market (measureCreateSeriesGas)
- *   B  delay           warp past TSLA's finalizableAt: finalize (single source, after the delay),
+ *   B  delay           warp past the single-source market's finalizableAt: finalize (single source, after the delay),
  *                      settle, redeem the shorts (the OTM long's zero payout is left alone)
  *   C  expiry e2       (the seed's second daily expiry. It is also the seed's WEEKLY expiry — the two ladders name the
  *                      same series — only when the run starts the day before the weekly; over a weekend gap it is
- *                      Monday and the seed's TSLA interest and resale ask sit on the later weekly instead, so the
+ *                      Monday and the seed's interest in the single-source market and resale ask sit on the later weekly instead, so the
  *                      checks that need them are conditioned on the chain, not assumed) an ITM NVDA call
  *                      is minted to a buyer who lists part of it for resale; the settlement window is
- *                      pushed (NVDA at the pool price, TSLA flat); spot is fresh, so ladders for the
+ *                      pushed (NVDA at the pool price, the single-source market flat); spot is fresh, so ladders for the
  *                      expiries after e2 appear; the harness wakes the cranker a minute before e2 and
  *                      then only waits: the NVDA pool snapshot lands within seconds of e2 (precise
  *                      wake-up); warp past e2 + 120: NVDA finalizes corroborated, settles, BOTH resale
  *                      asks are pruned before the redeem, the ITM long (escrow included) and the shorts
- *                      are paid; warp past TSLA's delay: TSLA settles and its shorts are paid
- *   stale           INTERFACE_VERSION 7 (c16): the NVDA spot is pushed past a live roller ask's strike and the
+ *                      are paid; warp past the single-source market's delay: the single-source market settles and its shorts are paid
+ *   stale           INTERFACE_VERSION 7: the NVDA spot is pushed past a live roller ask's strike and the
  *                      cranker withdraws it with AutoRoller.cancelStale — StaleAskCancelled, the position keeps its
  *                      series and expiry with no tracked ask, the fixed gas limit, and the next tick sends nothing
  *   D  end state       every expiry above Finalized, every series with supply settled, no open order
@@ -66,11 +66,12 @@ import { autoRollerAbi } from '../abi/autoRoller.js';
 import { clearinghouseAbi } from '../abi/clearinghouse.js';
 import { expiryCalendarAbi } from '../abi/expiryCalendar.js';
 import { orderBookAbi } from '../abi/orderBook.js';
+import { quoteTakeAs } from '../quoteTake.js';
 import { settlementOracleAbi } from '../abi/settlementOracle.js';
 import { uniV3TwapSourceAbi } from '../abi/uniV3TwapSource.js';
 import { loadV2Config, type CrankerConfig } from '../config.js';
 import type { RunningMode } from '../mode.js';
-import { v2Markets } from '../registry.js';
+import { listsDailyOn, v2Markets } from '../registry.js';
 import { longIdOf, shortIdOf } from '../seriesId.js';
 import { bigintReplacer } from '../store.js';
 import { GAS, MIN_SERIES_LEAD, LADDER_LEAD_MARGIN_S } from './constants.js';
@@ -197,13 +198,13 @@ async function deployRoller(D: Devnet): Promise<Address> {
   if (!existsSync(artifactFile)) throw new Error(`CYCLE_DEPLOY_ROLLER=1 needs ${artifactFile} (forge build in CONTRACTS_DIR)`);
   const artifact = JSON.parse(readFileSync(artifactFile, 'utf8')) as { abi: Abi; bytecode: { object: `0x${string}` } };
   const admin = getAddress(D.accounts.admin!);
-  // C8-05 HAS LANDED, AND THE SECOND ARGUMENT CHANGED MEANING WITHOUT CHANGING ARITY.
+  // A CONTRACT CHANGE HAS LANDED, AND THE SECOND ARGUMENT CHANGED MEANING WITHOUT CHANGING ARITY.
   // src/v2/AutoRoller.sol:95 is now `AutoRoller is IAutoRoller, Managed, ...` and :181 is
   // `constructor(IOrderBook orderBook_, address authority_) Managed(authority_)`. It used to be
   // (IOrderBook, address admin) on an AccessControl contract. Passing the admin EOA still COMPILES,
   // still DEPLOYS, and produces a roller whose authority() is an address with no code, so every
   // `restricted` call on it consults a non-contract. Nothing fails at deploy time. The authority is
-  // the AccessManager, which ops/devnet/addresses.json now records (F8-03/T-119).
+  // the AccessManager, which ops/devnet/addresses.json now records.
   const authority = getAddress(D.contracts.accessManager);
   const wallet = createWalletClient({ account: admin, chain, transport: http(RPC) });
   const hash = await wallet.deployContract({ abi: artifact.abi, bytecode: artifact.bytecode.object, args: [D.contracts.orderBook, authority], account: admin, chain, gas: 8_000_000n } as never);
@@ -263,6 +264,8 @@ async function assertLadders(D: Devnet, config: CrankerConfig, at: number, label
       for (let i = 0; i < m.v2.params.expiriesAhead[tenor]; i += 1) {
         const expiry = Number(await read<number>(D.contracts.expiryCalendar, expiryCalendarAbi, 'nextExpiry', [after, tenor === 'weekly']));
         after = expiry;
+        // The cranker ladders a daily close only on the market's dailyWeekdays (NVDA mon, wed, fri).
+        if (tenor === 'daily' && !listsDailyOn(m.v2.params, expiry)) continue;
         for (const strike of ladderStrikes(spot, m.v2.params.ladder[tenor], tick, false)) {
           total += 1;
           if (!(await read<boolean>(D.contracts.clearinghouse, clearinghouseAbi, 'seriesExists', [longIdOf(m.underlying, false, strike, expiry)]))) missing += 1;
@@ -412,7 +415,9 @@ async function main(): Promise<void> {
   const D = JSON.parse(readFileSync(addressesFile, 'utf8')) as Devnet;
   const acct = D.accounts;
   const NVDA = D.markets.find((m) => m.ticker === 'NVDA')!;
-  const TSLA = D.markets.find((m) => m.ticker === 'TSLA')!;
+  // The single-source market is whichever one the devnet registered without a pool (ops/devnet/lib.mjs
+  // marketRoles): the registry decides it (SPCX, TSLA before), so no ticker is named here.
+  const SINGLE = D.markets.find((m) => m.pool === null) ?? (() => { throw new Error(`${addressesFile} lists no Chainlink-only market`); })();
   const e1 = D.seed.trade.settleExpiry;
   const e2 = D.seed.trade.expiries.daily[1]!;
   // The seed's resale ask on e2 (ops/devnet/seed.mjs records its id; periphery orders come after it).
@@ -484,7 +489,7 @@ async function main(): Promise<void> {
 
   try {
     /* ---------------------------------------------------------------- A */
-    step('A. boot: ladders, the settled seed expiry, TSLA pending');
+    step(`A. boot: ladders, the settled seed expiry, ${SINGLE.ticker} pending`);
     await waitFor('the first tick', async () => (await health(running)).ticks >= 1 && !(await health(running)).tickInFlight, { timeoutMs: 180_000 });
     const bootHead = (await state(running))?.head?.timestamp as number;
     await assertLadders(D, config, bootHead, 'A');
@@ -506,15 +511,15 @@ async function main(): Promise<void> {
         `A: at 16:02 New York no roll is sent (${decisions.map((d) => `${d.writer}: ${d.reason}, expected ${expected.get(d.writer.toLowerCase()) ?? 'no strategy'}`).join('; ') || 'no decision'})`,
       );
     }
-    const [tslaStatus] = await read<readonly [number, bigint]>(D.contracts.settlementOracle, settlementOracleAbi, 'settlementPrice', [TSLA.underlying, e1]);
-    check(tslaStatus === 1, `A: TSLA ${e1} is a Pending single-source candidate (status ${tslaStatus})`);
+    const [singleStatus] = await read<readonly [number, bigint]>(D.contracts.settlementOracle, settlementOracleAbi, 'settlementPrice', [SINGLE.underlying, e1]);
+    check(singleStatus === 1, `A: ${SINGLE.ticker} ${e1} is a Pending single-source candidate (status ${singleStatus})`);
 
     /* ---------------------------------------------------------------- B */
-    step(`B. warp past TSLA ${e1}'s uncorroborated delay`);
-    const [, , , finalizableAt1] = await read<readonly [bigint, number, boolean, number]>(D.contracts.settlementOracle, settlementOracleAbi, 'candidate', [TSLA.underlying, e1]);
+    step(`B. warp past ${SINGLE.ticker} ${e1}'s uncorroborated delay`);
+    const [, , , finalizableAt1] = await read<readonly [bigint, number, boolean, number]>(D.contracts.settlementOracle, settlementOracleAbi, 'candidate', [SINGLE.underlying, e1]);
     await warpTo(Number(finalizableAt1) + 5);
     await settleTicks(running, 1);
-    await assertExpiryDone(D, 'TSLA', e1);
+    await assertExpiryDone(D, SINGLE.ticker, e1);
 
     /* ---------------------------------------------------------------- C */
     step(`C. expiry ${e2}: an ITM NVDA call with a resale ask, the settlement window, the precise wake-up`);
@@ -525,7 +530,7 @@ async function main(): Promise<void> {
     const itm = (await sendAs(acct.ada!, { address: D.contracts.clearinghouse, abi: clearinghouseAbi, functionName: 'createSeries', args: [NVDA.underlying, false, itmStrike, e2] })) as bigint;
     // THE POSITION IS MADE THE WAY A USER MAKES ONE. v8 `Clearinghouse.mint` is minter-allowlisted
     // (src/v2/Clearinghouse.sol:563-564, allowlist :166) and the OrderBook is the only protocol
-    // minter (script/v2/DevDeploy.s.sol:346, T-77). ada is an EOA and never will be one, so the old
+    // minter (script/v2/DevDeploy.s.sol:346). ada is an EOA and never will be one, so the old
     // direct `mint(itm, 50, ada, dee)` here reverts NotMinter() on any v8 devnet. Instead ada rests
     // an AskWrite and dee takes it, and the BOOK mints: same end state, ada short 50 and dee long 50.
     const askWriteId = (await sendAs(acct.ada!, {
@@ -539,19 +544,18 @@ async function main(): Promise<void> {
     const takeBase = {
       longId: itm, buying: true, orderIds: [askWriteId], units: 50n, minUnits: 50n,
       limitPrice: ITM_ASK_PRICE, writeToSell: false, recipient: acct.dee!,
-      deadline: BigInt((await now()) + 3_600), maxTotalFee: 0n,
+      deadline: (await now()) + 3_600, maxTotalFee: 0n,
     };
     // v8 quoteTake returns FOUR values (unitsFilled, premium, takerFee, sellerFees) —
     // src/v2/OrderBook.sol:459-467. This take is BUYING, so the cap is the taker fee alone: the
     // seller fees of an ask that gets hit are the MAKER's, not the taker's (OrderBook.sol:464-466).
-    // Quoted as dee because quoteTake reads msg.sender for the discount.
-    const [, , quotedTakerFee] = await read<readonly [bigint, bigint, bigint, bigint]>(
-      D.contracts.orderBook, orderBookAbi, 'quoteTake', [takeBase], acct.dee!,
-    );
-    // NOTE: `OrderBook.take` does NOT enforce p.maxTotalFee yet — `grep -n maxTotalFee
-    // src/v2/OrderBook.sol` finds only NatSpec at :416 and :463, and the enforcement is C8-03
-    // (claimed, not landed). The field is correct data either way, so it is filled from the quote
-    // rather than left at a sentinel; do not assert that the cap reverts until C8-03 lands.
+    // Quoted as dee because quoteTake reads msg.sender for the discount. It is simulated (no longer a
+    // view), and a quote with no `from` reverts NotAuthorized.
+    const [, , quotedTakerFee] = await quoteTakeAs(pub, D.contracts.orderBook, acct.dee!, takeBase);
+    // NOTE: `OrderBook.take` enforces p.maxTotalFee: once the final taker-side fees are known, and
+    // before any USDG moves, it reverts FeeAboveMax(totalFee, maxTotalFee) (src/v2/OrderBook.sol take).
+    // The cap is filled from the quote, so this take sits exactly at it and passes; a cap one unit lower
+    // would revert. This cycle does not exercise that revert.
     await sendAs(acct.dee!, {
       address: D.contracts.orderBook, abi: orderBookAbi, functionName: 'take',
       args: [{ ...takeBase, maxTotalFee: quotedTakerFee }],
@@ -561,7 +565,7 @@ async function main(): Promise<void> {
 
     await warpTo(e2 - 90);
     await setFeed(['NVDA', '--window', String(e2), '--pool']);
-    await setFeed(['TSLA', '--window', String(e2)]);
+    await setFeed([SINGLE.ticker, '--window', String(e2)]);
     const beforeWake = await now();
     say(`  settlement window pushed; chain time ${beforeWake} (${e2 - beforeWake} s before expiry)`);
     const ticksBefore = (await health(running)).ticks;
@@ -617,21 +621,22 @@ async function main(): Promise<void> {
     check(deeItm === 0n, 'C: the ITM long (including the 20 units back from escrow) redeemed');
     await assertExpiryDone(D, 'NVDA', e2);
 
-    // TSLA's turn, on the calendars where the seed left it open interest at e2 (see the resale note above: the seed's
-    // TSLA fills are on its weekly, which is the second daily expiry only when the two ladders name the same series).
+    // The single-source market's turn, on the calendars where the seed left it open interest at e2 (see the resale note
+    // above: the seed's fills on it are on its weekly, which is the second daily expiry only when the two ladders name
+    // the same series).
     // Its single-source delay is exercised at e1 in step B either way.
-    const tslaOpenE2 = await read<bigint>(D.contracts.clearinghouse, clearinghouseAbi, 'openInterest', [TSLA.underlying, e2]);
-    if (tslaOpenE2 > 0n) {
-      const [, , , finalizableAt2] = await read<readonly [bigint, number, boolean, number]>(D.contracts.settlementOracle, settlementOracleAbi, 'candidate', [TSLA.underlying, e2]);
-      check(Number(finalizableAt2) > e2, `C: TSLA ${e2} waits as a single-source candidate until ${finalizableAt2}`);
+    const singleOpenE2 = await read<bigint>(D.contracts.clearinghouse, clearinghouseAbi, 'openInterest', [SINGLE.underlying, e2]);
+    if (singleOpenE2 > 0n) {
+      const [, , , finalizableAt2] = await read<readonly [bigint, number, boolean, number]>(D.contracts.settlementOracle, settlementOracleAbi, 'candidate', [SINGLE.underlying, e2]);
+      check(Number(finalizableAt2) > e2, `C: ${SINGLE.ticker} ${e2} waits as a single-source candidate until ${finalizableAt2}`);
       await warpTo(Number(finalizableAt2) + 5);
       await settleTicks(running, 1);
-      await assertExpiryDone(D, 'TSLA', e2);
+      await assertExpiryDone(D, SINGLE.ticker, e2);
     } else {
-      say(`  TSLA has no open interest at ${e2} on this calendar (the seed's TSLA fills are on ${D.seed.trade.expiries.weekly[0]}); its single-source delay is step B's`);
-      const left = (await seriesOfExpiry(D, TSLA.underlying, e2)).map((s) => s.longId);
+      say(`  ${SINGLE.ticker} has no open interest at ${e2} on this calendar (the seed's ${SINGLE.ticker} fills are on ${D.seed.trade.expiries.weekly[0]}); its single-source delay is step B's`);
+      const left = (await seriesOfExpiry(D, SINGLE.underlying, e2)).map((s) => s.longId);
       const supply = await Promise.all(left.map((id) => read<bigint>(D.contracts.clearinghouse, clearinghouseAbi, 'totalSupply', [id])));
-      check(supply.every((n) => n === 0n), `C: TSLA ${e2} has nothing to settle (${left.length} series, no supply)`);
+      check(supply.every((n) => n === 0n), `C: ${SINGLE.ticker} ${e2} has nothing to settle (${left.length} series, no supply)`);
       let openOrders = 0;
       for (const id of left) {
         const [ids] = await read<readonly [readonly bigint[], bigint]>(D.contracts.orderBook, orderBookAbi, 'ordersOfSeries', [id, 0n, 200n]);
@@ -639,7 +644,7 @@ async function main(): Promise<void> {
         const orders = await read<ReadonlyArray<{ cancelled: boolean; units: bigint; filled: bigint }>>(D.contracts.orderBook, orderBookAbi, 'getOrders', [ids]);
         openOrders += orders.filter((o) => !o.cancelled && o.filled < o.units).length;
       }
-      check(openOrders === 0, `C: the cranker still pruned every expired order on TSLA ${e2} (${openOrders} left)`);
+      check(openOrders === 0, `C: the cranker still pruned every expired order on ${SINGLE.ticker} ${e2} (${openOrders} left)`);
     }
 
     if (roller === null) {
@@ -647,7 +652,7 @@ async function main(): Promise<void> {
       say('  skipped: this devnet has no AutoRoller (the cranker booted without one and reported the step skipped; CYCLE_DEPLOY_ROLLER=1 deploys one)');
     } else {
       /* --------------------------------------------------------- stale */
-      // INTERFACE_VERSION 7 (c16). The roll's AskWrite is priced at a fraction of spot; once the spot reaches the
+      // INTERFACE_VERSION 7. The roll's AskWrite is priced at a fraction of spot; once the spot reaches the
       // strike every price the writer's band allows is below intrinsic value and the ask is free money for the first
       // taker. `cancelStale` is permissionless, so the cranker withdraws it. Nothing settled above is touched: every
       // expiry of this run is already finished, and the rolled position writes a later one.

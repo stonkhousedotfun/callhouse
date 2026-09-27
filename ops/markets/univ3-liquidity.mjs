@@ -1,12 +1,12 @@
 /**
  * ops/markets/univ3-liquidity.mjs — integrity check and derivation for the measured UniV3
- * pool-liquidity input set (T-216-O8-UNIV3-LIQUIDITY-INPUT-SET).
+ * pool-liquidity input set.
  *
  *   node ops/markets/univ3-liquidity.mjs              # verify the committed dataset
  *   node ops/markets/univ3-liquidity.mjs --derive     # regenerate it from the upstream sessions file
  *   node --test ops/markets/univ3-liquidity.test.mjs
  *
- * WHAT THIS IS FOR. T-200 derives the v8 `univ3MinLiquidity` floors from this dataset. A wrong input
+ * WHAT THIS IS FOR. The v8 `univ3MinLiquidity` floors are derived from this dataset. A wrong input
  * set is a pinned-constant failure by another name: the floors would be computed correctly from the
  * wrong numbers, and the consequence is silent — a market whose pool cannot meet its floor drops to
  * the 6 h settlement path instead of the TWAP path and looks like normal operation.
@@ -26,12 +26,12 @@
  * NOT THE ORIGINAL MEASUREMENT SCRIPT. The recon that produced these numbers kept a `.mjs` for every
  * step from 01 to 15; step 16 kept only its `.json`, and its `INDEX.json` documents files through 13
  * only. The script that emitted the derived file was never saved and could not be landed. `--derive`
- * below was written on 2026-09-20 for this task. It reproduces the derived file from the landed
+ * below was written on 2026-09-20 for this file. It reproduces the derived file from the landed
  * upstream series, which is what "reproducible in principle" can honestly mean here — it is NOT a
  * reconstruction of the original presented as the original.
  *
  * OFFLINE BY CONSTRUCTION. No RPC, no explorer, no API. Re-MEASUREMENT (as opposed to re-derivation)
- * needs historical pool reads and therefore the owner RPC gate, which this task did not have.
+ * needs historical pool reads, which this script does not make.
  */
 import { readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
@@ -50,7 +50,7 @@ export const SESSIONS = path.join(HERE, "univ3-liquidity-sessions-2026-09-17.jso
  * interpolated, never given a neighbour's value.
  */
 /**
- * THE FRESHNESS GATE (T-234). The dataset records `asOf` and says in its own `snapshotWarning` that it
+ * THE FRESHNESS GATE. The dataset records `asOf` and says in its own `snapshotWarning` that it
  * is a FROZEN snapshot which does not refresh itself - and until now nothing in this file read either
  * field. Every consumer therefore got a two-day-old number with the same confidence as a live one, and
  * the failure is silent by construction: a stale liquidity figure is a plausible liquidity figure.
@@ -61,7 +61,7 @@ export const SESSIONS = path.join(HERE, "univ3-liquidity-sessions-2026-09-17.jso
  * pass `Infinity` deliberately rather than by omission.
  *
  * WHAT THIS DOES NOT DO, and cannot: it does not refresh anything. Re-measurement needs live UniV3
- * reads at historical blocks, which is an owner-gated network action this task does not carry. See
+ * reads at historical blocks, which this script does not make. See
  * `OFFLINE-LIMITS` below for the exact list of facts that are unobtainable without it.
  */
 export function measuredAt(dataset) {
@@ -219,7 +219,7 @@ export function verify(dataset) {
 /**
  * Regenerate the derived rows from the upstream session series.
  *
- * Written 2026-09-20 for T-216-O8-UNIV3-LIQUIDITY-INPUT-SET. This is NOT the recon's own step-16
+ * Written 2026-09-20 for the liquidity input set. This is NOT the recon's own step-16
  * script, which was never saved — see the header. It exists so the derived file is reproducible
  * offline from a landed input rather than being a number nobody can re-obtain.
  */

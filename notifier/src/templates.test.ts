@@ -2,16 +2,16 @@
  * Message templates and number formatting.
  *
  * WHAT IS PINNED:
- *   - every §6 event kind renders, with a link into APP_URL;
+ *   - every event kind renders, with a link into APP_URL;
  *   - every message about a long position states its cost and its max loss, rounded UP;
  *   - a price-driven message states "as of <New York time>" when its payload dated the spot, and
  *     states no time at all when it did not;
- *   - the copy rules: the FORBIDDEN phrases (formerly copy-lint's, inlined here since its removal) and the plan README appear
+ *   - the copy rules: the FORBIDDEN phrases (formerly copy-lint's, inlined here since its removal) and the product copy rules' banned words appear
  *     neither in templates.ts nor in any rendered message, and no rendered message carries an
  *     exclamation mark, an emoji or a promotional word. copy-lint scanned web/ only (its
- *     package list is fixed and the file belongs to another lane), so this test is the gate here;
+ *     package list is fixed and the linter lives in another package), so this test is the gate here;
  *   - numbers read as the dapp formats them (web/lib/format.ts, web/lib/v2/payoff.ts);
- *   - the payload schemas N2-02 builds against.
+ *   - the payload schemas the dapp builds against.
  */
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
@@ -44,6 +44,9 @@ const VARIANTS: [string, EventKind, unknown][] = [
   ['fill sell resale', 'fill_receipt', { ...SAMPLE_PAYLOADS.fill_receipt, side: 'sell', primary: false, total: usdg('1800000'), fee: usdg('0') }],
   ['fill sell with proceeds to another wallet', 'fill_receipt', { ...SAMPLE_PAYLOADS.fill_receipt, side: 'sell', role: 'taker', recipient: '0x4088c59Eb3fB713B124f182E7083AEb3358A030B', total: usdg('1610000'), fee: usdg('190000') }],
   ['fill sale proceeds received', 'fill_receipt', { ...SAMPLE_PAYLOADS.fill_receipt, side: 'sell', role: 'recipient', seller: '0x4088c59Eb3fB713B124f182E7083AEb3358A030B', total: usdg('1610000'), fee: usdg('190000') }],
+  // An ask-hit resale maker (seller fee 0, rebate 0.05) and a bid-hit maker (credited the 0.05 rebate).
+  ['fill sell maker rebate above fees', 'fill_receipt', { ...SAMPLE_PAYLOADS.fill_receipt, side: 'sell', role: 'maker', primary: false, total: usdg('1850000'), fee: usdg('0') }],
+  ['fill buy maker bid hit', 'fill_receipt', { ...SAMPLE_PAYLOADS.fill_receipt, role: 'maker', total: usdg('1750000'), fee: usdg('0') }],
   ['strike cross short put below', 'strike_cross', { series: { ...SERIES_221, isPut: true }, position: 'short', direction: 'below', spot: usdg('220000000'), units: '100' }],
   ['strike cross as of', 'strike_cross', { ...SAMPLE_PAYLOADS.strike_cross, spotUpdatedAt: SPOT_SEEN_AT }],
   ['price alert below', 'price_alert', { ...SAMPLE_PAYLOADS.price_alert, direction: 'below' }],
@@ -77,7 +80,7 @@ const rendered: [string, EventKind, unknown, Rendered][] = VARIANTS.map(([label,
   render(event(kind, payload), links),
 ]);
 
-test('every §6 kind renders a title, a body and a link into the app', () => {
+test('every event kind renders a title, a body and a link into the app', () => {
   assert.deepEqual([...EVENT_KINDS].sort(), Object.keys(SAMPLE_PAYLOADS).sort());
   for (const [label, , , message] of rendered) {
     assert.ok(message.title.length > 0 && message.title.length <= 120, label);
@@ -90,13 +93,32 @@ test('every §6 kind renders a title, a body and a link into the app', () => {
 
 test('links go to the page the message is about', () => {
   const byLabel = new Map(rendered.map(([label, , , m]) => [label, m.url]));
-  assert.equal(byLabel.get('fill_receipt'), `${APP}/NVDA/${SERIES_221.longId}`);
-  assert.equal(byLabel.get('price_alert'), `${APP}/NVDA`);
-  assert.equal(byLabel.get('writer_itm_warning'), `${APP}/earn/NVDA`);
-  assert.equal(byLabel.get('auto_roll'), `${APP}/earn/NVDA`);
+  // lower-case ticker segments; the web app serves /nvda and 404s /NVDA.
+  assert.equal(byLabel.get('fill_receipt'), `${APP}/nvda/${SERIES_221.longId}`);
+  assert.equal(byLabel.get('price_alert'), `${APP}/nvda`);
+  assert.equal(byLabel.get('market_live'), `${APP}/spcx`);
+  // The writer page is Sell options at /sell/<ticker>; /earn is the lending vault.
+  assert.equal(byLabel.get('writer_itm_warning'), `${APP}/sell/nvda`);
+  assert.equal(byLabel.get('auto_roll'), `${APP}/sell/nvda`);
   assert.equal(byLabel.get('payout_failed_to_ledger'), `${APP}/portfolio`);
   assert.equal(byLabel.get('settlement long in kind to ledger'), `${APP}/portfolio`);
   assert.equal(byLabel.get('expiry 24h digest'), `${APP}/portfolio`);
+});
+
+/**
+ * The web ticker routes serve only lower-case tickers (web/app/[ticker]/page.tsx dynamicParams = false;
+ * web/app/v2-route-params.ts parseV2Ticker ^[a-z0-9.]+$), so a link with an upper-case ticker is a 404. Every link
+ * every sample renders, and every Links builder fed an upper-case ticker, has a path with no upper-case letter.
+ */
+test('no link carries an upper-case ticker: /NVDA is a 404 on the web app', () => {
+  for (const [label, , , message] of rendered) {
+    const path = message.url.slice(APP.length);
+    assert.equal(path, path.toLowerCase(), `${label}: ${message.url}`);
+  }
+  assert.equal(links.series({ ...SERIES_221, ticker: 'NVDA' }), `${APP}/nvda/${SERIES_221.longId}`);
+  assert.equal(links.market('SPCX'), `${APP}/spcx`);
+  assert.equal(links.earn('NVDA'), `${APP}/sell/nvda`);
+  assert.equal(appLinks(`${APP}/`).market('BRK.B'), `${APP}/brk.b`, 'a trailing slash and a dotted ticker');
 });
 
 test('a buy receipt reads exactly as specified', () => {
@@ -121,7 +143,7 @@ test('a sale paid to another wallet: the seller’s receipt names it, the recipi
       'Proceeds: 1.61 USDG, after 0.19 USDG in fees, paid to wallet 0x4088…030B.',
       'Your collateral backs these options until they settle. If NVDA settles above 221.00 USDG, holders are paid from it.',
     ].join('\n'),
-    url: `${APP}/NVDA/${SERIES_221.longId}`,
+    url: `${APP}/nvda/${SERIES_221.longId}`,
   });
   assert.deepEqual(byLabel.get('fill sale proceeds received'), {
     title: 'Received sale proceeds: NVDA 221.00 call',
@@ -129,8 +151,29 @@ test('a sale paid to another wallet: the seller’s receipt names it, the recipi
       'Wallet 0x4088…030B sold 0.50 shares of the NVDA 221.00 call expiring Fri 25 Sep, 4:00pm EDT, at 3.60 USDG per share, and the proceeds were paid to your wallet.',
       'Received: 1.61 USDG, after 0.19 USDG in fees.',
     ].join('\n'),
-    url: `${APP}/NVDA/${SERIES_221.longId}`,
+    url: `${APP}/nvda/${SERIES_221.longId}`,
   });
+});
+
+test('a maker whose rebate beats its fees is told the rebate, and the line reconciles with price × shares', () => {
+  // 0.50 shares at 3.60 = a 1.80 USDG premium. OrderBook credits an ask-hit maker premium − seller fee + rebate and a
+  // bid-hit maker the rebate; the payload's fee is the seller fee net of the rebate, floored at 0 (rules.ts).
+  const line = (payload: object) => render(event('fill_receipt', { ...SAMPLE_PAYLOADS.fill_receipt, ...payload }), links).body.split('\n')[1];
+  const makerSale = { side: 'sell', role: 'maker' } as const;
+  // Resale ask hit: seller fee 0, rebate 0.05 -> 1.80 + 0.05 received. The old line read "after 0.00 USDG in fees".
+  assert.equal(line({ ...makerSale, primary: false, total: usdg('1850000'), fee: usdg('0') }), 'Received: 1.85 USDG, including a 0.05 USDG maker rebate net of fees.');
+  // Primary ask hit where the 0.10 rebate beats the 0.09 seller fee: 1.80 − 0.09 + 0.10 = 1.81, a 0.01 net credit.
+  assert.equal(line({ ...makerSale, total: usdg('1810000'), fee: usdg('0') }), 'Received: 1.81 USDG, including a 0.01 USDG maker rebate net of fees.');
+  // The fee covers the rebate (0.09 − 0.05 = 0.04 net): the fee line as before, since 1.76 + 0.04 is the premium.
+  assert.equal(line({ ...makerSale, total: usdg('1760000'), fee: usdg('40000') }), 'Received: 1.76 USDG, after 0.04 USDG in fees.');
+  // Rebate exactly equal to the seller fee: nothing to credit, nothing hidden.
+  assert.equal(line({ ...makerSale, total: usdg('1800000'), fee: usdg('0') }), 'Received: 1.80 USDG, after 0.00 USDG in fees.');
+  // Bid hit: the maker bought and was credited the 0.05 rebate, so its cost is 1.75.
+  assert.equal(line({ role: 'maker', total: usdg('1750000'), fee: usdg('0') }), 'Cost: 1.75 USDG, after a 0.05 USDG maker rebate. Max loss: 1.75 USDG.');
+  // Only a maker is credited. A taker sale whose total is somehow above the premium is not explained as a rebate.
+  assert.equal(line({ side: 'sell', role: 'taker', total: usdg('1850000'), fee: usdg('0') }), 'Received: 1.85 USDG, after 0.00 USDG in fees.');
+  // Off OrderBook's price grid (3.600001 x 0.50 is not a whole base unit) nothing is guessed: the plain fee line.
+  assert.equal(line({ ...makerSale, price: usdg('3600001'), total: usdg('1850000'), fee: usdg('0') }), 'Received: 1.85 USDG, after 0.00 USDG in fees.');
 });
 
 test('auto-roll skipped states when the roll fell due and the last roll; a payload queued without dueAt keeps its old wording', () => {
@@ -140,21 +183,21 @@ test('auto-roll skipped states when the roll fell due and the last roll; a paylo
     [
       'Auto-roll has not rolled your NVDA position. The roll was due when the session opened Mon 21 Sep, 9:30am EDT, more than 24 hours ago.',
       'Last roll: Mon 14 Sep, 9:35am EDT.',
-      'Nothing new is listed for sale until it rolls. Check the strategy on Earn.',
+      'Nothing new is listed for sale until it rolls. Check the strategy on Sell options.',
     ].join('\n'),
   );
   assert.equal(
     byLabel.get('auto roll skipped never rolled'),
     [
       'Auto-roll has not rolled your NVDA position. The roll was due when the session opened Mon 21 Sep, 9:30am EDT, more than 24 hours ago.',
-      'Nothing new is listed for sale until it rolls. Check the strategy on Earn.',
+      'Nothing new is listed for sale until it rolls. Check the strategy on Sell options.',
     ].join('\n'),
   );
   assert.equal(
     byLabel.get('auto roll skipped'),
     [
       'Auto-roll has not rolled your NVDA position for more than 24 hours (last roll Fri 11 Sep, 4:00pm EDT).',
-      'Nothing new is listed for sale until it rolls. Check the strategy on Earn.',
+      'Nothing new is listed for sale until it rolls. Check the strategy on Sell options.',
     ].join('\n'),
   );
 });
@@ -227,7 +270,7 @@ test('every message about a long position states cost and max loss', () => {
 });
 
 /**
- * These were copy-lint's FORBIDDEN rules. copy-lint was removed on 2026-09-21 by owner instruction,
+ * These were copy-lint's FORBIDDEN rules. copy-lint was removed on 2026-09-21,
  * so this is no longer a pinned copy of anything - it is the only remaining copy, and it guards
  * notifier messages only.
  */
@@ -246,7 +289,7 @@ const NOTIFIER_FORBIDDEN: RegExp[] = [
   /\bfree\s+money\b/i,
 ];
 
-/** The plan README copy rules the linter never carried. */
+/** The product copy rules the linter never carried. */
 const README_FORBIDDEN: RegExp[] = [
   /tokeni[sz]ed\s+(stocks?|equit(y|ies)|shares?)/i,
   /\bguarantee/i,
@@ -254,8 +297,8 @@ const README_FORBIDDEN: RegExp[] = [
 
 const FORBIDDEN: RegExp[] = [...NOTIFIER_FORBIDDEN, ...README_FORBIDDEN];
 
-// The drift test that compared this list against disclosure policy (copy-lint enforced this until it was removed on 2026-09-21; nothing checks it now) was removed on
-// 2026-09-21 with the linter itself (owner instruction). The list below is now the ONLY copy of
+// A drift test once compared this list against the disclosure policy; it was removed
+// with the linter itself. The list below is now the ONLY copy of
 // these rules in the repository, so it is no longer a mirror that can drift - it is the source.
 // It still guards notifier messages; nothing guards web/ copy any more.
 

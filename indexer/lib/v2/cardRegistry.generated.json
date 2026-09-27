@@ -1,5 +1,5 @@
 {
-  "projectionSha256": "ff8e114ec219b6e0f6e4e9478c24eb30b3190b8a747630e8dea70334c3e173d7",
+  "projectionSha256": "f2e1efb72ec88e0165410ac7e3095282d9e6020fed24815eb0927bce68922f44",
   "v2": {
     "fees": {
       "takerFeeFlat": "100000",
@@ -22,132 +22,12 @@
         }
       },
       "expiriesAhead": {
-        "daily": 3,
-        "weekly": 2
+        "daily": 6,
+        "weekly": 0
       }
     }
   },
   "markets": [
-    {
-      "ticker": "AAPL",
-      "v2": {
-        "overrides": {}
-      }
-    },
-    {
-      "ticker": "AMD",
-      "v2": {
-        "overrides": {}
-      }
-    },
-    {
-      "ticker": "AMZN",
-      "v2": {
-        "overrides": {}
-      }
-    },
-    {
-      "ticker": "ASML",
-      "v2": {
-        "overrides": {}
-      }
-    },
-    {
-      "ticker": "BABA",
-      "v2": {
-        "overrides": {}
-      }
-    },
-    {
-      "ticker": "CLSK",
-      "v2": {
-        "overrides": {}
-      }
-    },
-    {
-      "ticker": "COIN",
-      "v2": {
-        "overrides": {}
-      }
-    },
-    {
-      "ticker": "CRCL",
-      "v2": {
-        "overrides": {}
-      }
-    },
-    {
-      "ticker": "CRWV",
-      "v2": {
-        "overrides": {}
-      }
-    },
-    {
-      "ticker": "DELL",
-      "v2": {
-        "overrides": {}
-      }
-    },
-    {
-      "ticker": "EWY",
-      "v2": {
-        "overrides": {}
-      }
-    },
-    {
-      "ticker": "GME",
-      "v2": {
-        "overrides": {}
-      }
-    },
-    {
-      "ticker": "GOOGL",
-      "v2": {
-        "overrides": {}
-      }
-    },
-    {
-      "ticker": "INTC",
-      "v2": {
-        "overrides": {}
-      }
-    },
-    {
-      "ticker": "IONQ",
-      "v2": {
-        "overrides": {}
-      }
-    },
-    {
-      "ticker": "META",
-      "v2": {
-        "overrides": {}
-      }
-    },
-    {
-      "ticker": "MSFT",
-      "v2": {
-        "overrides": {}
-      }
-    },
-    {
-      "ticker": "MSTR",
-      "v2": {
-        "overrides": {}
-      }
-    },
-    {
-      "ticker": "MU",
-      "v2": {
-        "overrides": {}
-      }
-    },
-    {
-      "ticker": "NBIS",
-      "v2": {
-        "overrides": {}
-      }
-    },
     {
       "ticker": "NVDA",
       "v2": {
@@ -155,87 +35,14 @@
       }
     },
     {
-      "ticker": "ORCL",
-      "v2": {
-        "overrides": {}
-      }
-    },
-    {
-      "ticker": "PLTR",
-      "v2": {
-        "overrides": {}
-      }
-    },
-    {
-      "ticker": "QQQ",
-      "v2": {
-        "overrides": {}
-      }
-    },
-    {
-      "ticker": "RGTI",
-      "v2": {
-        "overrides": {}
-      }
-    },
-    {
-      "ticker": "RKLB",
-      "v2": {
-        "overrides": {}
-      }
-    },
-    {
-      "ticker": "SGOV",
-      "v2": {
-        "overrides": {}
-      }
-    },
-    {
-      "ticker": "SLV",
-      "v2": {
-        "overrides": {}
-      }
-    },
-    {
-      "ticker": "SNDK",
-      "v2": {
-        "overrides": {}
-      }
-    },
-    {
       "ticker": "SPCX",
       "v2": {
-        "overrides": {}
-      }
-    },
-    {
-      "ticker": "SPY",
-      "v2": {
-        "overrides": {}
-      }
-    },
-    {
-      "ticker": "TSLA",
-      "v2": {
-        "overrides": {}
-      }
-    },
-    {
-      "ticker": "TSM",
-      "v2": {
-        "overrides": {}
-      }
-    },
-    {
-      "ticker": "USAR",
-      "v2": {
-        "overrides": {}
-      }
-    },
-    {
-      "ticker": "USO",
-      "v2": {
-        "overrides": {}
+        "overrides": {
+          "expiriesAhead": {
+            "daily": 0,
+            "weekly": 2
+          }
+        }
       }
     }
   ]

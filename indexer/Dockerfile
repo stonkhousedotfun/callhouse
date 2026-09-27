@@ -5,8 +5,8 @@
 # indexer/. pnpm-lock.yaml and pnpm-workspace.yaml live at the root and the install must be
 # workspace-aware, so a Dockerfile that could only see indexer/ would have nothing correct to
 # install from. `dockerfilePath` in indexer/railway.json therefore reads `indexer/Dockerfile`,
-# relative to a service Root Directory of the repo root. ops/deploy.md ("indexer") documents every
-# Railway-side setting this file assumes; if you change one, change it there too.
+# relative to a service Root Directory of the repo root. The Railway service settings
+# must match what this file assumes; if you change one, change the other too.
 #
 # THE LAYERING IS THE POINT: manifests → install → sources → prune. Copy the sources before the
 # install and every handler edit reinstalls node_modules from scratch.
@@ -27,14 +27,20 @@
 #     build of this file). `--ignore-scripts` was the alternative and is worse: it would also skip
 #     esbuild's postinstall, and the next dependency whose install script matters would fail at
 #     runtime instead of here. The toolchain stays in the builder; the runner never sees it.
-#   - No volume. The state is Postgres (DATABASE_URL). A container restart loses nothing; see
-#     ops/deploy.md "indexer" for what a REDEPLOY does, which is a different question.
-#   - A shell in CMD, deliberately, and `exec` so it is gone before Ponder runs. See the CMD note.
+#   - No volume. The state is Postgres (DATABASE_URL). A container restart loses nothing. What a
+#     REDEPLOY does is a different question.
+#   - A shell in CMD, deliberately, and `exec` so it is gone before the process it starts runs. That
+#     process is lib/stdio-redact.mjs, PID 1, with Ponder as its child. See the CMD note.
 #
 # DELIBERATELY ABSENT:
 #   - No `pnpm start` in CMD. pnpm would sit at PID 1 between Railway's SIGTERM and Ponder, and
 #     Ponder's shutdown (close the HTTP server, release the schema lock, stop the heartbeat) would
-#     not run. Ponder's own bin is invoked with node directly.
+#     not run. Ponder's own bin is invoked with node directly, as the child of the redaction
+#     wrapper, which forwards SIGTERM, SIGINT and SIGQUIT to it and exits with its code.
+#   - No shell pipe into a filter (`ponder ... | node redact`). A pipeline cannot be exec'd, so sh
+#     would sit at PID 1 and swallow SIGTERM, and the pipeline would exit with the FILTER's status,
+#     so a Ponder crash (1 or 75) would report 0 and indexer/railway.json's ON_FAILURE restart would
+#     never fire. The wrapper owns both pipes instead.
 #   - No --hostname. Unset, Node listens on `::` when IPv6 exists (which also accepts IPv4) and on
 #     `0.0.0.0` when it does not. Pinning 0.0.0.0 would make the service unreachable over Railway's
 #     IPv6 private network (`indexer.railway.internal`) while changing nothing for the public edge.
@@ -110,6 +116,29 @@ RUN test -f /out/ponder.config.ts \
       echo "Check the COPY lines above and the indexer/* exceptions in the root .dockerignore."; \
       exit 1; }
 
+# The CMD's PID 1 is lib/stdio-redact.mjs, which redacts every line Ponder writes (Ponder's own
+# logger prints its RPC errors with the keyed provider URL). Prove it here, on the file that ships: a FAKE
+# keyed URL written to fd 1 and to fd 2 must come out as scheme://host/..., and a child's exit 75 (Ponder's
+# retryable crash) must come out as 75, or the image would leak keys or hide crashes from ON_FAILURE.
+RUN test -f /out/lib/stdio-redact.mjs \
+ && out=$(node /out/lib/stdio-redact.mjs node -e 'const fs=require("fs");fs.writeSync(1,"a https://rpc.example.com/v2/FAKEKEY1\n");fs.writeSync(2,"b https://rpc.example.com/v2/FAKEKEY2\n")' 2>&1) \
+ && test "$(printf '%s\n' "$out" | grep -c 'https://rpc.example.com/')" -eq 2 \
+ && ! printf '%s\n' "$out" | grep -q FAKE \
+ && { node /out/lib/stdio-redact.mjs node -e 'process.exit(75)'; test $? -eq 75; } \
+ || { echo "BUILD ERROR: lib/stdio-redact.mjs is missing from /out, let a FAKE keyed URL through, or lost exit 75."; \
+      exit 1; }
+
+# Build the schema now, the way `ponder start` builds it at boot, so a schema Ponder refuses
+# fails THIS build instead of the new container on Railway. A change shipped a reserved column
+# name (`operationId` → `operation_id`) and the indexer could not boot. `ponder codegen` does not
+# build the schema (it exited 0 on that broken one) and CI does not run, so this stage is the gate
+# that actually runs. The check hands the schema to the installed Ponder's own buildSchema; see
+# indexer/scripts/check-schema.mjs. It validates /out, the files and the Ponder this image ships,
+# and lives outside /out so the runner never carries it. Exit 1 = Ponder refuses the schema,
+# exit 2 = the check could not run; either stops the build.
+COPY indexer/scripts/check-schema.mjs /check/check-schema.mjs
+RUN node --experimental-strip-types /check/check-schema.mjs /out
+
 
 # =============================================================================================
 # runner — the shipped image. No pnpm, no dev dependencies, no other workspace package.
@@ -141,7 +170,10 @@ EXPOSE 42069
 # An explicit DATABASE_SCHEMA wins — that is for `docker run` and one-off replays, and should be
 # left unset on Railway. With neither set, the shell stops with the message below.
 #
-# `exec` replaces the shell with node, so node is PID 1 and receives Railway's SIGTERM directly.
-# Without `exec` /bin/sh would sit at PID 1, swallow the signal, and every redeploy would end in a
-# SIGKILL with the schema lock still held.
-CMD ["sh", "-c", "exec node node_modules/ponder/dist/esm/bin/ponder.js start --log-format json --schema \"${DATABASE_SCHEMA:-${RAILWAY_DEPLOYMENT_ID:?set DATABASE_SCHEMA, or run on Railway where RAILWAY_DEPLOYMENT_ID is injected}}\""]
+# `exec` replaces the shell with node running lib/stdio-redact.mjs, so the WRAPPER is PID 1
+# and Ponder is its child. The wrapper receives Railway's SIGTERM and forwards SIGTERM, SIGINT and
+# SIGQUIT to Ponder (the signals Ponder's shutdown handles; SIGHUP is ignored, not forwarded), redacts
+# every line Ponder writes to stdout and stderr (its logger prints RPC errors with the keyed URL), and
+# exits after Ponder closes, with Ponder's code. Without `exec` /bin/sh would sit at PID 1, swallow the
+# signal, and every redeploy would end in a SIGKILL with the schema lock still held.
+CMD ["sh", "-c", "exec node lib/stdio-redact.mjs node node_modules/ponder/dist/esm/bin/ponder.js start --log-format json --schema \"${DATABASE_SCHEMA:-${RAILWAY_DEPLOYMENT_ID:?set DATABASE_SCHEMA, or run on Railway where RAILWAY_DEPLOYMENT_ID is injected}}\""]

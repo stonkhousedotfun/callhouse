@@ -2,7 +2,7 @@ import type { Metadata } from "next";
 import Link from "next/link";
 
 import { Button, Chip, Panel } from "@/components/ui";
-import { DEFAULT_MARKET, marketHref } from "@/lib/markets";
+import { V2_NAV_ENTRIES } from "@/lib/ui/navEntries";
 
 export const metadata: Metadata = {
   title: "Not found — StonkHouse",
@@ -10,17 +10,23 @@ export const metadata: Metadata = {
 };
 
 /**
- * The 404, including for a market that is not live: /tsla/account is this page until TSLA's
- * registry row is live. Account and Book point at the default market (lib/markets.ts), the same
- * place the bare /account and /book redirects go.
+ * The 404, including for a market that is not live (/tsla is this page until TSLA's registry row is live). The page
+ * list is the app's own nav (lib/ui/navEntries.ts, the header and the tab bar), so a 404 never links to a v1 route the
+ * nav has left behind (it used to point at /nvda/account and /nvda/book). Docs and Legal follow.
  */
-const ROUTES = [
-  { href: "/", label: "Home", what: "What StonkHouse is, and which markets are live" },
-  { href: marketHref(DEFAULT_MARKET.ticker, "account"), label: "Account", what: "Put stock in. Offer it this week." },
-  { href: marketHref(DEFAULT_MARKET.ticker, "book"), label: "Book", what: "Buy this week, or exercise" },
+const WHAT: Readonly<Record<string, string>> = {
+  "/": "Buy options",
+  "/portfolio": "Your positions and orders",
+  "/vaults": "Earn and House vaults",
+  "/wins": "Recent wins",
+  "/trust/markets": "Which markets are live",
+};
+
+const ROUTES: readonly { href: string; label: string; what: string }[] = [
+  ...V2_NAV_ENTRIES.map((entry) => ({ ...entry, what: WHAT[entry.href] ?? "" })),
   { href: "/docs", label: "Docs", what: "How this works" },
   { href: "/legal", label: "Legal", what: "Who this is for" },
-] as const;
+];
 
 export default function NotFound() {
   return (
@@ -35,15 +41,15 @@ export default function NotFound() {
           There is nothing <span className="text-accent-text">at this address.</span>
         </h1>
         <p className="mt-5 max-w-[34em] text-[17.5px] leading-[1.6] text-ink-2 sm:text-[18.5px]">
-          The link is old or mistyped, or it names a market that is not open yet.
+          The link is old or mistyped, or the market is not open yet.
         </p>
         <div className="mt-7 flex flex-wrap gap-2.5 sm:gap-3">
-          <Button href="/">Home</Button>
-          <Button variant="ghost" href={marketHref(DEFAULT_MARKET.ticker, "account")}>
-            Account
+          <Button href="/">Buy</Button>
+          <Button variant="ghost" href="/portfolio">
+            Portfolio
           </Button>
-          <Button variant="ghost" href={marketHref(DEFAULT_MARKET.ticker, "book")}>
-            Book
+          <Button variant="ghost" href="/vaults">
+            Vaults
           </Button>
         </div>
       </div>

@@ -3,7 +3,7 @@ import type { ReactNode } from "react";
 import { cn } from "@/lib/cn";
 
 /**
- * Numbers. Every figure on the site is Geist Mono with tabular figures.
+ * Numbers. Every figure in the app is JetBrains Mono with tabular figures.
  *
  * <Num> is the inline form: `<Num unit="USDG">225.00</Num>`. The unit renders as a smaller,
  * muted <small> after a space, like the mockup's `225.00 <small>USDG</small>`.

@@ -1,6 +1,14 @@
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 
 import {
+  boundaryState,
+  cutoffSentences,
+  HOUSE_ROLL_OVERDUE_S,
+  houseExposed,
+  houseHeldUntil,
+  UNPINNED_BOUNDARY_HOLD_S,
   NAV_NOT_AVAILABLE,
   NEW_YORK_TIME_ZONE,
   SHARE_DECIMALS,
@@ -9,6 +17,7 @@ import {
   depositJoinsSentence,
   epochResult,
   formatNewYork,
+  houseRollPreviewLabel,
   inKindPreview,
   navView,
   secondsUntilBoundary,
@@ -33,6 +42,14 @@ const atBoundary = (shares: bigint) =>
     poolUsdg: POOL_USDG,
     poolStock: POOL_STOCK,
   }) as const;
+
+describe("houseRollPreviewLabel", () => {
+  it("labels a non-exact preview as an estimate and an exact one as the close", () => {
+    expect(houseRollPreviewLabel(false)).toMatch(/estimate/i);
+    expect(houseRollPreviewLabel(true)).not.toMatch(/estimate/i);
+    expect(houseRollPreviewLabel(false)).not.toBe(houseRollPreviewLabel(true));
+  });
+});
 
 describe("navView", () => {
   it("never returns a number for a running epoch", () => {
@@ -83,7 +100,7 @@ describe("inKindPreview", () => {
     const a = inKindPreview(atBoundary(ALICE));
     if (!a.available) throw new Error("boundary input must produce a preview");
 
-    // Stage 1 -- HouseVault.rollEpoch:617-618 (contracts v8 0124b58e), the whole queue out of the pool.
+    // Stage 1 -- HouseVault.rollEpoch, the whole queue out of the pool.
     expect(a.queueUsdg).toBe((POOL_USDG * QUEUE_SHARES) / TOTAL_SHARES);
     expect(a.queueUsdg).toBe(75_000_001n);
     expect(a.queueStock).toBe(3_000_000_000_000_000_001n);
@@ -112,7 +129,7 @@ describe("inKindPreview", () => {
     // Alice and Bob are the entire queue, so their two previews are the whole batch as this module
     // previews it. The residue is real dust and it is strictly positive for this vector -- not an
     // identity that holds for any input, which is what the previous version of this assertion was.
-    // WHERE THE DUST GOES is the next test's subject: since SEC-27 it is paid to the last claimant,
+    // WHERE THE DUST GOES is the next test's subject: it is paid to the last claimant,
     // it does NOT stay in the vault, and this test's conservation equation is about the preview's
     // own outputs, not about the contract's final balances.
     expect(ALICE + BOB).toBe(QUEUE_SHARES);
@@ -136,10 +153,10 @@ describe("inKindPreview", () => {
     expect(a.stockOut + b.stockOut + a.stockLeftInVault + stockDust).toBe(POOL_STOCK);
   });
 
-  it("is exact for the first claimant and a lower bound for every later one (SEC-27 run-down)", () => {
-    // HouseVault.claim:478-503 at contracts v8 0124b58e756568b239f7ad97acd1571add5b58a9 pays each
+  it("is exact for the first claimant and a lower bound for every later one (the batch runs down as claims pay)", () => {
+    // HouseVault.claim (HouseVault.sol) pays each
     // claimant mulDiv(batchUsdgRemaining, holderShares, batchSharesRemaining) and then SUBTRACTS what
-    // it paid from the batch (SEC-27, T-SEC-P4-HOUSEVAULT 5c7ac72b), so the last claimant of an epoch
+    // it paid from the batch, so the last claimant of an epoch
     // divides the whole remainder by the whole remaining share count and takes the dust. This test
     // walks that run-down for both claim orders and asserts what the preview may promise against it.
     const a = inKindPreview(atBoundary(ALICE));
@@ -237,10 +254,121 @@ describe("countdown", () => {
     const stamp = formatNewYork(1_700_000_000);
     expect(stamp.length).toBeGreaterThan(0);
     expect(NEW_YORK_TIME_ZONE).toBe("America/New_York");
-    // Exact, not substring: a rewrite that keeps "next boundary" and the stamp but loses the meaning
-    // ("does not join before the next boundary") stayed green under the previous two `toContain`s.
+    // Exact, not substring: a rewrite that keeps "next close" and the stamp but loses the meaning
+    // ("does not join before the next close") stayed green under the previous two `toContain`s.
     expect(depositJoinsSentence(1_700_000_000)).toBe(
-      `Your deposit joins at the next boundary (${stamp}).`,
+      `Your deposit joins at the next close (${stamp}).`,
     );
   });
 });
+
+/**
+ * The two cutoffs are separate rules, stated separately, and the wording follows the cadence.
+ * The close is the vault's own epochEnd, stamped; no sentence hard-codes "Fri" or "4:00 pm", because a
+ * holiday week closes on Thursday and an early-close day closes at 1:00 pm.
+ */
+describe("cutoffSentences", () => {
+  const friday = 1_789_156_800; // Fri 2026-09-11 16:00 EDT
+  const thursday = friday - 86_400; // a holiday week's last trading day
+  /** A test fixture for the chain's SETTLEMENT_WINDOW() read; cutoffSentences takes it, never a literal. */
+  const W = 1_800;
+  it("requests stop SETTLEMENT_WINDOW before the close they were given; the withdrawal rule is the same for both", () => {
+    const w = cutoffSentences("weekly", friday, W);
+    const d = cutoffSentences("daily", friday, W);
+    expect(w.deposit).toBe(`Deposit before ${formatNewYork(friday - W)} to be priced at this week's close (${formatNewYork(friday)}).`);
+    expect(d.deposit).toBe(`Deposit before ${formatNewYork(friday - W)} to be priced at today's close (${formatNewYork(friday)}).`);
+    expect(d.deposit).not.toMatch(/fri|week/i);
+    expect(d.idle).not.toMatch(/fri|week|monday/i);
+    expect(w.withdraw).toBe(d.withdraw);
+    // This reversed "Withdrawal requests are taken until the close is processed".
+    expect(w.withdraw).toBe(`Withdrawal requests are taken until ${formatNewYork(friday - W)}, 30 minutes before the close, and are priced at that close.`);
+  });
+
+  it("the window is the one passed in, not a literal", () => {
+    expect(cutoffSentences("daily", friday, 600).withdraw)
+      .toBe(`Withdrawal requests are taken until ${formatNewYork(friday - 600)}, 10 minutes before the close, and are priced at that close.`);
+  });
+
+  it("names no weekday or clock time of its own, so a holiday-week close is stated as it is", () => {
+    const h = cutoffSentences("weekly", thursday, W);
+    expect(h.deposit).toBe(`Deposit before ${formatNewYork(thursday - W)} to be priced at this week's close (${formatNewYork(thursday)}).`);
+    for (const c of [h, cutoffSentences("daily", thursday, W)]) {
+      // The stamps are the chain's own times and may read "4:00 PM"; only the words around them are checked.
+      const text = [c.deposit, c.withdraw, c.idle].join(" ")
+        .split(formatNewYork(thursday)).join("").split(formatNewYork(thursday - W)).join("");
+      expect(text).not.toMatch(/fri|monday|4:00|\bpm\b|boundary|epoch/i);
+    }
+  });
+});
+
+describe("boundaryState", () => {
+  const end = 1_789_156_800;
+  it("is open before the close, waiting from the close for seven hours, overdue after", () => {
+    expect(boundaryState(end - 1, end)).toBe("open");
+    expect(boundaryState(end, end)).toBe("waiting");
+    expect(boundaryState(end + HOUSE_ROLL_OVERDUE_S, end)).toBe("waiting");
+    expect(boundaryState(end + HOUSE_ROLL_OVERDUE_S + 1, end)).toBe("overdue");
+  });
+
+  // A close money is exposed to that the vault did not lock is HELD by rollEpoch for a week.
+  it("is held, not overdue, from the close until a week after it when the vault did not lock an exposed boundary", () => {
+    const unlocked = { pinnedBoundary: 0, exposed: true };
+    expect(UNPINNED_BOUNDARY_HOLD_S).toBe(604_800);
+    expect(houseHeldUntil(end)).toBe(end + UNPINNED_BOUNDARY_HOLD_S);
+    expect(boundaryState(end - 1, end, unlocked)).toBe("open");
+    expect(boundaryState(end, end, unlocked)).toBe("held");
+    expect(boundaryState(end + HOUSE_ROLL_OVERDUE_S + 1, end, unlocked)).toBe("held");
+    expect(boundaryState(houseHeldUntil(end) - 1, end, unlocked)).toBe("held");
+    expect(boundaryState(houseHeldUntil(end), end, unlocked), "past the hold an unrolled close is late again").toBe("overdue");
+    expect(boundaryState(end, end, { pinnedBoundary: end - 604_800, exposed: true }), "a lock of the previous close is not this one's").toBe("held");
+  });
+
+  it("is never held for a locked close, an unexposed vault, or reads that failed", () => {
+    const late = end + HOUSE_ROLL_OVERDUE_S + 1;
+    expect(boundaryState(late, end, { pinnedBoundary: end, exposed: true })).toBe("overdue");
+    expect(boundaryState(late, end, { pinnedBoundary: 0, exposed: false })).toBe("overdue");
+    expect(boundaryState(late, end, { pinnedBoundary: 0, exposed: null })).toBe("overdue");
+    expect(boundaryState(late, end, { pinnedBoundary: null, exposed: true })).toBe("overdue");
+    expect(boundaryState(late, end, null)).toBe("overdue");
+  });
+
+  it("houseExposed: shares or a queued deposit; unknown when a read failed", () => {
+    expect(houseExposed(0n, { usdg: 0n, stock: 0n })).toBe(false);
+    expect(houseExposed(1n, { usdg: 0n, stock: 0n })).toBe(true);
+    expect(houseExposed(0n, { usdg: 1n, stock: 0n })).toBe(true);
+    expect(houseExposed(0n, { usdg: 0n, stock: 1n })).toBe(true);
+    expect(houseExposed(null, { usdg: 0n, stock: 0n })).toBeNull();
+    expect(houseExposed(0n, null)).toBeNull();
+    expect(houseExposed(undefined, undefined)).toBeNull();
+  });
+
+  it("mirrors the keeper's HOUSE_ROLL_OVERDUE_S rather than restating it", () => {
+    const steps = readFileSync(join(import.meta.dirname, "..", "..", "..", "keeper", "src", "v2", "cranker", "steps.ts"), "utf8");
+    expect(HOUSE_ROLL_OVERDUE_S).toBe(keeperConst(steps, "HOUSE_ROLL_OVERDUE_S"));
+  });
+});
+
+/**
+ * The value of `export const <name> = <expr>;` in keeper source text, where <expr> is a sum of products of integer
+ * literals and other exported constants of the same file. Any other shape throws, so the mirror above fails loudly
+ * rather than comparing against a number it could not read.
+ */
+function keeperConst(src: string, name: string, seen: readonly string[] = []): number {
+  if (seen.includes(name)) throw new Error(`keeper constant cycle: ${[...seen, name].join(" -> ")}`);
+  const m = src.match(new RegExp(`export const ${name} = ([^;]+);`));
+  if (!m) throw new Error(`keeper/src/v2/cranker/steps.ts no longer exports ${name}`);
+  const expr = m[1]!;
+  const value = expr.split("+").reduce(
+    (sum, term) =>
+      sum +
+      term.split("*").reduce((product, raw) => {
+        const factor = raw.trim();
+        if (/^[0-9][0-9_]*$/.test(factor)) return product * Number(factor.replace(/_/g, ""));
+        if (/^[A-Z][A-Z0-9_]*$/.test(factor)) return product * keeperConst(src, factor, [...seen, name]);
+        throw new Error(`cannot resolve keeper ${name} = ${expr}: "${factor}" is not an integer literal or constant`);
+      }, 1),
+    0,
+  );
+  if (!Number.isSafeInteger(value)) throw new Error(`keeper ${name} = ${expr} resolved to ${value}`);
+  return value;
+}

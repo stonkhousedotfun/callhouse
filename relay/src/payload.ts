@@ -1,9 +1,9 @@
 /**
- * The keeper's alert payload, as keeper/src/alerts.ts builds it and ops/alerts.md documents it:
+ * The keeper's alert payload, as keeper/src/alerts.ts builds it:
  *
  *   { source, kind, severity, message, market, factory, vault, chainId, at, data }
  *
- * WHAT IS STRICT, and why: `severity` is the routing key (ops/alerts.md "Routing") and `kind` and
+ * WHAT IS STRICT, and why: `severity` is the routing key and `kind` and
  * `message` are what a human reads, so all three are required and typed. A body without them is
  * not a keeper alert, and the relay answers 400 rather than forwarding noise into the channel.
  *

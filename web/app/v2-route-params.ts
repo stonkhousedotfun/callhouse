@@ -10,6 +10,19 @@ export function parseV2Ticker(param: string): V2Market | undefined {
   return getV2Market(param);
 }
 
+/**
+ * The /sell address an old /earn/<ticker> link moves to (the writer page left /earn when
+ * "Earn" went to the lending vault). The query string is kept, repeated keys included.
+ */
+export function sellHref(ticker: string, search: Readonly<Record<string, string | string[] | undefined>> = {}): string {
+  const query = new URLSearchParams();
+  for (const [key, value] of Object.entries(search)) {
+    for (const one of Array.isArray(value) ? value : value === undefined ? [] : [value]) query.append(key, one);
+  }
+  const qs = query.toString();
+  return `/sell/${ticker.toLowerCase()}${qs ? `?${qs}` : ""}`;
+}
+
 /** Numeric long id or a readable call/put alias. Returns the canonical decimal id. */
 export function parseV2Series(ticker: V2Market, param: string): string | undefined {
   if (UINT.test(param)) {

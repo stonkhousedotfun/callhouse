@@ -1,19 +1,19 @@
 /**
- * ops/v8/tvl-threshold.mjs — the OWN8-09 audit trigger: one definition, derived, in one place.
+ * ops/v8/tvl-threshold.mjs — the audit trigger: one definition, derived, in one place.
  *
  *   node ops/v8/tvl-threshold.mjs --registry ops/markets/tier1.json          # print the threshold line
  *   node ops/v8/tvl-threshold.mjs --registry ops/markets/tier1.json --json
  *
- * WHY THIS FILE EXISTS. OWN8-09 says the owner commissions an external review and a bug bounty once
- * TVL reaches $1M. Before this, that figure lived in PROSE in two places — ops/alerts.md §V61 and the
+ * WHY THIS FILE EXISTS. The team commissions an external review and a bug bounty once
+ * TVL reaches $1M. Before this, that figure lived in PROSE in two places — the alert runbook and the
  * DEFAULTS comment in ops/v2/monitor.mjs — and in NO configuration at all: `auditTriggerUsdg` defaults
  * to 0, no registry carried the field, and `MONITOR_THRESHOLDS` appeared in no env file under
  * ops/v2/env/ or ops/v2/env-dev/. A threshold nothing sets is a notice that is dark in every shipped
- * configuration, which is the failure OWN8-09 exists to prevent rather than a conservative default.
+ * configuration, which is the failure this trigger exists to prevent rather than a conservative default.
  *
  * WHAT IT DEFINES, AND WHY THE DEFINITION IS THE HARD PART. The monitor's DEFAULTS comment is right
- * that "the number is not the uncertain part, the DEFINITION is". $1,000,000 is an owner decision
- * (V3-D33). What counts as "locked" is a choice: this counts the USDG held by the protocol's own
+ * that "the number is not the uncertain part, the DEFINITION is". $1,000,000 is the fixed figure.
+ * What counts as "locked" is a choice: this counts the USDG held by the protocol's own
  * contracts — the Clearinghouse and the MakerVault — and nothing else. Both halves live here so that
  * a reader changing one is looking straight at the other.
  *
@@ -29,10 +29,10 @@ import { readFileSync } from "node:fs";
 export const USDG_DECIMALS = 6;
 
 /**
- * The owner's external-audit trigger, in USD. Owner decision V3-D33, "audit at $1M TVL".
+ * The external-audit trigger, in USD: audit at $1M TVL.
  * THE ONLY PLACE THIS NUMBER IS WRITTEN. ops/v2/monitor.mjs must not restate it; the monitor's own
  * test binds its DEFAULTS to this export, so a change here that is not made there fails rather than
- * drifting into two thresholds that disagree about when the owner is told.
+ * drifting into two thresholds that disagree about when the team is told.
  */
 export const AUDIT_TRIGGER_USD = 1_000_000;
 
@@ -54,7 +54,7 @@ export const LOCKED_HOLDERS = ["clearinghouse", "makerVault"];
  *
  * There was no staleness concept anywhere before this. A monitor that stopped being able to read the
  * balances would report its last known number forever, and for an alert whose whole premise is that
- * the owner is NOT watching, a stale number and a number that never moved are indistinguishable.
+ * the team is NOT watching, a stale number and a number that never moved are indistinguishable.
  * Four passes at the monitor's default cadence, so one missed pass is not a page.
  */
 export const MAX_TVL_AGE_S = 3600;
@@ -65,8 +65,8 @@ export class TvlThresholdError extends Error {}
  * Derive the audit trigger and its holder addresses from a parsed registry.
  *
  * REFUSES rather than defaulting. A registry with no `shared.usdg`, or naming none of LOCKED_HOLDERS,
- * cannot express this threshold, and answering 0 would be indistinguishable from "the owner turned it
- * off". That is the whole defect class this row is about, so the error is the answer.
+ * cannot express this threshold, and answering 0 would be indistinguishable from "the trigger was turned
+ * off". That is the whole defect class this file is about, so the error is the answer.
  */
 export function deriveTrigger(registry) {
   const shared = registry?.shared ?? {};

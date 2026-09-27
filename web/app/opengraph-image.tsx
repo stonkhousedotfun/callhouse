@@ -1,5 +1,5 @@
 import { renderBrandImage } from "@/components/v2/PnlImage";
-import { imageMoney } from "@/components/v2/PnlText";
+import { liveOptionImageLines } from "@/components/v2/PnlText";
 import { v2Api } from "@/lib/v2/api";
 
 export const alt = "StonkHouse — buy an outcome with a known maximum loss";
@@ -13,14 +13,8 @@ export default async function OpengraphImage() {
     risk: "Read the risks before you trade" });
   try {
     const { card } = await v2Api.getHeroCard();
-    if (card) {
-      const ticket = card.perShare ?? card.perUnit;
-      return renderBrandImage({ eyebrow: "Live option", metric: `${ticket.multiple}×`,
-        headline: `${card.series.ticker} outcome`,
-        detail: `If ${card.series.ticker} reaches $${card.target.formatted} by expiry`,
-        risk: `Max loss is ${imageMoney(ticket.cost, "up")} USDG for this ticket` });
-    }
-  } catch { /* the example below is deliberately labelled */ }
-  return renderBrandImage({ eyebrow: "Example", metric: "Buy an outcome", headline: "Know your maximum loss",
-    detail: "Explore Stock Token options on Robinhood Chain", risk: "Example only · live prices appear in the app" });
+    if (card) return renderBrandImage(liveOptionImageLines(card));
+  } catch { /* no live card: the brand card below carries no price, so it needs no "example" label */ }
+  return renderBrandImage({ eyebrow: "StonkHouse", metric: "Buy an outcome", headline: "Know your maximum loss",
+    detail: "Stock Token options on Robinhood Chain", risk: "Live prices in the app" });
 }

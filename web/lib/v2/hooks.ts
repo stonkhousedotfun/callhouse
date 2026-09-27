@@ -12,8 +12,12 @@ import {
   type LeaderboardOptions,
   type MarketSeriesOptions,
   type PageOptions,
+  type StrategiesOptions,
   type WinsOptions,
 } from "./api";
+import { readEarnVault, readHouseVault, readSplitter } from "./chainReads";
+import { V2_DEPLOYMENT } from "./config";
+import { readOrderBookOwed } from "./owed";
 
 const LIVE = { staleTime: 15_000, refetchInterval: 15_000, refetchOnWindowFocus: true } as const;
 const FRESH = { staleTime: 0, refetchInterval: 5_000, refetchOnWindowFocus: true, retry: 0 } as const;
@@ -34,7 +38,9 @@ export const v2Keys = {
   flywheel: ["v2", "flywheel"] as const,
   earn: (address?: string) => ["v2", "earn", address?.toLowerCase()] as const,
   house: ["v2", "house"] as const,
-  houseMarket: (market: string | undefined, address?: string) => ["v2", "houseMarket", market, address?.toLowerCase()] as const,
+  /** keyed by vault too (lowercased), so two vaults of one market never share a cached answer. */
+  houseMarket: (market: string | undefined, address?: string, vault?: string) =>
+    ["v2", "houseMarket", market, address?.toLowerCase(), vault?.toLowerCase()] as const,
   markets: ["v2", "markets"] as const,
   marketSeries: (ticker: string | undefined, filters: MarketSeriesOptions = {}) => ["v2", "marketSeries", ticker, filters] as const,
   allMarketSeries: (ticker: string | undefined, filters: Omit<MarketSeriesOptions, "cursor" | "limit"> = {}) => ["v2", "allMarketSeries", ticker, filters] as const,
@@ -48,13 +54,17 @@ export const v2Keys = {
   history: (address: string | undefined, filters: PageOptions = {}) => ["v2", "history", address?.toLowerCase(), filters] as const,
   wins: (filters: WinsOptions = {}) => ["v2", "wins", filters] as const,
   activity: (filters: ActivityOptions = {}) => ["v2", "activity", filters] as const,
-  strategies: (filters: PageOptions & { active?: boolean } = {}) => ["v2", "strategies", filters] as const,
+  strategies: (filters: StrategiesOptions = {}) => ["v2", "strategies", filters] as const,
   leaderboard: (filters: LeaderboardOptions = {}) => ["v2", "leaderboard", filters] as const,
   pnl: (id: string | undefined) => ["v2", "pnl", id] as const,
   stats: ["v2", "stats"] as const,
   makers: (filters: PageOptions = {}) => ["v2", "makers", filters] as const,
   maker: (address: string | undefined) => ["v2", "maker", address?.toLowerCase()] as const,
   fair: (longId: string | undefined) => ["v2", "fair", longId] as const,
+  vaultReads: (kind: "house" | "earn", vault: string | undefined, account?: string) =>
+    ["v2", "vaultReads", kind, vault?.toLowerCase(), account?.toLowerCase()] as const,
+  splitterReads: (splitter: string | undefined) => ["v2", "splitterReads", splitter?.toLowerCase()] as const,
+  orderBookOwed: (account: string | undefined) => ["v2", "orderBookOwed", account?.toLowerCase()] as const,
 };
 
 function useV2Query<T>(key: readonly unknown[], read: (signal: AbortSignal) => Promise<T>, enabled = true, fresh = false) {
@@ -84,8 +94,9 @@ export function useEarn(address?: string) {
 export function useHouse() {
   return useV2Query(v2Keys.house, (signal) => v2Api.getHouse({ signal }));
 }
-export function useHouseMarket(market: string | undefined, address?: string) {
-  return useV2Query(v2Keys.houseMarket(market, address), (signal) => v2Api.getHouseMarket(market!, { address }, { signal }), Boolean(market));
+export function useHouseMarket(market: string | undefined, address?: string, vault?: string) {
+  return useV2Query(v2Keys.houseMarket(market, address, vault),
+    (signal) => v2Api.getHouseMarket(market!, { address, vault }, { signal }), Boolean(market));
 }
 export function useMarkets() {
   return useV2Query(v2Keys.markets, (signal) => v2Api.getMarkets({ signal }));
@@ -135,7 +146,7 @@ export function useWins(filters: WinsOptions = {}) {
 export function useActivity(filters: ActivityOptions = {}) {
   return useV2Query(v2Keys.activity(filters), (signal) => v2Api.getActivity(filters, { signal }));
 }
-export function useStrategies(filters: PageOptions & { active?: boolean } = {}) {
+export function useStrategies(filters: StrategiesOptions = {}) {
   return useV2Query(v2Keys.strategies(filters), (signal) => v2Api.getStrategies(filters, { signal }));
 }
 export function useLeaderboard(filters: LeaderboardOptions = {}) {
@@ -155,4 +166,52 @@ export function useMaker(address?: string) {
 }
 export function useFair(longId?: string) {
   return useV2Query(v2Keys.fair(longId), (signal) => v2Api.getFair(longId!, { signal }), Boolean(longId));
+}
+
+/**
+ * Chain reads for the vault pages: one multicall per vault, refetched
+ * on the LIVE cadence and in place, so numbers update without moving the layout. Each field of the result is
+ * already null-on-failure (chainReads.ts); the query itself errors only when the whole multicall does.
+ */
+const VAULT_READS = { staleTime: 15_000, refetchInterval: 30_000, refetchOnWindowFocus: true } as const;
+
+export function useHouseVaultReads(vault: `0x${string}` | undefined, account?: `0x${string}`) {
+  return useQuery({
+    queryKey: v2Keys.vaultReads("house", vault, account),
+    queryFn: () => readHouseVault(vault!, account),
+    enabled: Boolean(vault),
+    ...VAULT_READS,
+  });
+}
+
+export function useEarnVaultReads(vault: `0x${string}` | undefined, account?: `0x${string}`) {
+  return useQuery({
+    queryKey: v2Keys.vaultReads("earn", vault, account),
+    queryFn: () => readEarnVault(vault!, account),
+    enabled: Boolean(vault),
+    ...VAULT_READS,
+  });
+}
+
+export function useSplitterReads(splitter: `0x${string}` | null | undefined) {
+  return useQuery({
+    queryKey: v2Keys.splitterReads(splitter ?? undefined),
+    queryFn: () => readSplitter(splitter!),
+    enabled: Boolean(splitter),
+    staleTime: 5 * 60_000,
+    refetchOnWindowFocus: false,
+  });
+}
+
+/**
+ * `OrderBook.owed(account)`, read on chain because the credit has no log (lib/v2/owed.ts). Under the
+ * `v2` key prefix, so the portfolio's post-transaction invalidation refreshes it after a claim.
+ */
+export function useOrderBookOwed(account: `0x${string}` | undefined) {
+  return useQuery({
+    queryKey: v2Keys.orderBookOwed(account),
+    queryFn: () => readOrderBookOwed(account!),
+    enabled: Boolean(account && V2_DEPLOYMENT.contracts.orderBook),
+    ...VAULT_READS,
+  });
 }

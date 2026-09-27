@@ -3,7 +3,7 @@
  * outside any try. The indexer's /v2/markets answers 503 spot_unavailable when SettlementOracle
  * spot() reverts for ANY market (index../api/v2/markets.ts, unchanged on codex/v2-integration),
  * and spot() reverts StaleSpot whenever the Chainlink push feed is older than spotMaxAgeS. At the 3600
- * of the time that was quiet hours, every night and every weekend; the 90000 of ops/deploy.md §15.13 still
+ * of the time that was quiet hours, every night and every weekend; the deployed 90000 still
  * leaves every weekend and a broken feed. Every tick then throws with nothing enqueued, and once
  * the gap passes 6 h the storm guard (engine.ts:198-203, 234) drops the receipts for good.
  * Expected after the fix: a markets failure leaves spot-driven rules idle but event receipts flow.

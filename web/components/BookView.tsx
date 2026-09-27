@@ -16,12 +16,13 @@ import { useAccount, useBlock, usePublicClient, useReadContract, useReadContract
 import { ConnectButton } from "@/components/ConnectButton";
 import { ExercisePanel } from "@/components/legacy/ExercisePanel";
 import { useNotice, useTxRunner } from "@/components/TxToast";
-import { Button, Card, CardHead, CardTitle, Notice, PageHead, Row, Rows } from "@/components/ui";
+import { Button, Card, CardHead, CardTitle, Notice, PageHead, Row, Rows, TickerLogo } from "@/components/ui";
 import { CHAIN_ID } from "@/lib/chain";
 import {
   CLEARINGHOUSE,
   SEAPORT,
   USDG,
+  USDG_DECIMALS,
   ZERO_CONDUIT_KEY,
   ZERO_HASH,
   accountFactoryAbi,
@@ -33,6 +34,7 @@ import {
 import { approvalFor, exerciseWindow } from "@/lib/exercise";
 import { parseFactoryWeek } from "@/lib/factoryWeek";
 import { fmtUsdg, shortAddress } from "@/lib/format";
+import { displayExact } from "@/lib/numberFormat";
 import type { OrderComponentsJson } from "@/lib/listing";
 import type { LegacyMarket } from "@/lib/legacy";
 import { advancedOrderFor } from "@/lib/seaportOrder";
@@ -394,7 +396,10 @@ export function BookView({ market }: { market: LegacyMarket }) {
     const out: Array<{ order: LotOrder; owner?: Address }> = [];
     let successIdx = 0;
     (lotsRead.data ?? []).forEach((row, i) => {
-      if (row.status !== "success") return;
+      // Advance the hash index only for rows hashCalls asked about: a successful read that does not decode has no
+      // hash call, so counting it would shift every later lot onto its neighbour's Seaport status.
+      const order = row.status === "success" ? asLotOrder(row.result) : undefined;
+      if (!order) return;
       const hashIdx = successIdx;
       successIdx += 1;
       const hashRow = hashesRead.data?.[hashIdx];
@@ -403,8 +408,6 @@ export function BookView({ market }: { market: LegacyMarket }) {
         const [validated, cancelled, filled, size] = status.result as [boolean, boolean, bigint, bigint];
         if (!validated || cancelled || (size > 0n && filled >= size)) return;
       }
-      const order = asLotOrder(row.result);
-      if (!order) return;
       const owner = ownerRead.data?.[accounts.indexOf(lotCalls[i].address)]?.result as Address | undefined;
       out.push({ order, owner });
     });
@@ -431,7 +434,7 @@ export function BookView({ market }: { market: LegacyMarket }) {
       }) as Promise<bigint>,
     ]);
     if (balance < total) {
-      notice("error", "Not enough USDG", `Need ${fmtUsdg(total)} USDG in this wallet.`);
+      notice("error", "Not enough USDG", `Need ${displayExact(total, USDG_DECIMALS)} USDG in this wallet.`);
       return false;
     }
     const needed = approvalFor(allowance, total);
@@ -483,12 +486,12 @@ export function BookView({ market }: { market: LegacyMarket }) {
   return (
     <>
       <PageHead
-        eyebrow={market.ticker}
+        eyebrow={<span className="inline-flex items-center gap-1.5"><TickerLogo ticker={market.ticker} />{market.ticker}</span>}
         title={<>{runoff ? "Your v1 calls." : "This week."}</>}
         lede={
           <p>
-            {runoff ? `Exercise existing ${market.ticker} calls while their exercise windows remain open.`
-              : `Each offer is one ${market.ticker} from one person. If you buy, they get paid and you get the call.`}
+            {runoff ? "Exercise the calls you hold while their window is open."
+              : `Each offer is one ${market.ticker} call from one seller.`}
             {!runoff && weekAsk !== undefined && weekOpen ? ` This week: ${fmtUsdg(weekAsk, 3)} USDG each.` : ""}
           </p>
         }
@@ -496,13 +499,13 @@ export function BookView({ market }: { market: LegacyMarket }) {
 
       <ExercisePanel rows={heldRows} ticker={market.ticker} onDone={() => void holdRead.refetch()} />
 
-      {runoff ? <Notice tone="info">New v1 purchases have moved to v2. Existing calls can still be exercised above.</Notice> : (
+      {runoff ? <Notice tone="info">New v1 buys have moved to v2.</Notice> : (
       !weekReady ? (
         <Notice tone="info">Loading this week.</Notice>
       ) : !weekOpen ? (
         <Notice tone="info">Nothing is for sale yet this week.</Notice>
       ) : liveRows.length === 0 ? (
-        <Notice tone="info">Nothing is for sale right now. Check back after someone offers their {market.ticker}.</Notice>
+        <Notice tone="info">Nothing is for sale right now.</Notice>
       ) : (
         <div className="grid gap-3">
           {liveRows.map(({ order, owner }) => {

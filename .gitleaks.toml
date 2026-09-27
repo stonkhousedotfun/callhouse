@@ -1,14 +1,66 @@
-title = "Stonkhouse app: default Gitleaks rules with one public-address exception"
+title = "Stonkhouse app: default Gitleaks rules with narrow, value-shaped exceptions"
 
 [extend]
 useDefault = true
 
-# The generic API-key heuristic also matches 20-byte EVM addresses assigned to
-# token0/token1 and contract-address fields. An address is public chain data;
-# a 32-byte private key does not match this exact shape. All other rules run.
+# Every exception below is scoped to the generic-api-key heuristic, so every
+# other default rule (private keys, GitHub/AWS/Slack tokens, ...) still runs on
+# every path. Each one matches the flagged value's exact shape, never a path
+# alone. Content-based on purpose: the line fingerprints this file replaced
+# (.gitleaksignore) went stale the first time the test they pinned moved.
+
+# A 20-byte EVM address is public chain data: token0/token1 in pool fixtures,
+# contract addresses in the generated registries, token constants in tests.
+# A 32-byte private key (64 hex digits) does not match this exact shape.
 [[allowlists]]
 description = "Exact 20-byte EVM address under generic-api-key only"
 targetRules = ["generic-api-key"]
 condition = "AND"
-paths = ['''^ops/''']
 regexes = ['''^0x[0-9a-fA-F]{40}$''']
+
+# Dotted registry key paths assigned to *_KEY / key: fields, for example
+# v2.fees.allowRent, v2.flywheel.feeSplitter and v7-legacy.v2.contracts.
+# They name a JSON path in the market registry; they are not credentials.
+# Each segment must be a camelCase word (or a version like v2), which a
+# random token segment never is, so v2.<random> is still reported.
+[[allowlists]]
+description = "Dotted registry key path under generic-api-key only"
+targetRules = ["generic-api-key"]
+regexes = ['''^v[0-9]+(-legacy)?(\.(v[0-9]+|[a-z]+([A-Z][a-z]+)*))+$''']
+
+# X's publicly documented OAuth 1.0a signing example (consumer key/secret,
+# token/secret, nonce and the two documented signatures), used only by the
+# test that checks the signer against it. Pinned to that one file: the same
+# values anywhere else are still reported.
+[[allowlists]]
+description = "Documented X OAuth 1.0a test vector, in its test only"
+targetRules = ["generic-api-key"]
+condition = "AND"
+paths = ['''^ops/v2/daily-win\.test\.mjs$''']
+regexes = [
+  '''^xvz1evFS4wEEPTGEFPHBog$''',
+  '''^kAcSOqF21Fu85e7zjz7ZN2U4ZRhfV3WpwPAoE3Z7kBw$''',
+  '''^370773112-GmHxMAgYyLbNEtIKZeRNFsMKPR9EyMZeS9weJAEb$''',
+  '''^LswwdoUaIvS8ltyTt5jkRh4J50vUPVVHtR2YPi5kE$''',
+  '''^kYjzVBB8Y0ZFabxSWbWovY3uYSQ2pTgmZeNu2VS4cg$''',
+  '''^hCtSmYh\+iHYCEqBWrE7C7hYmtUk=$''',
+  '''^tnnArxj06cWHq44gCs1OSKk/jLY=$''',
+]
+
+# Deliberately secret-shaped placeholders: the tests that prove a key is masked
+# or refused on argv need one, and the stonkctl guide names a script as the
+# thing a step runs. Exact values, pinned to those three files.
+[[allowlists]]
+description = "Secret-shaped test placeholders and a script name, in their files only"
+targetRules = ["generic-api-key"]
+condition = "AND"
+paths = [
+  '''^ops/rpc/set-backup-rpc\.test\.mjs$''',
+  '''^ops/stonkctl/tests/test_secrets\.py$''',
+  '''^ops/stonkctl/src/stonkctl/guide\.py$''',
+]
+regexes = [
+  '''^SECRET-KEY-6f1d2a$''',
+  '''^--private-key=abc$''',
+  '''^broadcast-v8\.sh$''',
+]

@@ -1,5 +1,5 @@
 /**
- * Vitest for the indexer. Node environment, tests live under src/.
+ * Vitest for the indexer. Node environment, tests live under src/, scripts/ and lib/.
  *
  * The event handlers in src/*.ts import `ponder:registry` and `ponder:schema`, which are virtual
  * modules that only exist inside a Ponder process. Vitest cannot resolve them, and no alias is
@@ -19,6 +19,8 @@ export default defineConfig({
   test: {
     environment: "node",
     // scripts/: the fork sync's pure halves (the diff and the expectation builder).
-    include: ["src/**/*.test.ts", "scripts/**/*.test.ts"],
+    // lib/: the pure modules the handlers call. A glob, not a file list: lib/v2/rewardDistributors.test.ts
+    // sat uncollected because the include named only src/ and scripts/, and naming files would repeat that for the next.
+    include: ["src/**/*.test.ts", "scripts/**/*.test.ts", "lib/**/*.test.ts"],
   },
 });

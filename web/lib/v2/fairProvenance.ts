@@ -1,7 +1,7 @@
 /**
- * W3-303. Turns a fair value's provenance into the label shown beside it. No React, no API, no chain.
+ * Turns a fair value's provenance into the label shown beside it. No React, no API, no chain.
  *
- * WHY THIS EXISTS AT ALL. X3-302 shipped the whole provenance CONTRACT — `pricingProvenanceSchema`
+ * WHY THIS EXISTS AT ALL. The pricing service shipped the whole provenance CONTRACT — `pricingProvenanceSchema`
  * (`api-schema.ts:120`), the entitlement class enum at `:211`, `fairProvenance` at `:368` and a
  * fail-closed refinement at `:372-374` — and it is asserted by schema twins and type tests. But
  * `grep -rn 'rovenance' web/components/ web/app/` returned NOTHING at this base: no UI read any of
@@ -11,7 +11,7 @@
  *
  * THE RULE THAT DECIDES EVERY BRANCH BELOW: ABSENCE IS NOT REAL-TIME. A missing, null or malformed
  * provenance renders as "Data source unknown", never as silence and never as a real-time claim. This
- * is a compliance surface — while the only source is delayed vendor data, showing a bare number with
+ * is a compliance surface — whenever a source is delayed (or its entitlement unknown), showing a bare number with
  * no qualifier tells the reader it is live. A label that disappears when the data is worst is the
  * failure this module is written to prevent, so every path returns a label and the fallback is the
  * most conservative one.

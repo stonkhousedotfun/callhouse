@@ -1,6 +1,6 @@
 /**
  * What every signing mode (cranker, mm, pricer) runs on, built once from its config, and the one
- * way to run such a mode. K2-03/K2-04/K2-05 write a `tick` (and a `/state` view) and hand it to
+ * way to run such a mode. The cranker, mm and pricer modes write a `tick` (and a `/state` view) and hand it to
  * runSigningMode; boot, the chain probe, the heartbeat, alerts, the loop and shutdown are here.
  *
  *   const runtime = createModeRuntime(config);
@@ -69,6 +69,8 @@ export interface RuntimeSeams {
   checkWiring?: () => Promise<string[]>;
   /** The first pause between boot wiring attempts (default 2 s, doubling to 30 s). */
   bootRetryDelayMs?: number;
+  /** The one address the health server listens on (health.ts serveApp); production: none, `::`. */
+  hostname?: string;
 }
 
 /** Build clients, signer, handles, store, sender, alerter and health state. Dials nothing. */
@@ -90,6 +92,8 @@ export function createModeRuntime<C extends SigningModeConfig>(config: C, seams:
       store,
       log: log.child({ mod: 'tx' }),
       txTimeoutMs: config.txTimeoutMs,
+      // CRANKER_GAS_SCALE_PCT scales every fixed gas limit this process sends (tx.ts scaleGas).
+      gasScalePct: config.gasScalePct,
       now,
       // Every send beats: a long tick of receipts is progress, not a wedged loop (health.ts).
       onProgress: () => runtime.health.beat(now()),
@@ -204,6 +208,7 @@ export async function runSigningMode<C extends SigningModeConfig>(runtime: ModeR
         now: rt.now,
       }),
       config.port,
+      seams.hostname,
     );
   } catch (error) {
     store.close();
@@ -265,6 +270,7 @@ export async function runSigningMode<C extends SigningModeConfig>(runtime: ModeR
         try {
           snapshot = await probe();
         } catch (error) {
+          health.recordChainFailure(rt.now(), describeError(error));
           await alerter.alert('v2_rpc_lag', `chain probe failed on every RPC: ${describeError(error)}`, { reason: describeError(error) });
           throw error;
         }

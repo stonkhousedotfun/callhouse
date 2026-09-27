@@ -4,7 +4,7 @@
  *
  * Reads `/v2/stats` from the v2 indexer, takes `biggestWinDay` (or `biggestWinWeek` with
  * `--window week`), checks it qualifies, cross-checks it against `/v2/pnl/:id` (the API the share
- * page renders from), builds the post text and the links to the W2-09 share page and its generated
+ * page renders from), builds the post text and the links to the share page and its generated
  * image, and prints them. Nothing is posted unless `--post` is given AND all four X credentials are
  * in the environment.
  *
@@ -48,11 +48,24 @@
  * links a 404 (the share page exists only in a NEXT_PUBLIC_V2=1 build). One POST /2/tweets, no retry:
  * a retry could double-post.
  *
- * Exit codes: 0 printed, skipped or posted · 1 error or refusal (nothing posted) · 2 bad usage.
+ * THE POST LEDGER. --post records every post in a JSON file, DAILY_WIN_LEDGER (default
+ * $HOME/.stonkhouse/daily-win-ledger.json; with neither set --post refuses). The entry is written as
+ * UNKNOWN before the POST is sent and becomes "posted" only when X answers with the new post's id.
+ * X refusing it (a 4xx) or a connection that never opened removes the entry: nothing was posted. Any
+ * other failure (a timeout, a dropped connection, a 5xx, an answer without an id) leaves it UNKNOWN,
+ * because the post may be live. A --post run then refuses while that window has an UNKNOWN entry, and
+ * skips when that window already posted today or already posted this win. Check the account, then
+ * `--resolve posted` or `--resolve not-posted` clears it. A ledger that exists but cannot be read is a
+ * refusal, never "nothing posted yet".
+ *
+ * Exit codes: 0 printed, skipped, posted or resolved · 1 error or refusal (nothing posted) · 2 bad
+ * usage · 3 the post's outcome is UNKNOWN, or it is live but the ledger could not record it (read
+ * the message: something may be on X).
  * Node 22+, no npm dependencies (fetch, node:crypto).
  * ------------------------------------------------------------------------------------------------- */
 import { createHmac, randomBytes } from "node:crypto";
-import { realpathSync } from "node:fs";
+import { mkdirSync, readFileSync, realpathSync, renameSync, writeFileSync } from "node:fs";
+import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 export const DEFAULT_INDEXER_URL = "http://localhost:42070";
@@ -81,8 +94,8 @@ const UINT_RE = /^(0|[1-9]\d*)$/;
 // ---------------------------------------------------------------------------------------------
 
 /**
- * Phrases the post must never contain: disclosure policy (copy-lint enforced this until it was removed on 2026-09-21; nothing checks it now)'s FORBIDDEN table (which cannot be
- * imported: it lints on load) plus the ops/publish-template.md "numbers never to publish" words and
+ * Phrases the post must never contain: the disclosure policy's FORBIDDEN table (no tool checks it now, and it cannot be
+ * imported: it lints on load) plus the publish template's "numbers never to publish" words and
  * return promises. The test also runs copy-lint's own regexes over real posts.
  */
 export const POST_FORBIDDEN = [
@@ -220,7 +233,7 @@ const isMoney = (m) =>
   m !== null && typeof m === "object" && typeof m.raw === "string" && UINT_RE.test(m.raw) &&
   Number.isInteger(m.decimals) && m.decimals >= 0 && typeof m.formatted === "string";
 
-/** Throws DataError unless `win` has the §4 Win shape this script relies on. */
+/** Throws DataError unless `win` has the API's Win shape this script relies on. */
 export function assertWinShape(win, where) {
   const bad = (what) => {
     throw new DataError(`${where}: ${what}`);
@@ -306,7 +319,7 @@ export function assertPnlMatches(win, pnl) {
 // The post
 // ---------------------------------------------------------------------------------------------
 
-/** W2-09's routes: web/app/pnl/[id]/page.tsx, .../opengraph-image.tsx, web/app/api/pnl/[id]/image/route.tsx. */
+/** The share page's routes: web/app/pnl/[id]/page.tsx, .../opengraph-image.tsx, web/app/api/pnl/[id]/image/route.tsx. */
 export function shareUrls(appUrl, id) {
   const base = appUrl.replace(/\/+$/, "");
   const seg = encodeURIComponent(id);
@@ -396,19 +409,45 @@ export function readXCredentials(env) {
   };
 }
 
-/** One POST /2/tweets. Returns the new post's id; throws with the API's status and body (never the header). */
+/** X did not create the post: it answered 4xx, or the connection never opened. */
+export class PostNotCreatedError extends Error {}
+/** The request may have reached X and no post id came back: the post may or may not be live. */
+export class PostOutcomeUnknownError extends Error {}
+
+/** Connection errors that mean the request never left this machine (DNS failed, or nothing listening). */
+const NEVER_SENT_CODES = new Set(["ECONNREFUSED", "ENOTFOUND", "EAI_AGAIN"]);
+
+/**
+ * One POST /2/tweets. Returns the new post's id. Throws PostNotCreatedError when X certainly did not
+ * create it, and PostOutcomeUnknownError for everything else (a timeout, a dropped connection, a 5xx,
+ * a 2xx without an id): those are not "nothing posted". Messages carry the API's status and body, never
+ * the header.
+ */
 export async function postToX({ apiBase, text, creds }) {
   const url = `${apiBase.replace(/\/+$/, "")}/2/tweets`;
   const authorization = oauth1Header({ method: "POST", url, ...creds });
-  const res = await fetch(url, {
-    method: "POST",
-    headers: { Authorization: authorization, "Content-Type": "application/json" },
-    body: JSON.stringify({ text }),
-    signal: AbortSignal.timeout(30_000),
-  });
-  const body = await res.text();
+  let res;
+  let body;
+  try {
+    res = await fetch(url, {
+      method: "POST",
+      headers: { Authorization: authorization, "Content-Type": "application/json" },
+      body: JSON.stringify({ text }),
+      signal: AbortSignal.timeout(30_000),
+    });
+  } catch (err) {
+    const code = err.cause?.code;
+    if (NEVER_SENT_CODES.has(code)) throw new PostNotCreatedError(`POST ${url} could not connect (${code})`);
+    throw new PostOutcomeUnknownError(`POST ${url} got no answer: ${code ?? err.name ?? err.message}`);
+  }
+  try {
+    body = await res.text();
+  } catch (err) {
+    throw new PostOutcomeUnknownError(`X answered ${res.status} and the body was cut off: ${err.cause?.code ?? err.message}`);
+  }
+  if (res.status >= 400 && res.status < 500) throw new PostNotCreatedError(`X answered ${res.status}: ${body.slice(0, 500)}`);
   if (res.status !== 201 && res.status !== 200) {
-    throw new Error(`X answered ${res.status}: ${body.slice(0, 500)}`);
+    throw new PostOutcomeUnknownError(`X answered ${res.status}: ${body.slice(0, 500)}`);
   }
   let id;
   try {
@@ -416,26 +455,118 @@ export async function postToX({ apiBase, text, creds }) {
   } catch {
     id = undefined;
   }
-  if (typeof id !== "string") throw new Error(`X answered ${res.status} without data.id: ${body.slice(0, 500)}`);
+  if (typeof id !== "string" || id === "") {
+    throw new PostOutcomeUnknownError(`X answered ${res.status} without data.id: ${body.slice(0, 500)}`);
+  }
   return id;
 }
+
+// ---------------------------------------------------------------------------------------------
+// The post ledger: what --post sent, so a re-run never posts the same day or the same win twice
+// ---------------------------------------------------------------------------------------------
+
+export const LEDGER_VERSION = 1;
+export const LEDGER_ENV = "DAILY_WIN_LEDGER";
+
+/** A ledger that exists but cannot be read or written. Always a refusal: never "nothing posted yet". */
+export class LedgerError extends Error {}
+
+/** DAILY_WIN_LEDGER, else $HOME/.stonkhouse/daily-win-ledger.json; null when neither is set. */
+export function ledgerPath(env) {
+  const set = (v) => typeof v === "string" && v.trim() !== "";
+  if (set(env[LEDGER_ENV])) return env[LEDGER_ENV].trim();
+  if (set(env.HOME)) return join(env.HOME.trim(), ".stonkhouse", "daily-win-ledger.json");
+  return null;
+}
+
+/**
+ * The New York calendar day of a unix time, "YYYY-MM-DD": the "day" a post belongs to. It is the day /v2/stats's
+ * biggestWinDay covers (nyDayBounds of the indexed head, indexer/src/api/v2/feed.ts), so two runs on one New York
+ * evening share a day even when 00:00 UTC falls between them.
+ */
+export function newYorkDay(unixSeconds) {
+  const parts = new Intl.DateTimeFormat("en-US", { timeZone: "America/New_York", year: "numeric", month: "2-digit", day: "2-digit" })
+    .formatToParts(new Date(unixSeconds * 1000));
+  const part = (type) => parts.find((p) => p.type === type).value;
+  return `${part("year")}-${part("month")}-${part("day")}`;
+}
+
+const validEntry = (e) =>
+  e !== null && typeof e === "object" && !Array.isArray(e) &&
+  (e.window === "day" || e.window === "week") &&
+  typeof e.day === "string" && /^\d{4}-\d{2}-\d{2}$/.test(e.day) &&
+  typeof e.winId === "string" && e.winId !== "" &&
+  (e.outcome === "unknown" || e.outcome === "posted") &&
+  (e.postId === null || typeof e.postId === "string");
+
+/** The ledger's entries. Only a missing file is an empty ledger; anything else unreadable throws LedgerError. */
+export function readLedger(file) {
+  let text;
+  try {
+    text = readFileSync(file, "utf8");
+  } catch (e) {
+    if (e.code === "ENOENT") return [];
+    throw new LedgerError(`could not read the post ledger ${file} (${e.code ?? e.message})`);
+  }
+  let doc;
+  try {
+    doc = JSON.parse(text);
+  } catch {
+    throw new LedgerError(`the post ledger ${file} is not JSON`);
+  }
+  if (doc === null || typeof doc !== "object" || doc.version !== LEDGER_VERSION || !Array.isArray(doc.entries) ||
+      !doc.entries.every(validEntry)) {
+    throw new LedgerError(`the post ledger ${file} is not a version ${LEDGER_VERSION} ledger of {window, day, winId, outcome, postId} entries`);
+  }
+  return doc.entries;
+}
+
+/** Replaces the ledger with `entries`, atomically (a temp file renamed over it). Throws LedgerError. */
+export function writeLedger(file, entries) {
+  const tmp = `${file}.${process.pid}.tmp`;
+  try {
+    mkdirSync(dirname(file), { recursive: true, mode: 0o700 });
+    writeFileSync(tmp, `${JSON.stringify({ version: LEDGER_VERSION, entries }, null, 2)}\n`, { mode: 0o600 });
+    renameSync(tmp, file);
+  } catch (e) {
+    throw new LedgerError(`could not write the post ledger ${file} (${e.code ?? e.message})`);
+  }
+}
+
+/**
+ * Why --post must not post now: `{ kind: "unknown", entry }` while this window has an UNKNOWN entry (any
+ * day: it may be live), `{ kind: "posted", entry }` when this window already posted this day or this win,
+ * else null.
+ */
+export function ledgerBlock(entries, { window, day, winId }) {
+  const unknown = entries.find((e) => e.window === window && e.outcome === "unknown");
+  if (unknown) return { kind: "unknown", entry: unknown };
+  const posted = entries.find((e) => e.window === window && e.outcome === "posted" && (e.day === day || e.winId === winId));
+  if (posted) return { kind: "posted", entry: posted };
+  return null;
+}
+
+const describeEntry = (e) => `${e.window} post for ${e.day}, win ${e.winId}${e.at ? `, sent ${e.at}` : ""}`;
 
 // ---------------------------------------------------------------------------------------------
 // CLI
 // ---------------------------------------------------------------------------------------------
 
-const USAGE = `usage: node ops/v2/daily-win.mjs [--window day|week] [--now <unix seconds>] [--post]
+const USAGE = `usage: node ops/v2/daily-win.mjs [--window day|week] [--now <unix seconds>] [--post | --resolve posted|not-posted]
 
   dry run by default: prints the post, the share page and image URLs, or why the day is skipped
   --window   day (default, /v2/stats biggestWinDay) or week (biggestWinWeek)
   --now      evaluate the freshness rule as of this time (default: the clock); the fixtures' now is 1789592400
-  --post     post to X; needs ${X_ENV.join(", ")} in the environment
-env: INDEXER_URL (default ${DEFAULT_INDEXER_URL}), APP_URL (default ${DEFAULT_APP_URL})`;
+  --post     post to X; needs ${X_ENV.join(", ")} in the environment, and records the post in the ledger
+  --resolve  after a post whose outcome was UNKNOWN (exit 3): check the account, then say whether that
+             window's post went out (posted) or not (not-posted); only then will --post run again
+env: INDEXER_URL (default ${DEFAULT_INDEXER_URL}), APP_URL (default ${DEFAULT_APP_URL}),
+     ${LEDGER_ENV} (default $HOME/.stonkhouse/daily-win-ledger.json)`;
 
 class UsageError extends Error {}
 
 export function parseArgs(argv) {
-  const opts = { window: "day", now: null, post: false, help: false };
+  const opts = { window: "day", now: null, post: false, resolve: null, help: false };
   for (let i = 0; i < argv.length; i++) {
     const [flag, inline] = argv[i].includes("=") ? [argv[i].slice(0, argv[i].indexOf("=")), argv[i].slice(argv[i].indexOf("=") + 1)] : [argv[i], undefined];
     const value = () => {
@@ -452,8 +583,14 @@ export function parseArgs(argv) {
       const v = value();
       if (!/^\d{1,12}$/.test(v)) throw new UsageError(`--now must be unix seconds, not ${JSON.stringify(v)}`);
       opts.now = Number(v);
+    } else if (flag === "--resolve") {
+      opts.resolve = value();
+      if (!["posted", "not-posted"].includes(opts.resolve)) {
+        throw new UsageError(`--resolve must be posted or not-posted, not ${JSON.stringify(opts.resolve)}`);
+      }
     } else throw new UsageError(`unknown argument ${JSON.stringify(argv[i])}`);
   }
+  if (opts.post && opts.resolve !== null) throw new UsageError("--post and --resolve cannot be combined");
   return opts;
 }
 
@@ -503,8 +640,10 @@ export async function run(argv, env = process.env, out = console.log, err = cons
     out(USAGE);
     return 0;
   }
+  if (opts.resolve !== null) return resolveUnknown(opts, env, out, err);
 
   let creds = null;
+  let ledger = null;
   if (opts.post) {
     const read = readXCredentials(env);
     if (read.missing.length > 0) {
@@ -513,6 +652,12 @@ export async function run(argv, env = process.env, out = console.log, err = cons
       return 1;
     }
     creds = read.creds;
+    ledger = ledgerPath(env);
+    if (ledger === null) {
+      err(`daily-win: refusing to post: neither ${LEDGER_ENV} nor HOME is set, so there is no post ledger to tell whether ` +
+        "this window already posted. Nothing was posted.");
+      return 1;
+    }
   }
 
   const indexer = (env.INDEXER_URL || DEFAULT_INDEXER_URL).replace(/\/+$/, "");
@@ -557,6 +702,23 @@ export async function run(argv, env = process.env, out = console.log, err = cons
       return 0;
     }
 
+    // The ledger before anything is sent: an UNKNOWN earlier post may be live, and a day or win already
+    // posted must not be posted again. A ledger that cannot be read throws LedgerError: a refusal.
+    const day = newYorkDay(now);
+    const entries = readLedger(ledger);
+    const block = ledgerBlock(entries, { window: opts.window, day, winId: win.id });
+    if (block?.kind === "unknown") {
+      err(`daily-win: refusing to post: the ${describeEntry(block.entry)} has an UNKNOWN outcome in ${ledger}, so it may be ` +
+        `live on X. Check the account, then run node ops/v2/daily-win.mjs${opts.window === "week" ? " --window week" : ""} ` +
+        "--resolve posted (or --resolve not-posted). Nothing was posted.");
+      return 1;
+    }
+    if (block?.kind === "posted") {
+      const link = block.entry.postId ? `: https://x.com/i/web/status/${block.entry.postId}` : "";
+      out(`daily-win: skip (${opts.window}): already posted (the ${describeEntry(block.entry)})${link}. Nothing to post.`);
+      return 0;
+    }
+
     for (const [url, image] of [[post.urls.page, false], [post.urls.image, true]]) {
       const problem = await preflight(url, image);
       if (problem) {
@@ -564,16 +726,84 @@ export async function run(argv, env = process.env, out = console.log, err = cons
         return 1;
       }
     }
+
+    // Written BEFORE the POST: if this process dies mid-request, the ledger already says UNKNOWN.
+    const entry = { window: opts.window, day, winId: win.id, outcome: "unknown", postId: null, at: new Date().toISOString(),
+      detail: "POST /2/tweets sent; no answer recorded" };
+    writeLedger(ledger, [...entries, entry]);
     const apiBase = (env.X_API_BASE || DEFAULT_X_API_BASE).replace(/\/+$/, "");
-    const id = await postToX({ apiBase, text: post.text, creds });
+    let id;
+    try {
+      id = await postToX({ apiBase, text: post.text, creds });
+    } catch (e) {
+      if (e instanceof PostNotCreatedError) {
+        try {
+          writeLedger(ledger, entries);
+        } catch (le) {
+          err(`daily-win: ${le.message}; its UNKNOWN entry for this post stays, so run --resolve not-posted before the next --post.`);
+        }
+        err(`daily-win: ${e.message}. X did not create the post; nothing was posted.`);
+        return 1;
+      }
+      const detail = e instanceof PostOutcomeUnknownError ? e.message : `unexpected error while posting: ${e.message}`;
+      try {
+        writeLedger(ledger, [...entries, { ...entry, detail }]);
+      } catch {
+        // The entry written before the POST already says UNKNOWN; only this detail is lost.
+      }
+      err(`daily-win: post outcome UNKNOWN: ${detail}. The post may be live on X. It is recorded as UNKNOWN in ${ledger}, ` +
+        "and --post refuses until you check the account and run --resolve posted (or --resolve not-posted). Do not re-run --post to find out.");
+      return 3;
+    }
     out(`posted: https://x.com/i/web/status/${id}`);
+    try {
+      writeLedger(ledger, [...entries, { ...entry, outcome: "posted", postId: id, detail: "X answered with the post id" }]);
+    } catch (le) {
+      err(`daily-win: the post is live, but ${le.message}: the ledger still says UNKNOWN for it, so run --resolve posted.`);
+      return 3;
+    }
     return 0;
   } catch (e) {
     if (e instanceof PostCheckError || e instanceof DataError) {
       err(`daily-win: ${e.message}`);
       return 1;
     }
+    if (e instanceof LedgerError) {
+      err(`daily-win: refusing to post: ${e.message}. --post needs a ledger it can read and write, or a re-run could post ` +
+        "the same day twice. Nothing was posted.");
+      return 1;
+    }
     err(`daily-win: error, nothing posted: ${e.message}`);
+    return 1;
+  }
+}
+
+/** --resolve posted|not-posted: settles this window's UNKNOWN ledger entries after the operator checked the account. */
+function resolveUnknown(opts, env, out, err) {
+  const ledger = ledgerPath(env);
+  if (ledger === null) {
+    err(`daily-win: nothing to resolve: neither ${LEDGER_ENV} nor HOME is set, so there is no post ledger.`);
+    return 1;
+  }
+  try {
+    const entries = readLedger(ledger);
+    const open = entries.filter((e) => e.window === opts.window && e.outcome === "unknown");
+    if (open.length === 0) {
+      out(`daily-win: nothing to resolve: no UNKNOWN ${opts.window} post in ${ledger}.`);
+      return 0;
+    }
+    const at = new Date().toISOString();
+    const next = opts.resolve === "posted"
+      ? entries.map((e) => (open.includes(e) ? { ...e, outcome: "posted", at, detail: `resolved as posted by the operator (was: ${e.detail ?? "UNKNOWN"})` } : e))
+      : entries.filter((e) => !open.includes(e));
+    writeLedger(ledger, next);
+    for (const e of open) {
+      out(`daily-win: ${opts.resolve === "posted" ? "recorded as posted" : "cleared as not posted"}: the ${describeEntry(e)}.`);
+    }
+    return 0;
+  } catch (e) {
+    if (!(e instanceof LedgerError)) throw e;
+    err(`daily-win: ${e.message}. Nothing was resolved.`);
     return 1;
   }
 }

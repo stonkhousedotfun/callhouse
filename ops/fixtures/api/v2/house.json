@@ -3,6 +3,7 @@
     {
       "market": "NVDA",
       "vault": "0x602CA55061735b596380f1e0f775a9D91966e2cD",
+      "kind": "weekly",
       "currentEpoch": {
         "id": "1789156800",
         "start": 1789156800,
@@ -10,19 +11,48 @@
         "nav": null,
         "resultUsdg": null
       },
-      "sharesSupply": "1000000000000000000000"
+      "sharesSupply": "1000000000000000000000",
+      "earliestWithdrawal": {
+        "kind": "weekly",
+        "at": 1789761600,
+        "reason": "epoch-boundary"
+      }
     },
     {
       "market": "TSLA",
       "vault": "0xDD01a2D05DC1ad373479E6a3cb633a9aaddF3EB4",
+      "kind": "daily",
       "currentEpoch": {
-        "id": "1789156800",
-        "start": 1789156800,
-        "end": 1789761600,
+        "id": "1789502400",
+        "start": 1789502400,
+        "end": 1789588800,
         "nav": null,
         "resultUsdg": null
       },
-      "sharesSupply": "250000000000000000000"
+      "sharesSupply": "250000000000000000000",
+      "earliestWithdrawal": {
+        "kind": "daily",
+        "at": null,
+        "reason": "queue-closed"
+      }
+    },
+    {
+      "market": "MSFT",
+      "vault": "0xb10263f6432a7047788fB51e0Fb445c160F31137",
+      "kind": "daily",
+      "currentEpoch": {
+        "id": "1789502400",
+        "start": 1789502400,
+        "end": 1789588800,
+        "nav": null,
+        "resultUsdg": null
+      },
+      "sharesSupply": "250000000000000000000",
+      "earliestWithdrawal": {
+        "kind": "daily",
+        "at": 1789588800,
+        "reason": "boundary-pending"
+      }
     }
   ],
   "nextCursor": null

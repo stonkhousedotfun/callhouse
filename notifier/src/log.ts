@@ -8,10 +8,15 @@
  * NOTIFIER_DATA_KEY, the bot token (it sits in every Bot API path), a
  * request URL with its query string (signatures and tokens ride there), or `String(error)` (an
  * undici or nodemailer message can carry the host or mailbox it was talking to). Callers pass
- * subscription ids, delivery ids, kinds, channels, statuses and error CODES. Nothing here can
- * redact after the fact, so the rule is enforced at the call sites and pinned by the tests,
- * which capture every line and assert on what is absent.
+ * subscription ids, delivery ids, kinds, channels, statuses and error CODES. The rule is enforced
+ * at the call sites and pinned by the tests, which capture every line and assert on what is absent.
+ *
+ * A change adds ONE backstop, not a licence to log more: every finished line goes through
+ * redactUrls (./redact.ts), so a URL whose path or query carries a key (an RPC URL, the bot token
+ * in a Bot API path) prints as scheme://host/…. It knows nothing of chat ids, addresses or
+ * mailboxes, so the call-site rule above still stands.
  */
+import { redactUrls } from './redact.js';
 
 export type LogSink = (line: string) => void;
 export type Fields = Record<string, unknown>;
@@ -26,7 +31,7 @@ const SERVICE = 'callhouse-notifier';
 
 export function createLogger(sink: LogSink = (line) => process.stdout.write(`${line}\n`)): Logger {
   const write = (level: 'info' | 'warn' | 'error', fields: Fields, msg: string): void => {
-    sink(JSON.stringify({ level, service: SERVICE, time: new Date().toISOString(), msg, ...fields }));
+    sink(redactUrls(JSON.stringify({ level, service: SERVICE, time: new Date().toISOString(), msg, ...fields })));
   };
   return {
     info: (fields, msg) => write('info', fields, msg),

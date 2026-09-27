@@ -1,3 +1,4 @@
+import { V2_DEFAULTS } from "../markets.generated";
 import type { Strategy } from "./api-types";
 import { premium } from "./payoff";
 import { autoRollTargetStrike, fixedAskBpsFromReference, MAX_ASK_BPS, MIN_ASK_BPS,
@@ -10,6 +11,67 @@ export const WRITER_PRESETS: readonly { id: PresetId; label: string; detail: str
   { id: "daily-2", label: "Daily, +2% OTM", detail: "A short daily call about 2% above spot.", weekly: false, otmBps: 200 },
   { id: "weekly-10", label: "Conservative, +10% OTM weekly", detail: "More room above spot, usually a smaller premium.", weekly: true, otmBps: 1_000 },
 ];
+
+/**
+ * How many weekly and daily expiries a market lists ahead, read from the registry, never assumed here: each tenor is
+ * the market's own `overrides.expiriesAhead.<tenor>` when it sets one, else `v2.defaults.expiriesAhead.<tenor>`.
+ */
+export function expiriesAheadOf(overrides?: Readonly<Record<string, unknown>> | null): { weekly: number; daily: number } {
+  const own = overrides?.expiriesAhead as { weekly?: unknown; daily?: unknown } | undefined;
+  return {
+    weekly: typeof own?.weekly === "number" ? own.weekly : V2_DEFAULTS.expiriesAhead.weekly,
+    daily: typeof own?.daily === "number" ? own.daily : V2_DEFAULTS.expiriesAhead.daily,
+  };
+}
+
+const WEEKDAYS = ["mon", "tue", "wed", "thu", "fri"] as const;
+const WEEKDAY_LABEL: Record<string, string> = { mon: "Mon", tue: "Tue", wed: "Wed", thu: "Thu", fri: "Fri" };
+
+/**
+ * The weekdays a market's daily expiries fall on, read from the registry: the market's own
+ * `overrides.dailyWeekdays` when it sets a list of weekdays, else `v2.defaults.dailyWeekdays`. NVDA lists Mon/Wed/Fri
+ * ("List Mon/Wed/Fri only"); every other market every weekday.
+ */
+export function dailyWeekdaysOf(overrides?: Readonly<Record<string, unknown>> | null): readonly string[] {
+  const own = overrides?.dailyWeekdays;
+  if (Array.isArray(own) && own.length > 0 && own.every((d) => (WEEKDAYS as readonly unknown[]).includes(d))) return own as string[];
+  return V2_DEFAULTS.dailyWeekdays;
+}
+
+/** "Mon, Wed and Fri" for a restricted list; null when the market lists every weekday. */
+export function dailyWeekdaysLabel(overrides?: Readonly<Record<string, unknown>> | null): string | null {
+  const days = WEEKDAYS.filter((d) => dailyWeekdaysOf(overrides).includes(d));
+  if (days.length === WEEKDAYS.length) return null;
+  const names = days.map((d) => WEEKDAY_LABEL[d]!);
+  return names.length === 1 ? names[0]! : `${names.slice(0, -1).join(", ")} and ${names.at(-1)}`;
+}
+
+/**
+ * whether a market lists WEEKLY expiries at all (expiriesAheadOf). The default is 0 since
+ * (six daily closes, no weekly ladder), so a market without its own count offers
+ * daily only. SPCX sets weekly 2 (its Friday closes). A non-zero count brings the weekly choices back with no
+ * code change.
+ */
+export function weeklyOffered(overrides?: Readonly<Record<string, unknown>> | null): boolean {
+  return expiriesAheadOf(overrides).weekly > 0;
+}
+
+/**
+ * whether a market lists DAILY expiries at all (expiriesAheadOf). SPCX sets daily 0 (no SPCX
+ * dailies), so its writers get the weekly (Friday) choices only.
+ */
+export function dailyOffered(overrides?: Readonly<Record<string, unknown>> | null): boolean {
+  return expiriesAheadOf(overrides).daily > 0;
+}
+
+/**
+ * The presets a market can use: the weekly ones only when the market lists weeklies (weeklyOffered), the daily one
+ * only when it lists dailies (dailyOffered). A preset for a tenor the market does not list could only fail with "No
+ * open series match that expiry type right now."
+ */
+export function visiblePresets(weekly: boolean, daily = true): typeof WRITER_PRESETS {
+  return WRITER_PRESETS.filter((preset) => (preset.weekly ? weekly : daily));
+}
 
 export function otmBps(spot: bigint, strike: bigint): number {
   if (spot <= 0n || strike <= spot) throw new RangeError("The strike must be above the live spot.");

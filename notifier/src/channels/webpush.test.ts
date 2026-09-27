@@ -35,7 +35,7 @@ import { isAllowedPushEndpoint, parsePushTarget, PUSH_TTL_S, pushTtlSeconds, web
 const cipher = createTargetCipher(Buffer.from(TEST_DATA_KEY_HEX, 'hex'));
 const links = appLinks('https://app.stonkhouse.test');
 const settings = { ...TEST_VAPID, subject: 'https://app.stonkhouse.test' };
-const MESSAGE: Rendered = { title: 'Bought NVDA 221.00 call', body: 'You bought 0.50 shares.', url: 'https://app.stonkhouse.test/NVDA/1' };
+const MESSAGE: Rendered = { title: 'Bought NVDA 221.00 call', body: 'You bought 0.50 shares.', url: 'https://app.stonkhouse.test/nvda/1' };
 
 let push: FakeServer;
 let reply: { status: number; headers?: Record<string, string> } = { status: 201 };

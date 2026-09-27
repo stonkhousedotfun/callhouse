@@ -1,5 +1,5 @@
 /**
- * F-APP-02. The zap deadline comes from CHAIN time, not the browser clock.
+ * The zap deadline comes from CHAIN time, not the browser clock.
  *
  * A SEPARATE FILE because `zapTx.test.ts` mocks `requireV2Address` to THROW — it asserts the
  * address-null-guarded behaviour, so no write in it ever reaches the deadline. This file mocks the

@@ -223,7 +223,7 @@ for (const target of targets) {
         prefs: { inKind: false, toLedger: true },
         lastKnownLongs: { '123': { units: '40', avgCost: '1250000', seenAt: T0 / 1000 } },
       };
-      const snapshot = { at: T0 / 1000, spots: { NVDA: '215500000' }, spotTimes: { NVDA: T0 / 1000 - 90 }, alerts: {}, strikeSides: { '123': 'above' as const }, alertStates: {}, settlements: {}, sessionDays: { '20717': false, '20718': true }, pendingFeesEffectiveAt: T0 / 1000 + 86400, liveFeesKey: 'fees-1', adminOperations: { 'op-1': { status: 'pending' as const, label: 'setMarketFees' } } };
+      const snapshot = { at: T0 / 1000, spots: { NVDA: '215500000' }, spotTimes: { NVDA: T0 / 1000 - 90 }, alerts: {}, strikeSides: { '123': 'above' as const }, alertStates: {}, settlements: {}, sessionDays: { '20717': false, '20718': true }, pendingFeesEffectiveAt: T0 / 1000 + 86400, liveFeesKey: 'fees-1', adminOperations: { 'op-1': { status: 'pending' as const, label: 'setMarketFees' } }, marketStatuses: { NVDA: 'live' as const, SPCX: 'paused' as const } };
       const cursor = { since: T0 / 1000, seen: { 'tx-1': T0 / 1000 }, resume: null };
       const watch = await loadWatchSet(db);
       assert.deepEqual([...watch.addresses], [SAMPLE_ADDRESS]);
@@ -243,7 +243,7 @@ for (const target of targets) {
       // than starting afresh — an upgrade must not throw away the state it can still read.
       const {
         sessionDays: _days, spotTimes: _times,
-        pendingFeesEffectiveAt: _pending, liveFeesKey: _liveKey, adminOperations: _ops,
+        pendingFeesEffectiveAt: _pending, liveFeesKey: _liveKey, adminOperations: _ops, marketStatuses: _statuses,
         ...olderSnapshot
       } = snapshot;
       const olderHoldings = { ...holdings, strategies: [{ ticker: 'NVDA', active: true, currentSeries: null }] };
@@ -253,9 +253,11 @@ for (const target of targets) {
       assert.deepEqual(older.snapshot, {
         ...olderSnapshot,
         sessionDays: {}, spotTimes: {},
-        // Same property, extended to the fields X8-181 added: a row stored before them parses as
+        // Same property, extended to the added fields: a row stored before them parses as
         // "no fee change scheduled, no fees block seen, no operations", not as a parse failure.
         pendingFeesEffectiveAt: null, liveFeesKey: null, adminOperations: {},
+        // And before marketStatuses, as "no baseline" (market_live records without messaging).
+        marketStatuses: {},
       });
       assert.equal(older.holdings[SAMPLE_ADDRESS]?.strategies[0]?.lastRolledAt, null);
     });

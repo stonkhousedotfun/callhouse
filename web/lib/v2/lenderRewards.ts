@@ -1,8 +1,8 @@
 /**
  * The lender program's names for the shared claim engine, plus its own configuration.
  *
- * P8-05 pays Earn-vault suppliers in $STONKHOUSE from a SECOND `RewardsDistributor` instance. The
- * runbook (`ops/runbooks/lender-rewards-epoch.md:3-5`) is explicit that it is "the same contract and
+ * The lender program pays Earn-vault suppliers in $STONKHOUSE from a SECOND `RewardsDistributor` instance. The
+ * epoch runbook is explicit that it is "the same contract and
  * the same file format as the maker program ... Nothing about the two is interchangeable except the
  * code." So the code is shared and everything else is separate: a different address, a different
  * path, a different token, a different decimals.
@@ -13,10 +13,11 @@
  *
  * THE DISTRIBUTOR IS RESOLVED, THE TOKEN IS READ, AND NEITHER IS A CONSTANT ANY MORE. The address
  * used to be a module-level null constant and the scale used to be an 18 mirrored by hand from
- * `ops/runbooks/lender-rewards-epoch.md:3`; both constants are gone, names included — the grep in
- * AC7 has to come back empty, so they are not quoted here either. The address comes from `config.ts` `resolveV2Address`,
- * which under design B means a validated `NEXT_PUBLIC_V2_LENDER_REWARDS_DISTRIBUTOR` override, and
- * the decimals and symbol come from the distributor's own token.
+ * the runbook; both constants are gone, names included — a grep for
+ * them has to come back empty, so they are not quoted here either. The address comes from `config.ts` `resolveV2Address`
+ * (`:123-130`): the registry's `rewardsDistributorLender` first, a validated
+ * `NEXT_PUBLIC_V2_LENDER_REWARDS_DISTRIBUTOR` override only while the registry is silent. The
+ * decimals and symbol come from the distributor's own token.
  */
 import type { Address } from "viem";
 
@@ -33,9 +34,9 @@ export {
 export { LENDER_EPOCH_BASE_PATH, lenderProgram } from "./rewardPrograms";
 
 /**
- * The lender distributor, or null when no valid override is set. See `rewardPrograms.ts` for the
- * two addresses this must never be taken from (the generator's exclusion registry, and the
- * published epoch file).
+ * The lender distributor: the registry's `rewardsDistributorLender`, else a valid override, else null.
+ * See `rewardPrograms.ts` for the two addresses this must never be taken from (the generator's
+ * exclusion registry, and the published epoch file).
  */
 export function lenderDistributorAddress(): Address | null {
   return resolveV2Address("lenderRewardsDistributor").address;

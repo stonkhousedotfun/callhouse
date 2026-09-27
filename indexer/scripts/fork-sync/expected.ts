@@ -3,8 +3,8 @@
  * own logs and views (chain.ts). Pure: no network, no Ponder.
  *
  * Precedence. The chain is the authority for every figure the API publishes: the expectations are
- * derived from logs and views the way the product defines them (README "The money columns the
- * site quotes"), never copied from the indexer's lib/harvest.ts, so an arithmetic slip in the
+ * derived from logs and views the way the product defines the money columns the
+ * site quotes, never copied from the indexer's lib/harvest.ts, so an arithmetic slip in the
  * indexer cannot agree with itself. run.json is the keeper's own account of what it drove, and
  * every figure it records is cross-checked against the chain into `disagreements`; the run fails
  * on any of them, because a dry run that misdescribes its own week is not a dry run.
@@ -1231,7 +1231,7 @@ export function buildExpectations(run: RunJson, chain: ChainFacts): Built {
   v.eq("week.assignmentLive.contractsWritten", views.contractsWritten.toString());
   v.eq("week.assignmentLive.capacity", capacityOf(chain.settings, views.totalAssets, views.contractsWritten).toString(), "Policy.maxContracts(totalAssets) - contractsWritten");
 
-  // X-3: the last TERMINAL harvest, which is not the last harvest when a retry or a checkpoint
+  // The last TERMINAL harvest, which is not the last harvest when a retry or a checkpoint
   // came after it; and the last closed week whole.
   expectHarvest(v.at("lastHarvest"), terminalsDesc[0]!);
   expectCycle(v.at("lastClosedCycle"), latestClosed);

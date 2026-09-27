@@ -24,6 +24,7 @@ import {
   impliedVol,
   intrinsicValue,
   normCdf,
+  sessionOpenOf,
   sessionSecondsBetween,
   tradingYears,
   type OptionKind,
@@ -201,6 +202,16 @@ test('sessionSecondsBetween: 09:30-16:00 New York on session days only, DST and 
   assert.equal(sessionSecondsBetween(utc(2026, 9, 18, 20), utc(2026, 9, 14, 20)), 0);
   assert.throws(() => sessionSecondsBetween(0, Number.POSITIVE_INFINITY), RangeError);
   assert.throws(() => sessionSecondsBetween(utc(2026, 1, 1, 0), utc(2030, 1, 1, 0)), RangeError, 'a span no series has');
+});
+
+test('sessionOpenOf: the 09:30 New York open of the day an instant falls on, EDT and EST; none on a weekend or a holiday', () => {
+  assert.equal(sessionOpenOf(utc(2026, 9, 22, 16)), utc(2026, 9, 22, 13, 30), 'Tuesday noon EDT: its 09:30 open');
+  assert.equal(sessionOpenOf(utc(2026, 9, 22, 11)), utc(2026, 9, 22, 13, 30), 'pre-market: the open of the same day, still to come');
+  assert.equal(sessionOpenOf(utc(2026, 11, 2, 16)), utc(2026, 11, 2, 14, 30), 'Monday after the DST switch: 09:30 EST');
+  assert.equal(sessionOpenOf(utc(2026, 9, 19, 16)), null, 'Saturday');
+  assert.equal(sessionOpenOf(utc(2026, 11, 26, 16)), null, 'Thanksgiving');
+  assert.equal(sessionOpenOf(utc(2026, 9, 22, 16), ['2026-09-22']), null, 'a custom table replaces the built-in one');
+  assert.throws(() => sessionOpenOf(Number.NaN), RangeError);
 });
 
 test('tradingYears: sessions over 252 × 6.5 h', () => {

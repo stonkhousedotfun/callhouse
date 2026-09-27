@@ -12,7 +12,7 @@ import {
 } from './format.js';
 import { parseKeeperAlert, type KeeperAlert } from './payload.js';
 
-/** Exactly what keeper/src/alerts.ts sends (ops/alerts.md, "The contract"). */
+/** Exactly what keeper/src/alerts.ts sends. */
 export const SAMPLE = {
   source: 'callhouse-keeper',
   kind: 'tx_revert',

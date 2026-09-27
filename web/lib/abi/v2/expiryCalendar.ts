@@ -394,8 +394,30 @@ export const expiryCalendarAbi = [
   },
   {
     "type": "error",
+    "name": "WeekendHoliday",
+    "inputs": [
+      {
+        "name": "dayIndex",
+        "type": "uint32",
+        "internalType": "uint32"
+      }
+    ]
+  },
+  {
+    "type": "error",
     "name": "AlreadyFinal",
     "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "AlreadyListed",
+    "inputs": [
+      {
+        "name": "asset",
+        "type": "address",
+        "internalType": "address"
+      }
+    ]
   },
   {
     "type": "error",

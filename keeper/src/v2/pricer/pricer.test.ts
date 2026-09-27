@@ -9,7 +9,7 @@
  * clamped tick price with the fixed gas limit, keyed by the ask it replaces; the /fair request names
  * the series' own strike and expiry; each failure raises its v2_pricer_* alert; and a store kept from
  * another deployment at the same roller address (a previous devnet) is reset before the first tick
- * reads its strategies or its evaluation clock. And GET /ready (T-423): ready only when the loop is
+ * reads its strategies or its evaluation clock. And GET /ready: ready only when the loop is
  * alive, a tick completed and the latest did not throw, the latest canCall read answered (true, 0), and a
  * qualified fair value is inside the bound - each failing alone names itself, and unknown is never ready.
  *
@@ -22,8 +22,9 @@ import { fileURLToPath } from 'node:url';
 import { getAddress, type Address } from 'viem';
 import type { V2AlertKind } from '../alerts.js';
 import { loadV2Config, type PricerConfig } from '../config.js';
+import { ladderSearchStart } from '../cranker/planner.js';
 import { ModeHealth, createModeHealthApp, type ReadyReason } from '../health.js';
-import { silentLogger } from '../logger.js';
+import { createV2Logger, silentLogger, type Logger } from '../logger.js';
 import { INTERFACE_VERSION } from '../registry.js';
 import { V2Store } from '../store.js';
 import type { ExecuteOptions, TxOutcome, WriteCall } from '../tx.js';
@@ -91,7 +92,7 @@ class FakeChain {
   /**
    * INTERFACE_VERSION 8: authority is one AccessManager.canCall(signer, roller, selector) -> (immediate,
    * delay), not AutoRoller.hasRole — the AutoRoller is `Managed` and has no role storage at all. Until
-   * K8-178 this fixture still served `hasRole`, so the tick's real read fell to the `default` arm below,
+   * a later change, this fixture served `hasRole`, so the tick's real read fell to the `default` arm below,
    * came back as a multicall FAILURE, and every test here ran against hasRole === null.
    */
   canReprice = true;
@@ -101,13 +102,13 @@ class FakeChain {
   canCallFails = false;
   sessionOpen = true;
   sessionReadFails = false;
-  /** The head read throws, so the whole tick does (T-423: a tick that threw). */
+  /** The head read throws, so the whole tick does (a tick that threw). */
   headFails = false;
   strategy = { active: true, weekly: true, smartPricing: true, otmBps: 500, askBps: 60, minAskBps: 30, maxAskBps: 150, maxUnits: 1_000n };
   position = { longId: 11n, orderId: 31n, expiry: T0 + 3 * 86_400 };
   spot: bigint | null = 212_210_000n;
   /**
-   * T-437: a spot belongs to ONE oracle. Anything not named here falls back to `spot`, so a single-oracle deployment
+   * A spot belongs to ONE oracle. Anything not named here falls back to `spot`, so a single-oracle deployment
    * reads exactly as before; a post-migration one names each oracle and `spotFrom` records who was actually asked.
    */
   spotByOracle = new Map<string, bigint | null>();
@@ -116,7 +117,7 @@ class FakeChain {
   orders = new Map<bigint, Order>([[31n, { maker: BEN, longId: 11n, kind: 2, price: 1_273_300n, units: 1_000n, filled: 200n, validUntil: T0 + 3 * 86_400 - 1_800, cancelled: false }]]);
   /**
    * `oracle` is the one createSeries PINNED into the series: what `reprice` reads on chain and what the series settles
-   * on (T-310/T-437). It is part of the real return value, so the fixture carries it - a series without one is not a
+   * on. It is part of the real return value, so the fixture carries it - a series without one is not a
    * shape the Clearinghouse can produce, and the tick correctly refuses to price it.
    */
   series = new Map<bigint, { underlying: Address; isPut: boolean; expiry: number; strike: bigint; oracle: Address }>([
@@ -124,6 +125,15 @@ class FakeChain {
     [12n, { underlying: NVDA, isPut: false, expiry: T0 + 10 * 86_400, strike: 225_000_000n, oracle: MARKET_ORACLE }],
   ]);
   nextOrderId = 32n;
+  /** `market(u).enabled`. */
+  marketEnabled = true;
+  /**
+   * ExpiryCalendar.nextExpiry(afterTs, weekly): the readiness probe's expiry. Every (afterTs, weekly) it was
+   * asked, so a test can pin that the probe asks the cranker's ladder question.
+   */
+  nextExpiryAt = T0 + 5 * 86_400;
+  nextExpiryFails = false;
+  nextExpiryAsked: Array<[number, boolean]> = [];
 
   private view(fn: string, args: readonly unknown[], address?: string): unknown {
     switch (fn) {
@@ -139,7 +149,11 @@ class FakeChain {
       case 'position':
         return [this.position.longId, this.position.orderId, this.position.expiry];
       case 'market':
-        return { enabled: true, mintPaused: false, strikeTick: 2_500_000n, exerciseFeeBps: 50, oracle: MARKET_ORACLE };
+        return { enabled: this.marketEnabled, mintPaused: false, strikeTick: 2_500_000n, exerciseFeeBps: 50, oracle: MARKET_ORACLE };
+      case 'nextExpiry':
+        this.nextExpiryAsked.push([Number(args[0]), args[1] as boolean]);
+        if (this.nextExpiryFails) throw new Error('calendar unavailable');
+        return this.nextExpiryAt;
       case 'trySpot': {
         const who = (address ?? '').toLowerCase();
         this.spotFrom.push(who);
@@ -201,6 +215,8 @@ interface Harness {
   sends: Array<{ args: readonly unknown[]; gas: bigint | undefined; kind: string; key: string }>;
   fairRequests: FairRequest[];
   alerts: Array<{ kind: V2AlertKind; dedupeKey: string | undefined; severity: string | undefined }>;
+  /** Each alert's page text and data, in the order sent (alerts keeps its narrower shape). */
+  pages: Array<{ kind: V2AlertKind; message: string; data: Record<string, unknown> | undefined }>;
   cleared: string[];
   setFair(answer: FairAnswer | bigint): void;
   /** The sender's next outcome instead of a confirmation. */
@@ -222,6 +238,17 @@ interface HarnessOptions {
   prepare?: (store: V2Store, strategies: StrategyIndex) => void;
   /** What the StrategySet scan finds. */
   logs?: unknown[];
+  /** The pricer's wall clock (PricerContext.now), for the readiness probe's cadence. Date.now when absent. */
+  now?: () => number;
+  /** The pricer's logger; silent when absent. A change passes a capturing one (captureLog) to read lines by name. */
+  log?: Logger;
+}
+
+/** A real v2 logger (bigints scrubbed, as in production) whose lines land in `lines`, parsed. */
+function captureLog(): { log: Logger; lines: Array<Record<string, unknown>> } {
+  const lines: Array<Record<string, unknown>> = [];
+  const log = createV2Logger({ level: 'info', mode: 'pricer', destination: { write: (line: string) => void lines.push(JSON.parse(line) as Record<string, unknown>) } });
+  return { log, lines };
 }
 
 function harness(env: Record<string, string> = {}, options: HarnessOptions = {}): Harness {
@@ -238,13 +265,14 @@ function harness(env: Record<string, string> = {}, options: HarnessOptions = {})
   const sends: Harness['sends'] = [];
   const fairRequests: FairRequest[] = [];
   const alerts: Harness['alerts'] = [];
+  const pages: Harness['pages'] = [];
   const cleared: string[] = [];
   let fair: FairAnswer | bigint = { ok: false, reason: 'unset' };
   let nextOutcome: TxOutcome | null = null;
   let logsThrow: string | null = null;
   const pricer = new Pricer({
     config,
-    log: silentLogger(),
+    log: options.log ?? silentLogger(),
     client: chain.client(),
     logClient: {
       getBlockNumber: (async () => 10n ** 12n) as never,
@@ -269,8 +297,9 @@ function harness(env: Record<string, string> = {}, options: HarnessOptions = {})
       }) as never,
     },
     alerter: {
-      alert: async (kind, _message, _data, options) => {
+      alert: async (kind, message, data, options) => {
         alerts.push({ kind, dedupeKey: options?.dedupeKey, severity: options?.severity });
+        pages.push({ kind, message, data });
         return true;
       },
       clear: (kind, dedupeKey) => {
@@ -288,6 +317,7 @@ function harness(env: Record<string, string> = {}, options: HarnessOptions = {})
     },
     indexer: null,
     strategies,
+    now: options.now,
   });
   return {
     chain,
@@ -296,6 +326,7 @@ function harness(env: Record<string, string> = {}, options: HarnessOptions = {})
     sends,
     fairRequests,
     alerts,
+    pages,
     cleared,
     setFair: (answer) => {
       fair = answer;
@@ -374,6 +405,55 @@ test('cadence: repriced right after the roll, not again inside 30 minutes howeve
   assert.deepEqual(h.fairRequests.at(-1), { ticker: 'NVDA', strike: 225_000_000n, expiry: T0 + 10 * 86_400, type: 'call' });
   assert.deepEqual(h.pricer.outcomes, { repriced: 3, 'not-due': 2, 'within-threshold': 1 });
   h.store.close();
+});
+
+test('a fair far below the ask is approached in steps under the monitor page, each one a reprice the contract accepts', async () => {
+  // AutoRoller.reprice (AutoRoller.sol) refuses `newPrice * 1e4 < ask * 7_500` (RepriceDropExceeded). The
+  // pricer used to send the whole drop, which that refuses on every tick, so the ask never moved down. Each step also
+  // stays under the monitor's 20 % leaked-key page.
+  const accepted = (price: bigint, ask: bigint) => price % 100n === 0n && price * 10_000n >= ask * 7_500n;
+  const pages = (price: bigint, ask: bigint) => ((ask - price) * 10_000n) / ask >= 2_000n;
+  const h = harness();
+  h.chain.roll(11n, 31n, 3_183_100n); // the ask at the 150 bps ceiling
+  h.setFair(1_500_000n); // + 5 % = 1.575000, 50.5 % below the ask
+  const prices: bigint[] = [];
+  for (const [i, at] of [T0, T0 + 1_800, T0 + 3_600, T0 + 5_400].entries()) {
+    const before = h.chain.orders.get(h.chain.position.orderId)!.price;
+    const pair = (await h.tickAt(at)).pairs[0]!;
+    if (i === 3) {
+      assert.equal(pair.outcome, 'within-threshold', 'the ask is within 10 % of the target: nothing more to send');
+      break;
+    }
+    assert.equal(pair.outcome, 'repriced');
+    const sent = h.sends.at(-1)!.args[2] as bigint;
+    assert.ok(accepted(sent, before), `step ${i + 1}: ${before} -> ${sent} is a reprice the contract accepts`);
+    assert.ok(!pages(sent, before), `step ${i + 1}: ${before} -> ${sent} does not page v2_mon_reprice_floorward`);
+    prices.push(sent);
+  }
+  assert.deepEqual(prices, [2_578_400n, 2_088_600n, 1_691_800n]);
+  h.store.close();
+});
+
+test('the report names the step floor that lifted a step, and a floor above the band sends nothing', async () => {
+  const h = harness();
+  h.chain.roll(11n, 31n, 3_183_100n);
+  h.setFair(1_500_000n);
+  const step = (await h.tickAt(T0)).pairs[0]!;
+  assert.equal(step.stepFloor, 2_578_400n);
+  assert.equal(step.target, 2_578_400n, 'target is the price sent');
+  assert.equal(step.raw, 1_575_000n, 'raw keeps what the fair value asked for');
+
+  // An ask above the band by more than one step: no price is accepted, nothing is sent, the evaluation completes.
+  const stuck = harness();
+  stuck.chain.roll(11n, 31n, 5_000_000n);
+  stuck.setFair(1_500_000n);
+  const pair = (await stuck.tickAt(T0)).pairs[0]!;
+  assert.equal(pair.outcome, 'drop-floor-above-band');
+  assert.equal(pair.stepFloor, 4_050_000n);
+  assert.equal(stuck.sends.length, 0);
+  assert.equal(pair.nextCheckAt, T0 + 1_800, 'a completed evaluation moves the clock');
+  h.store.close();
+  stuck.store.close();
 });
 
 test('no decision, no clock: a missing fair value is retried every tick and alerted after PRICER_FAIR_ALERT_S; a stale spot asks nothing', async () => {
@@ -490,7 +570,11 @@ test('what the contract would refuse is never asked about: no smart pricing, a f
   assert.equal(await outcome(order.validUntil - 30), 'near-cutoff');
   h.chain.position = { ...h.chain.position, orderId: 0n };
   assert.equal(await outcome(T0 + 3), 'no-tracked-ask');
-  assert.equal(h.fairRequests.length, 0);
+  // No pair asked /fair on the first tick, so the readiness probe did, once (it qualified, and does not ask
+  // again inside PRICER_MIN_INTERVAL_S). Its request is about a series the cranker could list now - the first 2.5
+  // strike tick at or above the 212.21 spot, the calendar's next weekly expiry - never about this ask's series 11
+  // (222.500000, T0 + 3 d). Before the probe this line read `fairRequests.length === 0`; it still pins every request.
+  assert.deepEqual(h.fairRequests, [{ ticker: 'NVDA', strike: 212_500_000n, expiry: h.chain.nextExpiryAt, type: 'call' }]);
   assert.equal(h.sends.length, 0);
   // The /state body names the reasons and the settings.
   const state = h.pricer.state() as { pairs: Array<{ outcome: string }>; settings: { edgeBps: number; repriceThresholdBps: number; minIntervalS: number } };
@@ -529,7 +613,7 @@ test('a store kept from another deployment at the same roller address: reset bef
   assert.equal(h.pricer.ctx.strategies.scannedTo(), h.chain.block);
 });
 
-test('K3-301: stale and unknown source times refuse, feed the fair-unavailable timer, and do not move the cadence clock', async () => {
+test('stale and unknown source times refuse, feed the fair-unavailable timer, and do not move the cadence clock', async () => {
   const h = harness({ PRICER_FAIR_ALERT_S: '3600' });
   const pairKey = `${BEN.toLowerCase()}:${NVDA.toLowerCase()}`;
   h.setFair({ ok: true, fair: 2_000_000n, source: 'cboe', asOf: T0 - 1_801, spot: 212_210_000n });
@@ -548,7 +632,7 @@ test('K3-301: stale and unknown source times refuse, feed the fair-unavailable t
   h.store.close();
 });
 
-test('K3-301: 301 bps fair/oracle spot gap is refused; 300 is accepted and repriced', async () => {
+test('301 bps fair/oracle spot gap is refused; 300 is accepted and repriced', async () => {
   const oracle = 212_210_000n;
   const at300 = oracle + (oracle * 300n) / 10_000n;
   const at301 = oracle + (oracle * 301n) / 10_000n;
@@ -565,7 +649,7 @@ test('K3-301: 301 bps fair/oracle spot gap is refused; 300 is accepted and repri
   ok.store.close();
 });
 
-test('K3-301: provenance quoteObservedAt can be fresh while asOf (underlying last-trade) is frozen; quote-age-unknown is not ready', async () => {
+test('provenance quoteObservedAt can be fresh while asOf (underlying last-trade) is frozen; quote-age-unknown is not ready', async () => {
   const frozen = T0 - 86_400;
   const h = harness();
   h.setFair({
@@ -596,7 +680,7 @@ test('K3-301: provenance quoteObservedAt can be fresh while asOf (underlying las
   unknown.store.close();
 });
 
-test('K3-307: clamp streak on /state, v2_pricer_clamped after 4 consecutive clamps, reset on an unclamped tick', async () => {
+test('clamp streak on /state, v2_pricer_clamped after 4 consecutive clamps, reset on an unclamped tick', async () => {
   const h = harness();
   const pairKey = `${BEN.toLowerCase()}:${NVDA.toLowerCase()}`;
   h.setFair(5_000_000n);
@@ -625,10 +709,10 @@ test('K3-307: clamp streak on /state, v2_pricer_clamped after 4 consecutive clam
 });
 
 /*//////////////////////////////////////////////////////////////
-       K8-178: RECORDED IS NOT ALERTED (the pricer's mute failures)
+       RECORDED IS NOT ALERTED (the pricer's mute failures)
 //////////////////////////////////////////////////////////////*/
 
-test('K8-178: an unreadable canCall stops every reprice, never reports the revoked key healthy, and pages on its own kind at the 3rd consecutive tick', async () => {
+test('an unreadable canCall stops every reprice, never reports the revoked key healthy, and pages on its own kind at the 3rd consecutive tick', async () => {
   const h = harness();
   h.setFair(2_000_000n);
   h.chain.canCallFails = true;
@@ -673,7 +757,7 @@ test('K8-178: an unreadable canCall stops every reprice, never reports the revok
   h.store.close();
 });
 
-test('K8-178: a throwing StrategySet scan pages instead of degrading to the stale list in silence, and clears when a scan gets through', async () => {
+test('a throwing StrategySet scan pages instead of degrading to the stale list in silence, and clears when a scan gets through', async () => {
   const h = harness();
   h.setFair(2_000_000n);
 
@@ -697,7 +781,7 @@ test('K8-178: a throwing StrategySet scan pages instead of degrading to the stal
   h.store.close();
 });
 
-test('K8-178: band-empty is a completed evaluation, so it resets the clamp streak - the page means four CONSECUTIVE clamps', async () => {
+test('band-empty is a completed evaluation, so it resets the clamp streak - the page means four CONSECUTIVE clamps', async () => {
   const h = harness();
   const pairKey = `${BEN.toLowerCase()}:${NVDA.toLowerCase()}`;
   const interval = 1_800;
@@ -712,7 +796,7 @@ test('K8-178: band-empty is a completed evaluation, so it resets the clamp strea
   assert.equal(r.pairs[0]!.clampStreak, 1);
 
   // clamp, band-empty, clamp, band-empty, clamp, band-empty, clamp: four clamps, none consecutive.
-  // Before K8-178 the band-empty arm skipped noteClamp, so the streak survived it, reached 4, and paged
+  // Earlier the band-empty arm skipped noteClamp, so the streak survived it, reached 4, and paged
   // "clamped to the ceiling for 4 consecutive evaluations" about clamps that were three apart.
   for (let i = 1; i <= 3; i++) {
     h.chain.spot = bandEmptySpot;
@@ -736,19 +820,19 @@ test('K8-178: band-empty is a completed evaluation, so it resets the clamp strea
   h.store.close();
 });
 
-test('T-OP-059 (F-APP-KEEPER-03): the two sequences the alert is defined over - clamp, clamp -> 2; clamp, band-empty, clamp -> 1', async () => {
+test(': the two sequences the alert is defined over - clamp, clamp -> 2; clamp, band-empty, clamp -> 1', async () => {
   // THE DECISION, and where it comes from. `v2_pricer_clamped` is defined at the top of pricer.ts as "four
   // consecutive COMPLETED EVALUATIONS landed on the minAsk/maxAsk clamp; reset by any completed evaluation
-  // that did not, band-empty included". ops/alerts.md has no section for this alert kind (a docs gap, reported
-  // in the T-OP-059 ledger entry), so the code header is the stated purpose. Band-empty is a completed
-  // evaluation whose target is absent, not one sitting on the clamp, so it RESETS. K8-178 implemented that;
+  // that did not, band-empty included". The alert runbook has no section for this kind
+  // yet, so the code header is the stated purpose. Band-empty is a completed
+  // evaluation whose target is absent, not one sitting on the clamp, so it RESETS. A change implemented that;
   // this test pins the two minimal sequences by name so the decision cannot drift back silently.
-  // PROVE BY BREAKING: in noteClamp, make `clamped` treat `undefined` as "leave the streak alone" (or skip
+  // BREAK CHECK: in noteClamp, make `clamped` treat `undefined` as "leave the streak alone" (or skip
   // noteClamp on the band-empty arm again) and the second sequence goes red at `clamp, band-empty, clamp -> 1`.
   const h = harness();
   const interval = 1_800;
   const goodSpot = 212_210_000n;
-  // Same construction as the K8-178 test above: a spot this small makes the band empty through a real evaluation.
+  // Same construction as the test above: a spot this small makes the band empty through a real evaluation.
   const bandEmptySpot = 1_000n;
   h.setFair(5_000_000n);
 
@@ -773,7 +857,7 @@ test('T-OP-059 (F-APP-KEEPER-03): the two sequences the alert is defined over - 
   h.store.close();
 });
 
-test('K8-178: a tick that reached a target but sent nothing is not an evaluation, so it does not inflate the clamp streak', async () => {
+test('a tick that reached a target but sent nothing is not an evaluation, so it does not inflate the clamp streak', async () => {
   const h = harness();
   h.setFair(5_000_000n); // clamps to the ceiling...
   h.chain.canReprice = false; // ...and nothing may be sent, so the clock never moves and the pair is due again next tick.
@@ -795,7 +879,7 @@ test('K8-178: a tick that reached a target but sent nothing is not an evaluation
 });
 
 /*//////////////////////////////////////////////////////////////
-                         GET /ready (T-423)
+                         GET /ready
 //////////////////////////////////////////////////////////////*/
 
 const NOW_MS = T0 * 1_000;
@@ -810,14 +894,14 @@ const READY_FACTS: PricerReadinessFacts = {
   lastEvaluationAt: NOW_MS - 60_000,
 };
 
-test('T-423 fairReadyBoundMs: max(PRICER_FAIR_ALERT_S, PRICER_MIN_INTERVAL_S) plus three poll intervals', () => {
+test('fairReadyBoundMs: max(PRICER_FAIR_ALERT_S, PRICER_MIN_INTERVAL_S) plus three poll intervals', () => {
   assert.equal(fairReadyBoundMs({ fairAlertS: 7_200, minIntervalS: 1_800 }, 60_000), BOUND_MS);
   assert.equal(fairReadyBoundMs({ fairAlertS: 600, minIntervalS: 1_800 }, 60_000), 1_980_000, 'never below the cadence, or a healthy pricer reads unready between evaluations');
   const config = pricerConfig();
   assert.equal(fairReadyBoundMs(config.tuning, config.pollIntervalMs), BOUND_MS, 'what loadV2Config defaults to');
 });
 
-test('T-423 evaluatePricerReadiness: ready only when all four hold; each failing ALONE is not ready and names exactly its reason', () => {
+test('evaluatePricerReadiness: ready only when all four hold; each failing ALONE is not ready and names exactly its reason', () => {
   assert.deepEqual(evaluatePricerReadiness(READY_FACTS, BOUND_MS, NOW_MS), { ready: true, reasons: [], lastEvaluationAt: NOW_MS - 60_000 });
   assert.equal(evaluatePricerReadiness({ ...READY_FACTS, lastQualifiedFairAt: NOW_MS - BOUND_MS }, BOUND_MS, NOW_MS).ready, true, 'at the bound: still ready');
 
@@ -846,7 +930,7 @@ test('T-423 evaluatePricerReadiness: ready only when all four hold; each failing
   });
 });
 
-test('T-423 readiness through the tick: a failed canCall read is role-unread AT ONCE, not at the 3rd tick like the page; a throwing tick is tick-failed', async () => {
+test('readiness through the tick: a failed canCall read is role-unread AT ONCE, not at the 3rd tick like the page; a throwing tick is tick-failed', async () => {
   const h = harness();
   const readiness = () => h.pricer.readiness(true, Date.now());
   assert.deepEqual(readiness(), { ready: false, reasons: ['no-completed-tick', 'role-unread', 'fair-stale'], lastEvaluationAt: null }, 'before the first tick');
@@ -888,7 +972,7 @@ test('T-423 readiness through the tick: a failed canCall read is role-unread AT 
   h.store.close();
 });
 
-test('T-423 an unqualified fair value is not a qualified one: fair-stale, alone', async () => {
+test('an unqualified fair value is not a qualified one: fair-stale, alone', async () => {
   const h = harness();
   h.setFair({ ok: false, reason: 'pricing service down' });
   assert.equal((await h.tickAt(T0)).pairs[0]!.outcome, 'fair-unavailable');
@@ -896,7 +980,7 @@ test('T-423 an unqualified fair value is not a qualified one: fair-stale, alone'
   h.store.close();
 });
 
-test('T-423 GET /ready on the pricer app: /health liveness is an input, never the answer; no signer, contract, RPC or db in the body', async () => {
+test('GET /ready on the pricer app: /health liveness is an input, never the answer; no signer, contract, RPC or db in the body', async () => {
   const h = harness();
   const config = h.pricer.ctx.config;
   let now = Date.now();
@@ -952,9 +1036,9 @@ test('T-423 GET /ready on the pricer app: /health liveness is an input, never th
   h.store.close();
 });
 
-test('T-437: the spot that judges an ask comes from its SERIES\' pinned oracle, never the market\'s pointer', async () => {
+test('the spot that judges an ask comes from its SERIES\' pinned oracle, never the market\'s pointer', async () => {
   // A setMarketOracle moved the market's pointer to an oracle reading past the strike. `reprice` reads the oracle the
-  // SERIES pinned (T-310), which is still short of it, so the ask is repriced — a pricer that read the market's would
+  // SERIES pinned, which is still short of it, so the ask is repriced — a pricer that read the market's would
   // answer in-the-money and skip a reprice the contract would have accepted.
   const h = harness();
   h.chain.series.get(11n)!.oracle = SERIES_ORACLE_A;
@@ -969,7 +1053,7 @@ test('T-437: the spot that judges an ask comes from its SERIES\' pinned oracle, 
   assert.ok(!h.chain.spotFrom.includes(MARKET_ORACLE.toLowerCase()), 'market(u).oracle is never asked for an existing series');
 });
 
-test('T-437: two series on ONE underlying with different pinned oracles are each priced on their own', async () => {
+test('two series on ONE underlying with different pinned oracles are each priced on their own', async () => {
   const h = harness();
   h.chain.series.get(11n)!.oracle = SERIES_ORACLE_A;
   h.chain.series.get(12n)!.oracle = SERIES_ORACLE_B;
@@ -991,14 +1075,316 @@ test('T-437: two series on ONE underlying with different pinned oracles are each
   assert.equal(h.sends.length, 1, 'nothing more is sent');
 });
 
-test('T-437: a series with no pinned oracle is priced on no oracle at all', async () => {
+test('a series with no pinned oracle is priced on no oracle at all', async () => {
   // Fail closed. Without the oracle the contract would use, no other oracle's price stands in for it.
   const h = harness();
   h.chain.series.get(11n)!.oracle = getAddress('0x0000000000000000000000000000000000000000');
   h.setFair(2_000_000n);
 
   const r = await h.tickAt(T0);
-  assert.deepEqual(h.chain.spotFrom, [], 'no trySpot is issued to any oracle');
+  // The PAIR issues no trySpot. The one read is the readiness probe's (the pair asked no /fair), to
+  // market(u).oracle - the oracle a NEW series would pin - and it prices no ask: the pair's spot stays null, nothing
+  // is sent, and r.probe owns the read. Before the probe this line read `spotFrom === []`. A pair falling back to the
+  // market's oracle would reach /fair, so the probe would not run (r.probe null) and the pair's spot would be set.
+  assert.deepEqual(h.chain.spotFrom, [MARKET_ORACLE.toLowerCase()], 'only the probe\'s trySpot, to the market pointer');
+  assert.equal(r.probe?.oracle, MARKET_ORACLE);
+  assert.equal(r.probe?.outcome, 'qualified');
   assert.equal(r.pairs[0]!.spot, null);
   assert.equal(h.sends.length, 0, 'nothing is repriced on an unknown oracle');
+});
+
+/** A fresh deployment: this chain's anchor, and a StrategySet scan that has found nothing. */
+const NO_STRATEGIES: HarnessOptions = {
+  prepare: (_store, strategies) => {
+    strategies.bindAnchor(ANCHOR);
+    strategies.applyRange([], 65_100_001n);
+  },
+};
+const TSLA = getAddress('0x322F0929c4625eD5bAd873c95208D54E1c003b2d');
+
+test('zero strategies - one tick of the readiness probe makes a fresh deployment ready, and it prices nothing', async () => {
+  // The deadlock: /ready needed a qualified fair value, only a smart-pricing strategy's due ask asked /fair, and the
+  // web offers smart pricing only while /ready is true. Measured on the rehearsal fork: 503 [fair-stale].
+  const h = harness({}, NO_STRATEGIES);
+  assert.deepEqual(h.pricer.readiness(true, Date.now()).reasons, ['no-completed-tick', 'role-unread', 'fair-stale'], 'before the first tick');
+  h.setFair(2_000_000n);
+
+  const r = await h.tickAt(T0);
+  assert.equal(r.strategies, 0);
+  assert.deepEqual(r.pairs, []);
+  assert.deepEqual(r.probe, {
+    ticker: 'NVDA',
+    underlying: NVDA,
+    oracle: MARKET_ORACLE,
+    spot: 212_210_000n,
+    strike: 212_500_000n,
+    expiry: h.chain.nextExpiryAt,
+    outcome: 'qualified',
+    fair: 2_000_000n,
+    fairSource: 'cboe',
+  });
+  // The series a new listing would get: the cranker's own ladder question to the calendar, the market's own oracle
+  // (the one createSeries pins) and its own strike tick, rounded up from that oracle's spot (212.21 -> 212.5).
+  assert.deepEqual(h.chain.nextExpiryAsked, [[ladderSearchStart(T0), true]]);
+  assert.deepEqual(h.chain.spotFrom, [MARKET_ORACLE.toLowerCase()]);
+  assert.deepEqual(h.fairRequests, [{ ticker: 'NVDA', strike: 212_500_000n, expiry: h.chain.nextExpiryAt, type: 'call' }]);
+  assert.equal(h.sends.length, 0, 'the probe sends nothing');
+  assert.deepEqual(h.pricer.readiness(true, Date.now()), { ready: true, reasons: [], lastEvaluationAt: null }, 'ready, and still no evaluation: nothing was priced');
+  assert.equal((h.pricer.state() as { probe: unknown }).probe, h.pricer.lastProbe);
+  h.store.close();
+});
+
+test('fair-stale is intact - every probe the gates refuse, or that cannot ask, leaves the pricer unready; the next market is tried', async () => {
+  const h = harness({}, NO_STRATEGIES);
+  const reasons = () => h.pricer.readiness(true, Date.now()).reasons;
+  let at = T0;
+  const probe = async () => (await h.tickAt((at += 60))).probe;
+
+  // A stale legacy asOf: qualifyFair refuses exactly as it would for a pair.
+  h.setFair({ ok: true, fair: 2_000_000n, source: 'cboe', asOf: T0 - 1_801, spot: 212_210_000n });
+  let p = await probe();
+  assert.deepEqual([p?.ticker, p?.outcome], ['NVDA', 'fair-stale']);
+  assert.deepEqual(reasons(), ['fair-stale']);
+
+  // A /fair priced far from the oracle: the spot gate refuses it. The market that did not qualify gave way to TSLA.
+  h.setFair({ ok: true, fair: 2_000_000n, source: 'cboe', asOf: T0, spot: 250_000_000n });
+  p = await probe();
+  assert.deepEqual([p?.ticker, p?.underlying, p?.outcome], ['TSLA', TSLA, 'fair-spot-mismatch']);
+  assert.deepEqual(reasons(), ['fair-stale']);
+
+  // The pricing service is down.
+  h.setFair({ ok: false, reason: 'unreachable: ECONNREFUSED' });
+  assert.equal((await probe())?.outcome, 'fair-unavailable');
+  const asked = h.fairRequests.length;
+  assert.equal(asked, 3);
+
+  // Nothing to ask about: no /fair request is spent, and nothing qualifies.
+  h.setFair(2_000_000n);
+  h.chain.spot = null;
+  assert.equal((await probe())?.outcome, 'spot-stale');
+  h.chain.spot = 212_210_000n;
+  h.chain.nextExpiryFails = true;
+  assert.equal((await probe())?.outcome, 'expiry-unread');
+  h.chain.nextExpiryFails = false;
+  h.chain.marketEnabled = false;
+  assert.equal((await probe())?.outcome, 'market-disabled');
+  h.chain.marketEnabled = true;
+  assert.equal(h.fairRequests.length, asked, 'no /fair request without a spot, an expiry and an enabled market');
+  assert.deepEqual(reasons(), ['fair-stale']);
+
+  // A session the pricer would not price in (planCheck's rule): no probe at all, not ready.
+  h.chain.sessionOpen = false;
+  assert.equal(await probe(), null);
+  h.chain.sessionReadFails = true;
+  assert.equal(await probe(), null);
+  assert.equal(h.fairRequests.length, asked);
+  assert.deepEqual(reasons(), ['fair-stale']);
+
+  // Open again, and /fair answers: ready.
+  h.chain.sessionOpen = true;
+  h.chain.sessionReadFails = false;
+  assert.equal((await probe())?.outcome, 'qualified');
+  assert.deepEqual(reasons(), []);
+  h.store.close();
+});
+
+test('a pair that asked /fair is the readiness fact (no probe beside it); the probe asks once per PRICER_MIN_INTERVAL_S and a lapse past the bound is fair-stale again', async () => {
+  // A pair that asked, refused: fair-stale, and no probe papers over its refusal.
+  const withPair = harness();
+  withPair.setFair({ ok: false, reason: 'pricing service down' });
+  const r = await withPair.tickAt(T0);
+  assert.equal(r.pairs[0]!.outcome, 'fair-unavailable');
+  assert.equal(r.probe, null);
+  assert.equal(withPair.fairRequests.length, 1, 'the pair\'s request only');
+  assert.deepEqual(withPair.pricer.readiness(true, Date.now()).reasons, ['fair-stale']);
+  withPair.store.close();
+
+  let wall = 1_000_000;
+  const h = harness({}, { ...NO_STRATEGIES, now: () => wall });
+  const config = h.pricer.ctx.config;
+  const intervalMs = config.tuning.minIntervalS * 1_000;
+  const boundMs = fairReadyBoundMs(config.tuning, config.pollIntervalMs);
+  assert.ok(boundMs >= intervalMs + 3 * config.pollIntervalMs, 'the probe cadence sits inside the /ready bound');
+  h.setFair(2_000_000n);
+
+  assert.equal((await h.tickAt(T0)).probe?.outcome, 'qualified');
+  wall += intervalMs - 1;
+  assert.equal((await h.tickAt(T0 + 60)).probe, null, 'inside the interval: nothing asked');
+  assert.equal(h.fairRequests.length, 1);
+  wall += 1;
+  assert.equal((await h.tickAt(T0 + 120)).probe?.outcome, 'qualified', 'at the interval: asked again');
+  assert.equal(h.fairRequests.length, 2);
+  assert.equal(h.pricer.lastQualifiedFairAt, wall);
+
+  // /fair stops answering. The probe keeps asking every tick; readiness holds until the bound, then fair-stale.
+  h.setFair({ ok: false, reason: 'pricing service down' });
+  const last = wall;
+  wall = last + intervalMs;
+  assert.equal((await h.tickAt(T0 + 180)).probe?.outcome, 'fair-unavailable');
+  assert.deepEqual(h.pricer.readiness(true, wall).reasons, [], 'still inside the bound');
+  wall = last + boundMs + 1;
+  assert.equal((await h.tickAt(T0 + 240)).probe?.outcome, 'fair-unavailable');
+  assert.deepEqual(h.pricer.readiness(true, wall).reasons, ['fair-stale']);
+  h.store.close();
+});
+
+test(': a step floor above the band sends the band ceiling and logs pricer band-ceiling-step; a 20 % step says the monitor pages it', async () => {
+  // The ask sits above the 150 bps ceiling (3.183100) by more than one pricer step but within the contract's 25 %:
+  // The old pricer sent nothing and the ask stayed above the band. Now: send the ceiling; the
+  // monitor pages a step of REPRICE_PAGE_DROP_BPS or more from the chain; the pricer logs the step either way.
+  const cases = [
+    { live: 3_940_000n, stepFloor: 3_191_400n, dropBps: 1_921n, pages: false },
+    { live: 4_000_000n, stepFloor: 3_240_000n, dropBps: 2_042n, pages: true },
+  ];
+  for (const c of cases) {
+    const { log, lines } = captureLog();
+    const h = harness({}, { log });
+    h.chain.roll(11n, 31n, c.live);
+    h.setFair(1_500_000n);
+    const pair = (await h.tickAt(T0)).pairs[0]!;
+    assert.equal(pair.outcome, 'repriced', `${c.live}: the ceiling was sent and confirmed`);
+    assert.equal(h.sends.length, 1);
+    assert.equal(h.sends[0]!.args[2], 3_183_100n, `${c.live}: the price sent is the band ceiling`);
+    assert.equal(pair.stepFloor, c.stepFloor);
+    assert.equal(pair.ceilingStepDropBps, c.dropBps);
+    const step = lines.filter((l) => l.msg === 'pricer band-ceiling-step');
+    assert.equal(step.length, 1, `${c.live}: one 'pricer band-ceiling-step' line`);
+    assert.equal(step[0]!.level, 'warn');
+    assert.equal(step[0]!.dropBps, String(c.dropBps));
+    assert.equal(step[0]!.price, '3183100');
+    assert.equal(step[0]!.pages, c.pages);
+    const done = lines.filter((l) => l.msg === 'pricer repriced');
+    assert.equal(done.length, 1);
+    assert.match(String(done[0]!.detail), /^band-ceiling step: /);
+    assert.equal(String(done[0]!.detail).includes('the monitor pages v2_mon_reprice_floorward'), c.pages);
+    assert.deepEqual(h.alerts.filter((a) => a.kind === 'v2_pricer_reprice_failed'), NO_ALERTS, 'nothing failed: the pricer does not page');
+    h.store.close();
+  }
+});
+
+test('a band ceiling below the contract floor sends nothing, pages v2_pricer_reprice_failed at warn, logs pricer drop-floor-above-band; the next confirmed reprice clears it', async () => {
+  const { log, lines } = captureLog();
+  const h = harness({}, { log });
+  h.chain.roll(11n, 31n, 5_000_000n); // contract floor 3.750000, over the 3.183100 ceiling
+  h.setFair(1_500_000n);
+  const pair = (await h.tickAt(T0)).pairs[0]!;
+  assert.equal(pair.outcome, 'drop-floor-above-band');
+  assert.equal(h.sends.length, 0, 'nothing is sent');
+  assert.equal(pair.contractFloor, 3_750_000n);
+  assert.equal(pair.stepFloor, 4_050_000n);
+  const key = `${BEN.toLowerCase()}:${NVDA.toLowerCase()}`;
+  assert.deepEqual(h.alerts.filter((a) => a.kind === 'v2_pricer_reprice_failed'), [{ kind: 'v2_pricer_reprice_failed', dedupeKey: key, severity: 'warn' }]);
+  const named = lines.filter((l) => l.msg === 'pricer drop-floor-above-band');
+  assert.equal(named.length, 1, "one 'pricer drop-floor-above-band' line");
+  assert.match(String(named[0]!.detail), /per-call floor 3750000/);
+  assert.equal(pair.nextCheckAt, T0 + 1_800, 'a completed evaluation: the clock moves');
+
+  // The writer's next ask is within one step of the band: the pricer steps it, confirmed, and the page clears.
+  h.chain.roll(12n, 32n, 3_500_000n);
+  const next = (await h.tickAt(T0 + 60)).pairs[0]!;
+  assert.equal(next.outcome, 'repriced');
+  assert.ok(h.cleared.includes(`v2_pricer_reprice_failed:${key}`), 'cleared by the next confirmed reprice');
+  h.store.close();
+});
+
+test('an event-day or model-uncertain fair is not re-priced, is named on /state, and never counts toward /ready; extrapolated alone still re-prices', async () => {
+  const h = harness();
+  h.setFair({ ok: true, fair: 2_000_000n, source: 'model', asOf: T0, spot: 212_210_000n, quality: { reasons: ['model-uncertainty'], eventInWindow: false, eventInput: 'missing' } });
+  const r = await h.tickAt(T0);
+  assert.equal(r.pairs[0]!.outcome, 'event-uncertainty');
+  assert.match(r.pairs[0]!.detail ?? '', /pricing flagged model-uncertainty/);
+  assert.equal(h.sends.length, 0, 'nothing sent on a price the market maker would not quote');
+  assert.equal(r.probe, null, 'the pair asked /fair, so no probe papers over its refusal');
+  const state = h.pricer.state() as { pairs: Array<{ outcome: string }>; outcomes: Record<string, number> };
+  assert.equal(state.pairs[0]!.outcome, 'event-uncertainty', '/state names the refusal');
+  assert.equal(state.outcomes['event-uncertainty'], 1);
+  assert.deepEqual(h.pricer.readiness(true, Date.now()).reasons, ['fair-stale'], 'a refused answer is not a qualified fair value');
+  assert.equal(h.pricer.lastQualifiedFairAt, null);
+
+  h.setFair({ ok: true, fair: 2_000_000n, source: 'model', asOf: T0 + 60, spot: 212_210_000n, quality: { reasons: ['extrapolated', 'book-one-sided'], eventInWindow: false, eventInput: 'missing' } });
+  assert.equal((await h.tickAt(T0 + 60)).pairs[0]!.outcome, 'repriced', 'extrapolated and one-sided do not refuse on their own');
+  assert.equal(h.sends.length, 1);
+  assert.notEqual(h.pricer.lastQualifiedFairAt, null);
+  h.store.close();
+});
+
+test('the /ready probe refuses an event inside the series window exactly as a pair does, and stays unready until a clean answer', async () => {
+  const h = harness({}, NO_STRATEGIES);
+  let at = T0;
+  const probe = async () => (await h.tickAt((at += 60))).probe;
+  h.setFair({ ok: true, fair: 2_000_000n, source: 'model', asOf: T0, spot: 212_210_000n, quality: { reasons: [], eventInWindow: true, eventInput: 'supplied' } });
+  const p = await probe();
+  assert.deepEqual([p?.ticker, p?.outcome], ['NVDA', 'event-uncertainty']);
+  assert.equal(h.pricer.lastQualifiedFairAt, null);
+  assert.deepEqual(h.pricer.readiness(true, Date.now()).reasons, ['fair-stale']);
+
+  h.setFair({ ok: true, fair: 2_000_000n, source: 'model', asOf: T0, spot: 212_210_000n, quality: { reasons: [], eventInWindow: false, eventInput: 'supplied' } });
+  assert.equal((await probe())?.outcome, 'qualified');
+  assert.deepEqual(h.pricer.readiness(true, Date.now()).reasons, []);
+  h.store.close();
+});
+
+/** /fair answered, but flagged the way the market maker halts on (the event-uncertainty refusal). */
+const flaggedFair = (asOf: number): FairAnswer => ({
+  ok: true, fair: 2_000_000n, source: 'model', asOf, spot: 212_210_000n,
+  quality: { reasons: ['event-uncertainty'], eventInWindow: false, eventInput: 'supplied' },
+});
+
+test('an event-uncertainty pause past PRICER_FAIR_ALERT_S still pages, names the series and pricing\'s flag, and never says "no fair value"', async () => {
+  const h = harness({ PRICER_FAIR_ALERT_S: '3600' });
+  const pairKey = `${BEN.toLowerCase()}:${NVDA.toLowerCase()}`;
+  h.setFair(flaggedFair(T0));
+  let r = await h.tickAt(T0);
+  assert.equal(r.pairs[0]!.outcome, 'event-uncertainty');
+  assert.deepEqual(h.alerts, NO_ALERTS, 'inside PRICER_FAIR_ALERT_S: no page');
+  h.setFair(flaggedFair(T0 + 3_600));
+  r = await h.tickAt(T0 + 3_600);
+  assert.equal(r.pairs[0]!.outcome, 'event-uncertainty', 'the refusal itself is T-OP-1042\'s, unchanged');
+  assert.equal(h.sends.length, 0);
+  assert.deepEqual(h.alerts, [{ kind: 'v2_pricer_fair_unavailable', dedupeKey: pairKey, severity: undefined }], 'kept: a long pause leaves the ask at a price nothing re-checks');
+  assert.equal(
+    h.pages[0]!.message,
+    `pricer: NVDA call strike 222500000 expiry ${T0 + 3 * 86_400} (series 11, ask 31, writer ${BEN}) has not been re-priced for 3600 s and is paused now because pricing flagged event/model uncertainty: pricing flagged event-uncertainty (event calendar: supplied). Not a missing fair value: the pricing service answered, and the market maker halts the same series. The ask keeps its last price until the flag clears`,
+  );
+  assert.doesNotMatch(h.pages[0]!.message, /no fair value/);
+  assert.deepEqual(h.pages[0]!.data, {
+    writer: BEN, underlying: NVDA, ticker: 'NVDA', since: T0, reason: 'pricing flagged event-uncertainty (event calendar: supplied)', cause: 'event-uncertainty',
+    longId: '11', orderId: '31', strike: '222500000', expiry: T0 + 3 * 86_400, type: 'call',
+  });
+  h.store.close();
+});
+
+test('a missing or failed fair value still pages v2_pricer_fair_unavailable exactly as before', async () => {
+  const h = harness({ PRICER_FAIR_ALERT_S: '3600' });
+  h.setFair({ ok: false, reason: 'chain-stale' });
+  await h.tickAt(T0);
+  await h.tickAt(T0 + 3_600);
+  assert.deepEqual(h.pages, [{
+    kind: 'v2_pricer_fair_unavailable',
+    message: `pricer: no fair value for NVDA (writer ${BEN}) for 3600 s: chain-stale`,
+    data: { writer: BEN, underlying: NVDA, ticker: 'NVDA', since: T0, reason: 'chain-stale' },
+  }]);
+  h.store.close();
+});
+
+test('the two refusals share one timer, and the page names the refusal of the tick that pages', async () => {
+  // A fair failure starts the clock; the pause that follows pages at the threshold with ITS cause, from the same start.
+  const h = harness({ PRICER_FAIR_ALERT_S: '3600' });
+  h.setFair({ ok: false, reason: 'chain-stale' });
+  await h.tickAt(T0);
+  h.setFair(flaggedFair(T0 + 3_600));
+  await h.tickAt(T0 + 3_600);
+  assert.equal(h.pages.length, 1);
+  assert.match(h.pages[0]!.message, /has not been re-priced for 3600 s and is paused now because pricing flagged event\/model uncertainty/);
+  assert.equal(h.pages[0]!.data?.since, T0);
+  h.store.close();
+
+  // And the other way: a pause starts the clock, a real failure at the threshold pages as a missing fair value.
+  const g = harness({ PRICER_FAIR_ALERT_S: '3600' });
+  g.setFair(flaggedFair(T0));
+  await g.tickAt(T0);
+  g.setFair({ ok: false, reason: 'http 503' });
+  await g.tickAt(T0 + 3_600);
+  assert.deepEqual(g.pages.map((p) => p.message), [`pricer: no fair value for NVDA (writer ${BEN}) for 3600 s: http 503`]);
+  g.store.close();
 });

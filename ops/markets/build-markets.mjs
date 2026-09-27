@@ -5,7 +5,7 @@
  * One file drives every market-specific thing in the system: the factory deploy scripts
  * (contracts/script/DeploySoloBatch.sh), the per-market keeper env files (ops/keeper-env.sh), the
  * indexer env, the web app's market list (web/lib/markets.ts via web/scripts/gen-markets.mjs) and
- * the docs page (callhouse-docs/product/markets.md). Nothing else may hard-code a market.
+ * the docs page. Nothing else may hard-code a market.
  *
  * WHAT IT DOES
  *   1. Fetches Chainlink's feed directory for chain 4663 (or reads --feeds <file>), keeps the
@@ -19,16 +19,18 @@
  *      `decimals() == 18`, `symbol()`, and the ERC-8056 `uiMultiplier()` / `oraclePaused()` probes.
  *      A market that fails any check is written with `verification.ok == false` and its issues,
  *      never silently dropped, and the script exits 1.
- *   4. Fetches Cboe's delayed option chain for the ticker (unless --skip-cboe) and records whether
- *      a weekly chain exists (the next two Fridays both listed) and how far Cboe's `current_price`
- *      sits from the feed's spot. The keeper's vol mode needs both: it prices the week from the
- *      chain of the SAME underlying and refuses a spot divergence above
- *      KEEPER_VOL_MAX_SPOT_DIVERGENCE_BPS (300). A root whose chain is a different instrument
- *      (SPCX on Cboe is not the SpaceX token) or has no weeklies (SGOV) is `mode: "fixed"`.
+ *   4. Reads the ticker's listed option contracts from Massive (unless --skip-chain) and records
+ *      whether a weekly chain exists (the next two Fridays both listed) and how far Massive's
+ *      underlying price sits from the feed's spot. The keeper's vol mode needs both: it prices the
+ *      week from the chain of the SAME underlying and refuses a spot divergence above
+ *      KEEPER_VOL_MAX_SPOT_DIVERGENCE_BPS (300). A root whose chain is a different instrument or
+ *      has no weeklies (SGOV) is `mode: "fixed"`. Massive is the only chain source
+ *      now; this was Cboe's delayed file before. The evidence keeps its registry
+ *      name and shape (`cboe`, see probeMassive) so no reader moves; `cboe.source` says "massive".
  *   5. Merges the result over the existing tier1.json so hand-maintained fields survive a
  *      regeneration: `deployment.*`, `wave`, `status`, `depositCapUsd`, `strikeOtmBps`,
  *      `minAskUsdg6`, `targetDelta`, `priceEdgeBps`, `premiumMarginBps`, `modeOverride`, `v1RunOff`
- *      (ADR-10: the owner froze this v1 factory; ops/keeper-env.sh then renders SOLO_WIND_DOWN=1),
+ *      (this v1 factory is frozen; ops/keeper-env.sh then renders SOLO_WIND_DOWN=1),
  *      `v1FrozenAt` (unix seconds of that freeze, written with `v1RunOff: true`), `notes`, and the
  *      v2 blocks: the top-level `v2` (contract addresses, bot addresses, Uniswap periphery, fees,
  *      defaults) and each market's `v2` (status, wave, strikeTick, pool, liquidity floor, Data
@@ -36,45 +38,63 @@
  *      never derived here: nothing the builder fetches can say which pool a settlement source
  *      should trust or which wave a market opens in. At the root, every key of the registry read
  *      comes out as it went in unless REGENERATED_ROOT_KEYS or RETIRED_ROOT_KEYS names it; a
- *      rebuild that would drop or rewrite any other root key is refused before it writes (T-607).
+ *      rebuild that would drop or rewrite any other root key is refused before it writes.
  *   6. Validates what it cannot regenerate, so a bad hand edit fails loudly here instead of at a
  *      deploy: `status` is live | planned | paused | superseded-by-v2 (the v1 factory lifecycle;
- *      ADR-02 cancelled the per-market factory rollout, so the 34 rows that were planned are
+ *      The per-market factory rollout was cancelled, so the 34 rows that were planned are
  *      superseded and a live row needs a factory while a superseded one must not have one);
  *      `v1FrozenAt` is absent, null or positive unix seconds, and when set the row has a factory
- *      and `v1RunOff: true`; the v2 blocks match ops/markets/README.md "v2 blocks" (interface
+ *      and `v1RunOff: true`; the v2 blocks match the registry schema (interface
  *      version, enums, strikeTick a positive multiple of PRICE_TICK = 100, fee ceilings of
  *      V2Constants, overrides naming only keys of `v2.defaults`, each market's effective
  *      `spotMaxAgeS` at most the oracle's 4-day ceiling and at least its feed heartbeat + 1 h,
  *      a pool always with its floor, the
  *      three bot addresses EIP-55 checksummed or null and distinct from each other and from every
  *      other key the registry names). A pool is checked twice: offline, its token pair must be
- *      {asset, USDG} in the F2-02 recon (ops/markets/v2-sources.json), and on chain
+ *      {asset, USDG} in the source recon (ops/markets/v2-sources.json), and on chain
  *      `token0()`/`token1()` must be that pair and the v3 factory's `getPool` must return it for the
  *      pool's own `fee()`. Current in-range liquidity under the floor is reported, not failed: it
  *      moves with the market, and the floor is a settlement-time gate.
  *
  * USAGE
- *   node ops/markets/build-markets.mjs                      # fetch feeds, verify, fetch Cboe, write
+ *   node ops/markets/build-markets.mjs                      # fetch feeds, verify, read Massive, write
  *   node ops/markets/build-markets.mjs --feeds path.json    # use a saved feed directory
- *   node ops/markets/build-markets.mjs --skip-cboe          # no Cboe fetch (keeps previous evidence)
+ *   node ops/markets/build-markets.mjs --skip-chain         # no Massive read (keeps previous evidence)
+ *                                                           # (--skip-cboe: the old name, an alias that says so)
+ *   MASSIVE_API_KEY=... or ~/.config/massive/api_key supplies the Massive key; it is never printed.
+ *   MASSIVE_API_URL=... overrides the Massive base (default https://api.massive.com).
  *   node ops/markets/build-markets.mjs --check              # verify only; exit 1 on drift, write nothing
  *   node ops/markets/build-markets.mjs --check --registry /path/to/other.json    # explicit alternate registry
  *   node ops/markets/build-markets.mjs --check --registry ops/markets/dev.json   # the local-devnet registry
+ *   node ops/markets/build-markets.mjs --pin-routes [--registry <file>]   # write V2_PAYOUT_ROUTE_PINS only; offline
+ *   node ops/markets/build-markets.mjs --pin-bands [--registry <file>]    # write V2_INTENDED_CHAINLINK_BANDS only; offline
  *   RH_RPC=... overrides the RPC (default: the public primary).
  *
  * `--registry <file>` reads AND writes that file instead of ops/markets/tier1.json, under exactly the
  * same rules. A separate development registry can be supplied explicitly; nothing defaults to it.
  * Every consumer that reads a non-production registry is told so on its own command line.
  *
+ * REDEPLOY PREFLIGHT: tier1.json describes the live v8, whose PayoutRouter holds the old v4
+ * routes, so it keeps them until a new deployment. Pinning them there (`--pin-routes` on the committed file) makes
+ * `--check` report drift against that live router, measured. The redeploy pins them only after its
+ * prepare step has reset the registry to no recorded deployment (the launch tool's prepare step), so no
+ * old router is left to drift from. The stonkctl order is then: prepare + `--pin-routes` (writes
+ * V2_PAYOUT_ROUTE_PINS: NVDA and SPCX v3 fee 500), deploy, the core write-back (records the new router; `--check`
+ * waives the router equality for the still-unregistered launch markets and requires their pins),
+ * then RegisterMarkets, which reads the pins through registry-env.sh and calls setRouteV3 on the new
+ * router. (The older launch-v8.sh order registered before its write-back.)
+ *
  * Needs `cast` (foundry) on PATH and Node >= 22. No npm dependencies on purpose: this runs from
  * a bare checkout during a deploy, before any workspace install.
  */
 import { execFile } from "node:child_process";
 import { readFileSync, writeFileSync, existsSync, mkdirSync, realpathSync } from "node:fs";
+import { homedir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { isDeepStrictEqual, promisify } from "node:util";
+
+import { chainSource, routeLiquidityIssues, rpcTransport } from "./route-liquidity.mjs";
 
 const execFileP = promisify(execFile);
 
@@ -100,7 +120,15 @@ const TOKENS = path.join(opsDir, "recon", "R6-stock-tokens-list.json");
 const V2_SOURCES = path.join(here, "v2-sources.json");
 const FEEDS_URL = "https://reference-data-directory.vercel.app/feeds-robinhood-mainnet.json";
 const RPC = process.env.RH_RPC ?? "https://rpc.mainnet.chain.robinhood.com";
-const CBOE = (root) => `https://cdn.cboe.com/api/global/delayed_quotes/options/${root}.json`;
+/** Massive (the rebranded Polygon.io), the only option-chain source this builder reads. */
+const MASSIVE_API_BASE = process.env.MASSIVE_API_URL ?? "https://api.massive.com";
+/**
+ * The root's Cboe locator, RECORDED in the evidence's `url` and never fetched here. Two readers still fetch it: the
+ * v2 pricing service's Cboe provider (keeper/src/v2/pricing/fair.ts, `cboe.url`; Massive's provider ignores it) and
+ * the v1 keeper's KEEPER_VOL_URL (ops/keeper-env.sh). Keeping `url` what they expect is what keeps the evidence's
+ * shape until those readers retire.
+ */
+const CBOE_LOCATOR = (root) => `https://cdn.cboe.com/api/global/delayed_quotes/options/${root}.json`;
 const EXPLORER = "https://robinhoodchain.blockscout.com";
 
 /**
@@ -115,7 +143,7 @@ const EXPLORER = "https://robinhoodchain.blockscout.com";
  * The four chain addresses are facts of 4663 (USDG, the v1 Clearinghouse the v1 run-off still reads,
  * Seaport, Multicall3). The three role wallets are **null in the v8 skeleton**: `admin` is the Admin
  * Safe and `feeRecipient` the FeeSplitter, neither of which exists before the v8 deploy, and the v8
- * guardian is a new hot key that is never the v7 one (06-QUIRKS §G).
+ * guardian is a new hot key that is never the v7 one.
  */
 const SHARED_SKELETON = {
   chainId: 4663,
@@ -123,15 +151,15 @@ const SHARED_SKELETON = {
   clearinghouse: "0x53d7A6d0489Daf3d67b9A314e0eAB2B78Acab9C6",
   seaport: "0x0000000000000068F116a894984e2DB1123eB395",
   multicall3: "0xcA11bde05977b3631167028862bE2a173976CA11",
-  // v8: the Admin Safe (OWN8-01), the guardian hot key and the FeeSplitter. Null until each exists.
+  // v8: the Admin Safe, the guardian hot key and the FeeSplitter. Null until each exists.
   admin: null,
   guardian: null,
   feeRecipient: null,
-  // The hot ops wallet that receives capped top-ups from the Treasury Safe for bot gas (V8-DESIGN §2.4).
+  // The hot ops wallet that receives capped top-ups from the Treasury Safe for bot gas.
   opsWallet: null,
-  // The two 2-of-3 Safes (V3-D1, D10). `safes.admin` is the same address as `shared.admin`.
+  // The two 2-of-3 Safes. `safes.admin` is the same address as `shared.admin`.
   safes: { admin: null, treasury: null },
-  // STONKHOUSE, and the pinned hookless Uniswap v4 pool the buyback buys it on (V8-DESIGN §6).
+  // STONKHOUSE, and the pinned hookless Uniswap v4 pool the buyback buys it on.
   token: {
     address: null,
     symbol: null,
@@ -181,7 +209,7 @@ const DEFAULTS = {
  * into the registry UNCONDITIONALLY (`waves: WAVES` below) -- the registry is generated, so a
  * hand-edit to its `waves` block does not survive the next run.
  *
- * T-566 REMOVED THE `canary` AND `wave1` KEYS. They recorded the v1 rollout plan, which ADR-02
+ * THE `canary` AND `wave1` KEYS ARE GONE. They recorded the v1 rollout plan, which a later plan
  * superseded, but they shared a NAMESPACE with the v8 waves in `markets[].v2.wave`:
  * `DeployV2Batch.sh` reads both sources for the same wave name and refuses a disagreement, so the v1
  * `canary` of [TSLA, AAPL] collided with the v8 `canary` of [NVDA] and killed `--wave canary`.
@@ -209,15 +237,15 @@ const README =
  * value. Version 2 (ISettlementOracle candidate view and events), version 3 (API only: card
  * `perShare` ticket and the put card target), version 4 (OrderFilled.recipient), version 5 (notifier
  * settings sessions) and version 6 (24 h fee-change delay, per-expiry settlement pins, the 1 % payout
- * route fee-tier ceiling) left the registry schema as is. Version 7 (c05 collateral rent, c16 stale-ask
- * cancel, c21 vault outflow cap) was the first that grew it: `v2.fees.mintFeePpm` and a per-market
+ * route fee-tier ceiling) left the registry schema as is. Version 7 (collateral rent, stale-ask
+ * cancel, vault outflow cap) was the first that grew it: `v2.fees.mintFeePpm` and a per-market
  * `v2.mintFeePpm` (the writer fee, then rent at mint), `v2.vault` (the six-field MakerVault Limits the
  * deploy sets), `v2.fees.premiumFeeBps` 0, and a pool observation ring of at least
  * MIN_POOL_OBSERVATION_CARDINALITY for any market that keeps a univ3 settlement source.
  *
  * **Version 8** (the v8 redeploy: AccessManager, 5 % premium fee, no rent, native flywheel, v4 payout
  * routes) is a breaking version, so every closed key set and every rule that reads one moves in this
- * one commit (ops/markets/README.md "Schema compatibility"):
+ * one commit:
  *
  *   grown      `v2.contracts.accessManager` (13 addresses -> 14); `v2.flywheel`; `shared.safes`,
  *              `shared.opsWallet`, `shared.token`; per-market `v2.payoutRoute`; `v2.fees.allowRent`.
@@ -240,7 +268,7 @@ const V2_WAVES = ["canary", "wave1", "wave2"];
  * INTERFACE_VERSION 8: `accessManager` joins the set (the OpenZeppelin AccessManager every v8 target
  * is `Managed` by), so the count the deploy tooling asserts goes from 13 addresses to **14**
  * (11 here plus the three `sources`). `payoutAdapter` keeps its name and now holds the `PayoutRouter`,
- * so nothing downstream has to learn a second key for the same slot (03-INTERFACES §4).
+ * so nothing downstream has to learn a second key for the same slot.
  */
 const V2_CONTRACT_NAMES = [
   "clearinghouse", "orderBook", "settlementOracle", "expiryCalendar", "keeperRewards",
@@ -248,8 +276,9 @@ const V2_CONTRACT_NAMES = [
 ];
 const V2_SOURCE_NAMES = ["chainlink", "univ3", "dataStreams"];
 /**
- * T-OP-114. THE SIX `v2.contracts` KEYS THE DEPLOY WRAPPER READS BUT DOES NOT CREATE. In callhouse-contracts,
- * `script/v2/lib/registry-env.sh:413` names them `EXTERNAL_KEYS`; `contract_of` (`:172-178`, the default arm)
+ * THE `v2.contracts` KEYS DeployV8 DOES NOT CREATE: the six the deploy wrapper reads, plus `stockZap`,
+ * which it does not (below). In callhouse-contracts,
+ * `script/v2/lib/registry-env.sh:413` names the six `EXTERNAL_KEYS`; `contract_of` (`:172-178`, the default arm)
  * reads each from `.v2.contracts.<key>` and `export_contracts` (`:414-420`) hands it to DeployV8 as its V2_*
  * variable (`env_name`, `:387-401`) — UNSET when the key is absent OR null, which `DeployV8._mapTarget` reads as
  * "not supplied: skip the target and say so" rather than "supplied as zero". They are deliberately NOT in the
@@ -257,44 +286,51 @@ const V2_SOURCE_NAMES = ["chainlink", "univ3", "dataStreams"];
  * are NOT in {V2_CONTRACT_NAMES} here: that list is the 11-plus-3 count that `ops/v2/finish-dev-deploy.sh:104-110`,
  * `keeper/src/v2/registry.ts:92`, `web/scripts/gen-markets.mjs:6` and `render-docs.mjs:99-111` all close over.
  *
- * WHAT WENT WRONG WITHOUT THIS LIST (T-OP-081's rehearsal, operator M-3fb6774607fd4e0a): the six arrive from their
- * own deploy steps and are written back under `v2.contracts.<key>` (T-OP-116's externals step, the path
+ * WHAT WENT WRONG WITHOUT THIS LIST (found in a rehearsal): the six arrive from their
+ * own deploy steps and are written back under `v2.contracts.<key>` (the externals step, the path
  * `check-deploy-inputs.sh:132-133` already pins), and `exactKeys` — symmetric, refusing any key it was not told
  * about — refused the written-back registry as "not a known key". The registry the deploy itself produced failed
  * the check the deploy is supposed to pass, the day after the broadcast.
  *
- * ACCEPTED, NOT REQUIRED (coordinator ruling M-ad3328c276524acb), and that asymmetry is deliberate. Every other
+ * ACCEPTED, NOT REQUIRED, and that asymmetry is deliberate. Every other
  * closed block is symmetric because its keys are written by THIS builder or by the core deploy in one shot. These
  * six are written by a later step at a time this builder does not control, and two of them may be skipped by the
- * owner's item-19 decision (`--skip-external`), so they are never in {V2_DEPLOYED_REQUIRED_PATHS} either. To every
+ * `--skip-external` option, so they are never in {V2_DEPLOYED_REQUIRED_PATHS} either. To every
  * reader "absent" and "null" already mean the same thing (`contract_of` returns empty for both; the keeper's
- * `contractsSchema` is `.passthrough()`). And the committed registries do NOT carry them yet, on purpose:
- * `render-docs.mjs:383-386` and `web/scripts/gen-markets.mjs:130` still throw on the keys, so a registry that
- * carried them today would land red under both generators; the consumers row that follows this one widens them
- * and adds the six to {V2_SKELETON} and to both registries in ONE commit (the README's rule for a new key), and only
- * then does a write-back put an address into `tier1.json`. Until then {V2_SKELETON} does not carry them either: a
- * first build from nothing must not emit a registry the generators refuse. Present or absent, then; when present,
- * null or an address; a seventh name is still refused.
+ * `contractsSchema` is `.passthrough()`). Both generators accept them, and both
+ * committed registries carry them (tier1.json as written back). {V2_SKELETON} still does not carry the
+ * address keys: `assembleRegistry` carries `v2` verbatim from the file, so a skeleton key only matters for a first
+ * build from nothing. Present or absent, then; when present, null or an address; an unknown name is still refused.
+ *
+ * `stockZap` IS THE SEVENTH, AND IT IS NOT A DeployV8 INPUT. StockZap is deployed outside DeployV8, by
+ * `script/v2/DeployEarnVault.s.sol` in the same externals stage that creates the EarnVault, but nothing in the deploy
+ * wrapper reads it back: DeployV8 has no StockZap target to map. So callhouse-contracts `registry-env.sh`
+ * `EXTERNAL_KEYS` and `ops/stonkctl` `registry.py` `EXTERNAL_KEYS` stay SIX ON PURPOSE, and
+ * this list is no longer a copy of them: it is every `v2.contracts` key a step outside DeployV8 may write, which is
+ * those six plus `stockZap`. The web reads the key (`web/lib/v2/config.ts`), and the indexer's `/v2/config` does not
+ * send it yet, which is why the web must not cross-check it as blocking.
  *
  * Which step deploys each — none is created by DeployV8, whose `_externallySupplied` (`DeployV8.s.sol:1740-1743`)
- * lists exactly these six by manifest name. Re-derived at callhouse-contracts `0124b58e` (leekzor/v8):
- *   earnVault, stockVenueAdapter  — `script/v2/DeployEarnVault.s.sol:104,115` (P8-02; its StockZap at `:111` has no
- *                                    registry key at all, and this row adds none — WIRE-06 P1)
- *   rewardsDistributorLender      — `script/v2/DeployLenderRewards.s.sol` (P8-05): the SECOND RewardsDistributor,
+ * lists the first six by manifest name. Re-derived from the v8 contracts scripts:
+ *   earnVault, stockVenueAdapter  — `script/v2/DeployEarnVault.s.sol`
+ *   stockZap                      — the same script (its StockZap step);
+ *                                    launched at 0x22191Ee2…4439, block 69518131 (provenance in tier1.json's
+ *                                    commit message)
+ *   rewardsDistributorLender      — `script/v2/DeployLenderRewards.s.sol`: the SECOND RewardsDistributor,
  *                                    which is why `v2.protocolAddresses.distributors.lender` is twin-less
  *   houseVaultFactory, houseVault — no production script at that SHA: only `script/v2/DevDeploy.s.sol:670`
  *                                    constructs a HouseVaultFactory, and vaults are factory-created per market
- *                                    (why `v2.protocolAddresses` has no house twin, T-232). T-OP-116 chooses the step.
+ *                                    (why `v2.protocolAddresses` has no house twin). The launch chooses the step.
  *   hedger                        — no script at that SHA either (`src/v2/periphery/Hedger.sol:88`: "`new Hedger(`
  *                                    appears only in test files"); item 19 may skip it.
  * A registry slot is not a deploy path: null here says "not yet", it never says "not planned".
  */
 export const V2_EXTERNAL_CONTRACT_NAMES = [
-  "houseVault", "houseVaultFactory", "hedger", "rewardsDistributorLender", "earnVault", "stockVenueAdapter",
+  "houseVault", "houseVaultFactory", "hedger", "rewardsDistributorLender", "earnVault", "stockVenueAdapter", "stockZap",
 ];
 /**
- * T-OP-114, from T-302's launch-phase action ("provenance-checked Earn/StockZap/HouseFactory address and
- * start-block slots"). The indexer REQUIRES a dedicated start block beside two of these addresses and refuses to
+ * Provenance-checked slots for the Earn / StockZap / HouseFactory addresses and their
+ * start blocks. The indexer REQUIRES a dedicated start block beside two of these addresses and refuses to
  * boot without it — `indexer/lib/env.ts:241-270`: `V2_EARN_START_BLOCK` with `V2_EARN_VAULT`, `V2_HOUSE_START_BLOCK`
  * with `V2_HOUSE_VAULT_FACTORY`, because starting them at `V2_START_BLOCK` would backfill every block between the
  * core deploy and the vault's. The only deploy blocks the registry held were `v2.deployBlock` (the core) and
@@ -305,10 +341,11 @@ export const V2_EXTERNAL_CONTRACT_NAMES = [
  * (`ops/v2-env.mjs`) derives the indexer's per-group value from these — the earliest of a group's members — so
  * the grouping lives with its consumer.
  *
- * REQUIRED, unlike the six address keys, and the difference is deliberate (coordinator M-b3f5ca18efa5443f): a new
+ * REQUIRED, unlike the external address keys, and the difference is deliberate: a new
  * top-level `v2` block breaks no consumer — `render-docs.mjs` and `gen-markets.mjs` close `v2.contracts`, not
  * `v2`, and the keeper's `v2BlockSchema` is `.passthrough()` — so it can land the way every other block did, in
- * {V2_SKELETON} and in both committed registries at once, all null, and stay symmetric. Exact over the six names;
+ * {V2_SKELETON} and in both committed registries at once, all null, and stay symmetric. Exact over the external names
+ * (seven, with `stockZap`);
  * every value null or a positive block number.
  *
  * COUPLED to the address, the flywheel's own rule (`v2.flywheel.feeSplitter` set with `deployBlock` null is
@@ -320,21 +357,21 @@ export const V2_EXTERNAL_CONTRACT_NAMES = [
 export const V2_EXTERNAL_DEPLOY_BLOCK_KEYS = V2_EXTERNAL_CONTRACT_NAMES;
 /**
  * The v2 bot keys, by ADDRESS only (ops/v2/derive-bot-keys.sh writes them; the keys stay under
- * ~/.callhouse-keys/v2/).
+ * the operator's key folder, outside this repo).
  *
  * INTERFACE_VERSION 8 renames and extends the set, and **every v8 key is a new key**: v7's keys are
- * never reused by v8 or by a dev stack (06-QUIRKS §G). `mmQuoter` becomes `quoter` (the role is
+ * never reused by v8 or by a dev stack. `mmQuoter` becomes `quoter` (the role is
  * QUOTER on the manager, not a vault role any more) and `guardian` joins it, because the guardian is
  * a hot key the protocol runs rather than a wallet the owner holds. `cranker` is no longer roleless:
- * it holds BUYBACK and cranks `FeeSplitter.buyback` (V8-DESIGN §2.2).
+ * it holds BUYBACK and cranks `FeeSplitter.buyback`.
  */
 const V2_BOT_NAMES = ["cranker", "pricer", "quoter", "guardian"];
 /** Which manager role each bot key holds at launch, for the messages and for ops/go-live-v2.sh. */
 const V2_BOT_ROLES = { cranker: "BUYBACK", pricer: "PRICER", quoter: "QUOTER", guardian: "GUARDIAN" };
 /**
- * `v2.protocolAddresses` (02-interfaces.md §3.3, O3-204): the protocol's own addresses — the ones
- * scoring flags `protocol` and `maker-epoch.mjs` never allocates to a maker (F2 D13). It is NOT a
- * `v2.contracts` key (§3.1 rule 2, which the 14-address count in ops/v2/finish-dev-deploy.sh and
+ * `v2.protocolAddresses`: the protocol's own addresses — the ones
+ * scoring flags `protocol` and `maker-epoch.mjs` never allocates to a maker. It is NOT a
+ * `v2.contracts` key (a closed block, which the 14-address count in ops/v2/finish-dev-deploy.sh and
  * render-docs both enforce): this block is the exclusion list, and it mirrors the blocks that hold
  * the contract slots rather than replacing them.
  *
@@ -343,7 +380,7 @@ const V2_BOT_ROLES = { cranker: "BUYBACK", pricer: "PRICER", quoter: "QUOTER", g
  * derived or the admin wallet — the ways an exclusion list goes wrong are all "something was added
  * somewhere else and nobody added it here".
  *
- * INTERFACE_VERSION 8 closes the gap O3-204 left: `feeSplitter`, `buybackExecutor` and `treasury`
+ * INTERFACE_VERSION 8 closes an earlier gap: `feeSplitter`, `buybackExecutor` and `treasury`
  * were "later-phase entries with no twin", which is exactly the hole this block exists to prevent.
  * Their blocks (`v2.flywheel`, `shared.safes`) exist now, so **every key but `distributors.user`
  * has a twin**. `accessManager` and `opsWallet` join for the same reason: the manager is the one
@@ -354,7 +391,7 @@ export const V2_PROTOCOL_KEYS = [
   "cranker", "pricer", "quoter", "feeSplitter", "buybackExecutor", "treasury", "distributors",
 ];
 /**
- * INTERFACE_VERSION 8. `lender` was added to `tier1.json` when P8-05 landed the lender-rewards
+ * INTERFACE_VERSION 8. `lender` was added to `tier1.json` with the lender-rewards
  * distributor and this constant was not widened, so `exactKeys` reported the registry the protocol
  * actually ships as invalid — and, more quietly, the leaf-entry loop below iterates THIS array, so
  * `distributors.lender` was skipped by the null/address check and by the duplicate-address check too:
@@ -363,13 +400,13 @@ export const V2_PROTOCOL_KEYS = [
 export const V2_PROTOCOL_DISTRIBUTOR_KEYS = ["maker", "user", "lender"];
 /**
  * WHY THERE IS NO `earnVault` OR `houseVault` KEY IN V2_PROTOCOL_KEYS, recorded so the next reader does not
- * add one (T-232). The lender-rewards generator excludes protocol-owned addresses by walking this block, and
+ * add one. The lender-rewards generator excludes protocol-owned addresses by walking this block, and
  * the two it most needs to exclude are exactly the two that cannot live here:
  *   - the House vaults are FACTORY-CREATED AND PER-MARKET, so no fixed key could name them at all;
  *   - `exactKeys` is symmetric, so adding a key makes it REQUIRED on every registry the validator walks —
  *     which is precisely how adding `distributors.lender` left `ops/markets/dev.json` a line short and
- *     created a follow-up row.
- * They are passed to the generator with repeated `--exclude` instead; see ops/runbooks/lender-rewards-epoch.md.
+ *     needed a follow-up fix.
+ * They are passed to the generator with repeated `--exclude` instead.
  */
 /** Each key that has a twin elsewhere in the registry, and where that twin lives. */
 export const V2_PROTOCOL_TWINS = {
@@ -389,7 +426,7 @@ export const V2_PROTOCOL_TWINS = {
   "distributors.maker": "v2.contracts.rewardsDistributor",
   // `distributors.user` and `distributors.lender` have NO twin, deliberately. The lender distributor is
   // a SECOND DEPLOYMENT of RewardsDistributor, not a second contract, and `v2.contracts` is a closed,
-  // counted block (§3.1 rule 2 — the address count and render-docs both close it), so giving it a
+  // counted block (the address count and render-docs both close it), so giving it a
   // `rewardsDistributorLender` slot to mirror would change a count other tooling consumes in order to
   // describe a deployment rather than a contract. That is the same distinction that made the roles
   // manifest containment check one-way. A twin-less key is still checked: it must be an address or null,
@@ -398,7 +435,7 @@ export const V2_PROTOCOL_TWINS = {
 /**
  * INTERFACE_VERSION 8: empty. In v7 the deploy read `admin`, `guardian` and `feeRecipient` straight
  * out of the registry, so `null` meant a broken deploy. In v8 all three are addresses that **do not
- * exist yet** while the set is being built: `admin` is the Admin Safe the owner creates (OWN8-01),
+ * exist yet** while the set is being built: `admin` is the Admin Safe the owner creates,
  * `feeRecipient` is the FeeSplitter the deploy itself produces, and the guardian is a fresh hot key.
  * The rule they encoded has not gone: it moved to `v2.deployBlock` (below), which is the registry's
  * own statement that a deployment exists.
@@ -407,7 +444,7 @@ export const V2_PROTOCOL_NEVER_NULL = [];
 /** Once `v2.deployBlock` is set there IS a deployment, and a deployment has these. */
 export const V2_PROTOCOL_DEPLOYED_NEVER_NULL = ["accessManager", "admin", "guardian", "feeRecipient"];
 /**
- * The same rule, with the reach it was missing (O8-08A). `v2.deployBlock` is the switch and the four
+ * The same rule, with the reach it was missing. `v2.deployBlock` is the switch and the four
  * keys above were the list, but that list governed only the `v2.protocolAddresses` mirror: everywhere
  * else the shape is `!== null && !isAddress(...)`, so a null passed. A post-broadcast registry with the
  * deploy block set, the four mirror keys written and `v2.contracts.orderBook` still null was GREEN —
@@ -433,14 +470,14 @@ export const V2_PROTOCOL_DEPLOYED_NEVER_NULL = ["accessManager", "admin", "guard
  *   - `v2.contracts.sources.dataStreams` — EXEMPT, and this is the entry most likely to be "fixed" back
  *     by someone reading the list and seeing two of three sources. `ops/go-live-v2.sh:333` treats a null
  *     there as fine ("v2.contracts.sources.dataStreams is null: fine, DataStreamsSource ships disabled
- *     (C2-12)"), and its preflight header repeats it at :29-30. Requiring it would turn
+ *     "), and its preflight header repeats it at :29-30. Requiring it would turn
  *     `build-markets --check` RED on a correct launch night, at the moment the owner is reading the check
  *     to decide whether to broadcast. If DataStreamsSource is ever deployed, add it back here.
  *
- *   - the six {V2_EXTERNAL_CONTRACT_NAMES} (T-OP-114) — EXEMPT for the same shape of reason. They are written
- *     back by the externals step that runs AFTER DeployV8 has set `v2.deployBlock`, so between the two steps
- *     a correct launch registry has the block set and every external null; and the owner's item-19 decision
- *     may skip `hedger` and `rewardsDistributorLender` outright (`--skip-external`). Requiring them here would
+ *   - the {V2_EXTERNAL_CONTRACT_NAMES} (seven) — EXEMPT for the same shape of reason.
+ *     They are written back by the externals step that runs AFTER DeployV8 has set `v2.deployBlock`, so between the two steps
+ *     a correct launch registry has the block set and every external null; and `--skip-external`
+ *     may skip `hedger` and `rewardsDistributorLender` outright. Requiring them here would
  *     make the registry red in the middle of the sequence the deploy scripts themselves define.
  */
 export const V2_DEPLOYED_REQUIRED_PATHS = [
@@ -456,13 +493,13 @@ export const V2_DEPLOYED_REQUIRED_PATHS = [
  *
  * v7 allowed any two "wallet roles" to be one wallet, because `shared.admin` and
  * `shared.feeRecipient` were one hot EOA. v8 removes that: the fee recipient is a contract, the two
- * Safes are two Safes with the same owners on purpose (V3-D1, D10), the ops wallet is hot precisely
+ * Safes are two Safes with the same owners on purpose, the ops wallet is hot precisely
  * so that neither Safe has to be, and the guardian is a hot key that must not be able to sign as the
  * Safe. A repeat among them is no longer a configuration, it is the configuration mistake that makes
  * a delay or a 2-of-3 threshold decorative — so it is refused and the message says which pair.
  *
  * The alias: `feeRecipient` IS `feeSplitter`. Both core contracts are constructed with the splitter
- * as their fee recipient (V8-DESIGN §6), so the two keys naming one address is the design, and the
+ * as their fee recipient, so the two keys naming one address is the design, and the
  * registry says it once here rather than in a comment somebody has to find.
  */
 export const V2_PROTOCOL_ALIASES = [["feeRecipient", "feeSplitter"]];
@@ -471,16 +508,16 @@ export const V2_PROTOCOL_ALIASES = [["feeRecipient", "feeSplitter"]];
  * winning call's Stock Tokens to USDG (and the FeeSplitter's fee stock too), which from v8 may be a
  * Uniswap **v4** pool and is therefore no longer the same thing as `univ3Pool`. `univ3Pool` stays
  * exactly what it was — the settlement TWAP source — because v4 has no observation array
- * (06-QUIRKS §H). Keeping one key for both would have silently re-pointed settlement at a v4 pool.
+ * to walk. Keeping one key for both would have silently re-pointed settlement at a v4 pool.
  */
 /**
- * The markets that settle on Chainlink ALONE, frozen deliberately (T-568 posture, pinned by T-599).
+ * The markets that settle on Chainlink ALONE, frozen deliberately.
  *
  * WHY THEY ARE SINGLE-SOURCE, and it is a trade rather than an oversight: every one of the 33 was
- * checked against the F2-02 recon in `ops/markets/v2-sources.json`. Pools EXIST for them — one to
+ * checked against the source recon in `ops/markets/v2-sources.json`. Pools EXIST for them — one to
  * four each — but not one has an `observationCardinality` reaching
  * `MIN_POOL_OBSERVATION_CARDINALITY`, which `src/v2/interfaces/V2Constants.sol:148` defines as
- * SETTLEMENT_WINDOW + SNAPSHOT_GRACE + 1 = 2401. Measured at callhouse `aac9d583`: the best ring
+ * SETTLEMENT_WINDOW + SNAPSHOT_GRACE + 1 = 2401. Measured on the chain: the best ring
  * across all 33 is 1801, while NVDA is 6000 and SPCX 3100 — the only two that clear the bar and the
  * only two the registry points at. `RegisterMarkets.s.sol:693` makes that a HARD REQUIRE, so wiring
  * one of the 33 to its pool would not merely be worse settlement, it would REFUSE AT REGISTRATION.
@@ -504,33 +541,77 @@ export const SINGLE_SOURCE_AT_2026_09_21 = new Set([
 ]);
 
 /**
- * `markets[].v2`: the closed per-market key set (exactKeys, symmetric). EXPORTED, and that is T-OP-156's rule
+ * `markets[].v2`: the closed per-market key set (exactKeys, symmetric). EXPORTED, and that is the rule
  * "one list": `web/scripts/gen-markets.mjs` used to carry its own copy (V2_MARKET_NAMES) and threw on the
- * thirteenth key the day this file gained one -- the T-OP-138 shape for the market block. It now imports this
+ * thirteenth key the day this file gained one -- the same failure the contracts block once had. It now imports this
  * constant, as it already imports {V2_EXTERNAL_CONTRACT_NAMES}; a consumer that must close the block reads it
  * from here, never re-types it.
  */
 export const V2_MARKET_KEYS = [
   "status", "wave", "strikeTick", "puts", "mintFeePpm", "univ3Pool", "univ3MinLiquidity", "dataStreamsFeedId",
-  "payoutRoute", "overrides", "houseVault", "registeredAt", "registerTx",
+  "payoutRoute", "overrides", "houseVault", "house", "registeredAt", "registerTx", "chainlinkBand",
 ];
-/** `markets[].v2.payoutRoute`: the keys each venue carries, closed per venue (03-INTERFACES §4). */
+
+/**
+ * The House factories and vaults, in the shape the daily-HouseVault deploy
+ * writes back (callhouse-contracts script/v2/day-zero-batch.mjs reads it unchanged):
+ *
+ *   v2.house.factories[]    { kind, address, deployBlock }: `weekly` is the original launch factory, which is
+ *                           v2.contracts.houseVaultFactory; `daily` is the kind-aware factory. At most one of each.
+ *                           v9: the launch factory IS a kind-aware factory that makes daily vaults only, so
+ *                           the `daily` entry is v2.contracts.houseVaultFactory and there is no weekly entry
+ *                           ({@link launchFactoryKind}). One launch factory is never recorded under both kinds.
+ *   markets[].v2.house      { weekly: <vault|null>, daily: <vault|null> }: the market's vault of each kind.
+ *                           The market's `houseVault` (the launch vault) is its vault of the LAUNCH
+ *                           factory's kind: `weekly` on v8, `daily` on v9.
+ *
+ * The KIND of a vault comes from the factory it was enumerated from (daily vaults are the product
+ * because they exit every close). A v8 launch-factory vault has no `weekly()` view at all, so it is weekly by its
+ * factory, never by a read; a v9 launch factory is a kind-aware one, whose vaults state their kind. `daily`
+ * only on a market with a univ3Pool (the dual-source rule: a daily boundary settles every session and
+ * needs a corroborated price), and only once a daily factory is recorded.
+ */
+export const HOUSE_FACTORY_KINDS = ["weekly", "daily"];
+export const HOUSE_MARKET_KEYS = ["weekly", "daily"];
+
+/**
+ * The kind the registry records for its LAUNCH factory (v2.contracts.houseVaultFactory): the kind of the
+ * v2.house.factories entry at that address. v8's launch factory is the original one, which can only make weekly
+ * vaults and is recorded as the `weekly` entry. v9's is a kind-aware factory from which the redeploy creates DAILY
+ * vaults only,
+ * and the launch path records it as the `daily` entry (script/v2/lib/registry-env.sh).
+ *   "weekly"  no entry names the launch address (the implied original launch factory), or the weekly one does;
+ *   "daily"   the daily entry names it;
+ *   null      entries of BOTH kinds name it: one launch factory, two kinds -- refused by validateV2.
+ */
+export function launchFactoryKind(registry) {
+  const launch = registry?.v2?.contracts?.houseVaultFactory;
+  const factories = Array.isArray(registry?.v2?.house?.factories) ? registry.v2.house.factories : [];
+  if (!isAddress(launch)) return "weekly";
+  const kinds = new Set(factories
+    .filter((f) => isObject(f) && isAddress(f.address) && f.address.toLowerCase() === launch.toLowerCase())
+    .map((f) => f.kind));
+  if (kinds.has("weekly") && kinds.has("daily")) return null;
+  return kinds.has("daily") ? "daily" : "weekly";
+}
+/** `markets[].v2.payoutRoute`: the keys each venue carries, closed per venue. */
 export const PAYOUT_ROUTE_KEYS = {
   v3: ["venue", "fee"],
   v4: ["venue", "fee", "tickSpacing", "poolId"],
 };
 /** V2Constants: strikes and prices are multiples of PRICE_TICK; the fee ceilings the contracts enforce. */
 const PRICE_TICK = 100n;
-const FEE_CEIL_BPS = { premiumFeeBps: 1000, resaleFeeBps: 1000, takerFeeCapBps: 1000, makerRebateBps: 10_000, exerciseFeeBps: 200 };
+// payoutSlippageBps: Clearinghouse.setPayoutAdapter's maxSlippageBps, capped at V2Constants.MAX_PAYOUT_SLIPPAGE_CEIL_BPS.
+const FEE_CEIL_BPS = { premiumFeeBps: 1000, resaleFeeBps: 1000, takerFeeCapBps: 1000, makerRebateBps: 10_000, exerciseFeeBps: 200, payoutSlippageBps: 300 };
 const TAKER_FEE_FLAT_CEIL = 1_000_000n;
 /**
- * V2Constants.MINT_FEE_CEIL_PPM (INTERFACE_VERSION 7, c05): the highest collateral rent a market may be
+ * V2Constants.MINT_FEE_CEIL_PPM (INTERFACE_VERSION 7): the highest collateral rent a market may be
  * registered with, in millionths of the locked collateral per MINT_FEE_PERIOD (7 days) of remaining life.
  * Clearinghouse._checkConfig reverts CeilingExceeded above it.
  */
 const MINT_FEE_CEIL_PPM = 5000;
 /**
- * V8-DESIGN §4.3 / V3-D18: v8 charges a 5 % premium fee on first sale and **no writer rent**. The rent
+ * v8 charges a 5 % premium fee on first sale and **no writer rent**. The rent
  * code stays in the Clearinghouse as a dial at zero, so the ceiling above still bounds it — but a
  * registry that carries a non-zero rate is refused unless it also carries `v2.fees.allowRent: true`.
  * The v7 rule was the exact opposite (zero was refused), which is why the inversion has to be one
@@ -542,10 +623,12 @@ const ALLOW_RENT_KEY = "v2.fees.allowRent";
  * It is part of the PoolKey and therefore of the pool id, so a wrong one names a different pool.
  */
 const MAX_TICK_SPACING = 32_767;
+/** The ONE tickSpacing rule -- an integer in [1, MAX_TICK_SPACING] -- shared by the validator and {encodePoolKey}. */
+export const isTickSpacing = (v) => isPositiveInt(v) && v <= MAX_TICK_SPACING;
 /**
  * SettlementOracle: the delay a market with only one ok source waits between recording a candidate and
- * finalizing on it. 21,600 s (6 h) is the registry default; the owner's 2026-09-19 decision drops it to
- * 3,600 s on the Chainlink-only launch markets (the 19 rows land in O8-10, the mechanism here). It is a
+ * finalizing on it. 21,600 s (6 h) is the registry default; the launch drops it to
+ * 3,600 s on the Chainlink-only launch markets (the rows are set elsewhere, the mechanism here). It is a
  * uint32 in `SettlementConfigPinned`, and 0 would finalize a single uncorroborated source immediately —
  * which is the one thing the delay exists to prevent.
  *
@@ -559,8 +642,8 @@ const MAX_TICK_SPACING = 32_767;
 const MIN_UNCORROBORATED_DELAY_S = 1_800;
 const MAX_UNCORROBORATED_DELAY_S = 86_400;
 /**
- * V2Constants.MIN_POOL_OBSERVATION_CARDINALITY (SETTLEMENT_WINDOW + SNAPSHOT_GRACE + 1). Owner sign-off c10
- * (DECISIONS-2026-09-17 §7): a pool with a shorter observation ring can have the expiry's window overwritten by
+ * V2Constants.MIN_POOL_OBSERVATION_CARDINALITY (SETTLEMENT_WINDOW + SNAPSHOT_GRACE + 1):
+ * a pool with a shorter observation ring can have the expiry's window overwritten by
  * one dust mint or burn per second before the snapshot grace ends, so UniV3TwapSource.setPool refuses it and the
  * market is registered Chainlink-only. Every launch pool but NVDA's and SPCX's is below it.
  */
@@ -573,39 +656,61 @@ const MAX_SPOT_MAX_AGE_S = 4 * 86_400;
  * The least a market's spotMaxAgeS may exceed its feed's heartbeat by. The Robinhood Chain equity feeds print on a
  * 0.5 % move or the 24 h heartbeat, so a quiet feed's last print is up to a heartbeat (plus a transmit latency of at
  * most 30 s, 2026-08-03..09-17) old inside a regular session; any smaller age makes `spot()` revert StaleSpot for part
- * of most sessions (ops/deploy.md §15.13).
+ * of most sessions.
  */
 const SPOT_AGE_OVER_HEARTBEAT_S = 3600;
 const UINT128_MAX = (1n << 128n) - 1n;
 
+/** One launch ticker's HouseVault Limits (a fresh object per call, so the two skeleton rows never alias). */
+function houseLaunchLimits() {
+  return {
+    maxSeriesUnits: "10000",
+    maxTotalNotional: UINT128_MAX.toString(),
+    askToleranceBps: 25,
+    maxBidBpsOfSpot: 300,
+    maxOrderLifetime: 300,
+    maxDailyOutflow: "1000000000000",
+  };
+}
+
+/** The weekdays a `dailyWeekdays` list may name. Mirrors keeper/src/v2/registry.ts WEEKDAYS. */
+export const WEEKDAYS = ["mon", "tue", "wed", "thu", "fri"];
+
 /**
  * What a registry with no top-level `v2` block gets (a first build from nothing): the frozen
  * schema with every address null. The periphery addresses are the Uniswap v3 deployment on 4663
- * that the F2-02 recon found with code; the fees and defaults are the launch values of the plan.
+ * that the source recon found with code; the fees and defaults are the launch values of the plan.
  */
 export const V2_SKELETON = {
   interfaceVersion: INTERFACE_VERSION,
+  // The House factories, by kind. Empty until the launch factory's entry is written.
+  // `limits` is the HouseVault Limits tuple per
+  // LAUNCH ticker, the one place a House limit is set. stonkctl writes it into the file DeployHouseVault and VerifyV8
+  // read through V2_HOUSE_LIMITS_FILE (the shape of callhouse-contracts script/v2/fixtures/house-limits.v8.json, which
+  // is now a test/dev default only). Launch values: the values in that fixture at callhouse-contracts
+  // v9 launch (100 shares per series, notional uncapped, 1,000,000 USDG a day; the price guards; lifetime 300).
+  house: { factories: [], limits: { NVDA: houseLaunchLimits(), SPCX: houseLaunchLimits() } },
   deployBlock: null,
   contracts: {
     ...Object.fromEntries(V2_CONTRACT_NAMES.map((k) => [k, null])),
     sources: Object.fromEntries(V2_SOURCE_NAMES.map((k) => [k, null])),
   },
-  // T-OP-114 (T-302): one start block per external contract, null until the externals step writes the
-  // address beside it. The six ADDRESS keys are not here yet — see V2_EXTERNAL_CONTRACT_NAMES.
+  // One start block per external contract, null until the externals step writes the
+  // address beside it. The external ADDRESS keys are not here — see V2_EXTERNAL_CONTRACT_NAMES.
   externalDeployBlocks: Object.fromEntries(V2_EXTERNAL_DEPLOY_BLOCK_KEYS.map((k) => [k, null])),
   bots: Object.fromEntries(V2_BOT_NAMES.map((k) => [k, null])),
-  // 02-interfaces.md §3.3. Every twin starts where its own block starts, which in v8 is null for all
+  // Every twin starts where its own block starts, which in v8 is null for all
   // of them: the Safes, the splitter and the v8 bot keys are all made during the v8 launch.
   protocolAddresses: {
     ...Object.fromEntries(V2_PROTOCOL_KEYS.filter((k) => k !== "distributors").map((k) => [k, null])),
     distributors: Object.fromEntries(V2_PROTOCOL_DISTRIBUTOR_KEYS.map((k) => [k, null])),
   },
-  // INTERFACE_VERSION 8 (V8-DESIGN §6): the native FeeSplitter and the v4 buyback executor. They are
+  // INTERFACE_VERSION 8: the native FeeSplitter and the v4 buyback executor. They are
   // not `v2.contracts` keys — that block is closed and counted by the deploy tooling — and they carry
   // their own deploy block because the splitter is constructed BEFORE the core (it is the core's fee
   // recipient), so its first event can precede `v2.deployBlock`.
   //
-  // DO NOT ADD A `tokenPool` BLOCK HERE. T-OP-002 asked whether the v4 token-pool parameters belong
+  // DO NOT ADD A `tokenPool` BLOCK HERE. The question was whether the v4 token-pool parameters belong
   // under `v2.flywheel`, and the answer is that they belong in the registry but ALREADY HAVE A HOME
   // somewhere else: `shared.token.poolKey` at :137, whose five keys are validated by
   // SHARED_TOKEN_KEYS (:144) and POOL_KEY_KEYS (:145). The contracts side names that path as the
@@ -629,21 +734,42 @@ export const V2_SKELETON = {
   // fixes it at native ETH, address zero.
   //
   // AND REPOINTING THE WRAPPER WAS NECESSARY BUT NOT SUFFICIENT -- found while running the proof for
-  // T-OP-002, not by reading. `shared.token.poolKey` could not hold a key the DEPLOYED executor would
-  // accept: the validator required `hooks` to be the zero address (quoting V8-DESIGN 6A, "the buyback
+  // it, not by reading. `shared.token.poolKey` could not hold a key the DEPLOYED executor would
+  // accept: the validator required `hooks` to be the zero address (quoting a design rule, "the buyback
   // only ever buys on a hookless pool"), while `src/v2/periphery/V4BuybackExecutor.sol:255` reverts
   // `NoSource` when `cfg.key.hooks.code.length == 0` and `:256` further requires that hook to be the
   // PoolManager's registered launch hook -- the executor reads `launches(poolId).hookFeeBps` and
   // `.creatorTaxBps` off it for its whole fee model. Measured then: a scratch tier1.json with the live
   // pinned key filled in failed `--check` on that rule.
-  // RESOLVED BY THE OWNER, 2026-09-21, and implemented in T-OP-012: the buyback venue is PERMANENTLY
+  // RESOLVED, and implemented: the buyback venue is PERMANENTLY
   // the Pons launch pool. The validator was stale, not the executor. 6A is the PAYOUT ROUTE section and
   // its zero-hooks sentence never governed this key; routes keep it. The rule on
   // `shared.token.poolKey.hooks` is now the positive one -- a pinned key must name a real hook -- and
   // relaxing it does NOT admit arbitrary hook code into a payout swap, because a route's poolId is
   // still recomputed with `hooks: ZERO_ADDRESS` hard-coded. No contracts file changed.
-  flywheel: { feeSplitter: null, buybackExecutor: null, deployBlock: null },
-  // WHY THERE IS NO `uniswapV4` SIBLING, recorded so the next reader does not add one (T-OP-018).
+  // `config` is the flywheel's deploy knobs, the contracts scripts' LAUNCH_* values in callhouse-contracts
+  // (V2DeployBase.sol LAUNCH_BURN_BPS ... LAUNCH_BUYBACK_MIN_LIQUIDITY, FeeSplitter LAUNCH_BUYBACK_CAP).
+  // buybackCapCeiling and buybackCooldownS are ADMIN-settable; their
+  // launch values are V2Constants.BUYBACK_CAP_CEIL (1,000 USDG) and BUYBACK_COOLDOWN (5 minutes).
+  // burnBps is the launch split, 10 % buyback-and-burn / 90 % treasury, set directly
+  // through the registry, not LAUNCH_BURN_BPS 5000. 50/50 later is setBurnBps(5000).
+  flywheel: {
+    feeSplitter: null,
+    buybackExecutor: null,
+    deployBlock: null,
+    config: {
+      burnBps: 1000,
+      conversionSlippageBps: 30,
+      buybackMaxTotalFeeBps: 250,
+      buybackSlippageBps: 51,
+      buybackTwapWindowS: 300,
+      buybackMinLiquidity: "1000000000000000000",
+      buybackCap: "50000000",
+      buybackCapCeiling: "1000000000",
+      buybackCooldownS: 300,
+    },
+  },
+  // WHY THERE IS NO `uniswapV4` SIBLING, recorded so the next reader does not add one.
   //
   // The v4 PoolManager (0x8366a39C...40951) and StateView (0xF3334192...E673b) are known, verified and
   // written down -- in ops/markets/v2-sources.json `contracts.v4PoolManager` / `contracts.v4StateView`,
@@ -656,13 +782,13 @@ export const V2_SKELETON = {
   // `uniswapV3` is here because five app-side readers take it from THIS file and nothing else
   // (keeper/src/v2/registry.ts:703, web/scripts/gen-markets.mjs:351, ops/devnet/seed.mjs:400 and
   // up.sh:228, ops/v2/rehearse/1-fork.mjs:230, ops/markets/render-docs.mjs:556). Measured at
-  // 135c0712 (2026-09-21): NOTHING in keeper, web, indexer, ops or the contracts scripts reads a
+  // the v8 launch: NOTHING in keeper, web, indexer, ops or the contracts scripts reads a
   // `v2.uniswapV4` path. The one would-be reader is the monitor's token-pool depth check
-  // (ops/v2/monitor.mjs:5696, alerts.md "registry publishes no PoolManager"), which is off by default
+  // (ops/v2/monitor.mjs, "registry publishes no PoolManager"), which is off by default
   // and recorded as a deliberate gap; when that check is built it can read the recon like the wrapper.
   //
   // What DOES name `v2.uniswapV4` is documentation, and it is stale: callhouse-contracts
-  // docs/DEPLOY-V2.md:113 and :499 and script/v2/lib/V2DeployBase.sol:253-254 say the two env vars
+  // script/v2/lib/V2DeployBase.sol:253-254 say the two env vars
   // come from `v2.uniswapV4.poolManager` / `.stateView`. An operator who follows them adds the block
   // here, and `exactKeys` refuses it ("not a known key") -- the same contradiction shape as the
   // `tokenPool` note above. validateV2Top now says where the value lives instead.
@@ -677,51 +803,101 @@ export const V2_SKELETON = {
   // eth_call StateView.poolManager() (selector 0xdc4c90d3) returned the PoolManager, and the same
   // selector against the PoolManager itself reverted -- so the check can fail.
   //
-  // EIP-55, EXACTLY AS `cast to-check-sum-address` PRINTS THEM (T-OP-131). These three were lowercase from
+  // EIP-55, EXACTLY AS `cast to-check-sum-address` PRINTS THEM. These three were lowercase from
   // the first build and every reader that compared case-insensitively was happy; the strict readers were not:
   // viem's `isAddress(a, { strict: true })`, the registry test's own EIP-55 rule, and the contracts deploy
-  // preflight's EIP-55 rule (T-OP-112 finding #3; the wrapper reads `v2.uniswapV3.factory` / `.swapRouter02`
-  // through callhouse-contracts script/v2/lib/registry-env.sh since T-OP-113), which refuses any registry
+  // preflight's EIP-55 rule (the wrapper reads `v2.uniswapV3.factory` / `.swapRouter02`
+  // through callhouse-contracts script/v2/lib/registry-env.sh), which refuses any registry
   // address that is not canonical. The case is a function of the twenty bytes, so this is a re-casing and not
-  // a new fact: the bytes are the F2-02 recon's (`validateV2Top` still cross-checks them against
+  // a new fact: the bytes are the source recon's (`validateV2Top` still cross-checks them against
   // v2-sources.json by value), and a registry copy that differs from these strings -- by case, or by bytes --
   // is refused by `--check` (`validateV2Top`) with the fault named, so the three cannot drift again. Not
-  // mirrored on build: `v2` is a hand-maintained root key that T-607's guard carries as written, so a rebuild
+  // mirrored on build: `v2` is a hand-maintained root key that the generator carries as written, so a rebuild
   // cannot repair a drifted copy either -- the refusal names the string to set.
   uniswapV3: {
     factory: "0x1f7d7550B1b028f7571E69A784071F0205FD2EfA",
     swapRouter02: "0xCaf681a66D020601342297493863E78C959E5cb2",
     quoterV2: "0x33e885eD0Ec9bF04EcfB19341582aADCb4c8A9E7",
   },
-  // INTERFACE_VERSION 8 (V3-D6, D17, D18): the writer pays 5 % of the premium on FIRST SALE and no rent.
+  // INTERFACE_VERSION 8: the writer pays 5 % of the premium on FIRST SALE and no rent.
   // `mint` is callable only by an allowlisted minter (the OrderBook at launch), so every long that
   // exists was created inside a fill with a known premium — which is what makes a premium fee above the
   // resale fee collectable at all. `mintFeePpm` is the rent dial, launched at 0 on every market and kept
   // only so it can be switched on later under the 72 h lane; `allowRent` is the explicit opt-in that a
   // non-zero rate needs anywhere in the registry.
-  fees: { premiumFeeBps: 500, mintFeePpm: 0, allowRent: false, resaleFeeBps: 0, takerFeeFlat: "100000", takerFeeCapBps: 1000, makerRebateBps: 5000, exerciseFeeBps: 25 },
-  // INTERFACE_VERSION 7 (c21): the MakerVault Limits tuple the deploy sets, all six fields in setLimits order
+  fees: { premiumFeeBps: 500, mintFeePpm: 0, allowRent: false, resaleFeeBps: 0, takerFeeFlat: "100000", takerFeeCapBps: 1000, makerRebateBps: 5000, exerciseFeeBps: 25, payoutSlippageBps: 30 },
+  // INTERFACE_VERSION 7: the MakerVault Limits tuple the deploy sets, all six fields in setLimits order
   // in the pinned contracts. maxDailyOutflow is the leaky-bucket cap on net USDG a quoter call may pay out: at most the
   // cap at once and at most twice the cap in 24 h. The deploy reads them as V2_VAULT_* env; recorded here so the
   // incident runbook, the monitor and a later setLimits all quote the same six fields.
+  // The launch values: 300 shares per series, askToleranceBps 0 and maxOrderLifetime 300 s,
+  // and NO cap on total notional or daily outflow, written as type(uint128).max.
   vault: {
-    maxSeriesUnits: "10000",
-    maxTotalNotional: "250000000000",
-    askToleranceBps: 100,
+    maxSeriesUnits: "30000",
+    maxTotalNotional: "340282366920938463463374607431768211455",
+    askToleranceBps: 0,
     maxBidBpsOfSpot: 1000,
-    maxOrderLifetime: 0,
-    maxDailyOutflow: "2500000000",
+    maxOrderLifetime: 300,
+    maxDailyOutflow: "340282366920938463463374607431768211455",
+  },
+  // The EarnVault skim and the KeeperRewards economics, the scripts' LAUNCH_* values. maxBounty is the
+  // per-call bounty ceiling, ADMIN-settable; launch value V2Constants.MAX_BOUNTY (1 USDG).
+  // `limits` is the EarnVault Limits tuple, written by stonkctl into the file
+  // DeployEarnVault reads through V2_EARN_LIMITS_FILE (the shape of script/v2/fixtures/earn-limits.v9.json).
+  // Launch values: 7,000 shares per series (700000 units) and 1,000,000 USDG caps.
+  earn: {
+    skimBps: 1000,
+    limits: {
+      maxSeriesUnits: "700000",
+      maxOrderNotional: "1000000000000",
+      maxWrittenUnitsPerSeries: "700000",
+      maxWrittenNotional: "1000000000000",
+      maxDailyOutflow: "1000000000000",
+    },
+  },
+  keeper: {
+    bountySnapshot: "50000",
+    bountyFinalize: "50000",
+    bountySettle: "50000",
+    bountyRedeem: "20000",
+    bountyRoll: "50000",
+    bountyCancelStale: "20000",
+    dailyCap: "100000000",
+    rewardsFund: "100000000",
+    maxBounty: "1000000",
   },
   defaults: {
     maxDeviationBps: 150,
     uncorroboratedDelayS: 21600,
-    // The feeds' 24 h heartbeat plus 1 h (ops/deploy.md §15.13): a quiet feed's last print stays accepted.
+    // The feeds' 24 h heartbeat plus 1 h: a quiet feed's last print stays accepted.
     spotMaxAgeS: 90000,
+    // V2_MAX_FEED_AGE_S (registry-wide) and the per-market oracle source tuning RegisterMarkets
+    // sends (a market's `overrides` may replace the last three): the source contracts' DEFAULT_* values.
+    maxFeedAgeS: 345600,
+    chainlinkMaxStaleS: 93600,
+    chainlinkMaxRoundJumpBps: 2000,
+    univ3WindowS: 300,
     ladder: {
       weekly: { rungs: 5, firstOtmBps: 200, stepBps: 200, cardTargetBps: 400 },
       daily: { rungs: 5, firstOtmBps: 100, stepBps: 100, cardTargetBps: 200 },
     },
-    expiriesAhead: { weekly: 2, daily: 3 },
+    // 0DTE only: list the next daily close only, no weeklies,
+    // so a vault can exit at every session close. A daily expiry is the session's 16:00 NY close
+    // (ExpiryCalendar.nextExpiry(t, false)). The cranker searches from now + MIN_SERIES_LEAD (1 h) +
+    // LADDER_LEAD_MARGIN_S (5 min) (keeper/src/v2/cranker/planner.ts ladderSearchStart), so it ladders today's close
+    // until 14:55 NY and the next session's close after that. `ladder.weekly` stays defined on purpose: weekly 0 switches the tenor off (the keeper's
+    // ladderSlots / ladderSeriesCount and indexer/scripts/v2-scale.ts all take 0 as "none"), and a later
+    // decision turns it back on with one number. `v2` is carried as written by a rebuild (assembleRegistry), so
+    // this constant seeds a first build only; the committed registries carry the same value by hand and the
+    // registry test pins the two equal.
+    // Daily options up to six days ahead: six upcoming daily session closes,
+    // still no weekly ladder. The six dailies include every Friday close in reach, so a weekly tenor would only
+    // list the same expiries twice. No per-market override.
+    expiriesAhead: { weekly: 0, daily: 6 },
+    // The weekdays a daily close may carry a ladder on,
+    // by the UTC day of the close. Every weekday by default; NVDA's row overrides it to mon, wed, fri, the days its
+    // listed options expire (keeper/src/v2/registry.ts listsDailyOn). A list, replaced whole by an override.
+    dailyWeekdays: [...WEEKDAYS],
   },
 };
 
@@ -732,17 +908,17 @@ export const V2_SKELETON = {
  *
  * INTERFACE_VERSION 8: `mintFeePpm` is **0**, not null. In v7 it was null on purpose, because a market
  * that silently inherited a rent rate would charge its writers the wrong one. v8 LAUNCHES every market
- * at 0 rent (V3-D18), so 0 is the reviewed value rather than a missing one — and a new market that came
+ * at 0 rent, so 0 is the reviewed value rather than a missing one — and a new market that came
  * up with a non-zero rate is now what the validator refuses.
  *
  * The rent PATH is still in the contract, and saying "v8 charges no rent" would be a claim about the
  * chain rather than about this file: `Clearinghouse.mint` still computes
  * `OptionMath.mintFee(need, s.mintFeePpm, expiry - block.timestamp)` on every mint
- * (callhouse-contracts v8 `1c536ffe`, `src/v2/Clearinghouse.sol:579`), and a series pins its rate at
+ * (callhouse-contracts `src/v2/Clearinghouse.sol`, the mint path), and a series pins its rate at
  * creation for its whole life. 0 here is a configuration, not a capability that was removed — which is
- * exactly why the monitor's rent alert is inverted under interface 8 rather than deleted (alerts.md §V59).
+ * exactly why the monitor's rent alert is inverted under interface 8 rather than deleted.
  */
-const v2MarketSkeleton = () => ({
+export const v2MarketSkeleton = () => ({
   status: "planned",
   wave: "wave2",
   strikeTick: null,
@@ -753,14 +929,18 @@ const v2MarketSkeleton = () => ({
   dataStreamsFeedId: null,
   payoutRoute: null,
   overrides: {},
-  // T-OP-156 (owner ruling 2026-09-22, two HouseVaults at launch): this market's HouseVault, written back by
+  // Two HouseVaults at launch: this market's HouseVault, written back by
   // the broadcast's externals stage per ticker (callhouse-contracts DeployV2Batch.sh, the same node snippet
   // that writes registeredAt / registerTx below); null until then and null for ever on a market outside
-  // `launchSet.markets`. `v2.contracts.houseVault` (T-OP-114) stays the ONE address VerifyV8 walks: the first
+  // `launchSet.markets`. `v2.contracts.houseVault` stays the ONE address VerifyV8 walks: the first
   // launch ticker's vault, and {validateMarket} refuses the two disagreeing.
   houseVault: null,
+  // This market's vault of each kind (HOUSE_MARKET_KEYS); both null until written back.
+  house: { weekly: null, daily: null },
   registeredAt: null,
   registerTx: null,
+  // The intended Chainlink plausibility band (V2_INTENDED_CHAINLINK_BANDS), written by --pin-bands.
+  chainlinkBand: CHAINLINK_NO_BAND,
 });
 
 const args = new Set(process.argv.slice(2));
@@ -769,7 +949,12 @@ const argValue = (flag) => {
   return i === -1 ? undefined : process.argv[i + 1];
 };
 const CHECK_ONLY = args.has("--check");
-const SKIP_CBOE = args.has("--skip-cboe");
+// --skip-cboe is the old name for --skip-chain, kept as an alias (stonkctl writeback.py and the runbooks
+// pass it, until they move). It says so on every run rather than refusing, so a launch step is not broken by a rename.
+const SKIP_CHAIN = args.has("--skip-chain") || args.has("--skip-cboe");
+if (args.has("--skip-cboe")) console.error("note: --skip-cboe is deprecated; use --skip-chain (T-OP-707: the chain evidence comes from Massive)");
+const PIN_ROUTES = args.has("--pin-routes");
+const PIN_BANDS = args.has("--pin-bands");
 const FEEDS_FILE = argValue("--feeds");
 
 /*//////////////////////////////////////////////////////////////
@@ -823,8 +1008,8 @@ function tickerOf(feed) {
   return m ? m[1] : null;
 }
 
-/** The next two Fridays after `now`, as Cboe's YYMMDD. */
-function nextFridays(now, count = 2) {
+/** The next two Fridays after `now`, as YYMMDD (the registry's expiry format, Cboe's before Massive). */
+export function nextFridays(now, count = 2) {
   const out = [];
   const d = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()));
   while (out.length < count) {
@@ -926,46 +1111,105 @@ async function verifyPair(ticker, asset, feed, block) {
 }
 
 /*//////////////////////////////////////////////////////////////
-                               CBOE
+                          OPTION CHAIN
 //////////////////////////////////////////////////////////////*/
 
-async function probeCboe(root, spotUsd, previous) {
-  const checkedAt = new Date().toISOString();
-  const out = { root, url: CBOE(root), checkedAt, http: null, rows: 0, expiries: [], weekly: false, currentPrice: null, spotDivergenceBps: null, underlyingMatches: null };
+/** Pages one contract listing may follow: 30 x 1000 contracts, far above the largest chain (NVDA ~3,800 on 2026-09-24). */
+export const MASSIVE_MAX_PAGES = 30;
+
+/**
+ * The Massive key: MASSIVE_API_KEY, else ~/.config/massive/api_key, else null. Never printed, never put in a URL:
+ * it goes only in the Authorization header (keeper/src/v2/pricing/massive.ts THE KEY, the same rule).
+ */
+export function massiveKey(env = process.env, file = path.join(homedir(), ".config", "massive", "api_key")) {
+  const fromEnv = env.MASSIVE_API_KEY?.trim();
+  if (fromEnv) return fromEnv;
   try {
-    const res = await fetch(out.url, { headers: { "user-agent": "Mozilla/5.0 stonkhouse-ops/1.0" }, signal: AbortSignal.timeout(30_000) });
-    out.http = res.status;
-    if (!res.ok) return out;
-    const json = await res.json();
-    const opts = json?.data?.options ?? [];
-    out.rows = opts.length;
-    out.symbol = json?.data?.symbol ?? null;
-    out.currentPrice = typeof json?.data?.current_price === "number" ? json.data.current_price : null;
+    const fromFile = readFileSync(file, "utf8").trim();
+    return fromFile === "" ? null : fromFile;
+  } catch {
+    return null;
+  }
+}
+
+/** `2026-09-25` -> `260925`, the registry's expiry format. */
+const yymmdd = (isoDate) => `${isoDate.slice(2, 4)}${isoDate.slice(5, 7)}${isoDate.slice(8, 10)}`;
+
+/**
+ * The option-chain evidence for `root`, from Massive, in the registry's existing `cboe` shape:
+ *   { source: "massive", root, url, checkedAt, http, rows, expiries (YYMMDD, sorted), weekly, currentPrice,
+ *     spotDivergenceBps, underlyingMatches, symbol }
+ * `url` stays the root's Cboe locator (CBOE_LOCATOR: readers fetch it; this probe does not), and `source` says where
+ * the evidence came from. `rows` counts listed contracts (calls and puts), as Cboe's rows did.
+ *
+ *   expiries, rows   GET {base}/v3/reference/options/contracts?underlying_ticker=ROOT&expired=false&limit=1000, then
+ *                    `next_url` until there is none. The listed contracts, not a quote snapshot: which expiries exist.
+ *   currentPrice     GET {base}/v3/snapshot/options/ROOT?limit=1: `underlying_asset.price`. On an options-only key this
+ *                    is Massive's 15-minute DELAYED underlying (massive.ts TWO TIMEFRAMES), which is what Cboe's
+ *                    `current_price` was too; the check it feeds is a 300 bps same-instrument test, not a price.
+ *
+ * FAIL CLOSED, the same outcomes as the Cboe probe: an HTTP failure on EITHER read returns this run's evidence with that
+ * status in `http` and no expiries, so modeFor says fixed; a half listing is never recorded. A network error keeps the
+ * previous evidence with `lastError`, exactly as before. A `next_url` on another origin is refused rather than sent the
+ * key. The key is scrubbed from every error text.
+ */
+export async function probeMassive(root, spotUsd, previous, { key, fetchImpl = fetch, now = new Date(), base = MASSIVE_API_BASE } = {}) {
+  const checkedAt = now.toISOString();
+  const listing = `${base}/v3/reference/options/contracts?underlying_ticker=${encodeURIComponent(root)}&expired=false&limit=1000`;
+  const out = { source: "massive", root, url: CBOE_LOCATOR(root), checkedAt, http: null, rows: 0, expiries: [], weekly: false, currentPrice: null, spotDivergenceBps: null, underlyingMatches: null, symbol: null };
+  const scrub = (text) => (key ? String(text).split(key).join("<key>") : String(text));
+  const get = (u) => fetchImpl(u, { headers: { authorization: `Bearer ${key}`, "user-agent": "stonkhouse-ops/1.0" }, signal: AbortSignal.timeout(30_000) });
+  try {
+    if (!key) throw new Error("no Massive key (MASSIVE_API_KEY or ~/.config/massive/api_key)");
+    const origin = new URL(base).origin;
     const exps = new Set();
-    for (const o of opts) {
-      const m = /^[A-Z.]+(\d{6})[CP]\d+$/.exec(o.option ?? "");
-      if (m) exps.add(m[1]);
+    let rows = 0;
+    let next = listing;
+    for (let page = 0; next; page++) {
+      if (page >= MASSIVE_MAX_PAGES) throw new Error(`more than ${MASSIVE_MAX_PAGES} pages of contracts for ${root}`);
+      const res = await get(next);
+      out.http = res.status;
+      if (!res.ok) return { ...out, rows: 0, expiries: [] };
+      const json = await res.json();
+      for (const c of Array.isArray(json?.results) ? json.results : []) {
+        if (typeof c?.expiration_date !== "string" || !/^\d{4}-\d{2}-\d{2}$/.test(c.expiration_date)) continue;
+        rows++;
+        exps.add(yymmdd(c.expiration_date));
+        out.symbol ??= typeof c.underlying_ticker === "string" ? c.underlying_ticker : null;
+      }
+      next = typeof json?.next_url === "string" && json.next_url !== "" ? json.next_url : null;
+      if (next !== null && new URL(next).origin !== origin) throw new Error(`next_url left ${origin}`);
     }
+    const snap = await get(`${base}/v3/snapshot/options/${encodeURIComponent(root)}?limit=1`);
+    if (!snap.ok) return { ...out, http: snap.status, rows: 0, expiries: [] };
+    const underlying = (await snap.json())?.results?.[0]?.underlying_asset;
+    out.rows = rows;
     out.expiries = [...exps].sort();
-    const fridays = nextFridays(new Date());
-    out.weekly = fridays.every((f) => exps.has(f));
+    out.weekly = nextFridays(now).every((f) => exps.has(f));
+    out.currentPrice = typeof underlying?.price === "number" && Number.isFinite(underlying.price) ? underlying.price : null;
+    if (typeof underlying?.ticker === "string") out.symbol = underlying.ticker;
     if (out.currentPrice !== null && spotUsd) {
       out.spotDivergenceBps = Math.round((Math.abs(out.currentPrice / spotUsd - 1)) * 10_000);
       out.underlyingMatches = out.spotDivergenceBps <= DEFAULTS.maxSpotDivergenceBps;
     }
   } catch (e) {
-    out.error = e.message;
-    if (previous) return { ...previous, lastError: e.message, lastErrorAt: checkedAt };
+    const message = scrub(e.message);
+    out.error = message;
+    if (previous) return { ...previous, lastError: message, lastErrorAt: checkedAt };
   }
   return out;
 }
 
-/** vol only when the chain is weekly AND is the same underlying as the feed. */
-function modeFor(cboe) {
-  if (!cboe || cboe.http !== 200) return { mode: "fixed", reason: "no Cboe chain" };
+/**
+ * vol only when the chain is weekly AND is the same underlying as the feed. The rules did not change with the move to Massive; only
+ * the reasons name the evidence's source (`cboe.source`: "massive", absent on evidence recorded from Cboe).
+ */
+export function modeFor(cboe) {
+  const source = cboe?.source === "massive" ? "Massive" : "Cboe";
+  if (!cboe || cboe.http !== 200) return { mode: "fixed", reason: `no ${source} option chain` };
   if (!cboe.weekly) return { mode: "fixed", reason: `no weekly expiries (has ${cboe.expiries.slice(0, 4).join(",")}…)` };
   if (cboe.underlyingMatches === false) {
-    return { mode: "fixed", reason: `Cboe ${cboe.root} is a different instrument: current_price diverges ${cboe.spotDivergenceBps} bps from the feed` };
+    return { mode: "fixed", reason: `${source} ${cboe.root} is a different instrument: its underlying price diverges ${cboe.spotDivergenceBps} bps from the feed` };
   }
   return { mode: "vol", reason: `weekly chain, ${cboe.rows} rows, spot divergence ${cboe.spotDivergenceBps ?? "?"} bps` };
 }
@@ -981,7 +1225,7 @@ const isObject = (v) => v !== null && typeof v === "object" && !Array.isArray(v)
 const isAddress = (v) => typeof v === "string" && ADDRESS.test(v);
 const isUint = (v) => Number.isSafeInteger(v) && v >= 0;
 const isPositiveInt = (v) => Number.isSafeInteger(v) && v > 0;
-/** A decimal string within (0, max]: how the registry spells a big integer (§3: strikeTick, takerFeeFlat). */
+/** A decimal string within (0, max]: how the registry spells a big integer (e.g. strikeTick, takerFeeFlat). */
 const isDecimalIn = (v, max) => typeof v === "string" && DECIMAL.test(v) && BigInt(v) > 0n && BigInt(v) <= max;
 
 function loadV2Sources() {
@@ -994,7 +1238,11 @@ function exactKeys(obj, keys, where, issues) {
   for (const k of Object.keys(obj)) if (!keys.includes(k)) issues.push(`${where}.${k} is not a known key (${keys.join(", ")})`);
 }
 
-/** An object whose every leaf is a non-negative integer, shaped like `shape`: the defaults and ladders. */
+/** A `dailyWeekdays` list: non-empty, distinct, each one of WEEKDAYS. */
+const isWeekdayList = (v) => Array.isArray(v) && v.length > 0 && v.every((d) => WEEKDAYS.includes(d)) && new Set(v).size === v.length;
+
+/** An object whose every leaf is a non-negative integer, shaped like `shape`: the defaults and ladders. A leaf that is a
+ *  list in `shape` (`dailyWeekdays`) is a weekday list instead. */
 function intTree(obj, shape, where, issues, { exact }) {
   if (!isObject(obj)) {
     issues.push(`${where} must be an object`);
@@ -1007,7 +1255,9 @@ function intTree(obj, shape, where, issues, { exact }) {
       continue;
     }
     if (isObject(shape[k])) intTree(v, shape[k], `${where}.${k}`, issues, { exact });
-    else if (!isUint(v)) issues.push(`${where}.${k} must be a non-negative integer, not ${JSON.stringify(v)}`);
+    else if (Array.isArray(shape[k])) {
+      if (!isWeekdayList(v)) issues.push(`${where}.${k} must be a non-empty list of distinct weekdays (${WEEKDAYS.join(", ")}), not ${JSON.stringify(v)}`);
+    } else if (!isUint(v)) issues.push(`${where}.${k} must be a non-negative integer, not ${JSON.stringify(v)}`);
   }
 }
 
@@ -1018,10 +1268,40 @@ function validateV2Top(v2, recon, issues) {
     return;
   }
   exactKeys(v2, Object.keys(V2_SKELETON), "v2", issues);
-  // T-OP-018. `exactKeys` already refuses the key; this names where the value lives, because the
+  // The House factories, by kind. The `weekly` entry is the launch factory, so it
+  // must be v2.contracts.houseVaultFactory (which the indexer and the keeper read); one entry per kind at most.
+  if (isObject(v2.house)) {
+    exactKeys(v2.house, Object.keys(V2_SKELETON.house), "v2.house", issues);
+    const factories = v2.house.factories;
+    if (!Array.isArray(factories)) {
+      issues.push("v2.house.factories must be a list of { kind, address, deployBlock }");
+    } else {
+      const seen = new Set();
+      factories.forEach((f, i) => {
+        const where = `v2.house.factories[${i}]`;
+        if (!isObject(f)) { issues.push(`${where} must be an object of { kind, address, deployBlock }`); return; }
+        exactKeys(f, ["kind", "address", "deployBlock"], where, issues);
+        if (!HOUSE_FACTORY_KINDS.includes(f.kind)) issues.push(`${where}.kind must be one of ${HOUSE_FACTORY_KINDS.join(" | ")}`);
+        else if (seen.has(f.kind)) issues.push(`${where}: a second ${f.kind} factory; the registry records at most one per kind`);
+        seen.add(f.kind);
+        if (!isAddress(f.address) || f.address === ZERO_ADDRESS) issues.push(`${where}.address must be a non-zero address`);
+        if (f.deployBlock !== null && !isPositiveInt(f.deployBlock)) issues.push(`${where}.deployBlock must be null or a block number`);
+        const launch = v2.contracts?.houseVaultFactory;
+        if (f.kind === "weekly" && isAddress(f.address) && isAddress(launch) && f.address.toLowerCase() !== launch.toLowerCase()) {
+          issues.push(`${where}: the weekly factory ${f.address} is not v2.contracts.houseVaultFactory ${launch}: the weekly entry IS the launch factory`);
+        }
+      });
+      // A v9 launch factory is recorded as the DAILY entry. The same address under both kinds is a record
+      // that contradicts itself: the launch vault's kind (and so which slot it mirrors) would be a guess.
+      if (launchFactoryKind({ v2 }) === null) {
+        issues.push(`v2.house.factories: the launch factory v2.contracts.houseVaultFactory ${v2.contracts.houseVaultFactory} is recorded as BOTH the weekly and the daily factory: one launch factory has one kind (weekly on v8, daily on v9)`);
+      }
+    }
+  }
+  // `exactKeys` already refuses the key; this names where the value lives, because the
   // contracts docs send an operator here and the generic message would send them to the skeleton next.
   // If a later row does add `uniswapV4` to V2_SKELETON (with dev.json and a recon cross-check in the
-  // same commit), delete this branch and the two T-OP-018 tests in that commit: they pin the absence.
+  // same commit), delete this branch and the two `uniswapV4` absence tests in that commit: they pin the absence.
   if ("uniswapV4" in v2) {
     issues.push(
       "v2.uniswapV4 is not a registry key: the v4 PoolManager and StateView live in ops/markets/v2-sources.json contracts.v4PoolManager / contracts.v4StateView, which script/v2/DeployV2Batch.sh reads directly (see the note at V2_SKELETON.uniswapV3)",
@@ -1032,7 +1312,7 @@ function validateV2Top(v2, recon, issues) {
     issues.push("v2.deployBlock must be null or a positive block number");
   }
   if (isObject(v2.contracts)) {
-    // T-OP-114: the recorded set and `sources` are exact; an external key is known only when present, and is
+    // The recorded set and `sources` are exact; an external key is known only when present, and is
     // then held to the same null-or-address rule. `present` is computed once so the two loops cannot disagree.
     const present = V2_EXTERNAL_CONTRACT_NAMES.filter((k) => k in v2.contracts);
     exactKeys(v2.contracts, [...V2_CONTRACT_NAMES, ...present, "sources"], "v2.contracts", issues);
@@ -1047,7 +1327,7 @@ function validateV2Top(v2, recon, issues) {
       }
     } else issues.push("v2.contracts.sources must be an object");
   } else issues.push("v2.contracts must be an object");
-  // T-OP-114 (T-302): the externals' start blocks — exact over the six names, each null or a positive block
+  // The externals' start blocks — exact over the external names, each null or a positive block
   // number judged exactly as `v2.deployBlock` is above, and COUPLED to the address: an external written back
   // under `v2.contracts.<key>` with its block still null is a half-written registry (the flywheel rule at
   // `v2.flywheel.feeSplitter`, below, is the precedent).
@@ -1084,7 +1364,7 @@ function validateV2Top(v2, recon, issues) {
       if (seen && (seen.address.toLowerCase() !== a.toLowerCase() || seen.codeExists !== true)) {
         issues.push(`v2.uniswapV3.${k} ${a} is not the ${r} the F2-02 recon found with code (${seen.address})`);
       }
-      // T-OP-131: the recon check above compares BYTES (lowercased); the STRING is judged here against the
+      // The recon check above compares BYTES (lowercased); the STRING is judged here against the
       // builder's own constant, in two refusals that name different faults. `v2` is a hand-maintained root
       // key that a rebuild carries as written (assembleRegistry), so `--check` is the only thing that can
       // see a copy drift from V2_SKELETON.uniswapV3 -- and it must say which of two things is wrong:
@@ -1112,7 +1392,7 @@ function validateV2Top(v2, recon, issues) {
     if ("takerFeeFlat" in v2.fees && !(flat === "0" || isDecimalIn(flat, TAKER_FEE_FLAT_CEIL))) {
       issues.push(`v2.fees.takerFeeFlat must be a decimal string of USDG base units in [0, ${TAKER_FEE_FLAT_CEIL}]`);
     }
-    // INTERFACE_VERSION 8 (V3-D6, D17), the INVERSION of the v7 rule. v7 refused premium > resale,
+    // INTERFACE_VERSION 8, the INVERSION of the v7 rule. v7 refused premium > resale,
     // because a writer could mint outside the book and resell at the resale fee. v8 closed that by
     // making `mint` callable only from an allowlisted minter, so the premium fee is the writer fee and
     // it MUST stand above the resale fee — premium <= resale is a registry that charges the writer
@@ -1123,7 +1403,7 @@ function validateV2Top(v2, recon, issues) {
         `v2.fees.premiumFeeBps ${v2.fees.premiumFeeBps} is not above v2.fees.resaleFeeBps ${v2.fees.resaleFeeBps}: from INTERFACE_VERSION 8 the writer fee IS the premium fee, charged on the first sale of every long (mint is minter-only, V8-DESIGN §4.2), there is no rent to fall back on, and a resale fee at or above it taxes market-maker round trips instead of writers`,
       );
     }
-    // INTERFACE_VERSION 8 (V3-D18), the INVERSION of the v7 rent rule. v7 refused 0; v8 refuses
+    // INTERFACE_VERSION 8, the INVERSION of the v7 rent rule. v7 refused 0; v8 refuses
     // ANYTHING BUT 0 unless the registry says `allowRent: true` out loud. The dial is still in the
     // Clearinghouse and can be switched on later under the 72 h MARKET_FEE_MANAGER lane, so the flag is
     // how that decision gets written down rather than arriving as an unexplained number in a diff.
@@ -1142,7 +1422,7 @@ function validateV2Top(v2, recon, issues) {
       );
     }
   } else issues.push("v2.fees must be an object");
-  // INTERFACE_VERSION 8 (V8-DESIGN §6). Its own block, never a v2.contracts key: that set is closed and
+  // INTERFACE_VERSION 8. Its own block, never a v2.contracts key: that set is closed and
   // counted, and a flywheel address there would be copied into generated code /v2/config does not expose.
   if (isObject(v2.flywheel)) {
     exactKeys(v2.flywheel, Object.keys(V2_SKELETON.flywheel), "v2.flywheel", issues);
@@ -1162,11 +1442,82 @@ function validateV2Top(v2, recon, issues) {
     }
   } else issues.push("v2.flywheel must be an object ({ feeSplitter, buybackExecutor, deployBlock }, null until the v8 deploy)");
   validateV2Vault(v2.vault, issues);
+  validateLaunchKnobs(v2, issues);
   intTree(v2.defaults, V2_SKELETON.defaults, "v2.defaults", issues, { exact: true });
 }
 
 /**
- * `v2.vault`: the MakerVault `Limits` tuple the deploy sets, in setLimits order (INTERFACE_VERSION 7, c21).
+ * The launch knobs the registry now owns (no fee or limit is baked into the deploy): the flywheel's
+ * deploy config, the EarnVault skim and the KeeperRewards economics. Exact keys, like every v2 block, because the two
+ * projections (stonkctl registry.py, contracts registry-env.sh) read fixed names and REFUSE a missing one by name; a
+ * misspelt key here would reach them as a missing value. Widths only: the contracts enforce their own ceilings.
+ */
+const FLYWHEEL_CONFIG_MAX = {
+  burnBps: 10_000n,
+  conversionSlippageBps: 10_000n,
+  buybackMaxTotalFeeBps: 10_000n,
+  buybackSlippageBps: 10_000n,
+  buybackTwapWindowS: (1n << 32n) - 1n,
+  buybackMinLiquidity: UINT128_MAX,
+  buybackCap: (1n << 256n) - 1n,
+  buybackCapCeiling: (1n << 256n) - 1n,
+  buybackCooldownS: (1n << 40n) - 1n,
+};
+/** The three flywheel amounts written as decimal strings; the rest are JSON integers. */
+const FLYWHEEL_CONFIG_STRINGS = new Set(["buybackMinLiquidity", "buybackCap", "buybackCapCeiling"]);
+
+function validateLaunchKnobs(v2, issues) {
+  // An ABSENT block is already named by exactKeys ("... is missing"); here only a present one of the wrong type.
+  const config = isObject(v2.flywheel) ? v2.flywheel.config : undefined;
+  if (!isObject(config)) {
+    if (config !== undefined) issues.push("v2.flywheel.config must be an object (the flywheel's deploy knobs, T-OP-609)");
+  } else {
+    exactKeys(config, Object.keys(V2_SKELETON.flywheel.config), "v2.flywheel.config", issues);
+    for (const [k, max] of Object.entries(FLYWHEEL_CONFIG_MAX)) {
+      if (!(k in config)) continue;
+      const v = config[k];
+      if (FLYWHEEL_CONFIG_STRINGS.has(k)) {
+        if (!(v === "0" || isDecimalIn(v, max))) issues.push(`v2.flywheel.config.${k} must be a decimal string in [0, ${max}]`);
+      } else if (!(isUint(v) && BigInt(v) <= max)) {
+        issues.push(`v2.flywheel.config.${k} must be an integer in [0, ${max}]`);
+      }
+    }
+    if (config.buybackTwapWindowS === 0) {
+      issues.push("v2.flywheel.config.buybackTwapWindowS must be > 0: a zero TWAP window reads no price");
+    }
+    if (config.buybackCooldownS === 0) {
+      issues.push("v2.flywheel.config.buybackCooldownS must be > 0: FeeSplitter.setBuybackCooldown refuses 0 (T-OP-607)");
+    }
+    // FeeSplitter.setBuybackCap reverts above the ceiling; stonkctl refuses the same.
+    const decimal = (v) => (v === "0" || isDecimalIn(v, (1n << 256n) - 1n) ? BigInt(v) : null);
+    const cap = decimal(config.buybackCap);
+    const ceiling = decimal(config.buybackCapCeiling);
+    if (cap !== null && ceiling !== null && cap > ceiling) {
+      issues.push(`v2.flywheel.config.buybackCap ${cap} is above buybackCapCeiling ${ceiling}: FeeSplitter.setBuybackCap reverts above the ceiling`);
+    }
+  }
+  if (!isObject(v2.earn)) {
+    if (v2.earn !== undefined) issues.push("v2.earn must be an object ({ skimBps, limits }, T-OP-609 / T-OP-655)");
+  } else {
+    exactKeys(v2.earn, Object.keys(V2_SKELETON.earn), "v2.earn", issues);
+    if ("skimBps" in v2.earn && !(isUint(v2.earn.skimBps) && v2.earn.skimBps <= 10_000)) {
+      issues.push("v2.earn.skimBps must be an integer in [0, 10000]");
+    }
+  }
+  if (!isObject(v2.keeper)) {
+    if (v2.keeper !== undefined) issues.push("v2.keeper must be an object (the KeeperRewards bounties, daily cap and funding, T-OP-609)");
+  } else {
+    exactKeys(v2.keeper, Object.keys(V2_SKELETON.keeper), "v2.keeper", issues);
+    for (const k of Object.keys(V2_SKELETON.keeper)) {
+      if (k in v2.keeper && !(v2.keeper[k] === "0" || isDecimalIn(v2.keeper[k], (1n << 256n) - 1n))) {
+        issues.push(`v2.keeper.${k} must be a decimal string of USDG base units`);
+      }
+    }
+  }
+}
+
+/**
+ * `v2.vault`: the MakerVault `Limits` tuple the deploy sets, in setLimits order (INTERFACE_VERSION 7).
  * Every field is validated against the solidity width it is encoded into, because a setLimits call site that
  * drops or overflows one does not encode. maxDailyOutflow must be > 0: 0 deploys the vault frozen — the quoter
  * could cancel, close and place asks but never bid, take or replace upwards — which is a post-launch spend
@@ -1203,6 +1554,75 @@ function validateV2Vault(vault, issues) {
   }
 }
 
+/**
+ * The House and Earn vault limits the deploy
+ * sets, which until now lived in two committed contracts fixtures. stonkctl (ops/stonkctl registry.py
+ * `limits_files`) writes these blocks into the two files the contracts scripts read (V2_HOUSE_LIMITS_FILE,
+ * V2_EARN_LIMITS_FILE), so a limit is changed here and nowhere else. Widths are the solidity fields'
+ * (HouseVault.Limits mirrors MakerVault.Limits; EarnVault.Limits is a five-field struct).
+ *
+ *   v2.house.limits.<TICKER>  the six HouseVault fields, for every market in launchSet.markets (DeployHouseVault
+ *                             creates a vault per launch ticker and STOPs on a ticker with no entry) and for no ticker
+ *                             the registry does not carry. HouseVault._setLimits reverts CeilingExceeded above 10000
+ *                             on the two bps fields; maxDailyOutflow 0 deploys the vault unable to pay out.
+ *   v2.earn.limits            the five EarnVault fields. The contract accepts 0 in every field (a fail-closed
+ *                             setting, EarnVault.sol Limits NatSpec), so only the widths are checked.
+ */
+const EARN_LIMIT_MAX = {
+  maxSeriesUnits: (1n << 64n) - 1n,
+  maxOrderNotional: UINT128_MAX,
+  maxWrittenUnitsPerSeries: (1n << 64n) - 1n,
+  maxWrittenNotional: UINT128_MAX,
+  maxDailyOutflow: UINT128_MAX,
+};
+
+function limitFields(obj, maxes, strings, where, issues) {
+  exactKeys(obj, Object.keys(maxes), where, issues);
+  for (const [k, max] of Object.entries(maxes)) {
+    if (!(k in obj)) continue;
+    const v = obj[k];
+    if (strings.has(k)) {
+      if (!(v === "0" || isDecimalIn(v, max))) issues.push(`${where}.${k} must be a decimal string in [0, ${max}]`);
+    } else if (!(isUint(v) && BigInt(v) <= max)) {
+      issues.push(`${where}.${k} must be an integer in [0, ${max}]`);
+    }
+  }
+}
+
+export function validateVaultLimits(registry, issues) {
+  const v2 = registry?.v2;
+  const house = isObject(v2?.house) ? v2.house.limits : undefined;
+  if (isObject(house)) {
+    const known = new Set((registry?.markets ?? []).map((m) => m?.ticker));
+    for (const [t, lim] of Object.entries(house)) {
+      const where = `v2.house.limits.${t}`;
+      if (!known.has(t)) issues.push(`${where}: ${t} is not a market in this registry`);
+      if (!isObject(lim)) {
+        issues.push(`${where} must be an object of the six HouseVault limits (${Object.keys(VAULT_LIMIT_MAX).join(", ")})`);
+        continue;
+      }
+      limitFields(lim, VAULT_LIMIT_MAX, VAULT_LIMIT_STRINGS, where, issues);
+      if (lim.maxDailyOutflow === "0") {
+        issues.push(`${where}.maxDailyOutflow must be > 0: 0 deploys the HouseVault unable to pay out; a spend freeze is a GUARDIAN tightenLimits call after launch, not a deploy value`);
+      }
+    }
+    const launched = Array.isArray(registry?.launchSet?.markets) ? registry.launchSet.markets : [];
+    for (const t of launched) {
+      if (typeof t === "string" && !(t in house)) {
+        issues.push(`v2.house.limits has no ${t}: ${t} is in launchSet.markets, and DeployHouseVault creates its vault with the limits written from this block (T-OP-655)`);
+      }
+    }
+  } else if (isObject(v2?.house) && "limits" in v2.house) {
+    issues.push("v2.house.limits must be an object of { <TICKER>: the six HouseVault limits } (T-OP-655)");
+  }
+  const earn = isObject(v2?.earn) ? v2.earn.limits : undefined;
+  if (isObject(earn)) {
+    limitFields(earn, EARN_LIMIT_MAX, new Set(Object.keys(EARN_LIMIT_MAX)), "v2.earn.limits", issues);
+  } else if (isObject(v2?.earn) && "limits" in v2.earn) {
+    issues.push(`v2.earn.limits must be an object of the five EarnVault limits (${Object.keys(EARN_LIMIT_MAX).join(", ")}) (T-OP-655)`);
+  }
+}
+
 /*//////////////////////////////////////////////////////////////
                     UNISWAP V4 POOL KEYS (v8)
 //////////////////////////////////////////////////////////////*/
@@ -1217,6 +1637,12 @@ function validateV2Vault(vault, issues) {
  * `fee` and `tickSpacing`: the pair is (asset, USDG) by definition and hooks are always zero.
  */
 export function encodePoolKey({ currency0, currency1, fee, tickSpacing, hooks }) {
+  // Refused BY NAME before encoding. `BigInt(-1).toString(16)` is "-1", so a negative spacing used to
+  // yield a non-hex "word" that `cast keccak` hashed as some other string; 0 or > int24 max names no v4 pool.
+  // Same rule as the validator ({isTickSpacing}).
+  if (!isTickSpacing(tickSpacing)) {
+    throw new Error(`encodePoolKey: tickSpacing ${JSON.stringify(tickSpacing)} must be an integer in [1, ${MAX_TICK_SPACING}]`);
+  }
   const word = (v) => BigInt(v).toString(16).padStart(64, "0");
   return `0x${word(currency0)}${word(currency1)}${word(fee)}${word(tickSpacing)}${word(hooks)}`;
 }
@@ -1241,7 +1667,7 @@ async function keccak(hex) {
  * `shared`: chain facts, the protocol's wallets, the two Safes and the token.
  *
  * INTERFACE_VERSION 8 made this block hand-maintained (SHARED_SKELETON says why), so it needs the
- * same closed-set treatment the `v2` block has had since O3-003: an unknown key here would be a
+ * same closed-set treatment the `v2` block has: an unknown key here would be a
  * wallet nobody reads, and a missing one a wallet every reader resolves to `undefined`.
  */
 function validateShared(registry, issues) {
@@ -1268,7 +1694,7 @@ function validateShared(registry, issues) {
     if (s.safes.admin !== s.admin) {
       issues.push(`shared.safes.admin ${JSON.stringify(s.safes.admin)} and shared.admin ${JSON.stringify(s.admin)} are the same Safe and must be written the same, null included`);
     }
-    // V3-D1/D10: two Safes, same three owners, separate roles. One address for both means the
+    // Two Safes, same three owners, separate roles. One address for both means the
     // Treasury Safe's signatures are the Admin Safe's, and the split that holds protocol money away
     // from protocol configuration is gone.
     if (isAddress(s.safes.admin) && s.safes.admin === s.safes.treasury) {
@@ -1290,16 +1716,16 @@ function validateShared(registry, issues) {
         if (k in pk && pk[k] !== null && !isAddress(pk[k])) issues.push(`shared.token.poolKey.${k} must be null or an address`);
       }
       if (pk.fee !== null && !(isUint(pk.fee) && pk.fee <= MAX_ROUTE_FEE_TIER)) issues.push(`shared.token.poolKey.fee must be null or an integer in [0, ${MAX_ROUTE_FEE_TIER}]`);
-      if (pk.tickSpacing !== null && !(isPositiveInt(pk.tickSpacing) && pk.tickSpacing <= MAX_TICK_SPACING)) {
+      if (pk.tickSpacing !== null && !isTickSpacing(pk.tickSpacing)) {
         issues.push(`shared.token.poolKey.tickSpacing must be null or an integer in [1, ${MAX_TICK_SPACING}]`);
       }
-      // OWNER RULING 2026-09-21 (T-OP-012): THE BUYBACK VENUE IS PERMANENTLY THE PONS LAUNCH POOL, so
+      // THE BUYBACK VENUE IS PERMANENTLY THE PONS LAUNCH POOL, so
       // this key MUST name that pool's launch hook. The rule here used to be the INVERSE, and it was a
-      // one-subject error rather than a design conflict: it quoted V8-DESIGN §6A, which is the PAYOUT
+      // one-subject error rather than a design conflict: it quoted the design text for the PAYOUT
       // ROUTE section ("the pair is exactly (asset, USDG); hooks == address(0) only"). Routes still get
       // that rule and do not lose it -- `payoutRouteIdIssues` recomputes a route's poolId with
       // `hooks: ZERO_ADDRESS` hard-coded, so a route can never name a hooked pool.
-      // The buyback key is the opposite case, and §6 says so: the executor is swappable BECAUSE the v4
+      // The buyback key is the opposite case, and the design says so: the executor is swappable BECAUSE the v4
       // pool and its hook are outside our control. `V4BuybackExecutor.sol:255` reverts `NoSource` when
       // `cfg.key.hooks.code.length == 0`, and `:256` requires that hook to be the PoolManager's
       // registered launch hook, off which it reads `launches(poolId).hookFeeBps` and `.creatorTaxBps`
@@ -1325,12 +1751,12 @@ function validateShared(registry, issues) {
 }
 
 /**
- * `markets[].v2.payoutRoute` (INTERFACE_VERSION 8, V8-DESIGN §6A): where the Clearinghouse's payout
+ * `markets[].v2.payoutRoute` (INTERFACE_VERSION 8): where the Clearinghouse's payout
  * adapter and the FeeSplitter sell this market's Stock Tokens for USDG. `null` means no route, which
  * is not a failure — the Clearinghouse pays a winning call in kind when no route clears its floor.
  *
  * This is NOT `univ3Pool`. That key is the settlement TWAP source and stays v3-only, because v4 has
- * no observation array to walk (06-QUIRKS §H). Sharing one key would have re-pointed settlement at a
+ * no observation array to walk. Sharing one key would have re-pointed settlement at a
  * v4 pool the moment a route was added, which is the whole reason the route gets its own.
  *
  * Offline rules here; `payoutRouteIdIssues` recomputes a v4 `poolId` from the key with `cast`.
@@ -1359,7 +1785,7 @@ export function validatePayoutRoute(m, registry, recon, issues) {
     issues.push(`${t}: v2.payoutRoute.fee ${JSON.stringify(r.fee)} must be an integer in [1, ${MAX_ROUTE_FEE_TIER}] (V2Constants.MAX_ROUTE_FEE_TIER)`);
   }
   if (r.venue === "v4") {
-    if (!(isPositiveInt(r.tickSpacing) && r.tickSpacing <= MAX_TICK_SPACING)) {
+    if (!isTickSpacing(r.tickSpacing)) {
       issues.push(`${t}: v2.payoutRoute.tickSpacing ${JSON.stringify(r.tickSpacing)} must be an integer in [1, ${MAX_TICK_SPACING}]`);
     }
     if (!(typeof r.poolId === "string" && BYTES32.test(r.poolId))) {
@@ -1367,7 +1793,7 @@ export function validatePayoutRoute(m, registry, recon, issues) {
     }
   }
   // A v3 route names a fee tier, and the pool is whatever the canonical factory returns for
-  // (asset, USDG, fee). If the F2-02 recon never saw a pool at that tier, the route resolves to
+  // (asset, USDG, fee). If the source recon never saw a pool at that tier, the route resolves to
   // address(0) on chain and every payout falls back to in-kind without anything failing.
   if (r.venue === "v3" && isPositiveInt(r.fee)) {
     const seen = recon?.markets?.find((x) => x.ticker === t)?.pools ?? null;
@@ -1387,7 +1813,7 @@ function validateMarket(m, registry, recon, issues) {
   if (m.status === "live" && !m.deployment?.factory) issues.push(`${t}: status live but deployment.factory is null`);
   // Superseded means the factory was never built. A deployed factory is run off (v1RunOff), never superseded.
   if (m.status === "superseded-by-v2" && m.deployment?.factory) issues.push(`${t}: status superseded-by-v2 but a factory exists; a deployed v1 market is run off (v1RunOff), not superseded`);
-  // When the owner froze this v1 factory (writesHalted + depositCap 0), in unix seconds. The freeze
+  // When this v1 factory was frozen (writesHalted + depositCap 0), in unix seconds. The freeze
   // runbook writes it together with v1RunOff: true, so a date without the run-off flag, or on a row
   // with no factory, is a half-done or misplaced edit.
   if (m.v1FrozenAt !== undefined && m.v1FrozenAt !== null) {
@@ -1408,7 +1834,7 @@ function validateMarket(m, registry, recon, issues) {
     issues.push(`${t}: v2.strikeTick ${JSON.stringify(v.strikeTick)} must be a decimal string of USDG base units, > 0 and a multiple of ${PRICE_TICK}`);
   }
   if (typeof v.puts !== "boolean") issues.push(`${t}: v2.puts must be true or false`);
-  // INTERFACE_VERSION 8 (V3-D18): the rent dial this market is registered with, launched at 0. v7
+  // INTERFACE_VERSION 8: the rent dial this market is registered with, launched at 0. v7
   // refused 0 here; v8 refuses anything else unless the registry carries the explicit opt-in. Per
   // market as well as shared, because the per-market value is what is pinned into every series and a
   // registry-wide flag with one stray market at 1500 ppm still charges that market's writers rent.
@@ -1424,7 +1850,7 @@ function validateMarket(m, registry, recon, issues) {
     );
   }
   if (v.univ3Pool !== null && !isAddress(v.univ3Pool)) issues.push(`${t}: v2.univ3Pool must be null or an address`);
-  // T-599: THE SINGLE-SOURCE SET IS PINNED IN THE BUILD, not only in the suite. `node --test` already
+  // THE SINGLE-SOURCE SET IS PINNED IN THE BUILD, not only in the suite. `node --test` already
   // froze it; `--check` did not, so a market could gain or lose its pool and the BUILD stayed green.
   // Both directions are checked, because only the pair is a guard: the first alone lets the set rot as
   // markets are wired up, the second alone lets a 34th single-source market slip in.
@@ -1450,8 +1876,12 @@ function validateMarket(m, registry, recon, issues) {
   validatePayoutRoute(m, registry, recon, issues);
   if (isObject(v.overrides)) intTree(v.overrides, registry.v2?.defaults ?? V2_SKELETON.defaults, `${t}.v2.overrides`, issues, { exact: false });
   else issues.push(`${t}: v2.overrides must be an object ({} for none)`);
+  // V2_MAX_FEED_AGE_S is registry-wide; no projection reads a per-market one, so an override would do nothing.
+  if (isObject(v.overrides) && "maxFeedAgeS" in v.overrides) {
+    issues.push(`${t}.v2.overrides.maxFeedAgeS: maxFeedAgeS is registry-wide (v2.defaults only, V2_MAX_FEED_AGE_S); a market cannot override it`);
+  }
   // The delay a market with one ok source waits before it finalizes on an uncorroborated candidate.
-  // The 19 Chainlink-only launch markets take 3600 here (owner, 2026-09-19); those rows land in O8-10.
+  // The Chainlink-only launch markets take 3600 here; those rows are set elsewhere.
   // What lands now is the mechanism: the override exists, it is bounded, and a market that still has a
   // corroborating Uniswap v3 source may not carry one, because on such a market the shortened delay
   // only ever applies on the day the pool is NOT ok — which is exactly when the delay is what protects
@@ -1477,13 +1907,13 @@ function validateMarket(m, registry, recon, issues) {
       issues.push(`${t}: spotMaxAgeS ${spotMaxAgeS} is under the feed heartbeat ${m.feedHeartbeatS} + ${SPOT_AGE_OVER_HEARTBEAT_S} s: spot() would revert StaleSpot whenever the feed is quiet (ops/deploy.md §15.13)`);
     }
   }
-  // T-OP-156. The per-market HouseVault: null, or an address (its EIP-55 case is judged by {checksumMarketHouseVaults},
+  // The per-market HouseVault: null, or an address (its EIP-55 case is judged by {checksumMarketHouseVaults},
   // the same cast rule every other address in this file answers to). A vault on a market the owner did not launch
-  // is refused BY NAME: `launchSet.markets` is the authoritative list (T-OP-003), and a written-back vault on any
+  // is refused BY NAME: `launchSet.markets` is the authoritative list, and a written-back vault on any
   // other row means the externals stage deployed for the wrong market or wrote to the wrong row -- either way not
   // a registry to ship. Without a launchSet (a dev registry) any market may carry one.
   if (v.houseVault !== null && !isAddress(v.houseVault)) issues.push(`${t}: v2.houseVault must be null or an address`);
-  // The zero address is what DeployHouseVault.s.sol (callhouse-contracts, T-OP-141) writes into its JSON out for a
+  // The zero address is what DeployHouseVault.s.sol writes into its JSON out for a
   // vault whose createVault call was PRINTED for the Safe rather than sent (`built.vaults[i]`: "zero when the vault
   // call was printed rather than sent"; `houseVault` likewise "zero until it exists"). Copied into the registry
   // verbatim it would read as a vault that exists at 0x0 -- and pass the shape rule and the cast rule, since the
@@ -1496,12 +1926,47 @@ function validateMarket(m, registry, recon, issues) {
   if (isAddress(v.houseVault) && launched !== null && !launched.includes(t)) {
     issues.push(`${t}: v2.houseVault ${v.houseVault} is set on a market that is not in launchSet.markets (${launched.join(", ")}): only a launched market gets a HouseVault; a vault here means the externals stage wrote the wrong row`);
   }
-  // The single address VerifyV8 walks (v2.contracts.houseVault, T-OP-114) is the FIRST launch ticker's vault (owner
-  // ruling, option A). Both set and different is a registry that names two vaults for one market: refused by name.
+  // The single address VerifyV8 walks (v2.contracts.houseVault) is the FIRST launch ticker's vault (the
+  // chosen option). Both set and different is a registry that names two vaults for one market: refused by name.
   const first = launched?.[0];
   const walked = registry?.v2?.contracts?.houseVault;
   if (first === t && isAddress(v.houseVault) && isAddress(walked) && walked.toLowerCase() !== v.houseVault.toLowerCase()) {
     issues.push(`${t}: v2.houseVault ${v.houseVault} is not v2.contracts.houseVault ${walked}: the first launch ticker's vault IS the one VerifyV8 walks (owner ruling 2026-09-22, option A); write the same address in both or fix the write-back`);
+  }
+  // The market's vault per kind. The launch vault `houseVault`, once written, IS the
+  // vault of the launch factory's kind (launchFactoryKind): `weekly` on v8, `daily` on v9. `daily`
+  // needs a univ3Pool (dual source) and a recorded daily factory, and is never a weekly vault.
+  if (!isObject(v.house)) {
+    issues.push(`${t}: v2.house must be an object of { weekly, daily }`);
+  } else {
+    exactKeys(v.house, HOUSE_MARKET_KEYS, `${t}: v2.house`, issues);
+    for (const k of HOUSE_MARKET_KEYS) {
+      const a = v.house[k];
+      if (a !== null && a !== undefined && !isAddress(a)) issues.push(`${t}: v2.house.${k} must be null or an address`);
+      if (a === ZERO_ADDRESS) issues.push(`${t}: v2.house.${k} is the zero address: "not yet" is null, never 0x0`);
+    }
+    const w = v.house.weekly ?? null;
+    const d = v.house.daily ?? null;
+    const launchKind = launchFactoryKind(registry);
+    if (launchKind === "daily") {
+      // v9: the launch factory is daily, so the launch vault slot mirrors `daily`. It may still be null when
+      // only the House write-back ran (write-back-v8.mjs --house-deployment writes house.daily, never houseVault); when
+      // it is set it IS the daily vault. A weekly vault has no factory to come from: the only factory entry that may
+      // be weekly is the launch one, which is daily here.
+      if (v.houseVault !== null && !(isAddress(d) && isAddress(v.houseVault) && d.toLowerCase() === v.houseVault.toLowerCase())) {
+        issues.push(`${t}: v2.houseVault ${v.houseVault} is not v2.house.daily ${d}: the launch factory is daily (v2.house.factories), so the launch vault is the market's daily vault`);
+      }
+      if (w !== null) issues.push(`${t}: v2.house.weekly ${w} is set, but the launch factory is daily and no weekly factory is recorded`);
+    } else if (launchKind === "weekly" && ((w === null) !== (v.houseVault === null) || (w !== null && isAddress(w) && isAddress(v.houseVault) && w.toLowerCase() !== v.houseVault.toLowerCase()))) {
+      issues.push(`${t}: v2.house.weekly ${w} is not v2.houseVault ${v.houseVault}: the launch vault is the market's weekly vault (V8-DAILY-HOUSEVAULT-DEPLOY step 2)`);
+    }
+    if (d !== null) {
+      if (v.univ3Pool === null) issues.push(`${t}: v2.house.daily needs a v2.univ3Pool: a daily vault settles every session and needs a corroborated price (V8-DAILY-HOUSEVAULT-DESIGN §3)`);
+      const factories = Array.isArray(registry?.v2?.house?.factories) ? registry.v2.house.factories : [];
+      if (!factories.some((f) => f?.kind === "daily")) issues.push(`${t}: v2.house.daily is set but v2.house.factories has no daily factory`);
+      if (isAddress(d) && isAddress(w) && d.toLowerCase() === w.toLowerCase()) issues.push(`${t}: v2.house.daily equals its weekly vault`);
+      if (launched !== null && !launched.includes(t)) issues.push(`${t}: v2.house.daily is set on a market that is not in launchSet.markets`);
+    }
   }
   if (v.registeredAt !== null && !isPositiveInt(v.registeredAt)) issues.push(`${t}: v2.registeredAt must be null or unix seconds`);
   if (v.registerTx !== null && !(typeof v.registerTx === "string" && BYTES32.test(v.registerTx))) issues.push(`${t}: v2.registerTx must be null or a transaction hash`);
@@ -1525,7 +1990,7 @@ function validateMarket(m, registry, recon, issues) {
       const got = [p.token0.toLowerCase(), p.token1.toLowerCase()].sort().join("/");
       if (got !== want) issues.push(`${t}: v2.univ3Pool pair ${got} is not {asset, USDG} ${want}`);
       if (p.twap !== "usable") issues.push(`${t}: v2.univ3Pool is "${p.twap}" in the F2-02 recon; only a usable pool may be a settlement source`);
-      // INTERFACE_VERSION 7, owner sign-off c10 (DECISIONS-2026-09-17 §7): the ring has to hold the whole
+      // INTERFACE_VERSION 7: the ring has to hold the whole
       // settlement window plus the snapshot grace, or one dust mint or burn per second overwrites the expiry's
       // observations before the snapshot is taken. UniV3TwapSource.setPool refuses a shallower pool
       // (UnsupportedAsset) and DeployV2Batch.sh refuses the registry row before anything is broadcast.
@@ -1549,7 +2014,7 @@ function at(registry, dotted) {
 }
 
 /**
- * `v2.protocolAddresses` (02-interfaces.md §3.3, O3-204). Four refusals, and a check `--check` runs
+ * `v2.protocolAddresses`. Four refusals, and a check `--check` runs
  * before any deploy reads the block:
  *
  *   MISSING    the block, a key, or — once `v2.deployBlock` says a deployment exists — the manager,
@@ -1561,29 +2026,165 @@ function at(registry, dotted) {
  *   DUPLICATED one address under two keys. In v8 there is exactly one pair that may repeat
  *              (`feeRecipient` is `feeSplitter`); everything else repeating is a mistake.
  *
- * INTERFACE_VERSION 8: `distributors.user` is the only key left without a twin (it waits for F5).
- * Every other key now mirrors a block that exists, which is what O3-204 could not do yet.
+ * INTERFACE_VERSION 8: `distributors.user` is the only key left without a twin (it waits for a later feature).
+ * Every other key now mirrors a block that exists, which an earlier version could not do yet.
  */
 /**
- * Every required-when-deployed slot that is still null (O8-08A). Same switch as the mirror rule:
+ * Every required-when-deployed slot that is still null. Same switch as the mirror rule:
  * `v2.deployBlock` is the registry's own statement that a deployment exists. Before it is set every
  * one of these is legitimately null and this returns nothing — that pre-deploy state is pinned by a
  * test and must stay green.
  */
 /**
- * O8-03's payout-route decision, as data rather than as prose (T-147, ops/markets/PAYOUT-ROUTES-V8.md).
+ * v8's payout-route decision, as data rather than as prose.
  *
- * Before O8-03 every `payoutRoute` was null and "null" meant "not written yet". Now fourteen launch
+ * Before that decision every `payoutRoute` was null and "null" meant "not written yet". Now fourteen launch
  * markets carry a route and six are null ON PURPOSE — no eligible v4 pool cleared the depth, activity
  * and deviation gates — and to a completeness check those six are indistinguishable from a row somebody
  * forgot. This list is what tells them apart: post-broadcast, a launch market that is null and NOT named
  * here has been forgotten, and a market named here that suddenly HAS a route means the decision changed
  * without the document changing with it.
  *
- * These six are re-measured immediately before OWN8-06. When a re-measurement pins one of them, it moves
+ * These six are re-measured immediately before their routes are set. When a re-measurement pins one of them, it moves
  * out of this list in the same commit that writes its route.
  */
 export const V2_PAYOUT_ROUTE_DELIBERATELY_NULL = ["AMD", "AMZN", "CRWV", "MU", "ORCL", "SNDK"];
+
+/**
+ * The new deploy carries this fix by default. The launch markets' payout
+ * route is the Uniswap v3 fee-500 {asset, USDG} pool, the same pool their settlement TWAP reads (`v2.univ3Pool`),
+ * and no longer v8's v4 pools: those miss the Clearinghouse conversion floor and pay winners in kind
+ * (the payout-route floor).
+ *
+ * This table is the decision, as data, and the builder WRITES it. WHEN it writes it depends on whether the registry
+ * describes a deployment:
+ *   - A registry with no `v2.deployBlock` (dev.json, or any registry before its broadcast) carries the pin: a build
+ *     writes it ({@link assembleMarket}) and {@link validatePayoutRoutePins} refuses anything else, so `--check`
+ *     catches a hand edit.
+ *   - A registry WITH `v2.deployBlock` (tier1.json today) records the LIVE v8, whose PayoutRouter still holds the
+ *     v4 routes, and route-liquidity.mjs requires the registry to describe the live route. A build keeps its route
+ *     as written and the pin rule is silent for a REGISTERED market. THE REDEPLOY applies the pin: its prepare step
+ *     resets the registry to no recorded deployment (the launch tool's prepare step) and runs
+ *     `build-markets.mjs --pin-routes`. The core write-back then records the new router while the launch
+ *     markets are still unregistered: route-liquidity.mjs waives the router equality for them and the pin
+ *     rule requires the pin. RegisterMarkets then sets the v3 routes on the new router, so the chain and
+ *     the registry agree from then on.
+ * `--pin-routes` writes the table into any registry, offline, touching no other field.
+ *
+ * The deploy consumes it through callhouse-contracts script/v2/lib/registry-env.sh (`V2_MARKET_<T>_PAYOUT_VENUE=v3`,
+ * `_PAYOUT_FEE=500`), and RegisterMarkets' v3 branch sends `payoutRouter.setRouteV3(asset, 500)`.
+ */
+export const V2_PAYOUT_ROUTE_PINS = Object.freeze({
+  NVDA: Object.freeze({ venue: "v3", fee: 500 }),
+  SPCX: Object.freeze({ venue: "v3", fee: 500 }),
+});
+
+/** True when a build writes and `--check` enforces the pins: the registry names no deployment yet. */
+export function routesPinnedByBuild(registry) {
+  const block = registry?.v2?.deployBlock;
+  return block === null || block === undefined;
+}
+
+/** `v2` with its `payoutRoute` replaced by the pinned route when `ticker` has one; otherwise `v2` itself. */
+export function pinPayoutRoute(ticker, v2) {
+  const pin = V2_PAYOUT_ROUTE_PINS[ticker];
+  if (pin === undefined || v2 === null || typeof v2 !== "object") return v2;
+  return { ...v2, payoutRoute: { ...pin } };
+}
+
+/**
+ * A pin on a market recorded as deliberately routeless, always; on a registry {@link routesPinnedByBuild}, a pinned
+ * market whose route is not its pin; and the same on a DEPLOYED registry for a pinned market that is not
+ * registered yet (`v2.registeredAt` null).
+ *
+ * WHY THE LAST CASE. The stonkctl launch writes the new deployment back BEFORE RegisterMarkets (phases: deploy,
+ * writeback, ..., register), so writeback's `--check` sees a deployed registry whose launch markets are unregistered.
+ * route-liquidity.mjs waives the registry-vs-router equality for them (the new router's slots are empty until
+ * RegisterMarkets) and only measures the registry route's depth. RegisterMarkets then READS that route
+ * from the registry and sets it on the new router. So a prepare step that skipped `--pin-routes` would show up only
+ * as SHALLOW / TOO EXPENSIVE on the old v4 pools, with nothing naming the cause, and the v4 route would go live.
+ * This names it, offline. Once a market is registered the chain governs its route and this rule is silent, which
+ * keeps the committed tier1.json (registered live v8 on its v4 routes) green here, as before.
+ */
+export function validatePayoutRoutePins(registry, issues) {
+  for (const t of Object.keys(V2_PAYOUT_ROUTE_PINS)) {
+    if (V2_PAYOUT_ROUTE_DELIBERATELY_NULL.includes(t)) {
+      issues.push(`${t}: V2_PAYOUT_ROUTE_PINS pins a route but V2_PAYOUT_ROUTE_DELIBERATELY_NULL lists it as routeless`);
+    }
+  }
+  const predeploy = routesPinnedByBuild(registry);
+  for (const m of registry.markets ?? []) {
+    const pin = V2_PAYOUT_ROUTE_PINS[m.ticker];
+    if (pin === undefined) continue;
+    const unregistered = m.v2?.registeredAt === null || m.v2?.registeredAt === undefined;
+    if (!predeploy && !unregistered) continue;
+    const route = m.v2?.payoutRoute;
+    if (isDeepStrictEqual(route, { ...pin })) continue;
+    issues.push(predeploy
+      ? `${m.ticker}: v2.payoutRoute is ${JSON.stringify(route)} but V2_PAYOUT_ROUTE_PINS pins ${JSON.stringify(pin)} (T-OP-337): run node ops/markets/build-markets.mjs --pin-routes, never hand-edit the route`
+      : `${m.ticker}: v2.payoutRoute is ${JSON.stringify(route)} but V2_PAYOUT_ROUTE_PINS pins ${JSON.stringify(pin)}, and ${m.ticker} is not registered yet on this deployment (v2.deployBlock ${JSON.stringify(registry.v2.deployBlock)}, v2.registeredAt null): RegisterMarkets would set this route on the new router. The launch's prepare step must run node ops/markets/build-markets.mjs --pin-routes before the deploy (T-OP-337, T-OP-349); never hand-edit the route`);
+  }
+}
+
+/**
+ * The Chainlink plausibility band each market is INTENDED to run with: `ChainlinkFeedSource.setBand(underlying,
+ * minPrice, maxPrice)`, USDG base units (6 dp) per whole share, inclusive (callhouse-contracts
+ * src/v2/oracle/ChainlinkFeedSource.sol setBand, uint128, minPrice > 0 and maxPrice > minPrice). The values are
+ * the scale-fault rule: `[lowest real price / 5, highest x 5]`, rounded outward, sized
+ * so every real price the feed has printed is inside and a 100x scale fault in either direction is outside. The same
+ * numbers are in that repo's migration plan (script/v2/safe/chainlink-source-migration.json ops 3-4), whose test asserts
+ * both conditions against them.
+ *
+ * WHY THE REGISTRY PUBLISHES IT. Without it the monitor held an expiry's pinned band (`pinnedBands`) to the source's
+ * CURRENT band (`bands`). A band that was wrong from the start, pinned == current and both wrong, looked healthy. With an
+ * intended band, ops/v2/monitor.mjs pages `v2_mon_pin_mismatch` when either one differs from it.
+ *
+ * This table is the decision, as data. `--pin-bands` writes it into a registry, offline, touching no other field, and
+ * {@link validateChainlinkBands} refuses any market whose `v2.chainlinkBand` is not this table's value. A market with no
+ * entry carries the explicit marker {@link CHAINLINK_NO_BAND}, never an absent key or a null. The monitor reports that
+ * marker as NOT CHECKED, never as a pass. That is the 33 non-launch markets' state (the doc's "33 unbanded markets"):
+ * none of them is in the launch registries, and a market added without a sized band gets the marker until
+ * somebody sizes one from its feed history.
+ */
+export const V2_INTENDED_CHAINLINK_BANDS = Object.freeze({
+  NVDA: Object.freeze({ minPrice: "20000000", maxPrice: "2000000000" }),
+  SPCX: Object.freeze({ minPrice: "20000000", maxPrice: "1000000000" }),
+});
+
+/** `v2.chainlinkBand` for a market with no intended band: stated, so an absent key stays a fault. */
+export const CHAINLINK_NO_BAND = "none";
+
+/** The `v2.chainlinkBand` value `ticker` must carry: its V2_INTENDED_CHAINLINK_BANDS entry, else the no-band marker. */
+export function intendedChainlinkBand(ticker) {
+  const b = V2_INTENDED_CHAINLINK_BANDS[ticker];
+  return b === undefined ? CHAINLINK_NO_BAND : { minPrice: b.minPrice, maxPrice: b.maxPrice };
+}
+
+/** `v2` with `chainlinkBand` set to the ticker's intended band; a non-object `v2` is returned as it is. */
+export function pinChainlinkBand(ticker, v2) {
+  if (v2 === null || typeof v2 !== "object") return v2;
+  return { ...v2, chainlinkBand: intendedChainlinkBand(ticker) };
+}
+
+/**
+ * Every table entry must be a band `setBand` accepts; every market's `v2.chainlinkBand` must equal its intended band.
+ * Keyed on the table, not on the market, so a band can only be changed by editing the table and re-running `--pin-bands`.
+ */
+export function validateChainlinkBands(registry, issues) {
+  for (const [t, b] of Object.entries(V2_INTENDED_CHAINLINK_BANDS)) {
+    if (!isDecimalIn(b.minPrice, UINT128_MAX) || !isDecimalIn(b.maxPrice, UINT128_MAX) || BigInt(b.maxPrice) <= BigInt(b.minPrice)) {
+      issues.push(`${t}: V2_INTENDED_CHAINLINK_BANDS ${JSON.stringify(b)} is not a band setBand accepts (uint128 decimal strings, minPrice > 0, maxPrice > minPrice)`);
+    }
+  }
+  for (const m of registry.markets ?? []) {
+    if (!isObject(m.v2)) continue; // validateMarket names a missing v2 block
+    const want = intendedChainlinkBand(m.ticker);
+    if (isDeepStrictEqual(m.v2.chainlinkBand, want)) continue;
+    issues.push(
+      `${m.ticker}: v2.chainlinkBand is ${JSON.stringify(m.v2.chainlinkBand)} but the intended band is ${JSON.stringify(want)} (V2_INTENDED_CHAINLINK_BANDS, T-OP-506): run node ops/markets/build-markets.mjs --pin-bands, never hand-edit the band`,
+    );
+  }
+}
 
 /** The launch set: the wave a market is in is the registry's own statement of whether it launches. */
 const isLaunchMarket = (m) => m?.v2?.wave === "wave1" || m?.v2?.wave === "canary";
@@ -1614,6 +2215,39 @@ export function validateDeployedCompleteness(registry, issues) {
       issues.push(
         `${m.ticker}: v2.payoutRoute is set but ${m.ticker} is listed as deliberately routeless: the decision changed and ops/markets/PAYOUT-ROUTES-V8.md did not`,
       );
+    }
+  }
+  // The go-live check. A v9 launch factory emits only the 5-field VaultCreated. The indexer
+  // watches the House vaults this registry LISTS; with none listed it falls back to factory() discovery, which watched
+  // the launch factory's legacy 4-field topic, a topic a v9 factory never emits, so it found nothing and said nothing.
+  // A later fix made that fallback watch the topic the registry's launch kind names, but in production the fallback is
+  // still a page (HOUSE_SOURCE_FACTORY_FALLBACK) and an eth_getLogs per block. So a written-back registry whose launch
+  // factory is daily must list a daily vault for every launch market before it ships (and before the indexer
+  // deploys). null means the createVault has not landed: finish it and write back.
+  // A launch factory with NO v2.house.factories entry cannot be told apart (the launch's window stage records the entry
+  // only once a vault was created), so it is refused too: the registry must say the launch factory's kind.
+  const launchFactory = at(registry, "v2.contracts.houseVaultFactory");
+  const factoryEntries = Array.isArray(registry?.v2?.house?.factories) ? registry.v2.house.factories : [];
+  if (isAddress(launchFactory) && !factoryEntries.some((f) => isObject(f) && isAddress(f.address) && f.address.toLowerCase() === launchFactory.toLowerCase())) {
+    issues.push(
+      `v2.contracts.houseVaultFactory ${launchFactory} has no v2.house.factories entry but v2.deployBlock is ${JSON.stringify(block)}: the registry must say the launch factory's kind (weekly on v8, daily on v9) and list its vaults before it ships, or the indexer cannot find them`,
+    );
+  }
+  if (launchFactoryKind(registry) === "daily") {
+    const listed = Array.isArray(registry?.launchSet?.markets)
+      ? registry.launchSet.markets
+      : (registry.markets ?? []).filter(isLaunchMarket).map((m) => m.ticker);
+    for (const t of listed) {
+      const m = (registry.markets ?? []).find((x) => x.ticker === t);
+      // A market listed after the launch joins launchSet.markets before
+      // it is registered, and its House vault is created with (or after) the registration. Skipped ONLY while
+      // v2.registeredAt is null; a REGISTERED launch-set market with no daily vault is refused as before.
+      if (m !== undefined && (m?.v2?.registeredAt ?? null) === null) continue;
+      if ((m?.v2?.house?.daily ?? null) === null) {
+        issues.push(
+          `${t}: v2.house.daily is null but v2.deployBlock is ${JSON.stringify(block)} and the launch factory is daily: the indexer watches only the House vaults the registry lists (with none listed a production indexer falls back to factory() discovery and pages HOUSE_SOURCE_FACTORY_FALLBACK), so record ${t}'s daily vault before this registry ships`,
+        );
+      }
     }
   }
 }
@@ -1712,15 +2346,15 @@ export function validateDevIsolation(registry, production, issues) {
   };
   for (const k of ["admin", "guardian", "feeRecipient", "opsWallet"]) claim(at(production, `shared.${k}`), `shared.${k}`);
   for (const k of SHARED_SAFE_KEYS) claim(at(production, `shared.safes.${k}`), `shared.safes.${k}`);
-  // `shared.token.address` is deliberately NOT claimed (T-OP-108). Until v8 it was, and the rule was
+  // `shared.token.address` is deliberately NOT claimed. Until v8 it was, and the rule was
   // wrong by its own doc comment: STONKHOUSE is a fixed fact of chain 4663 like `shared.usdg` -- the
   // Pons launch already minted it, the devnet is a fork of 4663 and the dev deploy path reads the
   // same token and launch pool from dev.json (`DeployV2Batch.sh:354-358`). Claiming it meant the
-  // moment production pinned the real token (this row), a dev registry naming the SAME token was
+  // moment production pinned the real token, a dev registry naming the SAME token was
   // refused, and the only way to pass --check was to point the devnet at a token that does not
   // exist. Wallets, keys and deployed protocol contracts stay claimed below: those ARE ours.
   for (const k of V2_CONTRACT_NAMES) claim(at(production, `v2.contracts.${k}`), `v2.contracts.${k}`);
-  // T-OP-114: a written-back external (EarnVault, the House factory, ...) is a deployed protocol contract like
+  // A written-back external (EarnVault, the House factory, ...) is a deployed protocol contract like
   // any other, so production claims it too. `at` answers undefined for a key the registry does not carry yet,
   // and `claim` ignores a non-address, so this is a no-op until the externals step writes one.
   for (const k of V2_EXTERNAL_CONTRACT_NAMES) claim(at(production, `v2.contracts.${k}`), `v2.contracts.${k}`);
@@ -1728,7 +2362,7 @@ export function validateDevIsolation(registry, production, issues) {
   for (const k of V2_BOT_NAMES) claim(at(production, `v2.bots.${k}`), `v2.bots.${k}`);
   for (const k of ["feeSplitter", "buybackExecutor"]) claim(at(production, `v2.flywheel.${k}`), `v2.flywheel.${k}`);
   /**
-   * PRODUCTION'S OWN PROTOCOL BLOCK (T-249). Every claim above walks a block the dev side also walks -
+   * PRODUCTION'S OWN PROTOCOL BLOCK. Every claim above walks a block the dev side also walks -
    * except this one, which was missing entirely, so a production address living in
    * `v2.protocolAddresses` was only ever caught THROUGH ITS TWIN somewhere else. Most keys have a twin
    * (`accessManager` mirrors `v2.contracts.accessManager`, `treasury` mirrors `shared.safes.treasury`),
@@ -1736,7 +2370,7 @@ export function validateDevIsolation(registry, production, issues) {
    *
    * The exposure is exactly the slots with NO twin - `distributors.user` and `distributors.lender`,
    * twin-less BY DESIGN because a second deployment of RewardsDistributor cannot be mirrored into a
-   * closed, counted `v2.contracts` block (T-221). Measured before this change: production's
+   * closed, counted `v2.contracts` block. Measured before this change: production's
    * `distributors.lender` and `distributors.user` copied into a `_dev` registry were ACCEPTED, while
    * `distributors.maker` was REFUSED via its twin. Walking the block by its own entries, the way the
    * dev side already does, removes the dependence on twins altogether.
@@ -1812,7 +2446,7 @@ async function checksumV2Protocol(registry) {
 }
 
 /**
- * One key per process (two bots on one key collide on nonces, ops/deploy.md §10): the bot addresses
+ * One key per process (two bots on one key collide on nonces): the bot addresses
  * differ from each other and from every other key the registry names.
  *
  * INTERFACE_VERSION 8: `v2.bots.guardian` and `shared.guardian` are the SAME key and must be written
@@ -1877,7 +2511,7 @@ async function checksumShared(registry) {
 }
 
 /**
- * T-OP-156: every per-market HouseVault address in EIP-55 form, the same `cast` rule as {checksumShared} and
+ * Every per-market HouseVault address in EIP-55 form, the same `cast` rule as {checksumShared} and
  * {checksumV2Protocol} -- one rule for every address this file judges, not a second one for this key. Exported
  * so the registry test can hand it a lowercase copy and watch it refuse (the offline validator only checks the
  * shape; `--check` is where the case is judged). Null is skipped: it is the value for every market until the
@@ -1915,7 +2549,7 @@ export async function poolIdIssues(registry) {
   const token = at(registry, "shared.token");
   if (isObject(token) && typeof token.poolId === "string" && BYTES32.test(token.poolId) && isObject(token.poolKey)) {
     const pk = token.poolKey;
-    if (isAddress(pk.currency0) && isAddress(pk.currency1) && isUint(pk.fee) && isUint(pk.tickSpacing) && isAddress(pk.hooks)) {
+    if (isAddress(pk.currency0) && isAddress(pk.currency1) && isUint(pk.fee) && isTickSpacing(pk.tickSpacing) && isAddress(pk.hooks)) {
       await check("shared.token.poolId", pk, token.poolId);
     }
   }
@@ -1923,7 +2557,7 @@ export async function poolIdIssues(registry) {
   for (const m of registry.markets ?? []) {
     const r = m.v2?.payoutRoute;
     if (!isObject(r) || r.venue !== "v4" || !isAddress(m.asset)) continue;
-    if (!(typeof r.poolId === "string" && BYTES32.test(r.poolId)) || !isUint(r.fee) || !isUint(r.tickSpacing)) continue;
+    if (!(typeof r.poolId === "string" && BYTES32.test(r.poolId)) || !isUint(r.fee) || !isTickSpacing(r.tickSpacing)) continue;
     // The pair and the hooks are not the route's to choose: (asset, USDG) sorted, hooks address(0).
     await check(`${m.ticker}: v2.payoutRoute.poolId`, { ...routeCurrencies(m.asset, usdg), fee: r.fee, tickSpacing: r.tickSpacing, hooks: ZERO_ADDRESS }, r.poolId);
   }
@@ -1931,6 +2565,40 @@ export async function poolIdIssues(registry) {
 }
 
 /** Every v2 problem the registry has without touching the chain. */
+/**
+ * Only NVDA and SPCX are supported for now:
+ * the registry carries ONLY the launch set. The feed directory still lists every tokenised-equity feed on 4663;
+ * this is where the builder cuts the list, so the cut survives every rebuild instead of being a hand edit a
+ * rebuild would undo.
+ *
+ * The set is the registry's own `launchSet.markets`, else (a `_dev` registry, which carries no launch set)
+ * production's. With neither, nothing is cut: a brand-new registry has no launch set to cut to.
+ */
+export function launchTickers(existing, production) {
+  const own = existing?.launchSet?.markets;
+  if (Array.isArray(own) && own.length > 0) return own;
+  const prod = production?.launchSet?.markets;
+  if (Array.isArray(prod) && prod.length > 0) return prod;
+  return null;
+}
+
+/**
+ * Split paired feeds into the markets this registry carries and the ones the launch set leaves out, each of the
+ * latter as a `skipped` entry that says why. `launch` null keeps every pair. A launch ticker with no pair is not
+ * handled here: `validateLaunchSet` refuses a launch set that names a market the registry does not carry.
+ */
+export function selectLaunchPairs(pairs, launch) {
+  if (launch === null) return { kept: pairs, left: [] };
+  const set = new Set(launch);
+  const kept = [];
+  const left = [];
+  for (const p of pairs) {
+    if (set.has(p.ticker)) kept.push(p);
+    else left.push({ feed: p.feed.name, ticker: p.ticker, why: `not in launchSet.markets (${launch.join(", ")})` });
+  }
+  return { kept, left };
+}
+
 /** The keys `launchSet` carries. Closed, like every other block the validator walks. */
 export const LAUNCH_SET_KEYS = ["note", "markets"];
 
@@ -1959,7 +2627,7 @@ export const LAUNCH_SET_KEYS = ["note", "markets"];
  *
  * REQUIRED on a production-shaped registry and OPTIONAL elsewhere. `production` is non-null only when
  * a dev registry is being validated against production, so a null `production` is the production
- * registry itself. That keeps `dev.json` -- which is out of this row's fence -- valid untouched.
+ * registry itself. That keeps `dev.json` valid untouched.
  */
 export function validateLaunchSet(registry, production, issues) {
   const block = registry?.launchSet;
@@ -1995,15 +2663,42 @@ export function validateLaunchSet(registry, production, issues) {
   }
 }
 
+/**
+ * Earn just-in-time funding stays off until quoteTake is fixed.
+ * No registry value allowlists a maker for Earn funding, at launch or after, until the quoteTake fix
+ * lands; not even an entry that is "disabled by default". Every other block is exact-keyed, so such a
+ * key is already an unknown key; this names it and the order, wherever in the registry it is put. Key names only:
+ * no registry key today contains any of these words (tier1.json and dev.json as committed).
+ */
+export const EARN_FUNDING_KEY = /funding|justintime|^jit$/i;
+export function validateNoEarnFunding(registry, issues, where = "", node = registry) {
+  if (Array.isArray(node)) {
+    node.forEach((v, i) => validateNoEarnFunding(registry, issues, `${where}[${i}]`, v));
+    return;
+  }
+  if (!isObject(node)) return;
+  for (const [k, v] of Object.entries(node)) {
+    const path = where === "" ? k : `${where}.${k}`;
+    if (EARN_FUNDING_KEY.test(k)) {
+      issues.push(`${path} is refused: no registry key may configure Earn just-in-time funding (owner order 2026-09-24 ~10:20 AM PT: "Do not turn on Earn just-in-time funding until quoteTake is fixed"; T-OP-836, until T-OP-835 lands and passes review)`);
+    }
+    validateNoEarnFunding(registry, issues, path, v);
+  }
+}
+
 export function validateV2(registry, recon, production) {
   const issues = [];
+  validateNoEarnFunding(registry, issues);
   validateShared(registry, issues);
   validateDeployedCompleteness(registry, issues);
+  validatePayoutRoutePins(registry, issues);
+  validateChainlinkBands(registry, issues);
   validateV2Top(registry.v2, recon, issues);
   validateV2Bots(registry, issues);
   validateV2Protocol(registry, issues);
   validateDevIsolation(registry, production, issues);
   validateLaunchSet(registry, production, issues);
+  validateVaultLimits(registry, issues);
   const tickers = new Set();
   for (const m of registry.markets) {
     if (tickers.has(m.ticker)) issues.push(`${m.ticker}: listed twice`);
@@ -2018,6 +2713,66 @@ export function validateV2(registry, recon, production) {
  * v3 factory returns it for its own fee tier (so it is a canonical factory pool, not a lookalike).
  * In-range liquidity under the floor is a note: harmonic-mean liquidity at settlement is the gate.
  */
+/**
+ * {routeLiquidityIssues} over the chain at `block`, or a logged skip for a `_dev` registry. `src` is
+ * injectable so build-markets.test.mjs can prove the wrapper passes the check's FAILs through.
+ */
+export async function liquidityCheck(registry, block, src = undefined) {
+  if (registry && "_dev" in registry) {
+    return { issues: [], reports: ["skipped for a _dev registry: a local devnet has no market liquidity; ops/markets/tier1.json is where the rule binds"] };
+  }
+  const source = src ?? chainSource(rpcTransport(RPC, { block }), { multicall: registry.shared?.multicall3 });
+  const out = await routeLiquidityIssues(registry, source);
+  // Say why a pinned market's live route FAILs and what clears it. Adds lines; never drops one.
+  return { ...out, issues: [...out.issues, ...pinNotLiveIssues(registry, out)] };
+}
+
+/**
+ * A registered market whose payout route FAILS the route-liquidity rule while it is not its
+ * V2_PAYOUT_ROUTE_PINS pin gets one more line, after its FAILs, naming the cause and what clears it. On the committed
+ * tier1.json that is the live v8, still on v8's v4 routes: NVDA v4 375/4 SHALLOW ($758 within ±100 bps), SPCX
+ * v4 10000/200 SHALLOW ($45,244) and TOO EXPENSIVE (11000 pips), measured at block 70981224 against v3 fee-500 pools
+ * of $709,893 and $235,947. Those FAILs are real and stay red: the rule may not be loosened, and no exemption may cover
+ * a launch market. The v9 redeploy clears them. stonkctl pins the v3 routes (`--pin-routes`
+ * before it deploys), RegisterMarkets sets them on the new router, and the write-back records them. Pinning tier1.json first
+ * clears nothing: the registry must describe the live router (route-liquidity.mjs), so it would only add drift.
+ *
+ * Silent for a market with no pin or no route, one not registered yet (validatePayoutRoutePins covers it), one already
+ * on its pin (a pinned route that FAILs is a different problem, and its FAIL says so), one whose route passes, and one
+ * whose registry route is not the live route (route-liquidity.mjs names that drift itself, and the fix is the
+ * write-back, not a route change).
+ *
+ * @param {object} registry the registry `routeLiquidityIssues` judged
+ * @param {{issues: string[], pairs: object[]}} result its result
+ * @returns {string[]} lines to append to `result.issues`
+ */
+export function pinNotLiveIssues(registry, { issues, pairs }) {
+  const out = [];
+  const router = registry.v2?.contracts?.payoutAdapter;
+  const launched = Array.isArray(registry.launchSet?.markets) ? registry.launchSet.markets : [];
+  for (const m of registry.markets ?? []) {
+    const t = m.ticker;
+    const pin = V2_PAYOUT_ROUTE_PINS[t];
+    const route = m.v2?.payoutRoute ?? null;
+    if (pin === undefined || route === null) continue;
+    if (m.v2?.registeredAt === null || m.v2?.registeredAt === undefined) continue;
+    if (isDeepStrictEqual(route, { ...pin })) continue;
+    // route-liquidity.mjs's registry-vs-router drift line: the registry route is not the live one.
+    if (issues.some((i) => i.startsWith(`${t}: registry v2.payoutRoute is `))) continue;
+    const refs = pairs.find((p) => p.ticker === t)?.refs ?? [];
+    if (!refs.some((r) => r.role === "payoutRoute" && (r.verdict?.ok === false || r.feeVerdict?.ok === false))) continue;
+    const live = route.venue === "v4" ? `v4 fee ${route.fee} tickSpacing ${route.tickSpacing}` : `${route.venue} fee ${route.fee}`;
+    out.push(
+      `${t}: the payout-route FAILs above are the LIVE route (${live} on PayoutRouter ${router}), not the pin ${pin.venue} fee ${pin.fee} (V2_PAYOUT_ROUTE_PINS, T-OP-337).` +
+        `${launched.includes(t) ? ` ${t} is in launchSet.markets, so no exemption applies.` : ""}` +
+        ` The v9 redeploy clears them: stonkctl runs --pin-routes before the deploy (T-OP-349), RegisterMarkets calls setRouteV3(asset, ${pin.fee}) on the new router, and the write-back records it.` +
+        ` Only if this deployment keeps running is the fix the owner's payout-routes Safe bundle (setRouteV3 on this router, T-OP-273).` +
+        ` Do not pin v2.payoutRoute here first: the registry must describe the live route (T-OP-509)`,
+    );
+  }
+  return out;
+}
+
 async function probeV2Pools(registry, block) {
   const issues = [];
   const notes = [];
@@ -2055,15 +2810,15 @@ async function probeV2Pools(registry, block) {
 //////////////////////////////////////////////////////////////*/
 
 /**
- * The root keys whose value in the registry READ a build deliberately throws away and writes afresh
- * (T-607). Each is an OUTPUT of the run, and each says why. Every root key NOT named here or in
+ * The root keys whose value in the registry READ a build deliberately throws away and writes afresh.
+ * Each is an OUTPUT of the run, and each says why. Every root key NOT named here or in
  * RETIRED_ROOT_KEYS is an INPUT, and `rootKeyIssues` makes a rebuild carry it out exactly as it came in.
  *
  * WHY THE LIST NAMES WHAT IS DROPPED AND NOT WHAT IS KEPT. `assembleRegistry` builds the registry as a
  * CLOSED literal. It must: spreading `existing` into it would resurrect the previous run's `generatedAt`
  * and `verifiedAtBlock` and report them as this run's. So each input key survives only because somebody
  * wrote a line for it (`_dev`, `launchSet`, `shared`, `v2`), and a list of keys to keep would be one more
- * list to forget. That already nearly happened: T-OP-003's `launchSet` would have been deleted by the
+ * list to forget. That already nearly happened: `launchSet` would have been deleted by the
  * next build, and every consumer would have gone back to a wave filter and launched twenty markets
  * instead of two. Inverting the list turns forgetting into a red build that names the key.
  *
@@ -2079,7 +2834,7 @@ export const REGENERATED_ROOT_KEYS = Object.freeze({
   tokensSource: "the Stock Token list this run read, and its count",
   defaults: "the DEFAULTS constant; a market that needs another value carries it on the market",
   waves: "the WAVES constant; each market's own `wave` is the hand-maintained field",
-  skipped: "the feeds this run could not pair with exactly one Stock Token",
+  skipped: "the feeds this run could not pair with exactly one Stock Token, or paired but left out because they are not in launchSet.markets",
   summary: "counts over this run's markets",
   markets:
     "rebuilt from this run's feeds and chain reads; the hand-maintained per-market fields are merged from the previous row inside the market literal, not carried as a block",
@@ -2140,7 +2895,7 @@ export function assembleRegistry(existing, { block, feedsSource, feeds, equity, 
     // Preserved as written, like the v2 blocks: what a non-production registry (supplied explicitly,
     // `--registry`) says about itself. Absent from ops/markets/tier1.json, which _readme describes.
     ...(existing && "_dev" in existing ? { _dev: existing._dev } : {}),
-    // Hand-maintained: the launch set the owner named (T-OP-003). Without this line a rebuild would drop
+    // Hand-maintained: the launch set. Without this line a rebuild would drop
     // it and every consumer would fall back on a wave filter -- rootKeyIssues now names it if it goes.
     ...(existing && "launchSet" in existing ? { launchSet: existing.launchSet } : {}),
     _readme: README,
@@ -2153,7 +2908,7 @@ export function assembleRegistry(existing, { block, feedsSource, feeds, equity, 
     defaults: DEFAULTS,
     waves: WAVES,
     // Hand-maintained until the v2 deploy writes addresses back; the skeleton only for a first build.
-    // NOT mirrored per sub-key on purpose (T-OP-131 tried `uniswapV3` and T-607's root-key guard refused
+    // NOT mirrored per sub-key on purpose (mirroring `uniswapV3` was tried and the root-key guard refused
     // the build: `v2` is carried as written or it is not). Drift in `v2.uniswapV3` is refused by `--check`
     // (`validateV2Top`) against V2_SKELETON.uniswapV3 instead, with the exact string to set.
     v2: existing && "v2" in existing ? existing.v2 : V2_SKELETON,
@@ -2171,10 +2926,10 @@ export function assembleRegistry(existing, { block, feedsSource, feeds, equity, 
 }
 
 /**
- * Every key `assembleMarket` writes, classified (T-OP-023). This is the per-market twin of
+ * Every key `assembleMarket` writes, classified. This is the per-market twin of
  * REGENERATED_ROOT_KEYS, and it exists for the same reason: the market row is a CLOSED literal, so a
  * hand-written key the literal does not name comes out of a rebuild gone, with no message. The root
- * guard (T-607) cannot see it: `markets` is a REGENERATED root key, so the whole block is this run's
+ * guard cannot see it: `markets` is a REGENERATED root key, so the whole block is this run's
  * output as far as `rootKeyIssues` is concerned.
  *
  * WHY THE LIST NAMES EVERY KEY, both directions. At the root, naming only what is dropped works
@@ -2212,8 +2967,8 @@ export const MARKET_FIELDS = Object.freeze({
   feedDescription: { kind: "regenerated", why: "description() read on chain by verifyPair" },
   feedHeartbeatS: { kind: "regenerated", why: "the feed directory's heartbeat" },
   feedThresholdPct: { kind: "regenerated", why: "the feed directory's deviation threshold" },
-  cboe: { kind: "regenerated", why: "this run's Cboe probe (--skip-cboe keeps the previous evidence, which is still this run's choice)" },
-  mode: { kind: "regenerated", why: "modeOverride, else the mode the Cboe evidence decides" },
+  cboe: { kind: "regenerated", why: "this run's option-chain probe, from Massive since T-OP-707 (the key keeps its name; --skip-chain keeps the previous evidence, which is still this run's choice)" },
+  mode: { kind: "regenerated", why: "modeOverride, else the mode the option-chain evidence decides" },
   modeReason: { kind: "regenerated", why: "why `mode` is what it is" },
   modeOverride: { kind: "optional", why: "a hand-written override; null and absent both mean no override, so a null is legitimately not written" },
   depositCapUsd: {
@@ -2246,7 +3001,7 @@ export const MARKET_FIELDS = Object.freeze({
  *     nobody decided what a rebuild does with the old value;
  *   - a `regenerated` or `carried` key must be written -- absent is a dropped key under a better name;
  *   - a key of `read` that MARKET_FIELDS does not name is refused: the literal does not write it, so a
- *     rebuild would drop it silently (the T-OP-023 defect);
+ *     rebuild would drop it silently (an earlier defect);
  *   - a `carried` key read as null with `nullOk: false` is refused: the literal would default it;
  *   - a `carried` or `kept` key must be written deep-equal to what was read (a different value is the
  *     same loss one level down), and a `kept` key absent from `read` must not be invented;
@@ -2315,7 +3070,7 @@ export function marketKeyIssues(read, written, fields = MARKET_FIELDS) {
  * the previous run's verification and Cboe evidence and report them as this run's. `MARKET_FIELDS`
  * says what each key is and `marketKeyIssues` refuses what the closed shape would otherwise lose.
  */
-export function assembleMarket(prev, { ticker, token, asset, feed, feedProxy, feedSvr, feedAggregator, verification, cboe, shared }) {
+export function assembleMarket(prev, { ticker, token, asset, feed, feedProxy, feedSvr, feedAggregator, verification, cboe, shared, pinRoutes = false }) {
   const auto = modeFor(cboe);
   const mode = prev?.modeOverride ?? auto.mode;
 
@@ -2331,7 +3086,7 @@ export function assembleMarket(prev, { ticker, token, asset, feed, feedProxy, fe
   }
 
   const wave = prev?.wave ?? (Object.entries(WAVES).find(([, list]) => list.includes(ticker))?.[0] ?? "wave2");
-  // ADR-02 cancelled the per-market factory rollout: a market the builder has not seen before is
+  // The per-market factory rollout was cancelled: a market the builder has not seen before is
   // never a v1 candidate. It enters superseded, with a planned v2 block (v2MarketSkeleton).
   const status = prev?.status ?? (wave === "live" ? "live" : "superseded-by-v2");
 
@@ -2366,8 +3121,14 @@ export function assembleMarket(prev, { ticker, token, asset, feed, feedProxy, fe
     ...(prev && "v1RunOff" in prev ? { v1RunOff: prev.v1RunOff } : {}),
     // Absent (or null) until the freeze. Kept as written too; validateMarket refuses a bad one.
     ...(prev && "v1FrozenAt" in prev ? { v1FrozenAt: prev.v1FrozenAt } : {}),
-    // Hand-maintained as written (validateMarket says what is wrong with it); never merged key by key.
-    v2: prev && "v2" in prev ? prev.v2 : v2MarketSkeleton(),
+    // Hand-maintained as written (validateMarket says what is wrong with it); never merged key by key. The one
+    // exception is a pinned payout route (V2_PAYOUT_ROUTE_PINS), which the builder owns on a registry
+    // that names no deployment yet (routesPinnedByBuild); a deployed registry keeps the route the chain holds.
+    // Off unless the caller asks: main passes routesPinnedByBuild(existing). A caller that forgets it on a
+    // pre-deploy registry carries the route as written, and validatePayoutRoutePins fails --check on it.
+    v2: pinRoutes
+      ? pinPayoutRoute(ticker, prev && "v2" in prev ? prev.v2 : v2MarketSkeleton())
+      : (prev && "v2" in prev ? prev.v2 : v2MarketSkeleton()),
     verification,
     deployment: prev?.deployment ?? {
       factory: null,
@@ -2408,6 +3169,14 @@ async function main() {
   const production = existing && "_dev" in existing && existsSync(PRODUCTION_REGISTRY) && realpathSync(PRODUCTION_REGISTRY) !== realpathSync(OUT)
     ? JSON.parse(readFileSync(PRODUCTION_REGISTRY, "utf8"))
     : null;
+  if (PIN_ROUTES) return writePinnedRoutes(existing, production);
+  if (PIN_BANDS) return writePinnedBands(existing, production);
+  // Without a key every market would record an auth failure and drop to fixed mode. Refuse before any read.
+  const MASSIVE_KEY = SKIP_CHAIN ? null : massiveKey();
+  if (!SKIP_CHAIN && MASSIVE_KEY === null) {
+    log("no Massive key: set MASSIVE_API_KEY or write ~/.config/massive/api_key, or pass --skip-chain to keep the previous option-chain evidence");
+    process.exit(2);
+  }
   const { source: feedsSource, feeds } = await loadFeeds();
   const tokens = loadTokens();
   const recon = loadV2Sources();
@@ -2444,9 +3213,12 @@ async function main() {
     pairs.push({ ticker, feed: f, token: matches[0] });
   }
   pairs.sort((a, b) => (a.ticker < b.ticker ? -1 : 1));
-  log(`pairs: ${pairs.length}; skipped: ${skipped.length}`);
+  // Only the launch set is a market (launchTickers). The rest are recorded in `skipped` with the reason.
+  const { kept, left } = selectLaunchPairs(pairs, launchTickers(existing, production));
+  skipped.push(...left);
+  log(`pairs: ${pairs.length}; kept (launch set): ${kept.length}; skipped: ${skipped.length}`);
 
-  const markets = await pool(pairs, 6, async ({ ticker, feed, token }) => {
+  const markets = await pool(kept, 6, async ({ ticker, feed, token }) => {
     const asset = await checksum(token.token);
     const feedProxy = await checksum(feed.proxyAddress);
     const feedSvr = feed.secondaryProxyAddress ? await checksum(feed.secondaryProxyAddress) : null;
@@ -2456,16 +3228,17 @@ async function main() {
     const verification = await verifyPair(ticker, asset, feedProxy, block);
     log(`  ${ticker.padEnd(6)} ${verification.ok ? "ok  " : "FAIL"} spot=${verification.spotUsd ?? "?"} age=${verification.feedAgeS ?? "?"}s ${verification.issues.join("; ")}`);
 
-    const cboe = SKIP_CBOE ? (prev?.cboe ?? null) : await probeCboe(ticker, verification.spotUsd, prev?.cboe);
-    return assembleMarket(prev, { ticker, token, asset, feed, feedProxy, feedSvr, feedAggregator, verification, cboe, shared });
+    const cboe = SKIP_CHAIN ? (prev?.cboe ?? null) : await probeMassive(ticker, verification.spotUsd, prev?.cboe, { key: MASSIVE_KEY });
+    return assembleMarket(prev, { ticker, token, asset, feed, feedProxy, feedSvr, feedAggregator, verification, cboe, shared,
+      pinRoutes: routesPinnedByBuild(existing) });
   });
-  // T-OP-023: the same guard as rootKeyIssues, one level down. A hand-written per-market key the
+  // The same guard as rootKeyIssues, one level down. A hand-written per-market key the
   // literal does not name, or a null the literal would silently default, is refused before the write.
   const lostMarketKeys = markets.flatMap((m) => marketKeyIssues(prevByTicker.get(m.ticker), m));
 
   const failing = markets.filter((m) => !m.verification.ok);
   const registry = assembleRegistry(existing, { block, feedsSource, feeds, equity, tokens, skipped, markets });
-  // T-607: every root key of the registry read comes out of this build as it went in, unless
+  // Every root key of the registry read comes out of this build as it went in, unless
   // REGENERATED_ROOT_KEYS or RETIRED_ROOT_KEYS says why not. Judged before anything is written,
   // because the write is the step that destroys the key.
   const lostRootKeys = rootKeyIssues(existing, registry);
@@ -2482,6 +3255,12 @@ async function main() {
   const probe = await probeV2Pools(subject, block);
   v2Issues.push(...probe.issues);
   for (const n of probe.notes) log(`  note: ${n}`);
+  // No route may reference a low-liquidity pool: every payout
+  // route and settlement TWAP pool, as the registry names it AND as the chain holds it, must be a deep pool
+  // (ops/markets/route-liquidity.mjs). A `_dev` registry is a local devnet with no market liquidity to judge.
+  const routes = await liquidityCheck(subject, block);
+  v2Issues.push(...routes.issues);
+  for (const r of routes.reports) log(`  route liquidity: ${r}`);
   const v2Summary = `v2: ${subject.markets.length} market blocks, ${probe.probed} pools checked on chain at block ${block}, ${v2Issues.length} problem(s)`;
 
   if (CHECK_ONLY) {
@@ -2492,7 +3271,11 @@ async function main() {
       else if (p.asset !== m.asset || p.feed !== m.feed) drift.push(`${m.ticker}: asset/feed changed`);
       if (!m.verification.ok) drift.push(`${m.ticker}: ${m.verification.issues.join("; ")}`);
     }
-    for (const t of prevByTicker.keys()) if (!markets.some((m) => m.ticker === t)) drift.push(`${t}: gone from feed directory`);
+    const outOfSet = new Set(left.map((l) => l.ticker));
+    for (const t of prevByTicker.keys()) {
+      if (markets.some((m) => m.ticker === t)) continue;
+      drift.push(outOfSet.has(t) ? `${t}: in the registry but not in launchSet.markets (T-OP-216): rebuild` : `${t}: gone from feed directory`);
+    }
     drift.push(...lostRootKeys, ...lostMarketKeys);
     drift.push(...v2Issues);
     if (drift.length) {
@@ -2520,6 +3303,70 @@ async function main() {
   // the exit code is what stops a deploy.
   if (v2Issues.length) log("v2 PROBLEMS:\n  " + v2Issues.join("\n  "));
   if (failing.length || v2Issues.length) process.exit(1);
+}
+
+/**
+ * `--pin-routes`: write V2_PAYOUT_ROUTE_PINS into the registry and nothing else. Offline: no feed, chain
+ * or Cboe read, so no verification, spot or evidence field moves with it. The result is judged by the same offline
+ * validator as a build and, like a build, written anyway and refused by the exit code. On a deployed registry
+ * (tier1.json) this is the REDEPLOY's step, run before RegisterMarkets; run on its own it leaves the registry
+ * describing routes the live router does not hold, which `--check` then reports (route-liquidity.mjs).
+ */
+function writePinnedRoutes(existing, production) {
+  if (CHECK_ONLY) {
+    log("--pin-routes writes the registry; --check writes nothing. Run them separately.");
+    process.exit(2);
+  }
+  if (!existing) {
+    log(`${path.relative(process.cwd(), OUT)} does not exist: --pin-routes edits a registry, it does not create one`);
+    process.exit(2);
+  }
+  const markets = existing.markets.map((m) => ("v2" in m ? { ...m, v2: pinPayoutRoute(m.ticker, m.v2) } : m));
+  const registry = { ...existing, markets };
+  for (const [i, m] of markets.entries()) {
+    const before = existing.markets[i].v2?.payoutRoute;
+    if (!isDeepStrictEqual(before, m.v2?.payoutRoute)) {
+      log(`  ${m.ticker}: payoutRoute ${JSON.stringify(before)} -> ${JSON.stringify(m.v2.payoutRoute)}`);
+    }
+  }
+  writeFileSync(OUT, JSON.stringify(registry, null, 2) + "\n");
+  const issues = validateV2(registry, loadV2Sources(), production);
+  log(`wrote ${path.relative(process.cwd(), OUT)}: payout routes pinned, ${issues.length} offline v2 problem(s)`);
+  if (issues.length) {
+    log("v2 PROBLEMS:\n  " + issues.join("\n  "));
+    process.exit(1);
+  }
+}
+
+/**
+ * `--pin-bands`: write V2_INTENDED_CHAINLINK_BANDS into the registry and nothing else. Offline, like
+ * `--pin-routes`: no feed, chain or Cboe read, so no verification, spot or evidence field moves with it. Judged by the
+ * same offline validator as a build, written anyway, refused by the exit code.
+ */
+function writePinnedBands(existing, production) {
+  if (CHECK_ONLY || PIN_ROUTES) {
+    log("--pin-bands writes the registry and runs alone: not with --check (writes nothing) or --pin-routes. Run them separately.");
+    process.exit(2);
+  }
+  if (!existing) {
+    log(`${path.relative(process.cwd(), OUT)} does not exist: --pin-bands edits a registry, it does not create one`);
+    process.exit(2);
+  }
+  const markets = existing.markets.map((m) => ("v2" in m ? { ...m, v2: pinChainlinkBand(m.ticker, m.v2) } : m));
+  const registry = { ...existing, markets };
+  for (const [i, m] of markets.entries()) {
+    const before = existing.markets[i].v2?.chainlinkBand;
+    if (!isDeepStrictEqual(before, m.v2?.chainlinkBand)) {
+      log(`  ${m.ticker}: chainlinkBand ${JSON.stringify(before)} -> ${JSON.stringify(m.v2.chainlinkBand)}`);
+    }
+  }
+  writeFileSync(OUT, JSON.stringify(registry, null, 2) + "\n");
+  const issues = validateV2(registry, loadV2Sources(), production);
+  log(`wrote ${path.relative(process.cwd(), OUT)}: Chainlink bands pinned, ${issues.length} offline v2 problem(s)`);
+  if (issues.length) {
+    log("v2 PROBLEMS:\n  " + issues.join("\n  "));
+    process.exit(1);
+  }
 }
 
 // Imported (by ops/markets/build-markets.test.mjs, which calls the validators directly) this file

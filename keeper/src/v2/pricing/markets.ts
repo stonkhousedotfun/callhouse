@@ -11,21 +11,31 @@
  * listed, instead of pricing some markets against a wrong feed. A market with no `cboe` block is
  * kept (it has a spot) and every price for it is refused as `chain-unavailable`.
  *
- * IDENTITY (K3-311). `token` is the registry's canonical Stock Token for the market: `asset`, the
+ * IDENTITY. `token` is the registry's canonical Stock Token for the market: `asset`, the
  * chain id from `shared.chainId` and `verification.uiMultiplier`, each null when the registry does not
  * carry it. It is informational (pricing provenance and identity checks); a missing or malformed value
  * leaves the market unmapped instead of refusing the boot, and `token` is absent when there is no
  * valid `asset`. There is no issuer field in the registry, so the canonical issuer is null.
+ *
+ * POOL. `pool` is the market's Uniswap v3 USDG pool for the second spot (pool-spot.ts):
+ * `v2.univ3Pool`, its harmonic-mean liquidity floor `v2.univ3MinLiquidity`, and `shared.usdg`, the
+ * quote token the pool must hold. Absent when the registry names no pool (the market prices on
+ * Chainlink alone, as before). A pool the registry names but this service cannot read (a bad
+ * address, a floor that is not a positive integer, no `shared.usdg`) REFUSES THE BOOT: a half-read
+ * pool would silently drop the second spot for that market.
  */
 import { readFileSync } from 'node:fs';
 import { getAddress, isAddress, type Address } from 'viem';
 import { z } from 'zod';
+import type { PricingPool } from './pool-spot.js';
 
 export interface PricingMarket {
   ticker: string;
   feed: Address;
   cboe: { root: string; url: string } | null;
   token?: { chainId: number | null; address: Address; uiMultiplier: string | null };
+  /** The registry's v3 pool for the pool spot (pool-spot.ts); absent when it names none. */
+  pool?: PricingPool;
 }
 
 export interface PricingRegistry {
@@ -47,6 +57,9 @@ const httpsUrl = z.string().refine((raw) => {
 }, 'not an https URL');
 
 const chainIdSchema = z.number().int().positive();
+/** `v2.univ3MinLiquidity`: pool L units, a positive decimal integer below 2^128 (build-markets.mjs). */
+const minLiquiditySchema = z.string().regex(/^[1-9]\d{0,38}$/).refine((raw) => BigInt(raw) < 1n << 128n, 'above uint128');
+
 /** The token's uiMultiplier as the registry verified it: a decimal integer string (1e18-scaled). */
 const uiMultiplierSchema = z.string().regex(/^[1-9]\d{0,40}$/);
 
@@ -79,7 +92,10 @@ export function parsePricingRegistry(json: unknown): PricingRegistry {
     throw new Error(`the market registry is not usable for pricing:\n${lines.join('\n')}`);
   }
   const markets = new Map<string, PricingMarket>();
-  const chainId = chainIdSchema.safeParse((json as { shared?: { chainId?: unknown } } | null)?.shared?.chainId);
+  const shared = (json as { shared?: { chainId?: unknown; usdg?: unknown } } | null)?.shared;
+  const chainId = chainIdSchema.safeParse(shared?.chainId);
+  const usdg = address.safeParse(shared?.usdg);
+  const poolProblems: string[] = [];
   for (const m of parsed.data.markets) {
     if (markets.has(m.ticker)) throw new Error(`the market registry lists ${m.ticker} twice`);
     const market: PricingMarket = { ticker: m.ticker, feed: m.feed, cboe: m.cboe ? { root: m.cboe.root, url: m.cboe.url } : null };
@@ -88,8 +104,21 @@ export function parsePricingRegistry(json: unknown): PricingRegistry {
       const ui = uiMultiplierSchema.safeParse((m as { verification?: { uiMultiplier?: unknown } }).verification?.uiMultiplier);
       market.token = { chainId: chainId.success ? chainId.data : null, address: asset.data, uiMultiplier: ui.success ? ui.data : null };
     }
+    const v2 = (m as { v2?: { univ3Pool?: unknown; univ3MinLiquidity?: unknown } }).v2;
+    if (v2?.univ3Pool !== undefined && v2.univ3Pool !== null) {
+      const pool = address.safeParse(v2.univ3Pool);
+      const floor = minLiquiditySchema.safeParse(v2.univ3MinLiquidity);
+      if (!pool.success) poolProblems.push(`  markets.${m.ticker}.v2.univ3Pool: not a 20-byte hex address`);
+      if (!floor.success) poolProblems.push(`  markets.${m.ticker}.v2.univ3MinLiquidity: not a positive uint128 decimal string`);
+      if (!usdg.success) poolProblems.push(`  shared.usdg: required when ${m.ticker} names a v2.univ3Pool`);
+      if (!asset.success) poolProblems.push(`  markets.${m.ticker}.asset: required when it names a v2.univ3Pool`);
+      if (pool.success && floor.success && usdg.success && asset.success) {
+        market.pool = { address: pool.data, minLiquidity: BigInt(floor.data), usdg: usdg.data };
+      }
+    }
     markets.set(m.ticker, market);
   }
+  if (poolProblems.length > 0) throw new Error(`the market registry is not usable for pricing:\n${[...new Set(poolProblems)].join('\n')}`);
   return {
     markets,
     maxPriceAgeS: parsed.data.defaults?.maxPriceAgeS ?? null,

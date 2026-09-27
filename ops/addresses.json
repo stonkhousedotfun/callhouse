@@ -25,7 +25,7 @@
       "type": "Arbitrum Orbit L2, settles to Ethereum mainnet",
       "nativeCurrency": "ETH",
       "codeSizeLimitBytes": 98304,
-      "_codeSizeLimit": "Chain 4663 enforces a 98,304 B contract code limit, not EIP-170's 24,576 B (verified with eth_call --create probes: 98,304 B deploys, 98,305 B fails `max code size exceeded`; owner decision D17). The Vault runtime is above 24,576 B and is accepted here. `foundry.toml` sets code_size_limit = 98304; anvil rehearsals need `--code-size-limit 98304`; `forge script --broadcast` needs `--non-interactive`.",
+      "_codeSizeLimit": "Chain 4663 enforces a 98,304 B contract code limit, not EIP-170's 24,576 B (verified with eth_call --create probes: 98,304 B deploys, 98,305 B fails `max code size exceeded`). The Vault runtime is above 24,576 B and is accepted here. `foundry.toml` sets code_size_limit = 98304; anvil rehearsals need `--code-size-limit 98304`; `forge script --broadcast` needs `--non-interactive`.",
       "rpc": {
         "primary": "https://rpc.mainnet.chain.robinhood.com",
         "backup": "https://robinhood-rpc.publicnode.com",
@@ -227,7 +227,7 @@
         "_venue": "The self-hosted fill page (/vault/nvda/cycle, fed by the keeper's /orders through the web server). There is no other venue and no off-chain book."
       },
       "ours": {
-        "_status": "DEPLOYED 2026-09-15 on chain 4663. Path A bootstrap: own Clear, feeTo = 1-of-1 Safe, vault admin = hot wallet account 0 (no timelock; Safe handover deferred). Sourcify partial `match` (not exact_match) on the vault (creation and runtime) and on both libraries (runtime only); our Clear is NOT source-verified on Sourcify or Blockscout, and Blockscout shows only the vault, as partially verified. Keeper RUNNING on Railway (service `keeper`, deployed with `railway up`, no git source; first on chain 07:50 UTC with newOptionType + rollOpen; current deployment 8437b1c3 since 15:28 UTC). Canary cycle 1 Listed as of 2026-09-15 ~17:00 UTC: one contract offered, none sold. Live cycle numbers are on the vault, not here.",
+        "_status": "DEPLOYED 2026-09-15 on chain 4663. Path A bootstrap: own Clear, feeTo = 1-of-1 Safe, vault admin = the deployer EOA (no timelock; Safe handover deferred). Sourcify partial `match` (not exact_match) on the vault (creation and runtime) and on both libraries (runtime only); our Clear is NOT source-verified on Sourcify or Blockscout, and Blockscout shows only the vault, as partially verified. Keeper RUNNING on Railway (service `keeper`, deployed with `railway up`, no git source; first on chain 07:50 UTC with newOptionType + rollOpen; current deployment 8437b1c3 since 15:28 UTC). Canary cycle 1 Listed as of 2026-09-15 ~17:00 UTC: one contract offered, none sold. Live cycle numbers are on the vault, not here.",
         "_fillFrom": "contracts/broadcast/Deploy.s.sol/4663/run-latest.json and DeployClear.s.sol/4663/run-latest.json, 2026-09-15",
         "_contractsCommit": "v1.0.0-rc1 @ 165b4ab (Vault runtime 25,775 B); callhouse-contracts main is 0e2f6f6, a docs-only rename on top with identical src/. Verify.s.sol run from this commit: VERIFY PASSED 61 checks bootstrap unconfigured, then after Configure keeper+guardian granted.",
         "vault": {
@@ -270,21 +270,21 @@
         },
         "safeFee": {
           "address": "0xEb82c3D0F89d47453F94f0C2b2a2752e27a19d9b",
-          "what": "Protocol fee recipient for the canary: hot-wallet account 0 (EOA). Not a Safe, despite this key's name. The same EOA deployed everything and holds the vault's DEFAULT_ADMIN_ROLE (the only holder).",
+          "what": "Protocol fee recipient for the canary: the deployer EOA. Not a Safe, despite this key's name. The same EOA deployed everything and holds the vault's DEFAULT_ADMIN_ROLE (the only holder).",
           "chainId": 4663,
           "confirmed": true,
           "evidence": "vault.feeRecipient() at deploy and re-read 2026-09-15; no FeeRecipientUpdated event since deploy."
         },
         "guardian": {
           "address": "0x29741A8d283a253E8Ce10aDfd04C6507438b6F39",
-          "what": "Guardian EOA, mnemonic account 2 (same mnemonic as the admin and keeper). GUARDIAN_ROLE granted; has never sent a tx (nonce 0 on 2026-09-15).",
+          "what": "Guardian EOA. GUARDIAN_ROLE granted; has never sent a tx (nonce 0 on 2026-09-15).",
           "chainId": 4663,
           "confirmed": true,
           "evidence": "hasRole GUARDIAN_ROLE true after Configure, re-read 2026-09-15; granted in tx 0x4a883ff7dda6db10c3d01305ca4e4886dae2f5078a805673152ba65fc3cb6144."
         },
         "keeper": {
           "address": "0x06c131cfEd73A56893f5eB52D17252856FAFC1d2",
-          "what": "Keeper hot key, mnemonic account 1. KEEPER_ROLE granted. Used by the Railway `keeper` service, running since 2026-09-15: cycle 1 newOptionType, rollOpen, two approveListing and one cancelListing (nonce 5).",
+          "what": "Keeper hot key. KEEPER_ROLE granted. Used by the Railway `keeper` service, running since 2026-09-15: cycle 1 newOptionType, rollOpen, two approveListing and one cancelListing (nonce 5).",
           "chainId": 4663,
           "confirmed": true,
           "evidence": "hasRole KEEPER_ROLE true after Configure, re-read 2026-09-15; granted in tx 0x9a5bda09b4e5405e839b8ad2587f3507828d816b5c90c4c497ad8b041a36dd00."
@@ -386,7 +386,7 @@
           }
         },
         "overcallOrderShape": {
-          "_what": "The order shape Overcall's own book required, copied from the one real filled NVDA order (orderHash 0xa11edb6292fa1789a13419830d5bd1b5a0145954d3e8352bb6ff776ca67de522): PARTIAL_OPEN (1), zone 0x0, two USDG consideration items (95% writer, 5% to 0xdAe7e82A\u2026, floored per contract), a 64/65-byte signature. The redesigned vault's listings are PARTIAL_RESTRICTED with the vault as zone, ONE consideration item and an empty signature, so Overcall's validator would refuse them and Overcall's book never lists them. That is the design (owner decision D1 = A(ii); L-04 dropped, D2 = b).",
+          "_what": "The order shape Overcall's own book required, copied from the one real filled NVDA order (orderHash 0xa11edb6292fa1789a13419830d5bd1b5a0145954d3e8352bb6ff776ca67de522): PARTIAL_OPEN (1), zone 0x0, two USDG consideration items (95% writer, 5% to 0xdAe7e82A\u2026, floored per contract), a 64/65-byte signature. The redesigned vault's listings are PARTIAL_RESTRICTED with the vault as zone, ONE consideration item and an empty signature, so Overcall's validator would refuse them and Overcall's book never lists them. That is the design.",
           "listingsApi": "https://overcall.finance/api/orders \u2014 not called by anything in this repository any more. Do not add a call."
         }
       }

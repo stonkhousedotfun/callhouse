@@ -8,7 +8,7 @@ import { CHAIN_ID } from "@/lib/chain";
 import { MARKET, SHARE_DECIMALS, SHARE_TICKER, VAULT, vaultAbi } from "@/lib/contracts";
 import { canSettleQueue, fmtAsset, fmtShares, fmtUsdg, parseAmount, redeemQueueView } from "@/lib/format";
 import type { AccountPosition, VaultSnapshot } from "@/lib/hooks";
-import { Button, Card, CardHead, CardMeta, CardTitle, Field, Notice, Row, Rows } from "@/components/ui";
+import { Button, Card, CardHead, CardMeta, CardTitle, Field, InfoTip, Notice, Row, Rows } from "@/components/ui";
 import { ConnectButton } from "./ConnectButton";
 import { useTxRunner } from "./TxToast";
 
@@ -115,7 +115,7 @@ export function RedeemQueue({
   });
 
   const overBalance = shares !== null && shares > free;
-  // W8-450, the same pair AccountView.tsx reads: the wallet's chain from useAccount against the one
+  // the same pair AccountView.tsx reads: the wallet's chain from useAccount against the one
   // CHAIN_ID in @/lib/chain. Nothing here switches the wallet's network.
   const wrongNetwork = isConnected && chainId !== CHAIN_ID;
   const disabled =
@@ -136,7 +136,7 @@ export function RedeemQueue({
                 abi: vaultAbi as unknown as Abi,
                 functionName: "redeem",
                 args: [shares, address, address],
-                // W8-450: without this @wagmi/core 3.6.5 disables its chain assertion entirely.
+                // without this @wagmi/core 3.6.5 disables its chain assertion entirely.
                 chainId: CHAIN_ID,
               }),
             { pending: "Redeeming", success: `Redeemed — ${MARKET} returned` },
@@ -148,7 +148,7 @@ export function RedeemQueue({
                 abi: vaultAbi as unknown as Abi,
                 functionName: "queueRedeem",
                 args: [shares],
-                // W8-450: without this @wagmi/core 3.6.5 disables its chain assertion entirely.
+                // without this @wagmi/core 3.6.5 disables its chain assertion entirely.
                 chainId: CHAIN_ID,
               }),
             { pending: "Queuing redemption", success: "Queued for this week's close" },
@@ -175,7 +175,7 @@ export function RedeemQueue({
             abi: vaultAbi as unknown as Abi,
             functionName: "completeRedeem",
             args: [address],
-            // W8-450: without this @wagmi/core 3.6.5 disables its chain assertion entirely.
+            // without this @wagmi/core 3.6.5 disables its chain assertion entirely.
             chainId: CHAIN_ID,
           }),
         { pending: "Completing redemption", success: "Redemption collected" },
@@ -199,10 +199,10 @@ export function RedeemQueue({
             abi: vaultAbi as unknown as Abi,
             functionName: "settleQueue",
             args: [],
-            // W8-450: without this @wagmi/core 3.6.5 disables its chain assertion entirely.
+            // without this @wagmi/core 3.6.5 disables its chain assertion entirely.
             chainId: CHAIN_ID,
           }),
-        { pending: "Settling the queue", success: "Queue settled — redemption ready to collect" },
+        { pending: "Settling the queue", success: "Queue settled: ready to collect" },
       );
       if (hash) onDone();
     } finally {
@@ -215,7 +215,7 @@ export function RedeemQueue({
       <CardHead>
         <CardTitle>Withdraw</CardTitle>
         <CardMeta>
-          {!instantKnown ? "state unavailable" : instant ? "instant path open" : stranded ? "queue only · claim stranded" : "queue only"}
+          {!instantKnown ? "loading" : instant ? "instant" : stranded ? "queue only · claim stranded" : "queue only"}
         </CardMeta>
       </CardHead>
 
@@ -247,7 +247,7 @@ export function RedeemQueue({
 
       {overBalance ? (
         <Notice tone="danger" role="status" className="mt-4">
-          More than the free share balance. Shares already in the queue cannot be queued twice.
+          More than your free shares. Shares already queued can&apos;t be queued again.
         </Notice>
       ) : null}
 
@@ -264,22 +264,43 @@ export function RedeemQueue({
       </div>
 
       <Notice tone="info" className="mt-4">
-        {!instantKnown
-          ? "The vault's phase has not been read yet, so which withdrawal path is open is unknown. The contract decides at the moment you send the transaction."
-          : instant
-            ? "The vault is flat, so a redemption settles in the same transaction."
-            : stranded
-              ? `A claim is stranded, so instant redemption is off. Queue here: settling the queue always works, because it only books each entry's share of the idle balance and of the stranded claim. Paying it out moves tokens, so ${MARKET} is paid only while the Stock Token lets the vault transfer (an issuer blocklist of the vault holds it back until lifted) and USDG only while USDG can move. The share of the claim is paid once the claim is redeemed.`
-              : "A call is open. Redemptions are queued and paid after the keeper closes the week. An assigned week pays part of the queue in USDG at the strike instead of in tokens."}
+        {!instantKnown ? (
+          <>
+            Loading the vault. The contract picks the path when you send.{" "}
+            <InfoTip label="About withdrawal paths">
+              Instant while the vault holds no open call; queued otherwise. The vault has not been read yet, so this form
+              cannot say which is open.
+            </InfoTip>
+          </>
+        ) : instant ? (
+          "No call is open, so you're paid in the same transaction."
+        ) : stranded ? (
+          <>
+            A claim is stranded, so instant withdrawals are off. You can still queue.{" "}
+            <InfoTip label="About queuing while a claim is stranded">
+              Settling the queue always works: it only books each entry&apos;s share of the free balance and of the stranded
+              claim. Paying out moves tokens, so {MARKET} is paid only while the Stock Token lets the vault transfer (an
+              issuer block on the vault holds it back until lifted), and USDG only while USDG can move. The claim&apos;s
+              share is paid once the claim is redeemed.
+            </InfoTip>
+          </>
+        ) : (
+          <>
+            A call is open. Redemptions are queued and paid after the keeper closes the week.{" "}
+            <InfoTip label="About assigned weeks">
+              If the call is assigned, part of the queue is paid in USDG at the strike instead of in {MARKET}.
+            </InfoTip>
+          </>
+        )}
       </Notice>
 
       {view.show ? (
         <div className="mt-5 border-t border-line pt-5">
           <CardHead className="mb-3!">
-            <CardTitle as="h3" className="text-base!">{queued > 0n ? "Queued redemption" : "Settled redemption to collect"}</CardTitle>
+            <CardTitle as="h3" className="text-base!">{queued > 0n ? "Queued redemption" : "Ready to collect"}</CardTitle>
             <CardMeta>
               {queued > 0n
-                ? `epoch ${position.queuedEpoch?.toString() ?? "—"} · current ${snapshot.epochId?.toString() ?? "—"}`
+                ? `batch #${position.queuedEpoch?.toString() ?? "—"} · now #${snapshot.epochId?.toString() ?? "—"}`
                 : "nothing queued"}
             </CardMeta>
           </CardHead>
@@ -290,12 +311,15 @@ export function RedeemQueue({
           {settleable ? (
             <>
               <Notice tone="info" className="mt-4">
-                The vault is Idle and this entry is in the current epoch, so nothing will settle it until someone
-                calls settleQueue. Settling it here does not need the keeper. It pays what an instant redemption of
-                the same shares would pay now, plus the USDG the escrowed shares earned while queued
-                {stranded ? ", and books this epoch's share of the stranded claim for when it is redeemed" : ""}. It
-                settles every entry in this epoch, not only yours, and anyone can send it. After it confirms, collect
-                with Complete redemption.
+                No call is open, so this waits until someone settles the queue. You can do it now; no keeper
+                needed.{" "}
+                <InfoTip label="About settling the queue">
+                  It pays what an instant redemption of the same shares would pay now, plus the USDG your queued shares
+                  earned
+                  {stranded ? ", and books this batch's share of the stranded claim for when it is redeemed" : ""}. It
+                  settles every entry in this batch, not only yours, and anyone can send it. After it confirms, collect
+                  with Complete redemption.
+                </InfoTip>
               </Notice>
               <Button
                 variant="primary"
@@ -310,21 +334,21 @@ export function RedeemQueue({
               ) : null}
               {hasPending ? (
                 <Button variant="ghost" className="mt-2 w-full" disabled={busy || wrongNetwork} onClick={complete}>
-                  {busy ? "Working…" : "Collect earlier settled redemption"}
+                  {busy ? "Working…" : "Collect earlier redemption"}
                 </Button>
               ) : null}
             </>
           ) : waitingOnKeeper ? (
             <>
               <Notice tone="warn" className="mt-4">
-                This epoch settles after the keeper closes the week at expiry.{" "}
+                Paid after the keeper closes the week at expiry.{" "}
                 {hasPending
-                  ? "The amounts above are owed from an earlier redemption and can be collected now."
-                  : "The amounts above turn non-zero then."}
+                  ? "The amounts above are from an earlier redemption and can be collected now."
+                  : "The amounts above fill in then."}
               </Notice>
               {hasPending ? (
                 <Button variant="ghost" className="mt-4 w-full" disabled={busy} onClick={complete}>
-                  {busy ? "Working…" : "Collect earlier settled redemption"}
+                  {busy ? "Working…" : "Collect earlier redemption"}
                 </Button>
               ) : null}
             </>
@@ -332,18 +356,20 @@ export function RedeemQueue({
             <>
               {strandShareWaiting ? (
                 <Notice tone="warn" className="mt-4">
-                  Part of this redemption is a share of the stranded claim and cannot be collected until the claim is
-                  redeemed (Retry claim above). The amounts above are what can be collected now.
+                  Part of this is a share of the stranded claim. It can be collected once the claim is redeemed (Retry
+                  claim above). The amounts above are what you can collect now.
                 </Notice>
               ) : view.strandShareRecovered ? (
                 <Notice tone="info" className="mt-4">
-                  The stranded claim this redemption had a share of has been redeemed. Complete redemption collects that
-                  share with anything else owed.
+                  The stranded claim has been redeemed. Complete redemption collects your share with anything else owed.
                 </Notice>
               ) : view.usdgLegDeferred ? (
                 <Notice tone="info" className="mt-4">
-                  USDG from an earlier collection is still owed: it could not move at the time (USDG paused, or the vault
-                  or the receiver frozen on USDG), so the vault kept it for you. Complete redemption tries again.
+                  Some USDG from an earlier collection is still owed. The vault kept it for you; Complete redemption
+                  tries again.{" "}
+                  <InfoTip label="Why USDG is still owed">
+                    It could not move at the time: USDG was paused, or the vault or the receiver was frozen on USDG.
+                  </InfoTip>
                 </Notice>
               ) : null}
               <Button
